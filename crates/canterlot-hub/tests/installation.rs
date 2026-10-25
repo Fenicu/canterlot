@@ -250,10 +250,18 @@ fn config_loads_paths_defaults_and_timer_overrides() -> TestResult {
     assert_eq!(config.timers.unavailable_after, Duration::from_secs(30));
     assert_eq!(config.timers.command_stored_receipt, Duration::from_secs(5));
     assert_eq!(config.timers.dispatch_sweep, Duration::from_secs(5));
+    assert_eq!(
+        config.timers.http2_keepalive_interval,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        config.timers.http2_keepalive_timeout,
+        Duration::from_secs(10)
+    );
     fs::write(
         &path,
         format!(
-            "{}\n[timers]\nhandshake = 1\ndegraded_after = 2\nunavailable_after = 3\ncommand_stored_receipt = 4\ndispatch_sweep = 6\n",
+            "{}\n[timers]\nhandshake = 1\ndegraded_after = 2\nunavailable_after = 3\ncommand_stored_receipt = 4\ndispatch_sweep = 6\nhttp2_keepalive_interval = 31\nhttp2_keepalive_timeout = 11\n",
             config_text()
         ),
     )?;
@@ -263,6 +271,8 @@ fn config_loads_paths_defaults_and_timer_overrides() -> TestResult {
     assert_eq!(timers.unavailable_after, Duration::from_secs(3));
     assert_eq!(timers.command_stored_receipt, Duration::from_secs(4));
     assert_eq!(timers.dispatch_sweep, Duration::from_secs(6));
+    assert_eq!(timers.http2_keepalive_interval, Duration::from_secs(31));
+    assert_eq!(timers.http2_keepalive_timeout, Duration::from_secs(11));
     fs::write(
         &path,
         format!("{}\n[timers]\nhandshake = 1\n", config_text()),
@@ -335,7 +345,10 @@ fn cli_errors_do_not_disclose_config_or_database_file_contents() -> TestResult {
     let output = run()?;
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(output.stderr == b"config_invalid\n");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.starts_with("config_invalid at "));
+    assert!(stderr.contains(config.to_str().unwrap()));
+    assert!(!stderr.contains("synthetic-secret"));
     fs::write(&config, config_text())?;
     for (contents, expected) in [
         ("", "database_url_invalid\n"),

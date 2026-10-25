@@ -3,6 +3,33 @@ use uuid::Uuid;
 
 use crate::model::HoldReason;
 
+pub mod tls {
+    use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
+
+    pub struct TestPki {
+        pub ca_pem: String,
+        pub server_cert_pem: String,
+        pub server_key_pem: String,
+    }
+
+    pub fn test_pki() -> TestPki {
+        let mut params = CertificateParams::new(Vec::new()).expect("CA parameters");
+        params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        let ca = CertifiedIssuer::self_signed(params, KeyPair::generate().expect("CA key"))
+            .expect("CA certificate");
+        let key = KeyPair::generate().expect("server key");
+        let cert = CertificateParams::new(vec!["localhost".into()])
+            .expect("server parameters")
+            .signed_by(&key, &ca)
+            .expect("server certificate");
+        TestPki {
+            ca_pem: ca.pem(),
+            server_cert_pem: cert.pem(),
+            server_key_pem: key.serialize_pem(),
+        }
+    }
+}
+
 pub struct Seed {
     pub owner_id: Uuid,
     pub machine_id: Uuid,

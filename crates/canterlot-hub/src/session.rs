@@ -1,0 +1,277 @@
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Instant,
+};
+
+use canterlot_proto::worker::v1::ControlDown;
+use tokio::sync::{Notify, broadcast, mpsc};
+use tokio_util::sync::CancellationToken;
+use uuid::Uuid;
+
+use crate::config::HubTimers;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Availability {
+    Available,
+    Degraded,
+    Unavailable,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionInfo {
+    pub machine_id: Uuid,
+    pub connection_id: Uuid,
+    pub data_attached: bool,
+    pub last_heartbeat: Instant,
+}
+
+struct SessionEntry {
+    info: SessionInfo,
+    key: Uuid,
+    commands: mpsc::Sender<ControlDown>,
+    cancel: CancellationToken,
+    wake: Arc<Notify>,
+    data: Option<(Uuid, CancellationToken)>,
+    availability: Availability,
+}
+
+#[derive(Clone)]
+pub struct Registry {
+    entries: Arc<Mutex<HashMap<Uuid, SessionEntry>>>,
+    timers: HubTimers,
+    changes: broadcast::Sender<(Uuid, Availability)>,
+}
+
+impl Registry {
+    pub fn new(timers: HubTimers) -> Self {
+        Self {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            timers,
+            changes: broadcast::channel(256).0,
+        }
+    }
+
+    pub fn availability(&self, machine_id: Uuid) -> Availability {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        entries
+            .get_mut(&machine_id)
+            .map_or(Availability::Unavailable, |entry| self.refresh(entry))
+    }
+
+    /// Производитель проверяет encoded_len() перед постановкой команды в очередь.
+    pub fn command_sender(&self, machine_id: Uuid) -> Option<mpsc::Sender<ControlDown>> {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        let entry = entries.get_mut(&machine_id)?;
+        (self.refresh(entry) != Availability::Unavailable).then(|| entry.commands.clone())
+    }
+
+    pub fn subscribe_changes(&self) -> broadcast::Receiver<(Uuid, Availability)> {
+        self.changes.subscribe()
+    }
+
+    pub fn session_info(&self, machine_id: Uuid) -> Option<SessionInfo> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .map(|entry| entry.info.clone())
+    }
+
+    fn refresh(&self, entry: &mut SessionEntry) -> Availability {
+        let age = entry.info.last_heartbeat.elapsed();
+        let availability = if age >= self.timers.unavailable_after {
+            Availability::Unavailable
+        } else if !entry.info.data_attached || age >= self.timers.degraded_after {
+            Availability::Degraded
+        } else {
+            Availability::Available
+        };
+        if entry.availability != availability {
+            entry.availability = availability;
+            let _ = self.changes.send((entry.info.machine_id, availability));
+        }
+        availability
+    }
+
+    pub(crate) fn register(
+        &self,
+        machine_id: Uuid,
+        connection_id: Uuid,
+    ) -> Option<(ControlLease, mpsc::Receiver<ControlDown>)> {
+        let cancel = CancellationToken::new();
+        let wake = Arc::new(Notify::new());
+        let key = Uuid::now_v7();
+        let (commands, receiver) = mpsc::channel(64);
+        let mut entries = self.entries.lock().expect("session registry lock");
+        if entries.get(&machine_id).is_some_and(|entry| {
+            entry.info.last_heartbeat.elapsed() < self.timers.unavailable_after
+        }) {
+            return None;
+        }
+        if let Some(old) = entries.remove(&machine_id) {
+            old.cancel.cancel();
+            if let Some((_, data)) = old.data {
+                data.cancel();
+            }
+        }
+        let mut entry = SessionEntry {
+            info: SessionInfo {
+                machine_id,
+                connection_id,
+                data_attached: false,
+                last_heartbeat: Instant::now(),
+            },
+            key,
+            commands,
+            cancel: cancel.clone(),
+            wake: wake.clone(),
+            data: None,
+            availability: Availability::Unavailable,
+        };
+        self.refresh(&mut entry);
+        entries.insert(machine_id, entry);
+        drop(entries);
+        let registry = self.clone();
+        let monitor_cancel = cancel.clone();
+        tokio::spawn(async move {
+            registry
+                .monitor(machine_id, key, monitor_cancel, wake)
+                .await;
+        });
+        Some((
+            ControlLease {
+                registry: self.clone(),
+                machine_id,
+                key,
+                cancel,
+            },
+            receiver,
+        ))
+    }
+
+    pub(crate) fn attach_data(&self, machine_id: Uuid, connection_id: Uuid) -> Option<DataLease> {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        let entry = entries.get_mut(&machine_id)?;
+        if entry.info.connection_id != connection_id
+            || entry.info.last_heartbeat.elapsed() >= self.timers.unavailable_after
+        {
+            return None;
+        }
+        let key = Uuid::now_v7();
+        let cancel = CancellationToken::new();
+        if let Some((_, previous)) = entry.data.replace((key, cancel.clone())) {
+            previous.cancel();
+        }
+        entry.info.data_attached = true;
+        self.refresh(entry);
+        Some(DataLease {
+            registry: self.clone(),
+            machine_id,
+            session_key: entry.key,
+            key,
+            cancel,
+        })
+    }
+
+    pub(crate) fn heartbeat(&self, machine_id: Uuid, key: Uuid) -> bool {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        let Some(entry) = entries
+            .get_mut(&machine_id)
+            .filter(|entry| entry.key == key)
+        else {
+            return false;
+        };
+        entry.info.last_heartbeat = Instant::now();
+        self.refresh(entry);
+        entry.wake.notify_one();
+        true
+    }
+
+    async fn monitor(
+        &self,
+        machine_id: Uuid,
+        key: Uuid,
+        cancel: CancellationToken,
+        wake: Arc<Notify>,
+    ) {
+        loop {
+            let notified = wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let deadline = {
+                let mut entries = self.entries.lock().expect("session registry lock");
+                let Some(entry) = entries
+                    .get_mut(&machine_id)
+                    .filter(|entry| entry.key == key)
+                else {
+                    return;
+                };
+                self.refresh(entry);
+                let age = entry.info.last_heartbeat.elapsed();
+                [self.timers.degraded_after, self.timers.unavailable_after]
+                    .into_iter()
+                    .filter(|threshold| age < *threshold)
+                    .min()
+                    .map(|threshold| entry.info.last_heartbeat + threshold)
+            };
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = &mut notified => {},
+                _ = async {
+                    if let Some(deadline) = deadline { tokio::time::sleep_until(deadline.into()).await; }
+                    else { std::future::pending::<()>().await; }
+                } => {},
+            }
+        }
+    }
+}
+
+pub(crate) struct ControlLease {
+    registry: Registry,
+    pub machine_id: Uuid,
+    pub key: Uuid,
+    pub cancel: CancellationToken,
+}
+
+impl Drop for ControlLease {
+    fn drop(&mut self) {
+        let mut entries = self.registry.entries.lock().expect("session registry lock");
+        if entries
+            .get(&self.machine_id)
+            .is_some_and(|entry| entry.key == self.key)
+        {
+            let entry = entries.remove(&self.machine_id).expect("current session");
+            entry.cancel.cancel();
+            if let Some((_, data)) = entry.data {
+                data.cancel();
+            }
+            let _ = self
+                .registry
+                .changes
+                .send((self.machine_id, Availability::Unavailable));
+        }
+    }
+}
+
+pub(crate) struct DataLease {
+    registry: Registry,
+    machine_id: Uuid,
+    session_key: Uuid,
+    key: Uuid,
+    pub cancel: CancellationToken,
+}
+
+impl Drop for DataLease {
+    fn drop(&mut self) {
+        let mut entries = self.registry.entries.lock().expect("session registry lock");
+        if let Some(entry) = entries.get_mut(&self.machine_id).filter(|entry| {
+            entry.key == self.session_key
+                && entry.data.as_ref().is_some_and(|(key, _)| *key == self.key)
+        }) {
+            entry.data = None;
+            entry.info.data_attached = false;
+            self.registry.refresh(entry);
+        }
+    }
+}
