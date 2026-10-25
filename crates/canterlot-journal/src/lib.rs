@@ -57,6 +57,7 @@ pub struct Journal {
     segments: Vec<Segment>,
     last_seq: u64,
     acked_seq: u64,
+    sealed_from: Option<u64>,
     failed: bool,
 }
 
@@ -92,6 +93,7 @@ impl Journal {
             segments: vec![first],
             last_seq: 0,
             acked_seq: 0,
+            sealed_from: None,
             failed: false,
         })
     }
@@ -103,6 +105,17 @@ impl Journal {
         };
         let id = format::decode_header(&metadata("header")?)?;
         let acked_seq = format::decode_ack(&metadata("ack")?)?;
+        let mut sealed_from = match fs::read(dir.join("sealed")) {
+            Ok(bytes) => {
+                let from_seq = format::decode_ack(&bytes)?;
+                if from_seq == 0 {
+                    return Err(JournalError::NotAJournal);
+                }
+                Some(from_seq)
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
         let paths = segment::list(dir)?;
         let mut last_seq = paths[0].0 - 1;
         let mut segments = Vec::new();
@@ -115,12 +128,12 @@ impl Journal {
                 opts.max_record_bytes,
             )?;
             if let Some(offset) = corrupted_at {
-                report.corrupted_tail = Some(segment::quarantine(
-                    dir,
-                    &paths[index..],
-                    offset,
-                    next_seq(last_seq)?,
-                )?);
+                let from_seq = next_seq(last_seq)?;
+                let sealed = sealed_from.map_or(from_seq, |prior| prior.min(from_seq));
+                segment::atomic_replace(dir, "sealed", &format::encode_ack(sealed))?;
+                sealed_from = Some(sealed);
+                report.corrupted_tail =
+                    Some(segment::quarantine(dir, &paths[index..], offset, from_seq)?);
                 segment.bytes = offset;
                 if segment.first_seq != next_seq(last_seq)? && offset == 0 {
                     fs::remove_file(&segment.path)?;
@@ -132,6 +145,13 @@ impl Journal {
             }
             segments.push(segment);
         }
+        for segment in &segments {
+            OpenOptions::new()
+                .write(true)
+                .open(&segment.path)?
+                .sync_all()?;
+        }
+        segment::sync_dir(dir)?;
         let journal = Self {
             dir: dir.to_path_buf(),
             id,
@@ -139,6 +159,7 @@ impl Journal {
             segments,
             last_seq,
             acked_seq,
+            sealed_from,
             failed: false,
         };
         Ok((journal, report))
@@ -146,6 +167,10 @@ impl Journal {
 
     pub fn id(&self) -> JournalId {
         self.id
+    }
+
+    pub fn is_sealed(&self) -> Option<u64> {
+        self.sealed_from
     }
 
     pub fn append(&mut self, payload: &[u8]) -> Result<u64, JournalError> {
@@ -156,6 +181,9 @@ impl Journal {
         &mut self,
         payloads: &[&[u8]],
     ) -> Result<RangeInclusive<u64>, JournalError> {
+        if let Some(from_seq) = self.sealed_from {
+            return Err(JournalError::Sealed { from_seq });
+        }
         self.ensure_writable()?;
         if payloads.is_empty() {
             return Err(io::Error::new(io::ErrorKind::InvalidInput, "empty journal batch").into());
@@ -236,7 +264,9 @@ impl Journal {
                 .iter()
                 .filter(|record| record.seq >= from_seq)
             {
-                if !records.is_empty() && position.len as usize > max_bytes.saturating_sub(bytes) {
+                if !records.is_empty()
+                    && (bytes > max_bytes || position.len as usize > max_bytes - bytes)
+                {
                     return Ok(records);
                 }
                 file.seek(SeekFrom::Start(position.offset))?;
@@ -328,6 +358,11 @@ impl Journal {
     pub fn bytes_on_disk(&self) -> u64 {
         format::HEADER_BYTES
             + format::ACK_BYTES
+            + if self.sealed_from.is_some() {
+                format::ACK_BYTES
+            } else {
+                0
+            }
             + self
                 .segments
                 .iter()
@@ -341,7 +376,7 @@ impl Journal {
                 "journal must be reopened after an I/O failure",
             ));
         }
-        if self.acked_seq > self.last_seq {
+        if self.acked_seq > self.last_seq && self.sealed_from.is_none() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "acknowledgement exceeds recovered journal end",

@@ -136,8 +136,8 @@ pub(crate) fn quarantine(
     let base = dir.join("quarantine");
     if !base.exists() {
         fs::create_dir(&base)?;
-        sync_dir(dir)?;
     }
+    sync_dir(dir)?;
     let destination_name = |path: &Path, offset| {
         format!(
             "{}-{offset}.bin",
@@ -173,6 +173,7 @@ pub(crate) fn quarantine(
         fs::rename(temporary, destination.join(name))?;
         sync_dir(&destination)?;
     }
+    sync_dir(dir)?;
     // Карантин устойчив до удаления исходного хвоста.
     for (_, path) in affected.iter().skip(1).rev() {
         fs::remove_file(path)?;

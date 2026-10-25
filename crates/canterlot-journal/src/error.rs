@@ -8,6 +8,7 @@ pub enum JournalError {
     RecordTooLarge { len: usize, max: u32 },
     SeqCompacted { requested: u64, first: u64 },
     AckBeyondEnd { ack: u64, last: u64 },
+    Sealed { from_seq: u64 },
 }
 
 impl fmt::Display for JournalError {
@@ -29,6 +30,9 @@ impl fmt::Display for JournalError {
             }
             Self::AckBeyondEnd { ack, last } => {
                 write!(f, "acknowledgement {ack} exceeds last sequence {last}")
+            }
+            Self::Sealed { from_seq } => {
+                write!(f, "journal is sealed from sequence {from_seq}")
             }
         }
     }

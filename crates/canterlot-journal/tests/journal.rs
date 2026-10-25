@@ -45,6 +45,7 @@ fn append_and_read_roundtrip() {
     assert_eq!(journal.first_seq(), 1);
     assert_eq!(journal.last_seq(), 0);
     assert_eq!(journal.acked_seq(), 0);
+    assert_eq!(journal.is_sealed(), None);
     assert_eq!(journal.append(b"first").unwrap(), 1);
     assert_eq!(journal.append(b"second\0").unwrap(), 2);
     assert_eq!(journal.append("третий".as_bytes()).unwrap(), 3);
@@ -70,6 +71,7 @@ fn reopen_preserves_records_and_ack() {
     assert_eq!(journal.last_seq(), 5);
     assert_eq!(journal.acked_seq(), 3);
     assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.is_sealed(), None);
     assert_records(
         &journal.read_from(1, usize::MAX).unwrap(),
         &[
@@ -113,6 +115,8 @@ fn torn_tail_at_every_offset_keeps_valid_prefix() {
         );
         if length == end_two {
             assert!(report.corrupted_tail.is_none());
+            assert_eq!(journal.is_sealed(), None);
+            assert_eq!(journal.append(b"replacement").unwrap(), 3);
         } else {
             let tail = report.corrupted_tail.unwrap();
             assert_eq!(tail.from_seq, 3, "length {length}");
@@ -129,13 +133,27 @@ fn torn_tail_at_every_offset_keeps_valid_prefix() {
                 fs::read(tail.quarantine_path).unwrap(),
                 original_bytes[end_two as usize..length as usize]
             );
+            assert_eq!(journal.is_sealed(), Some(3));
+            assert!(matches!(
+                journal.append(b"replacement"),
+                Err(JournalError::Sealed { from_seq: 3 })
+            ));
+            assert_eq!(fs::metadata(&path).unwrap().len(), end_two);
         }
-        assert_eq!(fs::metadata(&path).unwrap().len(), end_two);
-        assert_eq!(journal.append(b"replacement").unwrap(), 3);
         drop(journal);
-        let (journal, report) = Journal::open(copy.path(), JournalOptions::default()).unwrap();
-        assert_eq!(journal.last_seq(), 3);
+        let (mut journal, report) = Journal::open(copy.path(), JournalOptions::default()).unwrap();
         assert!(report.corrupted_tail.is_none());
+        if length == end_two {
+            assert_eq!(journal.last_seq(), 3);
+            assert_eq!(journal.is_sealed(), None);
+        } else {
+            assert_eq!(journal.last_seq(), 2);
+            assert_eq!(journal.is_sealed(), Some(3));
+            assert!(matches!(
+                journal.append_batch(&[b"replacement"]),
+                Err(JournalError::Sealed { from_seq: 3 })
+            ));
+        }
     }
 }
 
@@ -382,6 +400,234 @@ fn read_budget_returns_at_least_one_record() {
 }
 
 #[test]
+fn read_budget_excludes_empty_records_after_an_oversized_first_record() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 0,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    journal.append(b"12345").unwrap();
+    journal.append(b"").unwrap();
+    journal.append(b"").unwrap();
+    journal.append(b"6").unwrap();
+    for budget in [0, 4] {
+        assert_records(&journal.read_from(1, budget).unwrap(), &[(1, b"12345")]);
+    }
+    assert_records(
+        &journal.read_from(1, 5).unwrap(),
+        &[(1, b"12345"), (2, b""), (3, b"")],
+    );
+    assert_records(&journal.read_from(2, 0).unwrap(), &[(2, b""), (3, b"")]);
+    assert_eq!(journal.read_from(1, 6).unwrap().len(), 4);
+}
+
+#[test]
+fn reopen_adopts_segment_left_by_interrupted_creation() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    drop(journal);
+    let pending_segment = dir.path().join("seg-00000000000000000002.log");
+    fs::write(&pending_segment, b"").unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.append(b"two").unwrap(), 2);
+    assert_eq!(fs::metadata(pending_segment).unwrap().len(), 19);
+    drop(journal);
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_records(
+        &journal.read_from(1, usize::MAX).unwrap(),
+        &[(1, b"one"), (2, b"two")],
+    );
+}
+
+#[test]
+fn recovery_with_preexisting_quarantine_preserves_tail_and_later_segments() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 20,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    for payload in [b"one", b"two", b"end"] {
+        journal.append(payload).unwrap();
+    }
+    drop(journal);
+    let paths = segments(dir.path());
+    let mut tail = fs::read(&paths[1]).unwrap();
+    tail[RECORD_HEADER_BYTES] ^= 1;
+    fs::write(&paths[1], &tail).unwrap();
+    let later = fs::read(&paths[2]).unwrap();
+    let quarantine = dir.path().join("quarantine");
+    fs::create_dir(&quarantine).unwrap();
+    let (journal, report) = Journal::open(dir.path(), options).unwrap();
+    let report = report.corrupted_tail.unwrap();
+    assert_eq!(report.from_seq, 2);
+    assert_eq!(report.bytes, (tail.len() + later.len()) as u64);
+    assert_eq!(fs::read(report.quarantine_path).unwrap(), tail);
+    assert_eq!(
+        fs::read(quarantine.join(format!(
+            "{}-0.bin",
+            paths[2].file_name().unwrap().to_str().unwrap()
+        )))
+        .unwrap(),
+        later,
+    );
+    assert_eq!(fs::metadata(&paths[1]).unwrap().len(), 0);
+    assert!(!paths[2].exists());
+    assert_records(&journal.read_from(1, usize::MAX).unwrap(), &[(1, b"one")]);
+}
+
+#[test]
+fn corruption_without_local_ack_durably_blocks_sequence_reuse() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 20,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    let id = journal.id();
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    journal.append(b"end").unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(2);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[RECORD_HEADER_BYTES] ^= 1;
+    fs::write(path, bytes).unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), options).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 3);
+    assert_eq!(journal.acked_seq(), 0);
+    assert_eq!(journal.is_sealed(), Some(3));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 3 })
+    ));
+    assert!(matches!(
+        journal.append_batch(&[b"replacement"]),
+        Err(JournalError::Sealed { from_seq: 3 })
+    ));
+    let mut expected_seal = 3u64.to_le_bytes().to_vec();
+    expected_seal.extend_from_slice(&crc32c::crc32c(&expected_seal).to_le_bytes());
+    assert_eq!(fs::read(dir.path().join("sealed")).unwrap(), expected_seal);
+    assert_eq!(journal.bytes_on_disk(), 24 + 12 + 12 + 38);
+    assert_records(
+        &journal.read_from(1, usize::MAX).unwrap(),
+        &[(1, b"one"), (2, b"two")],
+    );
+    journal.ack(1).unwrap();
+    journal.ack(2).unwrap();
+    assert_eq!(journal.compact().unwrap(), 38);
+    assert_eq!(journal.first_seq(), 3);
+    drop(journal);
+    let (mut journal, report) = Journal::open(dir.path(), options).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.id(), id);
+    assert_eq!(journal.last_seq(), 2);
+    assert_eq!(journal.acked_seq(), 2);
+    assert_eq!(journal.is_sealed(), Some(3));
+    assert!(matches!(
+        journal.append_batch(&[b"replacement"]),
+        Err(JournalError::Sealed { from_seq: 3 })
+    ));
+    assert!(matches!(
+        journal.append_batch(&[]),
+        Err(JournalError::Sealed { from_seq: 3 })
+    ));
+    assert!(journal.read_from(3, 0).unwrap().is_empty());
+    assert_eq!(journal.compact().unwrap(), 0);
+}
+
+#[test]
+fn seal_publication_failure_keeps_original_tail_for_retry() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 20,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    drop(journal);
+    let paths = segments(dir.path());
+    let mut first = fs::read(&paths[0]).unwrap();
+    first[RECORD_HEADER_BYTES] ^= 1;
+    fs::write(&paths[0], &first).unwrap();
+    let later = fs::read(&paths[1]).unwrap();
+    let temporary = dir.path().join("sealed.tmp");
+    fs::create_dir(&temporary).unwrap();
+    assert!(matches!(
+        Journal::open(dir.path(), options),
+        Err(JournalError::Io(_))
+    ));
+    assert_eq!(fs::read(&paths[0]).unwrap(), first);
+    assert_eq!(fs::read(&paths[1]).unwrap(), later);
+    assert!(!dir.path().join("sealed").exists());
+    fs::remove_dir(temporary).unwrap();
+    let (mut journal, report) = Journal::open(dir.path(), options).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 1);
+    assert_eq!(journal.last_seq(), 0);
+    assert_eq!(journal.is_sealed(), Some(1));
+    assert!(journal.read_from(1, 0).unwrap().is_empty());
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 1 })
+    ));
+}
+
+#[test]
+fn failed_quarantine_keeps_durable_seal_and_original_tail() {
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    journal.append(b"two").unwrap();
+    drop(journal);
+    let path = segments(dir.path()).remove(0);
+    let mut bytes = fs::read(&path).unwrap();
+    bytes[19 + RECORD_HEADER_BYTES] ^= 1;
+    fs::write(&path, &bytes).unwrap();
+    let quarantine = dir.path().join("quarantine");
+    fs::write(&quarantine, b"blocked").unwrap();
+    assert!(matches!(
+        Journal::open(dir.path(), JournalOptions::default()),
+        Err(JournalError::Io(_))
+    ));
+    assert!(dir.path().join("sealed").is_file());
+    assert_eq!(fs::read(&path).unwrap(), bytes);
+    fs::remove_file(quarantine).unwrap();
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert_records(&journal.read_from(1, usize::MAX).unwrap(), &[(1, b"one")]);
+}
+
+#[test]
+fn sealed_metadata_is_validated_and_temporary_seal_is_ignored() {
+    let dir = TempDir::new().unwrap();
+    let journal = create(dir.path());
+    drop(journal);
+    fs::write(dir.path().join("sealed.tmp"), b"interrupted seal").unwrap();
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(journal.is_sealed(), None);
+    assert!(report.corrupted_tail.is_none());
+    drop(journal);
+    let zero = fs::read(dir.path().join("ack")).unwrap();
+    let mut bad_crc = zero.clone();
+    bad_crc[0] = 1;
+    let seal = dir.path().join("sealed");
+    for bytes in [Vec::new(), zero, bad_crc] {
+        fs::write(&seal, bytes).unwrap();
+        assert!(matches!(
+            Journal::open(dir.path(), JournalOptions::default()),
+            Err(JournalError::NotAJournal)
+        ));
+    }
+}
+
+#[test]
 fn full_compaction_preserves_sequence_after_reopen() {
     let dir = TempDir::new().unwrap();
     let mut journal = create(dir.path());
@@ -461,7 +707,7 @@ fn metadata_corruption_is_rejected_without_repair() {
 }
 
 #[test]
-fn missing_middle_segment_recovers_an_appendable_prefix() {
+fn missing_middle_segment_recovers_a_sealed_prefix() {
     let dir = TempDir::new().unwrap();
     let options = JournalOptions {
         segment_max_bytes: 40,
@@ -477,13 +723,18 @@ fn missing_middle_segment_recovers_an_appendable_prefix() {
     let (mut journal, report) = Journal::open(dir.path(), options).unwrap();
     assert_eq!(journal.last_seq(), 2);
     assert_eq!(report.corrupted_tail.unwrap().from_seq, 3);
-    assert_eq!(journal.append(b"replacement").unwrap(), 3);
+    assert_eq!(journal.is_sealed(), Some(3));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 3 })
+    ));
     drop(journal);
     let (journal, report) = Journal::open(dir.path(), options).unwrap();
-    assert_eq!(journal.last_seq(), 3);
+    assert_eq!(journal.last_seq(), 2);
+    assert_eq!(journal.is_sealed(), Some(3));
     assert_records(
-        &journal.read_from(3, usize::MAX).unwrap(),
-        &[(3, b"replacement")],
+        &journal.read_from(1, usize::MAX).unwrap(),
+        &[(1, b"data"), (2, b"data")],
     );
     assert!(report.corrupted_tail.is_none());
 }
@@ -498,7 +749,7 @@ fn quarantine_preserves_previous_and_interrupted_recoveries() {
     let segment = segments(dir.path()).remove(0);
     let mut bytes = fs::read(&segment).unwrap();
     bytes[19 + RECORD_HEADER_BYTES] ^= 1;
-    fs::write(&segment, bytes).unwrap();
+    fs::write(&segment, &bytes).unwrap();
     let base = dir.path().join("quarantine");
     fs::create_dir(&base).unwrap();
     let name = format!("{}-19.bin", segment.file_name().unwrap().to_str().unwrap());
@@ -507,14 +758,17 @@ fn quarantine_preserves_previous_and_interrupted_recoveries() {
     let (mut journal, first_report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
     let first_path = first_report.corrupted_tail.unwrap().quarantine_path;
     let first_bytes = fs::read(&first_path).unwrap();
-    assert_eq!(journal.append(b"different").unwrap(), 2);
+    assert!(matches!(
+        journal.append(b"different"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
     drop(journal);
-    let mut bytes = fs::read(&segment).unwrap();
     bytes[19 + RECORD_HEADER_BYTES] ^= 2;
     fs::write(&segment, bytes).unwrap();
     let (journal, second_report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
     let second_path = second_report.corrupted_tail.unwrap().quarantine_path;
     assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.is_sealed(), Some(2));
     assert_ne!(first_path, second_path);
     assert_eq!(fs::read(first_path).unwrap(), first_bytes);
     assert_eq!(fs::read(temporary).unwrap(), b"interrupted recovery");
@@ -579,11 +833,26 @@ fn corruption_preserves_ack_and_blocks_reuse_of_acked_sequences() {
     assert_eq!(journal.last_seq(), 1);
     assert_eq!(journal.acked_seq(), 2);
     assert_eq!(report.corrupted_tail.unwrap().from_seq, 2);
-    assert!(
-        matches!(journal.append(b"replacement"), Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData)
-    );
-    assert!(
-        matches!(journal.compact(), Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::InvalidData)
-    );
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
     assert_records(&journal.read_from(1, usize::MAX).unwrap(), &[(1, b"one")]);
+    journal.ack(1).unwrap();
+    assert_eq!(journal.acked_seq(), 2);
+    assert_eq!(journal.compact().unwrap(), 19);
+    assert_eq!(journal.first_seq(), 2);
+    drop(journal);
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.acked_seq(), 2);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert!(journal.read_from(2, 0).unwrap().is_empty());
+    assert_eq!(journal.compact().unwrap(), 0);
+    assert!(matches!(
+        journal.append(b"replacement"),
+        Err(JournalError::Sealed { from_seq: 2 })
+    ));
 }
