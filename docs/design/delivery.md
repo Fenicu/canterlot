@@ -80,8 +80,18 @@ stateDiagram-v2
 | `transmitting` | `explicit_rejection` | адаптер: `rejected(reason)` | `SJ`, `PG-tx`: `rejected`, `run_slot` свободен | `rejected` |
 | `transmitting` | `acceptance_undetermined` | адаптер: `undetermined` (в т.ч. истёк его deadline); сопровождение умерло; исполнение завершилось без результата; область команды в `SJ` повреждена | `SJ`/`CJ`: `unconfirmed`; `PG-tx`: `acceptance_unconfirmed`, пауза `unconfirmed_delivery(input_id)`, `run_slot` свободен | `acceptance_unconfirmed` |
 | `acceptance_unconfirmed` | `acceptance_proven` | поздний факт или `reconcile` нашли доказательство | `PG-tx`: `accepted`; пауза `unconfirmed_delivery` этого ввода снимается | `accepted` |
-| `acceptance_unconfirmed` | `non_acceptance_proven` | `reconcile`, источник истории гарантирует полноту (зависит от этапа 0) | `PG-tx`: `rejected(not_accepted_proven)`; пауза остаётся до решения владельца | `rejected` |
+| `acceptance_unconfirmed` | `non_acceptance_proven` | `reconcile`, источник истории гарантирует полноту; на закреплённых версиях недостижим: история ни Claude Code, ни Codex полноту не гарантирует | `PG-tx`: `rejected(not_accepted_proven)`; пауза остаётся до решения владельца | `rejected` |
 | `acceptance_unconfirmed` | `retry_as_new` | явное действие владельца после предупреждения | новая операция `submit` с новым ключом и `retry_of`; **Предложение**: в конец FIFO, потому что порядок задаёт серверная нумерация | исходный без изменений |
+
+Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
+
+| Событие | Claude Code 2.1.310 | Codex 0.164.0 |
+| --- | --- | --- |
+| запись после `transmission_started` | строка `SDKUserMessage` с `uuid` = `command_id` | `turn/start` с `clientUserMessageId` = `command_id` |
+| `acceptance_proven` | первый `stream_event` или `assistant` с `command_id` в `user_message_uuid(s)` | `item/started` элемента `userMessage` с `clientId` = `command_id` |
+| `explicit_rejection` | не бывает для корректного ввода | ошибка JSON-RPC в ответ на `turn/start` |
+| `non_acceptance_proven` | недостижим | недостижим |
+| ввод влит в чужой ход | не возникает, пока ввод пишется только после `result` (затвор сопровождения, п. 2) | ответ `turn/start` несёт `turn.id` уже активного хода. **Предложение**: ввод получает статус по своему доказательству, очередь получает паузу `fatal_error` с ошибкой области `adapter_protocol`. Причина: обычная отправка молча стала вмешательством, что §7.3 запрещает |
 
 Затвор сопровождения перед `transmission_started` описан в §3. Сопровождение может ждать открытия затвора (каталог занят, вложения не готовы, агент не готов); ожидание видно хабу как удержание очереди, а отмена и отзыв в это время побеждают.
 
@@ -165,6 +175,8 @@ stateDiagram-v2
 4. все вложения ввода `file_ready_for_agent`;
 5. для команды не записаны отмена или отзыв;
 6. журнал машины не в `critical`.
+
+Факт этапа 0 к п. 2: оба CLI вливают ввод, записанный во время хода, в этот ход (Claude Code при вызовах инструментов, Codex всегда), поэтому без п. 2 обычная отправка стала бы вмешательством. Готовность: Claude Code `result`, Codex `turn/completed` и `thread/status/changed` → `idle`.
 
 ### Автомат режима очереди
 
@@ -275,7 +287,7 @@ stateDiagram-v2
 | `requested`, `on_machine` | `generation_mismatch` | поколение закрыто или не совпадает | квитанция `rejected_stale`; новое исполнение не затрагивается | `rejected_stale` |
 | `on_machine` | `nothing_to_interrupt` | адаптер не в ходе | квитанция; пауза остаётся | `not_applicable` |
 | `on_machine` | `interrupt_delivered` | | `SJ`: запись; адаптер получил прерывание | `sent_to_agent` |
-| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание (зависит от этапа 0) | `SJ`, PG | `acknowledged` |
+| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание: Codex ответом `{}` на `turn/interrupt`; Claude Code ожидает решения владельца (OD-2), см. отображение ниже | `SJ`, PG | `acknowledged` |
 | `sent_to_agent`, `acknowledged` | `run_ended_or_process_exited` | факт адаптера о конце хода либо подтверждённый выход процесса | `SJ`, PG: терминальное состояние хода; блоки хода `incomplete` или `final`; слот свободен | `completed` |
 | `requested`, `on_machine` | `execution_terminal_or_owner_lost` | | PG | `superseded` |
 | любое нетерминальное | 3 с без `acknowledged` или `completed` | таймер UI от `requested_at` | UI «подтверждение задерживается» | без изменения |
@@ -289,8 +301,24 @@ stateDiagram-v2
 - INT-4: потеря связи и таймеры не убивают процесс; `force_stop` отдельное явное действие и касается только подтверждённо принадлежащей группы ресурсов (AT-C-09, AT-C-10).
 - INT-5: прерывание не откатывает файлы и внешние действия инструментов; UI этого не обещает.
 - INT-6: прерывание идёт по каналу управления и не ждёт очереди событий (P-05, AT-H-03).
+- INT-7: `completed` («остановлено») означает конец хода, а не всех процессов инструментов. Если адаптер сообщает, что процессы инструментов пережили прерывание или их наличие неизвестно, UI показывает их как фоновую работу исполнения и предлагает `stop_execution` или `force_stop`; владение каталогом не освобождается (execution.md §4, W-5).
 
-**Зависит от этапа 0**: сохраняет ли прерывание процесс CLI. Если CLI при прерывании завершается, исполнение уходит в `stopping` → `stopped(user_stop)`, а `completed` наступает по факту выхода процесса; следующий ввод потребует resume.
+Отображение на CLI (факты этапа 0):
+
+| Событие | Claude Code 2.1.310 | Codex 0.164.0 |
+| --- | --- | --- |
+| `interrupt_delivered` | OD-2 (а): SIGINT процессу CLI; (б): `control_request` `interrupt` с `cancel_queued: true` | `turn/interrupt {threadId, turnId}` |
+| `agent_ack` | (а): нет, переход сразу в `completed`; (б): `control_response`, 8 мс | ответ `{}`, 15 мс |
+| `run_ended_or_process_exited` | (а): `result` с `terminal_reason: aborted_tools` за 35 мс, затем выход процесса с кодом 0; (б): `result` за 29 мс, процесс жив | `turn/completed status: interrupted` за 15–16 мс, процесс жив |
+| процессы инструментов | убиты в обоих вариантах | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер сообщает `background_work(unknown)` и INT-7 |
+| открытый запрос пользователя | MCP `notifications/cancelled` → `request_closed(interrupted)` | `serverRequest/resolved` без нашего ответа → `request_closed(interrupted)` |
+| исполнение после прерывания | (а): `running` → `stopping` → `stopped(user_stop)`; (б): остаётся `running` | остаётся `running` |
+
+**Ожидает решения владельца (OD-2)** для Claude Code:
+
+- (а) SIGINT. Выход процесса является ожидаемым итогом команды `interrupt`, а не `process_exited`: исполнение `stopped(user_stop)`, у очереди только пауза `user_stop`. Следующий ввод требует resume (новое исполнение, около 1 с старта); `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
+- (б) `control_request`. Исполнение и процесс сохраняются, следующий ввод выдаётся после `result`. Работает только на закреплённой версии с контрактным тестом формы запроса и capability `interrupt_receipt_v1` в `system/init`.
+- Без решения прерывание Claude Code PARTIAL, AT-G-02 BLOCKED.
 
 **Терминальные состояния**: `completed`, `not_applicable`, `superseded`, `rejected_stale`. Поздние факты (подтверждение агента после выхода процесса) дополняют историю.
 
@@ -336,10 +364,25 @@ stateDiagram-v2
 | `decision_saved`, `decision_on_machine` | `request_already_closed` | сопровождение видит в `SJ`, что запрос закрыт | квитанция `not_applied(reason)` | `decision_not_applied` |
 | `decision_on_machine` | `transmission_started` | поколение живо, запрос открыт в `SJ`, по `request_id` передачи не было | `SJ`: fsync намерения, затем передача адаптеру | `decision_transmitting` |
 | `decision_transmitting` | `application_proven` | адаптер: `accepted(proof)` | `SJ`, PG: запрос закрыт как решённый; снять удержание | `decision_applied` |
-| `decision_transmitting` | `explicit_rejection` | адаптер однозначно отклонил (запрос уже не актуален) | `SJ`, PG | `decision_not_applied` |
+| `decision_transmitting` | `explicit_rejection` | адаптер однозначно отклонил: закрытие запроса наблюдено раньше записи ответа в CLI. Сами CLI решения не отвергают (отображение ниже) | `SJ`, PG | `decision_not_applied` |
 | `decision_transmitting` | `application_undetermined` | `undetermined` или смерть сопровождения | `SJ`/`CJ`, PG; повтор запрещён | `decision_unconfirmed` |
 | `decision_unconfirmed` | `application_proven` | поздний факт или `reconcile` | PG | `decision_applied` |
-| `decision_unconfirmed` | `retry_as_new` | явное действие владельца с предупреждением, запрос по данным адаптера ещё открыт | новое решение со ссылкой на исходное; дубликат на стороне CLI отклоняется по нативному ID (зависит от этапа 0) | исходный без изменений |
+| `decision_unconfirmed` | `retry_as_new` | явное действие владельца с предупреждением, запрос по данным адаптера ещё открыт | новое решение со ссылкой на исходное. На закреплённых версиях недостижим: ответ привязан к JSON-RPC `id` запроса в пределах соединения (Codex) или к ответу на MCP `tools/call` (Claude Code), повторный ответ CLI молча игнорирует, а после потери сопровождения запроса больше нет | исходный без изменений |
+
+Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
+
+| Факт | Claude Code 2.1.310 | Codex 0.164.0 |
+| --- | --- | --- |
+| `request_opened` | вызов MCP `tools/call` нашего prompt tool: `tool_name`, точный `input`, `tool_use_id`; `tool_name: AskUserQuestion` означает вопрос. Форма аргументов не документирована: контрактный тест на каждую версию | server request `item/commandExecution/requestApproval` или `item/fileChange/requestApproval` с `threadId`, `turnId`, `itemId`; вопрос `item/tool/requestUserInput`: ожидает решения владельца (OD-1) |
+| нативный ID для `request_id` | `tool_use_id` | `itemId` и JSON-RPC `id` запроса (уникален в пределах соединения) |
+| допустимые решения | allow (с `updatedInput`) или deny (с текстом); ответы на вопросы в `updatedInput.answers`, свободный текст допускается | только из `availableDecisions` запроса (у команды в проверке `accept`, `acceptWithExecpolicyAmendment`, `cancel`); ответы на вопросы из `options[].label`, свободный текст при `isOther` |
+| срок | CLI запрос не истекает (документировано) | поля срока в запросе нет; истечение не проверялось |
+| `request_closed` | MCP `notifications/cancelled` с `requestId` при прерывании хода; терминальное исполнение | `serverRequest/resolved` без нашего ответа: прерывание, начало или конец хода; терминальное исполнение |
+| `application_proven` | `tool_result` с тем же `tool_use_id` после ответа: allow даёт вывод инструмента, deny даёт `is_error` с нашим текстом и запись в `result.permission_denials` | `serverRequest/resolved` по нашему `requestId` и `item/completed` того же `itemId` со статусом решения; одного `serverRequest/resolved` мало, он приходит и при очистке |
+| отказ CLI в решении | не бывает: ответ после `notifications/cancelled` не исполняется, ошибки нет | не бывает: поздний и повторный ответы молча игнорируются |
+| действие без запроса (`auto_approved_by_cli_policy`) | встроенный read-only набор (`ls`, чтение в рабочем каталоге, `sleep 20`); часть команд CLI блокирует сам (`standalone sleep 30`) | пользовательские `.rules` с `allow` исполняют команду вне песочницы без запроса; набор зависит от OD-3 |
+
+**Предложение**: deadline адаптера для решения длится до конца хода или закрытия запроса, а не фиксированный таймер. Причина: у обоих CLI доказательство применения allow приходит только по завершении инструмента (`tool_result`, `item/completed`), и короткий таймер переводил бы каждый долгий инструмент в `decision_unconfirmed`.
 
 Политика сопровождения на время отключения хаба (§9.3):
 
