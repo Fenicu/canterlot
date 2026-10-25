@@ -74,9 +74,9 @@ stateDiagram-v2
 
 | Событие | Claude Code 2.1.310 | Codex 0.164.0 |
 | --- | --- | --- |
-| `adapter_ready` | процесс жив, MCP-сервер разрешений получил от него `initialize` и `tools/list` (`clientInfo.version` совпадает с закреплённой версией); native ID = `--session-id`, назначенный воркером, при resume прежний. `system/init` приходит только с первым вводом: тогда сверяются `claude_code_version`, инструменты и MCP, расхождение даёт `adapter_incompatible` | ответ `initialize`, `config/read` совпадает с требуемыми настройками (OD-3), ответ `thread/start` или `thread/resume` с `thread.id` |
+| `adapter_ready` | процесс жив, MCP-сервер разрешений получил от него `initialize` и `tools/list` (`clientInfo.version` совпадает с закреплённой версией); native ID = `--session-id`, назначенный воркером, при resume прежний. `system/init` приходит только с первым вводом: тогда сверяются `claude_code_version` и статус `connected` нашего MCP-сервера, расхождение даёт `adapter_incompatible`; `permissionMode` оттуда показывается владельцу (решение владельца OD-3) | ответ `initialize` с `capabilities.experimentalApi` и процесс, запущенный с `--enable default_mode_request_user_input` (решение владельца OD-1); ответ `thread/start` или `thread/resume` с `thread.id`, действующими `approvalPolicy` и `sandbox` (решение владельца OD-3: показываются владельцу) |
 | `stop_requested`, штатно | EOF stdin; если CLI ждёт живую фоновую работу и не выходит, SIGTERM (код 143, деревья Bash убиты) | EOF stdin: выход за ≈20 мс, с фоновым терминалом за ≈1 с, терминал завершён |
-| `process_exited` | код 0 после EOF или SIGINT; код 1, если последний `result` был ошибкой или строка ввода битая. Выход после прерывания по SIGINT: delivery.md §4, OD-2 | код 0 после EOF, SIGINT или SIGTERM без активного хода; SIGTERM во время хода не проверялся |
+| `process_exited` | код 0 после EOF или SIGINT; код 1, если последний `result` был ошибкой или строка ввода битая. Выход после прерывания по SIGINT (решение владельца OD-2) является итогом команды `interrupt`: `stopped(user_stop)`, delivery.md §4 | код 0 после EOF, SIGINT или SIGTERM без активного хода; SIGTERM во время хода не проверялся |
 | остаток группы после выхода | потомки Bash в собственных группах процессов; после SIGKILL CLI живут | после SIGKILL Node-обёртки живут нативный app-server, `codex-code-mode-host`, `bwrap` и команды |
 | resume (E-9) | новый процесс с `--resume <session_id>`, тот же ID, прерванный ход не продолжается. Транскрипт старше `cleanupPeriodDays` (исходно 30 дней) CLI удаляет сам; resume такого разговора не проверялся, при отказе UI предлагает новый разговор | новый процесс, `thread/resume {threadId}`; прерванный ход хранится как `interrupted` |
 
@@ -142,7 +142,7 @@ stateDiagram-v2
 | `generating` | `stream_event`, `assistant` текущего хода | `thread/status/changed` → `active` без флагов, `item/agentMessage/delta` |
 | `running_tool` | `tool_use` в `assistant` до `tool_result` с тем же `tool_use_id` | `item/started` элемента `commandExecution` или `fileChange` до его `item/completed` |
 | `awaiting_permission` | открыт вызов prompt tool, кроме `AskUserQuestion` | `activeFlags: ["waitingOnApproval"]` |
-| `awaiting_answer` | открыт вызов prompt tool с `AskUserQuestion` | `activeFlags: ["waitingOnUserInput"]` (OD-1) |
+| `awaiting_answer` | открыт вызов prompt tool с `AskUserQuestion` | `activeFlags: ["waitingOnUserInput"]` (экспериментальная поверхность, решение владельца OD-1) |
 | `context_maintenance` | на этапе 0 не наблюдалась; до проверки `unknown` | на этапе 0 не наблюдалась; до проверки `unknown` |
 
 Сопутствующие наблюдения:
@@ -233,13 +233,13 @@ stateDiagram-v2
 | `waiting` | `acquired` | конфликтующих держателей нет, либо каждый покрыт действующим `shared_override` с этим исполнением и ни один не `orphaned` | `CJ`: запись владения; хабу снять `workdir_busy` | `held` |
 | `waiting` | `conflict_persists` | конфликтующий держатель не освободил каталог | хабу удержание `workdir_busy(conflict_conversation_id)` | `waiting` |
 | `waiting` | `request_withdrawn` | старт отменён, ввод отменён или отозван | `CJ` | `released` |
-| `held` | `idle_proven` | адаптер подтвердил конец хода и ноль фоновых работ. Claude Code: `result` и пустой список `tasks` в последнем `system/background_tasks_changed`, плюс проверка группы ниже. Codex: на стабильной поверхности недостижим (`background_work = unknown`) | `CJ`: освободить; разбудить первого ожидающего | `released` |
+| `held` | `idle_proven` | адаптер подтвердил конец хода и ноль фоновых работ. Claude Code: `result` и пустой список `tasks` в последнем `system/background_tasks_changed`, плюс проверка группы ниже. Codex: `turn/completed` и пустой список экспериментального `thread/backgroundTerminals/list` (включён решением владельца OD-1), плюс та же проверка группы; на стабильной поверхности недостижим | `CJ`: освободить; разбудить первого ожидающего | `released` |
 | `held` | `execution_terminal` | группа ресурсов подтверждённо пуста | `CJ`: освободить | `released` |
 | `held` | `owner_lost` | | `CJ`: `orphaned` | `orphaned` |
 | `orphaned` | `termination_confirmed` | §9.5: группа подтверждённо пуста | `CJ`: освободить | `released` |
 | `orphaned` | `admin_resolved` | явное административное решение | `CJ`: освободить | `released` |
 
-**Предложение** для Claude Code: `idle_proven` дополнительно требует, чтобы в группе ресурсов исполнения не осталось процессов, кроме процесса CLI и его MCP-сервера разрешений. Причина: учёт CLI покрывает только фоновые задачи Bash, а потомки команд уходят в собственные группы процессов и в этот учёт не попадают ([отчёт Claude Code](../stage0/claude-code.md) §5), тогда как §9.5 не позволяет считать ненаблюдаемое остановленным. Для Codex владение держится до остановки исполнения (W-5): два живых разговора Codex в конфликтующих каталогах работают по очереди исполнений или с `shared_override`.
+**Предложение** для обоих адаптеров: `idle_proven` дополнительно требует, чтобы в группе ресурсов исполнения не осталось процессов, кроме снимка её членов на момент `adapter_ready` (по PID и времени старта): процесс CLI, Node-обёртка и вспомогательные процессы Codex, MCP-серверы, включая унаследованные от владельца (OD-3). Причина: учёт CLI покрывает только его собственные фоновые задачи, а потомки команд уходят в собственные группы процессов и в этот учёт не попадают ([отчёт Claude Code](../stage0/claude-code.md) §5, [отчёт Codex](../stage0/codex.md) §6), тогда как §9.5 не позволяет считать ненаблюдаемое остановленным. Без этого доказательства владение держится до остановки исполнения (W-5).
 
 Явное разрешение совместной работы (`shared_override`):
 

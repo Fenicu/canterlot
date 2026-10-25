@@ -287,7 +287,7 @@ stateDiagram-v2
 | `requested`, `on_machine` | `generation_mismatch` | поколение закрыто или не совпадает | квитанция `rejected_stale`; новое исполнение не затрагивается | `rejected_stale` |
 | `on_machine` | `nothing_to_interrupt` | адаптер не в ходе | квитанция; пауза остаётся | `not_applicable` |
 | `on_machine` | `interrupt_delivered` | | `SJ`: запись; адаптер получил прерывание | `sent_to_agent` |
-| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание: Codex ответом `{}` на `turn/interrupt`; Claude Code ожидает решения владельца (OD-2), см. отображение ниже | `SJ`, PG | `acknowledged` |
+| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание: Codex ответом `{}` на `turn/interrupt`; Claude Code кадром `result` с `terminal_reason: aborted_tools` после SIGINT (решение владельца OD-2), см. отображение ниже | `SJ`, PG | `acknowledged` |
 | `sent_to_agent`, `acknowledged` | `run_ended_or_process_exited` | факт адаптера о конце хода либо подтверждённый выход процесса | `SJ`, PG: терминальное состояние хода; блоки хода `incomplete` или `final`; слот свободен | `completed` |
 | `requested`, `on_machine` | `execution_terminal_or_owner_lost` | | PG | `superseded` |
 | любое нетерминальное | 3 с без `acknowledged` или `completed` | таймер UI от `requested_at` | UI «подтверждение задерживается» | без изменения |
@@ -301,24 +301,22 @@ stateDiagram-v2
 - INT-4: потеря связи и таймеры не убивают процесс; `force_stop` отдельное явное действие и касается только подтверждённо принадлежащей группы ресурсов (AT-C-09, AT-C-10).
 - INT-5: прерывание не откатывает файлы и внешние действия инструментов; UI этого не обещает.
 - INT-6: прерывание идёт по каналу управления и не ждёт очереди событий (P-05, AT-H-03).
-- INT-7: `completed` («остановлено») означает конец хода, а не всех процессов инструментов. Если адаптер сообщает, что процессы инструментов пережили прерывание или их наличие неизвестно, UI показывает их как фоновую работу исполнения и предлагает `stop_execution` или `force_stop`; владение каталогом не освобождается (execution.md §4, W-5).
+- INT-7: `completed` («остановлено») означает конец хода, а не всех процессов инструментов. Если адаптер сообщает, что процессы инструментов пережили прерывание или их наличие неизвестно, UI показывает их как фоновую работу исполнения и предлагает их остановку: у Codex `thread/backgroundTerminals/clean`, у любого адаптера `stop_execution` или `force_stop`; владение каталогом не освобождается (execution.md §4, W-5).
 
-Отображение на CLI (факты этапа 0):
+Отображение на CLI (факты этапа 0, решение владельца OD-2 и решения контролёра в [сводке этапа 0](../stage0/README.md) §6):
 
 | Событие | Claude Code 2.1.310 | Codex 0.164.0 |
 | --- | --- | --- |
-| `interrupt_delivered` | OD-2 (а): SIGINT процессу CLI; (б): `control_request` `interrupt` с `cancel_queued: true` | `turn/interrupt {threadId, turnId}` |
-| `agent_ack` | (а): нет, переход сразу в `completed`; (б): `control_response`, 8 мс | ответ `{}`, 15 мс |
-| `run_ended_or_process_exited` | (а): `result` с `terminal_reason: aborted_tools` за 35 мс, затем выход процесса с кодом 0; (б): `result` за 29 мс, процесс жив | `turn/completed status: interrupted` за 15–16 мс, процесс жив |
-| процессы инструментов | убиты в обоих вариантах | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер сообщает `background_work(unknown)` и INT-7 |
+| `interrupt_delivered` | SIGINT процессу CLI | `turn/interrupt {threadId, turnId}` |
+| `agent_ack` | `result` с `subtype: error_during_execution`, `terminal_reason: aborted_tools`, 35 мс; он же конец хода | ответ `{}`, 15 мс |
+| `run_ended_or_process_exited` | выход процесса CLI с кодом 0 | `turn/completed status: interrupted`, 15–16 мс, процесс жив |
+| процессы инструментов | дерево Bash убито | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер показывает её по `thread/backgroundTerminals/list` (INT-7) |
 | открытый запрос пользователя | MCP `notifications/cancelled` → `request_closed(interrupted)` | `serverRequest/resolved` без нашего ответа → `request_closed(interrupted)` |
-| исполнение после прерывания | (а): `running` → `stopping` → `stopped(user_stop)`; (б): остаётся `running` | остаётся `running` |
+| исполнение после прерывания | `running` → `stopping` → `stopped(user_stop)` | остаётся `running` |
 
-**Ожидает решения владельца (OD-2)** для Claude Code:
+**Решение владельца (OD-2)** для Claude Code: прерывание = документированный SIGINT, недокументированный `control_request` не используется. Выход процесса является ожидаемым итогом команды `interrupt`, а не `process_exited`: исполнение `stopped(user_stop)`, у очереди только пауза `user_stop`, которая и так требует явного продолжения (§7.3). Продолжение = явный resume, новое исполнение (около 1 с старта; эта задержка относится к resume, а не к прерыванию); `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
 
-- (а) SIGINT. Выход процесса является ожидаемым итогом команды `interrupt`, а не `process_exited`: исполнение `stopped(user_stop)`, у очереди только пауза `user_stop`. Следующий ввод требует resume (новое исполнение, около 1 с старта); `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
-- (б) `control_request`. Исполнение и процесс сохраняются, следующий ввод выдаётся после `result`. Работает только на закреплённой версии с контрактным тестом формы запроса и capability `interrupt_receipt_v1` в `system/init`.
-- Без решения прерывание Claude Code PARTIAL, AT-G-02 BLOCKED.
+Codex (решение контролёра): точная политика для команд, выполнявшихся в прерванном ходе, определяется на этапе 2 с отдельным тестом; до этого действует INT-7.
 
 **Терминальные состояния**: `completed`, `not_applicable`, `superseded`, `rejected_stale`. Поздние факты (подтверждение агента после выхода процесса) дополняют историю.
 
@@ -373,14 +371,16 @@ stateDiagram-v2
 
 | Факт | Claude Code 2.1.310 | Codex 0.164.0 |
 | --- | --- | --- |
-| `request_opened` | вызов MCP `tools/call` нашего prompt tool: `tool_name`, точный `input`, `tool_use_id`; `tool_name: AskUserQuestion` означает вопрос. Форма аргументов не документирована: контрактный тест на каждую версию | server request `item/commandExecution/requestApproval` или `item/fileChange/requestApproval` с `threadId`, `turnId`, `itemId`; вопрос `item/tool/requestUserInput`: ожидает решения владельца (OD-1) |
+| `request_opened` | вызов MCP `tools/call` нашего prompt tool: `tool_name`, точный `input`, `tool_use_id`; `tool_name: AskUserQuestion` означает вопрос. Форма аргументов не документирована: контрактный тест на каждую версию | server request `item/commandExecution/requestApproval` или `item/fileChange/requestApproval` с `threadId`, `turnId`, `itemId`; вопрос `item/tool/requestUserInput` на экспериментальной поверхности, включённой решением владельца (OD-1), в обычном режиме и в plan mode |
 | нативный ID для `request_id` | `tool_use_id` | `itemId` и JSON-RPC `id` запроса (уникален в пределах соединения) |
 | допустимые решения | allow (с `updatedInput`) или deny (с текстом); ответы на вопросы в `updatedInput.answers`, свободный текст допускается | только из `availableDecisions` запроса (у команды в проверке `accept`, `acceptWithExecpolicyAmendment`, `cancel`); ответы на вопросы из `options[].label`, свободный текст при `isOther` |
-| срок | CLI запрос не истекает (документировано) | поля срока в запросе нет; истечение не проверялось |
+| срок | CLI запрос не истекает (документировано) | у одобрения поля срока нет; у вопроса поле `autoResolutionMs`, в проверке `null`; истечение не проверялось |
 | `request_closed` | MCP `notifications/cancelled` с `requestId` при прерывании хода; терминальное исполнение | `serverRequest/resolved` без нашего ответа: прерывание, начало или конец хода; терминальное исполнение |
 | `application_proven` | `tool_result` с тем же `tool_use_id` после ответа: allow даёт вывод инструмента, deny даёт `is_error` с нашим текстом и запись в `result.permission_denials` | `serverRequest/resolved` по нашему `requestId` и `item/completed` того же `itemId` со статусом решения; одного `serverRequest/resolved` мало, он приходит и при очистке |
 | отказ CLI в решении | не бывает: ответ после `notifications/cancelled` не исполняется, ошибки нет | не бывает: поздний и повторный ответы молча игнорируются |
-| действие без запроса (`auto_approved_by_cli_policy`) | встроенный read-only набор (`ls`, чтение в рабочем каталоге, `sleep 20`); часть команд CLI блокирует сам (`standalone sleep 30`) | пользовательские `.rules` с `allow` исполняют команду вне песочницы без запроса; набор зависит от OD-3 |
+| действие без запроса (`auto_approved_by_cli_policy`) | встроенный read-only набор (`ls`, чтение в рабочем каталоге, `sleep 20`) и разрешения из настроек владельца (OD-3); часть команд CLI блокирует сам (`standalone sleep 30`) | действия, которые не требуют одобрения в режиме сессии; пользовательские `.rules` владельца с `allow` исполняют команду вне песочницы без запроса (OD-3) |
+
+Режим разрешений сессии (решение владельца OD-3). Сессия наследует режим разрешений и песочницы из конфигурации агента владельца, как если бы владелец запустил CLI сам (§15). Хаб показывает действующий режим каждой сессии и позволяет владельцу переопределить его на сессию (§11): Claude Code `--permission-mode` при запуске, действующее значение в `system/init.permissionMode`; Codex `approvalPolicy` и `sandbox` в `thread/start`, действующие значения в его ответе. Воркер всегда оставляет маршрут разрешений подключённым: Claude Code `--permission-prompt-tool` с нашим MCP-сервером, Codex `approvalsReviewer: "user"`. Режим, при котором CLI не спрашивает (у владельца в Codex `approval_policy = "never"`), запросов не порождает; это видимая настройка владельца, а не обход R-3: разрешения по таймеру или по отсутствию связи по-прежнему нет.
 
 **Предложение**: deadline адаптера для решения длится до конца хода или закрытия запроса, а не фиксированный таймер. Причина: у обоих CLI доказательство применения allow приходит только по завершении инструмента (`tool_result`, `item/completed`), и короткий таймер переводил бы каждый долгий инструмент в `decision_unconfirmed`.
 
