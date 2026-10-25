@@ -65,6 +65,8 @@ impl WorkerControl for HubGrpc {
             };
             #[cfg(feature = "fault-injection")]
             let mut failures = state.faults.failures();
+            #[cfg(not(feature = "fault-injection"))]
+            let mut failures = ();
             yield reply;
             let cj_journal = Uuid::parse_str(&hello.cj_journal_id).ok();
             let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Cj);
@@ -73,12 +75,7 @@ impl WorkerControl for HubGrpc {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
-                    fault = async {
-                        #[cfg(feature = "fault-injection")]
-                        return Next::Fault(failures.recv().await.expect("fault channel"));
-                        #[cfg(not(feature = "fault-injection"))]
-                        std::future::pending::<Next>().await
-                    } => fault,
+                    fault = fault_signal(&mut failures) => fault,
                     ack = lane.next_ack() => Next::Ack(ack),
                     next = inbound.message() => Next::Inbound(next),
                     command = commands.recv() => Next::Command(command),
@@ -119,7 +116,7 @@ impl WorkerControl for HubGrpc {
                                 _ = state.faults.pause(crate::fault_injection::Point::BeforeCommandSend) => {},
                             }
                             if let Some(control_down::Msg::Command(value)) = &command.msg {
-                                state.faults.command(value.clone());
+                                state.faults.command(value.clone(), connection_id);
                             }
                         }
                         yield checked(command)?;
@@ -131,4 +128,22 @@ impl WorkerControl for HubGrpc {
         };
         Ok(Response::new(Box::pin(output)))
     }
+}
+
+#[cfg(feature = "fault-injection")]
+async fn fault_signal(failures: &mut tokio::sync::broadcast::Receiver<tonic::Code>) -> Next {
+    loop {
+        match failures.recv().await {
+            Ok(code) => return Next::Fault(code),
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                return std::future::pending().await;
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn fault_signal(_: &mut ()) -> std::future::Pending<Next> {
+    std::future::pending()
 }

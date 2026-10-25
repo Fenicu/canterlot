@@ -59,14 +59,23 @@ impl WorkerData for HubGrpc {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
-                    ack = lane.next_ack() => {
+                    ack = lane.next_ack() => Ok(ack),
+                    next = inbound.message() => Err(next),
+                };
+                let message = match next {
+                    Ok(ack) => {
                         let Some(ack) = ack else { break; };
-                        yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack?)) })?;
+                        let ack = ack?;
+                        #[cfg(feature = "fault-injection")]
+                        if state.faults.ack(&state.pool, machine_id, &ack).await { continue; }
+                        yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack)) })?;
                         continue;
                     }
-                    next = inbound.message() => next,
+                    Err(message) => {
+                        let Some(message) = message? else { break; };
+                        message
+                    }
                 };
-                let Some(message) = next? else { break; };
                 match message.msg {
                     Some(data_up::Msg::SjRecords(records)) => lane.submit(records)?,
                     _ => Err(Status::invalid_argument("unexpected data message"))?,

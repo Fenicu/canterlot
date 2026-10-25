@@ -87,7 +87,9 @@ impl WorkerStore {
     #[cfg(feature = "fault-injection")]
     pub fn with_probe(mut self, probe: crate::fault_injection::StoreProbe) -> Self {
         self.probe = Some(probe);
-        self.record_snapshot().expect("initial store snapshot");
+        if self.record_snapshot().is_err() {
+            eprintln!("fault injection: initial store snapshot failed");
+        }
         self
     }
 
@@ -100,9 +102,17 @@ impl WorkerStore {
                 .inbox
                 .read_from(self.inbox.first_seq(), usize::MAX)?
                 .into_iter()
-                .map(|record| Command::decode(record.payload.as_slice()).map_err(StoreError::from))
+                .map(|record| {
+                    Command::decode(record.payload.as_slice())
+                        .map(|command| crate::fault_injection::CommandTrace::from(&command))
+                        .map_err(StoreError::from)
+                })
                 .collect::<Result<_, _>>()?,
-            cj: self.cj_records_from(self.cj.first_seq(), usize::MAX)?,
+            cj: self
+                .cj_records_from(self.cj.first_seq(), usize::MAX)?
+                .iter()
+                .map(crate::fault_injection::RecordTrace::from)
+                .collect(),
             receipt_count: self.receipts.last_seq(),
         })
     }

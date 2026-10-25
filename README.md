@@ -28,6 +28,8 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 ## Разработка
 
+Полная проверка — `scripts/check.sh`; e2e-тесты запускаются только с `--all-features`.
+
 Для тестов хаба нужен Docker. Из корня репозитория запустите PostgreSQL 18.6 и тесты:
 
 ```bash

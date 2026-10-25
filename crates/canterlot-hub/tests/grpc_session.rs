@@ -822,6 +822,11 @@ async fn stale_session_is_replaced(pool: PgPool) {
     }
     assert!(old_sender.is_closed());
     heartbeat(&new_tx, &mut new, 81).await;
+    assert!(
+        host.registry
+            .command_sender(host.machine.machine_id)
+            .is_some()
+    );
     changed(
         &mut changes,
         host.machine.machine_id,

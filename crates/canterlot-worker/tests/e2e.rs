@@ -9,12 +9,12 @@ use canterlot_hub::{
         submit::{self, ContentBlock, SubmitInput},
     },
     executions,
-    fault_injection::{Faults, Point},
+    fault_injection::{BatchTrace, Faults, Point},
     machines,
     model::ExecutionState,
     testkit::{self, TestHub, spawn_test_hub, spawn_test_hub_with_faults},
 };
-use canterlot_proto::worker::v1::{JournalRecords, RejectReason, record_body};
+use canterlot_proto::worker::v1::RejectReason;
 use canterlot_worker::{
     config::{WorkerConfig, WorkerTimers},
     fault_injection::{StoreProbe, StoreSnapshot},
@@ -373,11 +373,9 @@ impl Fixture {
         let mut stored = vec![];
         for (seq, record) in facts {
             assert!((1..=count).contains(&seq));
-            let Some(record_body::Body::CommandStored(fact)) = record.body.unwrap().body else {
-                panic!("unexpected CJ fact");
-            };
-            assert_eq!(fact.dispatch_attempt, 1);
-            stored.push(Uuid::parse_str(&fact.command_id).unwrap());
+            let (command_id, dispatch_attempt) = record.stored_command.expect("unexpected CJ fact");
+            assert_eq!(dispatch_attempt, 1);
+            stored.push(Uuid::parse_str(&command_id).unwrap());
         }
         stored.sort();
         assert_eq!(stored, expected);
@@ -423,8 +421,18 @@ fn assert_acks(faults: &Faults, fixture: &Fixture) {
     }
 }
 
-fn first_batch(faults: &Faults) -> JournalRecords {
+fn first_batch(faults: &Faults) -> BatchTrace {
     faults.batches().first().unwrap().clone()
+}
+
+fn sent_in_current_session(faults: &Faults) -> bool {
+    let Some(hello) = faults.hellos().last().cloned() else {
+        return false;
+    };
+    faults
+        .commands()
+        .iter()
+        .any(|command| command.connection_id.to_string() == hello.connection_id)
 }
 
 async fn restart(pool: &PgPool, hub: TestHub, faults: Faults) -> TestHub {
@@ -474,7 +482,15 @@ async fn stream_break_before_ack_replays_same_range(pool: PgPool) {
     assert_eq!(hellos[1].cursors[0].last_seq, 1);
     fixture.assert_db(&["dispatched"], 0).await;
     fixture.assert_local(&fixture.snapshot(), 0);
+    let before_ack = hub.faults.pause_next(Point::BeforeAckSend);
     resume.send(()).unwrap();
+    let ack_resume = hit(before_ack).await;
+    let ack = hub.faults.acks().last().unwrap().clone();
+    let committed_at_send = fixture.committed().await;
+    assert_eq!(committed_at_send, 1);
+    assert!(ack.range.up_to_seq <= committed_at_send);
+    assert_eq!(fixture.snapshot().cursor.acked_seq_known_to_worker, 0);
+    ack_resume.send(()).unwrap();
     until(async || hub.faults.acks().iter().any(|ack| ack.dropped)).await;
     fixture.assert_db(&["on_machine"], 1).await;
     assert_eq!(fixture.snapshot().cursor.acked_seq_known_to_worker, 0);
@@ -524,7 +540,22 @@ async fn hub_restart_redelivers_without_duplicates(pool: PgPool) {
     redelivery_resume.send(()).unwrap();
     let replay_resume = hit(replay).await;
     until(async || fixture.probe.duplicate_count() >= 1).await;
-    assert_eq!(hub.faults.commands()[0], sent[0]);
+    let redelivered = hub.faults.commands()[0].clone();
+    assert_ne!(redelivered.connection_id, sent[0].connection_id);
+    assert_eq!(
+        (
+            redelivered.command_id,
+            redelivered.dispatch_attempt,
+            redelivered.kind,
+            redelivered.encoded_len
+        ),
+        (
+            sent[0].command_id.clone(),
+            sent[0].dispatch_attempt,
+            sent[0].kind,
+            sent[0].encoded_len
+        )
+    );
     fixture.assert_local(&fixture.snapshot(), 0);
     replay_resume.send(()).unwrap();
     fixture.settled().await;
@@ -543,6 +574,8 @@ async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
     let mut worker = fixture.start();
     let mut resume = hit(pause).await;
     let original = first_batch(&hub.faults);
+    until(async || sent_in_current_session(&hub.faults)).await;
+    let mut restarts = 0;
     for _ in 0..2 {
         for code in [Code::Cancelled, Code::DeadlineExceeded] {
             fixture.assert_db(&["dispatched"], 0).await;
@@ -553,6 +586,11 @@ async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
             assert!(resume.is_closed());
             resume = next;
             assert_eq!(hub.faults.batches().last().unwrap(), &original);
+            restarts += 1;
+            until(async || {
+                fixture.probe.duplicate_count() >= restarts && sent_in_current_session(&hub.faults)
+            })
+            .await;
         }
         let next_faults = Faults::default();
         let pause = next_faults.pause_next(Point::BeforeCjCommit);
@@ -562,6 +600,11 @@ async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
         assert!(resume.is_closed());
         resume = next;
         assert_eq!(first_batch(&hub.faults), original);
+        restarts += 1;
+        until(async || {
+            fixture.probe.duplicate_count() >= restarts && sent_in_current_session(&hub.faults)
+        })
+        .await;
         assert!(!worker.join.is_finished());
     }
     fixture.assert_db(&["dispatched"], 0).await;

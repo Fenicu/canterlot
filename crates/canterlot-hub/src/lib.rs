@@ -1,3 +1,6 @@
+#[cfg(all(feature = "fault-injection", not(debug_assertions)))]
+compile_error!("fault-injection must not be built in release");
+
 pub mod config;
 pub mod db;
 pub mod delivery;

@@ -7,7 +7,9 @@ use canterlot_proto::{
     limits::check_record_batch,
     worker::v1::{JournalRecords, record_body::Body},
 };
+use prost::Message;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
@@ -115,26 +117,53 @@ impl Ingest {
         if batch.records.iter().any(|record| record.seq == 0) {
             return Err(IngestError::InvalidRecord);
         }
-        let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
-            "select machine_id, kind, committed_seq from journal_cursors where journal_id = $1",
+        let rows: Vec<CursorRow> = sqlx::query_as(
+            "select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1",
         )
         .bind(journal_id)
         .fetch_all(&self.pool)
         .await?;
-        let mut up_to_seq = checked_cursor(machine_id, kind, rows)?;
+        let (mut up_to_seq, mut last_digest) = checked_cursor(machine_id, kind, rows)?;
         for record in &batch.records {
-            // Курсор только растёт: запись не новее снимка точно дубликат, транзакция не нужна.
-            if record.seq <= up_to_seq {
+            // Записи старше снимка не требуют сравнения с последним digest.
+            if record.seq < up_to_seq {
+                continue;
+            }
+            let digest = record
+                .body
+                .as_ref()
+                .map(|body| Sha256::digest(body.encode_to_vec()).to_vec());
+            if record.seq == up_to_seq && (last_digest.is_none() || last_digest == digest) {
                 continue;
             }
             let mut tx = self.pool.begin().await?;
             sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
                 .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
-            let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
-                "select machine_id, kind, committed_seq from journal_cursors where journal_id = $1 for update",
+            let rows: Vec<CursorRow> = sqlx::query_as(
+                "select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1 for update",
             ).bind(journal_id).fetch_all(&mut *tx).await?;
-            up_to_seq = checked_cursor(machine_id, kind, rows)?;
+            (up_to_seq, last_digest) = checked_cursor(machine_id, kind, rows)?;
             if record.seq <= up_to_seq {
+                if record.seq == up_to_seq && last_digest.is_some() && last_digest != digest {
+                    let owner_id =
+                        sqlx::query_scalar("select owner_id from machines where id = $1")
+                            .bind(machine_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    events::append(
+                        &mut tx,
+                        NewEvent {
+                            scope: Scope::Conversations { owner_id },
+                            kind: "journal_record_mismatch",
+                            conversation_id: None,
+                            execution_id: None,
+                            payload: json!({"journal_id": journal_id, "seq": record.seq}),
+                            correlation_id: Uuid::now_v7(),
+                        },
+                    )
+                    .await?;
+                }
+                tx.commit().await?;
                 continue;
             }
             if record.seq > up_to_seq + 1 {
@@ -150,10 +179,11 @@ impl Ingest {
                 .and_then(|body| body.body.as_ref())
                 .ok_or(IngestError::UnknownRecord)?;
             let ignored = apply_body(&mut tx, machine_id, body, Uuid::now_v7()).await?;
-            sqlx::query("update journal_cursors set committed_seq = $3, updated_at = clock_timestamp() where machine_id = $1 and journal_id = $2")
-                .bind(machine_id).bind(journal_id).bind(seq).execute(&mut *tx).await?;
+            sqlx::query("update journal_cursors set committed_seq = $3, last_record_digest = $4, updated_at = clock_timestamp() where machine_id = $1 and journal_id = $2")
+                .bind(machine_id).bind(journal_id).bind(seq).bind(&digest).execute(&mut *tx).await?;
             tx.commit().await?;
             up_to_seq = record.seq;
+            last_digest = digest;
             if ignored {
                 self.ignored.fetch_add(1, Ordering::Relaxed);
             }
@@ -169,13 +199,16 @@ impl Ingest {
     }
 }
 
+type CursorRow = (Uuid, String, i64, Option<Vec<u8>>);
+
 fn checked_cursor(
     machine_id: Uuid,
     kind: JournalKind,
-    rows: Vec<(Uuid, String, i64)>,
-) -> Result<u64, IngestError> {
+    rows: Vec<CursorRow>,
+) -> Result<(u64, Option<Vec<u8>>), IngestError> {
     let mut committed = 0;
-    for (owner, stored_kind, seq) in rows {
+    let mut digest = None;
+    for (owner, stored_kind, seq, last_digest) in rows {
         if owner != machine_id {
             return Err(IngestError::ForeignJournal);
         }
@@ -183,8 +216,9 @@ fn checked_cursor(
             return Err(IngestError::JournalKindMismatch);
         }
         committed = u64::try_from(seq).map_err(|_| IngestError::Database)?;
+        digest = last_digest;
     }
-    Ok(committed)
+    Ok((committed, digest))
 }
 
 fn parse_id(value: &str) -> Result<Uuid, IngestError> {

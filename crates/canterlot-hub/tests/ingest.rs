@@ -1326,3 +1326,68 @@ async fn records_of_one_machine_never_affect_another_machine(pool: PgPool) -> Te
     .await;
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> TestResult {
+    use prost::Message;
+    use sha2::{Digest, Sha256};
+
+    let (seed, _, input) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let original = batch(journal, vec![stored(input.command_id)]);
+    let expected = IngestOutcome::Committed { up_to_seq: 1 };
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &original)
+            .await?,
+        expected
+    );
+    let digest: Vec<u8> =
+        sqlx::query_scalar("select last_record_digest from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        digest,
+        Sha256::digest(original.records[0].body.as_ref().unwrap().encode_to_vec()).to_vec()
+    );
+    let before: i64 = sqlx::query_scalar("select count(*) from events")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &original)
+            .await?,
+        expected
+    );
+    let after: i64 = sqlx::query_scalar("select count(*) from events")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(before, after);
+    let different = batch(journal, vec![accepted(input.command_id)]);
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &different)
+            .await?,
+        expected
+    );
+    let diagnostics: Vec<Value> =
+        sqlx::query_scalar("select payload from events where kind = 'journal_record_mismatch'")
+            .fetch_all(&pool)
+            .await?;
+    assert_eq!(diagnostics, vec![json!({"journal_id": journal, "seq": 1})]);
+    assert_eq!(cursor(&pool, journal).await, 1);
+    let state: String = sqlx::query_scalar("select state from inputs where id = $1")
+        .bind(input.input_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "on_machine");
+    let retained: Vec<u8> =
+        sqlx::query_scalar("select last_record_digest from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(retained, digest);
+    Ok(())
+}
