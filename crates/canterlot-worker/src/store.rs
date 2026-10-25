@@ -102,7 +102,7 @@ impl WorkerStore {
             index: HashMap::new(),
             hub,
             #[cfg(test)]
-            crash_after: None,
+            crash_after: tests::take_open_crash_point(),
         };
         store.reconcile()?;
         Ok(store)
@@ -161,6 +161,8 @@ impl WorkerStore {
                         }
                         .encode_to_vec(),
                     )?;
+                    #[cfg(test)]
+                    self.after_append(tests::AppendPoint::Cj);
                     self.append_receipt(ReceiptEntry {
                         command_id,
                         attempt: cmd.dispatch_attempt,

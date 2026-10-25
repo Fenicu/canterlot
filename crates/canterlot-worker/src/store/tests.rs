@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use canterlot_proto::worker::v1::CancelInput;
@@ -12,13 +13,21 @@ pub(super) enum AppendPoint {
     Receipt,
 }
 
+thread_local! {
+    static OPEN_CRASH_AFTER: Cell<Option<AppendPoint>> = const { Cell::new(None) };
+}
+
+pub(super) fn take_open_crash_point() -> Option<AppendPoint> {
+    OPEN_CRASH_AFTER.take()
+}
+
 impl WorkerStore {
     pub(super) fn after_append(&self, point: AppendPoint) {
         assert_ne!(self.crash_after, Some(point), "simulated crash");
     }
 }
 
-fn recover_after_crash(point: AppendPoint, rejected: bool) {
+fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[AppendPoint]) {
     let dir = TempDir::new().unwrap();
     let cmd = Command {
         command_id: Uuid::now_v7().to_string(),
@@ -37,6 +46,18 @@ fn recover_after_crash(point: AppendPoint, rejected: bool) {
         u64::from(point == AppendPoint::Receipt)
     );
     drop(store);
+
+    for &repair_point in repair_crashes {
+        OPEN_CRASH_AFTER.set(Some(repair_point));
+        assert!(catch_unwind(|| WorkerStore::open(dir.path())).is_err());
+        assert_eq!(open_journal(&dir.path().join("cj")).unwrap().last_seq(), 1);
+        assert_eq!(
+            open_journal(&dir.path().join("receipts"))
+                .unwrap()
+                .last_seq(),
+            u64::from(repair_point == AppendPoint::Receipt)
+        );
+    }
 
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert_eq!(store.cj_journal_id(), journal_id);
@@ -102,25 +123,54 @@ fn recover_after_crash(point: AppendPoint, rejected: bool) {
 
 #[test]
 fn crash_after_inbox_append_is_reconciled() {
-    recover_after_crash(AppendPoint::Inbox, false);
+    recover_after_crash(AppendPoint::Inbox, false, &[]);
 }
 
 #[test]
 fn crash_after_stored_cj_append_is_reconciled() {
-    recover_after_crash(AppendPoint::Cj, false);
+    recover_after_crash(AppendPoint::Cj, false, &[]);
 }
 
 #[test]
 fn crash_after_stored_receipt_append_is_reconciled() {
-    recover_after_crash(AppendPoint::Receipt, false);
+    recover_after_crash(AppendPoint::Receipt, false, &[]);
 }
 
 #[test]
 fn crash_after_rejected_cj_append_is_reconciled() {
-    recover_after_crash(AppendPoint::Cj, true);
+    recover_after_crash(AppendPoint::Cj, true, &[]);
 }
 
 #[test]
 fn crash_after_rejected_receipt_append_is_reconciled() {
-    recover_after_crash(AppendPoint::Receipt, true);
+    recover_after_crash(AppendPoint::Receipt, true, &[]);
+}
+
+#[test]
+fn crash_after_reconciled_cj_append_is_reconciled() {
+    recover_after_crash(AppendPoint::Inbox, false, &[AppendPoint::Cj]);
+}
+
+#[test]
+fn crash_after_reconciled_inbox_receipt_append_is_reconciled() {
+    recover_after_crash(AppendPoint::Inbox, false, &[AppendPoint::Receipt]);
+}
+
+#[test]
+fn crash_after_reconciled_stored_cj_receipt_append_is_reconciled() {
+    recover_after_crash(AppendPoint::Cj, false, &[AppendPoint::Receipt]);
+}
+
+#[test]
+fn crash_after_reconciled_rejected_cj_receipt_append_is_reconciled() {
+    recover_after_crash(AppendPoint::Cj, true, &[AppendPoint::Receipt]);
+}
+
+#[test]
+fn repeated_reconciliation_crashes_are_reconciled() {
+    recover_after_crash(
+        AppendPoint::Inbox,
+        false,
+        &[AppendPoint::Cj, AppendPoint::Receipt],
+    );
 }

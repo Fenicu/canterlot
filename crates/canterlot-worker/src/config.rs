@@ -53,51 +53,63 @@ impl Default for WorkerTimers {
     }
 }
 
-pub enum ConfigError {
-    // Старые варианты сохранены для совместимости; load и From отбрасывают исходные ошибки.
-    Io(io::Error),
-    Toml(toml::de::Error),
-    InvalidHubUrl,
+pub struct ConfigError {
+    pub path: PathBuf,
+    pub category: ConfigErrorCategory,
+    pub location: Option<(usize, usize)>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigErrorCategory {
+    Io(io::ErrorKind),
+    Parse,
+    HubUrl,
     TokenPermissions,
     UnsupportedTokenPermissions,
-    FileIo {
-        path: PathBuf,
-        kind: io::ErrorKind,
-    },
-    Parse {
-        path: PathBuf,
-        location: Option<(usize, usize)>,
-    },
-    HubUrl {
-        path: PathBuf,
-    },
+}
+
+impl ConfigError {
+    fn new(path: &Path, category: ConfigErrorCategory) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            category,
+            location: None,
+        }
+    }
 }
 
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Io(error) => write!(f, "configuration I/O error: {}", error.kind()),
-            Self::Toml(_) => f.write_str("invalid worker configuration"),
-            Self::InvalidHubUrl => {
-                f.write_str("hub URL must use HTTPS with a host and no credentials")
+        match self.category {
+            ConfigErrorCategory::Io(kind) => {
+                write!(
+                    f,
+                    "configuration I/O error in {}: {kind}",
+                    self.path.display()
+                )
             }
-            Self::TokenPermissions => {
-                f.write_str("token file must have no group or other permissions")
-            }
-            Self::UnsupportedTokenPermissions => {
-                f.write_str("token permission checks are not supported on this platform")
-            }
-            Self::FileIo { path, kind } => {
-                write!(f, "configuration I/O error in {}: {kind}", path.display())
-            }
-            Self::Parse { path, location } => {
-                write!(f, "invalid worker configuration in {}", path.display())?;
-                if let Some((line, column)) = location {
+            ConfigErrorCategory::Parse => {
+                write!(f, "invalid worker configuration in {}", self.path.display())?;
+                if let Some((line, column)) = self.location {
                     write!(f, " at line {line}, column {column}")?;
                 }
                 Ok(())
             }
-            Self::HubUrl { path } => write!(f, "{}: {}", path.display(), Self::InvalidHubUrl),
+            ConfigErrorCategory::HubUrl => write!(
+                f,
+                "{}: hub URL must use HTTPS with a host and no credentials",
+                self.path.display()
+            ),
+            ConfigErrorCategory::TokenPermissions => write!(
+                f,
+                "{}: token file must have no group or other permissions",
+                self.path.display()
+            ),
+            ConfigErrorCategory::UnsupportedTokenPermissions => write!(
+                f,
+                "{}: token permission checks are not supported on this platform",
+                self.path.display()
+            ),
         }
     }
 }
@@ -112,24 +124,18 @@ impl std::error::Error for ConfigError {}
 
 impl From<io::Error> for ConfigError {
     fn from(error: io::Error) -> Self {
-        Self::Io(error.kind().into())
+        file_io(Path::new(""), error)
     }
 }
 
 impl From<toml::de::Error> for ConfigError {
     fn from(_: toml::de::Error) -> Self {
-        Self::Parse {
-            path: PathBuf::new(),
-            location: None,
-        }
+        Self::new(Path::new(""), ConfigErrorCategory::Parse)
     }
 }
 
 fn file_io(path: &Path, error: io::Error) -> ConfigError {
-    ConfigError::FileIo {
-        path: path.to_path_buf(),
-        kind: error.kind(),
-    }
+    ConfigError::new(path, ConfigErrorCategory::Io(error.kind()))
 }
 
 pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
@@ -143,14 +149,12 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
                 let column = prefix.rsplit('\n').next().unwrap_or("").chars().count() + 1;
                 (line, column)
             });
-        ConfigError::Parse {
-            path: path.to_path_buf(),
+        ConfigError {
             location,
+            ..ConfigError::new(path, ConfigErrorCategory::Parse)
         }
     })?;
-    let invalid_url = || ConfigError::HubUrl {
-        path: path.to_path_buf(),
-    };
+    let invalid_url = || ConfigError::new(path, ConfigErrorCategory::HubUrl);
     let url = Url::parse(&config.hub_url).map_err(|_| invalid_url())?;
     if url.scheme() != "https"
         || url.host_str().is_none()
@@ -173,11 +177,17 @@ pub fn read_token(path: &Path) -> Result<String, ConfigError> {
             .permissions()
             .mode();
         if mode & 0o077 != 0 {
-            return Err(ConfigError::TokenPermissions);
+            return Err(ConfigError::new(
+                path,
+                ConfigErrorCategory::TokenPermissions,
+            ));
         }
     }
     #[cfg(not(unix))]
-    return Err(ConfigError::UnsupportedTokenPermissions);
+    return Err(ConfigError::new(
+        path,
+        ConfigErrorCategory::UnsupportedTokenPermissions,
+    ));
 
     let mut token = String::new();
     file.read_to_string(&mut token)
