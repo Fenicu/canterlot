@@ -293,6 +293,7 @@ fn format_matches_little_endian_layout_and_crc32c() {
     let mut expected_header = b"CNTJ".to_vec();
     expected_header.extend_from_slice(&1u32.to_le_bytes());
     expected_header.extend_from_slice(journal.id().0.as_bytes());
+    expected_header.extend_from_slice(&JournalOptions::default().max_record_bytes.to_le_bytes());
     assert_eq!(
         fs::read(dir.path().join("header")).unwrap(),
         expected_header
@@ -513,7 +514,7 @@ fn corruption_without_local_ack_durably_blocks_sequence_reuse() {
     let mut expected_seal = 3u64.to_le_bytes().to_vec();
     expected_seal.extend_from_slice(&crc32c::crc32c(&expected_seal).to_le_bytes());
     assert_eq!(fs::read(dir.path().join("sealed")).unwrap(), expected_seal);
-    assert_eq!(journal.bytes_on_disk(), 24 + 12 + 12 + 38);
+    assert_eq!(journal.bytes_on_disk(), 28 + 12 + 12 + 38);
     assert_records(
         &journal.read_from(1, usize::MAX).unwrap(),
         &[(1, b"one"), (2, b"two")],
@@ -855,4 +856,126 @@ fn corruption_preserves_ack_and_blocks_reuse_of_acked_sequences() {
         journal.append(b"replacement"),
         Err(JournalError::Sealed { from_seq: 2 })
     ));
+}
+
+#[test]
+fn reopen_uses_persisted_record_limit() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        max_record_bytes: 8,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    journal.append(b"12345678").unwrap();
+    drop(journal);
+    for max_record_bytes in [0, 4, 16] {
+        let (mut journal, report) = Journal::open(
+            dir.path(),
+            JournalOptions {
+                max_record_bytes,
+                ..options
+            },
+        )
+        .unwrap();
+        assert!(report.corrupted_tail.is_none());
+        assert_eq!(journal.is_sealed(), None);
+        assert_records(&journal.read_from(1, 0).unwrap(), &[(1, b"12345678")]);
+        assert!(matches!(
+            journal.append(b"123456789"),
+            Err(JournalError::RecordTooLarge { len: 9, max: 8 })
+        ));
+        assert_eq!(journal.append(b"12345678").unwrap(), journal.last_seq());
+    }
+    assert!(!dir.path().join("quarantine").exists());
+    assert!(!dir.path().join("sealed").exists());
+}
+
+#[test]
+fn open_validates_lengths_against_header_limit() {
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        max_record_bytes: 4,
+        ..JournalOptions::default()
+    };
+    let mut journal = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    journal.append(b"one").unwrap();
+    drop(journal);
+    let mut record = 5u32.to_le_bytes().to_vec();
+    let mut protected = 2u64.to_le_bytes().to_vec();
+    protected.extend_from_slice(b"12345");
+    record.extend_from_slice(&crc32c::crc32c(&protected).to_le_bytes());
+    record.extend_from_slice(&protected);
+    OpenOptions::new()
+        .append(true)
+        .open(&segments(dir.path())[0])
+        .unwrap()
+        .write_all(&record)
+        .unwrap();
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.is_sealed(), Some(2));
+    assert_eq!(
+        fs::read(report.corrupted_tail.unwrap().quarantine_path).unwrap(),
+        record
+    );
+}
+
+#[test]
+fn exclusive_lock_blocks_other_processes_and_releases_on_drop() {
+    const CHILD_DIR: &str = "CANTERLOT_JOURNAL_LOCK_REGRESSION_DIR";
+    if let Some(dir) = std::env::var_os(CHILD_DIR) {
+        let dir = Path::new(&dir);
+        assert!(matches!(
+            Journal::open(dir, JournalOptions::default()),
+            Err(JournalError::Locked)
+        ));
+        assert!(matches!(
+            Journal::create(dir, JournalId(Uuid::now_v7()), JournalOptions::default()),
+            Err(JournalError::Locked)
+        ));
+        return;
+    }
+    let dir = TempDir::new().unwrap();
+    let mut journal = create(dir.path());
+    journal.append(b"one").unwrap();
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "exclusive_lock_blocks_other_processes_and_releases_on_drop",
+            "--nocapture",
+        ])
+        .env(CHILD_DIR, dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(matches!(
+        Journal::open(dir.path(), JournalOptions::default()),
+        Err(JournalError::Locked)
+    ));
+    assert!(matches!(
+        Journal::create(
+            dir.path(),
+            JournalId(Uuid::now_v7()),
+            JournalOptions::default()
+        ),
+        Err(JournalError::Locked)
+    ));
+    drop(journal);
+    let (mut journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.last_seq(), 1);
+    assert_eq!(journal.append(b"two").unwrap(), 2);
+    assert!(matches!(
+        Journal::open(dir.path(), JournalOptions::default()),
+        Err(JournalError::Locked)
+    ));
+    drop(journal);
+    let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
+    assert!(report.corrupted_tail.is_none());
+    assert_eq!(journal.last_seq(), 2);
 }

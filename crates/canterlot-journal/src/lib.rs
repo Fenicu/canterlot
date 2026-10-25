@@ -4,8 +4,8 @@ mod error;
 mod format;
 mod segment;
 
-use std::fs::{self, File, OpenOptions};
-use std::io::{self, Seek, SeekFrom};
+use std::fs::{self, File, OpenOptions, TryLockError};
+use std::io::{self, Seek, SeekFrom, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
@@ -52,6 +52,7 @@ pub struct OpenReport {
 #[derive(Debug)]
 pub struct Journal {
     dir: PathBuf,
+    _lock: JournalLock,
     id: JournalId,
     options: JournalOptions,
     segments: Vec<Segment>,
@@ -59,6 +60,8 @@ pub struct Journal {
     acked_seq: u64,
     sealed_from: Option<u64>,
     failed: bool,
+    #[cfg(test)]
+    write_hook: tests::WriteHook,
 }
 
 impl Journal {
@@ -67,27 +70,65 @@ impl Journal {
         id: JournalId,
         opts: JournalOptions,
     ) -> Result<Journal, JournalError> {
-        match fs::create_dir(dir) {
-            Ok(()) => segment::sync_dir(
-                dir.parent()
-                    .filter(|p| !p.as_os_str().is_empty())
-                    .unwrap_or(Path::new(".")),
-            )?,
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+        Self::create_inner(
+            dir,
+            id,
+            opts,
+            #[cfg(test)]
+            |_| Ok(()),
+        )
+    }
+
+    fn create_inner(
+        dir: &Path,
+        id: JournalId,
+        opts: JournalOptions,
+        #[cfg(test)] before_header: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<Journal, JournalError> {
+        if dir.join("lock").try_exists()? {
+            let _lock = lock_directory(dir)?;
+        }
+        match fs::read_dir(dir) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::AlreadyExists,
+                        "journal directory is not empty",
+                    )
+                    .into());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        if fs::read_dir(dir)?.next().is_some() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                "journal directory is not empty",
-            )
-            .into());
+        let parent = dir
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let staging = parent.join(format!(".canterlot-journal-{}.tmp", uuid::Uuid::now_v7()));
+        fs::create_dir(&staging)?;
+        let lock = lock_directory(&staging)?;
+        lock.0.sync_all()?;
+        let mut first = Segment::create(&staging, 1)?;
+        segment::atomic_replace(&staging, "ack", &format::encode_ack(0))?;
+        #[cfg(test)]
+        before_header(&staging)?;
+        segment::atomic_replace(
+            &staging,
+            "header",
+            &format::encode_header(id, opts.max_record_bytes),
+        )?;
+        if let Err(error) = fs::rename(&staging, dir) {
+            if dir.join("lock").try_exists()? {
+                let _lock = lock_directory(dir)?;
+            }
+            return Err(error.into());
         }
-        let first = Segment::create(dir, 1)?;
-        segment::atomic_replace(dir, "ack", &format::encode_ack(0))?;
-        segment::atomic_replace(dir, "header", &format::encode_header(id))?;
+        segment::sync_dir(parent)?;
+        first.path = dir.join(first.path.file_name().unwrap());
         Ok(Self {
             dir: dir.to_path_buf(),
+            _lock: lock,
             id,
             options: opts,
             segments: vec![first],
@@ -95,15 +136,22 @@ impl Journal {
             acked_seq: 0,
             sealed_from: None,
             failed: false,
+            #[cfg(test)]
+            write_hook: tests::WriteHook::default(),
         })
     }
 
-    pub fn open(dir: &Path, opts: JournalOptions) -> Result<(Journal, OpenReport), JournalError> {
+    pub fn open(
+        dir: &Path,
+        mut opts: JournalOptions,
+    ) -> Result<(Journal, OpenReport), JournalError> {
         let metadata = |name| match fs::read(dir.join(name)) {
             Err(error) if error.kind() == io::ErrorKind::NotFound => Err(JournalError::NotAJournal),
             result => result.map_err(JournalError::Io),
         };
-        let id = format::decode_header(&metadata("header")?)?;
+        let (id, max_record_bytes) = format::decode_header(&metadata("header")?)?;
+        let lock = lock_directory(dir)?;
+        opts.max_record_bytes = max_record_bytes;
         let acked_seq = format::decode_ack(&metadata("ack")?)?;
         let mut sealed_from = match fs::read(dir.join("sealed")) {
             Ok(bytes) => {
@@ -154,6 +202,7 @@ impl Journal {
         segment::sync_dir(dir)?;
         let journal = Self {
             dir: dir.to_path_buf(),
+            _lock: lock,
             id,
             options: opts,
             segments,
@@ -161,6 +210,8 @@ impl Journal {
             acked_seq,
             sealed_from,
             failed: false,
+            #[cfg(test)]
+            write_hook: tests::WriteHook::default(),
         };
         Ok((journal, report))
     }
@@ -211,6 +262,10 @@ impl Journal {
             })?;
         let result = self.write_batch(payloads, batch_bytes, first);
         if let Err(error) = result {
+            let active = self.segments.last().unwrap();
+            if let Ok(file) = OpenOptions::new().write(true).open(&active.path) {
+                let _ = file.set_len(active.bytes).and_then(|()| file.sync_all());
+            }
             self.failed = true;
             return Err(error.into());
         }
@@ -219,6 +274,12 @@ impl Journal {
     }
 
     fn write_batch(&mut self, payloads: &[&[u8]], batch_bytes: u64, first: u64) -> io::Result<()> {
+        let capacity = usize::try_from(batch_bytes)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "batch size overflow"))?;
+        let mut buffer = Vec::with_capacity(capacity);
+        for (index, payload) in payloads.iter().enumerate() {
+            format::write_record(&mut buffer, first + index as u64, payload)?;
+        }
         let active = self.segments.last().unwrap();
         if active.bytes > 0
             && active.bytes.saturating_add(batch_bytes) > self.options.segment_max_bytes
@@ -227,9 +288,14 @@ impl Journal {
         }
         let active = self.segments.last_mut().unwrap();
         let mut file = OpenOptions::new().append(true).open(&active.path)?;
-        for (index, payload) in payloads.iter().enumerate() {
-            format::write_record(&mut file, first + index as u64, payload)?;
-        }
+        #[cfg(test)]
+        let mut writer = tests::AppendWriter {
+            file: &mut file,
+            hook: &mut self.write_hook,
+        };
+        #[cfg(not(test))]
+        let writer = &mut file;
+        writer.write_all(&buffer)?;
         file.sync_data()?;
         let mut offset = active.bytes;
         for (index, payload) in payloads.iter().enumerate() {
@@ -386,7 +452,33 @@ impl Journal {
     }
 }
 
+#[derive(Debug)]
+struct JournalLock(File);
+
+impl Drop for JournalLock {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
+
+fn lock_directory(dir: &Path) -> Result<JournalLock, JournalError> {
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("lock"))?;
+    lock.try_lock().map_err(|error| match error {
+        TryLockError::WouldBlock => JournalError::Locked,
+        TryLockError::Error(error) => JournalError::Io(error),
+    })?;
+    Ok(JournalLock(lock))
+}
+
 fn next_seq(last: u64) -> io::Result<u64> {
     last.checked_add(1)
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "sequence space exhausted"))
 }
+
+#[cfg(test)]
+mod tests;

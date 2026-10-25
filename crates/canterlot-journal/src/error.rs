@@ -4,6 +4,7 @@ use std::{error::Error, fmt, io};
 pub enum JournalError {
     Io(io::Error),
     NotAJournal,
+    Locked,
     UnsupportedVersion(u32),
     RecordTooLarge { len: usize, max: u32 },
     SeqCompacted { requested: u64, first: u64 },
@@ -16,6 +17,7 @@ impl fmt::Display for JournalError {
         match self {
             Self::Io(error) => write!(f, "journal I/O error: {error}"),
             Self::NotAJournal => f.write_str("not a valid journal"),
+            Self::Locked => f.write_str("journal is locked"),
             Self::UnsupportedVersion(version) => {
                 write!(f, "unsupported journal version: {version}")
             }

@@ -3,18 +3,19 @@ use std::io::{self, Read, Write};
 use crate::{JournalError, JournalId, Record};
 
 pub(crate) const RECORD_HEADER_BYTES: u64 = 16;
-pub(crate) const HEADER_BYTES: u64 = 24;
+pub(crate) const HEADER_BYTES: u64 = 28;
 pub(crate) const ACK_BYTES: u64 = 12;
 
-pub(crate) fn encode_header(id: JournalId) -> [u8; HEADER_BYTES as usize] {
+pub(crate) fn encode_header(id: JournalId, max_record_bytes: u32) -> [u8; HEADER_BYTES as usize] {
     let mut bytes = [0; HEADER_BYTES as usize];
     bytes[..4].copy_from_slice(b"CNTJ");
     bytes[4..8].copy_from_slice(&1u32.to_le_bytes());
-    bytes[8..].copy_from_slice(id.0.as_bytes());
+    bytes[8..24].copy_from_slice(id.0.as_bytes());
+    bytes[24..].copy_from_slice(&max_record_bytes.to_le_bytes());
     bytes
 }
 
-pub(crate) fn decode_header(bytes: &[u8]) -> Result<JournalId, JournalError> {
+pub(crate) fn decode_header(bytes: &[u8]) -> Result<(JournalId, u32), JournalError> {
     if bytes.len() != HEADER_BYTES as usize || &bytes[..4] != b"CNTJ" {
         return Err(JournalError::NotAJournal);
     }
@@ -22,9 +23,10 @@ pub(crate) fn decode_header(bytes: &[u8]) -> Result<JournalId, JournalError> {
     if version != 1 {
         return Err(JournalError::UnsupportedVersion(version));
     }
-    Ok(JournalId(uuid::Uuid::from_bytes(
-        bytes[8..].try_into().unwrap(),
-    )))
+    Ok((
+        JournalId(uuid::Uuid::from_bytes(bytes[8..24].try_into().unwrap())),
+        u32::from_le_bytes(bytes[24..].try_into().unwrap()),
+    ))
 }
 
 pub(crate) fn encode_ack(seq: u64) -> [u8; ACK_BYTES as usize] {
