@@ -23,6 +23,8 @@ pub enum Accept {
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("store needs to be reopened after a write failure")]
+    NeedsReopen,
     #[error("store I/O error: {0}")]
     Io(#[from] io::Error),
     #[error("journal error: {0}")]
@@ -65,6 +67,9 @@ struct HubState {
 }
 
 pub struct WorkerStore {
+    poisoned: bool,
+    #[cfg(test)]
+    fail_after: Option<tests::AppendPoint>,
     data_dir: PathBuf,
     cj: Journal,
     inbox: Journal,
@@ -95,6 +100,9 @@ impl WorkerStore {
             Err(error) => return Err(error.into()),
         };
         let mut store = Self {
+            poisoned: false,
+            #[cfg(test)]
+            fail_after: None,
             data_dir: data_dir.to_path_buf(),
             cj,
             inbox,
@@ -182,16 +190,34 @@ impl WorkerStore {
         Ok(())
     }
 
-    pub fn cj_journal_id(&self) -> Uuid {
-        self.cj.id().0
+    fn ensure_open(&self) -> Result<(), StoreError> {
+        if self.poisoned {
+            Err(StoreError::NeedsReopen)
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn cj_journal_id(&self) -> Result<Uuid, StoreError> {
+        self.ensure_open()?;
+        Ok(self.cj.id().0)
     }
 
     pub fn accept_command(&mut self, cmd: &Command) -> Result<Accept, StoreError> {
+        self.ensure_open()?;
         let command_id = Uuid::parse_str(&cmd.command_id)?;
         if self.index.contains_key(&command_id) {
             return Ok(Accept::Duplicate);
         }
         limits::check_deliver_input(cmd).map_err(StoreError::Limits)?;
+        let result = self.append_command(cmd, command_id);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn append_command(&mut self, cmd: &Command, command_id: Uuid) -> Result<Accept, StoreError> {
         let (body, class) = match &cmd.kind {
             None => (
                 record_body::Body::CommandRejected(CommandRejected {
@@ -212,6 +238,10 @@ impl WorkerStore {
                 self.inbox.append(&cmd.encode_to_vec())?;
                 #[cfg(test)]
                 self.after_append(tests::AppendPoint::Inbox);
+                #[cfg(test)]
+                if self.fail_after == Some(tests::AppendPoint::Inbox) {
+                    return Err(io::Error::other("injected write failure").into());
+                }
                 (
                     record_body::Body::CommandStored(CommandStored {
                         command_id: cmd.command_id.clone(),
@@ -242,13 +272,14 @@ impl WorkerStore {
         Ok(result)
     }
 
-    pub fn cj_cursor(&self) -> JournalCursor {
-        JournalCursor {
-            journal_id: self.cj_journal_id().to_string(),
+    pub fn cj_cursor(&self) -> Result<JournalCursor, StoreError> {
+        self.ensure_open()?;
+        Ok(JournalCursor {
+            journal_id: self.cj_journal_id()?.to_string(),
             first_stored_seq: self.cj.first_seq(),
             last_seq: self.cj.last_seq(),
             acked_seq_known_to_worker: self.cj.acked_seq(),
-        }
+        })
     }
 
     pub fn cj_records_from(
@@ -256,6 +287,7 @@ impl WorkerStore {
         from_seq: u64,
         max_bytes: usize,
     ) -> Result<Vec<JournalRecord>, StoreError> {
+        self.ensure_open()?;
         self.cj
             .read_from(from_seq, max_bytes)?
             .into_iter()
@@ -269,16 +301,33 @@ impl WorkerStore {
     }
 
     pub fn on_cj_ack(&mut self, up_to: u64) -> Result<(), StoreError> {
-        self.cj.ack(up_to)?;
-        self.cj.compact()?;
-        Ok(())
+        self.ensure_open()?;
+        let result = (|| {
+            self.cj.ack(up_to)?;
+            self.cj.compact()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
     }
 
-    pub fn restore_generation(&self) -> Option<Uuid> {
-        self.hub.restore_generation
+    pub fn restore_generation(&self) -> Result<Option<Uuid>, StoreError> {
+        self.ensure_open()?;
+        Ok(self.hub.restore_generation)
     }
 
     pub fn set_restore_generation(&mut self, g: Uuid) -> Result<(), StoreError> {
+        self.ensure_open()?;
+        let result = self.write_restore_generation(g);
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn write_restore_generation(&mut self, g: Uuid) -> Result<(), StoreError> {
         let hub = HubState {
             restore_generation: Some(g),
         };

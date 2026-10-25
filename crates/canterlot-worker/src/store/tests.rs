@@ -36,7 +36,7 @@ fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[App
         ..Default::default()
     };
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    let journal_id = store.cj_journal_id();
+    let journal_id = store.cj_journal_id().unwrap();
     store.crash_after = Some(point);
     assert!(catch_unwind(AssertUnwindSafe(|| store.accept_command(&cmd))).is_err());
     assert_eq!(store.inbox.last_seq(), u64::from(!rejected));
@@ -60,7 +60,7 @@ fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[App
     }
 
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert_eq!(store.cj_journal_id(), journal_id);
+    assert_eq!(store.cj_journal_id().unwrap(), journal_id);
     let facts = store.cj_records_from(1, usize::MAX).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].seq, 1);
@@ -173,4 +173,62 @@ fn repeated_reconciliation_crashes_are_reconciled() {
         false,
         &[AppendPoint::Cj, AppendPoint::Receipt],
     );
+}
+
+#[test]
+fn write_failure_after_inbox_poison_all_calls_until_reopen() {
+    let dir = TempDir::new().unwrap();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let cmd = Command {
+        command_id: Uuid::now_v7().to_string(),
+        kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        ..Default::default()
+    };
+    store.fail_after = Some(AppendPoint::Inbox);
+    assert!(store.accept_command(&cmd).is_err());
+    assert!(matches!(
+        store.accept_command(&cmd),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.cj_journal_id(),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)));
+    assert!(matches!(
+        store.cj_records_from(1, 1024),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(store.on_cj_ack(0), Err(StoreError::NeedsReopen)));
+    assert!(matches!(
+        store.restore_generation(),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.set_restore_generation(Uuid::now_v7()),
+        Err(StoreError::NeedsReopen)
+    ));
+    drop(store);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
+    assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+}
+
+#[test]
+fn ack_and_generation_errors_poison_the_store() {
+    let dir = TempDir::new().unwrap();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert!(store.on_cj_ack(1).is_err());
+    assert!(matches!(
+        store.restore_generation(),
+        Err(StoreError::NeedsReopen)
+    ));
+    drop(store);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    std::fs::create_dir(dir.path().join("hub.toml")).unwrap();
+    assert!(store.set_restore_generation(Uuid::now_v7()).is_err());
+    assert!(matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)));
+    drop(store);
+    std::fs::remove_dir(dir.path().join("hub.toml")).unwrap();
+    assert!(WorkerStore::open(dir.path()).unwrap().cj_cursor().is_ok());
 }

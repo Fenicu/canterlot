@@ -8,12 +8,21 @@ publish.workspace = true
 [dependencies]
 canterlot-journal = { version = "0.1.0", path = "../canterlot-journal" }
 canterlot-proto = { version = "0.1.0", path = "../canterlot-proto" }
+clap = { version = "4.6.7", features = ["derive"] }
 prost = "0.14.4"
+rand = "0.10.3"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal"] }
+tokio-stream = "0.1.19"
 toml = "1.1.8"
+tonic = { version = "0.14.6", features = ["tls-ring"] }
 url = "2.5.8"
 uuid = { version = "1.29.0", features = ["v7", "serde"] }
 
 [dev-dependencies]
+canterlot-hub = { path = "../canterlot-hub", features = ["testkit"] }
+chrono = "0.4.45"
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "migrate", "macros"] }
 tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["net", "process"] }

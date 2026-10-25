@@ -102,18 +102,18 @@ fn reopen_keeps_dedup_index() {
     let dir = TempDir::new().unwrap();
     let mut cmd = delivery();
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    let id = store.cj_journal_id();
+    let id = store.cj_journal_id().unwrap();
     store.accept_command(&cmd).unwrap();
     drop(store);
     cmd.dispatch_attempt += 1;
     cmd.kind = None;
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert_eq!(store.cj_journal_id(), id);
+    assert_eq!(store.cj_journal_id().unwrap(), id);
     assert!(matches!(
         store.accept_command(&cmd).unwrap(),
         Accept::Duplicate
     ));
-    assert_eq!(store.cj_cursor().last_seq, 1);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
     drop(store);
     assert_eq!(records(dir.path(), "inbox").len(), 1);
     assert_eq!(records(dir.path(), "receipts").len(), 1);
@@ -168,11 +168,11 @@ fn ack_compacts_cj_but_keeps_receipts() {
     let cmd = delivery();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     store.accept_command(&cmd).unwrap();
-    let id = store.cj_journal_id();
+    let id = store.cj_journal_id().unwrap();
     store.on_cj_ack(1).unwrap();
-    assert_eq!(store.cj_cursor().first_stored_seq, 2);
-    assert_eq!(store.cj_cursor().last_seq, 1);
-    assert_eq!(store.cj_cursor().acked_seq_known_to_worker, 1);
+    assert_eq!(store.cj_cursor().unwrap().first_stored_seq, 2);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
+    assert_eq!(store.cj_cursor().unwrap().acked_seq_known_to_worker, 1);
     assert!(store.cj_records_from(2, usize::MAX).unwrap().is_empty());
     drop(store);
     assert!(records(dir.path(), "cj").is_empty());
@@ -181,15 +181,15 @@ fn ack_compacts_cj_but_keeps_receipts() {
     assert_eq!(receipts.len(), 1);
     assert_receipt(&receipts[0], &cmd, "stored");
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert_eq!(store.cj_journal_id(), id);
-    assert_eq!(store.cj_cursor().acked_seq_known_to_worker, 1);
+    assert_eq!(store.cj_journal_id().unwrap(), id);
+    assert_eq!(store.cj_cursor().unwrap().acked_seq_known_to_worker, 1);
     assert!(matches!(
         store.accept_command(&cmd).unwrap(),
         Accept::Duplicate
     ));
     store.on_cj_ack(1).unwrap();
     store.on_cj_ack(0).unwrap();
-    assert_eq!(store.cj_cursor().first_stored_seq, 2);
+    assert_eq!(store.cj_cursor().unwrap().first_stored_seq, 2);
     assert!(matches!(
         store.accept_command(&delivery()).unwrap(),
         Accept::Stored { cj_seq: 2 }
@@ -247,8 +247,11 @@ fn all_known_command_kinds_store_full_payloads() {
 fn cursor_and_ack_preserve_unacknowledged_records() {
     let dir = TempDir::new().unwrap();
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    let cursor = store.cj_cursor();
-    assert_eq!(cursor.journal_id, store.cj_journal_id().to_string());
+    let cursor = store.cj_cursor().unwrap();
+    assert_eq!(
+        cursor.journal_id,
+        store.cj_journal_id().unwrap().to_string()
+    );
     assert_eq!(
         (
             cursor.first_stored_seq,
@@ -264,7 +267,10 @@ fn cursor_and_ack_preserve_unacknowledged_records() {
     assert_eq!(second.len(), 1);
     assert_eq!(second[0].seq, 2);
     assert!(store.on_cj_ack(4).is_err());
-    assert_eq!(store.cj_cursor().acked_seq_known_to_worker, 0);
+    assert!(matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)));
+    drop(store);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.cj_cursor().unwrap().acked_seq_known_to_worker, 0);
     store.on_cj_ack(1).unwrap();
     let suffix = store.cj_records_from(2, usize::MAX).unwrap();
     assert_eq!(suffix.iter().map(|r| r.seq).collect::<Vec<_>>(), [2, 3]);
@@ -329,7 +335,7 @@ fn invalid_commands_do_not_write() {
         ..Default::default()
     }));
     assert!(store.accept_command(&message).is_err());
-    assert_eq!(store.cj_cursor().last_seq, 0);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 0);
     drop(store);
     for name in ["inbox", "cj", "receipts"] {
         assert!(records(dir.path(), name).is_empty());
@@ -340,11 +346,11 @@ fn invalid_commands_do_not_write() {
 fn restore_generation_is_persisted_in_hub_toml() {
     let dir = TempDir::new().unwrap();
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert_eq!(store.restore_generation(), None);
+    assert_eq!(store.restore_generation().unwrap(), None);
     for _ in 0..2 {
         let generation = Uuid::now_v7();
         store.set_restore_generation(generation).unwrap();
-        assert_eq!(store.restore_generation(), Some(generation));
+        assert_eq!(store.restore_generation().unwrap(), Some(generation));
         let hub: toml::Value =
             toml::from_str(&fs::read_to_string(dir.path().join("hub.toml")).unwrap()).unwrap();
         assert_eq!(
@@ -353,7 +359,7 @@ fn restore_generation_is_persisted_in_hub_toml() {
         );
         drop(store);
         store = WorkerStore::open(dir.path()).unwrap();
-        assert_eq!(store.restore_generation(), Some(generation));
+        assert_eq!(store.restore_generation().unwrap(), Some(generation));
     }
 }
 
@@ -563,6 +569,7 @@ fn binary_config_errors_do_not_expose_file_contents() {
     for contents in sensitive_config_inputs() {
         fs::write(&path, contents).unwrap();
         let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+            .args(["run", "--config"])
             .arg(&path)
             .output()
             .unwrap();
@@ -582,7 +589,7 @@ fn binary_config_errors_do_not_expose_file_contents() {
 
 #[cfg(unix)]
 #[test]
-fn binary_checks_config_and_token_before_initializing_stores() {
+fn binary_checks_config_and_token_before_starting_session() {
     use std::os::unix::fs::PermissionsExt;
 
     let dir = TempDir::new().unwrap();
@@ -592,7 +599,7 @@ fn binary_checks_config_and_token_before_initializing_stores() {
     let run = || {
         std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
             .current_dir(dir.path())
-            .arg("worker.toml")
+            .args(["run", "--config", "worker.toml"])
             .output()
             .unwrap()
     };
@@ -603,13 +610,9 @@ fn binary_checks_config_and_token_before_initializing_stores() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("test-token"));
     fs::set_permissions(&token, fs::Permissions::from_mode(0o600)).unwrap();
     let output = run();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
     assert!(output.stdout.is_empty());
-    assert!(output.stderr.is_empty());
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("test-token"));
     for name in ["cj", "inbox", "receipts"] {
         assert!(dir.path().join("data").join(name).join("header").is_file());
     }

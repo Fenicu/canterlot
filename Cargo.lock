@@ -335,13 +335,21 @@ dependencies = [
 name = "canterlot-worker"
 version = "0.1.0"
 dependencies = [
+ "canterlot-hub",
  "canterlot-journal",
  "canterlot-proto",
+ "chrono",
+ "clap",
  "prost",
+ "rand",
  "serde",
+ "sqlx",
  "tempfile",
  "thiserror",
+ "tokio",
+ "tokio-stream",
  "toml",
+ "tonic",
  "url",
  "uuid",
 ]

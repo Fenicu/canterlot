@@ -1,15 +1,28 @@
 #![forbid(unsafe_code)]
 
-use std::env;
-use std::error::Error;
-use std::io;
-use std::path::Path;
-use std::process::ExitCode;
+use std::{path::PathBuf, process::ExitCode};
 
-use canterlot_worker::{config, store::WorkerStore};
+use canterlot_worker::{config, session::Worker, store::WorkerStore};
+use clap::{Parser, Subcommand};
+use tokio::sync::watch;
 
-fn main() -> ExitCode {
-    match run() {
+#[derive(Parser)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Run {
+        #[arg(long)]
+        config: PathBuf,
+    },
+}
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("{error}");
@@ -18,19 +31,16 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), Box<dyn Error>> {
-    let mut args = env::args_os().skip(1);
-    let path = args
-        .next()
-        .filter(|_| args.next().is_none())
-        .ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "usage: canterlot-worker <config.toml>",
-            )
-        })?;
-    let config = config::load(Path::new(&path))?;
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
+    let Command::Run { config: path } = Cli::parse().command;
+    let config = config::load(&path)?;
     let _token = config::read_token(&config.token_file)?;
-    let _store = WorkerStore::open(&config.data_dir)?;
+    let store = WorkerStore::open(&config.data_dir)?;
+    let (stop, shutdown) = watch::channel(false);
+    let worker = Worker::new(config, store);
+    tokio::select! {
+        result = worker.run(shutdown) => result?,
+        result = tokio::signal::ctrl_c() => { result?; stop.send_replace(true); },
+    }
     Ok(())
 }

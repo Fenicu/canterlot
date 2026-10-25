@@ -8,7 +8,7 @@ use serde::{Deserialize, Deserializer};
 use url::Url;
 use uuid::Uuid;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub struct WorkerConfig {
     pub hub_url: String,
     pub ca_cert: PathBuf,
@@ -25,6 +25,10 @@ pub struct WorkerConfig {
 pub struct WorkerTimers {
     #[serde(deserialize_with = "milliseconds")]
     pub handshake: Duration,
+    #[serde(deserialize_with = "milliseconds")]
+    pub http2_keepalive_interval: Duration,
+    #[serde(deserialize_with = "milliseconds")]
+    pub http2_keepalive_timeout: Duration,
     #[serde(deserialize_with = "milliseconds")]
     pub heartbeat: Duration,
     #[serde(deserialize_with = "milliseconds")]
@@ -43,6 +47,8 @@ impl Default for WorkerTimers {
     fn default() -> Self {
         Self {
             handshake: Duration::from_secs(10),
+            http2_keepalive_interval: Duration::from_secs(30),
+            http2_keepalive_timeout: Duration::from_secs(10),
             heartbeat: Duration::from_secs(5),
             heartbeat_ack: Duration::from_secs(5),
             range_ack: Duration::from_secs(10),
