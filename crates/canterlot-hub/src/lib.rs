@@ -5,6 +5,7 @@ pub mod events;
 pub mod executions;
 pub mod grpc;
 pub mod idempotency;
+pub mod ingest;
 pub mod installation;
 pub mod machines;
 pub mod model;

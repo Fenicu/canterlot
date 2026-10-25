@@ -30,26 +30,15 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[];
 pub trait Ingest: Send + Sync {
     async fn cj_records(
         &self,
-        _machine_id: uuid::Uuid,
-        _records: JournalRecords,
-    ) -> Result<JournalRangeAck, Status> {
-        Err(Status::unimplemented(
-            "journal ingestion is not implemented",
-        ))
-    }
+        machine_id: uuid::Uuid,
+        records: JournalRecords,
+    ) -> Result<JournalRangeAck, Status>;
     async fn sj_records(
         &self,
-        _machine_id: uuid::Uuid,
-        _records: JournalRecords,
-    ) -> Result<JournalRangeAck, Status> {
-        Err(Status::unimplemented(
-            "journal ingestion is not implemented",
-        ))
-    }
+        machine_id: uuid::Uuid,
+        records: JournalRecords,
+    ) -> Result<JournalRangeAck, Status>;
 }
-
-pub struct UnimplementedIngest;
-impl Ingest for UnimplementedIngest {}
 
 #[derive(Clone)]
 pub struct HubGrpc {
@@ -85,6 +74,22 @@ fn checked<T: Message>(message: T) -> Result<T, Status> {
 }
 
 impl HubGrpc {
+    pub fn new(
+        pool: PgPool,
+        registry: Registry,
+        installation: Installation,
+        timers: HubTimers,
+    ) -> Self {
+        let ingest = Arc::new(crate::ingest::Ingest::new(pool.clone()));
+        Self {
+            pool,
+            registry,
+            installation,
+            timers,
+            ingest,
+        }
+    }
+
     fn validate_hello(
         &self,
         hello: &Hello,

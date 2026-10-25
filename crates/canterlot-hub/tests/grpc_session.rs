@@ -49,13 +49,7 @@ impl Host {
             .await
             .unwrap();
         let registry = Registry::new(timers.clone());
-        let state = HubGrpc {
-            pool,
-            registry: registry.clone(),
-            installation,
-            timers,
-            ingest: std::sync::Arc::new(grpc::UnimplementedIngest),
-        };
+        let state = HubGrpc::new(pool, registry.clone(), installation, timers);
         let pki = test_pki();
         let cert = pki.server_cert_pem.clone();
         let key = pki.server_key_pem.clone();
@@ -198,6 +192,190 @@ async fn data_accepted(stream: &mut Streaming<DataDown>) -> Accepted {
         panic!("expected accepted data handshake")
     };
     value
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_ack_waits_for_record_commit(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone(), timers()).await;
+    let conversation = canterlot_hub::testkit::seed_conversation(
+        &pool,
+        host.installation.owner_id,
+        host.machine.machine_id,
+    )
+    .await;
+    let execution = canterlot_hub::executions::start(
+        &pool,
+        host.installation.owner_id,
+        conversation,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    let journal = Uuid::parse_str(&hello.cj_journal_id)?;
+    let (tx, mut stream) = host.control(hello).await;
+    accepted(&mut stream).await;
+    sqlx::query("insert into journal_cursors (machine_id, journal_id, kind) values ($1, $2, 'cj')")
+        .bind(host.machine.machine_id)
+        .bind(journal)
+        .execute(&pool)
+        .await?;
+    sqlx::query("create function block_journal_commit() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(741234); return new; end $$")
+        .execute(&pool).await?;
+    sqlx::query("create constraint trigger block_journal_commit after update on journal_cursors deferrable initially deferred for each row execute function block_journal_commit()")
+        .execute(&pool).await?;
+    let mut blocker = pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(741234)")
+        .execute(&mut *blocker)
+        .await?;
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: journal.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(record_body::Body::CommandStored(CommandStored {
+                            command_id: execution.command_id.to_string(),
+                            dispatch_attempt: 0,
+                        })),
+                    }),
+                }],
+            })),
+        },
+    )
+    .await;
+    timeout(Duration::from_secs(2), async {
+        loop {
+            let committing: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and query = 'COMMIT' and wait_event = 'advisory')")
+                .fetch_one(&pool).await.unwrap();
+            if committing { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await?;
+    assert!(
+        timeout(Duration::from_millis(100), stream.message())
+            .await
+            .is_err()
+    );
+    let committed: i64 =
+        sqlx::query_scalar("select committed_seq from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(committed, 0);
+    let state: String = sqlx::query_scalar("select delivery_state from commands where id = $1")
+        .bind(execution.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "pending");
+    blocker.commit().await?;
+    let Some(control_down::Msg::CjAck(ack)) = next(&mut stream).await.msg else {
+        panic!("expected journal range ACK");
+    };
+    assert_eq!(ack.journal_id, journal.to_string());
+    assert_eq!(ack.up_to_seq, 1);
+    let committed: i64 =
+        sqlx::query_scalar("select committed_seq from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(committed, 1);
+    let state: (String, bool) =
+        sqlx::query_as("select delivery_state, stored_at is not null from commands where id = $1")
+            .bind(execution.command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(state, ("stored_on_machine".into(), true));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> TestResult {
+    let host = Host::start(pool, timers()).await;
+    let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    let journal_id = hello.cj_journal_id.clone();
+    let (tx, mut control) = host.control(hello.clone()).await;
+    accepted(&mut control).await;
+    let closed = |seq| JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+        }),
+    };
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: journal_id.clone(),
+                records: vec![closed(1), closed(3)],
+            })),
+        },
+    )
+    .await;
+    let error = timeout(Duration::from_secs(2), control.message())
+        .await?
+        .unwrap_err();
+    assert_eq!(error.code(), Code::FailedPrecondition);
+    assert_eq!(error.message(), "journal_gap");
+    timeout(Duration::from_secs(2), async {
+        while host
+            .registry
+            .session_info(host.machine.machine_id)
+            .is_some()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    hello.connection_id = Uuid::now_v7().to_string();
+    let (tx, mut control) = host.control(hello).await;
+    assert_eq!(
+        accepted(&mut control).await.committed,
+        vec![JournalCommitted {
+            journal_id: journal_id.clone(),
+            committed_seq: 1,
+        }]
+    );
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: journal_id.clone(),
+                records: vec![JournalRecord { seq: 1, body: None }, closed(2), closed(3)],
+            })),
+        },
+    )
+    .await;
+    let Some(control_down::Msg::CjAck(ack)) = next(&mut control).await.msg else {
+        panic!("expected CJ ACK");
+    };
+    assert_eq!(
+        ack,
+        JournalRangeAck {
+            journal_id: journal_id.clone(),
+            up_to_seq: 3
+        }
+    );
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id,
+                records: vec![JournalRecord {
+                    seq: 4,
+                    body: Some(RecordBody::default()),
+                }],
+            })),
+        },
+    )
+    .await;
+    let error = timeout(Duration::from_secs(2), control.message())
+        .await?
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.message(), "unknown_record");
+    Ok(())
 }
 
 async fn rejected(stream: &mut Streaming<ControlDown>, reason: RejectReason, retryable: bool) {
@@ -676,12 +854,22 @@ async fn incompatible_protocol_and_wrong_stream_kind_are_rejected(pool: PgPool) 
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn journal_ingestion_is_explicitly_unimplemented(pool: PgPool) {
-    let host = Host::start(pool, timers()).await;
+async fn journal_ingestion_acks_both_streams(pool: PgPool) {
+    let host = Host::start(pool.clone(), timers()).await;
     let connection = Uuid::now_v7();
-    let (tx, mut control) = host
-        .control(host.hello(host.machine.machine_id, connection, StreamKind::Control))
-        .await;
+    let hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
+    let cj_journal = hello.cj_journal_id.clone();
+    let sj_journal = Uuid::now_v7().to_string();
+    let records = |journal_id| JournalRecords {
+        journal_id,
+        records: vec![JournalRecord {
+            seq: 1,
+            body: Some(RecordBody {
+                body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+            }),
+        }],
+    };
+    let (tx, mut control) = host.control(hello).await;
     accepted(&mut control).await;
     let (data_tx, mut data) = host
         .data(
@@ -693,25 +881,46 @@ async fn journal_ingestion_is_explicitly_unimplemented(pool: PgPool) {
     send(
         &data_tx,
         DataUp {
-            msg: Some(data_up::Msg::SjRecords(JournalRecords::default())),
+            msg: Some(data_up::Msg::SjRecords(records(sj_journal.clone()))),
         },
     )
     .await;
+    let Some(data_down::Msg::SjAck(ack)) = next(&mut data).await.msg else {
+        panic!("expected SJ ACK");
+    };
     assert_eq!(
-        data.message().await.unwrap_err().code(),
-        Code::Unimplemented
+        ack,
+        JournalRangeAck {
+            journal_id: sj_journal.clone(),
+            up_to_seq: 1
+        }
     );
     heartbeat(&tx, &mut control, 1).await;
     send(
         &tx,
         ControlUp {
-            msg: Some(control_up::Msg::CjRecords(JournalRecords::default())),
+            msg: Some(control_up::Msg::CjRecords(records(cj_journal.clone()))),
         },
     )
     .await;
+    let Some(control_down::Msg::CjAck(ack)) = next(&mut control).await.msg else {
+        panic!("expected CJ ACK");
+    };
     assert_eq!(
-        control.message().await.unwrap_err().code(),
-        Code::Unimplemented
+        ack,
+        JournalRangeAck {
+            journal_id: cj_journal.clone(),
+            up_to_seq: 1
+        }
+    );
+    let cursors: Vec<(Uuid, String, i64)> = sqlx::query_as("select journal_id, kind, committed_seq from journal_cursors where machine_id = $1 order by kind")
+        .bind(host.machine.machine_id).fetch_all(&pool).await.unwrap();
+    assert_eq!(
+        cursors,
+        vec![
+            (Uuid::parse_str(&cj_journal).unwrap(), "cj".into(), 1),
+            (Uuid::parse_str(&sj_journal).unwrap(), "sj".into(), 1)
+        ]
     );
 }
 
