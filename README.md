@@ -47,3 +47,62 @@ scripts/test-db.sh down
 ```
 
 Данные контейнера хранятся в tmpfs и теряются при его остановке.
+
+Для запуска команд хаба подготовьте TOML-конфиг и отдельный файл с URL PostgreSQL.
+URL не передаётся аргументом CLI и не читается из `DATABASE_URL` при запуске бинарника:
+
+```bash
+umask 077
+mkdir -p ~/.config/canterlot ~/.local/state/canterlot-control
+read -rsp 'URL PostgreSQL: ' canterlot_db_url
+printf '\n'
+printf '%s\n' "$canterlot_db_url" > ~/.config/canterlot/database-url
+unset canterlot_db_url
+```
+
+Сохраните `~/.config/canterlot/hub.toml`:
+
+```toml
+database_url_file = "database-url"
+grpc_listen = "127.0.0.1:7443"
+tls_cert = "tls/cert.pem"
+tls_key = "tls/key.pem"
+manifest = "../../.local/state/canterlot-control/installation.toml"
+
+[timers]
+handshake = 10
+degraded_after = 15
+unavailable_after = 30
+command_stored_receipt = 5
+dispatch_sweep = 5
+```
+
+Относительные пути разрешаются от каталога конфига. Таймеры задаются целым числом секунд;
+таблицу `timers` и отдельные её поля можно опустить, тогда действуют показанные значения.
+Секреты задаются только путями к файлам; неизвестные поля конфига отклоняются.
+Каталог манифеста должен существовать и находиться вне восстанавливаемого набора PostgreSQL/blobs.
+Для рабочей инсталляции этот файл должен сохраняться независимо от восстановления данных.
+
+Инициализируйте хаб и добавьте машину:
+
+```bash
+source ~/.cargo/env
+cargo run -p canterlot-hub -- init --config ~/.config/canterlot/hub.toml
+cargo run -p canterlot-hub -- machine add --config ~/.config/canterlot/hub.toml --name workstation
+```
+
+`init` применяет миграции и создаёт владельца, запись инсталляции и внешний манифест.
+Повторный вызов запрещён, если уже есть запись инсталляции или файл манифеста.
+`machine add` выводит ровно две строки: `machine_id=<uuid>` и `token=<base64url>`.
+Токен показывается один раз; сохраните его в файл воркера с правами `0600` или строже.
+Хаб сохраняет только SHA-256 токена, повторно получить токен нельзя.
+
+```bash
+cargo run -p canterlot-hub -- machine revoke --config ~/.config/canterlot/hub.toml --machine-id <uuid>
+cargo run -p canterlot-hub -- serve --config ~/.config/canterlot/hub.toml
+```
+
+На этом этапе `serve` проверяет манифест и завершается, сетевой сервер ещё не запускается.
+Отсутствующий или несовпадающий манифест и незавершённое восстановление запрещают запуск:
+команда возвращает ненулевой код и пишет в stderr только имя ошибки, например `manifest_missing`.
+Утерянный манифест не создаётся автоматически из восстановленной БД.
