@@ -1,9 +1,10 @@
+use std::fmt;
+
 use canterlot_proto::limits::{MAX_INPUT_META_BYTES, MAX_INPUT_TEXT_BYTES};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::{Connection, PgConnection, PgPool};
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
@@ -45,24 +46,137 @@ pub enum LimitKind {
     InputMeta,
 }
 
-#[derive(Debug, Error)]
 pub enum SubmitError {
-    #[error("idempotency conflict")]
     IdempotencyConflict,
-    #[error("queue limit exceeded: {limit}")]
-    QueueFull { limit: i64 },
-    #[error("resource limit exceeded: {kind:?}, limit {limit}, actual {actual}")]
+    KeyRaceLost,
+    InvalidContent {
+        reason: &'static str,
+    },
+    QueueFull {
+        limit: i64,
+    },
     ResourceLimit {
         kind: LimitKind,
         limit: usize,
         actual: usize,
     },
-    #[error("conversation not found")]
     ConversationNotFound,
-    #[error("conversation closed")]
     ConversationClosed,
-    #[error(transparent)]
-    Db(#[from] sqlx::Error),
+    Db(sqlx::Error),
+}
+
+fn fmt_db_error(error: &sqlx::Error, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    if let sqlx::Error::Database(error) = error {
+        return match error.code() {
+            Some(code) => f.write_str(&code),
+            None => write!(f, "{:?}", error.kind()),
+        };
+    }
+    f.write_str(match error {
+        sqlx::Error::Configuration(_) => "Configuration",
+        sqlx::Error::InvalidArgument(_) => "InvalidArgument",
+        sqlx::Error::Io(_) => "Io",
+        sqlx::Error::Tls(_) => "Tls",
+        sqlx::Error::Protocol(_) => "Protocol",
+        sqlx::Error::RowNotFound => "RowNotFound",
+        sqlx::Error::TypeNotFound { .. } => "TypeNotFound",
+        sqlx::Error::ColumnIndexOutOfBounds { .. } => "ColumnIndexOutOfBounds",
+        sqlx::Error::ColumnNotFound(_) => "ColumnNotFound",
+        sqlx::Error::ColumnDecode { .. } => "ColumnDecode",
+        sqlx::Error::Encode(_) => "Encode",
+        sqlx::Error::Decode(_) => "Decode",
+        sqlx::Error::AnyDriverError(_) => "AnyDriverError",
+        sqlx::Error::PoolTimedOut => "PoolTimedOut",
+        sqlx::Error::PoolClosed => "PoolClosed",
+        sqlx::Error::WorkerCrashed => "WorkerCrashed",
+        sqlx::Error::Migrate(_) => "Migrate",
+        sqlx::Error::InvalidSavePointStatement => "InvalidSavePointStatement",
+        sqlx::Error::BeginFailed => "BeginFailed",
+        sqlx::Error::ConfigFile(_) => "ConfigFile",
+        _ => "Unknown",
+    })
+}
+
+impl fmt::Debug for SubmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IdempotencyConflict => f.write_str("IdempotencyConflict"),
+            Self::KeyRaceLost => f.write_str("KeyRaceLost"),
+            Self::InvalidContent { reason } => f
+                .debug_struct("InvalidContent")
+                .field("reason", reason)
+                .finish(),
+            Self::QueueFull { limit } => f.debug_struct("QueueFull").field("limit", limit).finish(),
+            Self::ResourceLimit {
+                kind,
+                limit,
+                actual,
+            } => f
+                .debug_struct("ResourceLimit")
+                .field("kind", kind)
+                .field("limit", limit)
+                .field("actual", actual)
+                .finish(),
+            Self::ConversationNotFound => f.write_str("ConversationNotFound"),
+            Self::ConversationClosed => f.write_str("ConversationClosed"),
+            Self::Db(error) => {
+                f.write_str("Db(")?;
+                fmt_db_error(error, f)?;
+                f.write_str(")")
+            }
+        }
+    }
+}
+
+impl fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::IdempotencyConflict => f.write_str("idempotency conflict"),
+            Self::KeyRaceLost => f.write_str("idempotency key race lost"),
+            Self::InvalidContent { reason } => write!(f, "invalid content: {reason}"),
+            Self::QueueFull { limit } => write!(f, "queue limit exceeded: {limit}"),
+            Self::ResourceLimit {
+                kind,
+                limit,
+                actual,
+            } => write!(
+                f,
+                "resource limit exceeded: {kind:?}, limit {limit}, actual {actual}"
+            ),
+            Self::ConversationNotFound => f.write_str("conversation not found"),
+            Self::ConversationClosed => f.write_str("conversation closed"),
+            Self::Db(error) => {
+                f.write_str("database error: ")?;
+                fmt_db_error(error, f)
+            }
+        }
+    }
+}
+
+impl std::error::Error for SubmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Db(error) => error.source(),
+            _ => None,
+        }
+    }
+}
+
+impl From<sqlx::Error> for SubmitError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Db(error)
+    }
+}
+
+fn validate_content(req: &SubmitInput) -> Result<(), SubmitError> {
+    if req.content.iter().any(|block| match block {
+        ContentBlock::Text { text } => text.contains('\0'),
+    }) {
+        return Err(SubmitError::InvalidContent {
+            reason: "nul_character",
+        });
+    }
+    Ok(())
 }
 
 enum Attempt {
@@ -93,6 +207,7 @@ async fn resolve_race(
 }
 
 pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedInput, SubmitError> {
+    validate_content(&req)?;
     let hash = request_hash(&req);
     let mut tx = pool.begin().await?;
     match submit_attempt(&mut tx, &req, &hash).await {
@@ -112,29 +227,19 @@ pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedIn
     }
 }
 
-/// Вызывать внутри транзакции; savepoint не фиксирует внешнюю транзакцию.
+/// Вызывать внутри транзакции; при KeyRaceLost вызывающий обязан откатить всю транзакцию.
 pub async fn submit_input_in_tx(
     tx: &mut PgConnection,
     req: &SubmitInput,
 ) -> Result<SubmittedInput, SubmitError> {
+    validate_content(req)?;
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
     let hash = request_hash(req);
-    let mut savepoint = tx.begin().await?;
-    match submit_attempt(&mut savepoint, req, &hash).await {
-        Ok(Attempt::Submitted(submitted)) => {
-            savepoint.commit().await?;
-            Ok(submitted)
-        }
-        Ok(Attempt::LostRace) => {
-            savepoint.rollback().await?;
-            resolve_race(tx, req, &hash).await
-        }
-        Err(error) => {
-            savepoint.rollback().await?;
-            Err(error)
-        }
+    match submit_attempt(tx, req, &hash).await? {
+        Attempt::Submitted(submitted) => Ok(submitted),
+        Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
 }
 
@@ -159,6 +264,11 @@ async fn submit_attempt(
     .fetch_optional(&mut *conn)
     .await?
     .ok_or(SubmitError::ConversationNotFound)?;
+    match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
+        Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
+        Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
+        Begin::New => {}
+    }
     if closed {
         return Err(SubmitError::ConversationClosed);
     }

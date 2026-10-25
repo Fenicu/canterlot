@@ -412,13 +412,14 @@ async fn metadata_limit_refuses_without_binding_key(pool: PgPool) {
     assert_counts(&pool, (1, 1, 1, 1)).await;
 }
 
-async fn wait_for_queue_lock(pool: &PgPool) {
+async fn wait_for_submit_lock(pool: &PgPool, query: &str) {
     timeout(Duration::from_secs(10), async {
         loop {
             let waiting: bool = sqlx::query_scalar(
                 "select exists(select 1 from pg_stat_activity where datname = current_database()
-                 and wait_event_type = 'Lock' and query like '%for update of q%')",
+                 and wait_event_type = 'Lock' and query like $1)",
             )
+            .bind(query)
             .fetch_one(pool)
             .await
             .unwrap();
@@ -429,7 +430,67 @@ async fn wait_for_queue_lock(pool: &PgPool) {
         }
     })
     .await
-    .expect("losing submitter never reached the queue lock");
+    .expect("losing submitter never reached the expected lock");
+}
+
+async fn wait_for_queue_lock(pool: &PgPool) {
+    wait_for_submit_lock(pool, "%for update of q%").await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_lock_replay_after_winner_fills_queue(pool: PgPool) {
+    timeout(Duration::from_secs(30), async {
+        let seed = testkit::seed(&pool).await;
+        for index in 0..99 {
+            submit_input(&pool, request(&seed, &format!("filled-{index}"), "input"))
+                .await
+                .unwrap();
+        }
+        let req = request(&seed, "last-slot", "original");
+        let mut winner_tx = pool.begin().await.unwrap();
+        let winner = submit_input_in_tx(&mut winner_tx, &req).await.unwrap();
+        assert_eq!(winner.input_seq, 100);
+        let loser_pool = pool.clone();
+        let loser = tokio::spawn(async move { submit_input(&loser_pool, req).await });
+        wait_for_queue_lock(&pool).await;
+        winner_tx.commit().await.unwrap();
+        assert_eq!(loser.await.unwrap().unwrap(), winner);
+        assert_counts(&pool, (100, 100, 100, 100)).await;
+        assert_sequence(&pool, seed.conversation_id, 101, 100).await;
+    })
+    .await
+    .expect("full-queue replay timed out");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn queue_lock_replay_after_winner_closes_conversation(pool: PgPool) {
+    timeout(Duration::from_secs(30), async {
+        let seed = testkit::seed(&pool).await;
+        let req = request(&seed, "close-race", "original");
+        let mut winner_tx = pool.begin().await.unwrap();
+        let winner = submit_input_in_tx(&mut winner_tx, &req).await.unwrap();
+        sqlx::query("update queue_state set closed = true where conversation_id = $1")
+            .bind(seed.conversation_id)
+            .execute(&mut *winner_tx)
+            .await
+            .unwrap();
+        let loser_pool = pool.clone();
+        let loser = tokio::spawn(async move { submit_input(&loser_pool, req).await });
+        wait_for_queue_lock(&pool).await;
+        winner_tx.commit().await.unwrap();
+        assert_eq!(loser.await.unwrap().unwrap(), winner);
+        assert_counts(&pool, (1, 1, 1, 1)).await;
+        assert_sequence(&pool, seed.conversation_id, 2, 1).await;
+        let closed: bool =
+            sqlx::query_scalar("select closed from queue_state where conversation_id = $1")
+                .bind(seed.conversation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(closed);
+    })
+    .await
+    .expect("closed-conversation replay timed out");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -461,7 +522,7 @@ async fn lost_race_rolls_back_and_returns_winner_or_conflict(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn in_tx_lost_race_can_commit_without_duplicate_rows(pool: PgPool) {
+async fn in_tx_queue_lock_replay_can_commit_without_duplicate_rows(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let mut winner_tx = pool.begin().await.unwrap();
@@ -483,7 +544,202 @@ async fn in_tx_lost_race_can_commit_without_duplicate_rows(pool: PgPool) {
         assert_sequence(&pool, seed.conversation_id, 2, 1).await;
     })
     .await
+    .expect("in-tx queue replay timed out");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn in_tx_record_race_requires_caller_rollback(pool: PgPool) {
+    timeout(Duration::from_secs(30), async {
+        let seed = testkit::seed(&pool).await;
+        let loser_conversation =
+            testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+        let mut winner_tx = pool.begin().await.unwrap();
+        submit_input_in_tx(&mut winner_tx, &request(&seed, "race", "original"))
+            .await
+            .unwrap();
+        let mut req = request(&seed, "race", "original");
+        req.conversation_id = loser_conversation;
+        let loser_pool = pool.clone();
+        let loser = tokio::spawn(async move {
+            let mut tx = loser_pool.begin().await.unwrap();
+            let result = submit_input_in_tx(&mut tx, &req).await;
+            assert!(
+                matches!(result, Err(SubmitError::KeyRaceLost)),
+                "{result:?}"
+            );
+            let staged_counts: (i64, i64, i64, i64) = sqlx::query_as(
+                "select (select count(*) from inputs), (select count(*) from commands),
+                        (select count(*) from events where kind = 'input_queued'),
+                        (select count(*) from idempotency_keys)",
+            )
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            assert_eq!(staged_counts, (2, 2, 2, 1));
+            let staged_sequences: (i64, i64) = sqlx::query_as(
+                "select next_input_seq, (select last_seq from scope_counters where scope = $2)
+                 from queue_state where conversation_id = $1",
+            )
+            .bind(loser_conversation)
+            .bind(format!("conversation:{loser_conversation}"))
+            .fetch_one(&mut *tx)
+            .await
+            .unwrap();
+            assert_eq!(staged_sequences, (2, 1));
+            tx.rollback().await.unwrap();
+        });
+        wait_for_submit_lock(&pool, "%insert into idempotency_keys%").await;
+        winner_tx.commit().await.unwrap();
+        loser.await.unwrap();
+        assert_counts(&pool, (1, 1, 1, 1)).await;
+        assert_sequence(&pool, seed.conversation_id, 2, 1).await;
+        assert_sequence(&pool, loser_conversation, 1, 0).await;
+    })
+    .await
     .expect("in-tx lost-race test timed out");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn record_race_rolls_back_and_returns_winner_or_conflict(pool: PgPool) {
+    timeout(Duration::from_secs(30), async {
+        let seed = testkit::seed(&pool).await;
+        for (key, loser_text) in [
+            ("replay-record-race", "original"),
+            ("conflict-record-race", "changed"),
+        ] {
+            let req = request(&seed, key, "original");
+            let winner = submit_input(&pool, req.clone()).await.unwrap();
+            sqlx::query("delete from idempotency_keys where owner_id = $1 and key = $2")
+                .bind(seed.owner_id)
+                .bind(key)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut winner_tx = pool.begin().await.unwrap();
+            let hash = idempotency::request_hash(
+                "submit_input",
+                &json!({
+                    "conversation_id": req.conversation_id, "content": req.content,
+                }),
+            );
+            assert!(
+                idempotency::record(
+                    &mut winner_tx,
+                    seed.owner_id,
+                    key,
+                    "submit_input",
+                    &hash,
+                    &serde_json::to_value(&winner).unwrap(),
+                    Some(seed.conversation_id),
+                )
+                .await
+                .unwrap()
+            );
+            let req = request(&seed, key, loser_text);
+            let loser_pool = pool.clone();
+            let loser = tokio::spawn(async move { submit_input(&loser_pool, req).await });
+            wait_for_submit_lock(&pool, "%insert into idempotency_keys%").await;
+            winner_tx.commit().await.unwrap();
+            let result = loser.await.unwrap();
+            if loser_text == "original" {
+                assert_eq!(result.unwrap(), winner);
+            } else {
+                assert!(matches!(result, Err(SubmitError::IdempotencyConflict)));
+            }
+        }
+        assert_counts(&pool, (2, 2, 2, 2)).await;
+        assert_sequence(&pool, seed.conversation_id, 3, 2).await;
+    })
+    .await
+    .expect("record-race test timed out");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_content_is_rejected_before_sql_without_binding_key(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let req = request(&seed, "nul-content", "private-content-marker\0");
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("select 1 / 0")
+        .execute(&mut *tx)
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        submit_input_in_tx(&mut tx, &req).await,
+        Err(SubmitError::InvalidContent {
+            reason: "nul_character"
+        })
+    ));
+    tx.rollback().await.unwrap();
+    assert!(matches!(
+        submit_input(&pool, req.clone()).await,
+        Err(SubmitError::InvalidContent {
+            reason: "nul_character"
+        })
+    ));
+    assert_counts(&pool, (0, 0, 0, 0)).await;
+    assert_sequence(&pool, seed.conversation_id, 1, 0).await;
+    submit_input(&pool, request(&seed, "nul-content", "valid retry"))
+        .await
+        .unwrap();
+    assert_counts(&pool, (1, 1, 1, 1)).await;
+    pool.close().await;
+    assert!(matches!(
+        submit_input(&pool, req).await,
+        Err(SubmitError::InvalidContent {
+            reason: "nul_character"
+        })
+    ));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn db_error_formatting_redacts_message_detail_and_context(pool: PgPool) {
+    let error = sqlx::query(
+        "do $$ begin raise exception using errcode = 'P0001',
+         message = 'private-message-marker', detail = 'private-detail-marker'; end $$",
+    )
+    .execute(&pool)
+    .await
+    .unwrap_err();
+    let db = error.as_database_error().unwrap();
+    assert_eq!(db.code().as_deref(), Some("P0001"));
+    assert!(db.message().contains("private-message-marker"));
+    let db = db.downcast_ref::<sqlx::postgres::PgDatabaseError>();
+    assert!(db.detail().unwrap().contains("private-detail-marker"));
+    assert!(db.r#where().unwrap().contains("RAISE"));
+    let error = SubmitError::from(error);
+    for rendered in [format!("{error:?}"), error.to_string()] {
+        assert!(rendered.contains("P0001"));
+        for private in [
+            "private-message-marker",
+            "private-detail-marker",
+            "RAISE",
+            "PL/pgSQL",
+        ] {
+            assert!(!rendered.contains(private), "{rendered}");
+        }
+    }
+}
+
+#[test]
+fn db_error_formatting_without_sqlstate_shows_only_kind() {
+    for (error, kind) in [
+        (
+            sqlx::Error::Protocol("private-protocol-marker".into()),
+            "Protocol",
+        ),
+        (
+            sqlx::Error::Decode("private-decode-marker".into()),
+            "Decode",
+        ),
+        (
+            sqlx::Error::InvalidArgument("private-argument-marker".into()),
+            "InvalidArgument",
+        ),
+    ] {
+        let error = SubmitError::from(error);
+        assert_eq!(format!("{error:?}"), format!("Db({kind})"));
+        assert_eq!(error.to_string(), format!("database error: {kind}"));
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
