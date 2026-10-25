@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, fs, time::Duration};
+use std::{collections::VecDeque, fs, future::Future, pin::Pin, time::Duration};
 
 use canterlot_proto::{
     limits::{MAX_EVENT_BATCH_BYTES, MAX_MESSAGE_BYTES, PROTOCOL_VERSION, check_record_batch},
@@ -22,7 +22,8 @@ use tonic::{
 use uuid::Uuid;
 
 use crate::{
-    config::{ConfigError, WorkerConfig, read_token},
+    config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
+    session_store::StoreThread,
     store::{StoreError, WorkerStore},
 };
 
@@ -34,8 +35,58 @@ pub enum SessionState {
     Reconciling,
     Live,
     ControlOnly,
-    Backoff,
+    Backoff { last_error: ErrorKind },
     Rejected { reason: i32, retryable: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreErrorKind {
+    NeedsReopen,
+    Io,
+    Journal,
+    CjSealed,
+    LocalSealed,
+    InvalidCommandId,
+    Limits,
+    Decode,
+    Metadata,
+    EncodeMetadata,
+    MetadataUtf8,
+}
+
+impl StoreError {
+    pub fn kind(&self) -> StoreErrorKind {
+        match self {
+            Self::NeedsReopen => StoreErrorKind::NeedsReopen,
+            Self::Io(_) => StoreErrorKind::Io,
+            Self::Journal(_) => StoreErrorKind::Journal,
+            Self::CjSealed => StoreErrorKind::CjSealed,
+            Self::LocalSealed(_) => StoreErrorKind::LocalSealed,
+            Self::InvalidCommandId(_) => StoreErrorKind::InvalidCommandId,
+            Self::Limits(_) => StoreErrorKind::Limits,
+            Self::Decode(_) => StoreErrorKind::Decode,
+            Self::Metadata(_) => StoreErrorKind::Metadata,
+            Self::EncodeMetadata(_) => StoreErrorKind::EncodeMetadata,
+            Self::MetadataUtf8(_) => StoreErrorKind::MetadataUtf8,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ErrorKind {
+    Hub(tonic::Code),
+    Store(StoreErrorKind),
+    Rejected(i32),
+    Config,
+    Io,
+    Transport,
+    Timeout,
+    Protocol,
+    RestoreGenerationChanged,
+    GenerationMismatch,
+    StateDivergence,
+    InvalidConfig,
+    StoreThread,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +101,12 @@ pub enum WorkerError {
     Io(#[from] std::io::Error),
     #[error("session transport failed")]
     Transport,
+    #[error("hub status: {code}: {message}")]
+    Hub { code: tonic::Code, message: String },
+    #[error("store reopen failed ({kind:?}): {source}", kind = .0.kind(), source = .0)]
+    Reopen(#[source] StoreError),
+    #[error("store thread failed")]
+    StoreThread,
     #[error("session receipt or handshake timed out")]
     Timeout,
     #[error("invalid session message")]
@@ -66,6 +123,26 @@ pub enum WorkerError {
     InvalidConfig,
 }
 
+impl WorkerError {
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            Self::Hub { code, .. } => ErrorKind::Hub(*code),
+            Self::Store(error) | Self::Reopen(error) => ErrorKind::Store(error.kind()),
+            Self::Rejected { reason, .. } => ErrorKind::Rejected(*reason),
+            Self::Config(_) => ErrorKind::Config,
+            Self::Io(_) => ErrorKind::Io,
+            Self::Transport => ErrorKind::Transport,
+            Self::Timeout => ErrorKind::Timeout,
+            Self::Protocol => ErrorKind::Protocol,
+            Self::RestoreGenerationChanged => ErrorKind::RestoreGenerationChanged,
+            Self::GenerationMismatch => ErrorKind::GenerationMismatch,
+            Self::StateDivergence => ErrorKind::StateDivergence,
+            Self::InvalidConfig => ErrorKind::InvalidConfig,
+            Self::StoreThread => ErrorKind::StoreThread,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct Bearer(MetadataValue<Ascii>);
 
@@ -80,14 +157,14 @@ impl Interceptor for Bearer {
 
 pub struct Worker {
     config: WorkerConfig,
-    store: Option<WorkerStore>,
+    store: StoreThread,
     state: watch::Sender<SessionState>,
 }
 
 struct Pending {
     message: ControlUp,
     seq: u64,
-    deadline: Instant,
+    deadline: Option<Instant>,
     retried: bool,
 }
 
@@ -96,23 +173,23 @@ impl Pending {
         Self {
             message,
             seq,
-            deadline: Instant::now() + after,
+            deadline: Some(Instant::now() + after),
             retried: false,
         }
     }
 
-    async fn resend(
-        &mut self,
-        tx: &mpsc::Sender<ControlUp>,
-        after: Duration,
-    ) -> Result<(), WorkerError> {
+    fn resend(&mut self, after: Duration) -> Result<ControlUp, WorkerError> {
         if self.retried {
             return Err(WorkerError::Timeout);
         }
-        send(tx, self.message.clone(), after).await?;
         self.retried = true;
-        self.deadline = Instant::now() + after;
-        Ok(())
+        self.deadline = Some(Instant::now() + after);
+        Ok(self.message.clone())
+    }
+
+    fn reset(&mut self, after: Duration) {
+        self.retried = false;
+        self.deadline = Some(Instant::now() + after);
     }
 }
 
@@ -120,7 +197,7 @@ impl Worker {
     pub fn new(config: WorkerConfig, store: WorkerStore) -> Worker {
         Self {
             config,
-            store: Some(store),
+            store: StoreThread::new(store),
             state: watch::channel(SessionState::Disconnected).0,
         }
     }
@@ -130,18 +207,21 @@ impl Worker {
     }
 
     fn transition(&self, state: SessionState) {
+        tracing::info!(state = state_kind(&state), "session state");
         self.state.send_replace(state);
     }
 
-    fn store(&self) -> &WorkerStore {
-        self.store.as_ref().expect("open worker store")
-    }
-    fn store_mut(&mut self) -> &mut WorkerStore {
-        self.store.as_mut().expect("open worker store")
+    pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
+        let result = self.run_inner(shutdown).await;
+        let closed = self.store.close().await;
+        result.and(closed)
     }
 
-    pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
-        self.initialize_generation()?;
+    async fn run_inner(&mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
+        let configured = self.config.restore_generation;
+        self.store
+            .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
+            .await?;
         let hub_url =
             url::Url::parse(&self.config.hub_url).map_err(|_| WorkerError::InvalidConfig)?;
         if hub_url.scheme() != "https"
@@ -168,11 +248,15 @@ impl Worker {
         {
             return Err(WorkerError::InvalidConfig);
         }
-        let boot_id = fs::read_to_string("/proc/sys/kernel/random/boot_id")?;
+        let boot_id =
+            tokio::task::spawn_blocking(|| fs::read_to_string("/proc/sys/kernel/random/boot_id"))
+                .await
+                .map_err(|_| WorkerError::StoreThread)??;
         let boot_id = Uuid::parse_str(boot_id.trim())
             .map_err(|_| WorkerError::Protocol)?
             .to_string();
         let mut cap = self.config.timers.backoff_min;
+        let mut read_retries = 0;
         loop {
             if *shutdown.borrow() {
                 self.transition(SessionState::Disconnected);
@@ -188,59 +272,86 @@ impl Worker {
                 }
                 result = self.attempt(&boot_id, &mut live_since) => result,
             };
-            match result {
-                Err(
-                    error @ WorkerError::Rejected {
-                        reason,
+            let error = result.err().unwrap_or(WorkerError::Transport);
+            let last_error = error.kind();
+            if let WorkerError::Hub { code, .. } = &error {
+                tracing::warn!(error_kind = ?last_error, code = ?code, "session attempt failed");
+            } else {
+                tracing::warn!(error_kind = ?last_error, "session attempt failed");
+            }
+            let read_error = matches!(
+                &error,
+                WorkerError::Config(ConfigError {
+                    category: ConfigErrorCategory::Io(_) | ConfigErrorCategory::TokenPermissions,
+                    ..
+                }) | WorkerError::Io(_)
+            );
+            let read_delay = if read_error {
+                if read_retries == 3 {
+                    return Err(error);
+                }
+                read_retries += 1;
+                Some(Duration::from_secs(1))
+            } else {
+                read_retries = 0;
+                None
+            };
+            match error {
+                error @ WorkerError::Hub {
+                    code: tonic::Code::Unauthenticated,
+                    ..
+                } => {
+                    self.transition(SessionState::Rejected {
+                        reason: RejectReason::CredentialRevoked as i32,
                         retryable: false,
-                    },
-                ) => {
+                    });
+                    return Err(error);
+                }
+                error @ WorkerError::Rejected {
+                    reason,
+                    retryable: false,
+                } => {
                     self.transition(SessionState::Rejected {
                         reason,
                         retryable: false,
                     });
                     return Err(error);
                 }
-                Err(WorkerError::Rejected {
+                WorkerError::Rejected {
                     reason,
                     retryable: true,
-                }) => {
+                } => {
                     self.transition(SessionState::Rejected {
                         reason,
                         retryable: true,
                     });
                 }
-                Err(
-                    error @ (WorkerError::RestoreGenerationChanged
-                    | WorkerError::GenerationMismatch
-                    | WorkerError::StateDivergence
-                    | WorkerError::Config(_)
-                    | WorkerError::InvalidConfig
-                    | WorkerError::Io(_)),
-                ) => return Err(error),
+                WorkerError::Reopen(ref source) if transient_store_error(source) => {}
+                error @ (WorkerError::RestoreGenerationChanged
+                | WorkerError::GenerationMismatch
+                | WorkerError::StateDivergence
+                | WorkerError::InvalidConfig
+                | WorkerError::StoreThread
+                | WorkerError::Reopen(_)) => return Err(error),
+                error @ WorkerError::Config(_) if !read_error => return Err(error),
                 _ => {}
-            }
-            if self
-                .store
-                .as_ref()
-                .is_some_and(|store| matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)))
-            {
-                self.store.take();
             }
             if live_since.is_some_and(|since: Instant| {
                 since.elapsed() >= self.config.timers.backoff_reset_after
             }) {
                 cap = self.config.timers.backoff_min;
             }
-            self.transition(SessionState::Backoff);
-            let delay = Duration::from_nanos(rand::random_range(
-                self.config
-                    .timers
-                    .backoff_min
-                    .as_nanos()
-                    .min(u64::MAX as u128) as u64
-                    ..=cap.as_nanos().min(u64::MAX as u128) as u64,
-            ));
+            self.transition(SessionState::Backoff { last_error });
+            let delay = read_delay.unwrap_or_else(|| {
+                Duration::from_nanos(rand::random_range(
+                    self.config
+                        .timers
+                        .backoff_min
+                        .as_nanos()
+                        .min(u64::MAX as u128) as u64
+                        ..=cap.as_nanos().min(u64::MAX as u128) as u64,
+                ))
+            });
             tokio::select! {
                 biased;
                 _ = stopped(&mut shutdown) => {
@@ -259,11 +370,26 @@ impl Worker {
         live_since: &mut Option<Instant>,
     ) -> Result<(), WorkerError> {
         let connection_id = Uuid::now_v7();
-        if self.store.is_none() {
-            self.store = Some(WorkerStore::open(&self.config.data_dir)?);
-        }
-        self.initialize_generation()?;
-        let token = read_token(&self.config.token_file)?;
+        let configured = self.config.restore_generation;
+        let data_dir = self.config.data_dir.clone();
+        let (cursor, generation) = self
+            .store
+            .call(move |slot| {
+                if slot.is_none() {
+                    *slot = Some(WorkerStore::open(&data_dir).map_err(WorkerError::Reopen)?);
+                }
+                let store = slot.as_mut().unwrap();
+                initialize_generation(store, configured)?;
+                Ok((store.cj_cursor()?, store.restore_generation()?.unwrap()))
+            })
+            .await?;
+        let token_file = self.config.token_file.clone();
+        let ca_cert = self.config.ca_cert.clone();
+        let (token, ca) = tokio::task::spawn_blocking(move || {
+            Ok::<_, WorkerError>((read_token(&token_file)?, fs::read(ca_cert)?))
+        })
+        .await
+        .map_err(|_| WorkerError::StoreThread)??;
         let mut metadata: MetadataValue<Ascii> = format!("Bearer {token}")
             .parse()
             .map_err(|_| WorkerError::InvalidConfig)?;
@@ -271,10 +397,7 @@ impl Worker {
         let auth = Bearer(metadata);
         let endpoint = Endpoint::from_shared(self.config.hub_url.clone())
             .map_err(|_| WorkerError::InvalidConfig)?
-            .tls_config(
-                ClientTlsConfig::new()
-                    .ca_certificate(Certificate::from_pem(fs::read(&self.config.ca_cert)?)),
-            )
+            .tls_config(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(ca)))
             .map_err(|_| WorkerError::Transport)?
             .connect_timeout(self.config.timers.handshake)
             .http2_keep_alive_interval(self.config.timers.http2_keepalive_interval)
@@ -295,14 +418,27 @@ impl Worker {
         .await
         .map_err(|_| WorkerError::Timeout)??;
         self.transition(SessionState::Handshaking);
-        let hello = self.hello(connection_id, boot_id)?;
+        tracing::info!(%connection_id, "session connected");
+        let hello = Hello {
+            installation_id: self.config.installation_id.to_string(),
+            machine_id: self.config.machine_id.to_string(),
+            restore_generation: generation.to_string(),
+            protocol_version: PROTOCOL_VERSION,
+            connection_id: connection_id.to_string(),
+            cj_journal_id: cursor.journal_id.clone(),
+            cursors: vec![cursor.clone()],
+            boot_id: boot_id.to_owned(),
+            stream_kind: StreamKind::Control as i32,
+            required_capabilities: vec![],
+            optional_capabilities: vec![],
+        };
         let mut control = WorkerControlClient::with_interceptor(control, auth.clone())
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let mut data = WorkerDataClient::with_interceptor(data, auth)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
-        let (tx, rx) = mpsc::channel(8);
+        let (tx, rx) = mpsc::channel(1);
         let (data_tx, data_rx) = mpsc::channel(8);
         let (mut inbound, mut data_inbound, accepted) =
             timeout(self.config.timers.handshake, async {
@@ -328,7 +464,7 @@ impl Worker {
                     Some(control_down::Msg::HelloReply(reply)) => accept(reply)?,
                     _ => return Err(WorkerError::Protocol),
                 };
-                self.check_generation(&accepted)?;
+                check_generation(generation, &accepted)?;
                 let mut hello = hello;
                 hello.stream_kind = StreamKind::Data as i32;
                 send(
@@ -362,8 +498,7 @@ impl Worker {
             .map_err(|_| WorkerError::Timeout)??;
         let _keep_data_open = data_tx;
         self.transition(SessionState::Reconciling);
-        self.check_generation(&accepted)?;
-        let cursor = self.store().cj_cursor()?;
+        check_generation(generation, &accepted)?;
         let committed = accepted
             .committed
             .iter()
@@ -375,67 +510,137 @@ impl Worker {
         {
             return Err(WorkerError::StateDivergence);
         }
-        self.store_mut().on_cj_ack(committed)?;
+        self.store
+            .call(move |store| {
+                store.as_mut().unwrap().on_cj_ack(committed)?;
+                Ok(())
+            })
+            .await?;
         let replay_end = cursor.last_seq;
         let mut acknowledged = committed;
+        let mut received_ack = committed;
         let mut next_seq = committed + 1;
         let mut pending_batches: VecDeque<Pending> = VecDeque::new();
         let mut pending_heartbeat: Option<Pending> = None;
         let mut heartbeat_seq = 0u64;
         let mut heartbeat_at = Instant::now() + self.config.timers.heartbeat;
+        let journal_id = cursor.journal_id;
+        let mut commands = VecDeque::new();
+        let mut store_ack: Option<u64> = None;
+        let mut dirty = true;
+        let mut ready_batch: Option<(ControlUp, u64)> = None;
+        let mut heartbeat_outbound = None;
+        let mut range_outbound = None;
+        type StoreFuture = Pin<Box<dyn Future<Output = Result<StoreReply, WorkerError>> + Send>>;
+        let mut operation: Option<StoreFuture> = None;
         loop {
             if live_since.is_none() && acknowledged >= replay_end {
                 *live_since = Some(Instant::now());
                 self.transition(SessionState::Live);
             }
-            while pending_batches.len() < 8 {
-                let Some((message, last)) = self.batch(next_seq)? else {
-                    break;
-                };
-                send(&tx, message.clone(), self.config.timers.range_ack).await?;
-                pending_batches.push_back(Pending::new(
-                    message,
-                    last,
-                    self.config.timers.range_ack,
-                ));
-                next_seq = last + 1;
+            if operation.is_none() {
+                if let Some(up_to) = store_ack.take() {
+                    operation = Some(Box::pin(self.store.call(move |store| {
+                        store.as_mut().unwrap().on_cj_ack(up_to)?;
+                        Ok(StoreReply::Ack(up_to))
+                    })));
+                } else if dirty && ready_batch.is_none() && pending_batches.len() < 8 {
+                    let from = next_seq;
+                    operation = Some(Box::pin(self.store.call(move |store| {
+                        Ok(StoreReply::Batch(
+                            from,
+                            batch(store.as_ref().unwrap(), from)?.map(Box::new),
+                        ))
+                    })));
+                    dirty = false;
+                } else if let Some(command) = commands.pop_front() {
+                    operation = Some(Box::pin(self.store.call(move |store| {
+                        store.as_mut().unwrap().accept_command(&command)?;
+                        Ok(StoreReply::Command)
+                    })));
+                }
             }
             let heartbeat_deadline = pending_heartbeat
                 .as_ref()
-                .map_or(heartbeat_at, |p| p.deadline);
-            let batch_deadline = pending_batches.iter().map(|p| p.deadline).min();
+                .map_or(heartbeat_at, |p| p.deadline.unwrap());
+            let batch_deadline = pending_batches.front().and_then(|p| p.deadline);
+            let can_send = heartbeat_outbound.is_some()
+                || range_outbound.is_some()
+                || (ready_batch.is_some() && pending_batches.len() < 8);
             tokio::select! {
-                message = inbound.message() => {
+                message = inbound.message(), if commands.len() < 32 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
-                        Some(control_down::Msg::Command(command)) => { self.store_mut().accept_command(&command)?; }
+                        Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
-                            if ack.journal_id != self.store().cj_journal_id()?.to_string() { return Err(WorkerError::Protocol); }
-                            self.store_mut().on_cj_ack(ack.up_to_seq)?;
-                            acknowledged = acknowledged.max(ack.up_to_seq);
+                            if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
+                            store_ack = Some(store_ack.unwrap_or(0).max(ack.up_to_seq));
+                            next_seq = next_seq.max(ack.up_to_seq.saturating_add(1));
                             while pending_batches.front().is_some_and(|p| ack.up_to_seq >= p.seq) { pending_batches.pop_front(); }
+                            if ack.up_to_seq > received_ack {
+                                received_ack = ack.up_to_seq;
+                                for pending in &mut pending_batches { pending.deadline = None; pending.retried = false; }
+                                if let Some(head) = pending_batches.front_mut() { head.reset(self.config.timers.range_ack); }
+                                range_outbound = None;
+                            }
+                            if ready_batch.as_ref().is_some_and(|(m, _)| batch_first(m) < next_seq) {
+                                ready_batch = None;
+                            }
+                            dirty = true;
+                            tracing::debug!(up_to_seq = ack.up_to_seq, "journal acknowledged");
                         }
                         Some(control_down::Msg::HeartbeatAck(ack)) => {
                             if pending_heartbeat.as_ref().is_some_and(|p| ack.seq == p.seq) {
                                 pending_heartbeat = None;
+                                heartbeat_outbound = None;
+                                tracing::debug!(seq = ack.seq, "heartbeat acknowledged");
                             }
                         }
                         _ => return Err(WorkerError::Protocol),
                     }
                 }
-                message = data_inbound.message() => {
-                    match message {
-                        Ok(Some(DataDown { msg: Some(data_down::Msg::SjAck(_)) })) => return Err(WorkerError::Protocol),
-                        _ => { self.transition(SessionState::ControlOnly); return Err(WorkerError::Transport); }
+                result = async { operation.as_mut().unwrap().await }, if operation.is_some() => {
+                    operation = None;
+                    match result? {
+                        StoreReply::Command => dirty = true,
+                        StoreReply::Ack(up_to) => acknowledged = acknowledged.max(up_to),
+                        StoreReply::Batch(from, result) => {
+                            if from == next_seq { ready_batch = result.map(|batch| *batch); }
+                            else { dirty = true; }
+                        }
                     }
+                }
+                permit = tx.reserve(), if can_send => {
+                    let permit = permit.map_err(|_| WorkerError::Transport)?;
+                    let message = if let Some(message) = heartbeat_outbound.take() { message }
+                    else if let Some(message) = range_outbound.take() { message }
+                    else {
+                        let (message, last) = ready_batch.take().unwrap();
+                        let mut pending = Pending::new(message.clone(), last, self.config.timers.range_ack);
+                        if !pending_batches.is_empty() { pending.deadline = None; }
+                        pending_batches.push_back(pending);
+                        next_seq = last + 1;
+                        dirty = true;
+                        message
+                    };
+                    if message.encoded_len() > MAX_MESSAGE_BYTES { return Err(WorkerError::Protocol); }
+                    permit.send(message);
+                }
+                message = data_inbound.message() => {
+                    self.transition(SessionState::ControlOnly);
+                    return Err(match message {
+                        Err(status) => status_error(status),
+                        Ok(Some(_)) => WorkerError::Protocol,
+                        Ok(None) => WorkerError::Transport,
+                    });
                 }
                 _ = sleep_until(heartbeat_deadline) => {
                     if let Some(pending) = &mut pending_heartbeat {
-                        pending.resend(&tx, self.config.timers.heartbeat_ack).await?;
+                        heartbeat_outbound = Some(pending.resend(self.config.timers.heartbeat_ack)?);
                     } else {
                         heartbeat_seq += 1;
                         let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq })) };
-                        send(&tx, message.clone(), self.config.timers.heartbeat_ack).await?;
+                        heartbeat_outbound = Some(message.clone());
                         pending_heartbeat = Some(Pending::new(message, heartbeat_seq, self.config.timers.heartbeat_ack));
                         heartbeat_at = Instant::now() + self.config.timers.heartbeat;
                     }
@@ -444,79 +649,96 @@ impl Worker {
                     if let Some(deadline) = batch_deadline { sleep_until(deadline).await; }
                     else { std::future::pending::<()>().await; }
                 } => {
-                    if let Some(pending) = pending_batches.iter_mut().min_by_key(|p| p.deadline) {
-                        pending.resend(&tx, self.config.timers.range_ack).await?;
-                    }
+                    range_outbound = Some(pending_batches.front_mut().unwrap().resend(self.config.timers.range_ack)?);
                 }
             }
         }
     }
+}
 
-    fn initialize_generation(&mut self) -> Result<(), WorkerError> {
-        let configured = self.config.restore_generation;
-        match self.store().restore_generation()? {
-            None => self.store_mut().set_restore_generation(configured)?,
-            Some(persisted) if persisted == configured => {}
-            Some(_) => return Err(WorkerError::GenerationMismatch),
-        }
-        Ok(())
+enum StoreReply {
+    Command,
+    Ack(u64),
+    Batch(u64, Option<Box<(ControlUp, u64)>>),
+}
+
+fn batch_first(message: &ControlUp) -> u64 {
+    match &message.msg {
+        Some(control_up::Msg::CjRecords(batch)) => batch.records[0].seq,
+        _ => unreachable!(),
     }
+}
 
-    fn hello(&self, connection: Uuid, boot_id: &str) -> Result<Hello, WorkerError> {
-        Ok(Hello {
-            installation_id: self.config.installation_id.to_string(),
-            machine_id: self.config.machine_id.to_string(),
-            restore_generation: self
-                .store()
-                .restore_generation()?
-                .ok_or(WorkerError::GenerationMismatch)?
-                .to_string(),
-            protocol_version: PROTOCOL_VERSION,
-            connection_id: connection.to_string(),
-            cj_journal_id: self.store().cj_journal_id()?.to_string(),
-            cursors: vec![self.store().cj_cursor()?],
-            boot_id: boot_id.to_owned(),
-            stream_kind: StreamKind::Control as i32,
-            required_capabilities: vec![],
-            optional_capabilities: vec![],
-        })
+fn initialize_generation(store: &mut WorkerStore, configured: Uuid) -> Result<(), WorkerError> {
+    match store.restore_generation()? {
+        None => store.set_restore_generation(configured)?,
+        Some(persisted) if persisted == configured => {}
+        Some(_) => return Err(WorkerError::GenerationMismatch),
     }
+    Ok(())
+}
 
-    fn check_generation(&self, accepted: &Accepted) -> Result<(), WorkerError> {
-        let generation =
-            Uuid::parse_str(&accepted.restore_generation).map_err(|_| WorkerError::Protocol)?;
-        if self.store().restore_generation()? != Some(generation) {
-            return Err(WorkerError::RestoreGenerationChanged);
-        }
-        Ok(())
+fn check_generation(generation: Uuid, accepted: &Accepted) -> Result<(), WorkerError> {
+    let accepted =
+        Uuid::parse_str(&accepted.restore_generation).map_err(|_| WorkerError::Protocol)?;
+    if accepted != generation {
+        return Err(WorkerError::RestoreGenerationChanged);
     }
+    Ok(())
+}
 
-    fn batch(&self, from: u64) -> Result<Option<(ControlUp, u64)>, WorkerError> {
-        let mut batch = JournalRecords {
-            journal_id: self.store().cj_journal_id()?.to_string(),
-            records: vec![],
-        };
-        for record in self.store().cj_records_from(from, MAX_EVENT_BATCH_BYTES)? {
-            batch.records.push(record);
-            if check_record_batch(&batch).is_err() {
-                batch.records.pop();
-                if batch.records.is_empty() {
-                    return Err(WorkerError::Protocol);
-                }
-                break;
+fn transient_store_error(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Io(_)
+            | StoreError::Journal(
+                canterlot_journal::JournalError::Io(_) | canterlot_journal::JournalError::Locked
+            )
+    )
+}
+
+fn state_kind(state: &SessionState) -> &'static str {
+    match state {
+        SessionState::Disconnected => "disconnected",
+        SessionState::Connecting => "connecting",
+        SessionState::Handshaking => "handshaking",
+        SessionState::Reconciling => "reconciling",
+        SessionState::Live => "live",
+        SessionState::ControlOnly => "control_only",
+        SessionState::Backoff { .. } => "backoff",
+        SessionState::Rejected { .. } => "rejected",
+    }
+}
+
+fn batch(store: &WorkerStore, from: u64) -> Result<Option<(ControlUp, u64)>, WorkerError> {
+    let mut batch = JournalRecords {
+        journal_id: store.cj_journal_id()?.to_string(),
+        records: vec![],
+    };
+    for record in store
+        .cj_records_from(from, MAX_EVENT_BATCH_BYTES)?
+        .into_iter()
+        .take(256)
+    {
+        batch.records.push(record);
+        if check_record_batch(&batch).is_err() {
+            batch.records.pop();
+            if batch.records.is_empty() {
+                return Err(WorkerError::Protocol);
             }
+            break;
         }
-        let Some(last) = batch.records.last().map(|r| r.seq) else {
-            return Ok(None);
-        };
-        check_record_batch(&batch).map_err(|_| WorkerError::Protocol)?;
-        Ok(Some((
-            ControlUp {
-                msg: Some(control_up::Msg::CjRecords(batch)),
-            },
-            last,
-        )))
     }
+    let Some(last) = batch.records.last().map(|r| r.seq) else {
+        return Ok(None);
+    };
+    check_record_batch(&batch).map_err(|_| WorkerError::Protocol)?;
+    Ok(Some((
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(batch)),
+        },
+        last,
+    )))
 }
 
 async fn stopped(shutdown: &mut watch::Receiver<bool>) {
@@ -556,12 +778,11 @@ fn accept(reply: HelloReply) -> Result<Accepted, WorkerError> {
 }
 
 fn status_error(status: Status) -> WorkerError {
-    if status.code() == tonic::Code::Unauthenticated {
-        WorkerError::Rejected {
-            reason: RejectReason::CredentialRevoked as i32,
-            retryable: false,
-        }
-    } else {
-        WorkerError::Transport
+    WorkerError::Hub {
+        code: status.code(),
+        message: status.message().to_owned(),
     }
 }
+
+#[cfg(test)]
+mod tests;

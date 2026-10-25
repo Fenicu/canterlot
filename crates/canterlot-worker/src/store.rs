@@ -49,7 +49,7 @@ pub enum StoreError {
 
 #[derive(Serialize, Deserialize)]
 struct ReceiptEntry {
-    command_id: Uuid,
+    command_id: String,
     attempt: u32,
     class: ReceiptClass,
 }
@@ -74,7 +74,7 @@ pub struct WorkerStore {
     cj: Journal,
     inbox: Journal,
     receipts: Journal,
-    index: HashMap<Uuid, ReceiptEntry>,
+    index: HashMap<String, ReceiptEntry>,
     hub: HubState,
     #[cfg(test)]
     crash_after: Option<tests::AppendPoint>,
@@ -121,7 +121,7 @@ impl WorkerStore {
         while from_seq <= self.receipts.last_seq() {
             for record in self.receipts.read_from(from_seq, MAX_MESSAGE_BYTES)? {
                 let entry: ReceiptEntry = toml::from_str(std::str::from_utf8(&record.payload)?)?;
-                self.index.insert(entry.command_id, entry);
+                self.index.insert(entry.command_id.clone(), entry);
                 from_seq = record.seq + 1;
             }
         }
@@ -142,7 +142,7 @@ impl WorkerStore {
                         ),
                         _ => continue,
                     };
-                let command_id = Uuid::parse_str(&command_id)?;
+                let command_id = receipt_id(&command_id);
                 if !self.index.contains_key(&command_id) {
                     self.append_receipt(ReceiptEntry {
                         command_id,
@@ -158,7 +158,7 @@ impl WorkerStore {
             for record in self.inbox.read_from(from_seq, MAX_MESSAGE_BYTES)? {
                 from_seq = record.seq + 1;
                 let cmd = Command::decode(record.payload.as_slice())?;
-                let command_id = Uuid::parse_str(&cmd.command_id)?;
+                let command_id = receipt_id(&cmd.command_id);
                 if !self.index.contains_key(&command_id) {
                     self.cj.append(
                         &RecordBody {
@@ -186,7 +186,7 @@ impl WorkerStore {
         self.receipts.append(toml::to_string(&entry)?.as_bytes())?;
         #[cfg(test)]
         self.after_append(tests::AppendPoint::Receipt);
-        self.index.insert(entry.command_id, entry);
+        self.index.insert(entry.command_id.clone(), entry);
         Ok(())
     }
 
@@ -205,19 +205,55 @@ impl WorkerStore {
 
     pub fn accept_command(&mut self, cmd: &Command) -> Result<Accept, StoreError> {
         self.ensure_open()?;
-        let command_id = Uuid::parse_str(&cmd.command_id)?;
+        let command_id = receipt_id(&cmd.command_id);
         if self.index.contains_key(&command_id) {
             return Ok(Accept::Duplicate);
         }
-        limits::check_deliver_input(cmd).map_err(StoreError::Limits)?;
-        let result = self.append_command(cmd, command_id);
+        let reason = if Uuid::parse_str(&cmd.command_id).is_err() {
+            Some("invalid_command")
+        } else if limits::check_deliver_input(cmd).is_err() {
+            Some("resource_limit")
+        } else {
+            None
+        };
+        let result = if let Some(reason) = reason {
+            self.reject_command(cmd, command_id, reason)
+        } else {
+            self.append_command(cmd, command_id)
+        };
         if result.is_err() {
             self.poisoned = true;
         }
         result
     }
 
-    fn append_command(&mut self, cmd: &Command, command_id: Uuid) -> Result<Accept, StoreError> {
+    fn reject_command(
+        &mut self,
+        cmd: &Command,
+        command_id: String,
+        reason: &'static str,
+    ) -> Result<Accept, StoreError> {
+        let cj_seq = self.cj.append(
+            &RecordBody {
+                body: Some(record_body::Body::CommandRejected(CommandRejected {
+                    command_id: cmd.command_id.clone(),
+                    dispatch_attempt: cmd.dispatch_attempt,
+                    reason: reason.into(),
+                })),
+            }
+            .encode_to_vec(),
+        )?;
+        #[cfg(test)]
+        self.after_append(tests::AppendPoint::Cj);
+        self.append_receipt(ReceiptEntry {
+            command_id,
+            attempt: cmd.dispatch_attempt,
+            class: ReceiptClass::Rejected,
+        })?;
+        Ok(Accept::Rejected { cj_seq, reason })
+    }
+
+    fn append_command(&mut self, cmd: &Command, command_id: String) -> Result<Accept, StoreError> {
         let (body, class) = match &cmd.kind {
             None => (
                 record_body::Body::CommandRejected(CommandRejected {
@@ -350,6 +386,10 @@ impl WorkerStore {
         self.hub = hub;
         Ok(())
     }
+}
+
+fn receipt_id(raw: &str) -> String {
+    Uuid::parse_str(raw).map_or_else(|_| raw.to_owned(), |id| id.to_string())
 }
 
 fn open_journal(path: &Path) -> Result<Journal, StoreError> {

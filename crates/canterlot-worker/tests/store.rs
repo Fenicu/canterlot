@@ -311,12 +311,18 @@ fn journals_have_one_owner() {
 }
 
 #[test]
-fn invalid_commands_do_not_write() {
+fn invalid_commands_write_only_durable_rejections() {
     let dir = TempDir::new().unwrap();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let mut invalid_id = delivery();
     invalid_id.command_id = "invalid".into();
-    assert!(store.accept_command(&invalid_id).is_err());
+    assert!(matches!(
+        store.accept_command(&invalid_id).unwrap(),
+        Accept::Rejected {
+            reason: "invalid_command",
+            ..
+        }
+    ));
     let mut text = delivery();
     if let Some(command::Kind::DeliverInput(input)) = &mut text.kind {
         input.content = vec![ContentBlock {
@@ -325,21 +331,45 @@ fn invalid_commands_do_not_write() {
             })),
         }];
     }
-    assert!(store.accept_command(&text).is_err());
+    assert!(matches!(
+        store.accept_command(&text).unwrap(),
+        Accept::Rejected {
+            reason: "resource_limit",
+            ..
+        }
+    ));
     let mut meta = delivery();
     meta.execution_id = "x".repeat(MAX_INPUT_META_BYTES + 1);
-    assert!(store.accept_command(&meta).is_err());
+    assert!(matches!(
+        store.accept_command(&meta).unwrap(),
+        Accept::Rejected {
+            reason: "resource_limit",
+            ..
+        }
+    ));
     let mut message = delivery();
     message.kind = Some(command::Kind::StartExecution(StartExecution {
         workdir: "x".repeat(MAX_MESSAGE_BYTES),
         ..Default::default()
     }));
-    assert!(store.accept_command(&message).is_err());
-    assert_eq!(store.cj_cursor().unwrap().last_seq, 0);
+    assert!(matches!(
+        store.accept_command(&message).unwrap(),
+        Accept::Rejected {
+            reason: "resource_limit",
+            ..
+        }
+    ));
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 4);
     drop(store);
-    for name in ["inbox", "cj", "receipts"] {
-        assert!(records(dir.path(), name).is_empty());
-    }
+    assert!(records(dir.path(), "inbox").is_empty());
+    assert_eq!(records(dir.path(), "cj").len(), 4);
+    assert_eq!(records(dir.path(), "receipts").len(), 4);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.accept_command(&invalid_id).unwrap(),
+        Accept::Duplicate
+    );
+    assert_eq!(store.accept_command(&text).unwrap(), Accept::Duplicate);
 }
 
 #[test]

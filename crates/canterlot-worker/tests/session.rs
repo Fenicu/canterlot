@@ -77,6 +77,19 @@ async fn wait_state(state: &mut watch::Receiver<SessionState>, expected: Session
     .unwrap();
 }
 
+async fn wait_backoff(state: &mut watch::Receiver<SessionState>) {
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if matches!(*state.borrow_and_update(), SessionState::Backoff { .. }) {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
 fn start(
     config: WorkerConfig,
     store: WorkerStore,
@@ -164,7 +177,7 @@ async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
     wait_state(&mut state, SessionState::Live).await;
     let connection = hub.registry.session_info(machine).unwrap().connection_id;
     stop_hub(hub).await;
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     let registry = canterlot_hub::session::Registry::new(hub_timers());
     let grpc =
         canterlot_hub::grpc::HubGrpc::new(pool, registry.clone(), installation, hub_timers());
@@ -352,7 +365,7 @@ async fn poisoned_store_is_reopened_and_reconciled_before_reconnect(pool: PgPool
         })
         .await
         .unwrap();
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     fs::rename(backup, receipt).unwrap();
     wait_state(&mut state, SessionState::Live).await;
     assert_ne!(
@@ -458,7 +471,7 @@ async fn missing_heartbeat_ack_resends_once_then_restarts_session() {
     .await;
     let (stop, mut state, join) = start(hub.config.clone(), store);
     wait_state(&mut state, SessionState::Live).await;
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     let mut sequences = Vec::new();
     while let Ok(event) = hub.events.try_recv() {
         if let Observed::Control(message) = event
@@ -487,7 +500,7 @@ async fn missing_range_ack_resends_same_records_without_compaction() {
         .unwrap();
     let path = hub.config.data_dir.clone();
     let (stop, mut state, join) = start(hub.config.clone(), store);
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     let mut batches = Vec::new();
     while let Ok(event) = hub.events.try_recv() {
         if let Observed::Control(message) = event
@@ -572,7 +585,7 @@ async fn handshake_timeout_retries_and_shutdown_interrupts_backoff() {
     })
     .await;
     let (stop, mut state, join) = start(hub.config.clone(), store);
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     assert!(matches!(hub.event().await, Observed::Hello(_, _)));
     let started = tokio::time::Instant::now();
     stop_worker(stop, join).await;
@@ -589,7 +602,7 @@ async fn tls_rejects_untrusted_ca_and_wrong_hostname() {
             hub.config.hub_url = hub.config.hub_url.replace("localhost", "127.0.0.1");
         }
         let (stop, mut state, join) = start(hub.config.clone(), store);
-        wait_state(&mut state, SessionState::Backoff).await;
+        wait_backoff(&mut state).await;
         assert!(hub.events.try_recv().is_err());
         stop_worker(stop, join).await;
     }
@@ -608,7 +621,7 @@ async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(p
     wait_state(&mut state, SessionState::Live).await;
     let connection = hub.registry.session_info(machine).unwrap().connection_id;
     let (second_stop, mut second_state, second_join) = start(second_config, second_store);
-    wait_state(&mut second_state, SessionState::Backoff).await;
+    wait_backoff(&mut second_state).await;
     assert_eq!(
         hub.registry.session_info(machine).unwrap().connection_id,
         connection
@@ -672,7 +685,7 @@ async fn wrong_configured_generation_is_rejected_by_hub(pool: PgPool) {
     let path = config.data_dir.clone();
     let generation = config.restore_generation;
     let (stop, mut state, join) = start(config, store);
-    wait_state(&mut state, SessionState::Backoff).await;
+    wait_backoff(&mut state).await;
     assert!(hub.registry.session_info(machine).is_none());
     stop_worker(stop, join).await;
     assert_eq!(
@@ -737,4 +750,562 @@ async fn persisted_generation_mismatch_refuses_start_without_overwrite() {
             .unwrap(),
         Some(persisted)
     );
+}
+
+fn cancel_command() -> Command {
+    Command {
+        command_id: Uuid::now_v7().to_string(),
+        kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        ..Default::default()
+    }
+}
+
+fn seed_backlog(store: WorkerStore, path: &Path, count: usize, size: usize) -> WorkerStore {
+    use canterlot_journal::{Journal, JournalOptions};
+    use canterlot_proto::worker::v1::{CommandRejected, RecordBody, record_body};
+    use prost::Message;
+    drop(store);
+    let (mut journal, _) = Journal::open(&path.join("cj"), JournalOptions::default()).unwrap();
+    for _ in 0..count {
+        journal
+            .append(
+                &RecordBody {
+                    body: Some(record_body::Body::CommandRejected(CommandRejected {
+                        command_id: Uuid::now_v7().to_string(),
+                        dispatch_attempt: 1,
+                        reason: "x".repeat(size),
+                    })),
+                }
+                .encode_to_vec(),
+            )
+            .unwrap();
+    }
+    drop(journal);
+    WorkerStore::open(path).unwrap()
+}
+
+async fn live_without_backoff(state: &mut watch::Receiver<SessionState>) {
+    timeout(Duration::from_secs(15), async {
+        loop {
+            let current = state.borrow_and_update().clone();
+            assert!(
+                !matches!(current, SessionState::Backoff { .. }),
+                "unexpected restart: {current:?}"
+            );
+            if current == SessionState::Live {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn steadily_acking_backlog_does_not_restart_and_batches_have_256_records_at_most() {
+    use canterlot_proto::worker::v1::control_up;
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        range_ack_delay: Duration::from_millis(180),
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_millis(120);
+    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    let store = seed_backlog(store, &hub.config.data_dir, 2304, 0);
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    live_without_backoff(&mut state).await;
+    let mut hellos = 0;
+    let mut ranges = std::collections::BTreeSet::new();
+    while let Ok(event) = hub.events.try_recv() {
+        match event {
+            Observed::Hello(_, _) => hellos += 1,
+            Observed::Control(message) => {
+                if let Some(control_up::Msg::CjRecords(batch)) = message.msg {
+                    assert!(batch.records.len() <= 256);
+                    canterlot_proto::limits::check_record_batch(&batch).unwrap();
+                    ranges.insert((batch.records[0].seq, batch.records.last().unwrap().seq));
+                }
+            }
+        }
+    }
+    assert_eq!(hellos, 2);
+    assert_eq!(ranges.len(), 9);
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test]
+async fn ack_ahead_of_ship_cursor_does_not_restart() {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        ack_override: Some(4000),
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_secs(2);
+    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    let store = seed_backlog(store, &hub.config.data_dir, 4000, 1500);
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    live_without_backoff(&mut state).await;
+    sleep(Duration::from_millis(150)).await;
+    assert_eq!(*state.borrow(), SessionState::Live);
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
+    use canterlot_proto::worker::v1::{
+        ContentBlock, DeliverInput, TextBlock, content_block, control_up,
+    };
+    let commands: Vec<_> = (0..64)
+        .map(|_| Command {
+            kind: Some(command::Kind::DeliverInput(DeliverInput {
+                content: vec![ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock {
+                        text: "x".repeat(262_144),
+                    })),
+                }],
+                ..Default::default()
+            })),
+            ..cancel_command()
+        })
+        .collect();
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        commands_on_first_batch: commands,
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_secs(3);
+    hub.config.timers.heartbeat = Duration::from_millis(30);
+    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    let path = hub.config.data_dir.clone();
+    let store = seed_backlog(store, &path, 48, 200_000);
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    let mut last_heartbeat = 0;
+    let mut committed = 0;
+    timeout(Duration::from_secs(15), async {
+        while committed < 112 || last_heartbeat < 3 {
+            assert!(
+                !matches!(*state.borrow_and_update(), SessionState::Backoff { .. }),
+                "unexpected restart"
+            );
+            match hub.event().await {
+                Observed::Hello(_, _) => {}
+                Observed::Control(message) => match message.msg {
+                    Some(control_up::Msg::CjRecords(batch)) => {
+                        committed = committed.max(batch.records.last().unwrap().seq)
+                    }
+                    Some(control_up::Msg::Heartbeat(h)) => {
+                        assert!(
+                            h.seq > last_heartbeat,
+                            "heartbeat resent before ACK was read"
+                        );
+                        last_heartbeat = h.seq;
+                    }
+                    _ => {}
+                },
+            }
+        }
+    })
+    .await
+    .unwrap();
+    live_without_backoff(&mut state).await;
+    stop_worker(stop, join).await;
+    let store = WorkerStore::open(&path).unwrap();
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 112);
+}
+
+#[tokio::test]
+async fn malformed_and_over_limit_commands_are_rejected_without_restart() {
+    use canterlot_proto::worker::v1::{
+        ContentBlock, DeliverInput, TextBlock, content_block, control_up, record_body,
+    };
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let path = hub.config.data_dir.clone();
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    wait_state(&mut state, SessionState::Live).await;
+    let invalid = Command {
+        command_id: "raw invalid id".into(),
+        ..cancel_command()
+    };
+    let large = Command {
+        kind: Some(command::Kind::DeliverInput(DeliverInput {
+            content: vec![ContentBlock {
+                block: Some(content_block::Block::Text(TextBlock {
+                    text: "x".repeat(262_145),
+                })),
+            }],
+            ..Default::default()
+        })),
+        ..cancel_command()
+    };
+    let good = cancel_command();
+    for command in [&invalid, &large, &good] {
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::Command(command.clone())),
+        })
+        .await;
+    }
+    let mut facts = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        while facts.len() < 3 {
+            assert!(!matches!(*state.borrow(), SessionState::Backoff { .. }));
+            if let Observed::Control(message) = hub.event().await
+                && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+            {
+                facts.extend(
+                    batch
+                        .records
+                        .into_iter()
+                        .map(|r| r.body.unwrap().body.unwrap()),
+                );
+            }
+        }
+    })
+    .await
+    .unwrap();
+    for (fact, command, reason) in [
+        (&facts[0], &invalid, "invalid_command"),
+        (&facts[1], &large, "resource_limit"),
+    ] {
+        let record_body::Body::CommandRejected(rejected) = fact else {
+            panic!("missing rejection");
+        };
+        assert_eq!(rejected.command_id, command.command_id);
+        assert_eq!(rejected.reason, reason);
+    }
+    assert!(matches!(facts[2], record_body::Body::CommandStored(_)));
+    stop_worker(stop, join).await;
+    let mut store = WorkerStore::open(&path).unwrap();
+    assert_eq!(
+        store.accept_command(&invalid).unwrap(),
+        canterlot_worker::store::Accept::Duplicate
+    );
+}
+
+#[tokio::test]
+async fn slow_range_progress_resets_head_timer() {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        range_ack_delay: Duration::from_millis(900),
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_millis(600);
+    hub.config.timers.heartbeat_ack = Duration::from_millis(500);
+    let store = seed_backlog(store, &hub.config.data_dir, 20, 200_000);
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    live_without_backoff(&mut state).await;
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test]
+async fn hub_status_codes_are_visible_during_backoff_and_unauthenticated_is_terminal() {
+    for code in [tonic::Code::PermissionDenied, tonic::Code::InvalidArgument] {
+        let (mut hub, store) = ProtocolHub::start(Behavior {
+            status: Some((code, "foreign_journal")),
+            ..Default::default()
+        })
+        .await;
+        let (stop, mut state, join) = start(hub.config.clone(), store);
+        wait_backoff(&mut state).await;
+        assert!(format!("{:?}", *state.borrow()).contains(&format!("Hub({code:?})")));
+        assert!(!join.is_finished());
+        stop_worker(stop, join).await;
+        assert!(matches!(hub.event().await, Observed::Hello(_, _)));
+    }
+    let (hub, store) = ProtocolHub::start(Behavior {
+        status: Some((tonic::Code::Unauthenticated, "invalid machine credential")),
+        ..Default::default()
+    })
+    .await;
+    let (_stop, state, join) = start(hub.config.clone(), store);
+    assert!(matches!(
+        timeout(Duration::from_secs(2), join)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WorkerError::Hub {
+            code: tonic::Code::Unauthenticated,
+            ..
+        })
+    ));
+    assert!(matches!(
+        *state.borrow(),
+        SessionState::Rejected {
+            retryable: false,
+            ..
+        }
+    ));
+}
+
+#[tokio::test]
+async fn sealed_or_corrupt_store_discovered_on_reopen_is_fatal() {
+    use std::io::Write;
+    for kind in ["cj", "inbox", "metadata"] {
+        let (hub, store) = ProtocolHub::start(Behavior::default()).await;
+        let path = hub.config.data_dir.clone();
+        let receipt = segment(&path.join("receipts"));
+        let backup = path.join("receipt-backup");
+        let (stop, mut state, join) = start(hub.config.clone(), store);
+        wait_state(&mut state, SessionState::Live).await;
+        fs::rename(&receipt, &backup).unwrap();
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::Command(cancel_command())),
+        })
+        .await;
+        wait_backoff(&mut state).await;
+        fs::rename(&backup, &receipt).unwrap();
+        let expected = if kind == "metadata" {
+            fs::write(path.join("hub.toml"), "not valid metadata\n").unwrap();
+            "Metadata"
+        } else {
+            let mut file = fs::OpenOptions::new()
+                .append(true)
+                .open(segment(&path.join(kind)))
+                .unwrap();
+            file.write_all(b"torn tail").unwrap();
+            file.sync_all().unwrap();
+            if kind == "cj" {
+                "CjSealed"
+            } else {
+                "LocalSealed"
+            }
+        };
+        let error = timeout(Duration::from_secs(2), join)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert!(error.to_string().contains(expected), "{error}");
+        drop(stop);
+    }
+}
+
+#[tokio::test]
+async fn reconnect_retries_transient_token_and_ca_reads_with_one_second_spacing() {
+    use std::os::unix::fs::PermissionsExt;
+    for mode in ["token", "permissions", "ca"] {
+        let (hub, store) = ProtocolHub::start(Behavior::default()).await;
+        let path = if mode == "ca" {
+            &hub.config.ca_cert
+        } else {
+            &hub.config.token_file
+        };
+        let saved = fs::read(path).unwrap();
+        let (stop, mut state, join) = start(hub.config.clone(), store);
+        wait_state(&mut state, SessionState::Live).await;
+        if mode == "permissions" {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644)).unwrap();
+        } else {
+            fs::remove_file(path).unwrap();
+        }
+        hub.fail(tonic::Status::unavailable("reconnect")).await;
+        wait_backoff(&mut state).await;
+        sleep(Duration::from_millis(1500)).await;
+        assert!(!join.is_finished(), "read failure must be retried");
+        fs::write(path, saved).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+        wait_state(&mut state, SessionState::Live).await;
+        stop_worker(stop, join).await;
+    }
+}
+
+#[tokio::test]
+async fn persistent_reconnect_read_error_is_fatal_after_three_retries() {
+    let (hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    wait_state(&mut state, SessionState::Live).await;
+    fs::remove_file(&hub.config.token_file).unwrap();
+    let started = tokio::time::Instant::now();
+    hub.fail(tonic::Status::unavailable("reconnect")).await;
+    let error = timeout(Duration::from_secs(5), join)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(matches!(error, WorkerError::Config(_)));
+    assert!(started.elapsed() >= Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_millis(4200));
+    drop(stop);
+}
+
+#[tokio::test]
+async fn sigterm_closes_streams_and_releases_journal_locks() {
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let config = &hub.config;
+    let path = config.data_dir.parent().unwrap().join("worker.toml");
+    fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\nrestore_generation = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.restore_generation.to_string(), config.data_dir)).unwrap();
+    let data_dir = config.data_dir.clone();
+    drop(store);
+    let child = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args(["run", "--config"])
+        .arg(path)
+        .kill_on_drop(true)
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut hellos = 0;
+    while hellos < 2 {
+        if let Observed::Hello(_, _) = hub.event().await {
+            hellos += 1;
+        }
+    }
+    assert!(
+        std::process::Command::new("kill")
+            .args(["-TERM", &child.id().unwrap().to_string()])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let output = timeout(Duration::from_secs(3), child.wait_with_output())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(WorkerStore::open(&data_dir).is_ok());
+    let log = String::from_utf8(output.stderr).unwrap();
+    assert!(log.contains("disconnected"));
+    assert!(!log.contains("protocol-test"));
+}
+
+#[tokio::test]
+async fn stalled_outbound_write_does_not_block_inbound_command_or_ack() {
+    use canterlot_proto::worker::v1::{JournalRangeAck, control_up};
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        range_ack: false,
+        pause_after_first_batch: Duration::from_secs(3),
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_secs(5);
+    hub.config.timers.heartbeat_ack = Duration::from_secs(5);
+    let path = hub.config.data_dir.clone();
+    let store = seed_backlog(store, &path, 80, 200_000);
+    let journal_id = store.cj_journal_id().unwrap().to_string();
+    let inbox = segment(&path.join("inbox"));
+    let initial = fs::metadata(&inbox).unwrap().len();
+    let (stop, state, join) = start(hub.config.clone(), store);
+    loop {
+        if let Observed::Control(message) = hub.event().await
+            && matches!(message.msg, Some(control_up::Msg::CjRecords(_)))
+        {
+            break;
+        }
+    }
+    sleep(Duration::from_millis(600)).await;
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::CjAck(JournalRangeAck {
+            journal_id,
+            up_to_seq: 64,
+        })),
+    })
+    .await;
+    sleep(Duration::from_millis(600)).await;
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(cancel_command())),
+    })
+    .await;
+    timeout(Duration::from_millis(300), async {
+        while fs::metadata(&inbox).unwrap().len() == initial {
+            assert!(!matches!(*state.borrow(), SessionState::Backoff { .. }));
+            sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    stop_worker(stop, join).await;
+    assert_eq!(
+        WorkerStore::open(&path)
+            .unwrap()
+            .cj_cursor()
+            .unwrap()
+            .last_seq,
+        81
+    );
+}
+
+#[tokio::test]
+async fn partial_range_progress_resets_retry_budget_for_the_same_batch() {
+    use canterlot_proto::worker::v1::{JournalRangeAck, control_up};
+    let (mut hub, mut store) = ProtocolHub::start(Behavior {
+        range_ack: false,
+        ..Default::default()
+    })
+    .await;
+    hub.config.timers.range_ack = Duration::from_millis(120);
+    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    for _ in 0..3 {
+        store.accept_command(&cancel_command()).unwrap();
+    }
+    let journal_id = store.cj_journal_id().unwrap().to_string();
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    let mut sends = 0;
+    for up_to_seq in 1..=3 {
+        while sends < up_to_seq + 1 {
+            assert!(!matches!(*state.borrow(), SessionState::Backoff { .. }));
+            match hub.event().await {
+                Observed::Hello(_, _) => assert_eq!(sends, 0),
+                Observed::Control(message) => {
+                    if let Some(control_up::Msg::CjRecords(batch)) = message.msg {
+                        assert_eq!(batch.records.first().unwrap().seq, 1);
+                        assert_eq!(batch.records.last().unwrap().seq, 3);
+                        sends += 1;
+                    }
+                }
+            }
+        }
+        sleep(Duration::from_millis(60)).await;
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::CjAck(JournalRangeAck {
+                journal_id: journal_id.clone(),
+                up_to_seq,
+            })),
+        })
+        .await;
+    }
+    live_without_backoff(&mut state).await;
+    stop_worker(stop, join).await;
+}
+
+#[tokio::test]
+async fn duplicate_range_acks_do_not_extend_the_deadline() {
+    use canterlot_proto::worker::v1::JournalRangeAck;
+    let (mut hub, mut store) = ProtocolHub::start(Behavior {
+        range_ack: false,
+        ..Default::default()
+    })
+    .await;
+    store.accept_command(&cancel_command()).unwrap();
+    let journal_id = store.cj_journal_id().unwrap().to_string();
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    loop {
+        if let Observed::Control(message) = hub.event().await
+            && matches!(
+                message.msg,
+                Some(canterlot_proto::worker::v1::control_up::Msg::CjRecords(_))
+            )
+        {
+            break;
+        }
+    }
+    timeout(Duration::from_secs(1), async {
+        loop {
+            if matches!(*state.borrow_and_update(), SessionState::Backoff { .. }) {
+                break;
+            }
+            sleep(Duration::from_millis(30)).await;
+            if matches!(*state.borrow(), SessionState::Backoff { .. }) {
+                break;
+            }
+            hub.send(ControlDown {
+                msg: Some(control_down::Msg::CjAck(JournalRangeAck {
+                    journal_id: journal_id.clone(),
+                    up_to_seq: 0,
+                })),
+            })
+            .await;
+        }
+    })
+    .await
+    .unwrap();
+    stop_worker(stop, join).await;
 }

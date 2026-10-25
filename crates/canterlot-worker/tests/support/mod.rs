@@ -1,4 +1,10 @@
-use std::{fs, net::SocketAddr, os::unix::fs::PermissionsExt, time::Duration};
+use std::{
+    fs,
+    net::SocketAddr,
+    os::unix::fs::PermissionsExt,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use canterlot_hub::testkit::tls::test_pki;
 use canterlot_proto::{
@@ -22,6 +28,8 @@ use tonic::{
 };
 use uuid::Uuid;
 
+type Downstream = Arc<Mutex<Option<mpsc::Sender<Result<ControlDown, Status>>>>>;
+
 #[derive(Clone)]
 pub struct Behavior {
     pub generation: Uuid,
@@ -30,6 +38,11 @@ pub struct Behavior {
     pub range_ack: bool,
     pub hello_reply: bool,
     pub command_on_first_batch: Option<Command>,
+    pub commands_on_first_batch: Vec<Command>,
+    pub range_ack_delay: Duration,
+    pub pause_after_first_batch: Duration,
+    pub ack_override: Option<u64>,
+    pub status: Option<(tonic::Code, &'static str)>,
 }
 
 impl Default for Behavior {
@@ -41,6 +54,11 @@ impl Default for Behavior {
             range_ack: true,
             hello_reply: true,
             command_on_first_batch: None,
+            commands_on_first_batch: vec![],
+            range_ack_delay: Duration::ZERO,
+            pause_after_first_batch: Duration::ZERO,
+            ack_override: None,
+            status: None,
         }
     }
 }
@@ -54,6 +72,7 @@ pub enum Observed {
 struct Service {
     behavior: Behavior,
     events: mpsc::Sender<Observed>,
+    downstream: Downstream,
 }
 
 impl Service {
@@ -99,6 +118,10 @@ impl WorkerControl for Service {
             .send(Observed::Hello(hello, peer))
             .await
             .unwrap();
+        if let Some((code, message)) = self.behavior.status {
+            return Err(Status::new(code, message));
+        }
+        *self.downstream.lock().unwrap() = Some(tx.clone());
         if self.behavior.hello_reply {
             tx.send(Ok(ControlDown {
                 msg: Some(control_down::Msg::HelloReply(reply)),
@@ -108,7 +131,31 @@ impl WorkerControl for Service {
         }
         let service = self.clone();
         tokio::spawn(async move {
+            let mut pause = service.behavior.pause_after_first_batch;
             let mut command = service.behavior.command_on_first_batch.clone();
+            let mut commands = Some(service.behavior.commands_on_first_batch.clone());
+            let (acks, mut ack_queue) = mpsc::channel::<JournalRangeAck>(32);
+            let ack_tx = tx.clone();
+            let delay = service.behavior.range_ack_delay;
+            let ack_task = tokio::spawn(async move {
+                let mut last = 0;
+                while let Some(ack) = ack_queue.recv().await {
+                    if ack.up_to_seq <= last {
+                        continue;
+                    }
+                    tokio::time::sleep(delay).await;
+                    last = ack.up_to_seq;
+                    if ack_tx
+                        .send(Ok(ControlDown {
+                            msg: Some(control_down::Msg::CjAck(ack)),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            });
             loop {
                 let message = tokio::select! {
                     _ = tx.closed() => break,
@@ -119,13 +166,35 @@ impl WorkerControl for Service {
                         Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq: h.seq }))
                     }
                     Some(control_up::Msg::CjRecords(batch)) if service.behavior.range_ack => {
-                        Some(control_down::Msg::CjAck(JournalRangeAck {
+                        let ack = JournalRangeAck {
                             journal_id: batch.journal_id.clone(),
-                            up_to_seq: batch.records.last().unwrap().seq,
-                        }))
+                            up_to_seq: service
+                                .behavior
+                                .ack_override
+                                .unwrap_or(batch.records.last().unwrap().seq),
+                        };
+                        if acks.send(ack).await.is_err() {
+                            break;
+                        }
+                        None
                     }
                     _ => None,
                 };
+                if matches!(message.msg, Some(control_up::Msg::CjRecords(_)))
+                    && let Some(burst) = commands.take()
+                {
+                    for command in burst {
+                        if tx
+                            .send(Ok(ControlDown {
+                                msg: Some(control_down::Msg::Command(command)),
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
                 if matches!(message.msg, Some(control_up::Msg::CjRecords(_)))
                     && let Some(command) = command.take()
                     && tx
@@ -137,6 +206,7 @@ impl WorkerControl for Service {
                 {
                     break;
                 }
+                let is_batch = matches!(message.msg, Some(control_up::Msg::CjRecords(_)));
                 if service
                     .events
                     .send(Observed::Control(message))
@@ -150,7 +220,12 @@ impl WorkerControl for Service {
                 {
                     break;
                 }
+                if is_batch && !pause.is_zero() {
+                    tokio::time::sleep(pause).await;
+                    pause = Duration::ZERO;
+                }
             }
+            ack_task.abort();
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
@@ -194,6 +269,7 @@ pub struct ProtocolHub {
     pub events: mpsc::Receiver<Observed>,
     _directory: TempDir,
     pub config: WorkerConfig,
+    downstream: Downstream,
     task: JoinHandle<Result<(), tonic::transport::Error>>,
 }
 
@@ -208,11 +284,18 @@ impl ProtocolHub {
         fs::set_permissions(&token_file, fs::Permissions::from_mode(0o600)).unwrap();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let (events, receiver) = mpsc::channel(64);
+        let (events, receiver) = mpsc::channel(4096);
         let restore_generation = behavior.generation;
-        let service = Service { behavior, events };
+        let downstream = Arc::new(Mutex::new(None));
+        let service = Service {
+            behavior,
+            events,
+            downstream: downstream.clone(),
+        };
         let task = tokio::spawn(async move {
             Server::builder()
+                .initial_stream_window_size(65_535)
+                .initial_connection_window_size(65_535)
                 .tls_config(
                     ServerTlsConfig::new()
                         .identity(Identity::from_pem(pki.server_cert_pem, pki.server_key_pem)),
@@ -254,6 +337,7 @@ impl ProtocolHub {
                 events: receiver,
                 _directory: directory,
                 config,
+                downstream,
                 task,
             },
             store,
@@ -265,6 +349,16 @@ impl ProtocolHub {
             .await
             .unwrap()
             .unwrap()
+    }
+
+    pub async fn fail(&self, status: Status) {
+        let sender = self.downstream.lock().unwrap().clone().unwrap();
+        sender.send(Err(status)).await.unwrap();
+    }
+
+    pub async fn send(&self, message: ControlDown) {
+        let sender = self.downstream.lock().unwrap().clone().unwrap();
+        sender.send(Ok(message)).await.unwrap();
     }
 }
 
