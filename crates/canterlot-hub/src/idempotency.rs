@@ -73,3 +73,11 @@ pub fn request_hash<T: Serialize>(operation: &str, body: &T) -> Vec<u8> {
     hash.update(encoded);
     hash.finalize().to_vec()
 }
+
+pub(crate) fn validate_key(key: &str) -> Result<(), &'static str> {
+    if key.is_empty() || key.len() > 256 {
+        Err("invalid_idempotency_key")
+    } else {
+        Ok(())
+    }
+}

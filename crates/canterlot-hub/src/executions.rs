@@ -1,9 +1,10 @@
 use serde_json::json;
-use sqlx::{PgConnection, PgPool, types::Json};
+use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    delivery::LockedQueue,
     events::{self, NewEvent, Scope},
     model::{ExecutionState, HoldReason, PauseReason, RunSlot},
 };
@@ -39,8 +40,8 @@ pub async fn start(
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
     let mut tx = pool.begin().await?;
-    let (closed, mut holds): (bool, Json<Vec<HoldReason>>) = sqlx::query_as(
-        "select closed, hold_reasons from queue_state
+    let mut queue: LockedQueue = sqlx::query_as(
+        "select * from queue_state
          where conversation_id = $1 for update",
     )
     .bind(conversation_id)
@@ -55,7 +56,7 @@ pub async fn start(
     .fetch_optional(&mut *tx)
     .await?
     .ok_or(ExecutionError::ConversationNotFound)?;
-    if closed {
+    if queue.closed {
         return Err(ExecutionError::ConversationClosed);
     }
     if let Some((execution_id, _, _)) = live(&mut tx, conversation_id).await? {
@@ -94,11 +95,18 @@ pub async fn start(
     .bind(json!({"harness": harness, "workdir": workdir}))
     .execute(&mut *tx)
     .await?;
-    add_once(&mut holds.0, HoldReason::ExecutionStarting);
-    sqlx::query("update queue_state set hold_reasons = $2 where conversation_id = $1")
-        .bind(conversation_id)
-        .bind(holds)
+    sqlx::query("select pg_notify('canterlot_outbox', $1::text)")
+        .bind(machine_id.to_string())
         .execute(&mut *tx)
+        .await?;
+    add_once(&mut queue.hold_reasons.0, HoldReason::ExecutionStarting);
+    queue
+        .save(
+            &mut tx,
+            &queue.slot()?,
+            Some(started.execution_id),
+            correlation_id,
+        )
         .await?;
     events::append(
         &mut tx,
@@ -116,16 +124,6 @@ pub async fn start(
     Ok(started)
 }
 
-#[derive(sqlx::FromRow)]
-struct LockedQueue {
-    conversation_id: Uuid,
-    pause_reasons: Json<Vec<PauseReason>>,
-    hold_reasons: Json<Vec<HoldReason>>,
-    run_slot: String,
-    run_slot_input_id: Option<Uuid>,
-    run_slot_attempt: Option<i32>,
-}
-
 pub async fn set_state(
     pool: &PgPool,
     execution_id: Uuid,
@@ -135,9 +133,7 @@ pub async fn set_state(
 ) -> Result<(), ExecutionError> {
     let mut tx = pool.begin().await?;
     let mut queue: LockedQueue = sqlx::query_as(
-        "select q.conversation_id, q.pause_reasons, q.hold_reasons, q.run_slot,
-                q.run_slot_input_id, q.run_slot_attempt
-         from queue_state q join executions e on e.conversation_id = q.conversation_id
+        "select q.* from queue_state q join executions e on e.conversation_id = q.conversation_id
          where e.id = $1 for update of q",
     )
     .bind(execution_id)
@@ -154,12 +150,7 @@ pub async fn set_state(
     if !legal_transition(from, to, outcome) {
         return Err(ExecutionError::InvalidTransition { from, to });
     }
-    let mut slot = RunSlot::from_columns(
-        &queue.run_slot,
-        queue.run_slot_input_id,
-        queue.run_slot_attempt,
-    )
-    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    let mut slot = queue.slot()?;
     match to {
         ExecutionState::Running => queue.hold_reasons.0.retain(|reason| {
             !matches!(
@@ -168,7 +159,10 @@ pub async fn set_state(
             )
         }),
         ExecutionState::Stopped | ExecutionState::Failed => {
-            if outcome != Some("user_stop") {
+            if !matches!(
+                outcome,
+                Some("user_stop" | "start_cancelled" | "force_stopped")
+            ) {
                 add_once(
                     &mut queue.pause_reasons.0,
                     if to == ExecutionState::Stopped {
@@ -200,20 +194,9 @@ pub async fn set_state(
         .bind(outcome)
         .execute(&mut *tx)
         .await?;
-    let (slot, input_id, attempt) = slot.to_columns();
-    sqlx::query(
-        "update queue_state set pause_reasons = $2, hold_reasons = $3, run_slot = $4,
-                                run_slot_input_id = $5, run_slot_attempt = $6
-         where conversation_id = $1",
-    )
-    .bind(queue.conversation_id)
-    .bind(queue.pause_reasons)
-    .bind(queue.hold_reasons)
-    .bind(slot)
-    .bind(input_id)
-    .bind(attempt)
-    .execute(&mut *tx)
-    .await?;
+    queue
+        .save(&mut tx, &slot, Some(execution_id), correlation_id)
+        .await?;
     events::append(
         &mut tx,
         state_event(

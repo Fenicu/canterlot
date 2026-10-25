@@ -108,7 +108,12 @@ async fn seq_is_contiguous_per_scope(pool: PgPool) -> Result<(), sqlx::Error> {
     );
     assert_eq!(sequences(read_after(&pool, &scope_a, 2, 2).await?), [3, 4]);
     assert!(events(read_after(&pool, &scope_a, 5, 100).await?).is_empty());
-    assert!(events(read_after(&pool, &scope_a, i64::MAX, 100).await?).is_empty());
+    assert!(matches!(
+        read_after(&pool, &scope_a, i64::MAX, 100).await?,
+        ReadAfter::ResyncRequired {
+            oldest_available_seq: 1
+        }
+    ));
     Ok(())
 }
 

@@ -613,10 +613,12 @@ async fn continue_releases_user_pause_and_dispatches_once(pool: PgPool) -> TestR
     );
     assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
     assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
-    let event: String = sqlx::query_scalar("select kind from events where correlation_id = $1")
-        .bind(correlation_id)
-        .fetch_one(&pool)
-        .await?;
+    let event: String = sqlx::query_scalar(
+        "select kind from events where correlation_id = $1 and kind <> 'queue_state_changed'",
+    )
+    .bind(correlation_id)
+    .fetch_one(&pool)
+    .await?;
     assert_eq!(event, "queue_resumed");
     assert!(matches!(dispatch(&pool, seed.conversation_id).await,
         DispatchOutcome::Dispatched { input_id, attempt: 1, .. } if input_id == second.input_id));
@@ -646,7 +648,9 @@ async fn continue_releases_user_pause_and_dispatches_once(pool: PgPool) -> TestR
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn continue_keeps_owner_lost_and_unconfirmed_input(pool: PgPool) -> TestResult {
+async fn continue_clears_resolved_owner_lost_and_keeps_unconfirmed_input(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     running(&pool, &seed).await;
     let head = input(&pool, &seed).await;
@@ -676,8 +680,8 @@ async fn continue_keeps_owner_lost_and_unconfirmed_input(pool: PgPool) -> TestRe
         )
         .await?,
         ContinueOutcome {
-            removed: vec![unconfirmed],
-            remaining: vec![PauseReason::OwnerLost]
+            removed: vec![PauseReason::OwnerLost, unconfirmed],
+            remaining: vec![]
         }
     );
     assert_eq!(
@@ -689,25 +693,14 @@ async fn continue_keeps_owner_lost_and_unconfirmed_input(pool: PgPool) -> TestRe
         .fetch_one(&pool)
         .await?;
     assert_eq!(before, after);
-    assert_eq!(
-        pauses(&pool, seed.conversation_id).await,
-        [PauseReason::OwnerLost]
-    );
+    assert_eq!(pauses(&pool, seed.conversation_id).await, []);
     let (kind, payload): (String, Value) =
-        sqlx::query_as("select kind, payload from events where correlation_id = $1")
+        sqlx::query_as("select kind, payload from events where correlation_id = $1 and kind <> 'queue_state_changed'")
             .bind(correlation_id)
             .fetch_one(&pool)
             .await?;
-    assert_eq!(kind, "queue_paused");
-    assert_eq!(payload["pause_reasons"], json!([PauseReason::OwnerLost]));
-    assert_eq!(
-        dispatch(&pool, seed.conversation_id).await,
-        DispatchOutcome::Blocked(vec![BlockReason::Paused(vec![PauseReason::OwnerLost])])
-    );
-    sqlx::query("update queue_state set pause_reasons = '[]' where conversation_id = $1")
-        .bind(seed.conversation_id)
-        .execute(&pool)
-        .await?;
+    assert_eq!(kind, "queue_resumed");
+    assert_eq!(payload["pause_reasons"], json!([]));
     assert!(matches!(dispatch(&pool, seed.conversation_id).await,
         DispatchOutcome::Dispatched { input_id, .. } if input_id == next.input_id));
     let attempt: i32 = sqlx::query_scalar("select dispatch_attempt from commands where id = $1")
@@ -807,6 +800,7 @@ async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPo
         PauseReason::FatalError,
         PauseReason::ProcessExited,
         PauseReason::LimitReached,
+        PauseReason::OwnerLost,
         PauseReason::UnconfirmedDelivery {
             input_id: head.input_id,
         },
@@ -814,7 +808,7 @@ async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPo
             input_id: Uuid::now_v7(),
         },
     ];
-    let remaining = vec![PauseReason::RestorePending, PauseReason::OwnerLost];
+    let remaining = vec![PauseReason::RestorePending];
     let holds = vec![HoldReason::NoLiveExecution, HoldReason::ContextMaintenance];
     let all = [removed.clone(), remaining.clone()].concat();
     sqlx::query(

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgConnection, PgPool};
@@ -18,7 +20,6 @@ impl Scope {
     }
 }
 
-#[derive(Debug)]
 pub struct NewEvent {
     pub scope: Scope,
     pub kind: &'static str,
@@ -28,7 +29,7 @@ pub struct NewEvent {
     pub correlation_id: Uuid,
 }
 
-#[derive(Debug, sqlx::FromRow)]
+#[derive(sqlx::FromRow)]
 pub struct StoredEvent {
     pub id: Uuid,
     pub scope: String,
@@ -97,14 +98,24 @@ pub async fn read_after(
     .bind(&scope)
     .fetch_one(&mut *tx)
     .await?;
-    let resync_from = match oldest {
-        Some(oldest) if after_seq < oldest - 1 => Some(oldest),
-        None if after_seq < last_seq => Some(
-            last_seq
-                .checked_add(1)
-                .ok_or_else(|| sqlx::Error::Protocol("scope sequence exhausted".into()))?,
-        ),
-        _ => None,
+    let resync_from = if after_seq > last_seq {
+        Some(
+            oldest.unwrap_or(
+                last_seq
+                    .checked_add(1)
+                    .ok_or_else(|| sqlx::Error::Protocol("scope sequence exhausted".into()))?,
+            ),
+        )
+    } else {
+        match oldest {
+            Some(oldest) if after_seq < oldest - 1 => Some(oldest),
+            None if after_seq < last_seq => Some(
+                last_seq
+                    .checked_add(1)
+                    .ok_or_else(|| sqlx::Error::Protocol("scope sequence exhausted".into()))?,
+            ),
+            _ => None,
+        }
     };
 
     let result = if let Some(oldest_available_seq) = resync_from {
@@ -149,4 +160,47 @@ pub async fn purge_before(
             .await?
             .rows_affected(),
     )
+}
+
+fn redacted_payload(value: &Value) -> Value {
+    match value {
+        Value::String(text) => serde_json::json!({"bytes": text.len()}),
+        Value::Array(values) => Value::Array(values.iter().map(redacted_payload).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), redacted_payload(value)))
+                .collect(),
+        ),
+        value => value.clone(),
+    }
+}
+
+impl fmt::Debug for NewEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NewEvent")
+            .field("scope", &self.scope)
+            .field("kind", &self.kind)
+            .field("conversation_id", &self.conversation_id)
+            .field("execution_id", &self.execution_id)
+            .field("payload", &redacted_payload(&self.payload))
+            .field("correlation_id", &self.correlation_id)
+            .finish()
+    }
+}
+
+impl fmt::Debug for StoredEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StoredEvent")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("scope_seq", &self.scope_seq)
+            .field("kind", &self.kind)
+            .field("conversation_id", &self.conversation_id)
+            .field("execution_id", &self.execution_id)
+            .field("payload", &redacted_payload(&self.payload))
+            .field("correlation_id", &self.correlation_id)
+            .field("committed_at", &self.committed_at)
+            .finish()
+    }
 }

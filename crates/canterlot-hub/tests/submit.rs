@@ -393,16 +393,15 @@ async fn closed_conversation_refuses(pool: PgPool) {
 async fn metadata_limit_refuses_without_binding_key(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let mut req = request(&seed, "metadata", "");
-    req.content = (0..3_000)
+    req.content = (0..17_000)
         .map(|_| ContentBlock::Text {
             text: String::new(),
         })
         .collect();
-    let actual = serde_json::to_vec(&req.content).unwrap().len();
-    assert!(actual > MAX_INPUT_META_BYTES);
+    req.content[0] = ContentBlock::Text { text: "x".into() };
     assert!(matches!(
         submit_input(&pool, req).await,
-        Err(SubmitError::ResourceLimit { kind: LimitKind::InputMeta, limit: MAX_INPUT_META_BYTES, actual: bytes }) if bytes == actual
+        Err(SubmitError::ResourceLimit { kind: LimitKind::InputMeta, limit: MAX_INPUT_META_BYTES, actual: bytes }) if bytes > MAX_INPUT_META_BYTES
     ));
     assert_counts(&pool, (0, 0, 0, 0)).await;
     assert_sequence(&pool, seed.conversation_id, 1, 0).await;

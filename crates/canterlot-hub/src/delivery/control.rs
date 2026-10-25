@@ -41,6 +41,8 @@ pub enum ControlError {
     NotFound,
     #[error("idempotency conflict")]
     IdempotencyConflict,
+    #[error("invalid request: {reason}")]
+    InvalidRequest { reason: &'static str },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
 }
@@ -52,6 +54,8 @@ pub async fn cancel_input(
     idempotency_key: &str,
     correlation_id: Uuid,
 ) -> Result<CancelOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "cancel_input";
     let hash = idempotency::request_hash(OPERATION, &json!({"input_id": input_id}));
     let mut tx = pool.begin().await?;
@@ -148,6 +152,8 @@ pub async fn request_stop(
     idempotency_key: &str,
     correlation_id: Uuid,
 ) -> Result<StopOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "request_stop";
     let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
     let mut tx = pool.begin().await?;
@@ -160,7 +166,7 @@ pub async fn request_stop(
         queue.pause_reasons.0.push(PauseReason::UserStop);
     }
     let slot = queue.slot()?;
-    queue.save(&mut tx, &slot).await?;
+    queue.save(&mut tx, &slot, None, correlation_id).await?;
     let live = executions::live(&mut tx, conversation_id).await?;
     let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
         let existing: Option<Uuid> = sqlx::query_scalar(
@@ -246,6 +252,8 @@ pub async fn continue_queue(
     idempotency_key: &str,
     correlation_id: Uuid,
 ) -> Result<ContinueOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "continue_queue";
     let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
     let mut tx = pool.begin().await?;
@@ -254,16 +262,22 @@ pub async fn continue_queue(
         tx.commit().await?;
         return Ok(outcome);
     }
-    let (remaining, removed): (Vec<_>, Vec<_>) =
-        queue.pause_reasons.0.into_iter().partition(|reason| {
-            matches!(reason, PauseReason::OwnerLost | PauseReason::RestorePending)
+    let owner_lost: bool = sqlx::query_scalar(
+        "select exists(select 1 from executions where conversation_id = $1 and state = 'owner_lost')",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let (remaining, removed): (Vec<_>, Vec<_>) = std::mem::take(&mut queue.pause_reasons.0)
+        .into_iter()
+        .partition(|reason| {
+            matches!(reason, PauseReason::RestorePending)
+                || (owner_lost && *reason == PauseReason::OwnerLost)
         });
     let outcome = ContinueOutcome { removed, remaining };
     queue.pause_reasons.0 = outcome.remaining.clone();
-    sqlx::query("update queue_state set pause_reasons = $2 where conversation_id = $1")
-        .bind(conversation_id)
-        .bind(&queue.pause_reasons)
-        .execute(&mut *tx)
+    queue
+        .save(&mut tx, &queue.slot()?, None, correlation_id)
         .await?;
     events::append(
         &mut tx,
@@ -358,12 +372,25 @@ async fn target_command(
     target_command_id: Uuid,
     kind: &str,
 ) -> Result<Uuid, sqlx::Error> {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "select c.id from commands c join commands target on target.id = c.target_command_id
+         where c.target_command_id = $1 and c.kind = $2 and c.delivery_state <> 'completed'
+           and c.payload->>'target_dispatch_attempt' = target.dispatch_attempt::text
+         order by c.created_at, c.id limit 1",
+    )
+    .bind(target_command_id)
+    .bind(kind)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(existing) = existing {
+        return Ok(existing);
+    }
     let command_id = Uuid::now_v7();
     let machine_id: Uuid = sqlx::query_scalar(
         "insert into commands (id, machine_id, conversation_id, execution_id,
                                execution_generation, kind, payload, target_command_id, delivery_state)
          select $1, machine_id, conversation_id, execution_id, execution_generation, $3,
-                jsonb_build_object('target_command_id', id, 'dispatch_attempt', dispatch_attempt), id, 'pending'
+                jsonb_build_object('target_command_id', id, 'target_dispatch_attempt', dispatch_attempt), id, 'pending'
          from commands where id = $2 and kind = 'deliver_input' returning machine_id",
     )
     .bind(command_id)

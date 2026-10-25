@@ -5,6 +5,7 @@ use uuid::Uuid;
 use super::LockedQueue;
 use crate::{
     events::{self, NewEvent, Scope},
+    executions,
     model::{HoldReason, InputState, PauseReason, RunSlot},
 };
 
@@ -112,6 +113,23 @@ pub async fn apply_input_receipt(
         .state
         .parse()
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    if matches!(
+        receipt,
+        InputReceipt::Withdrawn
+            | InputReceipt::DispatchDeferred { .. }
+            | InputReceipt::CancelWon
+            | InputReceipt::CancelLost
+    ) {
+        sqlx::query(
+            "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now())
+             where target_command_id = $1 and kind in ('cancel_input', 'withdraw_input')
+               and delivery_state <> 'completed' and payload->>'target_dispatch_attempt' = $2::text",
+        )
+        .bind(command_id)
+        .bind(attempt.to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
     let late_acceptance =
         state == InputState::AcceptanceUnconfirmed && receipt == InputReceipt::Accepted;
     let ignored = if attempt != target.dispatch_attempt {
@@ -145,13 +163,17 @@ pub async fn apply_input_receipt(
     }
     let mut slot = queue.slot()?;
     let mut delivery = target.delivery_state.as_str();
+    let reason = receipt.reason().map(sanitize_reason);
     let mut reject_reason = None;
     let input_state = match &receipt {
         InputReceipt::Stored => {
             delivery = "stored_on_machine";
             InputState::OnMachine
         }
-        InputReceipt::TransmissionStarted => InputState::Transmitting,
+        InputReceipt::TransmissionStarted => {
+            delivery = "stored_on_machine";
+            InputState::Transmitting
+        }
         InputReceipt::Accepted => {
             delivery = "completed";
             if late_acceptance {
@@ -187,9 +209,9 @@ pub async fn apply_input_receipt(
             delivery = "completed";
             InputState::AcceptanceUnconfirmed
         }
-        InputReceipt::ExplicitRejection { reason }
-        | InputReceipt::RejectedBeforeTransmission { reason } => {
-            reject_reason = Some(reason.as_str());
+        InputReceipt::ExplicitRejection { .. }
+        | InputReceipt::RejectedBeforeTransmission { .. } => {
+            reject_reason = reason.as_deref();
             slot = RunSlot::Free;
             delivery = "completed";
             InputState::Rejected
@@ -202,13 +224,21 @@ pub async fn apply_input_receipt(
         InputReceipt::CancelLost => state,
         InputReceipt::Withdrawn | InputReceipt::DispatchDeferred { .. } => {
             if matches!(receipt, InputReceipt::DispatchDeferred { .. })
+                && executions::live(&mut tx, queue.conversation_id)
+                    .await?
+                    .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
                 && !queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution)
             {
                 queue.hold_reasons.0.push(HoldReason::NoLiveExecution);
             }
             slot = RunSlot::Free;
-            delivery = "held";
-            InputState::Queued
+            if target.cancel_requested {
+                delivery = "completed";
+                InputState::Cancelled
+            } else {
+                delivery = "held";
+                InputState::Queued
+            }
         }
     };
     if receipt == InputReceipt::CancelLost {
@@ -238,11 +268,13 @@ pub async fn apply_input_receipt(
         .bind(delivery)
         .bind(receipt.status())
         .bind(receipt.rank())
-        .bind(receipt.reason().map(|reason| json!({"reason": reason})))
-        .bind(receipt == InputReceipt::Stored)
+        .bind(reason.as_ref().map(|reason| json!({"reason": reason})))
+        .bind(matches!(receipt, InputReceipt::Stored | InputReceipt::TransmissionStarted))
         .execute(&mut *tx)
         .await?;
-        queue.save(&mut tx, &slot).await?;
+        queue
+            .save(&mut tx, &slot, target.execution_id, correlation_id)
+            .await?;
     }
     events::append(
         &mut tx,
@@ -253,7 +285,7 @@ pub async fn apply_input_receipt(
             kind: "input_state_changed",
             conversation_id: Some(queue.conversation_id),
             execution_id: target.execution_id,
-            payload: json!({"input_id": target.input_id, "state": input_state, "attempt": attempt}),
+            payload: json!({"input_id": target.input_id, "state": input_state, "attempt": attempt, "cause": receipt.status()}),
             correlation_id,
         },
     )
@@ -287,7 +319,9 @@ pub async fn apply_run_finished(
     if let (Some(mut queue), Some(input_id)) = (queue, input_id)
         && queue.slot()? == (RunSlot::Running { input_id })
     {
-        queue.save(&mut tx, &RunSlot::Free).await?;
+        queue
+            .save(&mut tx, &RunSlot::Free, Some(execution_id), correlation_id)
+            .await?;
         events::append(
             &mut tx,
             NewEvent {
@@ -305,4 +339,16 @@ pub async fn apply_run_finished(
     }
     tx.commit().await?;
     Ok(())
+}
+
+fn sanitize_reason(reason: &str) -> String {
+    let mut reason = reason.replace('\0', "");
+    if reason.len() > 1024 {
+        let mut end = 1024;
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        reason.truncate(end);
+    }
+    reason
 }

@@ -125,7 +125,7 @@ async fn happy_path_dispatches_head_then_next_after_run_finished(pool: PgPool) -
         }
     );
     let event: (String, Uuid, Uuid, Value) = sqlx::query_as(
-        "select kind, conversation_id, execution_id, payload from events where correlation_id = $1",
+        "select kind, conversation_id, execution_id, payload from events where correlation_id = $1 and kind = 'input_state_changed'",
     )
     .bind(correlation_id)
     .fetch_one(&pool)

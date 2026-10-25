@@ -308,6 +308,12 @@ async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
             },
         ),
     ] {
+        let cause = match &receipt {
+            InputReceipt::Stored => "stored",
+            InputReceipt::TransmissionStarted => "transmission_started",
+            InputReceipt::Accepted => "accepted",
+            _ => unreachable!(),
+        };
         let correlation_id = Uuid::now_v7();
         assert_eq!(
             apply_input_receipt(&pool, head.command_id, 1, receipt, correlation_id).await?,
@@ -320,7 +326,7 @@ async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
         assert_eq!(state["command"]["delivery_state"], delivery);
         assert_eq!(state["command"]["last_status_rank"], rank);
         assert_eq!(slot(&pool, seed.conversation_id).await, expected_slot);
-        let event: (String, String, Uuid, Uuid, Value) = sqlx::query_as("select kind, scope, conversation_id, execution_id, payload from events where correlation_id = $1")
+        let event: (String, String, Uuid, Uuid, Value) = sqlx::query_as("select kind, scope, conversation_id, execution_id, payload from events where correlation_id = $1 and kind <> 'queue_state_changed'")
             .bind(correlation_id).fetch_one(&pool).await?;
         assert_eq!(
             event,
@@ -329,7 +335,7 @@ async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
                 format!("conversation:{}", seed.conversation_id),
                 seed.conversation_id,
                 execution.execution_id,
-                json!({"input_id": head.input_id, "state": expected_state, "attempt": 1})
+                json!({"input_id": head.input_id, "state": expected_state, "attempt": 1, "cause": cause})
             )
         );
     }
@@ -783,7 +789,7 @@ async fn run_finished_matches_execution_command_and_running_slot(pool: PgPool) -
     .await?;
     assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
     let event: (String, Uuid, Value) =
-        sqlx::query_as("select kind, execution_id, payload from events where correlation_id = $1")
+        sqlx::query_as("select kind, execution_id, payload from events where correlation_id = $1 and kind <> 'queue_state_changed'")
             .bind(correlation_id)
             .fetch_one(&pool)
             .await?;

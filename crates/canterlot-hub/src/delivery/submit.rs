@@ -1,6 +1,14 @@
 use std::fmt;
 
-use canterlot_proto::limits::{MAX_INPUT_META_BYTES, MAX_INPUT_TEXT_BYTES};
+use canterlot_proto::{
+    limits::{
+        LimitError, MAX_INPUT_META_BYTES, MAX_INPUT_TEXT_BYTES, MAX_MESSAGE_BYTES,
+        check_deliver_input,
+    },
+    worker::v1::{
+        Command, ContentBlock as ProtoContentBlock, DeliverInput, TextBlock, command, content_block,
+    },
+};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -16,13 +24,13 @@ use crate::{
 const OPERATION: &str = "submit_input";
 pub const QUEUE_LIMIT: i64 = 100;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SubmitInput {
     pub owner_id: Uuid,
     pub conversation_id: Uuid,
@@ -44,11 +52,15 @@ pub struct SubmittedInput {
 pub enum LimitKind {
     InputText,
     InputMeta,
+    Message,
 }
 
 pub enum SubmitError {
     IdempotencyConflict,
     KeyRaceLost,
+    InvalidRequest {
+        reason: &'static str,
+    },
     InvalidContent {
         reason: &'static str,
     },
@@ -102,6 +114,10 @@ impl fmt::Debug for SubmitError {
         match self {
             Self::IdempotencyConflict => f.write_str("IdempotencyConflict"),
             Self::KeyRaceLost => f.write_str("KeyRaceLost"),
+            Self::InvalidRequest { reason } => f
+                .debug_struct("InvalidRequest")
+                .field("reason", reason)
+                .finish(),
             Self::InvalidContent { reason } => f
                 .debug_struct("InvalidContent")
                 .field("reason", reason)
@@ -133,6 +149,7 @@ impl fmt::Display for SubmitError {
         match self {
             Self::IdempotencyConflict => f.write_str("idempotency conflict"),
             Self::KeyRaceLost => f.write_str("idempotency key race lost"),
+            Self::InvalidRequest { reason } => write!(f, "invalid request: {reason}"),
             Self::InvalidContent { reason } => write!(f, "invalid content: {reason}"),
             Self::QueueFull { limit } => write!(f, "queue limit exceeded: {limit}"),
             Self::ResourceLimit {
@@ -169,6 +186,13 @@ impl From<sqlx::Error> for SubmitError {
 }
 
 fn validate_content(req: &SubmitInput) -> Result<(), SubmitError> {
+    idempotency::validate_key(&req.idempotency_key)
+        .map_err(|reason| SubmitError::InvalidRequest { reason })?;
+    if req.content.iter().all(|block| match block {
+        ContentBlock::Text { text } => text.is_empty(),
+    }) {
+        return Err(SubmitError::InvalidContent { reason: "empty" });
+    }
     if req.content.iter().any(|block| match block {
         ContentBlock::Text { text } => text.contains('\0'),
     }) {
@@ -273,31 +297,51 @@ async fn submit_attempt(
         return Err(SubmitError::ConversationClosed);
     }
 
-    let text_bytes: usize = req
-        .content
-        .iter()
-        .map(|block| match block {
-            ContentBlock::Text { text } => text.len(),
-        })
-        .sum();
-    if text_bytes > MAX_INPUT_TEXT_BYTES {
-        return Err(SubmitError::ResourceLimit {
-            kind: LimitKind::InputText,
-            limit: MAX_INPUT_TEXT_BYTES,
-            actual: text_bytes,
-        });
-    }
-    let content_bytes = serde_json::to_vec(&req.content)
-        .map_err(|error| sqlx::Error::Encode(Box::new(error)))?
-        .len();
-    let meta_bytes = content_bytes - text_bytes;
-    if meta_bytes > MAX_INPUT_META_BYTES {
-        return Err(SubmitError::ResourceLimit {
-            kind: LimitKind::InputMeta,
-            limit: MAX_INPUT_META_BYTES,
-            actual: meta_bytes,
-        });
-    }
+    let submitted = SubmittedInput {
+        input_id: Uuid::now_v7(),
+        input_seq,
+        command_id: Uuid::now_v7(),
+        state: InputState::Queued,
+    };
+    // Резервируем заголовок будущей выдачи до привязки исполнения.
+    let command = Command {
+        command_id: submitted.command_id.to_string(),
+        dispatch_attempt: i32::MAX as u32,
+        execution_id: Uuid::nil().to_string(),
+        execution_generation: i64::MAX as u64,
+        kind: Some(command::Kind::DeliverInput(DeliverInput {
+            input_id: submitted.input_id.to_string(),
+            conversation_id: req.conversation_id.to_string(),
+            content: req
+                .content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => ProtoContentBlock {
+                        block: Some(content_block::Block::Text(TextBlock { text: text.clone() })),
+                    },
+                })
+                .collect(),
+        })),
+    };
+    check_deliver_input(&command).map_err(|error| {
+        let (kind, limit, actual) = match error {
+            LimitError::InputText { actual } => {
+                (LimitKind::InputText, MAX_INPUT_TEXT_BYTES, actual)
+            }
+            LimitError::InputMeta { actual } => {
+                (LimitKind::InputMeta, MAX_INPUT_META_BYTES, actual)
+            }
+            LimitError::Message { actual } => (LimitKind::Message, MAX_MESSAGE_BYTES, actual),
+            LimitError::EventBatch { .. } => {
+                unreachable!("command check cannot return an event batch limit")
+            }
+        };
+        SubmitError::ResourceLimit {
+            kind,
+            limit,
+            actual,
+        }
+    })?;
     let queued: i64 = sqlx::query_scalar(
         "select count(*) from inputs where conversation_id = $1
          and state in ('queued', 'dispatched', 'on_machine')",
@@ -315,12 +359,6 @@ async fn submit_attempt(
     .bind(req.conversation_id)
     .execute(&mut *conn)
     .await?;
-    let submitted = SubmittedInput {
-        input_id: Uuid::now_v7(),
-        input_seq,
-        command_id: Uuid::now_v7(),
-        state: InputState::Queued,
-    };
     let content =
         serde_json::to_value(&req.content).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     sqlx::query(
@@ -389,5 +427,29 @@ async fn submit_attempt(
         Ok(Attempt::Submitted(submitted))
     } else {
         Ok(Attempt::LostRace)
+    }
+}
+
+impl fmt::Debug for ContentBlock {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Text { text } => f
+                .debug_struct("Text")
+                .field("text_bytes", &text.len())
+                .finish(),
+        }
+    }
+}
+
+impl fmt::Debug for SubmitInput {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SubmitInput")
+            .field("owner_id", &self.owner_id)
+            .field("conversation_id", &self.conversation_id)
+            .field("idempotency_key_bytes", &self.idempotency_key.len())
+            .field("content", &self.content)
+            .field("received_at", &self.received_at)
+            .field("correlation_id", &self.correlation_id)
+            .finish()
     }
 }

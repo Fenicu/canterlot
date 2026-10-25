@@ -31,7 +31,7 @@ create table inputs (id uuid primary key, conversation_id uuid not null referenc
   state text not null check (state in ('queued','dispatched','on_machine','transmitting','accepted','acceptance_unconfirmed','cancelled','rejected')),
   cancel_requested boolean not null default false, reject_reason text, retry_of uuid references inputs(id),
   command_id uuid not null unique references commands(id),
-  received_at timestamptz not null, committed_at timestamptz not null default now(), agent_confirmed_at timestamptz,
+  received_at timestamptz not null, committed_at timestamptz not null default clock_timestamp(), agent_confirmed_at timestamptz,
   unique (conversation_id, input_seq));
 create index inputs_fifo on inputs(conversation_id, input_seq) where state = 'queued';
 create table idempotency_keys (owner_id uuid not null references owners(id), key text not null,
@@ -41,4 +41,4 @@ create table idempotency_keys (owner_id uuid not null references owners(id), key
 create table scope_counters (scope text primary key, last_seq bigint not null);
 create table events (scope text not null, scope_seq bigint not null, id uuid not null unique, kind text not null,
   conversation_id uuid, execution_id uuid, payload jsonb not null, correlation_id uuid not null,
-  committed_at timestamptz not null default now(), primary key (scope, scope_seq));
+  committed_at timestamptz not null default clock_timestamp(), primary key (scope, scope_seq));

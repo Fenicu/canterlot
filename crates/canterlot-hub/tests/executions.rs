@@ -111,12 +111,12 @@ async fn start_creates_generation_and_command(pool: PgPool) -> TestResult {
     assert!(queue.pause_reasons.0.is_empty());
     let event: (String, i64, String, Uuid, Uuid, Uuid, Value) = sqlx::query_as(
         "select scope, scope_seq, kind, conversation_id, execution_id, correlation_id,
-                payload from events",
+                payload from events where kind = 'execution_state_changed'",
     )
     .fetch_one(&pool)
     .await?;
     assert_eq!(event.0, format!("conversation:{}", seed.conversation_id));
-    assert_eq!(event.1, 1);
+    assert_eq!(event.1, 2);
     assert_eq!(event.2, "execution_state_changed");
     assert_eq!(event.3, seed.conversation_id);
     assert_eq!(event.4, started.execution_id);
@@ -191,7 +191,7 @@ async fn running_clears_start_holds(pool: PgPool) -> TestResult {
     assert_eq!(queue.hold_reasons.0, holds[2..]);
     assert_eq!(queue.pause_reasons.0, [PauseReason::UserStop]);
     let event: (String, Value) =
-        sqlx::query_as("select kind, payload from events where correlation_id = $1")
+        sqlx::query_as("select kind, payload from events where correlation_id = $1 and kind = 'execution_state_changed'")
             .bind(correlation_id)
             .fetch_one(&pool)
             .await?;
@@ -248,7 +248,7 @@ async fn crash_pauses_queue(pool: PgPool) -> TestResult {
             (terminal.as_str().into(), Some(outcome.into()))
         );
         let payload: Value =
-            sqlx::query_scalar("select payload from events where correlation_id = $1")
+            sqlx::query_scalar("select payload from events where correlation_id = $1 and kind = 'execution_state_changed'")
                 .bind(correlation_id)
                 .fetch_one(&pool)
                 .await?;
@@ -279,7 +279,7 @@ async fn illegal_transition_rejected(pool: PgPool) -> TestResult {
         ));
     }
     assert_eq!(queue(&pool, seed.conversation_id).await?, before);
-    assert_eq!(counts(&pool).await?, (1, 1, 1, 1));
+    assert_eq!(counts(&pool).await?, (1, 1, 2, 1));
     executions::set_state(
         &pool,
         started.execution_id,
@@ -531,7 +531,7 @@ async fn workdir_wait_and_start_failure(pool: PgPool) -> TestResult {
     )
     .await?;
     assert_eq!(queue(&pool, seed.conversation_id).await?, before);
-    assert_eq!(counts(&pool).await?, (1, 1, 2, 1));
+    assert_eq!(counts(&pool).await?, (1, 1, 3, 1));
     executions::set_state(
         &pool,
         started.execution_id,
@@ -613,7 +613,7 @@ async fn concurrent_starts_create_one_live_execution(pool: PgPool) -> TestResult
         panic!("expected one start and one AlreadyLive");
     };
     assert_eq!(winner.execution_id, execution_id);
-    assert_eq!(counts(&pool).await?, (1, 1, 1, 1));
+    assert_eq!(counts(&pool).await?, (1, 1, 2, 1));
     Ok(())
 }
 

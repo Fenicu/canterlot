@@ -113,7 +113,12 @@ pub async fn dispatch_next(
     .fetch_one(&mut *tx)
     .await?;
     queue
-        .save(&mut tx, &RunSlot::Dispatching { input_id, attempt })
+        .save(
+            &mut tx,
+            &RunSlot::Dispatching { input_id, attempt },
+            Some(execution_id),
+            correlation_id,
+        )
         .await?;
     sqlx::query("update inputs set state = 'dispatched' where id = $1")
         .bind(input_id)
