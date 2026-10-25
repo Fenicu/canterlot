@@ -1,0 +1,18 @@
+syntax = "proto3";
+package probe;
+
+service Probe {
+  rpc Control(stream Up) returns (stream Down);
+  rpc Data(stream Up) returns (stream Down);
+}
+
+message Up {
+  uint64 sequence = 1;
+  bytes payload = 2;
+  uint32 response_bytes = 3;
+}
+
+message Down {
+  uint64 sequence = 1;
+  bytes payload = 2;
+}
