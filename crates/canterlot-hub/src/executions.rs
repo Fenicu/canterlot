@@ -1,0 +1,320 @@
+use serde_json::json;
+use sqlx::{PgConnection, PgPool, types::Json};
+use thiserror::Error;
+use uuid::Uuid;
+
+use crate::{
+    events::{self, NewEvent, Scope},
+    model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+};
+
+#[derive(Debug)]
+pub struct StartedExecution {
+    pub execution_id: Uuid,
+    pub generation: i64,
+    pub command_id: Uuid,
+}
+
+#[derive(Debug, Error)]
+pub enum ExecutionError {
+    #[error("execution {execution_id} is already live")]
+    AlreadyLive { execution_id: Uuid },
+    #[error("conversation not found")]
+    ConversationNotFound,
+    #[error("conversation closed")]
+    ConversationClosed,
+    #[error("invalid execution transition from {from:?} to {to:?}")]
+    InvalidTransition {
+        from: ExecutionState,
+        to: ExecutionState,
+    },
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
+}
+
+pub async fn start(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<StartedExecution, ExecutionError> {
+    let mut tx = pool.begin().await?;
+    let (closed, mut holds): (bool, Json<Vec<HoldReason>>) = sqlx::query_as(
+        "select closed, hold_reasons from queue_state
+         where conversation_id = $1 for update",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ExecutionError::ConversationNotFound)?;
+    let (machine_id, harness, workdir): (Uuid, String, String) = sqlx::query_as(
+        "select machine_id, harness, workdir from conversations where id = $1 and owner_id = $2",
+    )
+    .bind(conversation_id)
+    .bind(owner_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(ExecutionError::ConversationNotFound)?;
+    if closed {
+        return Err(ExecutionError::ConversationClosed);
+    }
+    if let Some((execution_id, _, _)) = live(&mut tx, conversation_id).await? {
+        return Err(ExecutionError::AlreadyLive { execution_id });
+    }
+    let generation: i64 = sqlx::query_scalar(
+        "select coalesce(max(generation), 0) + 1 from executions where conversation_id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let started = StartedExecution {
+        execution_id: Uuid::now_v7(),
+        generation,
+        command_id: Uuid::now_v7(),
+    };
+    sqlx::query(
+        "insert into executions (id, conversation_id, generation, state)
+         values ($1, $2, $3, 'created')",
+    )
+    .bind(started.execution_id)
+    .bind(conversation_id)
+    .bind(generation)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id,
+                               execution_generation, kind, payload, delivery_state)
+         values ($1, $2, $3, $4, $5, 'start_execution', $6, 'pending')",
+    )
+    .bind(started.command_id)
+    .bind(machine_id)
+    .bind(conversation_id)
+    .bind(started.execution_id)
+    .bind(generation)
+    .bind(json!({"harness": harness, "workdir": workdir}))
+    .execute(&mut *tx)
+    .await?;
+    add_once(&mut holds.0, HoldReason::ExecutionStarting);
+    sqlx::query("update queue_state set hold_reasons = $2 where conversation_id = $1")
+        .bind(conversation_id)
+        .bind(holds)
+        .execute(&mut *tx)
+        .await?;
+    events::append(
+        &mut tx,
+        state_event(
+            conversation_id,
+            started.execution_id,
+            generation,
+            ExecutionState::Created,
+            None,
+            correlation_id,
+        ),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(started)
+}
+
+#[derive(sqlx::FromRow)]
+struct LockedQueue {
+    conversation_id: Uuid,
+    pause_reasons: Json<Vec<PauseReason>>,
+    hold_reasons: Json<Vec<HoldReason>>,
+    run_slot: String,
+    run_slot_input_id: Option<Uuid>,
+    run_slot_attempt: Option<i32>,
+}
+
+pub async fn set_state(
+    pool: &PgPool,
+    execution_id: Uuid,
+    to: ExecutionState,
+    outcome: Option<&str>,
+    correlation_id: Uuid,
+) -> Result<(), ExecutionError> {
+    let mut tx = pool.begin().await?;
+    let mut queue: LockedQueue = sqlx::query_as(
+        "select q.conversation_id, q.pause_reasons, q.hold_reasons, q.run_slot,
+                q.run_slot_input_id, q.run_slot_attempt
+         from queue_state q join executions e on e.conversation_id = q.conversation_id
+         where e.id = $1 for update of q",
+    )
+    .bind(execution_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let (state, generation): (String, i64) =
+        sqlx::query_as("select state, generation from executions where id = $1")
+            .bind(execution_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    let from = state
+        .parse()
+        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    if !legal_transition(from, to, outcome) {
+        return Err(ExecutionError::InvalidTransition { from, to });
+    }
+    let mut slot = RunSlot::from_columns(
+        &queue.run_slot,
+        queue.run_slot_input_id,
+        queue.run_slot_attempt,
+    )
+    .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
+    match to {
+        ExecutionState::Running => queue.hold_reasons.0.retain(|reason| {
+            !matches!(
+                reason,
+                HoldReason::ExecutionStarting | HoldReason::NoLiveExecution
+            )
+        }),
+        ExecutionState::Stopped | ExecutionState::Failed => {
+            if outcome != Some("user_stop") {
+                add_once(
+                    &mut queue.pause_reasons.0,
+                    if to == ExecutionState::Stopped {
+                        PauseReason::ProcessExited
+                    } else {
+                        PauseReason::FatalError
+                    },
+                );
+            }
+            queue
+                .hold_reasons
+                .0
+                .retain(|reason| *reason != HoldReason::ExecutionStarting);
+            add_once(&mut queue.hold_reasons.0, HoldReason::NoLiveExecution);
+            if matches!(slot, RunSlot::Running { .. }) {
+                slot = RunSlot::Free;
+                queue
+                    .hold_reasons
+                    .0
+                    .retain(|reason| *reason != HoldReason::RunInProgress);
+            }
+        }
+        ExecutionState::OwnerLost => add_once(&mut queue.pause_reasons.0, PauseReason::OwnerLost),
+        _ => {}
+    }
+    sqlx::query("update executions set state = $2, outcome = $3, updated_at = now() where id = $1")
+        .bind(execution_id)
+        .bind(to.as_str())
+        .bind(outcome)
+        .execute(&mut *tx)
+        .await?;
+    let (slot, input_id, attempt) = slot.to_columns();
+    sqlx::query(
+        "update queue_state set pause_reasons = $2, hold_reasons = $3, run_slot = $4,
+                                run_slot_input_id = $5, run_slot_attempt = $6
+         where conversation_id = $1",
+    )
+    .bind(queue.conversation_id)
+    .bind(queue.pause_reasons)
+    .bind(queue.hold_reasons)
+    .bind(slot)
+    .bind(input_id)
+    .bind(attempt)
+    .execute(&mut *tx)
+    .await?;
+    events::append(
+        &mut tx,
+        state_event(
+            queue.conversation_id,
+            execution_id,
+            generation,
+            to,
+            outcome,
+            correlation_id,
+        ),
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn live(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<Option<(Uuid, i64, ExecutionState)>, sqlx::Error> {
+    let row: Option<(Uuid, i64, String)> = sqlx::query_as(
+        "select id, generation, state from executions
+         where conversation_id = $1 and state not in ('stopped', 'failed')",
+    )
+    .bind(conversation_id)
+    .fetch_optional(conn)
+    .await?;
+    row.map(|(id, generation, state)| {
+        state
+            .parse()
+            .map(|state| (id, generation, state))
+            .map_err(|error| sqlx::Error::Decode(Box::new(error)))
+    })
+    .transpose()
+}
+
+fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&str>) -> bool {
+    use ExecutionState::*;
+    matches!(
+        (from, to, outcome),
+        (Created, Created | Starting, None)
+            | (Created, Stopped, Some("start_cancelled"))
+            | (Created, Failed, Some("start_rejected"))
+            | (Starting, Running | Stopping | OwnerLost, None)
+            | (Running, Stopping | OwnerLost, None)
+            | (Stopping, OwnerLost, None)
+            | (
+                Starting | Running | Stopping | OwnerLost,
+                Stopped,
+                Some("machine_rebooted")
+            )
+            | (
+                Stopping,
+                Stopped,
+                Some("user_stop" | "normal_exit" | "start_cancelled" | "force_stopped")
+            )
+            | (
+                Stopping,
+                Failed,
+                Some(
+                    "start_rejected"
+                        | "start_failed"
+                        | "cli_incompatible"
+                        | "auth_required"
+                        | "crashed"
+                        | "protocol_incompatible"
+                        | "storage_failure"
+                        | "supervisor_died"
+                        | "admin_resolved"
+                )
+            )
+            | (
+                OwnerLost,
+                Failed,
+                Some("supervisor_died" | "admin_resolved")
+            )
+    )
+}
+
+fn add_once<T: PartialEq>(reasons: &mut Vec<T>, reason: T) {
+    if !reasons.contains(&reason) {
+        reasons.push(reason);
+    }
+}
+
+fn state_event(
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    generation: i64,
+    state: ExecutionState,
+    outcome: Option<&str>,
+    correlation_id: Uuid,
+) -> NewEvent {
+    NewEvent {
+        scope: Scope::Conversation {
+            id: conversation_id,
+        },
+        kind: "execution_state_changed",
+        conversation_id: Some(conversation_id),
+        execution_id: Some(execution_id),
+        payload: json!({"state": state, "generation": generation, "outcome": outcome}),
+        correlation_id,
+    }
+}
