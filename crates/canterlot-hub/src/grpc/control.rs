@@ -12,6 +12,8 @@ enum Next {
     Ack(Option<Result<JournalRangeAck, Status>>),
     Inbound(Result<Option<ControlUp>, Status>),
     Command(Option<ControlDown>),
+    #[cfg(feature = "fault-injection")]
+    Fault(tonic::Code),
 }
 
 #[tonic::async_trait]
@@ -42,6 +44,8 @@ impl WorkerControl for HubGrpc {
                 Err(Status::invalid_argument("first control message must be hello"))?;
                 return;
             };
+            #[cfg(feature = "fault-injection")]
+            state.faults.hello(hello.clone());
             let connection_id = match state.validate_hello(&hello, machine_id, StreamKind::Control) {
                 Ok(id) => id,
                 Err(rejected) => {
@@ -59,6 +63,8 @@ impl WorkerControl for HubGrpc {
                 yield checked(ControlDown { msg: Some(control_down::Msg::HelloReply(reply)) })?;
                 return;
             };
+            #[cfg(feature = "fault-injection")]
+            let mut failures = state.faults.failures();
             yield reply;
             let cj_journal = Uuid::parse_str(&hello.cj_journal_id).ok();
             let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Cj);
@@ -67,6 +73,12 @@ impl WorkerControl for HubGrpc {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
+                    fault = async {
+                        #[cfg(feature = "fault-injection")]
+                        return Next::Fault(failures.recv().await.expect("fault channel"));
+                        #[cfg(not(feature = "fault-injection"))]
+                        std::future::pending::<Next>().await
+                    } => fault,
                     ack = lane.next_ack() => Next::Ack(ack),
                     next = inbound.message() => Next::Inbound(next),
                     command = commands.recv() => Next::Command(command),
@@ -74,7 +86,10 @@ impl WorkerControl for HubGrpc {
                 match next {
                     Next::Ack(ack) => {
                         let Some(ack) = ack else { break; };
-                        yield checked(ControlDown { msg: Some(control_down::Msg::CjAck(ack?)) })?;
+                        let ack = ack?;
+                        #[cfg(feature = "fault-injection")]
+                        if state.faults.ack(&state.pool, machine_id, &ack).await { continue; }
+                        yield checked(ControlDown { msg: Some(control_down::Msg::CjAck(ack)) })?;
                     }
                     Next::Inbound(next) => {
                         let Some(message) = next? else { break; };
@@ -95,8 +110,22 @@ impl WorkerControl for HubGrpc {
                     Next::Command(command) => {
                         let Some(command) = command else { break; };
                         if command.msg.is_none() { break; }
+                        #[cfg(feature = "fault-injection")]
+                        {
+                            tokio::select! {
+                                biased;
+                                _ = state.shutdown.cancelled() => break,
+                                _ = lease.cancel.cancelled() => break,
+                                _ = state.faults.pause(crate::fault_injection::Point::BeforeCommandSend) => {},
+                            }
+                            if let Some(control_down::Msg::Command(value)) = &command.msg {
+                                state.faults.command(value.clone());
+                            }
+                        }
                         yield checked(command)?;
                     }
+                    #[cfg(feature = "fault-injection")]
+                    Next::Fault(code) => Err(Status::new(code, "injected transport failure"))?,
                 }
             }
         };

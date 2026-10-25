@@ -4,6 +4,8 @@ use uuid::Uuid;
 use crate::model::HoldReason;
 
 pub struct TestHub {
+    #[cfg(feature = "fault-injection")]
+    pub faults: crate::fault_injection::Faults,
     pub addr: std::net::SocketAddr,
     pub pki: tls::TestPki,
     pub installation: crate::installation::Installation,
@@ -14,6 +16,42 @@ pub struct TestHub {
 }
 
 pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> TestHub {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    spawn_on(
+        pool,
+        timers,
+        listener,
+        tls::test_pki(),
+        #[cfg(feature = "fault-injection")]
+        Default::default(),
+    )
+    .await
+}
+
+#[cfg(feature = "fault-injection")]
+pub async fn spawn_test_hub_with_faults(
+    pool: PgPool,
+    timers: crate::config::HubTimers,
+    addr: Option<std::net::SocketAddr>,
+    pki: tls::TestPki,
+    faults: crate::fault_injection::Faults,
+) -> TestHub {
+    let listener =
+        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test listener");
+    spawn_on(pool, timers, listener, pki, faults).await
+}
+
+async fn spawn_on(
+    pool: PgPool,
+    timers: crate::config::HubTimers,
+    listener: tokio::net::TcpListener,
+    pki: tls::TestPki,
+    #[cfg(feature = "fault-injection")] faults: crate::fault_injection::Faults,
+) -> TestHub {
     use crate::{dispatcher, grpc, ingest, installation, outbox, session::Registry};
     let directory = tempfile::tempdir().expect("test installation directory");
     let manifest = directory.path().join("manifest");
@@ -39,14 +77,17 @@ pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> T
     let (dispatcher, rx) = dispatcher::Dispatcher::channel();
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
-    state.ingest =
-        std::sync::Arc::new(ingest::Ingest::new(pool.clone()).with_dispatcher(dispatcher.clone()));
-    let pki = tls::test_pki();
+    let ingest = ingest::Ingest::new(pool.clone()).with_dispatcher(dispatcher.clone());
+    #[cfg(feature = "fault-injection")]
+    let ingest = {
+        state.faults = faults.clone();
+        let mut ingest = ingest;
+        ingest.faults = faults.clone();
+        ingest
+    };
+    state.ingest = std::sync::Arc::new(ingest);
     let cert = pki.server_cert_pem.clone();
     let key = pki.server_key_pem.clone();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener");
     let addr = listener.local_addr().expect("test address");
     let (shutdown, stop) = tokio::sync::oneshot::channel();
     let (stopping, stopped) = tokio::sync::watch::channel(false);
@@ -70,6 +111,8 @@ pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> T
         result
     });
     TestHub {
+        #[cfg(feature = "fault-injection")]
+        faults,
         addr,
         pki,
         installation,
@@ -83,6 +126,7 @@ pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> T
 pub mod tls {
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 
+    #[derive(Clone)]
     pub struct TestPki {
         pub ca_pem: String,
         pub server_cert_pem: String,

@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+fault-injection = ["canterlot-hub/fault-injection"]
+
 [dependencies]
 canterlot-journal = { version = "0.1.0", path = "../canterlot-journal" }
 canterlot-proto = { version = "0.1.0", path = "../canterlot-proto" }

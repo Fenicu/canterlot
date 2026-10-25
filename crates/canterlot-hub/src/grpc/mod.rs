@@ -48,6 +48,8 @@ pub struct HubGrpc {
     pub installation: Installation,
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
+    #[cfg(feature = "fault-injection")]
+    pub faults: crate::fault_injection::Faults,
     shutdown: CancellationToken,
 }
 
@@ -153,6 +155,8 @@ impl HubGrpc {
             installation,
             timers,
             ingest,
+            #[cfg(feature = "fault-injection")]
+            faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
     }
@@ -208,7 +212,7 @@ impl HubGrpc {
     async fn accepted(&self, machine_id: Uuid) -> Result<HelloReply, Status> {
         let cursors: Vec<(Uuid, i64)> = sqlx::query_as("select journal_id, committed_seq from journal_cursors where machine_id = $1 order by journal_id")
             .bind(machine_id).fetch_all(&self.pool).await.map_err(|_| Status::internal("journal cursors unavailable"))?;
-        let committed = cursors
+        let committed: Vec<_> = cursors
             .into_iter()
             .map(|(journal_id, seq)| {
                 Ok(JournalCommitted {
@@ -218,6 +222,8 @@ impl HubGrpc {
                 })
             })
             .collect::<Result<Vec<_>, Status>>()?;
+        #[cfg(feature = "fault-injection")]
+        self.faults.accepted(&committed);
         Ok(HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
                 restore_generation: self.installation.restore_generation.to_string(),

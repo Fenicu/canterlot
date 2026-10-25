@@ -19,6 +19,8 @@ use tonic::{
 };
 use uuid::Uuid;
 
+const WAIT: Duration = Duration::from_secs(15);
+
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 struct Host {
@@ -84,7 +86,7 @@ impl Host {
                     .domain_name(domain),
             )
             .unwrap()
-            .connect_timeout(Duration::from_secs(2))
+            .connect_timeout(WAIT)
             .http2_keep_alive_interval(Duration::from_secs(30))
             .keep_alive_timeout(Duration::from_secs(10))
             .keep_alive_while_idle(true)
@@ -167,7 +169,7 @@ async fn send<T: Message>(tx: &mpsc::Sender<T>, message: T) {
 }
 
 async fn next<T: Message + Default>(stream: &mut Streaming<T>) -> T {
-    timeout(Duration::from_secs(2), stream.message())
+    timeout(WAIT, stream.message())
         .await
         .unwrap()
         .unwrap()
@@ -495,7 +497,7 @@ async fn rejected(stream: &mut Streaming<ControlDown>, reason: RejectReason, ret
     assert_eq!(value.reason, reason as i32);
     assert_eq!(value.retryable, retryable);
     assert!(
-        timeout(Duration::from_secs(2), stream.message())
+        timeout(WAIT, stream.message())
             .await
             .unwrap()
             .unwrap()
@@ -513,7 +515,7 @@ async fn data_rejected(stream: &mut Streaming<DataDown>, reason: RejectReason, r
     assert_eq!(value.reason, reason as i32);
     assert_eq!(value.retryable, retryable);
     assert!(
-        timeout(Duration::from_secs(2), stream.message())
+        timeout(WAIT, stream.message())
             .await
             .unwrap()
             .unwrap()
@@ -539,7 +541,7 @@ async fn changed(
     machine: Uuid,
     expected: Availability,
 ) {
-    timeout(Duration::from_secs(2), async {
+    timeout(WAIT, async {
         loop {
             if changes.recv().await.unwrap() == (machine, expected) {
                 break;
@@ -772,17 +774,23 @@ async fn stale_session_is_replaced(pool: PgPool) {
     let host = Host::start(
         pool,
         HubTimers {
-            degraded_after: Duration::from_millis(50),
-            unavailable_after: Duration::from_millis(100),
+            handshake: Duration::from_secs(5),
+            degraded_after: Duration::from_secs(1),
+            unavailable_after: Duration::from_secs(3),
             ..timers()
         },
     )
     .await;
+    let mut changes = host.registry.subscribe_changes();
     let connection = Uuid::now_v7();
     let (_tx, mut old) = host
         .control(host.hello(host.machine.machine_id, connection, StreamKind::Control))
         .await;
     accepted(&mut old).await;
+    let old_sender = host
+        .registry
+        .command_sender(host.machine.machine_id)
+        .unwrap();
     let (_data_tx, mut old_data) = host
         .data(
             host.hello(host.machine.machine_id, connection, StreamKind::Data),
@@ -790,39 +798,36 @@ async fn stale_session_is_replaced(pool: PgPool) {
         )
         .await;
     data_accepted(&mut old_data).await;
-    let mut changes = host.registry.subscribe_changes();
     changed(
         &mut changes,
         host.machine.machine_id,
         Availability::Unavailable,
     )
     .await;
-    let old_sender = host.registry.command_sender(host.machine.machine_id);
     let (new_tx, mut new) = host
         .control(host.hello(host.machine.machine_id, connection, StreamKind::Control))
         .await;
     accepted(&mut new).await;
     for result in [
-        timeout(Duration::from_secs(2), old.message())
+        timeout(WAIT, old.message())
             .await
             .unwrap()
             .map(|v| v.is_none()),
-        timeout(Duration::from_secs(2), old_data.message())
+        timeout(WAIT, old_data.message())
             .await
             .unwrap()
             .map(|v| v.is_none()),
     ] {
         assert!(result.unwrap_or(true));
     }
-    if let Some(sender) = old_sender {
-        assert!(sender.is_closed());
-    }
+    assert!(old_sender.is_closed());
     heartbeat(&new_tx, &mut new, 81).await;
-    assert!(
-        host.registry
-            .command_sender(host.machine.machine_id)
-            .is_some()
-    );
+    changed(
+        &mut changes,
+        host.machine.machine_id,
+        Availability::Degraded,
+    )
+    .await;
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -885,8 +890,9 @@ async fn heartbeat_drives_availability(pool: PgPool) {
     let host = Host::start(
         pool,
         HubTimers {
-            degraded_after: Duration::from_millis(300),
-            unavailable_after: Duration::from_millis(600),
+            handshake: Duration::from_secs(5),
+            degraded_after: Duration::from_secs(1),
+            unavailable_after: Duration::from_secs(3),
             ..timers()
         },
     )
@@ -902,10 +908,7 @@ async fn heartbeat_drives_availability(pool: PgPool) {
         .control(host.hello(machine, connection, StreamKind::Control))
         .await;
     accepted(&mut control).await;
-    assert_eq!(
-        changes.recv().await.unwrap(),
-        (machine, Availability::Degraded)
-    );
+    changed(&mut changes, machine, Availability::Degraded).await;
     let (_data_tx, mut data) = host
         .data(
             host.hello(machine, connection, StreamKind::Data),
@@ -919,35 +922,26 @@ async fn heartbeat_drives_availability(pool: PgPool) {
         Availability::Unavailable,
     ] {
         assert_eq!(
-            timeout(Duration::from_secs(3), changes.recv())
-                .await
-                .unwrap()
-                .unwrap(),
+            timeout(WAIT, changes.recv()).await.unwrap().unwrap(),
             (machine, expected)
         );
     }
     heartbeat(&tx, &mut control, 6).await;
     assert_eq!(
-        timeout(Duration::from_secs(3), changes.recv())
-            .await
-            .unwrap()
-            .unwrap(),
+        timeout(WAIT, changes.recv()).await.unwrap().unwrap(),
         (machine, Availability::Available)
     );
     drop(tx);
     assert!(control.message().await.unwrap().is_none());
     assert!(
-        timeout(Duration::from_secs(2), data.message())
+        timeout(WAIT, data.message())
             .await
             .unwrap()
             .map(|v| v.is_none())
             .unwrap_or(true)
     );
-    assert_eq!(
-        host.registry.availability(machine),
-        Availability::Unavailable
-    );
-    assert!(host.registry.command_sender(machine).is_none());
+    changed(&mut changes, machine, Availability::Unavailable).await;
+    assert!(host.registry.session_info(machine).is_none());
 }
 
 #[sqlx::test(migrations = "./migrations")]

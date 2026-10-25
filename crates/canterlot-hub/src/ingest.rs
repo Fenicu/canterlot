@@ -80,6 +80,8 @@ pub struct Ingest {
     pool: PgPool,
     dispatcher: Option<crate::dispatcher::Dispatcher>,
     ignored: Arc<AtomicU64>,
+    #[cfg(feature = "fault-injection")]
+    pub faults: crate::fault_injection::Faults,
 }
 
 impl Ingest {
@@ -88,6 +90,8 @@ impl Ingest {
             pool,
             dispatcher: None,
             ignored: Arc::new(AtomicU64::new(0)),
+            #[cfg(feature = "fault-injection")]
+            faults: Default::default(),
         }
     }
 
@@ -535,6 +539,13 @@ impl crate::grpc::Ingest for Ingest {
         machine_id: Uuid,
         records: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
+        #[cfg(feature = "fault-injection")]
+        {
+            self.faults.batch(records.clone());
+            self.faults
+                .pause(crate::fault_injection::Point::BeforeCjCommit)
+                .await;
+        }
         self.range_ack(machine_id, JournalKind::Cj, records).await
     }
 

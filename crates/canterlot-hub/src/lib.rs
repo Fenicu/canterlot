@@ -4,6 +4,8 @@ pub mod delivery;
 pub mod dispatcher;
 pub mod events;
 pub mod executions;
+#[cfg(feature = "fault-injection")]
+pub mod fault_injection;
 pub mod grpc;
 pub mod idempotency;
 pub mod ingest;

@@ -67,6 +67,8 @@ struct HubState {
 }
 
 pub struct WorkerStore {
+    #[cfg(feature = "fault-injection")]
+    probe: Option<crate::fault_injection::StoreProbe>,
     poisoned: bool,
     #[cfg(test)]
     fail_after: Option<tests::AppendPoint>,
@@ -81,6 +83,37 @@ pub struct WorkerStore {
 }
 
 impl WorkerStore {
+    #[cfg(feature = "fault-injection")]
+    pub fn with_probe(mut self, probe: crate::fault_injection::StoreProbe) -> Self {
+        self.probe = Some(probe);
+        self.record_snapshot().expect("initial store snapshot");
+        self
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn fault_snapshot(&self) -> Result<crate::fault_injection::StoreSnapshot, StoreError> {
+        Ok(crate::fault_injection::StoreSnapshot {
+            at: std::time::Instant::now(),
+            cursor: self.cj_cursor()?,
+            inbox: self
+                .inbox
+                .read_from(self.inbox.first_seq(), usize::MAX)?
+                .into_iter()
+                .map(|record| Command::decode(record.payload.as_slice()).map_err(StoreError::from))
+                .collect::<Result<_, _>>()?,
+            cj: self.cj_records_from(self.cj.first_seq(), usize::MAX)?,
+            receipt_count: self.receipts.last_seq(),
+        })
+    }
+
+    #[cfg(feature = "fault-injection")]
+    fn record_snapshot(&self) -> Result<(), StoreError> {
+        if let Some(probe) = &self.probe {
+            probe.record(self.fault_snapshot()?);
+        }
+        Ok(())
+    }
+
     pub fn open(data_dir: &Path) -> Result<WorkerStore, StoreError> {
         fs::create_dir_all(data_dir)?;
         let cj = open_journal(&data_dir.join("cj"))?;
@@ -100,6 +133,8 @@ impl WorkerStore {
             Err(error) => return Err(error.into()),
         };
         let mut store = Self {
+            #[cfg(feature = "fault-injection")]
+            probe: None,
             poisoned: false,
             #[cfg(test)]
             fail_after: None,
@@ -207,6 +242,13 @@ impl WorkerStore {
         self.ensure_open()?;
         let command_id = receipt_id(&cmd.command_id);
         if self.index.contains_key(&command_id) {
+            #[cfg(feature = "fault-injection")]
+            {
+                if let Some(probe) = &self.probe {
+                    probe.duplicate();
+                }
+                self.record_snapshot()?;
+            }
             return Ok(Accept::Duplicate);
         }
         let reason = if Uuid::parse_str(&cmd.command_id).is_err() {
@@ -223,6 +265,10 @@ impl WorkerStore {
         };
         if result.is_err() {
             self.poisoned = true;
+        }
+        #[cfg(feature = "fault-injection")]
+        if result.is_ok() {
+            self.record_snapshot()?;
         }
         result
     }
@@ -345,6 +391,10 @@ impl WorkerStore {
         })();
         if result.is_err() {
             self.poisoned = true;
+        }
+        #[cfg(feature = "fault-injection")]
+        if result.is_ok() {
+            self.record_snapshot()?;
         }
         result
     }

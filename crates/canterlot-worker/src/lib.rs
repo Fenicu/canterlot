@@ -1,6 +1,8 @@
 #![forbid(unsafe_code)]
 
 pub mod config;
+#[cfg(feature = "fault-injection")]
+pub mod fault_injection;
 pub mod session;
 pub mod store;
 
