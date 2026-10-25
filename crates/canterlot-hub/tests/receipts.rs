@@ -5,7 +5,7 @@ use canterlot_hub::{
         submit::{ContentBlock, SubmitInput, SubmittedInput, submit_input},
     },
     executions,
-    model::{ExecutionState, InputState, PauseReason, RunSlot},
+    model::{ExecutionState, HoldReason, InputState, PauseReason, RunSlot},
     testkit::{self, Seed},
 };
 use chrono::Utc;
@@ -219,7 +219,8 @@ async fn withdrawn_returns_to_same_place(pool: PgPool) -> TestResult {
             reason: "generation_closed".into(),
         },
     ] {
-        let (seed, _, head) = setup(&pool).await;
+        let deferred = matches!(receipt, InputReceipt::DispatchDeferred { .. });
+        let (seed, execution, head) = setup(&pool).await;
         let next = input(&pool, &seed).await;
         apply(&pool, head.command_id, 1, InputReceipt::Stored).await;
         assert_eq!(
@@ -234,6 +235,34 @@ async fn withdrawn_returns_to_same_place(pool: PgPool) -> TestResult {
         assert_eq!(state["command"]["delivery_state"], "held");
         assert_eq!(state["command"]["dispatch_attempt"], 1);
         assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+        if deferred {
+            for (state, outcome) in [
+                (ExecutionState::Stopping, None),
+                (ExecutionState::Stopped, Some("user_stop")),
+            ] {
+                executions::set_state(
+                    &pool,
+                    execution.execution_id,
+                    state,
+                    outcome,
+                    Uuid::now_v7(),
+                )
+                .await?;
+            }
+            let next_execution =
+                executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+                    .await?;
+            for state in [ExecutionState::Starting, ExecutionState::Running] {
+                executions::set_state(
+                    &pool,
+                    next_execution.execution_id,
+                    state,
+                    None,
+                    Uuid::now_v7(),
+                )
+                .await?;
+            }
+        }
         assert!(matches!(dispatch(&pool, seed.conversation_id).await,
             DispatchOutcome::Dispatched { input_id, command_id, attempt: 2, .. } if input_id == head.input_id && command_id == head.command_id));
         let next_state: String = sqlx::query_scalar("select state from inputs where id = $1")
@@ -340,14 +369,26 @@ async fn receipt_mapping_and_events(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn cancel_lost_only_clears_request(pool: PgPool) -> TestResult {
+async fn cancel_lost_is_rank_neutral_and_allows_acceptance(pool: PgPool) -> TestResult {
     let (seed, _, head) = setup(&pool).await;
     apply(&pool, head.command_id, 1, InputReceipt::TransmissionStarted).await;
     sqlx::query("update inputs set cancel_requested = true where id = $1")
         .bind(head.input_id)
         .execute(&pool)
         .await?;
+    sqlx::query("update commands set result = $2 where id = $1")
+        .bind(head.command_id)
+        .bind(json!({"reason": "preserve_result"}))
+        .execute(&pool)
+        .await?;
     let before = snapshot(&pool, &head).await;
+    for attempt in [0, 2] {
+        assert_eq!(
+            apply(&pool, head.command_id, attempt, InputReceipt::CancelLost).await,
+            ApplyOutcome::Ignored(Ignored::StaleAttempt)
+        );
+        assert_eq!(snapshot(&pool, &head).await, before);
+    }
     assert_eq!(
         apply(&pool, head.command_id, 1, InputReceipt::CancelLost).await,
         ApplyOutcome::Applied {
@@ -356,11 +397,15 @@ async fn cancel_lost_only_clears_request(pool: PgPool) -> TestResult {
     );
     let after = snapshot(&pool, &head).await;
     assert_eq!(after["input"]["cancel_requested"], false);
+    let mut expected_input = before["input"].clone();
+    expected_input["cancel_requested"] = json!(false);
+    assert_eq!(after["input"], expected_input);
+    assert_eq!(after["command"], before["command"]);
+    assert_eq!(after["queue"], before["queue"]);
     assert_eq!(
-        after["command"]["delivery_state"],
-        before["command"]["delivery_state"]
+        after["events"].as_i64(),
+        before["events"].as_i64().map(|n| n + 1)
     );
-    assert_eq!(after["command"]["last_status_rank"], 3);
     assert_eq!(
         slot(&pool, seed.conversation_id).await,
         RunSlot::Dispatching {
@@ -369,10 +414,229 @@ async fn cancel_lost_only_clears_request(pool: PgPool) -> TestResult {
         }
     );
     assert_eq!(
-        apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+        apply(&pool, head.command_id, 1, InputReceipt::CancelLost).await,
         ApplyOutcome::Ignored(Ignored::NotMonotonic)
     );
     assert_eq!(snapshot(&pool, &head).await, after);
+    assert_eq!(
+        apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
+    );
+    let accepted = snapshot(&pool, &head).await;
+    assert_eq!(accepted["input"]["state"], "accepted");
+    assert!(!accepted["input"]["agent_confirmed_at"].is_null());
+    assert_eq!(accepted["command"]["delivery_state"], "completed");
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running {
+            input_id: head.input_id
+        }
+    );
+    sqlx::query("update inputs set cancel_requested = true where id = $1")
+        .bind(head.input_id)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        apply(&pool, head.command_id, 1, InputReceipt::CancelLost).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
+    );
+    let after = snapshot(&pool, &head).await;
+    assert_eq!(after["input"], accepted["input"]);
+    assert_eq!(after["command"], accepted["command"]);
+    assert_eq!(after["queue"], accepted["queue"]);
+    assert_eq!(
+        apply(&pool, head.command_id, 1, InputReceipt::CancelLost).await,
+        ApplyOutcome::Ignored(Ignored::NotMonotonic)
+    );
+    assert_eq!(snapshot(&pool, &head).await, after);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn acceptance_and_terminal_execution_free_slot_in_either_order(pool: PgPool) -> TestResult {
+    for terminal in [ExecutionState::Stopped, ExecutionState::Failed] {
+        for accepted_first in [true, false] {
+            let (seed, execution, head) = setup(&pool).await;
+            apply(&pool, head.command_id, 1, InputReceipt::TransmissionStarted).await;
+            if accepted_first {
+                assert_eq!(
+                    apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+                    ApplyOutcome::Applied {
+                        input_state: InputState::Accepted
+                    }
+                );
+                assert_eq!(
+                    slot(&pool, seed.conversation_id).await,
+                    RunSlot::Running {
+                        input_id: head.input_id
+                    }
+                );
+            }
+            executions::set_state(
+                &pool,
+                execution.execution_id,
+                ExecutionState::Stopping,
+                None,
+                Uuid::now_v7(),
+            )
+            .await?;
+            executions::set_state(
+                &pool,
+                execution.execution_id,
+                terminal,
+                Some(if terminal == ExecutionState::Stopped {
+                    "user_stop"
+                } else {
+                    "crashed"
+                }),
+                Uuid::now_v7(),
+            )
+            .await?;
+            if !accepted_first {
+                assert_eq!(
+                    slot(&pool, seed.conversation_id).await,
+                    RunSlot::Dispatching {
+                        input_id: head.input_id,
+                        attempt: 1
+                    }
+                );
+                assert_eq!(
+                    apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+                    ApplyOutcome::Applied {
+                        input_state: InputState::Accepted
+                    }
+                );
+            }
+            let after = snapshot(&pool, &head).await;
+            assert_eq!(after["input"]["state"], "accepted");
+            assert!(!after["input"]["agent_confirmed_at"].is_null());
+            assert_eq!(after["command"]["delivery_state"], "completed");
+            assert!(!after["command"]["completed_at"].is_null());
+            assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+            assert_eq!(
+                apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+                ApplyOutcome::Ignored(Ignored::NotMonotonic)
+            );
+            assert_eq!(snapshot(&pool, &head).await, after);
+        }
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn terminal_execution_acceptance_preserves_unrelated_slots(pool: PgPool) -> TestResult {
+    for next_state in ["free", "dispatching", "running"] {
+        let (seed, execution, head) = setup(&pool).await;
+        executions::set_state(
+            &pool,
+            execution.execution_id,
+            ExecutionState::Stopped,
+            Some("machine_rebooted"),
+            Uuid::now_v7(),
+        )
+        .await?;
+        sqlx::query("update queue_state set pause_reasons = '[]', run_slot = 'free', run_slot_input_id = null, run_slot_attempt = null where conversation_id = $1")
+            .bind(seed.conversation_id).execute(&pool).await?;
+        let next_execution =
+            executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
+        for state in [ExecutionState::Starting, ExecutionState::Running] {
+            executions::set_state(
+                &pool,
+                next_execution.execution_id,
+                state,
+                None,
+                Uuid::now_v7(),
+            )
+            .await?;
+        }
+        let next = input(&pool, &seed).await;
+        if next_state != "free" {
+            assert!(matches!(
+                dispatch(&pool, seed.conversation_id).await,
+                DispatchOutcome::Dispatched { input_id, .. } if input_id == next.input_id
+            ));
+        }
+        if next_state == "running" {
+            apply(&pool, next.command_id, 1, InputReceipt::Accepted).await;
+        }
+        let before = snapshot(&pool, &next).await;
+        assert_eq!(before["queue"]["run_slot"], next_state);
+        assert_eq!(
+            apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
+            ApplyOutcome::Applied {
+                input_state: InputState::Accepted
+            }
+        );
+        let after = snapshot(&pool, &next).await;
+        assert_eq!(after["queue"], before["queue"]);
+        assert_eq!(after["input"], before["input"]);
+        assert_eq!(after["command"], before["command"]);
+        let head_state = snapshot(&pool, &head).await;
+        assert_eq!(head_state["input"]["state"], "accepted");
+        assert!(!head_state["input"]["agent_confirmed_at"].is_null());
+        assert_eq!(head_state["command"]["delivery_state"], "completed");
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dispatch_deferred_adds_hold_once_and_is_atomic_with_event(pool: PgPool) -> TestResult {
+    for already_held in [false, true] {
+        let (seed, _, head) = setup(&pool).await;
+        let mut holds = vec![HoldReason::ContextMaintenance, HoldReason::RunInProgress];
+        if already_held {
+            holds.push(HoldReason::NoLiveExecution);
+        }
+        sqlx::query("update queue_state set hold_reasons = $2, pause_reasons = $3 where conversation_id = $1")
+            .bind(seed.conversation_id).bind(Json(holds)).bind(Json(vec![PauseReason::UserStop]))
+            .execute(&pool).await?;
+        let before = snapshot(&pool, &head).await;
+        let receipt = InputReceipt::DispatchDeferred {
+            reason: "arbitrary_reason".into(),
+        };
+        sqlx::query("alter table events add constraint reject_deferred_events check (kind <> 'input_state_changed') not valid")
+            .execute(&pool).await?;
+        assert!(
+            apply_input_receipt(&pool, head.command_id, 1, receipt.clone(), Uuid::now_v7())
+                .await
+                .is_err()
+        );
+        assert_eq!(snapshot(&pool, &head).await, before);
+        sqlx::query("alter table events drop constraint reject_deferred_events")
+            .execute(&pool)
+            .await?;
+        assert_eq!(
+            apply(&pool, head.command_id, 1, receipt.clone()).await,
+            ApplyOutcome::Applied {
+                input_state: InputState::Queued
+            }
+        );
+        let after = snapshot(&pool, &head).await;
+        assert_eq!(
+            after["queue"]["hold_reasons"],
+            json!([HoldReason::ContextMaintenance, HoldReason::NoLiveExecution])
+        );
+        assert_eq!(
+            after["queue"]["pause_reasons"],
+            before["queue"]["pause_reasons"]
+        );
+        assert_eq!(after["input"]["input_seq"], head.input_seq);
+        assert_eq!(after["input"]["command_id"], head.command_id.to_string());
+        assert_eq!(
+            after["command"]["result"],
+            json!({"reason": "arbitrary_reason"})
+        );
+        assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+        assert_eq!(
+            apply(&pool, head.command_id, 1, receipt).await,
+            ApplyOutcome::Ignored(Ignored::NotMonotonic)
+        );
+        assert_eq!(snapshot(&pool, &head).await, after);
+    }
     Ok(())
 }
 

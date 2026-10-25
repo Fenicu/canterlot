@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::LockedQueue;
 use crate::{
     events::{self, NewEvent, Scope},
-    model::{InputState, PauseReason, RunSlot},
+    model::{HoldReason, InputState, PauseReason, RunSlot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,10 +74,12 @@ pub enum ApplyOutcome {
 struct ReceiptTarget {
     input_id: Uuid,
     state: String,
+    cancel_requested: bool,
     dispatch_attempt: i32,
     last_status_rank: i32,
     delivery_state: String,
     execution_id: Option<Uuid>,
+    execution_state: Option<String>,
 }
 
 pub async fn apply_input_receipt(
@@ -96,8 +98,10 @@ pub async fn apply_input_receipt(
     .fetch_optional(&mut *tx)
     .await?;
     let target: Option<ReceiptTarget> = sqlx::query_as(
-        "select i.id as input_id, i.state, c.dispatch_attempt, c.last_status_rank,
-                c.delivery_state, c.execution_id from commands c join inputs i on i.command_id = c.id
+        "select i.id as input_id, i.state, i.cancel_requested, c.dispatch_attempt, c.last_status_rank,
+                c.delivery_state, c.execution_id, e.state as execution_state
+         from commands c join inputs i on i.command_id = c.id
+         left join executions e on e.id = c.execution_id
          where c.id = $1 and c.kind = 'deliver_input'",
     ).bind(command_id).fetch_optional(&mut *tx).await?;
     let (Some(mut queue), Some(target)) = (queue, target) else {
@@ -112,6 +116,8 @@ pub async fn apply_input_receipt(
         state == InputState::AcceptanceUnconfirmed && receipt == InputReceipt::Accepted;
     let ignored = if attempt != target.dispatch_attempt {
         Some(Ignored::StaleAttempt)
+    } else if receipt == InputReceipt::CancelLost {
+        (!target.cancel_requested).then_some(Ignored::NotMonotonic)
     } else if receipt.rank() <= target.last_status_rank && !late_acceptance {
         Some(Ignored::NotMonotonic)
     } else if matches!(
@@ -155,9 +161,17 @@ pub async fn apply_input_receipt(
                             input_id: target.input_id,
                         }
                 });
-            } else {
-                slot = RunSlot::Running {
-                    input_id: target.input_id,
+            } else if matches!(slot, RunSlot::Dispatching { input_id, .. } if input_id == target.input_id)
+            {
+                slot = if matches!(
+                    target.execution_state.as_deref(),
+                    Some("stopped" | "failed")
+                ) {
+                    RunSlot::Free
+                } else {
+                    RunSlot::Running {
+                        input_id: target.input_id,
+                    }
                 };
             }
             InputState::Accepted
@@ -187,29 +201,49 @@ pub async fn apply_input_receipt(
         }
         InputReceipt::CancelLost => state,
         InputReceipt::Withdrawn | InputReceipt::DispatchDeferred { .. } => {
+            if matches!(receipt, InputReceipt::DispatchDeferred { .. })
+                && !queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution)
+            {
+                queue.hold_reasons.0.push(HoldReason::NoLiveExecution);
+            }
             slot = RunSlot::Free;
             delivery = "held";
             InputState::Queued
         }
     };
-    sqlx::query(
-        "update inputs set state = $2, reject_reason = coalesce($3, reject_reason),
-                agent_confirmed_at = case when $4 then coalesce(agent_confirmed_at, now()) else agent_confirmed_at end,
-                cancel_requested = case when $5 then false else cancel_requested end where id = $1",
-    )
-    .bind(target.input_id).bind(input_state.as_str()).bind(reject_reason)
-    .bind(receipt == InputReceipt::Accepted).bind(receipt == InputReceipt::CancelLost)
-    .execute(&mut *tx).await?;
-    sqlx::query(
-        "update commands set delivery_state = $2, last_status = $3, last_status_rank = $4, result = $5,
-                stored_at = case when $6 then coalesce(stored_at, now()) else stored_at end,
-                completed_at = case when $2 = 'completed' then coalesce(completed_at, now()) else completed_at end
-         where id = $1",
-    )
-    .bind(command_id).bind(delivery).bind(receipt.status()).bind(receipt.rank())
-    .bind(receipt.reason().map(|reason| json!({"reason": reason})))
-    .bind(receipt == InputReceipt::Stored).execute(&mut *tx).await?;
-    queue.save(&mut tx, &slot).await?;
+    if receipt == InputReceipt::CancelLost {
+        sqlx::query("update inputs set cancel_requested = false where id = $1")
+            .bind(target.input_id)
+            .execute(&mut *tx)
+            .await?;
+    } else {
+        sqlx::query(
+            "update inputs set state = $2, reject_reason = coalesce($3, reject_reason),
+                    agent_confirmed_at = case when $4 then coalesce(agent_confirmed_at, now()) else agent_confirmed_at end
+             where id = $1",
+        )
+        .bind(target.input_id)
+        .bind(input_state.as_str())
+        .bind(reject_reason)
+        .bind(receipt == InputReceipt::Accepted)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "update commands set delivery_state = $2, last_status = $3, last_status_rank = $4, result = $5,
+                    stored_at = case when $6 then coalesce(stored_at, now()) else stored_at end,
+                    completed_at = case when $2 = 'completed' then coalesce(completed_at, now()) else completed_at end
+             where id = $1",
+        )
+        .bind(command_id)
+        .bind(delivery)
+        .bind(receipt.status())
+        .bind(receipt.rank())
+        .bind(receipt.reason().map(|reason| json!({"reason": reason})))
+        .bind(receipt == InputReceipt::Stored)
+        .execute(&mut *tx)
+        .await?;
+        queue.save(&mut tx, &slot).await?;
+    }
     events::append(
         &mut tx,
         NewEvent {

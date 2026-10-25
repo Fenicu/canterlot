@@ -3,11 +3,11 @@ use std::{sync::Arc, time::Duration};
 use canterlot_hub::{
     delivery::{
         dispatch::{BlockReason, DispatchOutcome, GateInputs, dispatch_next},
-        receipts::{InputReceipt, apply_input_receipt, apply_run_finished},
+        receipts::{ApplyOutcome, InputReceipt, apply_input_receipt, apply_run_finished},
         submit::{ContentBlock, SubmitInput, SubmittedInput, submit_input},
     },
     executions,
-    model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+    model::{ExecutionState, HoldReason, InputState, PauseReason, RunSlot},
     testkit::{self, Seed},
 };
 use chrono::Utc;
@@ -172,6 +172,114 @@ async fn happy_path_dispatches_head_then_next_after_run_finished(pool: PgPool) -
     assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
     assert!(matches!(dispatch(&pool, seed.conversation_id).await,
         DispatchOutcome::Dispatched { input_id, attempt: 1, .. } if input_id == second.input_id));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dispatch_deferred_holds_until_new_execution_runs(pool: PgPool) -> TestResult {
+    for reason in ["generation_closed", "adapter_busy"] {
+        let seed = testkit::seed(&pool).await;
+        let old_execution = running(&pool, &seed).await;
+        let head = input(&pool, &seed).await;
+        let next = input(&pool, &seed).await;
+        assert!(matches!(
+            dispatch(&pool, seed.conversation_id).await,
+            DispatchOutcome::Dispatched { input_id, attempt: 1, .. } if input_id == head.input_id
+        ));
+        assert_eq!(
+            apply_input_receipt(
+                &pool,
+                head.command_id,
+                1,
+                InputReceipt::DispatchDeferred {
+                    reason: reason.into()
+                },
+                Uuid::now_v7(),
+            )
+            .await?,
+            ApplyOutcome::Applied {
+                input_state: InputState::Queued
+            }
+        );
+        assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+        let row: (String, i64, String, i32, Value) = sqlx::query_as(
+            "select i.state, i.input_seq, c.delivery_state, c.dispatch_attempt, c.result
+             from inputs i join commands c on c.id = i.command_id where i.id = $1",
+        )
+        .bind(head.input_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(
+            row,
+            (
+                "queued".into(),
+                head.input_seq,
+                "held".into(),
+                1,
+                json!({"reason": reason})
+            )
+        );
+        let old_state: String = sqlx::query_scalar("select state from executions where id = $1")
+            .bind(old_execution.execution_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(old_state, "running");
+        for _ in 0..2 {
+            assert_eq!(
+                dispatch(&pool, seed.conversation_id).await,
+                DispatchOutcome::Blocked(vec![BlockReason::Held(vec![
+                    HoldReason::NoLiveExecution
+                ])])
+            );
+        }
+        for (state, outcome) in [
+            (ExecutionState::Stopping, None),
+            (ExecutionState::Stopped, Some("user_stop")),
+        ] {
+            executions::set_state(
+                &pool,
+                old_execution.execution_id,
+                state,
+                outcome,
+                Uuid::now_v7(),
+            )
+            .await?;
+        }
+        let new_execution =
+            executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
+        for state in [ExecutionState::Starting, ExecutionState::Running] {
+            executions::set_state(
+                &pool,
+                new_execution.execution_id,
+                state,
+                None,
+                Uuid::now_v7(),
+            )
+            .await?;
+        }
+        assert_eq!(
+            dispatch(&pool, seed.conversation_id).await,
+            DispatchOutcome::Dispatched {
+                input_id: head.input_id,
+                command_id: head.command_id,
+                attempt: 2,
+                machine_id: seed.machine_id,
+                execution_id: new_execution.execution_id,
+                generation: new_execution.generation,
+            }
+        );
+        let holds: Json<Vec<HoldReason>> =
+            sqlx::query_scalar("select hold_reasons from queue_state where conversation_id = $1")
+                .bind(seed.conversation_id)
+                .fetch_one(&pool)
+                .await?;
+        assert!(!holds.0.contains(&HoldReason::NoLiveExecution));
+        let next_state: String = sqlx::query_scalar("select state from inputs where id = $1")
+            .bind(next.input_id)
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(next_state, "queued");
+    }
     Ok(())
 }
 
