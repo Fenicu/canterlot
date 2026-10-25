@@ -1,0 +1,19 @@
+[package]
+name = "canterlot-worker"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+canterlot-journal = { version = "0.1.0", path = "../canterlot-journal" }
+canterlot-proto = { version = "0.1.0", path = "../canterlot-proto" }
+prost = "0.14.4"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+toml = "1.1.8"
+url = "2.5.8"
+uuid = { version = "1.29.0", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tempfile = "3.27.0"
