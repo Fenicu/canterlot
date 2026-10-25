@@ -1,3 +1,4 @@
+pub mod control;
 pub mod dispatch;
 pub mod receipts;
 pub mod submit;
