@@ -13,19 +13,19 @@ service WorkerData {
 
 enum StreamKind {
   STREAM_KIND_UNSPECIFIED = 0;
-  CONTROL = 1;
-  DATA = 2;
+  STREAM_KIND_CONTROL = 1;
+  STREAM_KIND_DATA = 2;
 }
 
 enum RejectReason {
-  UNSPECIFIED = 0;
-  CREDENTIAL_REVOKED = 1;
-  INSTALLATION_MISMATCH = 2;
-  PROTOCOL_INCOMPATIBLE = 3;
-  UNKNOWN_REQUIRED_CAPABILITY = 4;
-  IDENTITY_IN_USE = 5;
-  CONNECTION_BINDING_MISMATCH = 6;
-  HUB_NOT_OPERATIONAL = 7;
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_CREDENTIAL_REVOKED = 1;
+  REJECT_REASON_INSTALLATION_MISMATCH = 2;
+  REJECT_REASON_PROTOCOL_INCOMPATIBLE = 3;
+  REJECT_REASON_UNKNOWN_REQUIRED_CAPABILITY = 4;
+  REJECT_REASON_IDENTITY_IN_USE = 5;
+  REJECT_REASON_CONNECTION_BINDING_MISMATCH = 6;
+  REJECT_REASON_HUB_NOT_OPERATIONAL = 7;
 }
 
 message Hello {
@@ -159,10 +159,12 @@ message TextBlock {
 
 message CancelInput {
   string target_command_id = 1;
+  uint32 target_dispatch_attempt = 2;
 }
 
 message WithdrawInput {
   string target_command_id = 1;
+  uint32 target_dispatch_attempt = 2;
 }
 
 message Interrupt {}
