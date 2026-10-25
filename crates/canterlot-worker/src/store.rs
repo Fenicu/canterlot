@@ -71,6 +71,8 @@ pub struct WorkerStore {
     receipts: Journal,
     index: HashMap<Uuid, ReceiptEntry>,
     hub: HubState,
+    #[cfg(test)]
+    crash_after: Option<tests::AppendPoint>,
 }
 
 impl WorkerStore {
@@ -87,28 +89,95 @@ impl WorkerStore {
                 return Err(StoreError::LocalSealed(name));
             }
         }
-        let mut index = HashMap::new();
-        let mut from_seq = receipts.first_seq();
-        while from_seq <= receipts.last_seq() {
-            for record in receipts.read_from(from_seq, MAX_MESSAGE_BYTES)? {
-                let entry: ReceiptEntry = toml::from_str(std::str::from_utf8(&record.payload)?)?;
-                index.insert(entry.command_id, entry);
-                from_seq = record.seq + 1;
-            }
-        }
         let hub = match fs::read_to_string(data_dir.join("hub.toml")) {
             Ok(text) => toml::from_str(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => HubState::default(),
             Err(error) => return Err(error.into()),
         };
-        Ok(Self {
+        let mut store = Self {
             data_dir: data_dir.to_path_buf(),
             cj,
             inbox,
             receipts,
-            index,
+            index: HashMap::new(),
             hub,
-        })
+            #[cfg(test)]
+            crash_after: None,
+        };
+        store.reconcile()?;
+        Ok(store)
+    }
+
+    fn reconcile(&mut self) -> Result<(), StoreError> {
+        let mut from_seq = self.receipts.first_seq();
+        while from_seq <= self.receipts.last_seq() {
+            for record in self.receipts.read_from(from_seq, MAX_MESSAGE_BYTES)? {
+                let entry: ReceiptEntry = toml::from_str(std::str::from_utf8(&record.payload)?)?;
+                self.index.insert(entry.command_id, entry);
+                from_seq = record.seq + 1;
+            }
+        }
+
+        let mut from_seq = self.cj.first_seq();
+        while from_seq <= self.cj.last_seq() {
+            for record in self.cj.read_from(from_seq, MAX_MESSAGE_BYTES)? {
+                from_seq = record.seq + 1;
+                let (command_id, attempt, class) =
+                    match RecordBody::decode(record.payload.as_slice())?.body {
+                        Some(record_body::Body::CommandStored(fact)) => {
+                            (fact.command_id, fact.dispatch_attempt, ReceiptClass::Stored)
+                        }
+                        Some(record_body::Body::CommandRejected(fact)) => (
+                            fact.command_id,
+                            fact.dispatch_attempt,
+                            ReceiptClass::Rejected,
+                        ),
+                        _ => continue,
+                    };
+                let command_id = Uuid::parse_str(&command_id)?;
+                if !self.index.contains_key(&command_id) {
+                    self.append_receipt(ReceiptEntry {
+                        command_id,
+                        attempt,
+                        class,
+                    })?;
+                }
+            }
+        }
+
+        let mut from_seq = self.inbox.first_seq();
+        while from_seq <= self.inbox.last_seq() {
+            for record in self.inbox.read_from(from_seq, MAX_MESSAGE_BYTES)? {
+                from_seq = record.seq + 1;
+                let cmd = Command::decode(record.payload.as_slice())?;
+                let command_id = Uuid::parse_str(&cmd.command_id)?;
+                if !self.index.contains_key(&command_id) {
+                    self.cj.append(
+                        &RecordBody {
+                            body: Some(record_body::Body::CommandStored(CommandStored {
+                                command_id: cmd.command_id,
+                                dispatch_attempt: cmd.dispatch_attempt,
+                            })),
+                        }
+                        .encode_to_vec(),
+                    )?;
+                    self.append_receipt(ReceiptEntry {
+                        command_id,
+                        attempt: cmd.dispatch_attempt,
+                        class: ReceiptClass::Stored,
+                    })?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn append_receipt(&mut self, entry: ReceiptEntry) -> Result<(), StoreError> {
+        self.receipts.append(toml::to_string(&entry)?.as_bytes())?;
+        #[cfg(test)]
+        self.after_append(tests::AppendPoint::Receipt);
+        self.index.insert(entry.command_id, entry);
+        Ok(())
     }
 
     pub fn cj_journal_id(&self) -> Uuid {
@@ -139,6 +208,8 @@ impl WorkerStore {
                 | command::Kind::StopExecution(_),
             ) => {
                 self.inbox.append(&cmd.encode_to_vec())?;
+                #[cfg(test)]
+                self.after_append(tests::AppendPoint::Inbox);
                 (
                     record_body::Body::CommandStored(CommandStored {
                         command_id: cmd.command_id.clone(),
@@ -151,6 +222,8 @@ impl WorkerStore {
         let cj_seq = self
             .cj
             .append(&RecordBody { body: Some(body) }.encode_to_vec())?;
+        #[cfg(test)]
+        self.after_append(tests::AppendPoint::Cj);
         let result = match class {
             ReceiptClass::Stored => Accept::Stored { cj_seq },
             ReceiptClass::Rejected => Accept::Rejected {
@@ -163,8 +236,7 @@ impl WorkerStore {
             attempt: cmd.dispatch_attempt,
             class,
         };
-        self.receipts.append(toml::to_string(&entry)?.as_bytes())?;
-        self.index.insert(command_id, entry);
+        self.append_receipt(entry)?;
         Ok(result)
     }
 
@@ -237,3 +309,6 @@ fn open_journal(path: &Path) -> Result<Journal, StoreError> {
         Ok(Journal::create(path, JournalId(Uuid::now_v7()), options)?)
     }
 }
+
+#[cfg(test)]
+mod tests;

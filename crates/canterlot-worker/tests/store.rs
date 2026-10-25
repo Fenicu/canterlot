@@ -9,7 +9,7 @@ use canterlot_proto::worker::v1::{
     CancelInput, Command, CommandStored, ContentBlock, DeliverInput, Interrupt, RecordBody,
     StartExecution, StopExecution, TextBlock, WithdrawInput, command, content_block, record_body,
 };
-use canterlot_worker::config::{load, read_token};
+use canterlot_worker::config::{ConfigError, load, read_token};
 use canterlot_worker::store::{Accept, StoreError, WorkerStore};
 use prost::Message;
 use tempfile::TempDir;
@@ -443,6 +443,101 @@ fn config_requires_https_and_valid_fields() {
     ] {
         fs::write(&path, contents).unwrap();
         assert!(load(&path).is_err());
+    }
+}
+
+fn assert_error_redacted(error: &(dyn std::error::Error + 'static), markers: &[&str]) {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            for marker in markers {
+                assert!(!rendered.contains(marker), "error exposed file contents");
+            }
+        }
+        current = error.source();
+    }
+}
+
+fn sensitive_config_inputs() -> Vec<String> {
+    vec![
+        "secret-token-marker-never-print".into(),
+        config_text().replace(
+            "hub_url = \"https://hub.example:8443\"",
+            "hub_url = \"https://secret-user:secret-pass@[\" trailing-secret-marker",
+        ),
+        config_text().replace(
+            "\"https://hub.example:8443\"",
+            "[\"https://secret-user:secret-pass@[\"]",
+        ),
+        config_text().replace(
+            "https://hub.example:8443",
+            "https://secret-user:secret-pass@[",
+        ),
+        config_text().replace(
+            "https://hub.example:8443",
+            "https://secret-user:secret-pass@hub.example:8443",
+        ),
+    ]
+}
+
+#[test]
+fn config_errors_do_not_expose_file_contents() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("worker.toml");
+    for contents in sensitive_config_inputs() {
+        fs::write(&path, contents).unwrap();
+        let error = load(&path).unwrap_err();
+        assert!(error.to_string().contains(path.to_str().unwrap()));
+        assert!(
+            matches!(
+                &error,
+                ConfigError::Parse { path: error_path, location: Some((line, column)) }
+                    if error_path == &path && *line > 0 && *column > 0
+            ) || matches!(&error, ConfigError::HubUrl { path: error_path } if error_path == &path)
+        );
+        assert_error_redacted(
+            &error,
+            &[
+                "secret-token-marker",
+                "secret-user",
+                "secret-pass",
+                "trailing-secret-marker",
+            ],
+        );
+    }
+}
+
+#[test]
+fn config_error_conversions_discard_source_errors() {
+    let marker = "secret-token-marker";
+    let error = ConfigError::from(toml::from_str::<toml::Value>(marker).unwrap_err());
+    assert_error_redacted(&error, &[marker]);
+    assert!(matches!(error, ConfigError::Parse { location: None, .. }));
+    let error = ConfigError::from(std::io::Error::other(marker));
+    assert_error_redacted(&error, &[marker]);
+}
+
+#[test]
+fn binary_config_errors_do_not_expose_file_contents() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("worker.toml");
+    for contents in sensitive_config_inputs() {
+        fs::write(&path, contents).unwrap();
+        let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+            .arg(&path)
+            .output()
+            .unwrap();
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        for marker in [
+            "secret-token-marker",
+            "secret-user",
+            "secret-pass",
+            "trailing-secret-marker",
+        ] {
+            assert!(!stderr.contains(marker), "stderr exposed file contents");
+        }
     }
 }
 
