@@ -1,5 +1,5 @@
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 use super::LockedQueue;
@@ -91,12 +91,25 @@ pub async fn apply_input_receipt(
     correlation_id: Uuid,
 ) -> Result<ApplyOutcome, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    let outcome =
+        apply_input_receipt_in_tx(&mut tx, command_id, attempt, receipt, correlation_id).await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+pub async fn apply_input_receipt_in_tx(
+    conn: &mut PgConnection,
+    command_id: Uuid,
+    attempt: i32,
+    receipt: InputReceipt,
+    correlation_id: Uuid,
+) -> Result<ApplyOutcome, sqlx::Error> {
     let queue: Option<LockedQueue> = sqlx::query_as(
         "select q.* from queue_state q join commands c on c.conversation_id = q.conversation_id
          where c.id = $1 for update of q",
     )
     .bind(command_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let target: Option<ReceiptTarget> = sqlx::query_as(
         "select i.id as input_id, i.state, i.cancel_requested, c.dispatch_attempt, c.last_status_rank,
@@ -104,9 +117,8 @@ pub async fn apply_input_receipt(
          from commands c join inputs i on i.command_id = c.id
          left join executions e on e.id = c.execution_id
          where c.id = $1 and c.kind = 'deliver_input'",
-    ).bind(command_id).fetch_optional(&mut *tx).await?;
+    ).bind(command_id).fetch_optional(&mut *conn).await?;
     let (Some(mut queue), Some(target)) = (queue, target) else {
-        tx.commit().await?;
         return Ok(ApplyOutcome::Ignored(Ignored::UnknownCommand));
     };
     let state: InputState = target
@@ -127,7 +139,7 @@ pub async fn apply_input_receipt(
         )
         .bind(command_id)
         .bind(attempt.to_string())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     }
     let late_acceptance =
@@ -158,7 +170,6 @@ pub async fn apply_input_receipt(
         None
     };
     if let Some(ignored) = ignored {
-        tx.commit().await?;
         return Ok(ApplyOutcome::Ignored(ignored));
     }
     let mut slot = queue.slot()?;
@@ -224,7 +235,7 @@ pub async fn apply_input_receipt(
         InputReceipt::CancelLost => state,
         InputReceipt::Withdrawn | InputReceipt::DispatchDeferred { .. } => {
             if matches!(receipt, InputReceipt::DispatchDeferred { .. })
-                && executions::live(&mut tx, queue.conversation_id)
+                && executions::live(conn, queue.conversation_id)
                     .await?
                     .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
                 && !queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution)
@@ -244,7 +255,7 @@ pub async fn apply_input_receipt(
     if receipt == InputReceipt::CancelLost {
         sqlx::query("update inputs set cancel_requested = false where id = $1")
             .bind(target.input_id)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
     } else {
         sqlx::query(
@@ -256,7 +267,7 @@ pub async fn apply_input_receipt(
         .bind(input_state.as_str())
         .bind(reject_reason)
         .bind(receipt == InputReceipt::Accepted)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         sqlx::query(
             "update commands set delivery_state = $2, last_status = $3, last_status_rank = $4, result = $5,
@@ -270,14 +281,14 @@ pub async fn apply_input_receipt(
         .bind(receipt.rank())
         .bind(reason.as_ref().map(|reason| json!({"reason": reason})))
         .bind(matches!(receipt, InputReceipt::Stored | InputReceipt::TransmissionStarted))
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
         queue
-            .save(&mut tx, &slot, target.execution_id, correlation_id)
+            .save(conn, &slot, target.execution_id, correlation_id)
             .await?;
     }
     events::append(
-        &mut tx,
+        conn,
         NewEvent {
             scope: Scope::Conversation {
                 id: queue.conversation_id,
@@ -290,7 +301,6 @@ pub async fn apply_input_receipt(
         },
     )
     .await?;
-    tx.commit().await?;
     Ok(ApplyOutcome::Applied { input_state })
 }
 
@@ -301,12 +311,23 @@ pub async fn apply_run_finished(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    apply_run_finished_in_tx(&mut tx, execution_id, input_command_id, correlation_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn apply_run_finished_in_tx(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    input_command_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
     let queue: Option<LockedQueue> = sqlx::query_as(
         "select q.* from queue_state q join commands c on c.conversation_id = q.conversation_id
          where c.id = $1 for update of q",
     )
     .bind(input_command_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let input_id: Option<Uuid> = sqlx::query_scalar(
         "select i.id from inputs i join commands c on c.id = i.command_id
@@ -314,16 +335,16 @@ pub async fn apply_run_finished(
     )
     .bind(input_command_id)
     .bind(execution_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     if let (Some(mut queue), Some(input_id)) = (queue, input_id)
         && queue.slot()? == (RunSlot::Running { input_id })
     {
         queue
-            .save(&mut tx, &RunSlot::Free, Some(execution_id), correlation_id)
+            .save(conn, &RunSlot::Free, Some(execution_id), correlation_id)
             .await?;
         events::append(
-            &mut tx,
+            conn,
             NewEvent {
                 scope: Scope::Conversation {
                     id: queue.conversation_id,
@@ -337,7 +358,6 @@ pub async fn apply_run_finished(
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(())
 }
 

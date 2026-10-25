@@ -4,9 +4,9 @@ use canterlot_proto::limits::{
     check_record_batch,
 };
 use canterlot_proto::worker::v1::{
-    BlockDelta, Command, ContentBlock, DeliverInput, Hello, JournalCursor, JournalRecord,
-    JournalRecords, RecordBody, StartExecution, StreamKind, TextBlock, command, content_block,
-    record_body,
+    BlockDelta, Command, ContentBlock, DeliverInput, Hello, InputDispatchDeferred, JournalCursor,
+    JournalRecord, JournalRecords, RecordBody, StartExecution, StreamKind, TextBlock, command,
+    content_block, record_body,
 };
 use prost::Message;
 
@@ -48,6 +48,32 @@ fn command_roundtrip() {
     let command = deliver_input("Hello, world!".into());
     let decoded = Command::decode(command.encode_to_vec().as_slice()).unwrap();
     assert_eq!(decoded, command);
+}
+
+#[test]
+fn dispatch_deferred_record_roundtrip() {
+    let deferred = InputDispatchDeferred {
+        command_id: "019a1b10-0000-7000-8000-000000000001".into(),
+        dispatch_attempt: 7,
+        reason: "no_live_execution".into(),
+    };
+    let mut expected =
+        b"\x0a\x24019a1b10-0000-7000-8000-000000000001\x10\x07\x1a\x11no_live_execution".to_vec();
+    assert_eq!(deferred.encode_to_vec(), expected);
+    let body = RecordBody {
+        body: Some(record_body::Body::DispatchDeferred(deferred)),
+    };
+    let mut expected_body = vec![0x92, 0x01, expected.len() as u8];
+    expected_body.append(&mut expected);
+    assert_eq!(body.encode_to_vec(), expected_body);
+    let record = JournalRecord {
+        seq: 42,
+        body: Some(body),
+    };
+    assert_eq!(
+        JournalRecord::decode(record.encode_to_vec().as_slice()).unwrap(),
+        record
+    );
 }
 
 #[test]

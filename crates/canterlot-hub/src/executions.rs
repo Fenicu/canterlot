@@ -132,17 +132,29 @@ pub async fn set_state(
     correlation_id: Uuid,
 ) -> Result<(), ExecutionError> {
     let mut tx = pool.begin().await?;
+    set_state_in_tx(&mut tx, execution_id, to, outcome, correlation_id).await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+pub async fn set_state_in_tx(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    to: ExecutionState,
+    outcome: Option<&str>,
+    correlation_id: Uuid,
+) -> Result<(), ExecutionError> {
     let mut queue: LockedQueue = sqlx::query_as(
         "select q.* from queue_state q join executions e on e.conversation_id = q.conversation_id
          where e.id = $1 for update of q",
     )
     .bind(execution_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     let (state, generation): (String, i64) =
         sqlx::query_as("select state, generation from executions where id = $1")
             .bind(execution_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
     let from = state
         .parse()
@@ -192,13 +204,13 @@ pub async fn set_state(
         .bind(execution_id)
         .bind(to.as_str())
         .bind(outcome)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     queue
-        .save(&mut tx, &slot, Some(execution_id), correlation_id)
+        .save(conn, &slot, Some(execution_id), correlation_id)
         .await?;
     events::append(
-        &mut tx,
+        conn,
         state_event(
             queue.conversation_id,
             execution_id,
@@ -209,7 +221,6 @@ pub async fn set_state(
         ),
     )
     .await?;
-    tx.commit().await?;
     Ok(())
 }
 

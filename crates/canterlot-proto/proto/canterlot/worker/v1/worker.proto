@@ -199,6 +199,7 @@ message RecordBody {
     BlockFinal block_final = 15;
     BlockIncomplete block_incomplete = 16;
     PhaseChanged phase_changed = 17;
+    InputDispatchDeferred dispatch_deferred = 18;
   }
 }
 
@@ -246,6 +247,12 @@ message InputWithdrawn {
 }
 
 message InputRejected {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message InputDispatchDeferred {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
   string reason = 3;
