@@ -1,0 +1,14 @@
+[package]
+name = "canterlot-proto"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+prost = "0.14.4"
+tonic = { version = "0.14.6", features = ["tls-ring"] }
+tonic-prost = "0.14.6"
+
+[build-dependencies]
+tonic-prost-build = "0.14.6"

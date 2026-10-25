@@ -1,0 +1,299 @@
+// Номера удалённых полей объявляются reserved и никогда не используются повторно.
+syntax = "proto3";
+
+package canterlot.worker.v1;
+
+service WorkerControl {
+  rpc Control(stream ControlUp) returns (stream ControlDown);
+}
+
+service WorkerData {
+  rpc Data(stream DataUp) returns (stream DataDown);
+}
+
+enum StreamKind {
+  STREAM_KIND_UNSPECIFIED = 0;
+  CONTROL = 1;
+  DATA = 2;
+}
+
+enum RejectReason {
+  UNSPECIFIED = 0;
+  CREDENTIAL_REVOKED = 1;
+  INSTALLATION_MISMATCH = 2;
+  PROTOCOL_INCOMPATIBLE = 3;
+  UNKNOWN_REQUIRED_CAPABILITY = 4;
+  IDENTITY_IN_USE = 5;
+  CONNECTION_BINDING_MISMATCH = 6;
+  HUB_NOT_OPERATIONAL = 7;
+}
+
+message Hello {
+  string installation_id = 1;
+  string machine_id = 2;
+  string restore_generation = 3;
+  uint32 protocol_version = 4;
+  repeated string required_capabilities = 5;
+  repeated string optional_capabilities = 6;
+  string connection_id = 7;
+  string cj_journal_id = 8;
+  repeated JournalCursor cursors = 9;
+  string boot_id = 10;
+  StreamKind stream_kind = 11;
+}
+
+message JournalCursor {
+  string journal_id = 1;
+  uint64 first_stored_seq = 2;
+  uint64 last_seq = 3;
+  uint64 acked_seq_known_to_worker = 4;
+}
+
+message HelloReply {
+  oneof result {
+    Accepted accepted = 1;
+    Rejected rejected = 2;
+  }
+}
+
+message Accepted {
+  string restore_generation = 1;
+  repeated JournalCommitted committed = 2;
+}
+
+message JournalCommitted {
+  string journal_id = 1;
+  uint64 committed_seq = 2;
+}
+
+message Rejected {
+  RejectReason reason = 1;
+  string detail = 2;
+  bool retryable = 3;
+}
+
+message ControlUp {
+  oneof msg {
+    Hello hello = 1;
+    JournalRecords cj_records = 2;
+    Heartbeat heartbeat = 3;
+  }
+}
+
+message ControlDown {
+  oneof msg {
+    HelloReply hello_reply = 1;
+    Command command = 2;
+    JournalRangeAck cj_ack = 3;
+    HeartbeatAck heartbeat_ack = 4;
+  }
+}
+
+message DataUp {
+  oneof msg {
+    Hello hello = 1;
+    JournalRecords sj_records = 2;
+  }
+}
+
+message DataDown {
+  oneof msg {
+    HelloReply hello_reply = 1;
+    JournalRangeAck sj_ack = 2;
+  }
+}
+
+message Heartbeat {
+  uint64 seq = 1;
+}
+
+message HeartbeatAck {
+  uint64 seq = 1;
+}
+
+message JournalRangeAck {
+  string journal_id = 1;
+  uint64 up_to_seq = 2;
+}
+
+message JournalRecords {
+  string journal_id = 1;
+  repeated JournalRecord records = 2;
+}
+
+message JournalRecord {
+  uint64 seq = 1;
+  RecordBody body = 2;
+}
+
+message Command {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string execution_id = 3;
+  uint64 execution_generation = 4;
+  oneof kind {
+    DeliverInput deliver_input = 10;
+    CancelInput cancel_input = 11;
+    WithdrawInput withdraw_input = 12;
+    Interrupt interrupt = 13;
+    StartExecution start_execution = 14;
+    StopExecution stop_execution = 15;
+  }
+}
+
+message DeliverInput {
+  string input_id = 1;
+  string conversation_id = 2;
+  repeated ContentBlock content = 3;
+}
+
+message ContentBlock {
+  oneof block {
+    TextBlock text = 1;
+  }
+}
+
+message TextBlock {
+  string text = 1;
+}
+
+message CancelInput {
+  string target_command_id = 1;
+}
+
+message WithdrawInput {
+  string target_command_id = 1;
+}
+
+message Interrupt {}
+
+message StartExecution {
+  string conversation_id = 1;
+  string harness = 2;
+  string workdir = 3;
+  string native_conversation_id = 4;
+}
+
+message StopExecution {
+  bool force = 1;
+}
+
+message RecordBody {
+  oneof body {
+    CommandStored command_stored = 1;
+    CommandRejected command_rejected = 2;
+    InputTransmissionStarted transmission_started = 3;
+    InputAccepted input_accepted = 4;
+    InputAcceptanceUnconfirmed acceptance_unconfirmed = 5;
+    InputCancelWon cancel_won = 6;
+    InputCancelLost cancel_lost = 7;
+    InputWithdrawn input_withdrawn = 8;
+    InputRejected input_rejected = 9;
+    ExecutionState execution_state = 10;
+    RunFinished run_finished = 11;
+    JournalClosed journal_closed = 12;
+    BlockStarted block_started = 13;
+    BlockDelta block_delta = 14;
+    BlockFinal block_final = 15;
+    BlockIncomplete block_incomplete = 16;
+    PhaseChanged phase_changed = 17;
+  }
+}
+
+message CommandStored {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message CommandRejected {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message InputTransmissionStarted {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message InputAccepted {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message InputAcceptanceUnconfirmed {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message InputCancelWon {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message InputCancelLost {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message InputWithdrawn {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message InputRejected {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message ExecutionState {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string state = 3;
+  string outcome = 4;
+}
+
+message RunFinished {
+  string execution_id = 1;
+  string input_command_id = 2;
+}
+
+message JournalClosed {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string reason = 3;
+}
+
+message BlockStarted {
+  string block_id = 1;
+  uint64 rev = 2;
+  string kind = 3;
+}
+
+message BlockDelta {
+  string block_id = 1;
+  uint64 base_rev = 2;
+  uint64 rev = 3;
+  string append = 4;
+}
+
+message BlockFinal {
+  string block_id = 1;
+  uint64 rev = 2;
+  string text = 3;
+  string checksum = 4;
+}
+
+message BlockIncomplete {
+  string block_id = 1;
+  uint64 rev = 2;
+  string reason = 3;
+}
+
+message PhaseChanged {
+  string execution_id = 1;
+  string phase = 2;
+}
