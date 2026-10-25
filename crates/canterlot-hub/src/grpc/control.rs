@@ -1,13 +1,15 @@
 use canterlot_proto::worker::v1::{worker_control_server::WorkerControl, *};
 use tonic::{Request, Response, Status, Streaming};
+use uuid::Uuid;
 
 use super::{
-    HubGrpc, ReplyStream,
+    HubGrpc, IngestLane, LaneKind, ReplyStream,
     auth::{self, AuthenticatedMachine},
     checked, rejection,
 };
 
 enum Next {
+    Ack(Option<Result<JournalRangeAck, Status>>),
     Inbound(Result<Option<ControlUp>, Status>),
     Command(Option<ControlDown>),
 }
@@ -58,15 +60,22 @@ impl WorkerControl for HubGrpc {
                 return;
             };
             yield reply;
+            let cj_journal = Uuid::parse_str(&hello.cj_journal_id).ok();
+            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Cj);
             loop {
                 let next = tokio::select! {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
+                    ack = lane.next_ack() => Next::Ack(ack),
                     next = inbound.message() => Next::Inbound(next),
                     command = commands.recv() => Next::Command(command),
                 };
                 match next {
+                    Next::Ack(ack) => {
+                        let Some(ack) = ack else { break; };
+                        yield checked(ControlDown { msg: Some(control_down::Msg::CjAck(ack?)) })?;
+                    }
                     Next::Inbound(next) => {
                         let Some(message) = next? else { break; };
                         match message.msg {
@@ -75,8 +84,10 @@ impl WorkerControl for HubGrpc {
                                 yield checked(ControlDown { msg: Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq })) })?;
                             }
                             Some(control_up::Msg::CjRecords(records)) => {
-                                let ack = state.ingest.cj_records(machine_id, records).await?;
-                                yield checked(ControlDown { msg: Some(control_down::Msg::CjAck(ack)) })?;
+                                if Uuid::parse_str(&records.journal_id).ok() != cj_journal {
+                                    Err(Status::invalid_argument("invalid_record"))?;
+                                }
+                                lane.submit(records)?;
                             }
                             _ => Err(Status::invalid_argument("unexpected control message"))?,
                         }

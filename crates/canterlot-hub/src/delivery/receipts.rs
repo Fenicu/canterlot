@@ -361,7 +361,7 @@ pub async fn apply_run_finished_in_tx(
     Ok(())
 }
 
-fn sanitize_reason(reason: &str) -> String {
+pub(crate) fn sanitize_reason(reason: &str) -> String {
     let mut reason = reason.replace('\0', "");
     if reason.len() > 1024 {
         let mut end = 1024;

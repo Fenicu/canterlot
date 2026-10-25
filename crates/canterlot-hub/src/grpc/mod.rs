@@ -8,9 +8,9 @@ use canterlot_proto::{
 };
 use prost::Message;
 use sqlx::PgPool;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::mpsc};
 use tokio_stream::{Stream, wrappers::TcpListenerStream};
-use tokio_util::sync::CancellationToken;
+use tokio_util::sync::{CancellationToken, DropGuard};
 use tonic::{
     Status,
     transport::{Identity, Server, ServerTlsConfig, server::Router},
@@ -49,6 +49,70 @@ pub struct HubGrpc {
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
     shutdown: CancellationToken,
+}
+
+const INGEST_BACKLOG: usize = 32;
+
+#[derive(Clone, Copy)]
+enum LaneKind {
+    Cj,
+    Sj,
+}
+
+/// Приём журнала потока в отдельной задаче: подтверждения уходят строго по порядку,
+/// а цикл потока продолжает обслуживать heartbeat и команды.
+struct IngestLane {
+    batches: mpsc::Sender<JournalRecords>,
+    acks: mpsc::Receiver<Result<JournalRangeAck, Status>>,
+    _stop: DropGuard,
+}
+
+impl IngestLane {
+    fn start(ingest: Arc<dyn Ingest>, machine_id: Uuid, kind: LaneKind) -> Self {
+        let (batches, mut queue) = mpsc::channel::<JournalRecords>(INGEST_BACKLOG);
+        let (reply, acks) = mpsc::channel(INGEST_BACKLOG);
+        let stop = CancellationToken::new();
+        let cancelled = stop.clone();
+        tokio::spawn(async move {
+            while let Some(records) = tokio::select! {
+                biased;
+                _ = cancelled.cancelled() => None,
+                records = queue.recv() => records,
+            } {
+                let applied = async {
+                    match kind {
+                        LaneKind::Cj => ingest.cj_records(machine_id, records).await,
+                        LaneKind::Sj => ingest.sj_records(machine_id, records).await,
+                    }
+                };
+                let result = tokio::select! {
+                    biased;
+                    _ = cancelled.cancelled() => break,
+                    result = applied => result,
+                };
+                let failed = result.is_err();
+                if reply.send(result).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
+        Self {
+            batches,
+            acks,
+            _stop: stop.drop_guard(),
+        }
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn submit(&self, records: JournalRecords) -> Result<(), Status> {
+        self.batches
+            .try_send(records)
+            .map_err(|_| Status::resource_exhausted("ingest_backlog"))
+    }
+
+    async fn next_ack(&mut self) -> Option<Result<JournalRangeAck, Status>> {
+        self.acks.recv().await
+    }
 }
 
 type ReplyStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;

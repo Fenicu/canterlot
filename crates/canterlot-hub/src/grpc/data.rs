@@ -2,7 +2,7 @@ use canterlot_proto::worker::v1::{worker_data_server::WorkerData, *};
 use tonic::{Request, Response, Status, Streaming};
 
 use super::{
-    HubGrpc, ReplyStream,
+    HubGrpc, IngestLane, LaneKind, ReplyStream,
     auth::{self, AuthenticatedMachine},
     checked, rejection,
 };
@@ -53,19 +53,22 @@ impl WorkerData for HubGrpc {
                 return;
             };
             yield reply;
+            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Sj);
             loop {
                 let next = tokio::select! {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
+                    ack = lane.next_ack() => {
+                        let Some(ack) = ack else { break; };
+                        yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack?)) })?;
+                        continue;
+                    }
                     next = inbound.message() => next,
                 };
                 let Some(message) = next? else { break; };
                 match message.msg {
-                    Some(data_up::Msg::SjRecords(records)) => {
-                        let ack = state.ingest.sj_records(machine_id, records).await?;
-                        yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack)) })?;
-                    }
+                    Some(data_up::Msg::SjRecords(records)) => lane.submit(records)?,
                     _ => Err(Status::invalid_argument("unexpected data message"))?,
                 }
             }

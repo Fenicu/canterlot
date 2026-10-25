@@ -18,6 +18,11 @@ type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn setup(pool: &PgPool) -> (Seed, executions::StartedExecution, SubmittedInput) {
     let seed = testkit::seed(pool).await;
+    let (execution, input) = setup_for(pool, &seed).await;
+    (seed, execution, input)
+}
+
+async fn setup_for(pool: &PgPool, seed: &Seed) -> (executions::StartedExecution, SubmittedInput) {
     let execution = executions::start(pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
         .unwrap();
@@ -54,7 +59,7 @@ async fn setup(pool: &PgPool) -> (Seed, executions::StartedExecution, SubmittedI
         .unwrap(),
         DispatchOutcome::Dispatched { attempt: 1, .. }
     ));
-    (seed, execution, input)
+    (execution, input)
 }
 
 fn batch(journal_id: Uuid, bodies: Vec<record_body::Body>) -> JournalRecords {
@@ -754,5 +759,570 @@ async fn cursor_is_locked_before_queue_state(pool: PgPool) -> TestResult {
         IngestOutcome::Committed { up_to_seq: 1 }
     );
     assert_eq!(cursor(&pool, journal).await, 1);
+    Ok(())
+}
+
+async fn world(pool: &PgPool, conversation_id: Uuid) -> Value {
+    sqlx::query_scalar(
+        "select jsonb_build_object(
+            'executions', (select coalesce(jsonb_agg(to_jsonb(e) order by e.id), '[]') from executions e where e.conversation_id = $1),
+            'commands', (select coalesce(jsonb_agg(to_jsonb(c) order by c.id), '[]') from commands c where c.conversation_id = $1),
+            'inputs', (select coalesce(jsonb_agg(to_jsonb(i) order by i.id), '[]') from inputs i where i.conversation_id = $1),
+            'queue', (select to_jsonb(q) from queue_state q where q.conversation_id = $1),
+            'events', (select count(*) from events where conversation_id = $1))",
+    )
+    .bind(conversation_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+fn execution_fact(execution_id: Uuid, generation: i64, state: &str) -> record_body::Body {
+    record_body::Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+        execution_id: execution_id.to_string(),
+        generation: generation as u64,
+        state: state.into(),
+        outcome: String::new(),
+    })
+}
+
+async fn start_only(pool: &PgPool, seed: &Seed) -> executions::StartedExecution {
+    executions::start(pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_start_rejection_for_stopped_execution_is_consumed(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Stopped,
+        Some("start_cancelled"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let records = batch(
+        journal,
+        vec![
+            record_body::Body::CommandRejected(CommandRejected {
+                command_id: execution.command_id.to_string(),
+                dispatch_attempt: 0,
+                reason: "resource_limit".into(),
+            }),
+            record_body::Body::JournalClosed(JournalClosed::default()),
+        ],
+    );
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .await?,
+        IngestOutcome::Committed { up_to_seq: 2 }
+    );
+    assert_eq!(cursor(&pool, journal).await, 2);
+    let state: (String, String, String) = sqlx::query_as(
+        "select e.state, e.outcome, c.delivery_state
+         from executions e join commands c on c.execution_id = e.id where c.id = $1",
+    )
+    .bind(execution.command_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        state,
+        (
+            "stopped".into(),
+            "start_cancelled".into(),
+            "completed".into()
+        )
+    );
+    let diagnostic: Value = sqlx::query_scalar(
+        "select payload from events where kind = 'execution_fact_rejected' and execution_id = $1",
+    )
+    .bind(execution.execution_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(diagnostic["from"], "stopped");
+    assert_eq!(diagnostic["to"], "failed");
+    assert_eq!(diagnostic["generation"], execution.generation);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_rejection_for_completed_command_leaves_execution_untouched(
+    pool: PgPool,
+) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    sqlx::query("update commands set delivery_state = 'completed', completed_at = now(), result = '{\"done\": true}' where id = $1")
+        .bind(execution.command_id)
+        .execute(&pool)
+        .await?;
+    let before = world(&pool, seed.conversation_id).await;
+    let journal = Uuid::now_v7();
+    let outcome = Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            JournalKind::Cj,
+            &batch(
+                journal,
+                vec![record_body::Body::CommandRejected(CommandRejected {
+                    command_id: execution.command_id.to_string(),
+                    dispatch_attempt: 0,
+                    reason: "late".into(),
+                })],
+            ),
+        )
+        .await?;
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+    assert_eq!(world(&pool, seed.conversation_id).await, before);
+    assert_eq!(cursor(&pool, journal).await, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_rejection_for_other_attempt_is_ignored(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    let before = world(&pool, seed.conversation_id).await;
+    let journal = Uuid::now_v7();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            JournalKind::Cj,
+            &batch(
+                journal,
+                vec![record_body::Body::CommandRejected(CommandRejected {
+                    command_id: execution.command_id.to_string(),
+                    dispatch_attempt: 7,
+                    reason: "stale".into(),
+                })],
+            ),
+        )
+        .await?;
+    assert_eq!(world(&pool, seed.conversation_id).await, before);
+    assert_eq!(cursor(&pool, journal).await, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_rejection_without_execution_or_queue_is_consumed(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    sqlx::query("update commands set execution_id = null where id = $1")
+        .bind(execution.command_id)
+        .execute(&pool)
+        .await?;
+    let other = testkit::seed(&pool).await;
+    let second = start_only(&pool, &other).await;
+    sqlx::query("delete from queue_state where conversation_id = $1")
+        .bind(other.conversation_id)
+        .execute(&pool)
+        .await?;
+    let journal = Uuid::now_v7();
+    let rejected = |command: Uuid| {
+        record_body::Body::CommandRejected(CommandRejected {
+            command_id: command.to_string(),
+            dispatch_attempt: 0,
+            reason: "resource_limit".into(),
+        })
+    };
+    assert_eq!(
+        Ingest::new(pool.clone())
+            .apply_batch(
+                seed.machine_id,
+                JournalKind::Cj,
+                &batch(journal, vec![rejected(execution.command_id)]),
+            )
+            .await?,
+        IngestOutcome::Committed { up_to_seq: 1 }
+    );
+    let state: String = sqlx::query_scalar("select delivery_state from commands where id = $1")
+        .bind(execution.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "completed");
+    let journal = Uuid::now_v7();
+    assert_eq!(
+        Ingest::new(pool.clone())
+            .apply_batch(
+                other.machine_id,
+                JournalKind::Cj,
+                &batch(journal, vec![rejected(second.command_id)]),
+            )
+            .await?,
+        IngestOutcome::Committed { up_to_seq: 1 }
+    );
+    let state: (String, String) = sqlx::query_as(
+        "select e.state, c.delivery_state from executions e join commands c on c.execution_id = e.id where c.id = $1",
+    )
+    .bind(second.command_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(state, ("created".into(), "completed".into()));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unchanged_execution_state_emits_no_event(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    let before = world(&pool, seed.conversation_id).await;
+    let journal = Uuid::now_v7();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            JournalKind::Cj,
+            &batch(
+                journal,
+                vec![execution_fact(
+                    execution.execution_id,
+                    execution.generation,
+                    "created",
+                )],
+            ),
+        )
+        .await?;
+    assert_eq!(world(&pool, seed.conversation_id).await, before);
+    assert_eq!(cursor(&pool, journal).await, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn duplicates_are_skipped_without_locking_the_cursor(pool: PgPool) -> TestResult {
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    let (seed, _, input) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let records = batch(
+        journal,
+        vec![stored(input.command_id), accepted(input.command_id)],
+    );
+    ingest
+        .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+        .await?;
+    let mut holder = pool.begin().await?;
+    sqlx::query("select committed_seq from journal_cursors where journal_id = $1 for update")
+        .bind(journal)
+        .execute(&mut *holder)
+        .await?;
+    let replay = timeout(
+        Duration::from_secs(2),
+        ingest.apply_batch(seed.machine_id, JournalKind::Cj, &records),
+    )
+    .await??;
+    assert_eq!(replay, IngestOutcome::Committed { up_to_seq: 2 });
+    holder.rollback().await?;
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn seq_zero_is_an_invalid_record(pool: PgPool) -> TestResult {
+    let (seed, _, input) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let mut records = batch(journal, vec![stored(input.command_id)]);
+    records.records[0].seq = 0;
+    let before = snapshot(&pool, input.input_id).await;
+    assert!(matches!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .await,
+        Err(IngestError::InvalidRecord)
+    ));
+    let mut with_valid_first = batch(
+        journal,
+        vec![stored(input.command_id), accepted(input.command_id)],
+    );
+    with_valid_first.records[1].seq = 0;
+    assert!(matches!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &with_valid_first)
+            .await,
+        Err(IngestError::InvalidRecord)
+    ));
+    let cursors: i64 = sqlx::query_scalar("select count(*) from journal_cursors")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(cursors, 0);
+    assert_eq!(snapshot(&pool, input.input_id).await, before);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) -> TestResult {
+    let (seed, _, input) = setup(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let count = |journal: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "select count(*) from journal_cursors where journal_id = $1",
+            )
+            .bind(journal)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let gapped = Uuid::now_v7();
+    let mut records = batch(gapped, vec![stored(input.command_id)]);
+    records.records[0].seq = 2;
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .await?,
+        IngestOutcome::Gap {
+            committed_seq: 0,
+            got_seq: 2
+        }
+    );
+    assert_eq!(count(gapped).await, 0);
+    let unknown = Uuid::now_v7();
+    let mut records = batch(unknown, vec![stored(input.command_id)]);
+    records.records[0].body = None;
+    assert!(matches!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .await,
+        Err(IngestError::UnknownRecord)
+    ));
+    assert_eq!(count(unknown).await, 0);
+    let empty = batch(Uuid::now_v7(), vec![]);
+    assert_eq!(
+        ingest
+            .apply_batch(seed.machine_id, JournalKind::Cj, &empty)
+            .await?,
+        IngestOutcome::Committed { up_to_seq: 0 }
+    );
+    let applied = Uuid::now_v7();
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            JournalKind::Cj,
+            &batch(applied, vec![stored(input.command_id)]),
+        )
+        .await?;
+    assert_eq!(count(applied).await, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn journal_id_has_a_single_owner_in_the_schema(pool: PgPool) -> TestResult {
+    let first = testkit::seed(&pool).await;
+    let second = testkit::seed(&pool).await;
+    let journal = Uuid::now_v7();
+    let insert = |machine: Uuid| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query(
+                "insert into journal_cursors (machine_id, journal_id, kind) values ($1, $2, 'cj')",
+            )
+            .bind(machine)
+            .bind(journal)
+            .execute(&pool)
+            .await
+        }
+    };
+    insert(first.machine_id).await?;
+    let error = insert(second.machine_id).await.unwrap_err();
+    assert_eq!(
+        error
+            .as_database_error()
+            .and_then(|error| error.code())
+            .as_deref(),
+        Some("23505")
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ignored_records_are_counted_per_ingest(pool: PgPool) -> TestResult {
+    let (seed, _, _) = setup(&pool).await;
+    let records = batch(
+        Uuid::now_v7(),
+        vec![
+            record_body::Body::JournalClosed(JournalClosed::default()),
+            record_body::Body::PhaseChanged(PhaseChanged::default()),
+        ],
+    );
+    let first = Ingest::new(pool.clone());
+    let second = Ingest::new(pool.clone());
+    first
+        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .await?;
+    assert_eq!(first.ignored_record_count(), 2);
+    assert_eq!(second.ignored_record_count(), 0);
+    first
+        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .await?;
+    assert_eq!(first.ignored_record_count(), 2);
+    Ok(())
+}
+
+struct Foreign {
+    seed: Seed,
+    execution: executions::StartedExecution,
+    input: Option<SubmittedInput>,
+}
+
+#[derive(Clone, Copy)]
+enum Stage {
+    Created,
+    Dispatched,
+    Running,
+}
+
+async fn foreign_world(pool: &PgPool, stage: Stage) -> Foreign {
+    let seed = testkit::seed(pool).await;
+    if matches!(stage, Stage::Created) {
+        let execution = start_only(pool, &seed).await;
+        return Foreign {
+            seed,
+            execution,
+            input: None,
+        };
+    }
+    let (execution, input) = setup_for(pool, &seed).await;
+    if matches!(stage, Stage::Running) {
+        let own = batch(
+            Uuid::now_v7(),
+            vec![stored(input.command_id), accepted(input.command_id)],
+        );
+        Ingest::new(pool.clone())
+            .apply_batch(seed.machine_id, JournalKind::Sj, &own)
+            .await
+            .unwrap();
+    }
+    Foreign {
+        seed,
+        execution,
+        input: Some(input),
+    }
+}
+
+async fn assert_isolated(
+    pool: &PgPool,
+    stage: Stage,
+    name: &str,
+    body: impl Fn(&Foreign) -> Vec<record_body::Body>,
+) {
+    let victim = foreign_world(pool, stage).await;
+    let attacker = testkit::seed(pool).await;
+    let before = world(pool, victim.seed.conversation_id).await;
+    let journal = Uuid::now_v7();
+    let mut bodies = body(&victim);
+    bodies.push(record_body::Body::JournalClosed(JournalClosed::default()));
+    let count = bodies.len() as u64;
+    let outcome = Ingest::new(pool.clone())
+        .apply_batch(
+            attacker.machine_id,
+            JournalKind::Sj,
+            &batch(journal, bodies),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        IngestOutcome::Committed { up_to_seq: count },
+        "{name}"
+    );
+    assert_eq!(cursor(pool, journal).await, count as i64, "{name}");
+    assert_eq!(
+        world(pool, victim.seed.conversation_id).await,
+        before,
+        "{name} affected another machine"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn records_of_one_machine_never_affect_another_machine(pool: PgPool) -> TestResult {
+    let start = |v: &Foreign| v.execution.command_id.to_string();
+    let input = |v: &Foreign| v.input.as_ref().unwrap().command_id.to_string();
+    assert_isolated(
+        &pool,
+        Stage::Created,
+        "command_stored(start_execution)",
+        |v| {
+            vec![record_body::Body::CommandStored(CommandStored {
+                command_id: start(v),
+                dispatch_attempt: 0,
+            })]
+        },
+    )
+    .await;
+    assert_isolated(
+        &pool,
+        Stage::Created,
+        "command_rejected(start_execution)",
+        |v| {
+            vec![record_body::Body::CommandRejected(CommandRejected {
+                command_id: start(v),
+                dispatch_attempt: 0,
+                reason: "resource_limit".into(),
+            })]
+        },
+    )
+    .await;
+    assert_isolated(
+        &pool,
+        Stage::Dispatched,
+        "command_stored(deliver_input)",
+        |v| vec![stored(v.input.as_ref().unwrap().command_id)],
+    )
+    .await;
+    assert_isolated(
+        &pool,
+        Stage::Dispatched,
+        "command_rejected(deliver_input)",
+        |v| {
+            vec![record_body::Body::CommandRejected(CommandRejected {
+                command_id: input(v),
+                dispatch_attempt: 1,
+                reason: "resource_limit".into(),
+            })]
+        },
+    )
+    .await;
+    assert_isolated(&pool, Stage::Dispatched, "dispatch_deferred", |v| {
+        vec![record_body::Body::DispatchDeferred(InputDispatchDeferred {
+            command_id: input(v),
+            dispatch_attempt: 1,
+            reason: "generation_closed".into(),
+        })]
+    })
+    .await;
+    assert_isolated(&pool, Stage::Dispatched, "input_accepted", |v| {
+        vec![accepted(v.input.as_ref().unwrap().command_id)]
+    })
+    .await;
+    assert_isolated(&pool, Stage::Dispatched, "input_rejected", |v| {
+        vec![record_body::Body::InputRejected(InputRejected {
+            command_id: input(v),
+            dispatch_attempt: 1,
+            reason: "refused".into(),
+        })]
+    })
+    .await;
+    assert_isolated(&pool, Stage::Running, "run_finished", |v| {
+        vec![record_body::Body::RunFinished(RunFinished {
+            execution_id: v.execution.execution_id.to_string(),
+            input_command_id: input(v),
+        })]
+    })
+    .await;
+    assert_isolated(&pool, Stage::Running, "execution_state", |v| {
+        vec![execution_fact(
+            v.execution.execution_id,
+            v.execution.generation,
+            "stopping",
+        )]
+    })
+    .await;
     Ok(())
 }

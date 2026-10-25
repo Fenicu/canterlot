@@ -291,6 +291,113 @@ async fn cj_ack_waits_for_record_commit(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn heartbeats_are_acked_while_a_large_batch_is_ingested(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone(), timers()).await;
+    let hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    let journal = hello.cj_journal_id.clone();
+    let (tx, mut stream) = host.control(hello).await;
+    accepted(&mut stream).await;
+    sqlx::query("create function block_journal_commit() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(741235); return new; end $$")
+        .execute(&pool).await?;
+    sqlx::query("create constraint trigger block_journal_commit after insert or update on journal_cursors deferrable initially deferred for each row execute function block_journal_commit()")
+        .execute(&pool).await?;
+    let mut blocker = pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(741235)")
+        .execute(&mut *blocker)
+        .await?;
+    let records = (1..=2000)
+        .map(|seq| JournalRecord {
+            seq,
+            body: Some(RecordBody {
+                body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+            }),
+        })
+        .collect();
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: journal.clone(),
+                records,
+            })),
+        },
+    )
+    .await;
+    timeout(Duration::from_secs(10), async {
+        loop {
+            let committing: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and query = 'COMMIT' and wait_event = 'advisory')")
+                .fetch_one(&pool).await.unwrap();
+            if committing { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    for seq in 1..=3 {
+        send(
+            &tx,
+            ControlUp {
+                msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq })),
+            },
+        )
+        .await;
+        let Some(control_down::Msg::HeartbeatAck(ack)) =
+            timeout(Duration::from_secs(5), stream.message())
+                .await??
+                .unwrap()
+                .msg
+        else {
+            panic!("expected heartbeat ACK while the batch is blocked");
+        };
+        assert_eq!(ack.seq, seq);
+    }
+    blocker.commit().await?;
+    let Some(control_down::Msg::CjAck(ack)) = timeout(Duration::from_secs(60), stream.message())
+        .await??
+        .unwrap()
+        .msg
+    else {
+        panic!("expected CJ ACK");
+    };
+    assert_eq!(ack.up_to_seq, 2000);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_batch_for_another_journal_ends_the_stream(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone(), timers()).await;
+    let (tx, mut stream) = host
+        .control(host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control))
+        .await;
+    accepted(&mut stream).await;
+    let foreign = Uuid::now_v7();
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: foreign.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+                    }),
+                }],
+            })),
+        },
+    )
+    .await;
+    let error = timeout(Duration::from_secs(2), stream.message())
+        .await?
+        .unwrap_err();
+    assert_eq!(error.code(), Code::InvalidArgument);
+    assert_eq!(error.message(), "invalid_record");
+    let cursors: i64 = sqlx::query_scalar("select count(*) from journal_cursors")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(cursors, 0);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> TestResult {
     let host = Host::start(pool, timers()).await;
     let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);

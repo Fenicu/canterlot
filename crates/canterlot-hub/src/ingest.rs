@@ -1,4 +1,7 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use canterlot_proto::{
     limits::check_record_batch,
@@ -10,17 +13,13 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    delivery::receipts::{InputReceipt, apply_input_receipt_in_tx, apply_run_finished_in_tx},
+    delivery::receipts::{
+        InputReceipt, apply_input_receipt_in_tx, apply_run_finished_in_tx, sanitize_reason,
+    },
     events::{self, NewEvent, Scope},
     executions::{self, ExecutionError},
     model::ExecutionState,
 };
-
-static IGNORED_RECORDS: AtomicU64 = AtomicU64::new(0);
-
-pub fn ignored_record_count() -> u64 {
-    IGNORED_RECORDS.load(Ordering::Relaxed)
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JournalKind {
@@ -80,6 +79,7 @@ impl From<ExecutionError> for IngestError {
 pub struct Ingest {
     pool: PgPool,
     dispatcher: Option<crate::dispatcher::Dispatcher>,
+    ignored: Arc<AtomicU64>,
 }
 
 impl Ingest {
@@ -87,7 +87,12 @@ impl Ingest {
         Self {
             pool,
             dispatcher: None,
+            ignored: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub fn ignored_record_count(&self) -> u64 {
+        self.ignored.load(Ordering::Relaxed)
     }
 
     pub fn with_dispatcher(mut self, dispatcher: crate::dispatcher::Dispatcher) -> Self {
@@ -103,40 +108,32 @@ impl Ingest {
     ) -> Result<IngestOutcome, IngestError> {
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
         let journal_id = parse_id(&batch.journal_id)?;
-        if batch.records.is_empty() {
-            let rows = sqlx::query_as(
-                "select machine_id, kind, committed_seq from journal_cursors where journal_id = $1",
-            )
-            .bind(journal_id)
-            .fetch_all(&self.pool)
-            .await?;
-            return Ok(IngestOutcome::Committed {
-                up_to_seq: checked_cursor(machine_id, kind, rows)?,
-            });
+        if batch.records.iter().any(|record| record.seq == 0) {
+            return Err(IngestError::InvalidRecord);
         }
-        let mut up_to_seq = 0;
+        let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
+            "select machine_id, kind, committed_seq from journal_cursors where journal_id = $1",
+        )
+        .bind(journal_id)
+        .fetch_all(&self.pool)
+        .await?;
+        let mut up_to_seq = checked_cursor(machine_id, kind, rows)?;
         for record in &batch.records {
+            // Курсор только растёт: запись не новее снимка точно дубликат, транзакция не нужна.
+            if record.seq <= up_to_seq {
+                continue;
+            }
             let mut tx = self.pool.begin().await?;
-            // PK включает machine_id; блокировка журнала исключает одновременную регистрацию чужой машиной.
-            sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
-                .bind(journal_id.to_string())
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
+                .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
             let rows: Vec<(Uuid, String, i64)> = sqlx::query_as(
                 "select machine_id, kind, committed_seq from journal_cursors where journal_id = $1 for update",
             ).bind(journal_id).fetch_all(&mut *tx).await?;
-            let absent = rows.is_empty();
             up_to_seq = checked_cursor(machine_id, kind, rows)?;
-            if absent {
-                sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0)")
-                    .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
-            }
             if record.seq <= up_to_seq {
-                tx.commit().await?;
                 continue;
             }
             if record.seq > up_to_seq + 1 {
-                tx.commit().await?;
                 return Ok(IngestOutcome::Gap {
                     committed_seq: up_to_seq,
                     got_seq: record.seq,
@@ -154,7 +151,7 @@ impl Ingest {
             tx.commit().await?;
             up_to_seq = record.seq;
             if ignored {
-                IGNORED_RECORDS.fetch_add(1, Ordering::Relaxed);
+                self.ignored.fetch_add(1, Ordering::Relaxed);
             }
         }
         if let Some(dispatcher) = &self.dispatcher {
@@ -202,6 +199,7 @@ struct CommandTarget {
     kind: String,
     execution_id: Option<Uuid>,
     dispatch_attempt: i32,
+    delivery_state: String,
 }
 
 async fn command(
@@ -209,7 +207,7 @@ async fn command(
     machine_id: Uuid,
     command_id: Uuid,
 ) -> Result<Option<CommandTarget>, IngestError> {
-    Ok(sqlx::query_as("select kind, execution_id, dispatch_attempt from commands where id = $1 and machine_id = $2")
+    Ok(sqlx::query_as("select kind, execution_id, dispatch_attempt, delivery_state from commands where id = $1 and machine_id = $2")
         .bind(command_id).bind(machine_id).fetch_optional(conn).await?)
 }
 
@@ -271,19 +269,18 @@ async fn apply_body(
                         correlation_id,
                     )
                     .await?;
-                } else if dispatch_attempt == target.dispatch_attempt {
-                    if target.kind == "start_execution" {
-                        executions::set_state_in_tx(
-                            conn,
-                            target.execution_id.ok_or(IngestError::InvalidRecord)?,
-                            ExecutionState::Failed,
-                            Some("start_rejected"),
-                            correlation_id,
-                        )
-                        .await?;
-                    }
-                    sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = $2 where id = $1 and delivery_state <> 'completed'")
-                        .bind(command_id).bind(json!({"rejected": clean_reason(&fact.reason)})).execute(&mut *conn).await?;
+                } else if target.kind == "start_execution" {
+                    reject_start(
+                        conn,
+                        machine_id,
+                        command_id,
+                        dispatch_attempt,
+                        &fact.reason,
+                        correlation_id,
+                    )
+                    .await?;
+                } else {
+                    complete_rejected(conn, command_id, dispatch_attempt, &fact.reason).await?;
                 }
             }
         }
@@ -384,33 +381,12 @@ async fn apply_body(
             let generation =
                 i64::try_from(fact.generation).map_err(|_| IngestError::InvalidRecord)?;
             let to = fact.state.parse().map_err(|_| IngestError::InvalidRecord)?;
-            let conversation_id: Option<Uuid> = sqlx::query_scalar(
-                "select e.conversation_id from executions e join conversations c on c.id = e.conversation_id where e.id = $1 and e.generation = $2 and c.machine_id = $3",
+            let owned: Option<Uuid> = sqlx::query_scalar(
+                "select e.id from executions e join conversations c on c.id = e.conversation_id where e.id = $1 and e.generation = $2 and c.machine_id = $3",
             ).bind(execution_id).bind(generation).bind(machine_id).fetch_optional(&mut *conn).await?;
-            if let Some(conversation_id) = conversation_id {
+            if owned.is_some() {
                 let outcome = (!fact.outcome.is_empty()).then_some(fact.outcome.as_str());
-                match executions::set_state_in_tx(conn, execution_id, to, outcome, correlation_id)
-                    .await
-                {
-                    Ok(()) => {}
-                    Err(ExecutionError::InvalidTransition { from, to }) => {
-                        events::append(
-                            conn,
-                            NewEvent {
-                                scope: Scope::Conversation {
-                                    id: conversation_id,
-                                },
-                                kind: "execution_fact_rejected",
-                                conversation_id: Some(conversation_id),
-                                execution_id: Some(execution_id),
-                                payload: json!({"from": from, "to": to, "generation": generation}),
-                                correlation_id,
-                            },
-                        )
-                        .await?;
-                    }
-                    Err(error) => return Err(error.into()),
-                }
+                apply_execution_fact(conn, execution_id, to, outcome, correlation_id).await?;
             }
         }
         Body::RunFinished(fact) => {
@@ -430,14 +406,91 @@ async fn apply_body(
     Ok(false)
 }
 
-fn clean_reason(reason: &str) -> String {
-    let mut reason = reason.replace('\0', "");
-    let mut end = reason.len().min(1024);
-    while !reason.is_char_boundary(end) {
-        end -= 1;
+async fn reject_start(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    command_id: Uuid,
+    dispatch_attempt: i32,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    // Очередь блокируется раньше чтения команды: тот же порядок, что у квитанций и диспетчера.
+    sqlx::query(
+        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id where c.id = $1 for update of q",
+    )
+    .bind(command_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some(target) = command(conn, machine_id, command_id).await? else {
+        return Ok(());
+    };
+    if target.delivery_state == "completed" || target.dispatch_attempt != dispatch_attempt {
+        return Ok(());
     }
-    reason.truncate(end);
-    reason
+    if let Some(execution_id) = target.execution_id {
+        apply_execution_fact(
+            conn,
+            execution_id,
+            ExecutionState::Failed,
+            Some("start_rejected"),
+            correlation_id,
+        )
+        .await?;
+    }
+    complete_rejected(conn, command_id, dispatch_attempt, reason).await
+}
+
+async fn complete_rejected(
+    conn: &mut PgConnection,
+    command_id: Uuid,
+    dispatch_attempt: i32,
+    reason: &str,
+) -> Result<(), IngestError> {
+    sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = $3 where id = $1 and dispatch_attempt = $2 and delivery_state <> 'completed'")
+        .bind(command_id).bind(dispatch_attempt).bind(json!({"rejected": sanitize_reason(reason)})).execute(&mut *conn).await?;
+    Ok(())
+}
+
+async fn apply_execution_fact(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    to: ExecutionState,
+    outcome: Option<&str>,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let current: Option<(Uuid, String, i64)> =
+        sqlx::query_as("select conversation_id, state, generation from executions where id = $1")
+            .bind(execution_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some((conversation_id, state, generation)) = current else {
+        return Ok(());
+    };
+    if state == to.as_str() {
+        return Ok(());
+    }
+    match executions::set_state_in_tx(conn, execution_id, to, outcome, correlation_id).await {
+        Ok(()) => Ok(()),
+        Err(ExecutionError::InvalidTransition { from, to }) => {
+            events::append(
+                conn,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: conversation_id,
+                    },
+                    kind: "execution_fact_rejected",
+                    conversation_id: Some(conversation_id),
+                    execution_id: Some(execution_id),
+                    payload: json!({"from": from, "to": to, "generation": generation}),
+                    correlation_id,
+                },
+            )
+            .await?;
+            Ok(())
+        }
+        Err(ExecutionError::Db(sqlx::Error::RowNotFound)) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 impl Ingest {
