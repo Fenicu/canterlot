@@ -681,3 +681,62 @@ async fn revoked_machine_cannot_reconnect(pool: PgPool) {
     assert!(revoked);
     stop_hub(hub).await;
 }
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
+    use canterlot_proto::{
+        limits::MAX_MESSAGE_BYTES,
+        worker::v1::{Command, ControlDown, control_down},
+    };
+    use prost::Message;
+
+    let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
+    let mut fixture = Fixture::new(&pool, &hub).await;
+    let pause = hub.faults.pause_next(Point::BeforeCommandSend);
+    let mut worker = fixture.start();
+    let resume = hit(pause).await;
+    worker.state(SessionState::Live).await;
+    let connection = hub
+        .registry
+        .session_info(fixture.config.machine_id)
+        .unwrap()
+        .connection_id;
+    let sender = hub
+        .registry
+        .command_sender(fixture.config.machine_id)
+        .unwrap();
+    let invalid = ControlDown {
+        msg: Some(control_down::Msg::Command(Command {
+            command_id: "invalid".repeat(40_000),
+            ..Default::default()
+        })),
+    };
+    assert!(invalid.encoded_len() <= MAX_MESSAGE_BYTES);
+    sender.send(invalid).await.unwrap();
+    // Первая валидная команда уже взята хабом; следующая пойдёт за неверной.
+    resume.send(()).unwrap();
+    fixture.settled().await;
+    until(async || {
+        hub.faults
+            .commands()
+            .iter()
+            .any(|command| Uuid::parse_str(&command.command_id).is_err())
+    })
+    .await;
+    fixture.add_input().await;
+    fixture.settled().await;
+    fixture.assert_db(&["on_machine", "on_machine"], 2).await;
+    fixture.assert_local(&fixture.snapshot(), 2);
+    assert_eq!(
+        hub.registry
+            .session_info(fixture.config.machine_id)
+            .unwrap()
+            .connection_id,
+        connection
+    );
+    assert_eq!(hub.faults.hellos().len(), 1);
+    assert!(matches!(*worker.state.borrow(), SessionState::Live));
+    worker.stop().await;
+    fixture.reopen_and_assert(2);
+    stop_hub(hub).await;
+}

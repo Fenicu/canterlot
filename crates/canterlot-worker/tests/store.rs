@@ -311,18 +311,9 @@ fn journals_have_one_owner() {
 }
 
 #[test]
-fn invalid_commands_write_only_durable_rejections() {
+fn over_limit_commands_write_only_durable_rejections() {
     let dir = TempDir::new().unwrap();
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    let mut invalid_id = delivery();
-    invalid_id.command_id = "invalid".into();
-    assert!(matches!(
-        store.accept_command(&invalid_id).unwrap(),
-        Accept::Rejected {
-            reason: "invalid_command",
-            ..
-        }
-    ));
     let mut text = delivery();
     if let Some(command::Kind::DeliverInput(input)) = &mut text.kind {
         input.content = vec![ContentBlock {
@@ -359,16 +350,12 @@ fn invalid_commands_write_only_durable_rejections() {
             ..
         }
     ));
-    assert_eq!(store.cj_cursor().unwrap().last_seq, 4);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 3);
     drop(store);
     assert!(records(dir.path(), "inbox").is_empty());
-    assert_eq!(records(dir.path(), "cj").len(), 4);
-    assert_eq!(records(dir.path(), "receipts").len(), 4);
+    assert_eq!(records(dir.path(), "cj").len(), 3);
+    assert_eq!(records(dir.path(), "receipts").len(), 3);
     let mut store = WorkerStore::open(dir.path()).unwrap();
-    assert_eq!(
-        store.accept_command(&invalid_id).unwrap(),
-        Accept::Duplicate
-    );
     assert_eq!(store.accept_command(&text).unwrap(), Accept::Duplicate);
 }
 

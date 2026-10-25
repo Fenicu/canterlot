@@ -915,7 +915,7 @@ async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
 }
 
 #[tokio::test]
-async fn malformed_and_over_limit_commands_are_rejected_without_restart() {
+async fn invalid_ids_are_dropped_and_over_limit_commands_rejected_without_restart() {
     use canterlot_proto::worker::v1::{
         ContentBlock, DeliverInput, TextBlock, content_block, control_up, record_body,
     };
@@ -947,7 +947,7 @@ async fn malformed_and_over_limit_commands_are_rejected_without_restart() {
     }
     let mut facts = Vec::new();
     timeout(Duration::from_secs(3), async {
-        while facts.len() < 3 {
+        while facts.len() < 2 {
             assert!(!matches!(*state.borrow(), SessionState::Backoff { .. }));
             if let Observed::Control(message) = hub.event().await
                 && let Some(control_up::Msg::CjRecords(batch)) = message.msg
@@ -963,22 +963,17 @@ async fn malformed_and_over_limit_commands_are_rejected_without_restart() {
     })
     .await
     .unwrap();
-    for (fact, command, reason) in [
-        (&facts[0], &invalid, "invalid_command"),
-        (&facts[1], &large, "resource_limit"),
-    ] {
-        let record_body::Body::CommandRejected(rejected) = fact else {
-            panic!("missing rejection");
-        };
-        assert_eq!(rejected.command_id, command.command_id);
-        assert_eq!(rejected.reason, reason);
-    }
-    assert!(matches!(facts[2], record_body::Body::CommandStored(_)));
+    let record_body::Body::CommandRejected(rejected) = &facts[0] else {
+        panic!("missing rejection");
+    };
+    assert_eq!(rejected.command_id, large.command_id);
+    assert_eq!(rejected.reason, "resource_limit");
+    assert!(matches!(facts[1], record_body::Body::CommandStored(_)));
     stop_worker(stop, join).await;
     let mut store = WorkerStore::open(&path).unwrap();
     assert_eq!(
         store.accept_command(&invalid).unwrap(),
-        canterlot_worker::store::Accept::Duplicate
+        canterlot_worker::store::Accept::DroppedInvalidId
     );
 }
 

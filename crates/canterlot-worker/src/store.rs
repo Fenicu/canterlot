@@ -18,6 +18,7 @@ use uuid::Uuid;
 pub enum Accept {
     Stored { cj_seq: u64 },
     Duplicate,
+    DroppedInvalidId,
     Rejected { cj_seq: u64, reason: &'static str },
 }
 
@@ -240,7 +241,11 @@ impl WorkerStore {
 
     pub fn accept_command(&mut self, cmd: &Command) -> Result<Accept, StoreError> {
         self.ensure_open()?;
-        let command_id = receipt_id(&cmd.command_id);
+        let Ok(id) = Uuid::parse_str(&cmd.command_id) else {
+            tracing::warn!(error_kind = "invalid_command_id", "command dropped");
+            return Ok(Accept::DroppedInvalidId);
+        };
+        let command_id = id.to_string();
         if self.index.contains_key(&command_id) {
             #[cfg(feature = "fault-injection")]
             {
@@ -251,9 +256,7 @@ impl WorkerStore {
             }
             return Ok(Accept::Duplicate);
         }
-        let reason = if Uuid::parse_str(&cmd.command_id).is_err() {
-            Some("invalid_command")
-        } else if limits::check_deliver_input(cmd).is_err() {
+        let reason = if limits::check_deliver_input(cmd).is_err() {
             Some("resource_limit")
         } else {
             None

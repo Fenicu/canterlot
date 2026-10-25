@@ -232,3 +232,87 @@ fn ack_and_generation_errors_poison_the_store() {
     std::fs::remove_dir(dir.path().join("hub.toml")).unwrap();
     assert!(WorkerStore::open(dir.path()).unwrap().cj_cursor().is_ok());
 }
+
+#[test]
+fn invalid_command_id_leaves_all_journals_and_receipts_unchanged() {
+    let dir = TempDir::new().unwrap();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let mut cmd = Command {
+        command_id: Uuid::now_v7().to_string(),
+        kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        ..Default::default()
+    };
+    store.accept_command(&cmd).unwrap();
+    let before = [&store.cj, &store.inbox, &store.receipts]
+        .map(|journal| journal.read_from(1, usize::MAX).unwrap());
+    for id in ["invalid".into(), "x".repeat(MAX_MESSAGE_BYTES)] {
+        cmd.command_id = id;
+        assert_eq!(
+            store.accept_command(&cmd).unwrap(),
+            Accept::DroppedInvalidId
+        );
+    }
+    let after = [&store.cj, &store.inbox, &store.receipts]
+        .map(|journal| journal.read_from(1, usize::MAX).unwrap());
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(before.len(), after.len());
+        for (before, after) in before.iter().zip(after) {
+            assert_eq!(before.seq, after.seq);
+            assert_eq!(before.payload, after.payload);
+        }
+    }
+    assert_eq!(store.index.len(), 1);
+    drop(store);
+    let store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.index.len(), 1);
+    assert_eq!(store.receipts.last_seq(), 1);
+    assert_eq!(store.cj.last_seq(), 1);
+    assert_eq!(store.inbox.last_seq(), 1);
+}
+
+#[test]
+fn invalid_command_id_emits_one_warning_without_command_data() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct Output(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let output = Output(Arc::default());
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let dir = TempDir::new().unwrap();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let cmd = Command {
+        command_id: "private-invalid-id".into(),
+        execution_id: "private-payload".into(),
+        ..Default::default()
+    };
+    tracing::subscriber::with_default(subscriber, || {
+        assert_eq!(
+            store.accept_command(&cmd).unwrap(),
+            Accept::DroppedInvalidId
+        );
+    });
+    let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(log.lines().count(), 1);
+    assert!(log.contains("WARN"));
+    assert!(log.contains("invalid_command_id"));
+    assert!(!log.contains(&cmd.command_id));
+    assert!(!log.contains(&cmd.execution_id));
+}
