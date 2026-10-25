@@ -24,7 +24,11 @@ impl WorkerData for HubGrpc {
         let mut inbound = request.into_inner();
         let state = self.clone();
         let output = async_stream::try_stream! {
-            let first = tokio::time::timeout(state.timers.handshake, inbound.message()).await
+            let first = tokio::select! {
+                biased;
+                _ = state.shutdown.cancelled() => return,
+                first = tokio::time::timeout(state.timers.handshake, inbound.message()) => first,
+            }
                 .map_err(|_| Status::deadline_exceeded("stream handshake timed out"))??
                 .ok_or_else(|| Status::invalid_argument("missing stream handshake"))?;
             let Some(data_up::Msg::Hello(hello)) = first.msg else {
@@ -52,6 +56,7 @@ impl WorkerData for HubGrpc {
             loop {
                 let next = tokio::select! {
                     biased;
+                    _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
                     next = inbound.message() => next,
                 };

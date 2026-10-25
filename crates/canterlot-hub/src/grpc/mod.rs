@@ -10,6 +10,7 @@ use prost::Message;
 use sqlx::PgPool;
 use tokio::net::TcpListener;
 use tokio_stream::{Stream, wrappers::TcpListenerStream};
+use tokio_util::sync::CancellationToken;
 use tonic::{
     Status,
     transport::{Identity, Server, ServerTlsConfig, server::Router},
@@ -47,6 +48,7 @@ pub struct HubGrpc {
     pub installation: Installation,
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
+    shutdown: CancellationToken,
 }
 
 type ReplyStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
@@ -87,6 +89,7 @@ impl HubGrpc {
             installation,
             timers,
             ingest,
+            shutdown: CancellationToken::new(),
         }
     }
 
@@ -184,8 +187,12 @@ pub async fn serve(
     tls_key_pem: &str,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), tonic::transport::Error> {
+    let cancel = state.shutdown.clone();
     router(state, tls_cert_pem, tls_key_pem)?
-        .serve_with_shutdown(listen, shutdown)
+        .serve_with_shutdown(listen, async move {
+            shutdown.await;
+            cancel.cancel();
+        })
         .await
 }
 
@@ -196,7 +203,11 @@ pub async fn serve_with_listener(
     tls_key_pem: &str,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), tonic::transport::Error> {
+    let cancel = state.shutdown.clone();
     router(state, tls_cert_pem, tls_key_pem)?
-        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
+        .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {
+            shutdown.await;
+            cancel.cancel();
+        })
         .await
 }

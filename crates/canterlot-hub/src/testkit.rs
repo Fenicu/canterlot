@@ -3,6 +3,83 @@ use uuid::Uuid;
 
 use crate::model::HoldReason;
 
+pub struct TestHub {
+    pub addr: std::net::SocketAddr,
+    pub pki: tls::TestPki,
+    pub installation: crate::installation::Installation,
+    pub registry: crate::session::Registry,
+    pub dispatcher: crate::dispatcher::Dispatcher,
+    pub shutdown: tokio::sync::oneshot::Sender<()>,
+    pub join: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+}
+
+pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> TestHub {
+    use crate::{dispatcher, grpc, ingest, installation, outbox, session::Registry};
+    let directory = tempfile::tempdir().expect("test installation directory");
+    let manifest = directory.path().join("manifest");
+    let existing: Option<installation::Installation> =
+        sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
+            .fetch_optional(&pool)
+            .await
+            .expect("test installation lookup");
+    if let Some(existing) = existing {
+        std::fs::write(&manifest, format!(
+            "installation_id = \"{}\"\nrestore_generation = \"{}\"\nrestore_in_progress = false\n",
+            existing.installation_id, existing.restore_generation,
+        )).expect("test manifest");
+    } else {
+        installation::init(&pool, &manifest)
+            .await
+            .expect("test installation init");
+    }
+    let installation = installation::check(&pool, &manifest)
+        .await
+        .expect("test installation check");
+    let registry = Registry::new(timers.clone());
+    let (dispatcher, rx) = dispatcher::Dispatcher::channel();
+    let mut state =
+        grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
+    state.ingest =
+        std::sync::Arc::new(ingest::Ingest::new(pool.clone()).with_dispatcher(dispatcher.clone()));
+    let pki = tls::test_pki();
+    let cert = pki.server_cert_pem.clone();
+    let key = pki.server_key_pem.clone();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    let addr = listener.local_addr().expect("test address");
+    let (shutdown, stop) = tokio::sync::oneshot::channel();
+    let (stopping, stopped) = tokio::sync::watch::channel(false);
+    let outbox = tokio::spawn(outbox::run(
+        pool.clone(),
+        registry.clone(),
+        timers.clone(),
+        stopped.clone(),
+    ));
+    let dispatch = tokio::spawn(dispatcher::run(pool, registry.clone(), rx, timers, stopped));
+    let join = tokio::spawn(async move {
+        let signal = stopping.clone();
+        let result = grpc::serve_with_listener(state, listener, &cert, &key, async move {
+            let _ = stop.await;
+            let _ = signal.send(true);
+        })
+        .await;
+        let _ = stopping.send(true);
+        outbox.await.expect("test outbox task");
+        dispatch.await.expect("test dispatcher task");
+        result
+    });
+    TestHub {
+        addr,
+        pki,
+        installation,
+        registry,
+        dispatcher,
+        shutdown,
+        join,
+    }
+}
+
 pub mod tls {
     use rcgen::{BasicConstraints, CertificateParams, CertifiedIssuer, IsCa, KeyPair};
 

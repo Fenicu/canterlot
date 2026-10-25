@@ -1,7 +1,7 @@
-use std::{fs, process::Command};
+use std::{fs, process::Command, time::Duration};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use canterlot_hub::{installation, machines};
+use canterlot_hub::{installation, machines, testkit::tls::test_pki};
 use sha2::{Digest, Sha256};
 use sqlx::{ConnectOptions, PgPool};
 use uuid::Uuid;
@@ -97,11 +97,16 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
     let dir = tempfile::tempdir()?;
     let config = dir.path().join("hub.toml");
     let manifest = dir.path().join("installation.toml");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let addr = listener.local_addr()?;
+    drop(listener);
     let url = pool.connect_options().to_url_lossy().to_string();
     fs::write(dir.path().join("database-url"), &url)?;
     fs::write(
         &config,
-        "database_url_file = 'database-url'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n",
+        format!(
+            "database_url_file = 'database-url'\ngrpc_listen = '{addr}'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n"
+        ),
     )?;
     let run = |args: &[&str]| {
         Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
@@ -136,8 +141,60 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
             .await?,
         current.owner_id
     );
-    let served = run(&["serve"])?;
-    assert!(served.status.success());
+    let refuses_serve = |expected: &str| -> TestResult {
+        let served = run(&["serve"])?;
+        assert!(!served.status.success());
+        assert!(served.stdout.is_empty());
+        let error = String::from_utf8(served.stderr)?;
+        assert!(error == format!("{expected}\n"));
+        assert!(!error.contains(token));
+        assert!(!error.contains(&url));
+        Ok(())
+    };
+    refuses_serve("tls_cert_file_error")?;
+    let pki = test_pki();
+    fs::write(dir.path().join("cert.pem"), &pki.server_cert_pem)?;
+    refuses_serve("tls_key_file_error")?;
+    fs::write(dir.path().join("key.pem"), "invalid-private-key")?;
+    refuses_serve("grpc_server_error")?;
+    fs::write(dir.path().join("key.pem"), &pki.server_key_pem)?;
+    fs::write(dir.path().join("cert.pem"), "invalid-certificate")?;
+    refuses_serve("grpc_server_error")?;
+    fs::write(dir.path().join("cert.pem"), &pki.server_cert_pem)?;
+    let saved_manifest = fs::read(&manifest)?;
+    fs::rename(&manifest, dir.path().join("saved-manifest"))?;
+    refuses_serve("manifest_missing")?;
+    fs::write(&manifest, "invalid-manifest")?;
+    refuses_serve("manifest_mismatch")?;
+    fs::write(&manifest, saved_manifest)?;
+
+    let mut server = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
+        .args(["serve", "--config"])
+        .arg(&config)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            assert!(
+                server.try_wait()?.is_none(),
+                "serve exited before listening"
+            );
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                return Ok::<_, std::io::Error>(());
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await??;
+    let signalled = Command::new("kill")
+        .arg("-TERM")
+        .arg(server.id().expect("serve process id").to_string())
+        .output()?;
+    assert!(signalled.status.success());
+    let served = tokio::time::timeout(Duration::from_secs(10), server.wait_with_output()).await??;
+    assert_eq!(served.status.code(), Some(0));
     assert!(served.stdout.is_empty() && served.stderr.is_empty());
     let revoked = run(&["machine", "revoke", "--machine-id", &machine_id.to_string()])?;
     assert!(revoked.status.success());

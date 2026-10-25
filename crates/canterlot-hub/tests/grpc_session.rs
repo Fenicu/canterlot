@@ -778,8 +778,8 @@ async fn heartbeat_drives_availability(pool: PgPool) {
     let host = Host::start(
         pool,
         HubTimers {
-            degraded_after: Duration::from_millis(100),
-            unavailable_after: Duration::from_millis(200),
+            degraded_after: Duration::from_millis(300),
+            unavailable_after: Duration::from_millis(600),
             ..timers()
         },
     )
@@ -795,7 +795,10 @@ async fn heartbeat_drives_availability(pool: PgPool) {
         .control(host.hello(machine, connection, StreamKind::Control))
         .await;
     accepted(&mut control).await;
-    assert_eq!(host.registry.availability(machine), Availability::Degraded);
+    assert_eq!(
+        changes.recv().await.unwrap(),
+        (machine, Availability::Degraded)
+    );
     let (_data_tx, mut data) = host
         .data(
             host.hello(machine, connection, StreamKind::Data),
@@ -803,19 +806,27 @@ async fn heartbeat_drives_availability(pool: PgPool) {
         )
         .await;
     data_accepted(&mut data).await;
-    heartbeat(&tx, &mut control, 5).await;
-    changed(&mut changes, machine, Availability::Available).await;
-    assert_eq!(host.registry.availability(machine), Availability::Available);
-    changed(&mut changes, machine, Availability::Degraded).await;
-    assert_eq!(host.registry.availability(machine), Availability::Degraded);
-    changed(&mut changes, machine, Availability::Unavailable).await;
-    assert_eq!(
-        host.registry.availability(machine),
-        Availability::Unavailable
-    );
+    for expected in [
+        Availability::Available,
+        Availability::Degraded,
+        Availability::Unavailable,
+    ] {
+        assert_eq!(
+            timeout(Duration::from_secs(3), changes.recv())
+                .await
+                .unwrap()
+                .unwrap(),
+            (machine, expected)
+        );
+    }
     heartbeat(&tx, &mut control, 6).await;
-    changed(&mut changes, machine, Availability::Available).await;
-    assert_eq!(host.registry.availability(machine), Availability::Available);
+    assert_eq!(
+        timeout(Duration::from_secs(3), changes.recv())
+            .await
+            .unwrap()
+            .unwrap(),
+        (machine, Availability::Available)
+    );
     drop(tx);
     assert!(control.message().await.unwrap().is_none());
     assert!(

@@ -79,11 +79,20 @@ impl From<ExecutionError> for IngestError {
 #[derive(Clone)]
 pub struct Ingest {
     pool: PgPool,
+    dispatcher: Option<crate::dispatcher::Dispatcher>,
 }
 
 impl Ingest {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self {
+            pool,
+            dispatcher: None,
+        }
+    }
+
+    pub fn with_dispatcher(mut self, dispatcher: crate::dispatcher::Dispatcher) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
     }
 
     pub async fn apply_batch(
@@ -146,6 +155,13 @@ impl Ingest {
             up_to_seq = record.seq;
             if ignored {
                 IGNORED_RECORDS.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some(dispatcher) = &self.dispatcher {
+            for conversation in
+                crate::dispatcher::queued_conversations(&self.pool, Some(machine_id)).await?
+            {
+                dispatcher.trigger(conversation);
             }
         }
         Ok(IngestOutcome::Committed { up_to_seq })
