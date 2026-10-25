@@ -1,0 +1,34 @@
+{"data":{"header":{"cli":"/home/fenicu/.local/bin/claude","cwd":"/tmp/canterlot-stage0/claude-code/diagnostics","effort":"low","env_allowlist":[{"HOME":"/home/fenicu"},{"USER":"fenicu"},{"LANG":"en_US.UTF-8"},{"TERM":"dumb"},{"PATH":"/home/fenicu/.local/bin:/usr/local/bin:/usr/bin:/bin"},{"DISABLE_AUTOUPDATER":"1"},{"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC":"1"}],"model":"haiku","unix_time":1792911442},"scenario":"diagnostics"},"dir":"note","t_ms":0}
+{"data":{"step":"locate CLI"},"dir":"note","t_ms":0}
+{"data":{"check":"cli_located","detail":{"configured":"/home/fenicu/.local/bin/claude","resolved":"/home/fenicu/.local/share/claude/versions/2.1.310"},"ok":true},"dir":"note","t_ms":0}
+{"data":{"step":"version"},"dir":"note","t_ms":0}
+{"data":{"exec":["--version"]},"dir":"note","t_ms":0}
+{"data":"2.1.310 (Claude Code)","dir":"out","t_ms":16}
+{"data":{"exec_done":{"args":["--version"],"code":0,"ms":15}},"dir":"note","t_ms":16}
+{"data":{"check":"version","detail":{"ms":15,"stdout":"2.1.310 (Claude Code)"},"ok":true},"dir":"note","t_ms":16}
+{"data":{"step":"auth status (documented `claude auth status --json`, no model request)"},"dir":"note","t_ms":16}
+{"data":{"exec":["auth","status","--json"]},"dir":"note","t_ms":16}
+{"data":{"analyticsDisabled":true,"apiProvider":"firstParty","authMethod":"claude.ai","configDirectory":"/home/fenicu/.claude","email":"<redacted>","loggedIn":true,"orgId":"<redacted>","orgName":"<redacted>","projectsDirectory":"/home/fenicu/.claude/projects","subscriptionType":"max"},"dir":"out","t_ms":429}
+{"data":{"exec_done":{"args":["auth","status","--json"],"code":0,"ms":413}},"dir":"note","t_ms":429}
+{"data":{"check":"auth_ready","detail":{"apiProvider":"firstParty","authMethod":"claude.ai","exit_code":0,"fields":["analyticsDisabled","apiProvider","authMethod","configDirectory","email","loggedIn","orgId","orgName","projectsDirectory","subscriptionType"],"loggedIn":true,"ms":413,"subscriptionType":"max"},"ok":true},"dir":"note","t_ms":429}
+{"data":{"step":"dry start: stream-json process with the full base flag set, no input written"},"dir":"note","t_ms":430}
+{"data":{"spawn":{"args":["-p","--input-format","stream-json","--output-format","stream-json","--verbose","--include-partial-messages","--replay-user-messages","--setting-sources","project","--strict-mcp-config","--mcp-config","/tmp/canterlot-stage0/claude-code/.ipc/diagnostics/mcp.json","--permission-prompt-tool","mcp__canterlot__approve","--permission-mode","manual","--model","haiku","--effort","low"],"cwd":"/tmp/canterlot-stage0/claude-code/diagnostics","env_keys":["HOME","USER","LANG","TERM","PATH","DISABLE_AUTOUPDATER","CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"],"pid":2992554,"program":"/home/fenicu/.local/bin/claude"}},"dir":"note","t_ms":430}
+{"data":{"mcp_connection":{"conn":1,"event":"connected"}},"dir":"note","t_ms":1055}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_in","frame":{"id":"server-discover-probe-1","jsonrpc":"2.0","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/clientCapabilities":{"elicitation":{"form":{},"url":{}},"roots":{"listChanged":true}},"io.modelcontextprotocol/clientInfo":{"description":"Anthropic's agentic coding tool","name":"claude-code","title":"Claude Code","version":"2.1.310","websiteUrl":"https://claude.com/claude-code"},"io.modelcontextprotocol/protocolVersion":"2026-07-28"}}}}},"dir":"note","t_ms":1055}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_out","frame":{"error":{"code":-32601,"message":"method not found"},"id":"server-discover-probe-1","jsonrpc":"2.0"}}},"dir":"note","t_ms":1056}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_in","frame":{"id":0,"jsonrpc":"2.0","method":"initialize","params":{"capabilities":{"elicitation":{"form":{},"url":{}},"roots":{"listChanged":true}},"clientInfo":{"description":"Anthropic's agentic coding tool","name":"claude-code","title":"Claude Code","version":"2.1.310","websiteUrl":"https://claude.com/claude-code"},"protocolVersion":"2025-11-25"}}}},"dir":"note","t_ms":1074}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_out","frame":{"id":0,"jsonrpc":"2.0","result":{"capabilities":{"tools":{}},"protocolVersion":"2025-11-25","serverInfo":{"name":"canterlot","version":"0.1.0"}}}}},"dir":"note","t_ms":1074}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_in","frame":{"jsonrpc":"2.0","method":"notifications/initialized"}}},"dir":"note","t_ms":1112}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_in","frame":{"id":1,"jsonrpc":"2.0","method":"tools/list"}}},"dir":"note","t_ms":1112}
+{"data":{"mcp_trace":{"conn":1,"dir":"mcp_out","frame":{"id":1,"jsonrpc":"2.0","result":{"tools":[{"description":"Permission prompt handler of the canterlot probe supervisor. Not for direct use.","inputSchema":{"additionalProperties":true,"type":"object"},"name":"approve"}]}}}},"dir":"note","t_ms":1112}
+{"data":{"check":"dry_start_frames_before_any_input","detail":{"alive_after_20s_without_input":true,"frames":[],"init_emitted_before_input":false},"ok":true},"dir":"note","t_ms":20432}
+{"data":{"process_tree":{"label":"dry start, no input","processes":[{"cmdline":"/home/fenicu/.local/bin/claude -p --input-format stream-json --output-format stream-json --verbose --include-partial-messages --replay-user-messages --setting-s","comm":"claude","pgid":2992554,"pid":2992554,"ppid":2992258,"start_ticks":177117705,"state":"S"},{"cmdline":"/home/fenicu/myprojects/canterlot/.claude/worktrees/agent-a963a8efcf4655eb5/spikes/claude-probe/target/debug/claude-probe mcp-permission --socket /tmp/canterlot","comm":"claude-probe","pgid":2992554,"pid":2992570,"ppid":2992554,"start_ticks":177117768,"state":"S"}],"root_pid":2992554}},"dir":"note","t_ms":20450}
+{"data":{"check":"permission_mcp_server_spawned_at_startup","detail":{"processes":2},"ok":true},"dir":"note","t_ms":20450}
+{"data":{"step":"close stdin without any input: observe exit"},"dir":"note","t_ms":20450}
+{"data":{"step":"stdin closed (EOF)"},"dir":"note","t_ms":20450}
+{"data":{"mcp_connection":{"conn":1,"event":"closed"}},"dir":"note","t_ms":20455}
+{"data":{"step":"stdout closed"},"dir":"note","t_ms":20538}
+{"data":{"exit":{"code":0,"signal":null}},"dir":"note","t_ms":20539}
+{"data":{"check":"eof_without_input_exits","detail":{"exit":{"code":0,"signal":null},"ms_after_eof":89,"other_frames":[],"results_emitted":[]},"ok":true},"dir":"note","t_ms":20539}
+{"data":{"turns_used":0},"dir":"note","t_ms":20539}
+{"data":{"reason":"CLI 2.1.310 (Claude Code) found, logged in, startup works without a paid request","verdict":"PASS"},"dir":"note","t_ms":20539}
