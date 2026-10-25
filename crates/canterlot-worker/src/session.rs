@@ -56,6 +56,10 @@ pub enum WorkerError {
     Protocol,
     #[error("hub restore generation changed; restore reconciliation is required")]
     RestoreGenerationChanged,
+    #[error(
+        "configured restore generation differs from persisted generation; re-pairing is required"
+    )]
+    GenerationMismatch,
     #[error("hub and worker journal cursors diverged")]
     StateDivergence,
     #[error("invalid worker timers or credential metadata")]
@@ -137,6 +141,7 @@ impl Worker {
     }
 
     pub async fn run(mut self, mut shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
+        self.initialize_generation()?;
         let hub_url =
             url::Url::parse(&self.config.hub_url).map_err(|_| WorkerError::InvalidConfig)?;
         if hub_url.scheme() != "https"
@@ -207,6 +212,7 @@ impl Worker {
                 }
                 Err(
                     error @ (WorkerError::RestoreGenerationChanged
+                    | WorkerError::GenerationMismatch
                     | WorkerError::StateDivergence
                     | WorkerError::Config(_)
                     | WorkerError::InvalidConfig
@@ -256,6 +262,7 @@ impl Worker {
         if self.store.is_none() {
             self.store = Some(WorkerStore::open(&self.config.data_dir)?);
         }
+        self.initialize_generation()?;
         let token = read_token(&self.config.token_file)?;
         let mut metadata: MetadataValue<Ascii> = format!("Bearer {token}")
             .parse()
@@ -324,9 +331,6 @@ impl Worker {
                 self.check_generation(&accepted)?;
                 let mut hello = hello;
                 hello.stream_kind = StreamKind::Data as i32;
-                hello
-                    .restore_generation
-                    .clone_from(&accepted.restore_generation);
                 send(
                     &data_tx,
                     DataUp {
@@ -370,11 +374,6 @@ impl Worker {
             || cursor.first_stored_seq > committed.saturating_add(1)
         {
             return Err(WorkerError::StateDivergence);
-        }
-        if self.store().restore_generation()?.is_none() {
-            self.store_mut().set_restore_generation(
-                Uuid::parse_str(&accepted.restore_generation).map_err(|_| WorkerError::Protocol)?,
-            )?;
         }
         self.store_mut().on_cj_ack(committed)?;
         let replay_end = cursor.last_seq;
@@ -453,6 +452,16 @@ impl Worker {
         }
     }
 
+    fn initialize_generation(&mut self) -> Result<(), WorkerError> {
+        let configured = self.config.restore_generation;
+        match self.store().restore_generation()? {
+            None => self.store_mut().set_restore_generation(configured)?,
+            Some(persisted) if persisted == configured => {}
+            Some(_) => return Err(WorkerError::GenerationMismatch),
+        }
+        Ok(())
+    }
+
     fn hello(&self, connection: Uuid, boot_id: &str) -> Result<Hello, WorkerError> {
         Ok(Hello {
             installation_id: self.config.installation_id.to_string(),
@@ -460,7 +469,8 @@ impl Worker {
             restore_generation: self
                 .store()
                 .restore_generation()?
-                .map_or_else(String::new, |g| g.to_string()),
+                .ok_or(WorkerError::GenerationMismatch)?
+                .to_string(),
             protocol_version: PROTOCOL_VERSION,
             connection_id: connection.to_string(),
             cj_journal_id: self.store().cj_journal_id()?.to_string(),
@@ -475,11 +485,7 @@ impl Worker {
     fn check_generation(&self, accepted: &Accepted) -> Result<(), WorkerError> {
         let generation =
             Uuid::parse_str(&accepted.restore_generation).map_err(|_| WorkerError::Protocol)?;
-        if self
-            .store()
-            .restore_generation()?
-            .is_some_and(|known| known != generation)
-        {
+        if self.store().restore_generation()? != Some(generation) {
             return Err(WorkerError::RestoreGenerationChanged);
         }
         Ok(())

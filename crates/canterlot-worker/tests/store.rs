@@ -393,7 +393,8 @@ fn token_file_permissions_are_enforced() {
 
 fn config_text() -> String {
     format!(
-        "hub_url = \"https://hub.example:8443\"\nca_cert = \"ca.pem\"\ntoken_file = \"token\"\nmachine_id = \"{}\"\ninstallation_id = \"{}\"\ndata_dir = \"data\"\n",
+        "hub_url = \"https://hub.example:8443\"\nca_cert = \"ca.pem\"\ntoken_file = \"token\"\nmachine_id = \"{}\"\ninstallation_id = \"{}\"\nrestore_generation = \"{}\"\ndata_dir = \"data\"\n",
+        Uuid::now_v7(),
         Uuid::now_v7(),
         Uuid::now_v7()
     )
@@ -411,6 +412,7 @@ fn config_loads_with_defaults() {
     assert_eq!(config.data_dir, Path::new("data"));
     assert_eq!(config.machine_id.get_version_num(), 7);
     assert_eq!(config.installation_id.get_version_num(), 7);
+    assert_eq!(config.restore_generation.get_version_num(), 7);
     assert_eq!(config.timers.handshake, Duration::from_secs(10));
     assert_eq!(config.timers.heartbeat, Duration::from_secs(5));
     assert_eq!(config.timers.heartbeat_ack, Duration::from_secs(5));
@@ -615,5 +617,24 @@ fn binary_checks_config_and_token_before_starting_session() {
     assert!(!String::from_utf8_lossy(&output.stderr).contains("test-token"));
     for name in ["cj", "inbox", "receipts"] {
         assert!(dir.path().join("data").join(name).join("header").is_file());
+    }
+}
+
+#[test]
+fn config_requires_valid_restore_generation() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("worker.toml");
+    let text = config_text();
+    let missing = text
+        .lines()
+        .filter(|line| !line.starts_with("restore_generation"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for contents in [
+        missing.clone(),
+        format!("{missing}\nrestore_generation = 'invalid'\n"),
+    ] {
+        fs::write(&path, contents).unwrap();
+        assert!(load(&path).is_err());
     }
 }

@@ -93,7 +93,8 @@ cargo run -p canterlot-hub -- machine add --config ~/.config/canterlot/hub.toml 
 
 `init` применяет миграции и создаёт владельца, запись инсталляции и внешний манифест.
 Повторный вызов запрещён, если уже есть запись инсталляции или файл манифеста.
-`machine add` выводит ровно две строки: `machine_id=<uuid>` и `token=<base64url>`.
+`machine add` выводит ровно четыре строки: `machine_id=<uuid>`, `installation_id=<uuid>`, `restore_generation=<uuid>`, `token=<base64url>`.
+Перенесите `machine_id`, `installation_id` и `restore_generation` в конфиг воркера, а значение `token` сохраните в файл, указанный в `token_file`.
 Токен показывается один раз; сохраните его в файл воркера с правами `0600` или строже.
 Хаб сохраняет только SHA-256 токена, повторно получить токен нельзя.
 

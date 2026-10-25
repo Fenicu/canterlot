@@ -124,13 +124,21 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
     assert!(added.stderr.is_empty());
     let text = String::from_utf8(added.stdout)?;
     let lines: Vec<_> = text.lines().collect();
-    assert_eq!(lines.len(), 2);
+    assert_eq!(lines.len(), 4);
     let machine_id = Uuid::parse_str(
         lines[0]
             .strip_prefix("machine_id=")
             .expect("machine id missing"),
     )?;
-    let token = lines[1].strip_prefix("token=").expect("token missing");
+    assert_eq!(
+        lines[1],
+        format!("installation_id={}", current.installation_id)
+    );
+    assert_eq!(
+        lines[2],
+        format!("restore_generation={}", current.restore_generation)
+    );
+    let token = lines[3].strip_prefix("token=").expect("token missing");
     assert_eq!(machines::verify(&pool, token).await?, Some(machine_id));
     assert_eq!(text.matches(token).count(), 1);
     assert!(!text.contains(&url));

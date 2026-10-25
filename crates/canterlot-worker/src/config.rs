@@ -15,6 +15,7 @@ pub struct WorkerConfig {
     pub token_file: PathBuf,
     pub machine_id: Uuid,
     pub installation_id: Uuid,
+    pub restore_generation: Uuid,
     pub data_dir: PathBuf,
     #[serde(default)]
     pub timers: WorkerTimers,

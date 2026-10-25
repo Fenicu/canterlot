@@ -209,6 +209,7 @@ impl ProtocolHub {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let (events, receiver) = mpsc::channel(64);
+        let restore_generation = behavior.generation;
         let service = Service { behavior, events };
         let task = tokio::spawn(async move {
             Server::builder()
@@ -235,6 +236,7 @@ impl ProtocolHub {
             token_file,
             machine_id: Uuid::now_v7(),
             installation_id: Uuid::now_v7(),
+            restore_generation,
             data_dir: directory.path().join("store"),
             timers: WorkerTimers {
                 handshake: Duration::from_millis(300),

@@ -41,16 +41,14 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let ca_cert = directory.path().join("ca.pem");
     fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
     let data_dir = directory.path().join("store");
-    let mut store = WorkerStore::open(&data_dir).unwrap();
-    store
-        .set_restore_generation(hub.installation.restore_generation)
-        .unwrap();
+    let store = WorkerStore::open(&data_dir).unwrap();
     let config = WorkerConfig {
         hub_url: format!("https://localhost:{}", hub.addr.port()),
         ca_cert,
         token_file,
         machine_id: machine.machine_id,
         installation_id: hub.installation.installation_id,
+        restore_generation: hub.installation.restore_generation,
         data_dir,
         timers: WorkerTimers {
             handshake: Duration::from_secs(2),
@@ -116,6 +114,7 @@ async fn worker_connects_and_goes_live(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
+    assert_eq!(store.restore_generation().unwrap(), None);
     let (stop, mut state, join) = start(config, store);
     wait_state(&mut state, SessionState::Live).await;
     let before = hub.registry.session_info(machine).unwrap();
@@ -261,7 +260,7 @@ async fn no_listening_socket_on_worker(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (directory, config, store) = fixture(&pool, &hub).await;
     let path = directory.path().join("worker.toml");
-    fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.data_dir)).unwrap();
+    fs::write(&path, format!("hub_url = {:?}\nca_cert = {:?}\ntoken_file = {:?}\nmachine_id = {:?}\ninstallation_id = {:?}\nrestore_generation = {:?}\ndata_dir = {:?}\n", config.hub_url, config.ca_cert, config.token_file, config.machine_id.to_string(), config.installation_id.to_string(), config.restore_generation.to_string(), config.data_dir)).unwrap();
     drop(store);
     let mut child = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
         .args(["run", "--config"])
@@ -392,7 +391,7 @@ mod support;
 use support::{Behavior, Observed, ProtocolHub};
 
 #[tokio::test]
-async fn first_accepted_persists_generation_and_binds_two_verified_connections() {
+async fn configured_generation_is_persisted_and_binds_two_verified_connections() {
     let behavior = Behavior::default();
     let generation = behavior.generation;
     let (mut hub, store) = ProtocolHub::start(behavior).await;
@@ -422,7 +421,7 @@ async fn first_accepted_persists_generation_and_binds_two_verified_connections()
     assert_eq!(control.cursors[0].first_stored_seq, 1);
     assert_eq!(control.cursors[0].last_seq, 0);
     assert_eq!(control.cursors[0].acked_seq_known_to_worker, 0);
-    assert!(control.restore_generation.is_empty());
+    assert_eq!(control.restore_generation, generation.to_string());
     assert_eq!(data.restore_generation, generation.to_string());
     assert_eq!(control.connection_id, data.connection_id);
     assert_eq!(control.cj_journal_id, data.cj_journal_id);
@@ -604,10 +603,7 @@ async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(p
     let second_dir = TempDir::new().unwrap();
     let mut second_config = config.clone();
     second_config.data_dir = second_dir.path().to_owned();
-    let mut second_store = WorkerStore::open(second_dir.path()).unwrap();
-    second_store
-        .set_restore_generation(hub.installation.restore_generation)
-        .unwrap();
+    let second_store = WorkerStore::open(second_dir.path()).unwrap();
     let (stop, mut state, join) = start(config, store);
     wait_state(&mut state, SessionState::Live).await;
     let connection = hub.registry.session_info(machine).unwrap().connection_id;
@@ -665,4 +661,80 @@ async fn worker_api_refuses_plaintext_urls() {
         Err(WorkerError::InvalidConfig)
     ));
     assert!(hub.events.try_recv().is_err());
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wrong_configured_generation_is_rejected_by_hub(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
+    let (_directory, mut config, store) = fixture(&pool, &hub).await;
+    config.restore_generation = Uuid::now_v7();
+    let machine = config.machine_id;
+    let path = config.data_dir.clone();
+    let generation = config.restore_generation;
+    let (stop, mut state, join) = start(config, store);
+    wait_state(&mut state, SessionState::Backoff).await;
+    assert!(hub.registry.session_info(machine).is_none());
+    stop_worker(stop, join).await;
+    assert_eq!(
+        WorkerStore::open(&path)
+            .unwrap()
+            .restore_generation()
+            .unwrap(),
+        Some(generation)
+    );
+    stop_hub(hub).await;
+}
+
+#[tokio::test]
+async fn accepted_generation_mismatch_stops_without_adopting_hub_generation() {
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let generation = Uuid::now_v7();
+    hub.config.restore_generation = generation;
+    let path = hub.config.data_dir.clone();
+    let (_stop, state, join) = start(hub.config.clone(), store);
+    assert!(matches!(
+        timeout(Duration::from_secs(2), join)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WorkerError::RestoreGenerationChanged)
+    ));
+    assert_ne!(*state.borrow(), SessionState::Live);
+    let Observed::Hello(hello, _) = hub.event().await else {
+        panic!("expected control hello");
+    };
+    assert_eq!(hello.restore_generation, generation.to_string());
+    assert!(hub.events.try_recv().is_err());
+    assert_eq!(
+        WorkerStore::open(&path)
+            .unwrap()
+            .restore_generation()
+            .unwrap(),
+        Some(generation)
+    );
+}
+
+#[tokio::test]
+async fn persisted_generation_mismatch_refuses_start_without_overwrite() {
+    let (mut hub, mut store) = ProtocolHub::start(Behavior::default()).await;
+    let persisted = Uuid::now_v7();
+    store.set_restore_generation(persisted).unwrap();
+    let path = hub.config.data_dir.clone();
+    let (_stop, state, join) = start(hub.config.clone(), store);
+    assert!(matches!(
+        timeout(Duration::from_secs(1), join)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WorkerError::GenerationMismatch)
+    ));
+    assert_eq!(*state.borrow(), SessionState::Disconnected);
+    assert!(hub.events.try_recv().is_err());
+    assert_eq!(
+        WorkerStore::open(&path)
+            .unwrap()
+            .restore_generation()
+            .unwrap(),
+        Some(persisted)
+    );
 }

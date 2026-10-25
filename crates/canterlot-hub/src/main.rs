@@ -101,8 +101,10 @@ async fn run(args: Args) -> Result<(), String> {
                         .map_err(|_| "db_error".to_owned())?;
                     writeln!(
                         std::io::stdout().lock(),
-                        "machine_id={}\ntoken={}",
+                        "machine_id={}\ninstallation_id={}\nrestore_generation={}\ntoken={}",
                         machine.machine_id,
+                        installation.installation_id,
+                        installation.restore_generation,
                         machine.token
                     )
                     .map_err(|_| "output_error".to_owned())?;
