@@ -278,6 +278,7 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
         let deadline = sent
             .values()
             .map(|item| item.deadline)
+            .filter(|deadline| *deadline > Instant::now())
             .min()
             .unwrap_or_else(|| Instant::now() + timers.dispatch_sweep);
         tokio::select! {
@@ -286,7 +287,10 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             _ = wake.recv() => {},
             _ = tokio::time::sleep_until(deadline) => {},
         }
-        let current = registry.command_sender(machine);
+        let Some((sender, connection, credential)) = registry.command_session(machine) else {
+            break;
+        };
+        let current = Some(sender);
         let changed = match (&session, &current) {
             (Some(previous), Some(current)) => !previous.same_channel(current),
             (None, None) => false,
@@ -299,6 +303,23 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
         }
         if closing {
             continue;
+        }
+        let active = async {
+            crate::machines::credential_active(&mut *pool.acquire().await?, machine, &credential)
+                .await
+        }
+        .await;
+        match active {
+            Ok(true) => {}
+            Ok(false) => {
+                registry.revoke(machine, connection);
+                break;
+            }
+            Err(_) => {
+                tracing::warn!(kind = "outbox_database", machine_id = %machine, "credential check failed");
+                tokio::time::sleep(timers.dispatch_sweep).await;
+                continue;
+            }
         }
         let rows = tokio::select! {
             biased;
@@ -331,6 +352,7 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                     continue;
                 }
                 if item.resent {
+                    tracing::warn!(kind = "outbox_restart", command_id = %row.id, machine_id = %machine, "command receipt timeout");
                     // Пустое сообщение закрывает сеанс внутри gRPC и не попадает в сеть.
                     tokio::select! {
                         biased;
@@ -342,7 +364,7 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                     break;
                 }
             } else if registry.availability(machine) != Availability::Available {
-                break;
+                continue;
             }
             let command = match to_proto(&row) {
                 Ok(command) => command,
@@ -362,6 +384,9 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             match sender.try_send(envelope(command)) {
                 Ok(()) => {
                     let resent = sent.contains_key(&row.id);
+                    if resent {
+                        tracing::info!(kind = "outbox_resend", command_id = %row.id, machine_id = %machine, "command resent");
+                    }
                     sent.insert(
                         row.id,
                         Sent {

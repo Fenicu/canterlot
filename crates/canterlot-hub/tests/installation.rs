@@ -261,7 +261,7 @@ fn config_loads_paths_defaults_and_timer_overrides() -> TestResult {
     fs::write(
         &path,
         format!(
-            "{}\n[timers]\nhandshake = 1\ndegraded_after = 2\nunavailable_after = 3\ncommand_stored_receipt = 4\ndispatch_sweep = 6\nhttp2_keepalive_interval = 31\nhttp2_keepalive_timeout = 11\n",
+            "{}\n[timers]\nhandshake = '1s'\ndegraded_after = '2s'\nunavailable_after = '3s'\ncommand_stored_receipt = '4s'\ndispatch_sweep = '6s'\nhttp2_keepalive_interval = '31s'\nhttp2_keepalive_timeout = '11s'\n",
             config_text()
         ),
     )?;
@@ -275,7 +275,7 @@ fn config_loads_paths_defaults_and_timer_overrides() -> TestResult {
     assert_eq!(timers.http2_keepalive_timeout, Duration::from_secs(11));
     fs::write(
         &path,
-        format!("{}\n[timers]\nhandshake = 1\n", config_text()),
+        format!("{}\n[timers]\nhandshake = '1s'\n", config_text()),
     )?;
     assert_eq!(
         HubConfig::load(&path)?.timers.dispatch_sweep,
@@ -320,7 +320,8 @@ async fn cli_serve_refuses_without_manifest(pool: PgPool) -> TestResult {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr)?;
-    assert_eq!(stderr.trim(), "manifest_missing");
+    assert_eq!(stderr.lines().last(), Some("manifest_missing"));
+    assert!(stderr.contains("migrations_applied"));
     assert!(!stderr.contains(&url));
     assert!(!stderr.contains("ignored-secret-environment"));
     assert!(!dir.path().join("external/installation.toml").exists());

@@ -22,6 +22,7 @@ use crate::{config::HubTimers, installation::Installation, session::Registry};
 mod auth;
 mod control;
 mod data;
+mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
 pub const KNOWN_CAPABILITIES: &[&str] = &[];
@@ -119,6 +120,20 @@ impl IngestLane {
 
 type ReplyStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send>>;
 
+fn rejection_kind(reason: i32) -> &'static str {
+    match RejectReason::try_from(reason).unwrap_or(RejectReason::Unspecified) {
+        RejectReason::CredentialRevoked => "credential_revoked",
+        RejectReason::InstallationMismatch => "installation_mismatch",
+        RejectReason::ProtocolIncompatible => "protocol_incompatible",
+        RejectReason::UnknownRequiredCapability => "unknown_required_capability",
+        RejectReason::IdentityInUse => "identity_in_use",
+        RejectReason::ConnectionBindingMismatch => "connection_binding_mismatch",
+        RejectReason::HubNotOperational => "hub_not_operational",
+        RejectReason::LocalStateReset => "local_state_reset",
+        RejectReason::Unspecified => "unspecified",
+    }
+}
+
 fn rejection(reason: RejectReason) -> Rejected {
     Rejected {
         reason: reason as i32,
@@ -159,6 +174,65 @@ impl HubGrpc {
             faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    async fn admit_control(
+        &self,
+        machine_id: Uuid,
+        connection_id: Uuid,
+        journal_id: Uuid,
+        credential: Vec<u8>,
+    ) -> Result<Result<(crate::session::ControlLease, mpsc::Receiver<ControlDown>), Rejected>, Status>
+    {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|_| Status::internal("database"))?;
+        let (owner_id, previous): (Uuid, Option<Uuid>) =
+            sqlx::query_as("select owner_id, cj_journal_id from machines where id = $1 for update")
+                .bind(machine_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|_| Status::internal("database"))?;
+        if !crate::machines::credential_active(&mut tx, machine_id, &credential)
+            .await
+            .map_err(|_| Status::internal("database"))?
+        {
+            return Err(Status::unauthenticated("credential_revoked"));
+        }
+        if let Some(previous) = previous.filter(|previous| *previous != journal_id) {
+            tracing::warn!(kind = "local_state_reset", machine_id = %machine_id,
+                old_journal_id = %previous, new_journal_id = %journal_id, "local state reset");
+            crate::events::append(&mut tx, crate::events::NewEvent {
+                scope: crate::events::Scope::Conversations { owner_id },
+                kind: "local_state_reset",
+                conversation_id: None,
+                execution_id: None,
+                payload: serde_json::json!({"machine_id": machine_id, "old_journal_id": previous, "new_journal_id": journal_id}),
+                correlation_id: Uuid::now_v7(),
+            }).await.map_err(|_| Status::internal("database"))?;
+            tx.commit()
+                .await
+                .map_err(|_| Status::internal("database"))?;
+            return Ok(Err(rejection(RejectReason::LocalStateReset)));
+        }
+        let Some(session) = self
+            .registry
+            .register(machine_id, connection_id, credential)
+        else {
+            return Ok(Err(rejection(RejectReason::IdentityInUse)));
+        };
+        sqlx::query("update machines set cj_journal_id = $2 where id = $1")
+            .bind(machine_id)
+            .bind(journal_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|_| Status::internal("database"))?;
+        tx.commit()
+            .await
+            .map_err(|_| Status::internal("database"))?;
+        Ok(Ok(session))
     }
 
     fn validate_hello(
@@ -257,6 +331,7 @@ pub async fn serve(
     tls_key_pem: &str,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), tonic::transport::Error> {
+    let _revocations = revocation::start(state.pool.clone(), state.registry.clone()).await;
     let cancel = state.shutdown.clone();
     router(state, tls_cert_pem, tls_key_pem)?
         .serve_with_shutdown(listen, async move {
@@ -273,6 +348,7 @@ pub async fn serve_with_listener(
     tls_key_pem: &str,
     shutdown: impl Future<Output = ()>,
 ) -> Result<(), tonic::transport::Error> {
+    let _revocations = revocation::start(state.pool.clone(), state.registry.clone()).await;
     let cancel = state.shutdown.clone();
     router(state, tls_cert_pem, tls_key_pem)?
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), async move {

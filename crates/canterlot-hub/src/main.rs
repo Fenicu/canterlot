@@ -5,6 +5,7 @@ use canterlot_hub::{
     session::Registry,
 };
 use clap::{Parser, Subcommand};
+use tracing_subscriber::{Layer, prelude::*};
 use uuid::Uuid;
 
 #[derive(Parser)]
@@ -38,6 +39,14 @@ enum MachineCommand {
         #[arg(long)]
         name: String,
     },
+    RotateToken {
+        #[command(flatten)]
+        config: ConfigArgs,
+        #[arg(long)]
+        machine_id: Uuid,
+        #[arg(long)]
+        reset_local_state: bool,
+    },
     Revoke {
         #[command(flatten)]
         config: ConfigArgs,
@@ -61,7 +70,9 @@ async fn run(args: Args) -> Result<(), String> {
     let config = match &args.command {
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
-            MachineCommand::Add { config, .. } | MachineCommand::Revoke { config, .. } => config,
+            MachineCommand::Add { config, .. }
+            | MachineCommand::Revoke { config, .. }
+            | MachineCommand::RotateToken { config, .. } => config,
         },
     };
     let config = HubConfig::load(&config.config).map_err(|error| error.to_string())?;
@@ -85,6 +96,28 @@ async fn run(args: Args) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
         }
         Command::Serve(_) => {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_target(false)
+                        .with_ansi(false)
+                        .with_writer(std::io::stderr)
+                        .with_filter(tracing_subscriber::filter::filter_fn(|metadata| {
+                            metadata.target().starts_with("canterlot_hub")
+                        })),
+                )
+                .init();
+            db::MIGRATOR
+                .run(&pool)
+                .await
+                .map_err(|_| "migration_error".to_owned())?;
+            let version: i64 = sqlx::query_scalar(
+                "select coalesce(max(version), 0) from _sqlx_migrations where success",
+            )
+            .fetch_one(&pool)
+            .await
+            .map_err(|_| "migration_error".to_owned())?;
+            tracing::info!(kind = "migrations_applied", version, "schema ready");
             let installation = installation::check(&pool, &config.manifest)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -109,10 +142,25 @@ async fn run(args: Args) -> Result<(), String> {
                     )
                     .map_err(|_| "output_error".to_owned())?;
                 }
-                MachineCommand::Revoke { machine_id, .. } => {
-                    machines::revoke(&pool, machine_id)
+                MachineCommand::RotateToken {
+                    machine_id,
+                    reset_local_state,
+                    ..
+                } => {
+                    let token = machines::rotate_token(&pool, machine_id, reset_local_state)
                         .await
-                        .map_err(|_| "db_error".to_owned())?;
+                        .map_err(|_| "db_error".to_owned())?
+                        .ok_or("machine_not_found")?;
+                    writeln!(std::io::stdout().lock(), "token={token}")
+                        .map_err(|_| "output_error".to_owned())?;
+                }
+                MachineCommand::Revoke { machine_id, .. } => {
+                    if !machines::revoke(&pool, machine_id)
+                        .await
+                        .map_err(|_| "db_error".to_owned())?
+                    {
+                        return Err("machine_not_found".into());
+                    }
                 }
             }
         }

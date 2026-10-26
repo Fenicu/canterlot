@@ -5,7 +5,7 @@ use std::{
     time::Duration,
 };
 
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,19 +22,19 @@ pub struct HubConfig {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct HubTimers {
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub handshake: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub degraded_after: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub unavailable_after: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub http2_keepalive_interval: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub http2_keepalive_timeout: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub command_stored_receipt: Duration,
-    #[serde(deserialize_with = "seconds")]
+    #[serde(with = "humantime_serde")]
     pub dispatch_sweep: Duration,
 }
 
@@ -108,8 +108,4 @@ impl HubConfig {
         }
         Ok(config)
     }
-}
-
-fn seconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-    u64::deserialize(deserializer).map(Duration::from_secs)
 }

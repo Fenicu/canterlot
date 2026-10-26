@@ -171,6 +171,13 @@ pub async fn seed(pool: &PgPool) -> Seed {
         .execute(pool)
         .await
         .expect("seed machine");
+    use sha2::{Digest, Sha256};
+    sqlx::query("insert into machine_credentials (machine_id, token_sha256) values ($1, $2)")
+        .bind(machine_id)
+        .bind(Sha256::digest(machine_id.as_bytes()).as_slice())
+        .execute(pool)
+        .await
+        .expect("seed credential");
     let conversation_id = seed_conversation(pool, owner_id, machine_id).await;
     Seed {
         owner_id,

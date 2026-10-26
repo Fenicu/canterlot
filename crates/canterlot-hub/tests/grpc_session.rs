@@ -29,6 +29,7 @@ struct Host {
     registry: Registry,
     installation: Installation,
     machine: NewMachine,
+    journal: Uuid,
     task: JoinHandle<Result<(), tonic::transport::Error>>,
 }
 
@@ -66,6 +67,7 @@ impl Host {
             registry,
             installation,
             machine,
+            journal: Uuid::now_v7(),
             task,
         }
     }
@@ -99,7 +101,7 @@ impl Host {
             restore_generation: self.installation.restore_generation.to_string(),
             protocol_version: PROTOCOL_VERSION,
             connection_id: connection.to_string(),
-            cj_journal_id: Uuid::now_v7().to_string(),
+            cj_journal_id: self.journal.to_string(),
             boot_id: Uuid::now_v7().to_string(),
             stream_kind: kind as i32,
             ..Hello::default()
@@ -1222,4 +1224,56 @@ async fn first_message_must_be_hello_on_both_streams(pool: PgPool) {
             .session_info(host.machine.machine_id)
             .is_none()
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn changed_cj_is_terminal_local_state_reset(pool: PgPool) {
+    let host = Host::start(pool.clone(), timers()).await;
+    let hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    let (tx, mut stream) = host.control(hello.clone()).await;
+    accepted(&mut stream).await;
+    drop(tx);
+    assert!(next_end(&mut stream).await);
+    let mut changed = hello.clone();
+    changed.connection_id = Uuid::now_v7().to_string();
+    changed.cj_journal_id = Uuid::now_v7().to_string();
+    let (_tx, mut stream) = host.control(changed.clone()).await;
+    let Some(control_down::Msg::HelloReply(HelloReply {
+        result: Some(hello_reply::Result::Rejected(value)),
+    })) = next(&mut stream).await.msg
+    else {
+        panic!("expected local_state_reset rejection");
+    };
+    assert_eq!(value.reason, 8);
+    assert!(!value.retryable);
+    let stored: Option<Uuid> =
+        sqlx::query_scalar("select cj_journal_id from machines where id = $1")
+            .bind(host.machine.machine_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stored, Some(Uuid::parse_str(&hello.cj_journal_id).unwrap()));
+    let event: serde_json::Value =
+        sqlx::query_scalar("select payload from events where kind = 'local_state_reset'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(event["machine_id"], host.machine.machine_id.to_string());
+    assert_eq!(event["old_journal_id"], hello.cj_journal_id);
+    assert_eq!(event["new_journal_id"], changed.cj_journal_id);
+    let (_tx, mut original) = host
+        .control(Hello {
+            connection_id: Uuid::now_v7().to_string(),
+            ..hello
+        })
+        .await;
+    accepted(&mut original).await;
+}
+
+async fn next_end(stream: &mut Streaming<ControlDown>) -> bool {
+    timeout(Duration::from_secs(2), stream.message())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none()
 }

@@ -154,7 +154,7 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
         assert!(!served.status.success());
         assert!(served.stdout.is_empty());
         let error = String::from_utf8(served.stderr)?;
-        assert!(error == format!("{expected}\n"));
+        assert_eq!(error.lines().last(), Some(expected));
         assert!(!error.contains(token));
         assert!(!error.contains(&url));
         Ok(())
@@ -203,14 +203,81 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
     assert!(signalled.status.success());
     let served = tokio::time::timeout(Duration::from_secs(10), server.wait_with_output()).await??;
     assert_eq!(served.status.code(), Some(0));
-    assert!(served.stdout.is_empty() && served.stderr.is_empty());
+    assert!(served.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&served.stderr).contains("migrations_applied"));
     let revoked = run(&["machine", "revoke", "--machine-id", &machine_id.to_string()])?;
     assert!(revoked.status.success());
     assert!(revoked.stdout.is_empty() && revoked.stderr.is_empty());
     assert_eq!(machines::verify(&pool, token).await?, None);
+    let missing = run(&[
+        "machine",
+        "revoke",
+        "--machine-id",
+        &Uuid::now_v7().to_string(),
+    ])?;
+    assert!(!missing.status.success());
+    assert!(missing.stdout.is_empty());
+    assert_eq!(missing.stderr, b"machine_not_found\n");
     let repeated = run(&["init"])?;
     assert!(!repeated.status.success());
     assert!(repeated.stdout.is_empty());
     assert!(repeated.stderr == b"already_initialized\n");
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn revoke_and_rotate_notify_transactionally_and_rotation_is_atomic(
+    pool: PgPool,
+) -> TestResult {
+    use sqlx::postgres::PgListener;
+    let owner = Uuid::now_v7();
+    sqlx::query("insert into owners (id) values ($1)")
+        .bind(owner)
+        .execute(&pool)
+        .await?;
+    let machine = machines::add(&pool, owner, "notification").await?;
+    let mut listener = PgListener::connect_with(&pool).await?;
+    listener.listen("canterlot_revoke").await?;
+    sqlx::query("create function block_revoke_commit() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(774123); return new; end $$")
+        .execute(&pool).await?;
+    sqlx::query("create constraint trigger block_revoke_commit after update on machine_credentials deferrable initially deferred for each row execute function block_revoke_commit()")
+        .execute(&pool).await?;
+    let mut blocker = pool.begin().await?;
+    sqlx::query("select pg_advisory_xact_lock(774123)")
+        .execute(&mut *blocker)
+        .await?;
+    let task_pool = pool.clone();
+    let id = machine.machine_id;
+    let revoked = tokio::spawn(async move { machines::revoke(&task_pool, id).await });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and query = 'COMMIT' and wait_event = 'advisory')").fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await?;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.recv())
+            .await
+            .is_err()
+    );
+    blocker.commit().await?;
+    assert!(revoked.await??);
+    let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv()).await??;
+    assert_eq!(notification.channel(), "canterlot_revoke");
+    assert_eq!(notification.payload(), id.to_string());
+    let token = machines::rotate_token(&pool, id, false).await?.unwrap();
+    let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv()).await??;
+    assert_eq!(notification.channel(), "canterlot_revoke");
+    assert_eq!(notification.payload(), id.to_string());
+    sqlx::query("alter table machine_credentials add constraint no_rotation check (revoked_at is not null) not valid")
+        .execute(&pool).await?;
+    assert!(machines::rotate_token(&pool, id, true).await.is_err());
+    assert_eq!(machines::verify(&pool, &token).await?, Some(id));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), listener.recv())
+            .await
+            .is_err()
+    );
     Ok(())
 }

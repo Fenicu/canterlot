@@ -1,6 +1,9 @@
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Instant,
 };
 
@@ -34,6 +37,8 @@ struct SessionEntry {
     wake: Arc<Notify>,
     data: Option<(Uuid, CancellationToken)>,
     availability: Availability,
+    revoked: Arc<AtomicBool>,
+    credential: Vec<u8>,
 }
 
 #[derive(Clone)]
@@ -61,9 +66,23 @@ impl Registry {
 
     /// Производитель проверяет encoded_len() перед постановкой команды в очередь.
     pub fn command_sender(&self, machine_id: Uuid) -> Option<mpsc::Sender<ControlDown>> {
+        self.command_session(machine_id)
+            .map(|(sender, _, _)| sender)
+    }
+
+    pub(crate) fn command_session(
+        &self,
+        machine_id: Uuid,
+    ) -> Option<(mpsc::Sender<ControlDown>, Uuid, Vec<u8>)> {
         let mut entries = self.entries.lock().expect("session registry lock");
         let entry = entries.get_mut(&machine_id)?;
-        (self.refresh(entry) != Availability::Unavailable).then(|| entry.commands.clone())
+        (self.refresh(entry) != Availability::Unavailable).then(|| {
+            (
+                entry.commands.clone(),
+                entry.info.connection_id,
+                entry.credential.clone(),
+            )
+        })
     }
 
     pub fn subscribe_changes(&self) -> broadcast::Receiver<(Uuid, Availability)> {
@@ -76,6 +95,38 @@ impl Registry {
             .expect("session registry lock")
             .get(&machine_id)
             .map(|entry| entry.info.clone())
+    }
+
+    pub(crate) fn credentials(&self) -> Vec<(Uuid, Uuid, Vec<u8>)> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .values()
+            .map(|entry| {
+                (
+                    entry.info.machine_id,
+                    entry.info.connection_id,
+                    entry.credential.clone(),
+                )
+            })
+            .collect()
+    }
+
+    pub(crate) fn revoke(&self, machine_id: Uuid, connection_id: Uuid) {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        if !entries
+            .get(&machine_id)
+            .is_some_and(|entry| entry.info.connection_id == connection_id)
+        {
+            return;
+        }
+        let entry = entries.remove(&machine_id).expect("current session");
+        entry.revoked.store(true, Ordering::Release);
+        entry.cancel.cancel();
+        if let Some((_, data)) = entry.data {
+            data.cancel();
+        }
+        let _ = self.changes.send((machine_id, Availability::Unavailable));
     }
 
     fn refresh(&self, entry: &mut SessionEntry) -> Availability {
@@ -98,10 +149,12 @@ impl Registry {
         &self,
         machine_id: Uuid,
         connection_id: Uuid,
+        credential: Vec<u8>,
     ) -> Option<(ControlLease, mpsc::Receiver<ControlDown>)> {
         let cancel = CancellationToken::new();
         let wake = Arc::new(Notify::new());
         let key = Uuid::now_v7();
+        let revoked = Arc::new(AtomicBool::new(false));
         let (commands, receiver) = mpsc::channel(64);
         let mut entries = self.entries.lock().expect("session registry lock");
         if entries.get(&machine_id).is_some_and(|entry| {
@@ -128,6 +181,8 @@ impl Registry {
             wake: wake.clone(),
             data: None,
             availability: Availability::Unavailable,
+            revoked: revoked.clone(),
+            credential,
         };
         self.refresh(&mut entry);
         entries.insert(machine_id, entry);
@@ -145,15 +200,22 @@ impl Registry {
                 machine_id,
                 key,
                 cancel,
+                revoked,
             },
             receiver,
         ))
     }
 
-    pub(crate) fn attach_data(&self, machine_id: Uuid, connection_id: Uuid) -> Option<DataLease> {
+    pub(crate) fn attach_data(
+        &self,
+        machine_id: Uuid,
+        connection_id: Uuid,
+        credential: &[u8],
+    ) -> Option<DataLease> {
         let mut entries = self.entries.lock().expect("session registry lock");
         let entry = entries.get_mut(&machine_id)?;
         if entry.info.connection_id != connection_id
+            || entry.credential != credential
             || entry.info.last_heartbeat.elapsed() >= self.timers.unavailable_after
         {
             return None;
@@ -168,6 +230,7 @@ impl Registry {
         Some(DataLease {
             registry: self.clone(),
             machine_id,
+            revoked: entry.revoked.clone(),
             session_key: entry.key,
             key,
             cancel,
@@ -232,6 +295,13 @@ pub(crate) struct ControlLease {
     pub machine_id: Uuid,
     pub key: Uuid,
     pub cancel: CancellationToken,
+    revoked: Arc<AtomicBool>,
+}
+
+impl ControlLease {
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for ControlLease {
@@ -260,6 +330,13 @@ pub(crate) struct DataLease {
     session_key: Uuid,
     key: Uuid,
     pub cancel: CancellationToken,
+    revoked: Arc<AtomicBool>,
+}
+
+impl DataLease {
+    pub fn is_revoked(&self) -> bool {
+        self.revoked.load(Ordering::Acquire)
+    }
 }
 
 impl Drop for DataLease {

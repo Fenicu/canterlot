@@ -39,3 +39,41 @@ fn config_errors_retain_location_without_source_contents() {
     assert!(format!("{error:?}").contains(path.to_str().unwrap()));
     assert!(error.source().is_none());
 }
+
+#[test]
+fn hub_durations_are_strings_and_unknown_fields_are_rejected() {
+    let base = "database_url_file = 'db'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert'\ntls_key = 'key'\nmanifest = 'manifest'\n";
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, format!("{base}[timers]\nhandshake = '250ms'\n")).unwrap();
+    assert_eq!(
+        HubConfig::load(&path).unwrap().timers.handshake,
+        std::time::Duration::from_millis(250)
+    );
+    for extra in [
+        "handshake = '10s'",
+        "[timer]\nhandshake = '10s'",
+        "[timers]\nhandshak = '10s'",
+        "[timers]\nhandshake = 10",
+    ] {
+        fs::write(&path, format!("{base}{extra}\n")).unwrap();
+        assert!(HubConfig::load(&path).is_err());
+    }
+}
+
+#[test]
+fn readme_documents_running_both_services() {
+    let readme = include_str!("../../../README.md");
+    for required in [
+        "canterlot-worker run --config",
+        "hub_url =",
+        "ca_cert =",
+        "token_file =",
+        "backoff_min = \"250ms\"",
+        "rotate-token",
+        "--reset-local-state",
+    ] {
+        assert!(readme.contains(required), "missing {required}");
+    }
+    assert!(!readme.contains("сетевой сервер ещё не запускается"));
+}

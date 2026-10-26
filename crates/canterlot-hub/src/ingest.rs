@@ -46,6 +46,8 @@ pub enum IngestOutcome {
 
 #[derive(Debug, Error)]
 pub enum IngestError {
+    #[error("credential_revoked")]
+    CredentialRevoked,
     #[error("unknown_record")]
     UnknownRecord,
     #[error("foreign_journal")]
@@ -112,6 +114,26 @@ impl Ingest {
         kind: JournalKind,
         batch: &JournalRecords,
     ) -> Result<IngestOutcome, IngestError> {
+        let result = self.apply_batch_inner(machine_id, kind, batch).await;
+        match &result {
+            Err(error) => tracing::warn!(kind = %error, machine_id = %machine_id,
+                journal_id = ?Uuid::parse_str(&batch.journal_id).ok(), "ingest rejected"),
+            Ok(IngestOutcome::Gap { .. }) => {
+                tracing::warn!(kind = "journal_gap", machine_id = %machine_id,
+                journal_id = ?Uuid::parse_str(&batch.journal_id).ok(), "ingest gap")
+            }
+            _ => {}
+        }
+        result
+    }
+
+    async fn apply_batch_inner(
+        &self,
+        machine_id: Uuid,
+        kind: JournalKind,
+        batch: &JournalRecords,
+    ) -> Result<IngestOutcome, IngestError> {
+        require_active(&mut *self.pool.acquire().await?, machine_id).await?;
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
         let journal_id = parse_id(&batch.journal_id)?;
         if batch.records.iter().any(|record| record.seq == 0) {
@@ -137,6 +159,7 @@ impl Ingest {
                 continue;
             }
             let mut tx = self.pool.begin().await?;
+            require_active(&mut tx, machine_id).await?;
             sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
                 .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
             let rows: Vec<CursorRow> = sqlx::query_as(
@@ -197,6 +220,15 @@ impl Ingest {
         }
         Ok(IngestOutcome::Committed { up_to_seq })
     }
+}
+
+async fn require_active(conn: &mut PgConnection, machine_id: Uuid) -> Result<(), IngestError> {
+    let active = sqlx::query("select machine_id from machine_credentials where machine_id = $1 and revoked_at is null for share")
+        .bind(machine_id).fetch_optional(conn).await?;
+    if active.is_none() {
+        return Err(IngestError::CredentialRevoked);
+    }
+    Ok(())
 }
 
 type CursorRow = (Uuid, String, i64, Option<Vec<u8>>);
@@ -544,6 +576,7 @@ impl Ingest {
             .map_err(|error| {
                 let message = error.to_string();
                 match error {
+                    IngestError::CredentialRevoked => tonic::Status::unauthenticated(message),
                     IngestError::BatchLimit => tonic::Status::resource_exhausted(message),
                     IngestError::ForeignJournal => tonic::Status::permission_denied(message),
                     IngestError::Database | IngestError::Execution => {

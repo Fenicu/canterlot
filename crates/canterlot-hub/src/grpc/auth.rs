@@ -1,11 +1,15 @@
+use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 use tonic::{Request, Status};
 use uuid::Uuid;
 
 use crate::machines;
 
-#[derive(Clone, Copy)]
-pub(super) struct AuthenticatedMachine(pub Uuid);
+#[derive(Clone)]
+pub(super) struct AuthenticatedMachine {
+    pub machine_id: Uuid,
+    pub credential: Vec<u8>,
+}
 
 // Перехватчик асинхронный: штатный tonic::Interceptor не может ожидать PostgreSQL.
 pub(super) async fn intercept<T>(pool: &PgPool, request: &mut Request<T>) -> Result<(), Status> {
@@ -27,8 +31,10 @@ pub(super) async fn intercept<T>(pool: &PgPool, request: &mut Request<T>) -> Res
         .await
         .map_err(|_| Status::internal("machine authentication unavailable"))?
         .ok_or_else(|| Status::unauthenticated("invalid machine credential"))?;
-    request
-        .extensions_mut()
-        .insert(AuthenticatedMachine(machine_id));
+    let credential = Sha256::digest(token.as_bytes()).to_vec();
+    request.extensions_mut().insert(AuthenticatedMachine {
+        machine_id,
+        credential,
+    });
     Ok(())
 }
