@@ -1,0 +1,278 @@
+use std::{
+    collections::{HashMap, HashSet},
+    fs, io,
+    sync::{
+        Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+
+use rustix::process::{self, Pid, Signal, WaitOptions};
+use tokio::process::Command;
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct Member {
+    pub pid: u32,
+    pub start_ticks: u64,
+}
+
+#[derive(Debug)]
+pub enum Termination {
+    Empty,
+    Survivors(Vec<Member>),
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ContainmentError {
+    #[error("process inspection failed")]
+    Io(#[from] io::Error),
+    #[error("process operation failed")]
+    Process(#[from] rustix::io::Errno),
+    #[error("invalid process stat")]
+    InvalidStat,
+    #[error("supervisor identity changed")]
+    SupervisorChanged,
+}
+
+#[async_trait::async_trait]
+pub trait Containment: Send + Sync {
+    fn kind(&self) -> &'static str;
+    fn prepare_command(&self, command: &mut Command);
+    fn members(&self) -> Result<Vec<Member>, ContainmentError>;
+    fn populated(&self) -> Result<bool, ContainmentError>;
+    async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
+}
+
+/// Одно исполнение на процесс; первый members после spawn фиксирует прямой CLI.
+pub struct TreeContainment {
+    supervisor: Member,
+    cli: Mutex<Option<Member>>,
+    prepared: AtomicBool,
+}
+
+struct Stat {
+    member: Member,
+    parent: u32,
+    group: u32,
+    zombie: bool,
+}
+
+fn stat(pid: u32) -> Result<Stat, ContainmentError> {
+    let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let end = text.rfind(')').ok_or(ContainmentError::InvalidStat)?;
+    let fields: Vec<_> = text[end + 1..].split_whitespace().collect();
+    let number = |index: usize| -> Result<u64, ContainmentError> {
+        fields
+            .get(index)
+            .ok_or(ContainmentError::InvalidStat)?
+            .parse()
+            .map_err(|_| ContainmentError::InvalidStat)
+    };
+    Ok(Stat {
+        member: Member {
+            pid,
+            start_ticks: number(19)?,
+        },
+        parent: u32::try_from(number(1)?).map_err(|_| ContainmentError::InvalidStat)?,
+        group: u32::try_from(number(2)?).map_err(|_| ContainmentError::InvalidStat)?,
+        zombie: matches!(fields.first(), Some(&"Z") | Some(&"X")),
+    })
+}
+
+fn disappeared(error: &ContainmentError) -> bool {
+    matches!(error, ContainmentError::Io(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()))
+}
+
+impl TreeContainment {
+    pub fn new() -> Result<Self, ContainmentError> {
+        process::set_child_subreaper(Pid::from_raw(1))?;
+        tracing::info!(containment = "tree", "process containment initialized");
+        Ok(Self {
+            supervisor: stat(std::process::id())?.member,
+            cli: Mutex::new(None),
+            prepared: AtomicBool::new(false),
+        })
+    }
+
+    fn snapshot(&self) -> Result<HashMap<u32, Stat>, ContainmentError> {
+        if stat(self.supervisor.pid)?.member != self.supervisor {
+            return Err(ContainmentError::SupervisorChanged);
+        }
+        let mut all = HashMap::new();
+        for entry in fs::read_dir("/proc")? {
+            let entry = entry?;
+            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
+                continue;
+            };
+            match stat(pid) {
+                Ok(info) => {
+                    all.insert(pid, info);
+                }
+                Err(error) if disappeared(&error) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(all)
+    }
+
+    fn belongs(&self, info: &Stat, all: &HashMap<u32, Stat>) -> bool {
+        let mut current = info;
+        let mut seen = HashSet::new();
+        while seen.insert(current.member.pid) {
+            let Some(parent) = all.get(&current.parent) else {
+                return false;
+            };
+            if parent.member.start_ticks > current.member.start_ticks {
+                return false;
+            }
+            if parent.member == self.supervisor {
+                return info.member != self.supervisor;
+            }
+            current = parent;
+        }
+        false
+    }
+
+    pub fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError> {
+        let all = self.snapshot()?;
+        let Some(info) = all.get(&member.pid) else {
+            return Ok(false);
+        };
+        if info.member != *member || info.zombie || !self.belongs(info, &all) {
+            return Ok(false);
+        }
+        let current = match stat(member.pid) {
+            Ok(info) => info,
+            Err(error) if disappeared(&error) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        if current.member != *member || current.parent != info.parent || current.zombie {
+            return Ok(false);
+        }
+        let Some(pid) = i32::try_from(member.pid).ok().and_then(Pid::from_raw) else {
+            return Ok(false);
+        };
+        match process::kill_process(pid, signal) {
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::SRCH) => Ok(false),
+            Err(error) => Err(error.into()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl Containment for TreeContainment {
+    fn kind(&self) -> &'static str {
+        "tree"
+    }
+
+    fn prepare_command(&self, command: &mut Command) {
+        let mut cli = self.cli.lock().expect("containment mutex poisoned");
+        if cli.as_ref().is_some_and(|member| match stat(member.pid) {
+            Ok(current) => current.member != *member,
+            Err(error) => disappeared(&error),
+        }) {
+            *cli = None;
+        }
+        self.prepared.store(true, Ordering::Relaxed);
+        command.process_group(0);
+    }
+
+    fn members(&self) -> Result<Vec<Member>, ContainmentError> {
+        let all = self.snapshot()?;
+        let mut cli = self.cli.lock().expect("containment mutex poisoned");
+        if cli.is_none() && self.prepared.load(Ordering::Relaxed) {
+            *cli = all
+                .values()
+                .filter(|s| s.parent == self.supervisor.pid && s.group == s.member.pid)
+                .min_by_key(|s| (s.member.start_ticks, s.member.pid))
+                .map(|s| s.member.clone());
+        }
+        let mut members = Vec::new();
+        for info in all.values().filter(|info| self.belongs(info, &all)) {
+            if !info.zombie {
+                members.push(info.member.clone());
+                continue;
+            }
+            // Прямой CLI (лидер группы) остаётся за tokio::process::Child.
+            if info.parent == self.supervisor.pid
+                && cli.as_ref() != Some(&info.member)
+                && let Some(pid) = i32::try_from(info.member.pid).ok().and_then(Pid::from_raw)
+                && stat(info.member.pid).is_ok_and(|current| {
+                    current.member == info.member
+                        && current.parent == self.supervisor.pid
+                        && current.zombie
+                })
+            {
+                match process::waitpid(Some(pid), WaitOptions::NOHANG) {
+                    Ok(_) | Err(rustix::io::Errno::CHILD) | Err(rustix::io::Errno::SRCH) => {}
+                    Err(error) => return Err(error.into()),
+                }
+            }
+        }
+        members.sort_by_key(|m| m.pid);
+        Ok(members)
+    }
+
+    fn populated(&self) -> Result<bool, ContainmentError> {
+        Ok(!self.members()?.is_empty())
+    }
+
+    async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError> {
+        let deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let members = self.members()?;
+            if members.is_empty() {
+                return Ok(Termination::Empty);
+            }
+            for member in &members {
+                self.signal_member(member, Signal::TERM)?;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(
+                Duration::from_millis(10)
+                    .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+            )
+            .await;
+        }
+        let kill_deadline = tokio::time::Instant::now() + grace;
+        loop {
+            let members = self.members()?;
+            if members.is_empty() {
+                return Ok(Termination::Empty);
+            }
+            for member in &members {
+                self.signal_member(member, Signal::KILL)?;
+            }
+            if tokio::time::Instant::now() >= kill_deadline {
+                return Ok(Termination::Survivors(members));
+            }
+            tokio::time::sleep(
+                Duration::from_millis(10)
+                    .min(kill_deadline.saturating_duration_since(tokio::time::Instant::now())),
+            )
+            .await;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disappearing_process_is_not_inspection_failure() {
+        assert!(disappeared(
+            &io::Error::from(io::ErrorKind::NotFound).into()
+        ));
+        assert!(disappeared(
+            &io::Error::from_raw_os_error(rustix::io::Errno::SRCH.raw_os_error()).into()
+        ));
+        assert!(!disappeared(
+            &io::Error::from(io::ErrorKind::PermissionDenied).into()
+        ));
+    }
+}

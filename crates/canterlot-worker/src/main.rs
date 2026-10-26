@@ -14,6 +14,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(feature = "synthetic-adapter")]
+    #[command(hide = true)]
+    SyntheticCli {
+        #[arg(long)]
+        profile: String,
+        #[arg(long)]
+        native_conversation_id: Option<String>,
+    },
     Run {
         #[arg(long)]
         config: PathBuf,
@@ -32,7 +40,17 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let Command::Run { config: path } = Cli::parse().command;
+    let path = match Cli::parse().command {
+        Command::Run { config } => config,
+        #[cfg(feature = "synthetic-adapter")]
+        Command::SyntheticCli {
+            profile,
+            native_conversation_id,
+        } => {
+            canterlot_worker::adapter::synthetic_cli::run(&profile, native_conversation_id).await?;
+            return Ok(());
+        }
+    };
     tracing_subscriber::fmt()
         .with_target(false)
         .with_writer(std::io::stderr)

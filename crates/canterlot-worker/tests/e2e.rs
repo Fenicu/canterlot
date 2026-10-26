@@ -183,6 +183,7 @@ impl Fixture {
             conversation,
             GateInputs {
                 machine_available: true,
+                machine_reconciled: true,
             },
             Uuid::now_v7(),
         )

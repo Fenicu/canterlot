@@ -3,7 +3,9 @@
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("fault-injection must not be built in release");
 
+pub mod adapter;
 pub mod config;
+pub mod containment;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
 pub mod ownership;

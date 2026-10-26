@@ -338,6 +338,7 @@ dependencies = [
 name = "canterlot-worker"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "canterlot-hub",
  "canterlot-journal",
  "canterlot-proto",
@@ -346,7 +347,10 @@ dependencies = [
  "humantime-serde",
  "prost",
  "rand",
+ "rustix",
  "serde",
+ "serde_json",
+ "sha2 0.11.1",
  "sqlx",
  "tempfile",
  "thiserror",
