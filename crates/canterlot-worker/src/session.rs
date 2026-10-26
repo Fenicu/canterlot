@@ -41,6 +41,7 @@ pub enum SessionState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreErrorKind {
+    InsecureDataDir,
     NeedsReopen,
     Io,
     Journal,
@@ -57,6 +58,7 @@ pub enum StoreErrorKind {
 impl StoreError {
     pub fn kind(&self) -> StoreErrorKind {
         match self {
+            Self::InsecureDataDir => StoreErrorKind::InsecureDataDir,
             Self::NeedsReopen => StoreErrorKind::NeedsReopen,
             Self::Io(_) => StoreErrorKind::Io,
             Self::Journal(_) => StoreErrorKind::Journal,

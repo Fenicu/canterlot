@@ -793,7 +793,7 @@ async fn rotated_token_reconnects_same_data_dir_without_cursor_divergence(pool: 
     worker.state(SessionState::Live).await;
     let before = fixture.snapshot().cursor;
     let old = canterlot_worker::config::read_token(&fixture.config.token_file).unwrap();
-    let token = machines::rotate_token(&pool, fixture.config.machine_id, false)
+    let token = machines::rotate_token(&pool, fixture.config.machine_id, false, false)
         .await
         .unwrap()
         .unwrap();

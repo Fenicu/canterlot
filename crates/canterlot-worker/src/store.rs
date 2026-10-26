@@ -24,6 +24,8 @@ pub enum Accept {
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("insecure_data_dir")]
+    InsecureDataDir,
     #[error("store needs to be reopened after a write failure")]
     NeedsReopen,
     #[error("store I/O error: {0}")]
@@ -132,7 +134,9 @@ impl WorkerStore {
                 .recursive(true)
                 .mode(0o700)
                 .create(data_dir)?;
-            fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+            if fs::metadata(data_dir)?.permissions().mode() & 0o077 != 0 {
+                return Err(StoreError::InsecureDataDir);
+            }
         }
         let cj = open_journal(&data_dir.join("cj"))?;
         if cj.is_sealed().is_some() {

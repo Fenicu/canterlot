@@ -15,6 +15,14 @@ use prost::Message;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+fn private_dir() -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
 fn delivery() -> Command {
     Command {
         command_id: Uuid::now_v7().to_string(),
@@ -56,7 +64,7 @@ fn assert_receipt(record: &Record, cmd: &Command, class: &str) {
 
 #[test]
 fn hundred_deliveries_store_once() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let cmd = delivery();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert!(matches!(
@@ -99,7 +107,7 @@ fn hundred_deliveries_store_once() {
 
 #[test]
 fn reopen_keeps_dedup_index() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut cmd = delivery();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let id = store.cj_journal_id().unwrap();
@@ -121,7 +129,7 @@ fn reopen_keeps_dedup_index() {
 
 #[test]
 fn unknown_command_kind_is_rejected_not_defaulted() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut cmd = delivery();
     cmd.kind = None;
     let mut bytes = cmd.encode_to_vec();
@@ -164,7 +172,7 @@ fn unknown_command_kind_is_rejected_not_defaulted() {
 
 #[test]
 fn ack_compacts_cj_but_keeps_receipts() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let cmd = delivery();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     store.accept_command(&cmd).unwrap();
@@ -198,7 +206,7 @@ fn ack_compacts_cj_but_keeps_receipts() {
 
 #[test]
 fn all_known_command_kinds_store_full_payloads() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let kinds = [
         delivery().kind.unwrap(),
         command::Kind::CancelInput(CancelInput {
@@ -245,7 +253,7 @@ fn all_known_command_kinds_store_full_payloads() {
 
 #[test]
 fn cursor_and_ack_preserve_unacknowledged_records() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let cursor = store.cj_cursor().unwrap();
     assert_eq!(
@@ -278,7 +286,7 @@ fn cursor_and_ack_preserve_unacknowledged_records() {
 
 #[test]
 fn sealed_cj_refuses_open_even_after_quarantine() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     store.accept_command(&delivery()).unwrap();
     drop(store);
@@ -300,7 +308,7 @@ fn sealed_cj_refuses_open_even_after_quarantine() {
 
 #[test]
 fn journals_have_one_owner() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let store = WorkerStore::open(dir.path()).unwrap();
     assert!(matches!(
         WorkerStore::open(dir.path()),
@@ -312,7 +320,7 @@ fn journals_have_one_owner() {
 
 #[test]
 fn over_limit_commands_write_only_durable_rejections() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let mut text = delivery();
     if let Some(command::Kind::DeliverInput(input)) = &mut text.kind {
@@ -361,7 +369,7 @@ fn over_limit_commands_write_only_durable_rejections() {
 
 #[test]
 fn restore_generation_is_persisted_in_hub_toml() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert_eq!(store.restore_generation().unwrap(), None);
     for _ in 0..2 {
@@ -382,7 +390,7 @@ fn restore_generation_is_persisted_in_hub_toml() {
 
 #[test]
 fn malformed_receipts_refuse_open() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     drop(WorkerStore::open(dir.path()).unwrap());
     let (mut receipts, _) =
         Journal::open(&dir.path().join("receipts"), JournalOptions::default()).unwrap();
@@ -395,7 +403,7 @@ fn malformed_receipts_refuse_open() {
 #[test]
 fn token_file_permissions_are_enforced() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("token");
     fs::write(&path, "test-token\n").unwrap();
     for mode in [0o600, 0o400] {
@@ -419,7 +427,7 @@ fn config_text() -> String {
 
 #[test]
 fn config_loads_with_defaults() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     fs::write(&path, config_text()).unwrap();
     let config = load(&path).unwrap();
@@ -441,7 +449,7 @@ fn config_loads_with_defaults() {
 
 #[test]
 fn config_timers_use_humantime_and_allow_partial_overrides() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     fs::write(
         &path,
@@ -459,7 +467,7 @@ fn config_timers_use_humantime_and_allow_partial_overrides() {
 
 #[test]
 fn config_requires_https_and_valid_fields() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     for contents in [
         config_text().replace("https://", "http://"),
@@ -508,7 +516,7 @@ fn sensitive_config_inputs() -> Vec<String> {
 
 #[test]
 fn config_errors_do_not_expose_file_contents() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     for contents in sensitive_config_inputs() {
         fs::write(&path, contents).unwrap();
@@ -559,7 +567,7 @@ fn config_error_conversions_discard_source_errors() {
 
 #[test]
 fn config_io_errors_keep_path_and_kind() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("missing");
     for error in [load(&path).unwrap_err(), read_token(&path).unwrap_err()] {
         assert_eq!(error.path, path);
@@ -583,7 +591,7 @@ fn config_io_errors_keep_path_and_kind() {
 
 #[test]
 fn binary_config_errors_do_not_expose_file_contents() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     for contents in sensitive_config_inputs() {
         fs::write(&path, contents).unwrap();
@@ -611,7 +619,7 @@ fn binary_config_errors_do_not_expose_file_contents() {
 fn binary_checks_config_and_token_before_starting_session() {
     use std::os::unix::fs::PermissionsExt;
 
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     fs::write(dir.path().join("worker.toml"), config_text()).unwrap();
     let token = dir.path().join("token");
     fs::write(&token, "test-token-that-must-not-be-logged\n").unwrap();
@@ -639,7 +647,7 @@ fn binary_checks_config_and_token_before_starting_session() {
 
 #[test]
 fn config_requires_valid_restore_generation() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     let text = config_text();
     let missing = text
@@ -658,7 +666,7 @@ fn config_requires_valid_restore_generation() {
 
 #[test]
 fn configs_reject_unknown_fields_and_numeric_durations() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("worker.toml");
     for extra in [
         "handshake = 10",
@@ -689,7 +697,7 @@ fn worker_store_creates_private_directories_and_files() {
             }
         }
     }
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let path = dir.path().join("nested/store");
     let mut store = WorkerStore::open(&path).unwrap();
     store.accept_command(&delivery()).unwrap();
@@ -700,4 +708,29 @@ fn worker_store_creates_private_directories_and_files() {
     drop(store);
     WorkerStore::open(&path).unwrap();
     check(&path);
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_store_refuses_insecure_existing_data_dir_without_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir();
+    for mode in [0o750, 0o707, 0o755, 0o777] {
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(mode)).unwrap();
+        let result = WorkerStore::open(dir.path());
+        assert!(result.is_err(), "insecure data_dir accepted");
+        let error = result.err().unwrap();
+        assert_eq!(error.to_string(), "insecure_data_dir");
+        assert_eq!(
+            error.kind(),
+            canterlot_worker::session::StoreErrorKind::InsecureDataDir
+        );
+        assert_eq!(
+            fs::metadata(dir.path()).unwrap().permissions().mode() & 0o777,
+            mode
+        );
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 0);
+    }
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(WorkerStore::open(dir.path()).is_ok());
 }

@@ -6,6 +6,14 @@ use tempfile::TempDir;
 
 use super::*;
 
+fn private_dir() -> TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    tempfile::Builder::new()
+        .permissions(std::fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap()
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum AppendPoint {
     Inbox,
@@ -28,7 +36,7 @@ impl WorkerStore {
 }
 
 fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[AppendPoint]) {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let cmd = Command {
         command_id: Uuid::now_v7().to_string(),
         dispatch_attempt: 3,
@@ -177,7 +185,7 @@ fn repeated_reconciliation_crashes_are_reconciled() {
 
 #[test]
 fn write_failure_after_inbox_poison_all_calls_until_reopen() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let cmd = Command {
         command_id: Uuid::now_v7().to_string(),
@@ -216,7 +224,7 @@ fn write_failure_after_inbox_poison_all_calls_until_reopen() {
 
 #[test]
 fn ack_and_generation_errors_poison_the_store() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert!(store.on_cj_ack(1).is_err());
     assert!(matches!(
@@ -235,7 +243,7 @@ fn ack_and_generation_errors_poison_the_store() {
 
 #[test]
 fn invalid_command_id_leaves_all_journals_and_receipts_unchanged() {
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let mut cmd = Command {
         command_id: Uuid::now_v7().to_string(),
@@ -296,7 +304,7 @@ fn invalid_command_id_emits_one_warning_without_command_data() {
         .with_target(false)
         .with_writer(move || writer.clone())
         .finish();
-    let dir = TempDir::new().unwrap();
+    let dir = private_dir();
     let mut store = WorkerStore::open(dir.path()).unwrap();
     let cmd = Command {
         command_id: "private-invalid-id".into(),

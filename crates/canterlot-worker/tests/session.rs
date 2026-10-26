@@ -613,7 +613,11 @@ async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(p
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, config, store) = fixture(&pool, &hub).await;
     let machine = config.machine_id;
-    let second_dir = TempDir::new().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let second_dir = tempfile::Builder::new()
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir()
+        .unwrap();
     let mut second_config = config.clone();
     second_config.data_dir = second_dir.path().to_owned();
     // Коллизия живого сеанса проверяется на клоне CJ, без сброса локального состояния.
