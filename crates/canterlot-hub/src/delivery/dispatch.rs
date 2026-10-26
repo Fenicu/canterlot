@@ -12,6 +12,7 @@ use crate::{
 #[derive(Debug, Clone, Copy)]
 pub struct GateInputs {
     pub machine_available: bool,
+    pub machine_reconciled: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,6 +23,7 @@ pub enum BlockReason {
     SlotBusy,
     NoLiveRunningExecution,
     MachineUnavailable,
+    MachineNotReconciled,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +86,8 @@ pub async fn dispatch_next(
     }
     if !gate.machine_available {
         reasons.push(BlockReason::MachineUnavailable);
+    } else if !gate.machine_reconciled {
+        reasons.push(BlockReason::MachineNotReconciled);
     }
     if !reasons.is_empty() {
         tx.commit().await?;

@@ -14,6 +14,8 @@ use uuid::Uuid;
 
 use crate::config::HubTimers;
 
+pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
     Available,
@@ -39,6 +41,7 @@ struct SessionEntry {
     availability: Availability,
     revoked: Arc<AtomicBool>,
     credential: Vec<u8>,
+    reconciled: bool,
 }
 
 #[derive(Clone)]
@@ -62,6 +65,42 @@ impl Registry {
         entries
             .get_mut(&machine_id)
             .map_or(Availability::Unavailable, |entry| self.refresh(entry))
+    }
+
+    pub fn is_reconciled(&self, machine_id: Uuid) -> bool {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .is_some_and(|entry| entry.reconciled)
+    }
+
+    pub(crate) fn mark_accepted(
+        &self,
+        machine_id: Uuid,
+        connection_id: Uuid,
+        capabilities: &[String],
+    ) {
+        if !capabilities
+            .iter()
+            .any(|capability| capability == CAPABILITY_EXEC_V1)
+        {
+            self.mark_reconciled(machine_id, connection_id);
+        }
+    }
+
+    pub(crate) fn mark_reconciled(&self, machine_id: Uuid, connection_id: Uuid) {
+        let mut entries = self.entries.lock().expect("session registry lock");
+        if let Some(entry) = entries
+            .get_mut(&machine_id)
+            .filter(|entry| entry.info.connection_id == connection_id)
+        {
+            entry.reconciled = true;
+            let availability = self.refresh(entry);
+            if availability == Availability::Available {
+                let _ = self.changes.send((machine_id, availability));
+            }
+        }
     }
 
     /// Производитель проверяет encoded_len() перед постановкой команды в очередь.
@@ -183,6 +222,7 @@ impl Registry {
             availability: Availability::Unavailable,
             revoked: revoked.clone(),
             credential,
+            reconciled: false,
         };
         self.refresh(&mut entry);
         entries.insert(machine_id, entry);
@@ -350,5 +390,57 @@ impl Drop for DataLease {
             entry.info.data_attached = false;
             self.registry.refresh(entry);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn accepted_requires_reconciliation_only_with_exec_v1() {
+        for capabilities in [vec![], vec![CAPABILITY_EXEC_V1.to_string()]] {
+            let registry = Registry::new(HubTimers::default());
+            let machine = Uuid::now_v7();
+            let connection = Uuid::now_v7();
+            let (_lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+            let mut changes = registry.subscribe_changes();
+            assert!(!registry.is_reconciled(machine));
+            registry.mark_accepted(machine, Uuid::now_v7(), &capabilities);
+            assert!(!registry.is_reconciled(machine));
+            registry.mark_accepted(machine, connection, &capabilities);
+            assert_eq!(registry.is_reconciled(machine), capabilities.is_empty());
+            assert!(matches!(
+                changes.try_recv(),
+                Err(broadcast::error::TryRecvError::Empty)
+            ));
+            registry.mark_reconciled(machine, connection);
+            assert!(registry.is_reconciled(machine));
+        }
+    }
+
+    #[tokio::test]
+    async fn reconciliation_is_bound_to_the_current_connection() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        assert!(!registry.is_reconciled(machine));
+        let (lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        let data = registry.attach_data(machine, connection, &[]).unwrap();
+        assert_eq!(registry.availability(machine), Availability::Available);
+        assert!(!registry.is_reconciled(machine));
+        registry.mark_reconciled(machine, Uuid::now_v7());
+        assert!(!registry.is_reconciled(machine));
+        registry.mark_reconciled(machine, connection);
+        assert!(registry.is_reconciled(machine));
+        drop(data);
+        drop(lease);
+        assert!(!registry.is_reconciled(machine));
+        let replacement = Uuid::now_v7();
+        let (_lease, _commands) = registry.register(machine, replacement, vec![]).unwrap();
+        registry.mark_reconciled(machine, connection);
+        assert!(!registry.is_reconciled(machine));
+        registry.mark_reconciled(machine, replacement);
+        assert!(registry.is_reconciled(machine));
     }
 }

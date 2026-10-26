@@ -9,7 +9,7 @@ use super::{
 };
 
 enum Next {
-    Ack(Option<Result<JournalRangeAck, Status>>),
+    Ack(Option<Result<Option<JournalRangeAck>, Status>>),
     Inbound(Result<Option<ControlUp>, Status>),
     Command(Option<ControlDown>),
     #[cfg(feature = "fault-injection")]
@@ -77,7 +77,10 @@ impl WorkerControl for HubGrpc {
                     return;
                 }
             };
-            let reply = state.accepted(machine_id).await?;
+            let reply = state.accepted(machine_id, &hello).await?;
+            if let Some(hello_reply::Result::Accepted(accepted)) = &reply.result {
+                state.registry.mark_accepted(machine_id, connection_id, &accepted.capabilities);
+            }
             let reply = checked(ControlDown { msg: Some(control_down::Msg::HelloReply(reply)) })?;
             #[cfg(feature = "fault-injection")]
             let mut failures = state.faults.failures();
@@ -104,7 +107,10 @@ impl WorkerControl for HubGrpc {
                 match next {
                     Next::Ack(ack) => {
                         let Some(ack) = ack else { break; };
-                        let ack = ack.map_err(|error| session_log.error(error))?;
+                        let Some(ack) = ack.map_err(|error| session_log.error(error))? else {
+                            state.registry.mark_reconciled(machine_id, connection_id);
+                            continue;
+                        };
                         #[cfg(feature = "fault-injection")]
                         if state.faults.ack(&state.pool, machine_id, &ack).await { continue; }
                         yield checked(ControlDown { msg: Some(control_down::Msg::CjAck(ack)) })?;
@@ -121,6 +127,9 @@ impl WorkerControl for HubGrpc {
                                     Err(session_log.error(Status::invalid_argument("invalid_record")))?;
                                 }
                                 lane.submit(records).map_err(|error| session_log.error(error))?;
+                            }
+                            Some(control_up::Msg::ReconcileReport(report)) => {
+                                lane.submit_reconcile(report).map_err(|error| session_log.error(error))?;
                             }
                             _ => Err(session_log.error(Status::invalid_argument("unexpected control message")))?,
                         }

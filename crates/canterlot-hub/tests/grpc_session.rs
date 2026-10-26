@@ -586,7 +586,12 @@ async fn handshake_accepts_and_reports_cursors(pool: PgPool) -> TestResult {
     let connection = Uuid::now_v7();
     let mut hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
     hello.optional_capabilities = vec!["future_optional".into()];
-    let (tx, mut control) = host.control(hello).await;
+    hello.cj_journal_id = journals[0].to_string();
+    hello.cursors = vec![JournalCursor {
+        journal_id: journals[1].to_string(),
+        ..Default::default()
+    }];
+    let (tx, mut control) = host.control(hello.clone()).await;
     let reply = accepted(&mut control).await;
     assert_eq!(
         reply.restore_generation,
@@ -610,7 +615,10 @@ async fn handshake_accepts_and_reports_cursors(pool: PgPool) -> TestResult {
     );
     let (_data_tx, mut data) = host
         .data(
-            host.hello(host.machine.machine_id, connection, StreamKind::Data),
+            Hello {
+                stream_kind: StreamKind::Data as i32,
+                ..hello
+            },
             &host.machine.token,
         )
         .await;
@@ -1297,4 +1305,185 @@ async fn next_end(stream: &mut Streaming<ControlDown>) -> bool {
         .unwrap()
         .unwrap()
         .is_none()
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn accepted_echoes_known_optional_capabilities_only(pool: PgPool) -> TestResult {
+    let host = Host::start(pool, timers()).await;
+    let connection = Uuid::now_v7();
+    let mut hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
+    hello.optional_capabilities = vec![
+        "unknown_optional".into(),
+        "exec_v1".into(),
+        "exec_v1".into(),
+    ];
+    let (_tx, mut control) = host.control(hello.clone()).await;
+    assert_eq!(accepted(&mut control).await.capabilities, ["exec_v1"]);
+    assert!(!host.registry.is_reconciled(host.machine.machine_id));
+    hello.stream_kind = StreamKind::Data as i32;
+    let (_data_tx, mut data) = host.data(hello, &host.machine.token).await;
+    assert_eq!(data_accepted(&mut data).await.capabilities, ["exec_v1"]);
+    assert!(!host.registry.is_reconciled(host.machine.machine_id));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn session_without_exec_v1_is_reconciled_at_accepted(pool: PgPool) -> TestResult {
+    let host = Host::start(pool, timers()).await;
+    let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    hello.optional_capabilities = vec!["unknown_optional".into()];
+    let (_tx, mut control) = host.control(hello.clone()).await;
+    assert!(accepted(&mut control).await.capabilities.is_empty());
+    assert!(host.registry.is_reconciled(host.machine.machine_id));
+    hello.stream_kind = StreamKind::Data as i32;
+    let (_data_tx, mut data) = host.data(hello, &host.machine.token).await;
+    assert!(data_accepted(&mut data).await.capabilities.is_empty());
+    assert_eq!(
+        host.registry.availability(host.machine.machine_id),
+        Availability::Available
+    );
+    assert!(host.registry.is_reconciled(host.machine.machine_id));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn accepted_lists_only_journals_the_worker_names(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone(), timers()).await;
+    let named = Uuid::now_v7();
+    let missing = Uuid::now_v7();
+    let historical = Uuid::now_v7();
+    let foreign = Uuid::now_v7();
+    let other = machines::add(&pool, host.installation.owner_id, "other").await?;
+    for (machine, journal, kind, seq) in [
+        (host.machine.machine_id, host.journal, "cj", 3_i64),
+        (host.machine.machine_id, named, "sj", 7),
+        (host.machine.machine_id, historical, "sj", 12),
+        (other.machine_id, foreign, "sj", 99),
+    ] {
+        sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, $4)")
+            .bind(machine).bind(journal).bind(kind).bind(seq).execute(&pool).await?;
+    }
+    let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    hello.cursors = [named, missing, named, host.journal, foreign]
+        .into_iter()
+        .map(|id| JournalCursor {
+            journal_id: id.to_string(),
+            ..Default::default()
+        })
+        .collect();
+    let (_tx, mut control) = host.control(hello.clone()).await;
+    let reply = accepted(&mut control).await;
+    let mut actual: Vec<_> = reply
+        .committed
+        .into_iter()
+        .map(|c| (Uuid::parse_str(&c.journal_id).unwrap(), c.committed_seq))
+        .collect();
+    actual.sort_unstable();
+    let mut expected = vec![(host.journal, 3), (named, 7), (missing, 0), (foreign, 0)];
+    expected.sort_unstable();
+    assert_eq!(actual, expected);
+    hello.stream_kind = StreamKind::Data as i32;
+    let (_data_tx, mut data) = host.data(hello, &host.machine.token).await;
+    let mut actual: Vec<_> = data_accepted(&mut data)
+        .await
+        .committed
+        .into_iter()
+        .map(|c| (Uuid::parse_str(&c.journal_id).unwrap(), c.committed_seq))
+        .collect();
+    actual.sort_unstable();
+    assert_eq!(actual, expected);
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn reconcile_report_is_applied_after_earlier_cj_batches(pool: PgPool) -> TestResult {
+    let host = Host::start(pool.clone(), timers()).await;
+    let conversation = canterlot_hub::testkit::seed_conversation(
+        &pool,
+        host.installation.owner_id,
+        host.machine.machine_id,
+    )
+    .await;
+    let run = canterlot_hub::executions::start(
+        &pool,
+        host.installation.owner_id,
+        conversation,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let mut hello = host.hello(host.machine.machine_id, Uuid::now_v7(), StreamKind::Control);
+    hello.optional_capabilities = vec!["exec_v1".into()];
+    let (tx, mut control) = host.control(hello).await;
+    assert_eq!(accepted(&mut control).await.capabilities, ["exec_v1"]);
+    assert!(!host.registry.is_reconciled(host.machine.machine_id));
+    let mut blocker = pool.begin().await?;
+    sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+        .bind(conversation)
+        .execute(&mut *blocker)
+        .await?;
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::CjRecords(JournalRecords {
+                journal_id: host.journal.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(record_body::Body::ExecutionState(ExecutionState {
+                            execution_id: run.execution_id.to_string(),
+                            generation: run.generation.try_into()?,
+                            state: "starting".into(),
+                            ..Default::default()
+                        })),
+                    }),
+                }],
+            })),
+        },
+    )
+    .await;
+    timeout(WAIT, async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like 'select q.* from queue_state q join executions%')").fetch_one(&pool).await.unwrap();
+            if waiting { break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await?;
+    send(
+        &tx,
+        ControlUp {
+            msg: Some(control_up::Msg::ReconcileReport(ReconcileReport::default())),
+        },
+    )
+    .await;
+    heartbeat(&tx, &mut control, 91).await;
+    let state: String = sqlx::query_scalar("select state from executions where id = $1")
+        .bind(run.execution_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "created");
+    blocker.commit().await?;
+    assert!(matches!(
+        next(&mut control).await.msg,
+        Some(control_down::Msg::CjAck(JournalRangeAck {
+            up_to_seq: 1,
+            ..
+        }))
+    ));
+    timeout(WAIT, async {
+        loop {
+            let state: String = sqlx::query_scalar("select state from executions where id = $1")
+                .bind(run.execution_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            if state == "owner_lost" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    let reason: String = sqlx::query_scalar("select payload->>'reason' from events where execution_id = $1 and kind = 'state_divergence'").bind(run.execution_id).fetch_one(&pool).await?;
+    assert_eq!(reason, "execution_unknown_to_worker");
+    Ok(())
 }

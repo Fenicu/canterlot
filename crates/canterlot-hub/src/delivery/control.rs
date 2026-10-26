@@ -30,6 +30,14 @@ pub enum StopOutcome {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StopExecutionOutcome {
+    Requested { command_id: Uuid, force: bool },
+    AlreadyRequested { command_id: Uuid },
+    NothingToStop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ContinueOutcome {
     pub removed: Vec<PauseReason>,
     pub remaining: Vec<PauseReason>,
@@ -202,21 +210,7 @@ pub async fn request_stop(
     } else {
         None
     };
-    let withdraw_command_id = if let RunSlot::Dispatching { input_id, .. } = slot {
-        let command_id: Option<Uuid> = sqlx::query_scalar(
-            "select command_id from inputs where id = $1 and state in ('dispatched', 'on_machine')",
-        )
-        .bind(input_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(command_id) = command_id {
-            Some(target_command(&mut tx, command_id, "withdraw_input").await?)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let withdraw_command_id = withdraw_dispatch(&mut tx, &slot).await?;
     events::append(
         &mut tx,
         queue_event(
@@ -243,6 +237,113 @@ pub async fn request_stop(
     .await?;
     tx.commit().await?;
     Ok(outcome)
+}
+
+pub async fn request_stop_execution(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    force: bool,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+) -> Result<StopExecutionOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "request_stop_execution";
+    let hash = idempotency::request_hash(
+        OPERATION,
+        &json!({"conversation_id": conversation_id, "force": force}),
+    );
+    let mut tx = pool.begin().await?;
+    let mut queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
+    if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
+        tx.commit().await?;
+        return Ok(outcome);
+    }
+    if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
+        queue.pause_reasons.0.push(PauseReason::UserStop);
+    }
+    let slot = queue.slot()?;
+    queue.save(&mut tx, &slot, None, correlation_id).await?;
+    let live = executions::live(&mut tx, conversation_id).await?;
+    let outcome = if let Some((execution_id, generation, _)) = live {
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "select id from commands where conversation_id = $1 and kind = 'stop_execution'
+             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
+             and payload->>'force' = $4 order by created_at, id limit 1",
+        )
+        .bind(conversation_id)
+        .bind(execution_id)
+        .bind(generation)
+        .bind(if force { "true" } else { "false" })
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(command_id) = existing {
+            StopExecutionOutcome::AlreadyRequested { command_id }
+        } else {
+            let command_id = Uuid::now_v7();
+            let machine_id: Uuid = sqlx::query_scalar(
+                "insert into commands (id, machine_id, conversation_id, execution_id,
+                                       execution_generation, kind, payload, delivery_state)
+                 select $1, machine_id, id, $3, $4, 'stop_execution', $5, 'pending'
+                 from conversations where id = $2 returning machine_id",
+            )
+            .bind(command_id)
+            .bind(conversation_id)
+            .bind(execution_id)
+            .bind(generation)
+            .bind(json!({"force": force}))
+            .fetch_one(&mut *tx)
+            .await?;
+            notify_outbox(&mut tx, machine_id).await?;
+            StopExecutionOutcome::Requested { command_id, force }
+        }
+    } else {
+        StopExecutionOutcome::NothingToStop
+    };
+    withdraw_dispatch(&mut tx, &slot).await?;
+    events::append(
+        &mut tx,
+        queue_event(
+            &queue,
+            "queue_paused",
+            live.map(|(id, _, _)| id),
+            correlation_id,
+        ),
+    )
+    .await?;
+    record(
+        &mut tx,
+        owner_id,
+        idempotency_key,
+        OPERATION,
+        &hash,
+        conversation_id,
+        &outcome,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+async fn withdraw_dispatch(
+    conn: &mut PgConnection,
+    slot: &RunSlot,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    if let RunSlot::Dispatching { input_id, .. } = slot {
+        let command_id: Option<Uuid> = sqlx::query_scalar(
+            "select command_id from inputs where id = $1 and state in ('dispatched', 'on_machine')",
+        )
+        .bind(input_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        if let Some(command_id) = command_id {
+            return Ok(Some(
+                target_command(conn, command_id, "withdraw_input").await?,
+            ));
+        }
+    }
+    Ok(None)
 }
 
 pub async fn continue_queue(

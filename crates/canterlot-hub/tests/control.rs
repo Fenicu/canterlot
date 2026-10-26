@@ -58,6 +58,7 @@ async fn dispatch(pool: &PgPool, conversation_id: Uuid) -> DispatchOutcome {
         conversation_id,
         GateInputs {
             machine_available: true,
+            machine_reconciled: true,
         },
         Uuid::now_v7(),
     )

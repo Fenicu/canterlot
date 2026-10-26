@@ -54,7 +54,7 @@ impl WorkerData for HubGrpc {
                     return;
                 }
             };
-            let reply = state.accepted(machine_id).await?;
+            let reply = state.accepted(machine_id, &hello).await?;
             let reply = checked(DataDown { msg: Some(data_down::Msg::HelloReply(reply)) })?;
             let Some(lease) = state.registry.attach_data(machine_id, connection_id, &authenticated.credential) else {
                 tracing::warn!(kind = "session_rejected", reason = "connection_binding_mismatch", machine_id = %machine_id,
@@ -88,7 +88,7 @@ impl WorkerData for HubGrpc {
                 let message = match next {
                     Ok(ack) => {
                         let Some(ack) = ack else { break; };
-                        let ack = ack.map_err(|error| session_log.error(error))?;
+                        let Some(ack) = ack.map_err(|error| session_log.error(error))? else { continue; };
                         #[cfg(feature = "fault-injection")]
                         if state.faults.ack(&state.pool, machine_id, &ack).await { continue; }
                         yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack)) })?;

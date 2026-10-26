@@ -17,7 +17,11 @@ use tonic::{
 };
 use uuid::Uuid;
 
-use crate::{config::HubTimers, installation::Installation, session::Registry};
+use crate::{
+    config::HubTimers,
+    installation::Installation,
+    session::{CAPABILITY_EXEC_V1, Registry},
+};
 
 mod auth;
 mod control;
@@ -26,10 +30,12 @@ mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
 pub const KNOWN_CAPABILITIES: &[&str] = &[];
+pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[CAPABILITY_EXEC_V1];
 
 #[tonic::async_trait]
 /// ACK возвращается только после commit всех записей диапазона.
 pub trait Ingest: Send + Sync {
+    async fn reconcile(&self, machine_id: Uuid, report: ReconcileReport) -> Result<(), Status>;
     async fn cj_records(
         &self,
         machine_id: uuid::Uuid,
@@ -64,11 +70,16 @@ enum LaneKind {
     Sj,
 }
 
+enum IngestJob {
+    Records(JournalRecords),
+    Reconcile(ReconcileReport),
+}
+
 /// Приём журнала потока в отдельной задаче: подтверждения уходят строго по порядку,
 /// а цикл потока продолжает обслуживать heartbeat и команды.
 struct IngestLane {
-    batches: mpsc::Sender<JournalRecords>,
-    acks: mpsc::Receiver<Result<JournalRangeAck, Status>>,
+    batches: mpsc::Sender<IngestJob>,
+    acks: mpsc::Receiver<Result<Option<JournalRangeAck>, Status>>,
     _stop: DropGuard,
 }
 
@@ -79,20 +90,30 @@ impl IngestLane {
         credential: Vec<u8>,
         kind: LaneKind,
     ) -> Self {
-        let (batches, mut queue) = mpsc::channel::<JournalRecords>(INGEST_BACKLOG);
+        let (batches, mut queue) = mpsc::channel::<IngestJob>(INGEST_BACKLOG);
         let (reply, acks) = mpsc::channel(INGEST_BACKLOG);
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
         tokio::spawn(async move {
-            while let Some(records) = tokio::select! {
+            while let Some(job) = tokio::select! {
                 biased;
                 _ = cancelled.cancelled() => None,
                 records = queue.recv() => records,
             } {
                 let applied = async {
-                    match kind {
-                        LaneKind::Cj => ingest.cj_records(machine_id, &credential, records).await,
-                        LaneKind::Sj => ingest.sj_records(machine_id, &credential, records).await,
+                    match job {
+                        IngestJob::Records(records) => match kind {
+                            LaneKind::Cj => {
+                                ingest.cj_records(machine_id, &credential, records).await
+                            }
+                            LaneKind::Sj => {
+                                ingest.sj_records(machine_id, &credential, records).await
+                            }
+                        }
+                        .map(Some),
+                        IngestJob::Reconcile(report) => {
+                            ingest.reconcile(machine_id, report).await.map(|()| None)
+                        }
                     }
                 };
                 let result = tokio::select! {
@@ -116,11 +137,18 @@ impl IngestLane {
     #[allow(clippy::result_large_err)]
     fn submit(&self, records: JournalRecords) -> Result<(), Status> {
         self.batches
-            .try_send(records)
+            .try_send(IngestJob::Records(records))
             .map_err(|_| Status::resource_exhausted("ingest_backlog"))
     }
 
-    async fn next_ack(&mut self) -> Option<Result<JournalRangeAck, Status>> {
+    #[allow(clippy::result_large_err)]
+    fn submit_reconcile(&self, report: ReconcileReport) -> Result<(), Status> {
+        self.batches
+            .try_send(IngestJob::Reconcile(report))
+            .map_err(|_| Status::resource_exhausted("ingest_backlog"))
+    }
+
+    async fn next_ack(&mut self) -> Option<Result<Option<JournalRangeAck>, Status>> {
         self.acks.recv().await
     }
 }
@@ -291,9 +319,20 @@ impl HubGrpc {
         Ok(connection_id)
     }
 
-    async fn accepted(&self, machine_id: Uuid) -> Result<HelloReply, Status> {
-        let cursors: Vec<(Uuid, i64)> = sqlx::query_as("select journal_id, committed_seq from journal_cursors where machine_id = $1 order by journal_id")
-            .bind(machine_id).fetch_all(&self.pool).await.map_err(|_| Status::internal("journal cursors unavailable"))?;
+    async fn accepted(&self, machine_id: Uuid, hello: &Hello) -> Result<HelloReply, Status> {
+        let mut named = vec![Uuid::parse_str(&hello.cj_journal_id).expect("validated journal")];
+        named.extend(
+            hello
+                .cursors
+                .iter()
+                .map(|cursor| Uuid::parse_str(&cursor.journal_id).expect("validated journal")),
+        );
+        named.sort_unstable();
+        named.dedup();
+        let cursors: Vec<(Uuid, i64)> = sqlx::query_as(
+            "select named.journal_id, coalesce(c.committed_seq, 0) from unnest($2::uuid[]) as named(journal_id)
+             left join journal_cursors c on c.journal_id = named.journal_id and c.machine_id = $1 order by named.journal_id",
+        ).bind(machine_id).bind(&named).fetch_all(&self.pool).await.map_err(|_| Status::internal("journal cursors unavailable"))?;
         let committed: Vec<_> = cursors
             .into_iter()
             .map(|(journal_id, seq)| {
@@ -308,7 +347,16 @@ impl HubGrpc {
         self.faults.accepted(&committed);
         Ok(HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
-                capabilities: Vec::new(),
+                capabilities: KNOWN_OPTIONAL_CAPABILITIES
+                    .iter()
+                    .filter(|known| {
+                        hello
+                            .optional_capabilities
+                            .iter()
+                            .any(|capability| capability == **known)
+                    })
+                    .map(|capability| (*capability).to_owned())
+                    .collect(),
                 restore_generation: self.installation.restore_generation.to_string(),
                 committed,
             })),

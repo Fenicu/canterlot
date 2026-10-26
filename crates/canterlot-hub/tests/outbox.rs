@@ -409,6 +409,7 @@ async fn pending_commands_are_sent_in_created_at_order(pool: PgPool) {
         conversation,
         GateInputs {
             machine_available: true,
+            machine_reconciled: true,
         },
         Uuid::now_v7(),
     )
@@ -648,6 +649,7 @@ async fn restart_redelivers_pending_commands(pool: PgPool) {
         conversation,
         GateInputs {
             machine_available: true,
+            machine_reconciled: true,
         },
         Uuid::now_v7(),
     )
@@ -944,6 +946,7 @@ async fn revoked_outbox_backstop_blocks_pending_command_before_notification(pool
         conversation,
         GateInputs {
             machine_available: true,
+            machine_reconciled: true,
         },
         Uuid::now_v7(),
     )

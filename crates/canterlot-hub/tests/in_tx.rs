@@ -47,6 +47,7 @@ async fn dispatched_input(
             seed.conversation_id,
             GateInputs {
                 machine_available: true,
+                machine_reconciled: true,
             },
             Uuid::now_v7(),
         )

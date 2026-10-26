@@ -8,7 +8,7 @@ use canterlot_proto::{
         BLOCK_FINAL_INLINE_MAX_BYTES, MAX_BLOCK_DELTA_BYTES, MAX_SJ_BATCH_RECORDS,
         check_record_batch,
     },
-    worker::v1::{JournalRecords, record_body::Body},
+    worker::v1::{JournalRecords, ReconcileReport, record_body::Body},
 };
 use prost::Message;
 use serde_json::json;
@@ -113,6 +113,125 @@ impl Ingest {
     pub fn with_dispatcher(mut self, dispatcher: crate::dispatcher::Dispatcher) -> Self {
         self.dispatcher = Some(dispatcher);
         self
+    }
+
+    pub async fn reconcile(
+        &self,
+        machine_id: Uuid,
+        report: &ReconcileReport,
+    ) -> Result<(), IngestError> {
+        let observations = report
+            .executions
+            .iter()
+            .map(|observation| {
+                Ok((
+                    parse_id(&observation.execution_id)?,
+                    i64::try_from(observation.generation)
+                        .map_err(|_| IngestError::InvalidRecord)?,
+                    observation
+                        .state
+                        .parse::<ExecutionState>()
+                        .map_err(|_| IngestError::InvalidRecord)?,
+                    observation,
+                ))
+            })
+            .collect::<Result<Vec<_>, IngestError>>()?;
+        let mut tx = self.pool.begin().await?;
+        let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
+            .bind(machine_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        sqlx::query(
+            "select q.conversation_id from queue_state q join conversations c on c.id = q.conversation_id
+             where c.machine_id = $1 order by q.conversation_id for update of q",
+        ).bind(machine_id).fetch_all(&mut *tx).await?;
+        let executions: Vec<(Uuid, Uuid, i64, String)> = sqlx::query_as(
+            "select e.id, e.conversation_id, e.generation, e.state from executions e
+             join conversations c on c.id = e.conversation_id where c.machine_id = $1",
+        )
+        .bind(machine_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for (id, generation, worker_state, observation) in &observations {
+            let known = executions
+                .iter()
+                .find(|(execution_id, _, _, _)| execution_id == id);
+            let Some((_, _, hub_generation, hub_state)) = known else {
+                events::append(&mut tx, NewEvent {
+                    scope: Scope::Conversations { owner_id }, kind: "state_divergence",
+                    conversation_id: None, execution_id: None,
+                    payload: json!({"machine_id": machine_id, "execution_id": id, "generation": generation, "reason": "unknown_execution"}),
+                    correlation_id: Uuid::now_v7(),
+                }).await?;
+                continue;
+            };
+            if generation != hub_generation || matches!(hub_state.as_str(), "stopped" | "failed") {
+                continue;
+            }
+            if matches!(
+                worker_state,
+                ExecutionState::Stopped | ExecutionState::Failed
+            ) {
+                apply_body(
+                    &mut tx,
+                    machine_id,
+                    &Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+                        execution_id: id.to_string(),
+                        generation: observation.generation,
+                        state: observation.state.clone(),
+                        outcome: observation.outcome.clone(),
+                        ..Default::default()
+                    }),
+                    Uuid::now_v7(),
+                )
+                .await?;
+            } else {
+                sqlx::query("update executions set observed_at = now() where id = $1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+            }
+        }
+        for (execution_id, conversation_id, generation, state) in executions {
+            if matches!(state.as_str(), "starting" | "running" | "stopping")
+                && !observations.iter().any(|(id, observed_generation, _, _)| {
+                    *id == execution_id && *observed_generation == generation
+                })
+            {
+                let correlation_id = Uuid::now_v7();
+                executions::set_state_in_tx(
+                    &mut tx,
+                    execution_id,
+                    ExecutionState::OwnerLost,
+                    None,
+                    correlation_id,
+                )
+                .await?;
+                events::append(
+                    &mut tx,
+                    NewEvent {
+                        scope: Scope::Conversation {
+                            id: conversation_id,
+                        },
+                        kind: "state_divergence",
+                        conversation_id: Some(conversation_id),
+                        execution_id: Some(execution_id),
+                        payload: json!({"reason": "execution_unknown_to_worker"}),
+                        correlation_id,
+                    },
+                )
+                .await?;
+            }
+        }
+        tx.commit().await?;
+        if let Some(dispatcher) = &self.dispatcher {
+            for conversation in
+                crate::dispatcher::queued_conversations(&self.pool, Some(machine_id)).await?
+            {
+                dispatcher.trigger(conversation);
+            }
+        }
+        Ok(())
     }
 
     pub async fn apply_batch(
@@ -736,6 +855,19 @@ impl Ingest {
 
 #[tonic::async_trait]
 impl crate::grpc::Ingest for Ingest {
+    async fn reconcile(
+        &self,
+        machine_id: Uuid,
+        report: ReconcileReport,
+    ) -> Result<(), tonic::Status> {
+        Ingest::reconcile(self, machine_id, &report)
+            .await
+            .map_err(|error| match error {
+                IngestError::InvalidRecord => tonic::Status::invalid_argument(error.to_string()),
+                _ => tonic::Status::internal(error.to_string()),
+            })
+    }
+
     async fn cj_records(
         &self,
         machine_id: Uuid,

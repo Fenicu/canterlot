@@ -234,13 +234,19 @@ pub async fn apply_input_receipt_in_tx(
         }
         InputReceipt::CancelLost => state,
         InputReceipt::Withdrawn | InputReceipt::DispatchDeferred { .. } => {
-            if matches!(receipt, InputReceipt::DispatchDeferred { .. })
+            if let InputReceipt::DispatchDeferred { reason } = &receipt
                 && executions::live(conn, queue.conversation_id)
                     .await?
                     .is_some_and(|(id, _, _)| Some(id) == target.execution_id)
-                && !queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution)
             {
-                queue.hold_reasons.0.push(HoldReason::NoLiveExecution);
+                let hold = if reason == "storage_low" {
+                    HoldReason::StorageLow
+                } else {
+                    HoldReason::NoLiveExecution
+                };
+                if !queue.hold_reasons.0.contains(&hold) {
+                    queue.hold_reasons.0.push(hold);
+                }
             }
             slot = RunSlot::Free;
             if target.cancel_requested {
