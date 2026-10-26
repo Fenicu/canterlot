@@ -1,5 +1,7 @@
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Seek, SeekFrom, Write};
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::format::{self, RECORD_HEADER_BYTES};
@@ -23,10 +25,7 @@ pub(crate) struct Segment {
 impl Segment {
     pub fn create(dir: &Path, first_seq: u64) -> io::Result<Self> {
         let path = dir.join(format!("seg-{first_seq:020}.log"));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)?;
+        let file = private_file().write(true).create_new(true).open(&path)?;
         file.sync_all()?;
         sync_dir(dir)?;
         Ok(Self {
@@ -116,7 +115,7 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
 
 pub(crate) fn atomic_replace(dir: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
     let temporary = dir.join(format!("{name}.tmp"));
-    let mut file = OpenOptions::new()
+    let mut file = private_file()
         .write(true)
         .create(true)
         .truncate(true)
@@ -135,7 +134,7 @@ pub(crate) fn quarantine(
 ) -> io::Result<CorruptedTail> {
     let base = dir.join("quarantine");
     if !base.exists() {
-        fs::create_dir(&base)?;
+        private_dir(&base)?;
     }
     sync_dir(dir)?;
     let destination_name = |path: &Path, offset| {
@@ -150,7 +149,7 @@ pub(crate) fn quarantine(
     });
     let destination = if collision {
         let path = base.join(uuid::Uuid::now_v7().to_string());
-        fs::create_dir(&path)?;
+        private_dir(&path)?;
         sync_dir(&base)?;
         path
     } else {
@@ -164,7 +163,7 @@ pub(crate) fn quarantine(
         source.seek(SeekFrom::Start(cut))?;
         let name = destination_name(path, cut);
         let temporary = destination.join(format!("{name}.tmp"));
-        let mut target = OpenOptions::new()
+        let mut target = private_file()
             .write(true)
             .create_new(true)
             .open(&temporary)?;
@@ -179,7 +178,7 @@ pub(crate) fn quarantine(
         fs::remove_file(path)?;
         sync_dir(dir)?;
     }
-    let file = OpenOptions::new().write(true).open(&affected[0].1)?;
+    let file = private_file().write(true).open(&affected[0].1)?;
     file.set_len(offset)?;
     file.sync_all()?;
     Ok(CorruptedTail {
@@ -187,4 +186,18 @@ pub(crate) fn quarantine(
         quarantine_path,
         bytes,
     })
+}
+
+pub(crate) fn private_file() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    #[cfg(unix)]
+    options.mode(0o600);
+    options
+}
+
+pub(crate) fn private_dir(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder.create(path)
 }

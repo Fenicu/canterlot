@@ -106,7 +106,7 @@ impl Journal {
             .filter(|p| !p.as_os_str().is_empty())
             .unwrap_or(Path::new("."));
         let staging = parent.join(format!(".canterlot-journal-{}.tmp", uuid::Uuid::now_v7()));
-        fs::create_dir(&staging)?;
+        segment::private_dir(&staging)?;
         let lock = lock_directory(&staging)?;
         lock.0.sync_all()?;
         let mut first = Segment::create(&staging, 1)?;
@@ -462,7 +462,7 @@ impl Drop for JournalLock {
 }
 
 fn lock_directory(dir: &Path) -> Result<JournalLock, JournalError> {
-    let lock = OpenOptions::new()
+    let lock = segment::private_file()
         .read(true)
         .write(true)
         .create(true)
