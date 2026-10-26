@@ -331,3 +331,17 @@ fn debug_redacts_text_at_all_message_levels() {
         assert!(value.contains(&marker.len().to_string()));
     }
 }
+
+#[test]
+fn local_state_reset_rejection_has_stable_wire_value() {
+    use canterlot_proto::worker::v1::{RejectReason, Rejected};
+    let reason = RejectReason::try_from(8).expect("local_state_reset enum value");
+    assert_eq!(reason.as_str_name(), "REJECT_REASON_LOCAL_STATE_RESET");
+    let rejected = Rejected {
+        reason: 8,
+        detail: String::new(),
+        retryable: false,
+    };
+    assert_eq!(rejected.encode_to_vec(), [8, 8]);
+    assert_eq!(Rejected::decode([8, 8].as_slice()).unwrap(), rejected);
+}
