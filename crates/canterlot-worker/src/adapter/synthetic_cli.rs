@@ -31,6 +31,14 @@ pub(super) enum Request {
 }
 
 fn log_input(line: &str) {
+    #[cfg(not(feature = "fault-injection"))]
+    let _ = line;
+    #[cfg(feature = "fault-injection")]
+    trace_input(line);
+}
+
+#[cfg(feature = "fault-injection")]
+fn trace_input(line: &str) {
     use std::io::Write;
     if let Some(path) = std::env::var_os("CANTERLOT_SYNTHETIC_STDIN_LOG")
         && let Ok(mut file) = std::fs::OpenOptions::new()
@@ -38,7 +46,11 @@ fn log_input(line: &str) {
             .append(true)
             .open(path)
     {
-        let _ = writeln!(file, "{line}");
+        let Ok(value) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
+        let receipt = json!({"type":value["type"], "command_id":value["command_id"], "attempt":value["attempt"]});
+        let _ = writeln!(file, "{receipt}");
     }
 }
 

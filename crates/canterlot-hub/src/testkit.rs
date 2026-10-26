@@ -100,7 +100,11 @@ async fn spawn_on(
     let dispatch = tokio::spawn(dispatcher::run(pool, registry.clone(), rx, timers, stopped));
     let join = tokio::spawn(async move {
         let signal = stopping.clone();
-        let result = grpc::serve_with_listener(state, listener, &cert, &key, async move {
+        #[cfg(feature = "fault-injection")]
+        let serve = grpc::serve_test_with_goaway;
+        #[cfg(not(feature = "fault-injection"))]
+        let serve = grpc::serve_with_listener;
+        let result = serve(state, listener, &cert, &key, async move {
             let _ = stop.await;
             let _ = signal.send(true);
         })

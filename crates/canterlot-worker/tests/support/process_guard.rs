@@ -23,7 +23,7 @@ impl ProcessGuard {
         }
     }
 
-    fn members(&self) -> Vec<(u32, u64)> {
+    pub fn members(&self) -> Vec<(u32, u64)> {
         fs::read_dir("/proc")
             .unwrap()
             .flatten()

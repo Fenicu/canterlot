@@ -167,6 +167,8 @@ impl Interceptor for Bearer {
 }
 
 pub struct Worker {
+    #[cfg(feature = "fault-injection")]
+    probe: crate::fault_injection::SessionProbe,
     config: WorkerConfig,
     store: StoreThread,
     state: watch::Sender<SessionState>,
@@ -209,6 +211,8 @@ impl Pending {
 impl Worker {
     pub fn new(config: WorkerConfig, store: WorkerStore) -> Worker {
         Self {
+            #[cfg(feature = "fault-injection")]
+            probe: Default::default(),
             config,
             store: StoreThread::new(store),
             state: watch::channel(SessionState::Disconnected).0,
@@ -219,6 +223,12 @@ impl Worker {
 
     pub fn state(&self) -> watch::Receiver<SessionState> {
         self.state.subscribe()
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn with_session_probe(mut self, probe: crate::fault_injection::SessionProbe) -> Self {
+        self.probe = probe;
+        self
     }
 
     fn transition(&self, state: SessionState) {
@@ -670,6 +680,8 @@ impl Worker {
                         }
                         Some(control_down::Msg::HeartbeatAck(ack)) => {
                             if pending_heartbeat.as_ref().is_some_and(|p| ack.seq == p.seq) {
+                                #[cfg(feature = "fault-injection")]
+                                self.probe.ack(ack.seq);
                                 pending_heartbeat = None;
                                 heartbeat_outbound = None;
                                 tracing::debug!(seq = ack.seq, "heartbeat acknowledged");
@@ -750,6 +762,8 @@ impl Worker {
                         heartbeat_outbound = Some(pending.resend(self.config.timers.heartbeat_ack)?);
                     } else {
                         heartbeat_seq += 1;
+                        #[cfg(feature = "fault-injection")]
+                        self.probe.sent(heartbeat_seq);
                         let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq })) };
                         heartbeat_outbound = Some(message.clone());
                         pending_heartbeat = Some(Pending::new(message, heartbeat_seq, self.config.timers.heartbeat_ack));

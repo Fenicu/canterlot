@@ -891,6 +891,11 @@ impl crate::grpc::Ingest for Ingest {
         credential: &[u8],
         records: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
+        #[cfg(feature = "fault-injection")]
+        {
+            self.faults.batch(records.clone());
+            self.faults.pause_sj_batch().await;
+        }
         self.range_ack(machine_id, credential, JournalKind::Sj, records)
             .await
     }

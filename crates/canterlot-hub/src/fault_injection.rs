@@ -15,6 +15,7 @@ use tonic::Code;
 pub enum Point {
     BeforeCommandSend,
     BeforeCjCommit,
+    BeforeSjCommit,
     BeforeAckSend,
 }
 
@@ -55,11 +56,21 @@ impl From<&Command> for CommandTrace {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SjFact {
+    TransmissionStarted(String, u32),
+    InputWithdrawn(String, u32),
+    InterruptStatus(String, i32),
+    JournalClosed,
+    BlockDelta,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RecordTrace {
     pub seq: u64,
     pub kind: Option<std::mem::Discriminant<canterlot_proto::worker::v1::record_body::Body>>,
     pub encoded_len: usize,
     pub stored_command: Option<(String, u32)>,
+    pub sj_fact: Option<SjFact>,
 }
 
 impl From<&canterlot_proto::worker::v1::JournalRecord> for RecordTrace {
@@ -72,6 +83,27 @@ impl From<&canterlot_proto::worker::v1::JournalRecord> for RecordTrace {
             stored_command: match body {
                 Some(canterlot_proto::worker::v1::record_body::Body::CommandStored(fact)) => {
                     Some((fact.command_id.clone(), fact.dispatch_attempt))
+                }
+                _ => None,
+            },
+            sj_fact: match body {
+                Some(canterlot_proto::worker::v1::record_body::Body::TransmissionStarted(f)) => {
+                    Some(SjFact::TransmissionStarted(
+                        f.command_id.clone(),
+                        f.dispatch_attempt,
+                    ))
+                }
+                Some(canterlot_proto::worker::v1::record_body::Body::InputWithdrawn(f)) => Some(
+                    SjFact::InputWithdrawn(f.command_id.clone(), f.dispatch_attempt),
+                ),
+                Some(canterlot_proto::worker::v1::record_body::Body::InterruptStatus(f)) => {
+                    Some(SjFact::InterruptStatus(f.command_id.clone(), f.state))
+                }
+                Some(canterlot_proto::worker::v1::record_body::Body::JournalClosed(_)) => {
+                    Some(SjFact::JournalClosed)
+                }
+                Some(canterlot_proto::worker::v1::record_body::Body::BlockDelta(_)) => {
+                    Some(SjFact::BlockDelta)
                 }
                 _ => None,
             },
@@ -96,6 +128,9 @@ pub struct BatchTrace {
 struct Trace {
     pauses: HashMap<Point, VecDeque<oneshot::Sender<oneshot::Sender<()>>>>,
     drop_acks: usize,
+    drop_sj_acks: usize,
+    sj_batch_pause: std::time::Duration,
+    goaways: usize,
     hellos: Vec<Hello>,
     batches: Vec<BatchTrace>,
     commands: Vec<CommandTrace>,
@@ -108,6 +143,7 @@ pub struct Faults {
     trace: Arc<Mutex<Trace>>,
     failures: broadcast::Sender<Code>,
     data_failures: broadcast::Sender<Code>,
+    goaway: broadcast::Sender<()>,
 }
 
 impl Default for Faults {
@@ -116,11 +152,52 @@ impl Default for Faults {
             trace: Arc::default(),
             failures: broadcast::channel(16).0,
             data_failures: broadcast::channel(16).0,
+            goaway: broadcast::channel(16).0,
         }
     }
 }
 
 impl Faults {
+    pub fn goaway(&self) {
+        let _ = self.goaway.send(());
+    }
+
+    pub(crate) fn goaway_signals(&self) -> broadcast::Receiver<()> {
+        self.goaway.subscribe()
+    }
+
+    pub(crate) fn goaway_started(&self) {
+        self.trace.lock().unwrap_or_else(|e| e.into_inner()).goaways += 1;
+    }
+
+    pub fn goaway_count(&self) -> usize {
+        self.trace.lock().unwrap_or_else(|e| e.into_inner()).goaways
+    }
+
+    pub fn set_sj_batch_pause(&self, pause: std::time::Duration) {
+        self.trace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sj_batch_pause = pause;
+    }
+
+    pub(crate) async fn pause_sj_batch(&self) {
+        let pause = self
+            .trace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .sj_batch_pause;
+        tokio::time::sleep(pause).await;
+        self.pause(Point::BeforeSjCommit).await;
+    }
+
+    pub fn drop_next_sj_acks(&self, count: usize) {
+        self.trace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drop_sj_acks = count;
+    }
+
     pub fn pause_next(&self, point: Point) -> oneshot::Receiver<oneshot::Sender<()>> {
         let (tx, rx) = oneshot::channel();
         self.trace
@@ -237,24 +314,27 @@ impl Faults {
             eprintln!("fault injection: invalid journal id");
             return false;
         };
-        let committed = match sqlx::query_scalar::<_, i64>(
-            "select committed_seq from journal_cursors where machine_id = $1 and journal_id = $2",
+        let (committed, sj) = match sqlx::query_as::<_, (i64, String)>(
+            "select committed_seq, kind from journal_cursors where machine_id = $1 and journal_id = $2",
         )
         .bind(machine)
         .bind(journal)
         .fetch_optional(pool)
         .await
         {
-            Ok(seq) => seq.unwrap_or(0).try_into().unwrap_or(0),
+            Ok(row) => row.map_or((0, false), |(seq, kind)| (seq.try_into().unwrap_or(0), kind == "sj")),
             Err(_) => {
                 eprintln!("fault injection: cursor query failed");
-                0
+                (0, false)
             }
         };
         let dropped = {
             let mut trace = self.trace.lock().unwrap_or_else(|error| error.into_inner());
-            let dropped = trace.drop_acks > 0;
+            let dropped = trace.drop_acks > 0 || (sj && trace.drop_sj_acks > 0);
             trace.drop_acks = trace.drop_acks.saturating_sub(1);
+            if sj {
+                trace.drop_sj_acks = trace.drop_sj_acks.saturating_sub(1);
+            }
             push(
                 &mut trace.acks,
                 Ack {

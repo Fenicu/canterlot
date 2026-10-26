@@ -8,6 +8,39 @@ use prost::Message;
 
 use canterlot_proto::worker::v1::{Command, JournalCursor};
 
+#[derive(Clone, Default)]
+pub struct SessionProbe {
+    sent: Arc<Mutex<std::collections::HashMap<u64, Instant>>>,
+    acks: Arc<Mutex<Vec<std::time::Duration>>>,
+}
+
+impl SessionProbe {
+    pub(crate) fn sent(&self, seq: u64) {
+        self.sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(seq, Instant::now());
+    }
+
+    pub(crate) fn ack(&self, seq: u64) {
+        if let Some(at) = self
+            .sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&seq)
+        {
+            push(
+                &mut self.acks.lock().unwrap_or_else(|e| e.into_inner()),
+                at.elapsed(),
+            );
+        }
+    }
+
+    pub fn heartbeat_acks(&self) -> Vec<std::time::Duration> {
+        self.acks.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CommandTrace {
     pub command_id: String,

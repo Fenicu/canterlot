@@ -414,3 +414,42 @@ pub async fn serve_with_listener(
         })
         .await
 }
+
+#[cfg(all(feature = "fault-injection", feature = "testkit"))]
+pub(crate) async fn serve_test_with_goaway(
+    state: HubGrpc,
+    listener: TcpListener,
+    cert: &str,
+    key: &str,
+    shutdown: impl Future<Output = ()>,
+) -> Result<(), tonic::transport::Error> {
+    let _revocations = revocation::start(state.pool.clone(), state.registry.clone()).await;
+    let cancel = state.shutdown.clone();
+    let faults = state.faults.clone();
+    let mut goaway = faults.goaway_signals();
+    let (graceful, graceful_rx) = tokio::sync::oneshot::channel::<()>();
+    let serving = router(state, cert, key)?.serve_with_incoming_shutdown(
+        TcpListenerStream::new(listener),
+        async {
+            let _ = graceful_rx.await;
+        },
+    );
+    tokio::pin!(serving, shutdown);
+    tokio::select! {
+        result = &mut serving => result,
+        _ = &mut shutdown => {
+            cancel.cancel();
+            drop(graceful);
+            serving.await
+        }
+        _ = goaway.recv() => {
+            // Hyper закрывает приём новых потоков через GOAWAY, живые RPC остаются.
+            drop(graceful);
+            faults.goaway_started();
+            tokio::select! {
+                result = &mut serving => result,
+                _ = &mut shutdown => { cancel.cancel(); serving.await }
+            }
+        }
+    }
+}

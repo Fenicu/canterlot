@@ -76,12 +76,17 @@ impl WorkerData for HubGrpc {
             session_log.reason = "stream_end";
             session_log.cancelled = lease.cancel.clone();
             yield reply;
+            #[cfg(feature = "fault-injection")]
+            let mut failures = state.faults.data_failures();
+            #[cfg(not(feature = "fault-injection"))]
+            let mut failures = ();
             let mut lane = IngestLane::start(state.ingest.clone(), machine_id, authenticated.credential.clone(), LaneKind::Sj);
             loop {
                 let next = tokio::select! {
                     biased;
                     _ = state.shutdown.cancelled() => break,
                     _ = lease.cancel.cancelled() => break,
+                    code = fault_signal(&mut failures) => Err(Err(Status::new(code, "injected data failure"))),
                     ack = lane.next_ack() => Ok(ack),
                     next = inbound.message() => Err(next),
                 };
@@ -111,4 +116,18 @@ impl WorkerData for HubGrpc {
         };
         Ok(Response::new(Box::pin(output)))
     }
+}
+
+#[cfg(feature = "fault-injection")]
+async fn fault_signal(failures: &mut tokio::sync::broadcast::Receiver<tonic::Code>) -> tonic::Code {
+    loop {
+        if let Ok(code) = failures.recv().await {
+            return code;
+        }
+    }
+}
+
+#[cfg(not(feature = "fault-injection"))]
+fn fault_signal(_: &mut ()) -> std::future::Pending<tonic::Code> {
+    std::future::pending()
 }
