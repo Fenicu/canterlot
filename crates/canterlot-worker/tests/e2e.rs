@@ -783,3 +783,44 @@ async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
     fixture.reopen_and_assert(2);
     stop_hub(hub).await;
 }
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn rotated_token_reconnects_same_data_dir_without_cursor_divergence(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
+    let mut fixture = Fixture::new(&pool, &hub).await;
+    let mut worker = fixture.start();
+    fixture.settled().await;
+    worker.state(SessionState::Live).await;
+    let before = fixture.snapshot().cursor;
+    let old = canterlot_worker::config::read_token(&fixture.config.token_file).unwrap();
+    let token = machines::rotate_token(&pool, fixture.config.machine_id, false)
+        .await
+        .unwrap()
+        .unwrap();
+    let result = timeout(Duration::from_secs(2), &mut worker.join)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(WorkerError::Hub {
+            code: Code::Unauthenticated,
+            ..
+        })
+    ));
+    assert!(machines::verify(&pool, &old).await.unwrap().is_none());
+    fs::write(&fixture.config.token_file, token).unwrap();
+    fixture.reopen_and_assert(1);
+    let mut worker = fixture.start();
+    worker.state(SessionState::Live).await;
+    fixture.add_input().await;
+    fixture.settled().await;
+    let after = fixture.snapshot().cursor;
+    assert_eq!(after.journal_id, before.journal_id);
+    assert_eq!(after.acked_seq_known_to_worker, 2);
+    fixture.assert_db(&["on_machine", "on_machine"], 2).await;
+    assert_acks(&hub.faults, &fixture);
+    worker.stop().await;
+    fixture.reopen_and_assert(2);
+    stop_hub(hub).await;
+}

@@ -616,6 +616,13 @@ async fn retryable_identity_rejection_backs_off_without_displacing_live_worker(p
     let second_dir = TempDir::new().unwrap();
     let mut second_config = config.clone();
     second_config.data_dir = second_dir.path().to_owned();
+    // Коллизия живого сеанса проверяется на клоне CJ, без сброса локального состояния.
+    canterlot_journal::Journal::create(
+        &second_dir.path().join("cj"),
+        canterlot_journal::JournalId(store.cj_journal_id().unwrap()),
+        canterlot_journal::JournalOptions::default(),
+    )
+    .unwrap();
     let second_store = WorkerStore::open(second_dir.path()).unwrap();
     let (stop, mut state, join) = start(config, store);
     wait_state(&mut state, SessionState::Live).await;

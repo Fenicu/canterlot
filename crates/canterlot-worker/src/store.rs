@@ -126,7 +126,14 @@ impl WorkerStore {
     }
 
     pub fn open(data_dir: &Path) -> Result<WorkerStore, StoreError> {
-        fs::create_dir_all(data_dir)?;
+        {
+            use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+            fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(data_dir)?;
+            fs::set_permissions(data_dir, fs::Permissions::from_mode(0o700))?;
+        }
         let cj = open_journal(&data_dir.join("cj"))?;
         if cj.is_sealed().is_some() {
             return Err(StoreError::CjSealed);
@@ -433,7 +440,9 @@ impl WorkerStore {
         let bytes = toml::to_string(&hub)?;
         let temporary = self.data_dir.join(format!(".hub-{}.tmp", Uuid::now_v7()));
         let result = (|| -> io::Result<()> {
+            use std::os::unix::fs::OpenOptionsExt;
             let mut file = OpenOptions::new()
+                .mode(0o600)
                 .write(true)
                 .create_new(true)
                 .open(&temporary)?;

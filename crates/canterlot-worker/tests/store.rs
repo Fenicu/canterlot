@@ -440,13 +440,13 @@ fn config_loads_with_defaults() {
 }
 
 #[test]
-fn config_timers_use_milliseconds_and_allow_partial_overrides() {
+fn config_timers_use_humantime_and_allow_partial_overrides() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("worker.toml");
     fs::write(
         &path,
         format!(
-            "{}\n[timers]\nheartbeat = 25\nbackoff_min = 1\n",
+            "{}\n[timers]\nheartbeat = '25ms'\nbackoff_min = '1ms'\n",
             config_text()
         ),
     )
@@ -654,4 +654,50 @@ fn config_requires_valid_restore_generation() {
         fs::write(&path, contents).unwrap();
         assert!(load(&path).is_err());
     }
+}
+
+#[test]
+fn configs_reject_unknown_fields_and_numeric_durations() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("worker.toml");
+    for extra in [
+        "handshake = 10",
+        "[timer]\nheartbeat = '5s'",
+        "[timers]\nheartbeet = '5s'",
+        "[timers]\nheartbeat = 5",
+    ] {
+        fs::write(&path, format!("{}\n{extra}\n", config_text())).unwrap();
+        assert!(load(&path).is_err(), "accepted {extra}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn worker_store_creates_private_directories_and_files() {
+    use std::os::unix::fs::PermissionsExt;
+    fn check(path: &Path) {
+        let metadata = fs::metadata(path).unwrap();
+        assert_eq!(
+            metadata.permissions().mode() & 0o777,
+            if metadata.is_dir() { 0o700 } else { 0o600 },
+            "{}",
+            path.display()
+        );
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).unwrap() {
+                check(&entry.unwrap().path());
+            }
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("nested/store");
+    let mut store = WorkerStore::open(&path).unwrap();
+    store.accept_command(&delivery()).unwrap();
+    store.set_restore_generation(Uuid::now_v7()).unwrap();
+    check(&path);
+    store.on_cj_ack(1).unwrap();
+    check(&path);
+    drop(store);
+    WorkerStore::open(&path).unwrap();
+    check(&path);
 }

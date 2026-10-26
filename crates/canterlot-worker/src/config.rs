@@ -4,11 +4,12 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use url::Url;
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     pub hub_url: String,
     pub ca_cert: PathBuf,
@@ -22,25 +23,25 @@ pub struct WorkerConfig {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct WorkerTimers {
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub handshake: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub http2_keepalive_interval: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub http2_keepalive_timeout: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub heartbeat: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub heartbeat_ack: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub range_ack: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub backoff_min: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub backoff_max: Duration,
-    #[serde(deserialize_with = "milliseconds")]
+    #[serde(with = "humantime_serde")]
     pub backoff_reset_after: Duration,
 }
 
@@ -200,8 +201,4 @@ pub fn read_token(path: &Path) -> Result<String, ConfigError> {
     file.read_to_string(&mut token)
         .map_err(|error| file_io(path, error))?;
     Ok(token.trim().to_owned())
-}
-
-fn milliseconds<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-    u64::deserialize(deserializer).map(Duration::from_millis)
 }
