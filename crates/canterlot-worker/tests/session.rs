@@ -60,6 +60,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
             backoff_reset_after: Duration::from_millis(500),
             ..Default::default()
         },
+        execution: Default::default(),
     };
     (directory, config, store)
 }

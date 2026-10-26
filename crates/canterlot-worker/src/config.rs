@@ -20,6 +20,29 @@ pub struct WorkerConfig {
     pub data_dir: PathBuf,
     #[serde(default)]
     pub timers: WorkerTimers,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ExecutionConfig {
+    pub allowed_workdir_roots: Vec<PathBuf>,
+    pub supervisor_exe: Option<PathBuf>,
+    #[serde(with = "humantime_serde")]
+    pub spawn_timeout: Duration,
+    pub supervisor: SupervisorTimers,
+}
+
+impl Default for ExecutionConfig {
+    fn default() -> Self {
+        Self {
+            allowed_workdir_roots: Vec::new(),
+            supervisor_exe: None,
+            spawn_timeout: Duration::from_secs(10),
+            supervisor: SupervisorTimers::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

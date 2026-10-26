@@ -331,6 +331,7 @@ impl ProtocolHub {
                 backoff_max: Duration::from_millis(500),
                 ..Default::default()
             },
+            execution: Default::default(),
         };
         let store = WorkerStore::open(&config.data_dir).unwrap();
         (

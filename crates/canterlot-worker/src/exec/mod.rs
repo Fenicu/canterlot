@@ -1,0 +1,452 @@
+use std::{
+    collections::{HashMap, HashSet},
+    io,
+    path::PathBuf,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+};
+
+use canterlot_proto::worker::v1::{
+    Command, ExecutionObservation, JournalCursor, JournalRecord, StartExecution, command::Kind,
+    record_body::Body,
+};
+use tokio::{
+    sync::{OnceCell, mpsc, watch},
+    task::JoinHandle,
+};
+use uuid::Uuid;
+
+use crate::{
+    config::ExecutionConfig,
+    session::WorkerError,
+    session_store::StoreClient,
+    store::{Accept, StoreError, WorkerStore},
+    supervisor::ipc::IpcError,
+};
+
+mod manager;
+mod procfs;
+mod spawn;
+
+use manager::{Actor, Msg, Start};
+
+pub struct SjRelay {
+    pub journal_id: Uuid,
+    pub records: Vec<JournalRecord>,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ExecError {
+    #[error(transparent)]
+    Store(#[from] WorkerError),
+    #[error("execution I/O failed: {0}")]
+    Io(#[from] io::Error),
+    #[error("supervisor ipc failed: {0}")]
+    Ipc(#[from] IpcError),
+    #[error("invalid command")]
+    InvalidCommand,
+    #[error("supervisor did not attach in time")]
+    AttachTimeout,
+    #[error("supervisor verification failed: {0}")]
+    Verify(&'static str),
+    #[error("execution manager is shut down")]
+    Shutdown,
+}
+
+pub(crate) struct ExecInfo {
+    pub conversation_id: Uuid,
+    pub generation: u64,
+    pub state: String,
+    pub outcome: String,
+    pub attached: bool,
+    pub sj_journal_id: Option<Uuid>,
+    pub last_seq: u64,
+    pub acked_seq: u64,
+    pub retired: bool,
+}
+
+pub(crate) struct Shared {
+    pub config: ExecutionConfig,
+    pub store: StoreClient,
+    pub relay: mpsc::Sender<SjRelay>,
+    pub enabled: AtomicBool,
+    pub hub: watch::Sender<Option<Arc<HashMap<Uuid, u64>>>>,
+    pub shutdown: watch::Receiver<bool>,
+    pub infos: Mutex<HashMap<Uuid, ExecInfo>>,
+    pub actors: Mutex<HashMap<Uuid, mpsc::UnboundedSender<Msg>>>,
+    pub tasks: Mutex<Vec<JoinHandle<()>>>,
+    pub cancelled_starts: Mutex<HashSet<Uuid>>,
+    pub data_dir: OnceCell<PathBuf>,
+    pub boot_id: OnceCell<String>,
+    #[cfg(feature = "fault-injection")]
+    pub spawn_delay: Mutex<std::time::Duration>,
+}
+
+pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
+    store
+        .as_mut()
+        .ok_or(WorkerError::Store(StoreError::NeedsReopen))
+}
+
+impl Shared {
+    pub(crate) async fn data_dir(&self) -> Result<&PathBuf, ExecError> {
+        self.data_dir
+            .get_or_try_init(|| async {
+                self.store
+                    .call(|store| Ok(open(store)?.data_dir().to_path_buf()))
+                    .await
+                    .map_err(ExecError::from)
+            })
+            .await
+    }
+
+    pub(crate) async fn boot_id(&self) -> Result<&String, ExecError> {
+        self.boot_id
+            .get_or_try_init(|| async {
+                tokio::task::spawn_blocking(procfs::boot_id)
+                    .await
+                    .map_err(|_| ExecError::Shutdown)?
+                    .map_err(ExecError::from)
+            })
+            .await
+    }
+
+    /// Факты управляющей службы пишутся в CJ; погашенные команды освобождают inbox.
+    pub(crate) async fn cj(
+        &self,
+        facts: Vec<Body>,
+        terminal: Vec<(String, u32)>,
+    ) -> Result<(), ExecError> {
+        self.store
+            .call(move |store| {
+                let store = open(store)?;
+                for body in facts {
+                    store.append_cj_fact(body)?;
+                }
+                for (command_id, attempt) in terminal {
+                    store.mark_terminal(&command_id, attempt)?;
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+
+    pub(crate) fn with_info(&self, id: Uuid, change: impl FnOnce(&mut ExecInfo)) {
+        if let Some(info) = self.infos.lock().expect("infos lock").get_mut(&id) {
+            change(info);
+        }
+    }
+}
+
+pub struct ExecutionManager {
+    shared: Arc<Shared>,
+    shutdown: watch::Sender<bool>,
+}
+
+impl Drop for ExecutionManager {
+    fn drop(&mut self) {
+        let _ = self.shutdown.send(true);
+    }
+}
+
+impl ExecutionManager {
+    pub fn new(
+        config: ExecutionConfig,
+        store: StoreClient,
+        relay: mpsc::Sender<SjRelay>,
+    ) -> ExecutionManager {
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        ExecutionManager {
+            shared: Arc::new(Shared {
+                config,
+                store,
+                relay,
+                enabled: AtomicBool::new(true),
+                hub: watch::channel(None).0,
+                shutdown: shutdown_rx,
+                infos: Mutex::default(),
+                actors: Mutex::default(),
+                tasks: Mutex::default(),
+                cancelled_starts: Mutex::default(),
+                data_dir: OnceCell::new(),
+                boot_id: OnceCell::new(),
+                #[cfg(feature = "fault-injection")]
+                spawn_delay: Mutex::new(std::time::Duration::ZERO),
+            }),
+            shutdown,
+        }
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn set_spawn_delay(&self, delay: std::time::Duration) {
+        *self.shared.spawn_delay.lock().expect("delay lock") = delay;
+    }
+
+    pub fn set_enabled(&self, enabled: bool) {
+        self.shared.enabled.store(enabled, Ordering::Relaxed);
+    }
+
+    /// Останавливает только акторов; процессы исполнений не затрагиваются.
+    pub async fn shutdown(self) {
+        let _ = self.shutdown.send(true);
+        let tasks = std::mem::take(&mut *self.shared.tasks.lock().expect("tasks lock"));
+        for task in tasks {
+            let _ = task.await;
+        }
+    }
+
+    pub fn observations(&self) -> Vec<ExecutionObservation> {
+        let infos = self.shared.infos.lock().expect("infos lock");
+        let mut list: Vec<_> = infos
+            .iter()
+            .filter(|(_, info)| !info.retired)
+            .map(|(id, info)| ExecutionObservation {
+                execution_id: id.to_string(),
+                generation: info.generation,
+                state: info.state.clone(),
+                outcome: info.outcome.clone(),
+                supervisor_attached: info.attached,
+                sj_journal_id: info
+                    .sj_journal_id
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+            })
+            .collect();
+        list.sort_by(|a, b| a.execution_id.cmp(&b.execution_id));
+        list
+    }
+
+    pub fn journal_cursors(&self) -> Vec<JournalCursor> {
+        let infos = self.shared.infos.lock().expect("infos lock");
+        let mut list: Vec<_> = infos
+            .values()
+            .filter(|info| !info.retired)
+            .filter_map(|info| {
+                info.sj_journal_id.map(|journal| JournalCursor {
+                    journal_id: journal.to_string(),
+                    first_stored_seq: info.acked_seq + 1,
+                    last_seq: info.last_seq,
+                    acked_seq_known_to_worker: info.acked_seq,
+                })
+            })
+            .collect();
+        list.sort_by(|a, b| a.journal_id.cmp(&b.journal_id));
+        list
+    }
+
+    pub fn on_hub_session(&self, committed: HashMap<Uuid, u64>) {
+        self.shared.hub.send_replace(Some(Arc::new(committed)));
+    }
+
+    pub fn on_sj_ack(&self, journal_id: Uuid, up_to: u64) {
+        let execution = self
+            .shared
+            .infos
+            .lock()
+            .expect("infos lock")
+            .iter()
+            .find(|(_, info)| info.sj_journal_id == Some(journal_id))
+            .map(|(id, _)| *id);
+        if let Some(sender) = execution.and_then(|id| {
+            self.shared
+                .actors
+                .lock()
+                .expect("actors lock")
+                .get(&id)
+                .cloned()
+        }) {
+            let _ = sender.send(Msg::SjAck(up_to));
+        }
+    }
+
+    pub async fn startup_verify(&self) -> Result<Vec<Uuid>, ExecError> {
+        let records = self
+            .shared
+            .store
+            .call(|store| {
+                Ok(open(store)?
+                    .ownership()
+                    .live()
+                    .into_iter()
+                    .cloned()
+                    .collect::<Vec<_>>())
+            })
+            .await?;
+        let mut attached = Vec::new();
+        for record in records {
+            let Ok(id) = Uuid::parse_str(&record.execution_id) else {
+                continue;
+            };
+            let conversation_id = Uuid::parse_str(&record.conversation_id).unwrap_or_default();
+            self.shared.infos.lock().expect("infos lock").insert(
+                id,
+                ExecInfo {
+                    conversation_id,
+                    generation: record.generation,
+                    state: "starting".into(),
+                    outcome: String::new(),
+                    attached: false,
+                    sj_journal_id: Uuid::parse_str(&record.sj_journal_id).ok(),
+                    last_seq: 0,
+                    acked_seq: 0,
+                    retired: false,
+                },
+            );
+            if manager::is_orphaned(&record) {
+                self.shared.with_info(id, |info| {
+                    info.state = "owner_lost".into();
+                });
+                continue;
+            }
+            match manager::verify(&self.shared, &record).await {
+                Ok(linked) => {
+                    self.spawn_actor(id, Start::Reattach(Box::new((linked, record))));
+                    attached.push(id);
+                }
+                Err(error) => {
+                    tracing::warn!(execution_id = %id, error_kind = ?std::mem::discriminant(&error), "ownership not verified");
+                    manager::report_owner_lost(&self.shared, id, record.generation).await?;
+                }
+            }
+        }
+        let commands = self
+            .shared
+            .store
+            .call(|store| Ok(open(store)?.stored_commands()?))
+            .await?;
+        for command in commands {
+            self.route(command).await?;
+        }
+        Ok(attached)
+    }
+
+    pub async fn handle(&self, command: Command, accept: Accept) -> Result<(), ExecError> {
+        match accept {
+            Accept::Stored { .. } | Accept::Redelivered { .. } => {}
+            Accept::Duplicate => {
+                let id = command.command_id.clone();
+                let state = self
+                    .shared
+                    .store
+                    .call(move |store| Ok(open(store)?.command_state(&id)?))
+                    .await?;
+                if state.is_none_or(|state| state.terminal) {
+                    return Ok(());
+                }
+            }
+            Accept::Stale | Accept::DroppedInvalidId | Accept::Rejected { .. } => return Ok(()),
+        }
+        self.route(command).await
+    }
+
+    async fn route(&self, command: Command) -> Result<(), ExecError> {
+        let Some(kind) = &command.kind else {
+            return Ok(());
+        };
+        if let Kind::StartExecution(start) = kind {
+            let start = start.clone();
+            return self.start(command, start).await;
+        }
+        let Ok(id) = Uuid::parse_str(&command.execution_id) else {
+            return manager::reject_invalid(&self.shared, &command).await;
+        };
+        let sender = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .get(&id)
+            .cloned();
+        if let Some(sender) = sender
+            && sender.send(Msg::Command(command.clone())).is_ok()
+        {
+            return Ok(());
+        }
+        manager::answer_without_execution(&self.shared, &command).await
+    }
+
+    async fn start(&self, command: Command, start: StartExecution) -> Result<(), ExecError> {
+        let shared = &self.shared;
+        let (Ok(id), Ok(conversation_id)) = (
+            Uuid::parse_str(&command.execution_id),
+            Uuid::parse_str(&start.conversation_id),
+        ) else {
+            return manager::reject(shared, &command, "unsupported_command").await;
+        };
+        let existing = shared.actors.lock().expect("actors lock").get(&id).cloned();
+        if let Some(sender) = existing {
+            let _ = sender.send(Msg::Command(command));
+            return Ok(());
+        }
+        let known = shared
+            .store
+            .call(move |store| Ok(open(store)?.ownership().get(id).is_some()))
+            .await?;
+        let cancelled = shared
+            .cancelled_starts
+            .lock()
+            .expect("cancelled lock")
+            .contains(&id);
+        if known || cancelled {
+            return shared
+                .cj(
+                    vec![],
+                    vec![(command.command_id.clone(), command.dispatch_attempt)],
+                )
+                .await;
+        }
+        let workdir = match manager::validate(shared, &command, &start, conversation_id).await? {
+            Ok(workdir) => workdir,
+            Err(reason) => return manager::reject(shared, &command, reason).await,
+        };
+        {
+            let mut infos = shared.infos.lock().expect("infos lock");
+            infos.insert(
+                id,
+                ExecInfo {
+                    conversation_id,
+                    generation: command.execution_generation,
+                    state: "starting".into(),
+                    outcome: String::new(),
+                    attached: false,
+                    sj_journal_id: None,
+                    last_seq: 0,
+                    acked_seq: 0,
+                    retired: false,
+                },
+            );
+        }
+        self.spawn_actor(
+            id,
+            Start::Spawn(Box::new(manager::SpawnRequest {
+                command,
+                start,
+                workdir,
+                conversation_id,
+            })),
+        );
+        Ok(())
+    }
+
+    fn spawn_actor(&self, id: Uuid, start: Start) {
+        let generation = self
+            .shared
+            .infos
+            .lock()
+            .expect("infos lock")
+            .get(&id)
+            .map_or(0, |info| info.generation);
+        let (sender, receiver) = mpsc::unbounded_channel();
+        self.shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .insert(id, sender);
+        let actor = Actor::new(self.shared.clone(), id, generation, receiver);
+        let task = tokio::spawn(actor.run(start));
+        self.shared.tasks.lock().expect("tasks lock").push(task);
+    }
+}

@@ -533,6 +533,41 @@ impl WorkerStore {
             .transpose()
     }
 
+    pub fn data_dir(&self) -> &Path {
+        &self.data_dir
+    }
+
+    /// Непогашенные сохранённые команды в порядке inbox.
+    pub fn stored_commands(&self) -> Result<Vec<Command>, StoreError> {
+        self.ensure_open()?;
+        let mut entries: Vec<u64> = self
+            .index
+            .values()
+            .filter(|entry| !entry.terminal && entry.class == ReceiptClass::Stored)
+            .filter_map(|entry| entry.inbox_seq)
+            .collect();
+        entries.sort_unstable();
+        let mut commands = Vec::new();
+        for seq in entries {
+            if let Some(record) = self.inbox.read_from(seq, 0)?.into_iter().next()
+                && record.seq == seq
+            {
+                commands.push(Command::decode(record.payload.as_slice())?);
+            }
+        }
+        Ok(commands)
+    }
+
+    /// Факт `transmission_started` из SJ: следующие попытки команды отклоняются.
+    pub fn note_transmitted(&mut self, command_id: &str) -> Result<(), StoreError> {
+        self.ensure_open()?;
+        let result = self.record_transmission(&receipt_id(command_id));
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
     pub fn append_cj_fact(&mut self, body: record_body::Body) -> Result<u64, StoreError> {
         self.ensure_open()?;
         let result = (|| {

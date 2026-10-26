@@ -73,6 +73,15 @@ impl OwnershipStore {
             .collect()
     }
 
+    pub fn max_generation(&self, conversation_id: &str) -> u64 {
+        self.latest
+            .values()
+            .filter(|record| record.conversation_id == conversation_id)
+            .map(|record| record.generation)
+            .max()
+            .unwrap_or(0)
+    }
+
     pub(crate) fn is_poisoned(&self) -> bool {
         self.poisoned
     }

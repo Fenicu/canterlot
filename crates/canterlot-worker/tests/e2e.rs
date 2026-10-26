@@ -131,6 +131,7 @@ impl Fixture {
                 backoff_max: Duration::from_millis(500),
                 ..Default::default()
             },
+            execution: Default::default(),
         };
         let mut fixture = Self {
             pool: pool.clone(),

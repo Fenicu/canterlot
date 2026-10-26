@@ -9,13 +9,41 @@ use crate::{
 
 type Job = Box<dyn FnOnce(&mut Option<WorkerStore>) + Send>;
 
-pub(crate) struct StoreThread {
+pub struct StoreThread {
     sender: mpsc::Sender<Job>,
     thread: thread::JoinHandle<()>,
 }
 
+#[derive(Clone)]
+pub struct StoreClient {
+    sender: mpsc::Sender<Job>,
+}
+
+async fn submit<T: Send + 'static>(
+    sender: mpsc::Sender<Job>,
+    operation: impl FnOnce(&mut Option<WorkerStore>) -> Result<T, WorkerError> + Send + 'static,
+) -> Result<T, WorkerError> {
+    let (reply, result) = oneshot::channel();
+    sender
+        .send(Box::new(move |store| {
+            let _ = reply.send(operation(store));
+        }))
+        .await
+        .map_err(|_| WorkerError::StoreThread)?;
+    result.await.map_err(|_| WorkerError::StoreThread)?
+}
+
+impl StoreClient {
+    pub fn call<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Option<WorkerStore>) -> Result<T, WorkerError> + Send + 'static,
+    ) -> impl Future<Output = Result<T, WorkerError>> + Send + 'static {
+        submit(self.sender.clone(), operation)
+    }
+}
+
 impl StoreThread {
-    pub(crate) fn new(store: WorkerStore) -> Self {
+    pub fn new(store: WorkerStore) -> Self {
         let (sender, mut receiver) = mpsc::channel::<Job>(8);
         let thread = thread::spawn(move || {
             let mut store = Some(store);
@@ -32,24 +60,20 @@ impl StoreThread {
         Self { sender, thread }
     }
 
-    pub(crate) fn call<T: Send + 'static>(
-        &self,
-        operation: impl FnOnce(&mut Option<WorkerStore>) -> Result<T, WorkerError> + Send + 'static,
-    ) -> impl Future<Output = Result<T, WorkerError>> + Send + 'static {
-        let sender = self.sender.clone();
-        async move {
-            let (reply, result) = oneshot::channel();
-            sender
-                .send(Box::new(move |store| {
-                    let _ = reply.send(operation(store));
-                }))
-                .await
-                .map_err(|_| WorkerError::StoreThread)?;
-            result.await.map_err(|_| WorkerError::StoreThread)?
+    pub fn client(&self) -> StoreClient {
+        StoreClient {
+            sender: self.sender.clone(),
         }
     }
 
-    pub(crate) async fn close(self) -> Result<(), WorkerError> {
+    pub fn call<T: Send + 'static>(
+        &self,
+        operation: impl FnOnce(&mut Option<WorkerStore>) -> Result<T, WorkerError> + Send + 'static,
+    ) -> impl Future<Output = Result<T, WorkerError>> + Send + 'static {
+        submit(self.sender.clone(), operation)
+    }
+
+    pub async fn close(self) -> Result<(), WorkerError> {
         drop(self.sender);
         tokio::task::spawn_blocking(move || self.thread.join())
             .await

@@ -79,6 +79,18 @@ command_stored_receipt = "5s"
 dispatch_sweep = "5s"
 http2_keepalive_interval = "30s"
 http2_keepalive_timeout = "10s"
+
+[execution]
+allowed_workdir_roots = ["/home/user/projects"]
+supervisor_exe = "/usr/local/bin/canterlot-worker"
+spawn_timeout = "10s"
+
+[execution.supervisor]
+attach_wait = "30s"
+ready_deadline = "30s"
+transmit_deadline = "10s"
+stop_grace = "5s"
+stop_retry = "2s"
 ```
 
 Относительные пути хаба разрешаются от каталога конфига. Таймеры хаба и воркера задаются строками humantime (`"10s"`, `"250ms"`);
@@ -129,6 +141,15 @@ http2_keepalive_timeout = "10s"
 Относительные пути воркера считаются от рабочего каталога процесса. Неизвестные поля,
 включая опечатки в `[timers]`, отклоняются; числовые таймеры без единицы измерения запрещены.
 `data_dir` создаётся с правами `0700`, файлы журналов и `hub.toml` — `0600`.
+
+Таблица `[execution]` необязательна и так же строгая. `allowed_workdir_roots` — каталоги,
+внутри которых допустим рабочий каталог исполнения (сравнение по каноническому пути);
+пустой список отклоняет каждый `start_execution` с причиной `workdir_not_allowed`.
+`supervisor_exe` — бинарник процесса сопровождения (по умолчанию текущий исполняемый файл),
+`spawn_timeout` — срок, за который запущенное сопровождение должно принять `Attach`.
+`[execution.supervisor]` задаёт таймеры сопровождения. Каталоги исполнений лежат в
+`data_dir/executions/<execution_id>` с правами `0700`; секрет IPC и `spec.toml` — `0600`.
+Второй экземпляр службы на том же `data_dir` завершается с ошибкой блокировки журнала.
 
 Хабу нужны PEM-сертификат и закрытый ключ в `tls_cert`/`tls_key`.
 SAN сертификата должен совпадать с хостом в `hub_url` (в примере `hub.example`).

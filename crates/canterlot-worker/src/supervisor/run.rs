@@ -762,6 +762,16 @@ impl Supervisor {
             {
                 continue;
             }
+            if self.transmitted.contains(&key.0) {
+                input.state = InputState::Done;
+                input.text = String::new();
+                self.record(Body::DispatchDeferred(InputDispatchDeferred {
+                    command_id: key.0.to_string(),
+                    dispatch_attempt: key.1,
+                    reason: "already_transmitted".into(),
+                }))?;
+                continue;
+            }
             let text = std::mem::take(&mut input.text);
             input.state = InputState::Transmitting;
             self.transmitted.insert(key.0);
