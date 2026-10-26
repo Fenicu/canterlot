@@ -33,6 +33,10 @@ use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+#[allow(dead_code)]
+mod support;
+use support::data_proxy::DataProxy;
+
 type Pause = oneshot::Receiver<oneshot::Sender<()>>;
 
 fn hub_timers() -> HubTimers {
@@ -101,11 +105,14 @@ struct Fixture {
     owner: Uuid,
     inputs: Vec<Input>,
     probe: StoreProbe,
+    _proxy: DataProxy,
 }
 
 impl Fixture {
     async fn new(pool: &PgPool, hub: &TestHub) -> Self {
         let directory = TempDir::new().unwrap();
+        // Проверки 1.2a явно согласуют сеанс без exec_v1.
+        let proxy = DataProxy::start(hub, false, false).await;
         let machine = machines::add(pool, hub.installation.owner_id, "e2e")
             .await
             .unwrap();
@@ -115,7 +122,7 @@ impl Fixture {
         let ca_cert = directory.path().join("ca.pem");
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let config = WorkerConfig {
-            hub_url: format!("https://localhost:{}", hub.addr.port()),
+            hub_url: proxy.url.clone(),
             ca_cert,
             token_file,
             machine_id: machine.machine_id,
@@ -140,6 +147,7 @@ impl Fixture {
             owner: hub.installation.owner_id,
             inputs: vec![],
             probe: StoreProbe::default(),
+            _proxy: proxy,
         };
         fixture.add_input().await;
         fixture

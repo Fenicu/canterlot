@@ -2,7 +2,7 @@ use super::*;
 
 #[allow(dead_code)]
 #[path = "../../tests/support/mod.rs"]
-mod support;
+pub(super) mod support;
 
 #[test]
 fn hub_status_preserves_code_and_static_message() {

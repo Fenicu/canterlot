@@ -28,7 +28,11 @@ use tonic::{
 };
 use uuid::Uuid;
 
+#[cfg(feature = "fault-injection")]
+pub mod data_proxy;
+
 type Downstream = Arc<Mutex<Option<mpsc::Sender<Result<ControlDown, Status>>>>>;
+type DataDownstream = Arc<Mutex<Option<mpsc::Sender<Result<DataDown, Status>>>>>;
 
 #[derive(Clone)]
 pub struct Behavior {
@@ -37,6 +41,7 @@ pub struct Behavior {
     pub committed: u64,
     pub heartbeat_ack: bool,
     pub range_ack: bool,
+    pub sj_ack: bool,
     pub hello_reply: bool,
     pub command_on_first_batch: Option<Command>,
     pub commands_on_first_batch: Vec<Command>,
@@ -54,6 +59,7 @@ impl Default for Behavior {
             committed: 0,
             heartbeat_ack: true,
             range_ack: true,
+            sj_ack: true,
             hello_reply: true,
             command_on_first_batch: None,
             commands_on_first_batch: vec![],
@@ -68,6 +74,7 @@ impl Default for Behavior {
 pub enum Observed {
     Hello(Hello, SocketAddr),
     Control(ControlUp),
+    Data(DataUp),
 }
 
 #[derive(Clone)]
@@ -75,6 +82,8 @@ struct Service {
     behavior: Behavior,
     events: mpsc::Sender<Observed>,
     downstream: Downstream,
+    committed: Arc<Mutex<std::collections::HashMap<String, u64>>>,
+    data_downstream: DataDownstream,
 }
 
 impl Service {
@@ -83,10 +92,25 @@ impl Service {
             result: Some(hello_reply::Result::Accepted(Accepted {
                 capabilities: self.behavior.capabilities.clone(),
                 restore_generation: self.behavior.generation.to_string(),
-                committed: vec![JournalCommitted {
-                    journal_id: hello.cj_journal_id.clone(),
-                    committed_seq: self.behavior.committed,
-                }],
+                committed: hello
+                    .cursors
+                    .iter()
+                    .map(|cursor| JournalCommitted {
+                        journal_id: cursor.journal_id.clone(),
+                        committed_seq: self
+                            .committed
+                            .lock()
+                            .unwrap()
+                            .get(&cursor.journal_id)
+                            .copied()
+                            .unwrap_or(0)
+                            .max(if cursor.journal_id == hello.cj_journal_id {
+                                self.behavior.committed
+                            } else {
+                                0
+                            }),
+                    })
+                    .collect(),
             })),
         }
     }
@@ -140,6 +164,7 @@ impl WorkerControl for Service {
             let (acks, mut ack_queue) = mpsc::channel::<JournalRangeAck>(32);
             let ack_tx = tx.clone();
             let delay = service.behavior.range_ack_delay;
+            let committed = service.committed.clone();
             let ack_task = tokio::spawn(async move {
                 let mut last = 0;
                 while let Some(ack) = ack_queue.recv().await {
@@ -148,6 +173,10 @@ impl WorkerControl for Service {
                     }
                     tokio::time::sleep(delay).await;
                     last = ack.up_to_seq;
+                    committed
+                        .lock()
+                        .unwrap()
+                        .insert(ack.journal_id.clone(), ack.up_to_seq);
                     if ack_tx
                         .send(Ok(ControlDown {
                             msg: Some(control_down::Msg::CjAck(ack)),
@@ -253,15 +282,45 @@ impl WorkerData for Service {
             .await
             .unwrap();
         let (tx, rx) = mpsc::channel(8);
+        *self.data_downstream.lock().unwrap() = Some(tx.clone());
         tx.send(Ok(DataDown {
             msg: Some(data_down::Msg::HelloReply(reply)),
         }))
         .await
         .unwrap();
+        let events = self.events.clone();
+        let committed = self.committed.clone();
+        let sj_ack = self.behavior.sj_ack;
         tokio::spawn(async move {
-            tokio::select! {
-                _ = tx.closed() => {},
-                _ = async { while inbound.message().await.is_ok_and(|m| m.is_some()) {} } => {},
+            loop {
+                let message = tokio::select! {
+                    _ = tx.closed() => break,
+                    message = inbound.message() => match message { Ok(Some(message)) => message, _ => break },
+                };
+                if let Some(data_up::Msg::SjRecords(batch)) = &message.msg
+                    && sj_ack
+                {
+                    let ack = JournalRangeAck {
+                        journal_id: batch.journal_id.clone(),
+                        up_to_seq: batch.records.last().unwrap().seq,
+                    };
+                    committed
+                        .lock()
+                        .unwrap()
+                        .insert(ack.journal_id.clone(), ack.up_to_seq);
+                    if tx
+                        .send(Ok(DataDown {
+                            msg: Some(data_down::Msg::SjAck(ack)),
+                        }))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                if events.send(Observed::Data(message)).await.is_err() {
+                    break;
+                }
             }
         });
         Ok(Response::new(ReceiverStream::new(rx)))
@@ -273,6 +332,7 @@ pub struct ProtocolHub {
     _directory: TempDir,
     pub config: WorkerConfig,
     downstream: Downstream,
+    data_downstream: DataDownstream,
     task: JoinHandle<Result<(), tonic::transport::Error>>,
 }
 
@@ -290,10 +350,13 @@ impl ProtocolHub {
         let (events, receiver) = mpsc::channel(4096);
         let restore_generation = behavior.generation;
         let downstream = Arc::new(Mutex::new(None));
+        let data_downstream = Arc::new(Mutex::new(None));
         let service = Service {
             behavior,
             events,
             downstream: downstream.clone(),
+            committed: Arc::default(),
+            data_downstream: data_downstream.clone(),
         };
         let task = tokio::spawn(async move {
             Server::builder()
@@ -342,6 +405,7 @@ impl ProtocolHub {
                 _directory: directory,
                 config,
                 downstream,
+                data_downstream,
                 task,
             },
             store,
@@ -362,6 +426,11 @@ impl ProtocolHub {
 
     pub async fn send(&self, message: ControlDown) {
         let sender = self.downstream.lock().unwrap().clone().unwrap();
+        sender.send(Ok(message)).await.unwrap();
+    }
+
+    pub async fn send_data(&self, message: DataDown) {
+        let sender = self.data_downstream.lock().unwrap().clone().unwrap();
         sender.send(Ok(message)).await.unwrap();
     }
 }

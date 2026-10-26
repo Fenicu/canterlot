@@ -1,0 +1,236 @@
+use super::*;
+use crate::{
+    session::tests::support::{Behavior, Observed, ProtocolHub},
+    session_store::StoreThread,
+};
+
+fn record(seq: u64, size: usize) -> JournalRecord {
+    JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::BlockDelta(BlockDelta {
+                append: "x".repeat(size),
+                ..Default::default()
+            })),
+        }),
+    }
+}
+
+#[test]
+fn full_sj_batch_is_split_to_include_the_data_envelope() {
+    let id = Uuid::now_v7();
+    let mut batch = JournalRecords {
+        journal_id: id.to_string(),
+        records: (1..=31)
+            .map(|seq| record(seq, 16_384))
+            .chain(std::iter::once(record(32, 10_000)))
+            .collect(),
+    };
+    let slack = MAX_EVENT_BATCH_BYTES - batch.encoded_len();
+    if let Some(record_body::Body::BlockDelta(delta)) = batch
+        .records
+        .last_mut()
+        .unwrap()
+        .body
+        .as_mut()
+        .unwrap()
+        .body
+        .as_mut()
+    {
+        delta.append.push_str(&"x".repeat(slack));
+    }
+    assert_eq!(batch.encoded_len(), MAX_EVENT_BATCH_BYTES);
+    let packed = pack(id, batch.records).unwrap();
+    assert_eq!(packed.len(), 2);
+    let mut seqs = Vec::new();
+    for (message, journal, _) in packed {
+        assert_eq!(journal, id);
+        assert!(message.encoded_len() <= MAX_EVENT_BATCH_BYTES);
+        let Some(data_up::Msg::SjRecords(batch)) = message.msg else {
+            panic!("missing batch")
+        };
+        seqs.extend(batch.records.iter().map(|r| r.seq));
+    }
+    assert_eq!(seqs, (1..=32).collect::<Vec<_>>());
+}
+
+async fn link(hub: &ProtocolHub) -> (mpsc::Sender<DataUp>, tonic::Streaming<DataDown>) {
+    let endpoint = Endpoint::from_shared(hub.config.hub_url.clone())
+        .unwrap()
+        .tls_config(ClientTlsConfig::new().ca_certificate(Certificate::from_pem(
+            fs::read(&hub.config.ca_cert).unwrap(),
+        )))
+        .unwrap();
+    let channel = endpoint.connect().await.unwrap();
+    let mut client = WorkerDataClient::with_interceptor(
+        channel,
+        Bearer("Bearer protocol-test".parse().unwrap()),
+    );
+    let (tx, rx) = mpsc::channel(1);
+    tx.send(DataUp {
+        msg: Some(data_up::Msg::Hello(Hello {
+            cj_journal_id: Uuid::now_v7().to_string(),
+            ..Default::default()
+        })),
+    })
+    .await
+    .unwrap();
+    let mut inbound = client
+        .data(ReceiverStream::new(rx))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        inbound.message().await.unwrap().unwrap().msg,
+        Some(data_down::Msg::HelloReply(_))
+    ));
+    (tx, inbound)
+}
+
+#[tokio::test]
+async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        sj_ack: false,
+        ..Default::default()
+    })
+    .await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(16);
+    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let journal = Uuid::now_v7();
+    for seq in 1..=12 {
+        sender
+            .send(SjRelay {
+                journal_id: journal,
+                records: vec![record(seq, 0)],
+            })
+            .await
+            .unwrap();
+    }
+    let task = tokio::spawn(async move {
+        let (_active, mut active) = watch::channel(true);
+        let result = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &WorkerTimers {
+                range_ack: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &mut active,
+            HashMap::new(),
+        )
+        .await;
+        manager.shutdown().await;
+        result
+    });
+    let mut seqs = Vec::new();
+    timeout(Duration::from_secs(3), async {
+        while seqs.len() < 9 {
+            if let Observed::Data(message) = hub.event().await
+                && let Some(data_up::Msg::SjRecords(batch)) = message.msg
+            {
+                seqs.push(batch.records[0].seq);
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(&seqs[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(seqs[8], 1);
+    assert!(matches!(
+        timeout(Duration::from_secs(3), task)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WorkerError::Timeout)
+    ));
+    while let Ok(event) = hub.events.try_recv() {
+        assert!(!matches!(event, Observed::Data(_)));
+    }
+    drop(sender);
+    thread.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        sj_ack: false,
+        ..Default::default()
+    })
+    .await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(8);
+    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let first = Uuid::now_v7();
+    let other = Uuid::now_v7();
+    sender
+        .send(SjRelay {
+            journal_id: first,
+            records: vec![record(1, 0)],
+        })
+        .await
+        .unwrap();
+    sender
+        .send(SjRelay {
+            journal_id: other,
+            records: (1..=6).map(|seq| record(seq, 0)).collect(),
+        })
+        .await
+        .unwrap();
+    let task = tokio::spawn(async move {
+        let (_active, mut active) = watch::channel(true);
+        let result = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &WorkerTimers {
+                range_ack: Duration::from_millis(100),
+                ..Default::default()
+            },
+            &mut active,
+            HashMap::new(),
+        )
+        .await;
+        manager.shutdown().await;
+        result
+    });
+    let mut batches = 0;
+    while batches < 2 {
+        if let Observed::Data(_) = hub.event().await {
+            batches += 1;
+        }
+    }
+    let started = Instant::now();
+    for seq in 1..=6 {
+        hub.send_data(DataDown {
+            msg: Some(data_down::Msg::SjAck(JournalRangeAck {
+                journal_id: other.to_string(),
+                up_to_seq: seq,
+            })),
+        })
+        .await;
+        hub.send_data(DataDown {
+            msg: Some(data_down::Msg::SjAck(JournalRangeAck {
+                journal_id: first.to_string(),
+                up_to_seq: 0,
+            })),
+        })
+        .await;
+        sleep(Duration::from_millis(25)).await;
+    }
+    assert!(matches!(
+        timeout(Duration::from_millis(130), task)
+            .await
+            .unwrap()
+            .unwrap(),
+        Err(WorkerError::Timeout)
+    ));
+    assert!(started.elapsed() < Duration::from_millis(280));
+    drop(sender);
+    thread.close().await.unwrap();
+}

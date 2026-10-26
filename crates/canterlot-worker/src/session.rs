@@ -28,6 +28,10 @@ use crate::{
     store::{Accept, StoreError, WorkerStore},
 };
 
+mod data;
+
+pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1"];
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
     Disconnected,
@@ -218,8 +222,7 @@ impl Worker {
     }
 
     fn transition(&self, state: SessionState) {
-        tracing::info!(state = state_kind(&state), "session state");
-        self.state.send_replace(state);
+        transition(&self.state, state);
     }
 
     pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
@@ -449,11 +452,16 @@ impl Worker {
             protocol_version: PROTOCOL_VERSION,
             connection_id: connection_id.to_string(),
             cj_journal_id: cursor.journal_id.clone(),
-            cursors: vec![cursor.clone()],
+            cursors: std::iter::once(cursor.clone())
+                .chain(self.manager.as_ref().unwrap().journal_cursors())
+                .collect(),
             boot_id: boot_id.to_owned(),
             stream_kind: StreamKind::Control as i32,
             required_capabilities: vec![],
-            optional_capabilities: vec![],
+            optional_capabilities: OPTIONAL_CAPABILITIES
+                .iter()
+                .map(|cap| (*cap).into())
+                .collect(),
         };
         let mut control = WorkerControlClient::with_interceptor(control, auth.clone())
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
@@ -463,65 +471,63 @@ impl Worker {
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let (tx, rx) = mpsc::channel(1);
         let (data_tx, data_rx) = mpsc::channel(8);
-        let (mut inbound, mut data_inbound, accepted) =
-            timeout(self.config.timers.handshake, async {
-                send(
-                    &tx,
-                    ControlUp {
-                        msg: Some(control_up::Msg::Hello(hello.clone())),
-                    },
-                    self.config.timers.handshake,
-                )
-                .await?;
-                let mut inbound = control
-                    .control(ReceiverStream::new(rx))
-                    .await
-                    .map_err(status_error)?
-                    .into_inner();
-                let accepted = match inbound
-                    .message()
-                    .await
-                    .map_err(status_error)?
-                    .and_then(|message| message.msg)
-                {
-                    Some(control_down::Msg::HelloReply(reply)) => accept(reply)?,
-                    _ => return Err(WorkerError::Protocol),
-                };
-                check_generation(generation, &accepted)?;
-                let mut hello = hello;
-                hello.stream_kind = StreamKind::Data as i32;
-                send(
-                    &data_tx,
-                    DataUp {
-                        msg: Some(data_up::Msg::Hello(hello)),
-                    },
-                    self.config.timers.handshake,
-                )
-                .await?;
-                let mut data_inbound = data
-                    .data(ReceiverStream::new(data_rx))
-                    .await
-                    .map_err(status_error)?
-                    .into_inner();
-                let data_accepted = match data_inbound
-                    .message()
-                    .await
-                    .map_err(status_error)?
-                    .and_then(|message| message.msg)
-                {
-                    Some(data_down::Msg::HelloReply(reply)) => accept(reply)?,
-                    _ => return Err(WorkerError::Protocol),
-                };
-                if data_accepted.restore_generation != accepted.restore_generation {
-                    return Err(WorkerError::RestoreGenerationChanged);
-                }
-                Ok((inbound, data_inbound, accepted))
-            })
-            .await
-            .map_err(|_| WorkerError::Timeout)??;
+        let (mut inbound, data_inbound, accepted) = timeout(self.config.timers.handshake, async {
+            send(
+                &tx,
+                ControlUp {
+                    msg: Some(control_up::Msg::Hello(hello.clone())),
+                },
+                self.config.timers.handshake,
+            )
+            .await?;
+            let mut inbound = control
+                .control(ReceiverStream::new(rx))
+                .await
+                .map_err(status_error)?
+                .into_inner();
+            let accepted = match inbound
+                .message()
+                .await
+                .map_err(status_error)?
+                .and_then(|message| message.msg)
+            {
+                Some(control_down::Msg::HelloReply(reply)) => accept(reply)?,
+                _ => return Err(WorkerError::Protocol),
+            };
+            check_generation(generation, &accepted)?;
+            let mut hello = hello.clone();
+            hello.stream_kind = StreamKind::Data as i32;
+            send(
+                &data_tx,
+                DataUp {
+                    msg: Some(data_up::Msg::Hello(hello)),
+                },
+                self.config.timers.handshake,
+            )
+            .await?;
+            let mut data_inbound = data
+                .data(ReceiverStream::new(data_rx))
+                .await
+                .map_err(status_error)?
+                .into_inner();
+            let data_accepted = match data_inbound
+                .message()
+                .await
+                .map_err(status_error)?
+                .and_then(|message| message.msg)
+            {
+                Some(data_down::Msg::HelloReply(reply)) => accept(reply)?,
+                _ => return Err(WorkerError::Protocol),
+            };
+            if data_accepted.restore_generation != accepted.restore_generation {
+                return Err(WorkerError::RestoreGenerationChanged);
+            }
+            Ok((inbound, data_inbound, accepted))
+        })
+        .await
+        .map_err(|_| WorkerError::Timeout)??;
         let exec_enabled = accepted.capabilities.iter().any(|cap| cap == "exec_v1");
         self.manager.as_ref().unwrap().set_enabled(exec_enabled);
-        let _keep_data_open = data_tx;
         self.transition(SessionState::Reconciling);
         check_generation(generation, &accepted)?;
         let committed = accepted
@@ -557,12 +563,56 @@ impl Worker {
         let mut ready_batch: Option<(ControlUp, u64)> = None;
         let mut heartbeat_outbound = None;
         let mut range_outbound = None;
+        let mut report_outbound = None;
+        let mut report_created = false;
+        let mut reconciled = false;
+        let session_state = self.state.clone();
+        let manager = self.manager.as_ref().unwrap();
+        let (data_state, mut data_attached) = watch::channel(true);
+        let (activate_data, data_active) = watch::channel(false);
+        let data_loop = data::run(
+            data::Stream {
+                client: data,
+                hello: hello.clone(),
+                tx: data_tx,
+                inbound: data_inbound,
+                committed: data::committed(&hello, &accepted)?,
+            },
+            manager,
+            self.relay.as_mut().unwrap(),
+            &self.config.timers,
+            data_state,
+            self.store.client(),
+            data_active,
+        );
+        tokio::pin!(data_loop);
         type StoreFuture = Pin<Box<dyn Future<Output = Result<StoreReply, WorkerError>> + Send>>;
         let mut operation: Option<StoreFuture> = None;
+        type ExecutionFuture<'a> =
+            Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send + 'a>>;
+        let mut execution_operation: Option<ExecutionFuture<'_>> = None;
         loop {
-            if live_since.is_none() && acknowledged >= replay_end {
-                *live_since = Some(Instant::now());
-                self.transition(SessionState::Live);
+            if !report_created && acknowledged >= replay_end {
+                report_created = true;
+                if exec_enabled {
+                    let report = ControlUp {
+                        msg: Some(control_up::Msg::ReconcileReport(ReconcileReport {
+                            executions: manager.observations(),
+                        })),
+                    };
+                    if report.encoded_len() > MAX_MESSAGE_BYTES {
+                        return Err(WorkerError::Protocol);
+                    }
+                    report_outbound = Some(report);
+                } else {
+                    manager.on_hub_session(data::committed(&hello, &accepted)?);
+                    activate_data.send_replace(true);
+                    reconciled = true;
+                    if *data_attached.borrow() {
+                        *live_since = Some(Instant::now());
+                        transition(&session_state, SessionState::Live);
+                    }
+                }
             }
             if operation.is_none() {
                 if let Some(up_to) = store_ack.take() {
@@ -579,7 +629,9 @@ impl Worker {
                         ))
                     })));
                     dirty = false;
-                } else if let Some(command) = commands.pop_front() {
+                } else if execution_operation.is_none()
+                    && let Some(command) = commands.pop_front()
+                {
                     operation = Some(Box::pin(self.store.call(move |store| {
                         let accept = store.as_mut().unwrap().accept_command(&command)?;
                         Ok(StoreReply::Command(Box::new(command), accept))
@@ -591,6 +643,7 @@ impl Worker {
                 .map_or(heartbeat_at, |p| p.deadline.unwrap());
             let batch_deadline = pending_batches.front().and_then(|p| p.deadline);
             let can_send = heartbeat_outbound.is_some()
+                || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
             tokio::select! {
@@ -632,8 +685,9 @@ impl Worker {
                             dirty |= matches!(accept, Accept::Stored { .. } | Accept::Redelivered { .. } | Accept::Rejected { .. });
                             // Без exec_v1 сохраняется протокол воркеров 1.2a.
                             if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
-                                self.manager.as_ref().unwrap().handle(*command, accept).await.map_err(|_| WorkerError::Execution)?;
-                                dirty = true;
+                                execution_operation = Some(Box::pin(async move {
+                                    manager.handle(*command, accept).await.map_err(|_| WorkerError::Execution)
+                                }));
                             }
                         },
                         StoreReply::Ack(up_to) => {
@@ -646,9 +700,24 @@ impl Worker {
                         }
                     }
                 }
+                result = async { execution_operation.as_mut().unwrap().await }, if execution_operation.is_some() => {
+                    execution_operation = None;
+                    result?;
+                    dirty = true;
+                }
                 permit = tx.reserve(), if can_send => {
                     let permit = permit.map_err(|_| WorkerError::Transport)?;
                     let message = if let Some(message) = heartbeat_outbound.take() { message }
+                    else if let Some(message) = report_outbound.take() {
+                        manager.on_hub_session(data::committed(&hello, &accepted)?);
+                        activate_data.send_replace(true);
+                        reconciled = true;
+                        if *data_attached.borrow() {
+                            *live_since = Some(Instant::now());
+                            transition(&session_state, SessionState::Live);
+                        }
+                        message
+                    }
                     else if let Some(message) = range_outbound.take() { message }
                     else {
                         let (message, last) = ready_batch.take().unwrap();
@@ -662,13 +731,18 @@ impl Worker {
                     if message.encoded_len() > MAX_MESSAGE_BYTES { return Err(WorkerError::Protocol); }
                     permit.send(message);
                 }
-                message = data_inbound.message() => {
-                    self.transition(SessionState::ControlOnly);
-                    return Err(match message {
-                        Err(status) => status_error(status),
-                        Ok(Some(_)) => WorkerError::Protocol,
-                        Ok(None) => WorkerError::Transport,
-                    });
+                result = &mut data_loop => return result,
+                changed = data_attached.changed() => {
+                    changed.map_err(|_| WorkerError::Transport)?;
+                    if *data_attached.borrow_and_update() {
+                        if reconciled {
+                            *live_since = Some(Instant::now());
+                            transition(&session_state, SessionState::Live);
+                        }
+                    } else {
+                        *live_since = None;
+                        transition(&session_state, SessionState::ControlOnly);
+                    }
                 }
                 _ = sleep_until(heartbeat_deadline) => {
                     dirty = true;
@@ -745,6 +819,11 @@ fn state_kind(state: &SessionState) -> &'static str {
         SessionState::Backoff { .. } => "backoff",
         SessionState::Rejected { .. } => "rejected",
     }
+}
+
+fn transition(sender: &watch::Sender<SessionState>, state: SessionState) {
+    tracing::info!(state = state_kind(&state), "session state");
+    sender.send_replace(state);
 }
 
 fn batch(store: &WorkerStore, from: u64) -> Result<Option<(ControlUp, u64)>, WorkerError> {

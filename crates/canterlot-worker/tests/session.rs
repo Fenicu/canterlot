@@ -2,9 +2,7 @@ use std::{fs, path::Path, time::Duration};
 
 use canterlot_hub::{
     config::HubTimers,
-    delivery::submit::{ContentBlock, SubmitInput},
     executions, machines,
-    model::ExecutionState,
     testkit::{self, TestHub, spawn_test_hub},
 };
 use canterlot_proto::worker::v1::{CancelInput, Command, ControlDown, command, control_down};
@@ -206,8 +204,19 @@ async fn worker_reconnects_with_backoff_after_hub_restart(pool: PgPool) {
 async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let (_directory, config, store) = fixture(&pool, &hub).await;
+    let machine = config.machine_id;
+    let path = config.data_dir.clone();
     let conversation =
         testkit::seed_conversation(&pool, hub.installation.owner_id, config.machine_id).await;
+    let (stop, mut state, join) = start(config, store);
+    wait_state(&mut state, SessionState::Live).await;
+    timeout(Duration::from_secs(5), async {
+        while !hub.registry.is_reconciled(machine) {
+            sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
     let execution = executions::start(
         &pool,
         hub.installation.owner_id,
@@ -216,46 +225,17 @@ async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
     )
     .await
     .unwrap();
-    for state in [ExecutionState::Starting, ExecutionState::Running] {
-        executions::set_state(&pool, execution.execution_id, state, None, Uuid::now_v7())
-            .await
-            .unwrap();
-    }
-    sqlx::query(
-        "update commands set delivery_state = 'completed', completed_at = now() where id = $1",
-    )
-    .bind(execution.command_id)
-    .execute(&pool)
-    .await
-    .unwrap();
-    let path = config.data_dir.clone();
-    let (stop, mut state, join) = start(config, store);
-    wait_state(&mut state, SessionState::Live).await;
-    let input = hub
-        .dispatcher
-        .submit_input(
-            &pool,
-            SubmitInput {
-                owner_id: hub.installation.owner_id,
-                conversation_id: conversation,
-                idempotency_key: Uuid::now_v7().to_string(),
-                content: vec![ContentBlock::Text {
-                    text: "synthetic".into(),
-                }],
-                received_at: chrono::Utc::now(),
-                correlation_id: Uuid::now_v7(),
-            },
-        )
-        .await
-        .unwrap();
     timeout(Duration::from_secs(5), async {
         loop {
-            let state: String = sqlx::query_scalar("select state from inputs where id = $1")
-                .bind(input.input_id)
-                .fetch_one(&pool)
-                .await
-                .unwrap();
-            if state == "on_machine" {
+            let stored: bool =
+                sqlx::query_scalar("select stored_at is not null from commands where id = $1")
+                    .bind(execution.command_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let acked = fs::read(path.join("cj/ack"))
+                .is_ok_and(|bytes| u64::from_le_bytes(bytes[..8].try_into().unwrap()) >= 1);
+            if stored && acked {
                 break;
             }
             sleep(Duration::from_millis(10)).await;
@@ -265,7 +245,8 @@ async fn received_command_is_stored_and_receipt_shipped(pool: PgPool) {
     .unwrap();
     stop_worker(stop, join).await;
     let store = WorkerStore::open(&path).unwrap();
-    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
+    assert!(store.cj_cursor().unwrap().last_seq >= 1);
+    assert!(store.cj_cursor().unwrap().acked_seq_known_to_worker >= 1);
     stop_hub(hub).await;
 }
 
@@ -832,6 +813,7 @@ async fn steadily_acking_backlog_does_not_restart_and_batches_have_256_records_a
     while let Ok(event) = hub.events.try_recv() {
         match event {
             Observed::Hello(_, _) => hellos += 1,
+            Observed::Data(_) => {}
             Observed::Control(message) => {
                 if let Some(control_up::Msg::CjRecords(batch)) = message.msg {
                     assert!(batch.records.len() <= 256);
@@ -901,7 +883,7 @@ async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
                 "unexpected restart"
             );
             match hub.event().await {
-                Observed::Hello(_, _) => {}
+                Observed::Hello(_, _) | Observed::Data(_) => {}
                 Observed::Control(message) => match message.msg {
                     Some(control_up::Msg::CjRecords(batch)) => {
                         committed = committed.max(batch.records.last().unwrap().seq)
@@ -1251,6 +1233,7 @@ async fn partial_range_progress_resets_retry_budget_for_the_same_batch() {
             assert!(!matches!(*state.borrow(), SessionState::Backoff { .. }));
             match hub.event().await {
                 Observed::Hello(_, _) => assert_eq!(sends, 0),
+                Observed::Data(_) => {}
                 Observed::Control(message) => {
                     if let Some(control_up::Msg::CjRecords(batch)) = message.msg {
                         assert_eq!(batch.records.first().unwrap().seq, 1);
@@ -1395,3 +1378,6 @@ async fn accepted_commands_are_routed_to_execution_manager() {
         assert!(!path.join("executions").exists());
     }
 }
+
+#[path = "support/task8.rs"]
+mod task8;

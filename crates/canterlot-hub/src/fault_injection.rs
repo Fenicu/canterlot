@@ -107,6 +107,7 @@ struct Trace {
 pub struct Faults {
     trace: Arc<Mutex<Trace>>,
     failures: broadcast::Sender<Code>,
+    data_failures: broadcast::Sender<Code>,
 }
 
 impl Default for Faults {
@@ -114,6 +115,7 @@ impl Default for Faults {
         Self {
             trace: Arc::default(),
             failures: broadcast::channel(16).0,
+            data_failures: broadcast::channel(16).0,
         }
     }
 }
@@ -162,6 +164,14 @@ impl Faults {
 
     pub(crate) fn failures(&self) -> broadcast::Receiver<Code> {
         self.failures.subscribe()
+    }
+
+    pub fn fail_data(&self, code: Code) {
+        let _ = self.data_failures.send(code);
+    }
+
+    pub fn data_failures(&self) -> broadcast::Receiver<Code> {
+        self.data_failures.subscribe()
     }
 
     pub(crate) fn hello(&self, hello: Hello) {
