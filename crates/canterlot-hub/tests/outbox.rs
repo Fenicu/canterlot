@@ -1,3 +1,4 @@
+use sha2::Digest as _;
 use std::time::Duration;
 
 use canterlot_hub::{
@@ -690,7 +691,11 @@ async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest(pool
     };
     let ingest = canterlot_hub::ingest::Ingest::new(pool.clone());
     let error = ingest
-        .cj_records(machine.machine_id, batch.clone())
+        .cj_records(
+            machine.machine_id,
+            &sha2::Sha256::digest(machine.token.as_bytes()),
+            batch.clone(),
+        )
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
@@ -840,6 +845,7 @@ async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets(po
         ingest
             .apply_batch(
                 machine.machine_id,
+                &sha2::Sha256::digest(machine.token.as_bytes()),
                 canterlot_hub::ingest::JournalKind::Cj,
                 &JournalRecords {
                     journal_id: journal.to_string(),

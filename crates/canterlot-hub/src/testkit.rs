@@ -157,6 +157,13 @@ pub struct Seed {
     pub conversation_id: Uuid,
 }
 
+impl Seed {
+    pub fn credential_digest(&self) -> Vec<u8> {
+        use sha2::{Digest, Sha256};
+        Sha256::digest(self.machine_id.as_bytes()).to_vec()
+    }
+}
+
 pub async fn seed(pool: &PgPool) -> Seed {
     let owner_id = Uuid::now_v7();
     let machine_id = Uuid::now_v7();

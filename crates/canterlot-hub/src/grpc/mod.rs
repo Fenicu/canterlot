@@ -33,11 +33,13 @@ pub trait Ingest: Send + Sync {
     async fn cj_records(
         &self,
         machine_id: uuid::Uuid,
+        credential: &[u8],
         records: JournalRecords,
     ) -> Result<JournalRangeAck, Status>;
     async fn sj_records(
         &self,
         machine_id: uuid::Uuid,
+        credential: &[u8],
         records: JournalRecords,
     ) -> Result<JournalRangeAck, Status>;
 }
@@ -71,7 +73,12 @@ struct IngestLane {
 }
 
 impl IngestLane {
-    fn start(ingest: Arc<dyn Ingest>, machine_id: Uuid, kind: LaneKind) -> Self {
+    fn start(
+        ingest: Arc<dyn Ingest>,
+        machine_id: Uuid,
+        credential: Vec<u8>,
+        kind: LaneKind,
+    ) -> Self {
         let (batches, mut queue) = mpsc::channel::<JournalRecords>(INGEST_BACKLOG);
         let (reply, acks) = mpsc::channel(INGEST_BACKLOG);
         let stop = CancellationToken::new();
@@ -84,8 +91,8 @@ impl IngestLane {
             } {
                 let applied = async {
                     match kind {
-                        LaneKind::Cj => ingest.cj_records(machine_id, records).await,
-                        LaneKind::Sj => ingest.sj_records(machine_id, records).await,
+                        LaneKind::Cj => ingest.cj_records(machine_id, &credential, records).await,
+                        LaneKind::Sj => ingest.sj_records(machine_id, &credential, records).await,
                     }
                 };
                 let result = tokio::select! {
@@ -189,12 +196,13 @@ impl HubGrpc {
             .begin()
             .await
             .map_err(|_| Status::internal("database"))?;
-        let (owner_id, previous): (Uuid, Option<Uuid>) =
-            sqlx::query_as("select owner_id, cj_journal_id from machines where id = $1 for update")
-                .bind(machine_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(|_| Status::internal("database"))?;
+        let (owner_id, previous): (Uuid, Option<Uuid>) = sqlx::query_as(
+            "select owner_id, cj_journal_id from machines where id = $1 for no key update",
+        )
+        .bind(machine_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|_| Status::internal("database"))?;
         if !crate::machines::credential_active(&mut tx, machine_id, &credential)
             .await
             .map_err(|_| Status::internal("database"))?

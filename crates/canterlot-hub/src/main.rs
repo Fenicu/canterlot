@@ -46,6 +46,8 @@ enum MachineCommand {
         machine_id: Uuid,
         #[arg(long)]
         reset_local_state: bool,
+        #[arg(long)]
+        reactivate: bool,
     },
     Revoke {
         #[command(flatten)]
@@ -107,6 +109,7 @@ async fn run(args: Args) -> Result<(), String> {
                         })),
                 )
                 .init();
+            installation::check_manifest(&config.manifest).map_err(|error| error.to_string())?;
             db::MIGRATOR
                 .run(&pool)
                 .await
@@ -145,12 +148,14 @@ async fn run(args: Args) -> Result<(), String> {
                 MachineCommand::RotateToken {
                     machine_id,
                     reset_local_state,
+                    reactivate,
                     ..
                 } => {
-                    let token = machines::rotate_token(&pool, machine_id, reset_local_state)
-                        .await
-                        .map_err(|_| "db_error".to_owned())?
-                        .ok_or("machine_not_found")?;
+                    let token =
+                        machines::rotate_token(&pool, machine_id, reset_local_state, reactivate)
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .ok_or("machine_not_found")?;
                     writeln!(std::io::stdout().lock(), "token={token}")
                         .map_err(|_| "output_error".to_owned())?;
                 }

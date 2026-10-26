@@ -78,6 +78,25 @@ pub async fn init(pool: &PgPool, manifest: &Path) -> Result<Installation, Instal
 }
 
 pub async fn check(pool: &PgPool, manifest: &Path) -> Result<Installation, InstallationError> {
+    let manifest = read_manifest(manifest)?;
+    let installation: Installation =
+        sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
+            .fetch_optional(pool)
+            .await?
+            .ok_or(InstallationError::NotInitialized)?;
+    if installation.installation_id != manifest.installation_id
+        || installation.restore_generation != manifest.restore_generation
+    {
+        return Err(InstallationError::ManifestMismatch);
+    }
+    Ok(installation)
+}
+
+pub fn check_manifest(manifest: &Path) -> Result<(), InstallationError> {
+    read_manifest(manifest).map(|_| ())
+}
+
+fn read_manifest(manifest: &Path) -> Result<Manifest, InstallationError> {
     let text = fs::read_to_string(manifest).map_err(|error| {
         if error.kind() == io::ErrorKind::NotFound {
             InstallationError::ManifestMissing
@@ -90,17 +109,7 @@ pub async fn check(pool: &PgPool, manifest: &Path) -> Result<Installation, Insta
     if manifest.restore_in_progress {
         return Err(InstallationError::RestoreInProgress);
     }
-    let installation: Installation =
-        sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
-            .fetch_optional(pool)
-            .await?
-            .ok_or(InstallationError::NotInitialized)?;
-    if installation.installation_id != manifest.installation_id
-        || installation.restore_generation != manifest.restore_generation
-    {
-        return Err(InstallationError::ManifestMismatch);
-    }
-    Ok(installation)
+    Ok(manifest)
 }
 
 fn refuse_existing_manifest(path: &Path) -> Result<(), InstallationError> {

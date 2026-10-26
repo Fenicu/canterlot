@@ -321,10 +321,61 @@ async fn cli_serve_refuses_without_manifest(pool: PgPool) -> TestResult {
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8(output.stderr)?;
     assert_eq!(stderr.lines().last(), Some("manifest_missing"));
-    assert!(stderr.contains("migrations_applied"));
+    assert!(!stderr.contains("migrations_applied"));
     assert!(!stderr.contains(&url));
     assert!(!stderr.contains("ignored-secret-environment"));
     assert!(!dir.path().join("external/installation.toml").exists());
+    Ok(())
+}
+
+#[sqlx::test(migrations = false)]
+async fn cli_serve_checks_manifest_before_migrations(pool: PgPool) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let config = dir.path().join("hub.toml");
+    fs::write(&config, config_text())?;
+    fs::write(
+        dir.path().join("database-url"),
+        pool.connect_options().to_url_lossy().as_str(),
+    )?;
+    fs::create_dir(dir.path().join("external"))?;
+    let manifest = dir.path().join("external/installation.toml");
+    let run = || {
+        Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
+            .args(["serve", "--config"])
+            .arg(&config)
+            .output()
+    };
+    for reason in ["manifest_missing", "restore_in_progress"] {
+        if reason == "restore_in_progress" {
+            write_manifest(&manifest, Uuid::now_v7(), Uuid::now_v7(), true);
+        }
+        let output = run()?;
+        assert!(!output.status.success());
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8(output.stderr)?;
+        assert_eq!(stderr.lines().last(), Some(reason));
+        assert!(!stderr.contains("migrations_applied"));
+        let tables: i64 =
+            sqlx::query_scalar("select count(*) from pg_tables where schemaname = 'public'")
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(tables, 0, "serve changed schema before refusing manifest");
+    }
+    write_manifest(&manifest, Uuid::now_v7(), Uuid::now_v7(), false);
+    let output = run()?;
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let stderr = String::from_utf8(output.stderr)?;
+    assert_eq!(stderr.lines().last(), Some("not_initialized"));
+    assert!(stderr.contains("migrations_applied"));
+    let version: i64 =
+        sqlx::query_scalar("select max(version) from _sqlx_migrations where success")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        version,
+        canterlot_hub::db::MIGRATOR.iter().last().unwrap().version
+    );
     Ok(())
 }
 

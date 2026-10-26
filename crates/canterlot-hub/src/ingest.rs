@@ -111,10 +111,13 @@ impl Ingest {
     pub async fn apply_batch(
         &self,
         machine_id: Uuid,
+        credential: &[u8],
         kind: JournalKind,
         batch: &JournalRecords,
     ) -> Result<IngestOutcome, IngestError> {
-        let result = self.apply_batch_inner(machine_id, kind, batch).await;
+        let result = self
+            .apply_batch_inner(machine_id, credential, kind, batch)
+            .await;
         match &result {
             Err(error) => tracing::warn!(kind = %error, machine_id = %machine_id,
                 journal_id = ?Uuid::parse_str(&batch.journal_id).ok(), "ingest rejected"),
@@ -130,10 +133,11 @@ impl Ingest {
     async fn apply_batch_inner(
         &self,
         machine_id: Uuid,
+        credential: &[u8],
         kind: JournalKind,
         batch: &JournalRecords,
     ) -> Result<IngestOutcome, IngestError> {
-        require_active(&mut *self.pool.acquire().await?, machine_id).await?;
+        require_active(&mut *self.pool.acquire().await?, machine_id, credential).await?;
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
         let journal_id = parse_id(&batch.journal_id)?;
         if batch.records.iter().any(|record| record.seq == 0) {
@@ -159,7 +163,7 @@ impl Ingest {
                 continue;
             }
             let mut tx = self.pool.begin().await?;
-            require_active(&mut tx, machine_id).await?;
+            require_active(&mut tx, machine_id, credential).await?;
             sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
                 .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
             let rows: Vec<CursorRow> = sqlx::query_as(
@@ -222,9 +226,13 @@ impl Ingest {
     }
 }
 
-async fn require_active(conn: &mut PgConnection, machine_id: Uuid) -> Result<(), IngestError> {
-    let active = sqlx::query("select machine_id from machine_credentials where machine_id = $1 and revoked_at is null for share")
-        .bind(machine_id).fetch_optional(conn).await?;
+async fn require_active(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    credential: &[u8],
+) -> Result<(), IngestError> {
+    let active = sqlx::query("select machine_id from machine_credentials where machine_id = $1 and token_sha256 = $2 and revoked_at is null for share")
+        .bind(machine_id).bind(credential).fetch_optional(conn).await?;
     if active.is_none() {
         return Err(IngestError::CredentialRevoked);
     }
@@ -567,11 +575,12 @@ impl Ingest {
     async fn range_ack(
         &self,
         machine_id: Uuid,
+        credential: &[u8],
         kind: JournalKind,
         batch: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
         let outcome = self
-            .apply_batch(machine_id, kind, &batch)
+            .apply_batch(machine_id, credential, kind, &batch)
             .await
             .map_err(|error| {
                 let message = error.to_string();
@@ -604,6 +613,7 @@ impl crate::grpc::Ingest for Ingest {
     async fn cj_records(
         &self,
         machine_id: Uuid,
+        credential: &[u8],
         records: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
         #[cfg(feature = "fault-injection")]
@@ -613,14 +623,17 @@ impl crate::grpc::Ingest for Ingest {
                 .pause(crate::fault_injection::Point::BeforeCjCommit)
                 .await;
         }
-        self.range_ack(machine_id, JournalKind::Cj, records).await
+        self.range_ack(machine_id, credential, JournalKind::Cj, records)
+            .await
     }
 
     async fn sj_records(
         &self,
         machine_id: Uuid,
+        credential: &[u8],
         records: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
-        self.range_ack(machine_id, JournalKind::Sj, records).await
+        self.range_ack(machine_id, credential, JournalKind::Sj, records)
+            .await
     }
 }

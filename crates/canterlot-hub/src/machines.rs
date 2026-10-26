@@ -9,6 +9,14 @@ pub struct NewMachine {
     pub token: String,
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum RotateTokenError {
+    #[error("machine_revoked")]
+    MachineRevoked,
+    #[error("db_error")]
+    Database(#[from] sqlx::Error),
+}
+
 pub async fn add(pool: &PgPool, owner_id: Uuid, name: &str) -> Result<NewMachine, sqlx::Error> {
     let token = new_token()?;
     let digest = Sha256::digest(token.as_bytes());
@@ -54,7 +62,8 @@ fn new_token() -> Result<String, sqlx::Error> {
 
 pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("select id from machines where id = $1 for update")
+    // NO KEY UPDATE сериализует отзыв и ротацию, не блокируя FK нового курсора журнала.
+    sqlx::query("select id from machines where id = $1 for no key update")
         .bind(machine_id)
         .fetch_optional(&mut *tx)
         .await?;
@@ -78,11 +87,12 @@ pub async fn rotate_token(
     pool: &PgPool,
     machine_id: Uuid,
     reset_local_state: bool,
-) -> Result<Option<String>, sqlx::Error> {
+    reactivate: bool,
+) -> Result<Option<String>, RotateTokenError> {
     let token = new_token()?;
     let digest = Sha256::digest(token.as_bytes());
     let mut tx = pool.begin().await?;
-    if sqlx::query("select id from machines where id = $1 for update")
+    if sqlx::query("select id from machines where id = $1 for no key update")
         .bind(machine_id)
         .fetch_optional(&mut *tx)
         .await?
@@ -90,8 +100,11 @@ pub async fn rotate_token(
     {
         return Ok(None);
     }
-    sqlx::query("update machine_credentials set revoked_at = clock_timestamp() where machine_id = $1 and revoked_at is null")
-        .bind(machine_id).execute(&mut *tx).await?;
+    let revoked = sqlx::query("update machine_credentials set revoked_at = clock_timestamp() where machine_id = $1 and revoked_at is null")
+        .bind(machine_id).execute(&mut *tx).await?.rows_affected();
+    if revoked == 0 && !reactivate {
+        return Err(RotateTokenError::MachineRevoked);
+    }
     sqlx::query("insert into machine_credentials (machine_id, token_sha256) values ($1, $2)")
         .bind(machine_id)
         .bind(digest.as_slice())

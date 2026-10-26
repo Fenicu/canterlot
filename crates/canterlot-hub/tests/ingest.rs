@@ -11,10 +11,164 @@ use canterlot_hub::{
 use canterlot_proto::{limits::MAX_EVENT_BATCH_BYTES, worker::v1::*};
 use chrono::Utc;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+async fn wait_for_lock(pool: &PgPool, query_prefix: &str, event: &str) -> TestResult {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let waiting: bool = sqlx::query_scalar("select exists(select 1 from pg_stat_activity where datname = current_database() and query like $1 and wait_event_type = 'Lock' and wait_event = $2)")
+                .bind(format!("{query_prefix}%")).bind(event).fetch_one(pool).await?;
+            if waiting { return Ok::<_, sqlx::Error>(()); }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }).await??;
+    Ok(())
+}
+
+async fn first_record_racing_credential_change(pool: PgPool, rotate: bool) -> TestResult {
+    use canterlot_hub::machines;
+    sqlx::query("create function pause_first_record() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(120501); return new; end $$")
+        .execute(&pool).await?;
+    sqlx::query("create trigger pause_first_record before insert on journal_cursors for each row execute function pause_first_record()")
+        .execute(&pool).await?;
+    let seed = testkit::seed(&pool).await;
+    for _ in 0..50 {
+        let machine = machines::add(&pool, seed.owner_id, "lock-order").await?;
+        let id = machine.machine_id;
+        let journal = Uuid::now_v7();
+        let mut gate = pool.begin().await?;
+        sqlx::query("select pg_advisory_xact_lock(120501)")
+            .execute(&mut *gate)
+            .await?;
+        let ingest = Ingest::new(pool.clone());
+        let record = tokio::spawn(async move {
+            ingest
+                .apply_batch(
+                    id,
+                    &sha2::Sha256::digest(machine.token.as_bytes()),
+                    JournalKind::Cj,
+                    &batch(journal, vec![stored(Uuid::now_v7())]),
+                )
+                .await
+        });
+        wait_for_lock(&pool, "insert into journal_cursors", "advisory").await?;
+        let task_pool = pool.clone();
+        let change = tokio::spawn(async move {
+            if rotate {
+                machines::rotate_token(&task_pool, id, false, false)
+                    .await
+                    .map(|token| token.is_some())
+            } else {
+                machines::revoke(&task_pool, id).await.map_err(Into::into)
+            }
+        });
+        wait_for_lock(&pool, "update machine_credentials", "transactionid").await?;
+        gate.commit().await?;
+        let (record, change) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(record, change)
+        })
+        .await?;
+        assert_eq!(record??, IngestOutcome::Committed { up_to_seq: 1 });
+        assert!(change??);
+        assert_eq!(cursor(&pool, journal).await, 1);
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn concurrent_revoke_and_first_record_has_no_deadlock(pool: PgPool) -> TestResult {
+    first_record_racing_credential_change(pool, false).await
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn concurrent_rotation_and_first_record_has_no_deadlock(pool: PgPool) -> TestResult {
+    first_record_racing_credential_change(pool, true).await
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn rotated_session_cannot_ingest_before_session_close(pool: PgPool) -> TestResult {
+    use canterlot_hub::machines;
+    let seed = testkit::seed(&pool).await;
+    let machine = machines::add(&pool, seed.owner_id, "rotated-session").await?;
+    let new_token = machines::rotate_token(&pool, machine.machine_id, false, false)
+        .await?
+        .unwrap();
+    assert_eq!(
+        machines::verify(&pool, &new_token).await?,
+        Some(machine.machine_id)
+    );
+    let journal = Uuid::now_v7();
+    let records = batch(journal, vec![stored(Uuid::now_v7())]);
+    let result = Ingest::new(pool.clone())
+        .apply_batch(
+            machine.machine_id,
+            &sha2::Sha256::digest(machine.token.as_bytes()),
+            JournalKind::Cj,
+            &records,
+        )
+        .await;
+    assert!(matches!(result, Err(IngestError::CredentialRevoked)));
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(count, 0);
+    assert_eq!(
+        Ingest::new(pool.clone())
+            .apply_batch(
+                machine.machine_id,
+                &sha2::Sha256::digest(new_token.as_bytes()),
+                JournalKind::Cj,
+                &records
+            )
+            .await?,
+        IngestOutcome::Committed { up_to_seq: 1 }
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn rotated_session_cannot_ingest_after_batch_check(pool: PgPool) -> TestResult {
+    use canterlot_hub::machines;
+    let seed = testkit::seed(&pool).await;
+    let machine = machines::add(&pool, seed.owner_id, "rotation-after-check").await?;
+    let id = machine.machine_id;
+    let journal = Uuid::now_v7();
+    let mut gate = pool.begin().await?;
+    sqlx::query("lock table journal_cursors in access exclusive mode")
+        .execute(&mut *gate)
+        .await?;
+    let ingest = Ingest::new(pool.clone());
+    let record = tokio::spawn(async move {
+        ingest
+            .apply_batch(
+                id,
+                &sha2::Sha256::digest(machine.token.as_bytes()),
+                JournalKind::Cj,
+                &batch(journal, vec![stored(Uuid::now_v7())]),
+            )
+            .await
+    });
+    wait_for_lock(&pool, "select machine_id, kind, committed_seq", "relation").await?;
+    machines::rotate_token(&pool, id, false, false)
+        .await?
+        .unwrap();
+    gate.commit().await?;
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), record).await??;
+    assert!(matches!(result, Err(IngestError::CredentialRevoked)));
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(count, 0);
+    Ok(())
+}
 
 async fn setup(pool: &PgPool) -> (Seed, executions::StartedExecution, SubmittedInput) {
     let seed = testkit::seed(pool).await;
@@ -114,6 +268,7 @@ async fn stored_record_moves_input_on_machine(pool: PgPool) -> TestResult {
     let outcome = Ingest::new(pool.clone())
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(journal, vec![stored(input.command_id)]),
         )
@@ -135,12 +290,22 @@ async fn duplicate_records_are_skipped_but_acked(pool: PgPool) -> TestResult {
     let ingest = Ingest::new(pool.clone());
     let records = batch(journal, vec![stored(input.command_id)]);
     let first = ingest
-        .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &records,
+        )
         .await?;
     let before = snapshot(&pool, input.input_id).await;
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await?,
         first
     );
@@ -169,7 +334,12 @@ async fn gap_stops_before_the_hole(pool: PgPool) -> TestResult {
     let ingest = Ingest::new(pool.clone());
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await?,
         IngestOutcome::Gap {
             committed_seq: 1,
@@ -184,7 +354,12 @@ async fn gap_stops_before_the_hole(pool: PgPool) -> TestResult {
     records.records[1].seq = 2;
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 2 }
     );
@@ -215,7 +390,12 @@ async fn ack_never_exceeds_commit(pool: PgPool) -> TestResult {
     let ingest = Ingest::new(pool.clone());
     assert!(matches!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await,
         Err(IngestError::UnknownRecord)
     ));
@@ -227,7 +407,12 @@ async fn ack_never_exceeds_commit(pool: PgPool) -> TestResult {
     replay.records.truncate(2);
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &replay)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &replay
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 2 }
     );
@@ -235,7 +420,12 @@ async fn ack_never_exceeds_commit(pool: PgPool) -> TestResult {
     records.records[2].body = Some(RecordBody::default());
     assert!(matches!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await,
         Err(IngestError::UnknownRecord)
     ));
@@ -253,6 +443,7 @@ async fn foreign_journal_is_rejected(pool: PgPool) -> TestResult {
     ingest
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(journal, vec![stored(input.command_id)]),
         )
@@ -262,6 +453,7 @@ async fn foreign_journal_is_rejected(pool: PgPool) -> TestResult {
         ingest
             .apply_batch(
                 other.machine_id,
+                &other.credential_digest(),
                 JournalKind::Cj,
                 &batch(journal, vec![accepted(input.command_id)])
             )
@@ -288,6 +480,7 @@ async fn rejected_start_fails_execution(pool: PgPool) -> TestResult {
     let outcome = Ingest::new(pool.clone())
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(
                 journal,
@@ -328,6 +521,7 @@ async fn dispatch_deferred_requeues(pool: PgPool) -> TestResult {
         Ingest::new(pool.clone())
             .apply_batch(
                 seed.machine_id,
+                &seed.credential_digest(),
                 JournalKind::Sj,
                 &batch(
                     journal,
@@ -443,7 +637,12 @@ async fn receipt_mapping_and_run_finished(pool: PgPool) -> TestResult {
         let records = batch(journal, bodies);
         assert_eq!(
             Ingest::new(pool.clone())
-                .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+                .apply_batch(
+                    seed.machine_id,
+                    &seed.credential_digest(),
+                    JournalKind::Sj,
+                    &records
+                )
                 .await?,
             IngestOutcome::Committed {
                 up_to_seq: records.records.len() as u64
@@ -500,7 +699,12 @@ async fn execution_facts_and_ignored_bodies_are_consumed(pool: PgPool) -> TestRe
     );
     assert_eq!(
         Ingest::new(pool.clone())
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 9 }
     );
@@ -533,7 +737,12 @@ async fn failed_record_rolls_back_effect_and_cursor(pool: PgPool) -> TestResult 
     sqlx::query("alter table events add constraint reject_acceptance check (kind <> 'input_state_changed' or payload->>'state' <> 'accepted') not valid")
         .execute(&pool).await?;
     let error = ingest
-        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
         .await
         .unwrap_err();
     assert!(!format!("{error:?} {error}").contains("synthetic"));
@@ -546,7 +755,12 @@ async fn failed_record_rolls_back_effect_and_cursor(pool: PgPool) -> TestResult 
         .await?;
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 2 }
     );
@@ -569,7 +783,12 @@ async fn limits_are_checked_before_any_record(pool: PgPool) -> TestResult {
     );
     let before = snapshot(&pool, input.input_id).await;
     let error = Ingest::new(pool.clone())
-        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
         .await
         .unwrap_err();
     assert_eq!(error.to_string(), "batch_limit");
@@ -592,9 +811,21 @@ async fn concurrent_registration_has_one_owner(pool: PgPool) -> TestResult {
         vec![record_body::Body::JournalClosed(JournalClosed::default())],
     );
     let ingest = Ingest::new(pool.clone());
+    let first_credential = first.credential_digest();
+    let second_credential = second.credential_digest();
     let (a, b) = tokio::join!(
-        ingest.apply_batch(first.machine_id, JournalKind::Cj, &records),
-        ingest.apply_batch(second.machine_id, JournalKind::Cj, &records),
+        ingest.apply_batch(
+            first.machine_id,
+            &first_credential,
+            JournalKind::Cj,
+            &records
+        ),
+        ingest.apply_batch(
+            second.machine_id,
+            &second_credential,
+            JournalKind::Cj,
+            &records
+        ),
     );
     assert!(matches!(
         (a, b),
@@ -632,7 +863,12 @@ async fn stale_and_unknown_receipts_are_consumed(pool: PgPool) -> TestResult {
     );
     assert_eq!(
         Ingest::new(pool.clone())
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 2 }
     );
@@ -657,6 +893,7 @@ async fn other_commands_are_stored_and_rejected(pool: PgPool) -> TestResult {
     ingest
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(journal, vec![stored.clone()]),
         )
@@ -681,7 +918,12 @@ async fn other_commands_are_stored_and_rejected(pool: PgPool) -> TestResult {
     );
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 3 }
     );
@@ -725,6 +967,7 @@ async fn cursor_is_locked_before_queue_state(pool: PgPool) -> TestResult {
         ingest
             .apply_batch(
                 seed.machine_id,
+                &seed.credential_digest(),
                 JournalKind::Cj,
                 &batch(journal, vec![stored(input.command_id)]),
             )
@@ -819,7 +1062,12 @@ async fn late_start_rejection_for_stopped_execution_is_consumed(pool: PgPool) ->
     );
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 2 }
     );
@@ -866,6 +1114,7 @@ async fn start_rejection_for_completed_command_leaves_execution_untouched(
     let outcome = Ingest::new(pool.clone())
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(
                 journal,
@@ -892,6 +1141,7 @@ async fn start_rejection_for_other_attempt_is_ignored(pool: PgPool) -> TestResul
     Ingest::new(pool.clone())
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(
                 journal,
@@ -934,6 +1184,7 @@ async fn start_rejection_without_execution_or_queue_is_consumed(pool: PgPool) ->
         Ingest::new(pool.clone())
             .apply_batch(
                 seed.machine_id,
+                &seed.credential_digest(),
                 JournalKind::Cj,
                 &batch(journal, vec![rejected(execution.command_id)]),
             )
@@ -950,6 +1201,7 @@ async fn start_rejection_without_execution_or_queue_is_consumed(pool: PgPool) ->
         Ingest::new(pool.clone())
             .apply_batch(
                 other.machine_id,
+                &other.credential_digest(),
                 JournalKind::Cj,
                 &batch(journal, vec![rejected(second.command_id)]),
             )
@@ -975,6 +1227,7 @@ async fn unchanged_execution_state_emits_no_event(pool: PgPool) -> TestResult {
     Ingest::new(pool.clone())
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(
                 journal,
@@ -1004,7 +1257,12 @@ async fn duplicates_are_skipped_without_locking_the_cursor(pool: PgPool) -> Test
         vec![stored(input.command_id), accepted(input.command_id)],
     );
     ingest
-        .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &records,
+        )
         .await?;
     let mut holder = pool.begin().await?;
     sqlx::query("select committed_seq from journal_cursors where journal_id = $1 for update")
@@ -1013,7 +1271,12 @@ async fn duplicates_are_skipped_without_locking_the_cursor(pool: PgPool) -> Test
         .await?;
     let replay = timeout(
         Duration::from_secs(2),
-        ingest.apply_batch(seed.machine_id, JournalKind::Cj, &records),
+        ingest.apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &records,
+        ),
     )
     .await??;
     assert_eq!(replay, IngestOutcome::Committed { up_to_seq: 2 });
@@ -1031,7 +1294,12 @@ async fn seq_zero_is_an_invalid_record(pool: PgPool) -> TestResult {
     let before = snapshot(&pool, input.input_id).await;
     assert!(matches!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await,
         Err(IngestError::InvalidRecord)
     ));
@@ -1042,7 +1310,12 @@ async fn seq_zero_is_an_invalid_record(pool: PgPool) -> TestResult {
     with_valid_first.records[1].seq = 0;
     assert!(matches!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &with_valid_first)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &with_valid_first
+            )
             .await,
         Err(IngestError::InvalidRecord)
     ));
@@ -1075,7 +1348,12 @@ async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) 
     records.records[0].seq = 2;
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await?,
         IngestOutcome::Gap {
             committed_seq: 0,
@@ -1088,7 +1366,12 @@ async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) 
     records.records[0].body = None;
     assert!(matches!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &records)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &records
+            )
             .await,
         Err(IngestError::UnknownRecord)
     ));
@@ -1096,7 +1379,12 @@ async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) 
     let empty = batch(Uuid::now_v7(), vec![]);
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &empty)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &empty
+            )
             .await?,
         IngestOutcome::Committed { up_to_seq: 0 }
     );
@@ -1104,6 +1392,7 @@ async fn cursor_row_exists_only_after_the_first_record_is_applied(pool: PgPool) 
     ingest
         .apply_batch(
             seed.machine_id,
+            &seed.credential_digest(),
             JournalKind::Cj,
             &batch(applied, vec![stored(input.command_id)]),
         )
@@ -1154,12 +1443,22 @@ async fn ignored_records_are_counted_per_ingest(pool: PgPool) -> TestResult {
     let first = Ingest::new(pool.clone());
     let second = Ingest::new(pool.clone());
     first
-        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
         .await?;
     assert_eq!(first.ignored_record_count(), 2);
     assert_eq!(second.ignored_record_count(), 0);
     first
-        .apply_batch(seed.machine_id, JournalKind::Sj, &records)
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
         .await?;
     assert_eq!(first.ignored_record_count(), 2);
     Ok(())
@@ -1195,7 +1494,12 @@ async fn foreign_world(pool: &PgPool, stage: Stage) -> Foreign {
             vec![stored(input.command_id), accepted(input.command_id)],
         );
         Ingest::new(pool.clone())
-            .apply_batch(seed.machine_id, JournalKind::Sj, &own)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &own,
+            )
             .await
             .unwrap();
     }
@@ -1222,6 +1526,7 @@ async fn assert_isolated(
     let outcome = Ingest::new(pool.clone())
         .apply_batch(
             attacker.machine_id,
+            &attacker.credential_digest(),
             JournalKind::Sj,
             &batch(journal, bodies),
         )
@@ -1339,7 +1644,12 @@ async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> Te
     let expected = IngestOutcome::Committed { up_to_seq: 1 };
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &original)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &original
+            )
             .await?,
         expected
     );
@@ -1357,7 +1667,12 @@ async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> Te
         .await?;
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &original)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &original
+            )
             .await?,
         expected
     );
@@ -1368,7 +1683,12 @@ async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> Te
     let different = batch(journal, vec![accepted(input.command_id)]);
     assert_eq!(
         ingest
-            .apply_batch(seed.machine_id, JournalKind::Cj, &different)
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &different
+            )
             .await?,
         expected
     );

@@ -209,6 +209,32 @@ async fn cli_initializes_adds_checks_and_revokes(pool: PgPool) -> TestResult {
     assert!(revoked.status.success());
     assert!(revoked.stdout.is_empty() && revoked.stderr.is_empty());
     assert_eq!(machines::verify(&pool, token).await?, None);
+    let refused = run(&[
+        "machine",
+        "rotate-token",
+        "--machine-id",
+        &machine_id.to_string(),
+    ])?;
+    assert!(!refused.status.success());
+    assert!(refused.stdout.is_empty());
+    assert_eq!(refused.stderr, b"machine_revoked\n");
+    let reactivated = run(&[
+        "machine",
+        "rotate-token",
+        "--machine-id",
+        &machine_id.to_string(),
+        "--reactivate",
+    ])?;
+    assert!(reactivated.status.success());
+    assert!(reactivated.stderr.is_empty());
+    let text = String::from_utf8(reactivated.stdout)?;
+    let new_token = text
+        .trim_end()
+        .strip_prefix("token=")
+        .expect("token missing");
+    assert_eq!(text.lines().count(), 1);
+    assert_eq!(machines::verify(&pool, new_token).await?, Some(machine_id));
+    assert_eq!(machines::verify(&pool, token).await?, None);
     let missing = run(&[
         "machine",
         "revoke",
@@ -266,13 +292,19 @@ async fn revoke_and_rotate_notify_transactionally_and_rotation_is_atomic(
     let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv()).await??;
     assert_eq!(notification.channel(), "canterlot_revoke");
     assert_eq!(notification.payload(), id.to_string());
-    let token = machines::rotate_token(&pool, id, false).await?.unwrap();
+    let token = machines::rotate_token(&pool, id, false, true)
+        .await?
+        .unwrap();
     let notification = tokio::time::timeout(Duration::from_secs(2), listener.recv()).await??;
     assert_eq!(notification.channel(), "canterlot_revoke");
     assert_eq!(notification.payload(), id.to_string());
     sqlx::query("alter table machine_credentials add constraint no_rotation check (revoked_at is not null) not valid")
         .execute(&pool).await?;
-    assert!(machines::rotate_token(&pool, id, true).await.is_err());
+    assert!(
+        machines::rotate_token(&pool, id, true, false)
+            .await
+            .is_err()
+    );
     assert_eq!(machines::verify(&pool, &token).await?, Some(id));
     assert!(
         tokio::time::timeout(Duration::from_millis(100), listener.recv())

@@ -76,7 +76,7 @@ impl WorkerData for HubGrpc {
             session_log.reason = "stream_end";
             session_log.cancelled = lease.cancel.clone();
             yield reply;
-            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Sj);
+            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, authenticated.credential.clone(), LaneKind::Sj);
             loop {
                 let next = tokio::select! {
                     biased;

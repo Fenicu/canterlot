@@ -66,7 +66,7 @@ impl WorkerControl for HubGrpc {
                 }
             };
             let (lease, mut commands) = match state.admit_control(machine_id, connection_id,
-                Uuid::parse_str(&hello.cj_journal_id).expect("validated journal"), authenticated.credential).await.map_err(|error| session_log.error(error))? {
+                Uuid::parse_str(&hello.cj_journal_id).expect("validated journal"), authenticated.credential.clone()).await.map_err(|error| session_log.error(error))? {
                 Ok(session) => session,
                 Err(rejected) => {
                     session_log.reason = super::rejection_kind(rejected.reason);
@@ -90,7 +90,7 @@ impl WorkerControl for HubGrpc {
             session_log.cancelled = lease.cancel.clone();
             yield reply;
             let cj_journal = Uuid::parse_str(&hello.cj_journal_id).ok();
-            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, LaneKind::Cj);
+            let mut lane = IngestLane::start(state.ingest.clone(), machine_id, authenticated.credential.clone(), LaneKind::Cj);
             loop {
                 let next = tokio::select! {
                     biased;
