@@ -68,6 +68,46 @@ pub struct StoreSnapshot {
     pub receipt_count: u64,
 }
 
+/// Читается только в режиме supervise при включённой feature.
+pub struct SupervisorFaults {
+    abort_at: Option<String>,
+    hold_gate: bool,
+    survivors: std::sync::atomic::AtomicU32,
+}
+
+impl SupervisorFaults {
+    pub fn from_env() -> Self {
+        Self {
+            abort_at: std::env::var("CANTERLOT_FAULT_ABORT_AT").ok(),
+            hold_gate: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref() == Ok("before_gate"),
+            survivors: std::sync::atomic::AtomicU32::new(
+                std::env::var("CANTERLOT_FAULT_TERMINATE_SURVIVORS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            ),
+        }
+    }
+
+    pub fn abort_at(&self, point: &str) {
+        if self.abort_at.as_deref() == Some(point) {
+            std::process::abort();
+        }
+    }
+
+    pub fn gate_held(&self, exec_dir: &std::path::Path) -> bool {
+        self.hold_gate && !exec_dir.join("fault_release").exists()
+    }
+
+    pub fn take_survivor(&self) -> bool {
+        self.survivors
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreAppendPoint {
     Inbox,

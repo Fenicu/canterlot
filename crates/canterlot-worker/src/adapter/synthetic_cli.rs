@@ -30,6 +30,18 @@ pub(super) enum Request {
     },
 }
 
+fn log_input(line: &str) {
+    use std::io::Write;
+    if let Some(path) = std::env::var_os("CANTERLOT_SYNTHETIC_STDIN_LOG")
+        && let Ok(mut file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+    {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 pub(super) async fn emit(value: Value) -> io::Result<()> {
     let mut bytes =
         serde_json::to_vec(&value).map_err(|_| io::Error::other("frame encoding failed"))?;
@@ -211,6 +223,7 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
     emit(json!({"type":"ready", "native_conversation_id":native_id.unwrap_or_else(|| format!("synthetic-{}", Uuid::now_v7()))})).await?;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
+        log_input(&line);
         let request: Request =
             serde_json::from_str(&line).map_err(|_| io::Error::other("invalid request"))?;
         match request {
@@ -225,6 +238,7 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
                         }
                         line = lines.next_line() => {
                             let Some(line) = line? else { return Ok(()) };
+                            log_input(&line);
                             match serde_json::from_str::<Request>(&line).map_err(|_| io::Error::other("invalid request"))? {
                                 Request::Interrupt { id } => {
                                     emit(json!({"type":"interrupted", "id":id})).await?;

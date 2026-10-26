@@ -26,10 +26,17 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    Supervise {
+        #[arg(long)]
+        exec_dir: PathBuf,
+    },
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(code) = supervise().await {
+        return code;
+    }
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
@@ -39,9 +46,27 @@ async fn main() -> ExitCode {
     }
 }
 
+async fn supervise() -> Option<ExitCode> {
+    let Command::Supervise { exec_dir } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    tracing_subscriber::fmt()
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+    Some(match canterlot_worker::supervisor::run(exec_dir).await {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("{error}");
+            ExitCode::FAILURE
+        }
+    })
+}
+
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
+        Command::Supervise { .. } => return Ok(()),
         #[cfg(feature = "synthetic-adapter")]
         Command::SyntheticCli {
             profile,

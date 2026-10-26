@@ -45,6 +45,33 @@ pub struct WorkerTimers {
     pub backoff_reset_after: Duration,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SupervisorTimers {
+    #[serde(with = "humantime_serde")]
+    pub attach_wait: Duration,
+    #[serde(with = "humantime_serde")]
+    pub ready_deadline: Duration,
+    #[serde(with = "humantime_serde")]
+    pub transmit_deadline: Duration,
+    #[serde(with = "humantime_serde")]
+    pub stop_grace: Duration,
+    #[serde(with = "humantime_serde")]
+    pub stop_retry: Duration,
+}
+
+impl Default for SupervisorTimers {
+    fn default() -> Self {
+        Self {
+            attach_wait: Duration::from_secs(30),
+            ready_deadline: Duration::from_secs(30),
+            transmit_deadline: Duration::from_secs(10),
+            stop_grace: Duration::from_secs(5),
+            stop_retry: Duration::from_secs(2),
+        }
+    }
+}
+
 impl Default for WorkerTimers {
     fn default() -> Self {
         Self {

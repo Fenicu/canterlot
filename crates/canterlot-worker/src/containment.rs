@@ -60,6 +60,10 @@ struct Stat {
 
 fn stat(pid: u32) -> Result<Stat, ContainmentError> {
     let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    // Завершающийся процесс иногда отдаёт пустой stat: считаем его исчезнувшим.
+    if text.trim().is_empty() {
+        return Err(io::Error::from(io::ErrorKind::NotFound).into());
+    }
     let end = text.rfind(')').ok_or(ContainmentError::InvalidStat)?;
     let fields: Vec<_> = text[end + 1..].split_whitespace().collect();
     let number = |index: usize| -> Result<u64, ContainmentError> {
@@ -78,6 +82,10 @@ fn stat(pid: u32) -> Result<Stat, ContainmentError> {
         group: u32::try_from(number(2)?).map_err(|_| ContainmentError::InvalidStat)?,
         zombie: matches!(fields.first(), Some(&"Z") | Some(&"X")),
     })
+}
+
+pub fn start_ticks(pid: u32) -> Result<u64, ContainmentError> {
+    Ok(stat(pid)?.member.start_ticks)
 }
 
 fn disappeared(error: &ContainmentError) -> bool {

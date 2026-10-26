@@ -11,6 +11,7 @@ pub mod fault_injection;
 pub mod ownership;
 pub mod session;
 pub mod store;
+pub mod supervisor;
 
 mod session_store;
 
