@@ -479,7 +479,11 @@ async fn apply_body(
         | Body::BlockDelta(_)
         | Body::BlockFinal(_)
         | Body::BlockIncomplete(_)
-        | Body::PhaseChanged(_) => return Ok(true),
+        | Body::PhaseChanged(_)
+        | Body::JournalOpened(_)
+        | Body::InterruptStatus(_)
+        | Body::WithdrawRefused(_)
+        | Body::AdapterDiagnostic(_) => return Ok(true),
     }
     Ok(false)
 }

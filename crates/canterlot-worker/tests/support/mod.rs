@@ -79,6 +79,7 @@ impl Service {
     fn reply(&self, hello: &Hello) -> HelloReply {
         HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
+                capabilities: Vec::new(),
                 restore_generation: self.behavior.generation.to_string(),
                 committed: vec![JournalCommitted {
                     journal_id: hello.cj_journal_id.clone(),

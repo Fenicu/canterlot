@@ -8,6 +8,11 @@ pub const MAX_INPUT_TEXT_BYTES: usize = 262_144;
 pub const MAX_INPUT_META_BYTES: usize = 65_536;
 pub const MAX_EVENT_BATCH_BYTES: usize = 524_288;
 pub const MAX_FILE_CHUNK_BYTES: usize = 131_072;
+pub const IPC_MAX_MESSAGE_BYTES: usize = 1_048_576;
+pub const IPC_PROTOCOL_VERSION: u32 = 1;
+pub const MAX_SJ_BATCH_RECORDS: usize = 256;
+pub const MAX_BLOCK_DELTA_BYTES: usize = 16_384;
+pub const BLOCK_FINAL_INLINE_MAX_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitError {
@@ -52,6 +57,15 @@ pub fn check_record_batch(batch: &JournalRecords) -> Result<(), LimitError> {
     let actual = batch.encoded_len();
     if actual > MAX_EVENT_BATCH_BYTES {
         return Err(LimitError::EventBatch { actual });
+    }
+
+    Ok(())
+}
+
+pub fn check_ipc_message<M: Message>(message: &M) -> Result<(), LimitError> {
+    let actual = message.encoded_len();
+    if actual > IPC_MAX_MESSAGE_BYTES {
+        return Err(LimitError::Message { actual });
     }
 
     Ok(())

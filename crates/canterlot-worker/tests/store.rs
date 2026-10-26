@@ -83,13 +83,12 @@ fn hundred_deliveries_store_once() {
     let cj = store.cj_records_from(1, usize::MAX).unwrap();
     assert_eq!(cj.len(), 1);
     assert_eq!(cj[0].seq, 1);
-    assert_eq!(
-        cj[0].body.as_ref().unwrap().body,
-        Some(record_body::Body::CommandStored(CommandStored {
-            command_id: cmd.command_id.clone(),
-            dispatch_attempt: cmd.dispatch_attempt,
-        }))
-    );
+    assert!(matches!(
+        &cj[0].body.as_ref().unwrap().body,
+        Some(record_body::Body::CommandStored(CommandStored { command_id, dispatch_attempt, machine_time_ms }))
+            if command_id == &cmd.command_id && *dispatch_attempt == cmd.dispatch_attempt
+                && *machine_time_ms > 0 && *machine_time_ms <= chrono::Utc::now().timestamp_millis() as u64
+    ));
     drop(store);
     let inbox = records(dir.path(), "inbox");
     assert_eq!(inbox.len(), 1);

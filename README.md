@@ -12,7 +12,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | Путь | Назначение |
 | --- | --- |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
-| `crates/canterlot-proto/` | Типы protobuf и контракты gRPC |
+| `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс с хабом, локальные журналы команд и квитанций |
 | `crates/canterlot-hub/` | Хаб: PostgreSQL, gRPC-сервер, диспетчер и outbox команд |
 | `spikes/` | Прототипы этапа 0, не продуктовый код |

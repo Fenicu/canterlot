@@ -60,6 +60,7 @@ message HelloReply {
 message Accepted {
   string restore_generation = 1;
   repeated JournalCommitted committed = 2;
+  repeated string capabilities = 3;
 }
 
 message JournalCommitted {
@@ -78,7 +79,21 @@ message ControlUp {
     Hello hello = 1;
     JournalRecords cj_records = 2;
     Heartbeat heartbeat = 3;
+    ReconcileReport reconcile_report = 4;
   }
+}
+
+message ReconcileReport {
+  repeated ExecutionObservation executions = 1;
+}
+
+message ExecutionObservation {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string state = 3;
+  string outcome = 4;
+  bool supervisor_attached = 5;
+  string sj_journal_id = 6;
 }
 
 message ControlDown {
@@ -201,12 +216,17 @@ message RecordBody {
     BlockIncomplete block_incomplete = 16;
     PhaseChanged phase_changed = 17;
     InputDispatchDeferred dispatch_deferred = 18;
+    JournalOpened journal_opened = 19;
+    InterruptStatus interrupt_status = 20;
+    WithdrawRefused withdraw_refused = 21;
+    AdapterDiagnostic adapter_diagnostic = 22;
   }
 }
 
 message CommandStored {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
+  uint64 machine_time_ms = 3;
 }
 
 message CommandRejected {
@@ -218,11 +238,13 @@ message CommandRejected {
 message InputTransmissionStarted {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
+  uint64 machine_time_ms = 3;
 }
 
 message InputAccepted {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
+  uint64 machine_time_ms = 3;
 }
 
 message InputAcceptanceUnconfirmed {
@@ -264,6 +286,7 @@ message ExecutionState {
   uint64 generation = 2;
   string state = 3;
   string outcome = 4;
+  string native_conversation_id = 5;
 }
 
 message RunFinished {
@@ -281,6 +304,8 @@ message BlockStarted {
   string block_id = 1;
   uint64 rev = 2;
   string kind = 3;
+  string input_command_id = 4;
+  string parent_block_id = 5;
 }
 
 message BlockDelta {
@@ -295,6 +320,7 @@ message BlockFinal {
   uint64 rev = 2;
   string text = 3;
   string checksum = 4;
+  bool text_omitted = 5;
 }
 
 message BlockIncomplete {
@@ -306,4 +332,38 @@ message BlockIncomplete {
 message PhaseChanged {
   string execution_id = 1;
   string phase = 2;
+}
+
+message JournalOpened {
+  string execution_id = 1;
+  uint64 generation = 2;
+  uint32 supervisor_protocol_version = 3;
+}
+
+enum InterruptState {
+  INTERRUPT_STATE_UNSPECIFIED = 0;
+  SENT_TO_AGENT = 1;
+  ACKNOWLEDGED = 2;
+  COMPLETED = 3;
+  NOT_APPLICABLE = 4;
+  SUPERSEDED = 5;
+  REJECTED_STALE = 6;
+}
+
+message InterruptStatus {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  InterruptState state = 3;
+}
+
+message WithdrawRefused {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string reason = 3;
+}
+
+message AdapterDiagnostic {
+  string execution_id = 1;
+  string kind = 2;
+  string event_type = 3;
 }

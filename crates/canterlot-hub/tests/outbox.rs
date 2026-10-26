@@ -163,6 +163,7 @@ impl Worker {
                         seq: self.seq,
                         body: Some(RecordBody {
                             body: Some(record_body::Body::CommandStored(CommandStored {
+                                machine_time_ms: 0,
                                 command_id: command.command_id.clone(),
                                 dispatch_attempt: command.dispatch_attempt,
                             })),
@@ -185,6 +186,7 @@ impl Worker {
     async fn finish(&mut self, command: &Command) {
         let bodies = [
             record_body::Body::InputAccepted(InputAccepted {
+                machine_time_ms: 0,
                 command_id: command.command_id.clone(),
                 dispatch_attempt: command.dispatch_attempt,
             }),
@@ -683,6 +685,7 @@ async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest(pool
             seq: 1,
             body: Some(RecordBody {
                 body: Some(record_body::Body::CommandStored(CommandStored {
+                    machine_time_ms: 0,
                     command_id: submitted.command_id.to_string(),
                     dispatch_attempt: 1,
                 })),

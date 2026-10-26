@@ -232,6 +232,7 @@ fn batch(journal_id: Uuid, bodies: Vec<record_body::Body>) -> JournalRecords {
 
 fn stored(command_id: Uuid) -> record_body::Body {
     record_body::Body::CommandStored(CommandStored {
+        machine_time_ms: 0,
         command_id: command_id.to_string(),
         dispatch_attempt: 1,
     })
@@ -239,6 +240,7 @@ fn stored(command_id: Uuid) -> record_body::Body {
 
 fn accepted(command_id: Uuid) -> record_body::Body {
     record_body::Body::InputAccepted(InputAccepted {
+        machine_time_ms: 0,
         command_id: command_id.to_string(),
         dispatch_attempt: 1,
     })
@@ -582,6 +584,7 @@ async fn receipt_mapping_and_run_finished(pool: PgPool) -> TestResult {
         let fact = match body {
             "transmission_started" => {
                 record_body::Body::TransmissionStarted(InputTransmissionStarted {
+                    machine_time_ms: 0,
                     command_id,
                     dispatch_attempt,
                 })
@@ -676,6 +679,7 @@ async fn execution_facts_and_ignored_bodies_are_consumed(pool: PgPool) -> TestRe
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
     let fact = |state: &str| {
         record_body::Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+            native_conversation_id: String::new(),
             execution_id: execution.execution_id.to_string(),
             generation: execution.generation as u64,
             state: state.into(),
@@ -855,6 +859,7 @@ async fn stale_and_unknown_receipts_are_consumed(pool: PgPool) -> TestResult {
         journal,
         vec![
             record_body::Body::CommandStored(CommandStored {
+                machine_time_ms: 0,
                 command_id: input.command_id.to_string(),
                 dispatch_attempt: 0,
             }),
@@ -887,6 +892,7 @@ async fn other_commands_are_stored_and_rejected(pool: PgPool) -> TestResult {
     let journal = Uuid::now_v7();
     let ingest = Ingest::new(pool.clone());
     let stored = record_body::Body::CommandStored(CommandStored {
+        machine_time_ms: 0,
         command_id: command.to_string(),
         dispatch_attempt: 0,
     });
@@ -1022,6 +1028,7 @@ async fn world(pool: &PgPool, conversation_id: Uuid) -> Value {
 
 fn execution_fact(execution_id: Uuid, generation: i64, state: &str) -> record_body::Body {
     record_body::Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+        native_conversation_id: String::new(),
         execution_id: execution_id.to_string(),
         generation: generation as u64,
         state: state.into(),
@@ -1555,6 +1562,7 @@ async fn records_of_one_machine_never_affect_another_machine(pool: PgPool) -> Te
         "command_stored(start_execution)",
         |v| {
             vec![record_body::Body::CommandStored(CommandStored {
+                machine_time_ms: 0,
                 command_id: start(v),
                 dispatch_attempt: 0,
             })]

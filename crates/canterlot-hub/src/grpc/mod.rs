@@ -308,6 +308,7 @@ impl HubGrpc {
         self.faults.accepted(&committed);
         Ok(HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
+                capabilities: Vec::new(),
                 restore_generation: self.installation.restore_generation.to_string(),
                 committed,
             })),

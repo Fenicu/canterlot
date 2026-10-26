@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use canterlot_journal::{Journal, JournalError, JournalId, JournalOptions};
 use canterlot_proto::limits::{self, LimitError, MAX_MESSAGE_BYTES};
@@ -220,6 +221,7 @@ impl WorkerStore {
                     self.cj.append(
                         &RecordBody {
                             body: Some(record_body::Body::CommandStored(CommandStored {
+                                machine_time_ms: machine_time_ms(),
                                 command_id: cmd.command_id,
                                 dispatch_attempt: cmd.dispatch_attempt,
                             })),
@@ -350,6 +352,7 @@ impl WorkerStore {
                 }
                 (
                     record_body::Body::CommandStored(CommandStored {
+                        machine_time_ms: machine_time_ms(),
                         command_id: cmd.command_id.clone(),
                         dispatch_attempt: cmd.dispatch_attempt,
                     }),
@@ -462,6 +465,15 @@ impl WorkerStore {
         self.hub = hub;
         Ok(())
     }
+}
+
+fn machine_time_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 fn receipt_id(raw: &str) -> String {

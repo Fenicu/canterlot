@@ -416,3 +416,100 @@ where
     assert_eq!(encoded, expected);
     assert_eq!(serde_json::from_value::<T>(encoded).unwrap(), value);
 }
+
+async fn execution_for_blocks(pool: &PgPool, seed: &Seed) -> Result<Uuid, sqlx::Error> {
+    let execution_id = Uuid::now_v7();
+    sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
+        .bind(execution_id).bind(seed.conversation_id).execute(pool).await?;
+    Ok(execution_id)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn blocks_enforce_kind_and_state(pool: PgPool) -> Result<(), sqlx::Error> {
+    let seed = testkit::seed(&pool).await;
+    let execution_id = execution_for_blocks(&pool, &seed).await?;
+    for kind in [
+        "text",
+        "reasoning",
+        "tool_call",
+        "tool_result",
+        "warning",
+        "error",
+    ] {
+        for state in ["streaming", "final", "incomplete"] {
+            let block_id = Uuid::now_v7();
+            sqlx::query("insert into blocks (block_id, execution_id, conversation_id, kind, state, rev) values ($1, $2, $3, $4, $5, 1)")
+                .bind(block_id).bind(execution_id).bind(seed.conversation_id).bind(kind).bind(state).execute(&pool).await?;
+            let defaults: (String, bool, bool) = sqlx::query_as("select content, created_at is not null, updated_at is not null from blocks where block_id = $1")
+                .bind(block_id).fetch_one(&pool).await?;
+            assert_eq!(defaults, (String::new(), true, true));
+        }
+    }
+    for (kind, state, constraint) in [
+        ("bogus", "streaming", "blocks_kind_check"),
+        ("text", "bogus", "blocks_state_check"),
+    ] {
+        let error = sqlx::query("insert into blocks (block_id, execution_id, conversation_id, kind, state, rev) values ($1, $2, $3, $4, $5, 1)")
+            .bind(Uuid::now_v7()).bind(execution_id).bind(seed.conversation_id).bind(kind).bind(state).execute(&pool).await.unwrap_err();
+        let error = error.as_database_error().unwrap();
+        assert!(error.is_check_violation());
+        assert_eq!(error.constraint(), Some(constraint));
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn journal_cursor_links_execution_and_closed_defaults_false(
+    pool: PgPool,
+) -> Result<(), sqlx::Error> {
+    let seed = testkit::seed(&pool).await;
+    let execution_id = execution_for_blocks(&pool, &seed).await?;
+    let journal_id = Uuid::now_v7();
+    sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, execution_id) values ($1, $2, 'sj', $3)")
+        .bind(seed.machine_id).bind(journal_id).bind(execution_id).execute(&pool).await?;
+    let cursor: (Uuid, bool) =
+        sqlx::query_as("select execution_id, closed from journal_cursors where journal_id = $1")
+            .bind(journal_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(cursor, (execution_id, false));
+    sqlx::query("update journal_cursors set closed = true where journal_id = $1")
+        .bind(journal_id)
+        .execute(&pool)
+        .await?;
+    let error = sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, execution_id) values ($1, $2, 'sj', $3)")
+        .bind(seed.machine_id).bind(Uuid::now_v7()).bind(Uuid::now_v7()).execute(&pool).await.unwrap_err();
+    assert!(
+        error
+            .as_database_error()
+            .unwrap()
+            .is_foreign_key_violation()
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn execution_columns_exist(pool: PgPool) -> Result<(), sqlx::Error> {
+    let seed = testkit::seed(&pool).await;
+    let execution_id = execution_for_blocks(&pool, &seed).await?;
+    let defaults: (Option<String>, Option<String>, bool, bool) = sqlx::query_as("select native_conversation_id, phase, phase_at is null, observed_at is null from executions where id = $1")
+        .bind(execution_id).fetch_one(&pool).await?;
+    assert_eq!(defaults, (None, None, true, true));
+    sqlx::query("update executions set native_conversation_id = 'native', phase = 'awaiting_input', phase_at = clock_timestamp(), observed_at = clock_timestamp() where id = $1")
+        .bind(execution_id).execute(&pool).await?;
+    let observed: (String, String, bool, bool) = sqlx::query_as("select native_conversation_id, phase, phase_at is not null, observed_at is not null from executions where id = $1")
+        .bind(execution_id).fetch_one(&pool).await?;
+    assert_eq!(
+        observed,
+        ("native".into(), "awaiting_input".into(), true, true)
+    );
+    let input_id = insert_input(&pool, &seed, 1, "queued").await?;
+    sqlx::query("update commands set machine_stored_at_ms = 1000 where id = (select command_id from inputs where id = $1)")
+        .bind(input_id).execute(&pool).await?;
+    sqlx::query("update inputs set transmitted_machine_ms = 1001, agent_confirmed_machine_ms = 1002 where id = $1")
+        .bind(input_id).execute(&pool).await?;
+    let times: (i64, i64, i64) = sqlx::query_as("select c.machine_stored_at_ms, i.transmitted_machine_ms, i.agent_confirmed_machine_ms from inputs i join commands c on c.id = i.command_id where i.id = $1")
+        .bind(input_id).fetch_one(&pool).await?;
+    assert_eq!(times, (1000, 1001, 1002));
+    Ok(())
+}

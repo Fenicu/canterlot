@@ -72,19 +72,23 @@ fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[App
     let facts = store.cj_records_from(1, usize::MAX).unwrap();
     assert_eq!(facts.len(), 1);
     assert_eq!(facts[0].seq, 1);
-    let expected = if rejected {
-        record_body::Body::CommandRejected(CommandRejected {
-            command_id: cmd.command_id.clone(),
-            dispatch_attempt: cmd.dispatch_attempt,
-            reason: "unsupported_command".into(),
-        })
+    if rejected {
+        assert_eq!(
+            facts[0].body.as_ref().unwrap().body,
+            Some(record_body::Body::CommandRejected(CommandRejected {
+                command_id: cmd.command_id.clone(),
+                dispatch_attempt: cmd.dispatch_attempt,
+                reason: "unsupported_command".into(),
+            }))
+        );
     } else {
-        record_body::Body::CommandStored(CommandStored {
-            command_id: cmd.command_id.clone(),
-            dispatch_attempt: cmd.dispatch_attempt,
-        })
-    };
-    assert_eq!(facts[0].body.as_ref().unwrap().body, Some(expected));
+        assert!(matches!(
+            &facts[0].body.as_ref().unwrap().body,
+            Some(record_body::Body::CommandStored(CommandStored { command_id, dispatch_attempt, machine_time_ms }))
+                if command_id == &cmd.command_id && *dispatch_attempt == cmd.dispatch_attempt
+                    && *machine_time_ms > 0 && *machine_time_ms <= super::machine_time_ms()
+        ));
+    }
     let receipts = store.receipts.read_from(1, usize::MAX).unwrap();
     assert_eq!(receipts.len(), 1);
     let receipt: ReceiptEntry =

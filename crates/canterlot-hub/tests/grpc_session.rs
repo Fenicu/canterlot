@@ -240,6 +240,7 @@ async fn cj_ack_waits_for_record_commit(pool: PgPool) -> TestResult {
                     seq: 1,
                     body: Some(RecordBody {
                         body: Some(record_body::Body::CommandStored(CommandStored {
+                            machine_time_ms: 0,
                             command_id: execution.command_id.to_string(),
                             dispatch_attempt: 0,
                         })),

@@ -1,0 +1,127 @@
+syntax = "proto3";
+
+package canterlot.worker.ipc.v1;
+
+import "canterlot/worker/v1/worker.proto";
+
+message ControlToSupervisor {
+  oneof msg {
+    Attach attach = 1;
+    StartCli start_cli = 2;
+    Deliver deliver = 3;
+    canterlot.worker.v1.CancelInput cancel = 4;
+    canterlot.worker.v1.WithdrawInput withdraw = 5;
+    InterruptRequest interrupt = 6;
+    StopRequest stop = 7;
+    ShipFrom ship_from = 8;
+    SjAck sj_ack = 9;
+  }
+}
+
+message SupervisorToControl {
+  oneof msg {
+    Attached attached = 1;
+    CliStarted cli_started = 2;
+    DeliverAck deliver_ack = 3;
+    SjBatch sj_batch = 4;
+    Exited exited = 5;
+  }
+}
+
+message Attach {
+  uint32 protocol_version = 1;
+  bytes secret = 2;
+  string execution_id = 3;
+  uint64 generation = 4;
+}
+
+message Attached {
+  uint32 protocol_version = 1;
+  uint32 pid = 2;
+  uint64 start_ticks = 3;
+  string sj_journal_id = 4;
+  uint64 last_sj_seq = 5;
+  uint64 acked_sj_seq = 6;
+  repeated ReceivedInput received = 7;
+}
+
+message ReceivedInput {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string state = 3;
+}
+
+message StartCli {
+  string profile = 1;
+  string workdir = 2;
+  string native_conversation_id = 3;
+}
+
+message CliStarted {
+  uint32 pid = 1;
+  uint64 start_ticks = 2;
+  string native_conversation_id = 3;
+}
+
+message Deliver {
+  canterlot.worker.v1.Command command = 1;
+}
+
+message DeliverAck {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string result = 3;
+}
+
+message InterruptRequest {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+}
+
+message StopRequest {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  bool force = 3;
+}
+
+message ShipFrom {
+  uint64 committed_seq = 1;
+}
+
+message SjAck {
+  uint64 up_to_seq = 1;
+}
+
+message SjBatch {
+  string journal_id = 1;
+  repeated canterlot.worker.v1.JournalRecord records = 2;
+}
+
+message Exited {
+  string reason = 1;
+}
+
+enum OwnershipPhase {
+  OWNERSHIP_PHASE_UNSPECIFIED = 0;
+  OWNERSHIP_PHASE_SPAWNING = 1;
+  OWNERSHIP_PHASE_ATTACHED = 2;
+  OWNERSHIP_PHASE_RELEASED = 3;
+}
+
+message Ownership {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string conversation_id = 3;
+  string boot_id = 4;
+  string exec_dir = 5;
+  uint32 supervisor_pid = 6;
+  uint64 supervisor_start_ticks = 7;
+  uint32 cli_pid = 8;
+  uint64 cli_start_ticks = 9;
+  string ipc_socket = 10;
+  bytes secret_sha256 = 11;
+  string sj_journal_id = 12;
+  uint32 ipc_protocol_version = 13;
+  OwnershipPhase phase = 14;
+  string released_reason = 15;
+}
