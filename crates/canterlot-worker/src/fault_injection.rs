@@ -68,13 +68,42 @@ pub struct StoreSnapshot {
     pub receipt_count: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreAppendPoint {
+    Inbox,
+    Cj,
+    Receipt,
+    InboxAck,
+    InboxCompact,
+    Ownership,
+}
+
 #[derive(Clone, Default)]
 pub struct StoreProbe {
     snapshots: Arc<Mutex<Vec<StoreSnapshot>>>,
     duplicates: Arc<AtomicU64>,
+    scanned_inbox: Arc<AtomicU64>,
+    crash: Arc<Mutex<Option<StoreAppendPoint>>>,
 }
 
 impl StoreProbe {
+    pub fn crash_after(&self, point: StoreAppendPoint) {
+        *self.crash.lock().unwrap_or_else(|error| error.into_inner()) = Some(point);
+    }
+
+    pub fn scanned_inbox_records(&self) -> u64 {
+        self.scanned_inbox.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn scan_inbox(&self) {
+        self.scanned_inbox.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn appended(&self, point: StoreAppendPoint) {
+        let crash = *self.crash.lock().unwrap_or_else(|error| error.into_inner());
+        assert_ne!(crash, Some(point), "simulated crash");
+    }
+
     pub fn snapshots(&self) -> Vec<StoreSnapshot> {
         self.snapshots
             .lock()

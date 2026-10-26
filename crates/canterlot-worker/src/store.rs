@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -7,18 +7,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use canterlot_journal::{Journal, JournalError, JournalId, JournalOptions};
 use canterlot_proto::limits::{self, LimitError, MAX_MESSAGE_BYTES};
 use canterlot_proto::worker::v1::{
-    Command, CommandRejected, CommandStored, JournalCursor, JournalRecord, RecordBody, command,
-    record_body,
+    Command, CommandRejected, CommandStored, JournalCursor, JournalRecord, RecordBody, record_body,
 };
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::ownership::OwnershipStore;
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum Accept {
     Stored { cj_seq: u64 },
+    Redelivered { cj_seq: u64 },
     Duplicate,
+    Stale,
     DroppedInvalidId,
     Rejected { cj_seq: u64, reason: &'static str },
 }
@@ -51,16 +54,30 @@ pub enum StoreError {
     MetadataUtf8(#[from] std::str::Utf8Error),
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct ReceiptEntry {
     command_id: String,
     attempt: u32,
     class: ReceiptClass,
+    #[serde(default)]
+    inbox_seq: Option<u64>,
+    #[serde(default)]
+    terminal: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    transmitted: bool,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandState {
+    pub attempt: u32,
+    pub class: ReceiptClass,
+    pub inbox_seq: Option<u64>,
+    pub terminal: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum ReceiptClass {
+pub enum ReceiptClass {
     Stored,
     Rejected,
 }
@@ -80,6 +97,7 @@ pub struct WorkerStore {
     cj: Journal,
     inbox: Journal,
     receipts: Journal,
+    ownership: OwnershipStore,
     index: HashMap<String, ReceiptEntry>,
     hub: HubState,
     #[cfg(test)]
@@ -89,6 +107,7 @@ pub struct WorkerStore {
 impl WorkerStore {
     #[cfg(feature = "fault-injection")]
     pub fn with_probe(mut self, probe: crate::fault_injection::StoreProbe) -> Self {
+        self.ownership.set_probe(Some(probe.clone()));
         self.probe = Some(probe);
         if self.record_snapshot().is_err() {
             eprintln!("fault injection: initial store snapshot failed");
@@ -129,6 +148,25 @@ impl WorkerStore {
     }
 
     pub fn open(data_dir: &Path) -> Result<WorkerStore, StoreError> {
+        Self::open_inner(
+            data_dir,
+            #[cfg(feature = "fault-injection")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn open_with_probe(
+        data_dir: &Path,
+        probe: crate::fault_injection::StoreProbe,
+    ) -> Result<WorkerStore, StoreError> {
+        Self::open_inner(data_dir, Some(probe))
+    }
+
+    fn open_inner(
+        data_dir: &Path,
+        #[cfg(feature = "fault-injection")] probe: Option<crate::fault_injection::StoreProbe>,
+    ) -> Result<WorkerStore, StoreError> {
         {
             use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
             fs::DirBuilder::new()
@@ -150,6 +188,7 @@ impl WorkerStore {
                 return Err(StoreError::LocalSealed(name));
             }
         }
+        let ownership = OwnershipStore::open(&data_dir.join("ownership"))?;
         let hub = match fs::read_to_string(data_dir.join("hub.toml")) {
             Ok(text) => toml::from_str(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => HubState::default(),
@@ -157,7 +196,7 @@ impl WorkerStore {
         };
         let mut store = Self {
             #[cfg(feature = "fault-injection")]
-            probe: None,
+            probe,
             poisoned: false,
             #[cfg(test)]
             fail_after: None,
@@ -165,11 +204,14 @@ impl WorkerStore {
             cj,
             inbox,
             receipts,
+            ownership,
             index: HashMap::new(),
             hub,
             #[cfg(test)]
             crash_after: tests::take_open_crash_point(),
         };
+        #[cfg(feature = "fault-injection")]
+        store.ownership.set_probe(store.probe.clone());
         store.reconcile()?;
         Ok(store)
     }
@@ -184,73 +226,144 @@ impl WorkerStore {
             }
         }
 
+        let legacy = self
+            .index
+            .values()
+            .any(|entry| !entry.terminal && entry.inbox_seq.is_none());
+        let highest = self
+            .index
+            .values()
+            .filter_map(|entry| entry.inbox_seq)
+            .max()
+            .unwrap_or(0);
+        let mut from_seq = if legacy {
+            self.inbox.first_seq()
+        } else {
+            highest.saturating_add(1).max(self.inbox.first_seq())
+        };
+        let mut pending = Vec::new();
+        let mut inbox_seqs = HashMap::new();
+        while from_seq <= self.inbox.last_seq() {
+            for record in self.inbox.read_from(from_seq, MAX_MESSAGE_BYTES)? {
+                from_seq = record.seq + 1;
+                #[cfg(feature = "fault-injection")]
+                if let Some(probe) = &self.probe {
+                    probe.scan_inbox();
+                }
+                let cmd = Command::decode(record.payload.as_slice())?;
+                inbox_seqs.insert(
+                    (receipt_id(&cmd.command_id), cmd.dispatch_attempt),
+                    record.seq,
+                );
+                pending.push((record.seq, cmd));
+            }
+        }
+
+        let mut facts = Vec::new();
+        let mut transmitted = HashSet::new();
         let mut from_seq = self.cj.first_seq();
         while from_seq <= self.cj.last_seq() {
             for record in self.cj.read_from(from_seq, MAX_MESSAGE_BYTES)? {
                 from_seq = record.seq + 1;
-                let (command_id, attempt, class) =
-                    match RecordBody::decode(record.payload.as_slice())?.body {
-                        Some(record_body::Body::CommandStored(fact)) => {
-                            (fact.command_id, fact.dispatch_attempt, ReceiptClass::Stored)
-                        }
-                        Some(record_body::Body::CommandRejected(fact)) => (
-                            fact.command_id,
-                            fact.dispatch_attempt,
-                            ReceiptClass::Rejected,
-                        ),
-                        _ => continue,
-                    };
-                let command_id = receipt_id(&command_id);
-                if !self.index.contains_key(&command_id) {
-                    self.append_receipt(ReceiptEntry {
-                        command_id,
-                        attempt,
-                        class,
-                    })?;
+                match RecordBody::decode(record.payload.as_slice())?.body {
+                    Some(record_body::Body::CommandStored(fact)) => facts.push((
+                        receipt_id(&fact.command_id),
+                        fact.dispatch_attempt,
+                        ReceiptClass::Stored,
+                    )),
+                    Some(record_body::Body::CommandRejected(fact)) => facts.push((
+                        receipt_id(&fact.command_id),
+                        fact.dispatch_attempt,
+                        ReceiptClass::Rejected,
+                    )),
+                    Some(record_body::Body::TransmissionStarted(fact)) => {
+                        transmitted.insert(receipt_id(&fact.command_id));
+                    }
+                    _ => {}
                 }
             }
         }
-
-        let mut from_seq = self.inbox.first_seq();
-        while from_seq <= self.inbox.last_seq() {
-            for record in self.inbox.read_from(from_seq, MAX_MESSAGE_BYTES)? {
-                from_seq = record.seq + 1;
-                let cmd = Command::decode(record.payload.as_slice())?;
-                let command_id = receipt_id(&cmd.command_id);
-                if !self.index.contains_key(&command_id) {
-                    self.cj.append(
-                        &RecordBody {
-                            body: Some(record_body::Body::CommandStored(CommandStored {
-                                machine_time_ms: machine_time_ms(),
-                                command_id: cmd.command_id,
-                                dispatch_attempt: cmd.dispatch_attempt,
-                            })),
-                        }
-                        .encode_to_vec(),
-                    )?;
-                    #[cfg(test)]
-                    self.after_append(tests::AppendPoint::Cj);
-                    self.append_receipt(ReceiptEntry {
-                        command_id,
-                        attempt: cmd.dispatch_attempt,
-                        class: ReceiptClass::Stored,
-                    })?;
-                }
+        for (command_id, attempt, class) in facts {
+            if self
+                .index
+                .get(&command_id)
+                .is_none_or(|entry| entry.attempt < attempt)
+            {
+                let inbox_seq = if class == ReceiptClass::Stored {
+                    inbox_seqs.get(&(command_id.clone(), attempt)).copied()
+                } else {
+                    self.index
+                        .get(&command_id)
+                        .and_then(|entry| entry.inbox_seq)
+                };
+                let was_transmitted = transmitted.contains(&command_id)
+                    || self
+                        .index
+                        .get(&command_id)
+                        .is_some_and(|entry| entry.transmitted);
+                let terminal = class == ReceiptClass::Rejected;
+                self.append_receipt(ReceiptEntry {
+                    command_id,
+                    attempt,
+                    class,
+                    inbox_seq,
+                    terminal,
+                    transmitted: was_transmitted,
+                })?;
             }
         }
+        for (inbox_seq, cmd) in pending {
+            let command_id = receipt_id(&cmd.command_id);
+            if self
+                .index
+                .get(&command_id)
+                .is_none_or(|entry| entry.attempt < cmd.dispatch_attempt)
+            {
+                self.append_stored_fact(&cmd)?;
+                self.append_receipt(ReceiptEntry {
+                    transmitted: transmitted.contains(&command_id),
+                    command_id,
+                    attempt: cmd.dispatch_attempt,
+                    class: ReceiptClass::Stored,
+                    inbox_seq: Some(inbox_seq),
+                    terminal: false,
+                })?;
+            } else if let Some(entry) = self.index.get(&command_id)
+                && entry.attempt == cmd.dispatch_attempt
+                && entry.class == ReceiptClass::Stored
+                && entry.inbox_seq.is_none()
+            {
+                let mut entry = entry.clone();
+                entry.inbox_seq = Some(inbox_seq);
+                self.append_receipt(entry)?;
+            }
+        }
+        let legacy_rejected: Vec<_> = self
+            .index
+            .values()
+            .filter(|entry| entry.class == ReceiptClass::Rejected && !entry.terminal)
+            .cloned()
+            .collect();
+        for mut entry in legacy_rejected {
+            entry.terminal = true;
+            self.append_receipt(entry)?;
+        }
+        for command_id in transmitted {
+            self.record_transmission(&command_id)?;
+        }
+        self.release_inbox()?;
         Ok(())
     }
 
     fn append_receipt(&mut self, entry: ReceiptEntry) -> Result<(), StoreError> {
         self.receipts.append(toml::to_string(&entry)?.as_bytes())?;
-        #[cfg(test)]
-        self.after_append(tests::AppendPoint::Receipt);
+        self.append_boundary(AppendBoundary::Receipt)?;
         self.index.insert(entry.command_id.clone(), entry);
         Ok(())
     }
 
     fn ensure_open(&self) -> Result<(), StoreError> {
-        if self.poisoned {
+        if self.poisoned || self.ownership.is_poisoned() {
             Err(StoreError::NeedsReopen)
         } else {
             Ok(())
@@ -269,7 +382,10 @@ impl WorkerStore {
             return Ok(Accept::DroppedInvalidId);
         };
         let command_id = id.to_string();
-        if self.index.contains_key(&command_id) {
+        let previous = self.index.get(&command_id);
+        if let Some(entry) = previous
+            && cmd.dispatch_attempt <= entry.attempt
+        {
             #[cfg(feature = "fault-injection")]
             {
                 if let Some(probe) = &self.probe {
@@ -277,17 +393,26 @@ impl WorkerStore {
                 }
                 self.record_snapshot()?;
             }
-            return Ok(Accept::Duplicate);
+            return Ok(if cmd.dispatch_attempt == entry.attempt {
+                Accept::Duplicate
+            } else {
+                Accept::Stale
+            });
         }
-        let reason = if limits::check_deliver_input(cmd).is_err() {
+        let redelivered = previous.is_some();
+        let reason = if previous.is_some_and(|entry| entry.transmitted) {
+            Some("already_transmitted")
+        } else if limits::check_deliver_input(cmd).is_err() {
             Some("resource_limit")
+        } else if cmd.kind.is_none() {
+            Some("unsupported_command")
         } else {
             None
         };
         let result = if let Some(reason) = reason {
             self.reject_command(cmd, command_id, reason)
         } else {
-            self.append_command(cmd, command_id)
+            self.append_command(cmd, command_id, redelivered)
         };
         if result.is_err() {
             self.poisoned = true;
@@ -315,70 +440,202 @@ impl WorkerStore {
             }
             .encode_to_vec(),
         )?;
-        #[cfg(test)]
-        self.after_append(tests::AppendPoint::Cj);
+        self.append_boundary(AppendBoundary::Cj)?;
+        let transmitted = self
+            .index
+            .get(&command_id)
+            .is_some_and(|entry| entry.transmitted);
+        let inbox_seq = self
+            .index
+            .get(&command_id)
+            .and_then(|entry| entry.inbox_seq);
         self.append_receipt(ReceiptEntry {
             command_id,
             attempt: cmd.dispatch_attempt,
             class: ReceiptClass::Rejected,
+            inbox_seq,
+            terminal: true,
+            transmitted,
         })?;
         Ok(Accept::Rejected { cj_seq, reason })
     }
 
-    fn append_command(&mut self, cmd: &Command, command_id: String) -> Result<Accept, StoreError> {
-        let (body, class) = match &cmd.kind {
-            None => (
-                record_body::Body::CommandRejected(CommandRejected {
+    fn append_stored_fact(&mut self, cmd: &Command) -> Result<u64, StoreError> {
+        let seq = self.cj.append(
+            &RecordBody {
+                body: Some(record_body::Body::CommandStored(CommandStored {
+                    machine_time_ms: machine_time_ms(),
                     command_id: cmd.command_id.clone(),
                     dispatch_attempt: cmd.dispatch_attempt,
-                    reason: "unsupported_command".into(),
-                }),
-                ReceiptClass::Rejected,
-            ),
-            Some(
-                command::Kind::DeliverInput(_)
-                | command::Kind::CancelInput(_)
-                | command::Kind::WithdrawInput(_)
-                | command::Kind::Interrupt(_)
-                | command::Kind::StartExecution(_)
-                | command::Kind::StopExecution(_),
-            ) => {
-                self.inbox.append(&cmd.encode_to_vec())?;
-                #[cfg(test)]
-                self.after_append(tests::AppendPoint::Inbox);
-                #[cfg(test)]
-                if self.fail_after == Some(tests::AppendPoint::Inbox) {
-                    return Err(io::Error::other("injected write failure").into());
-                }
-                (
-                    record_body::Body::CommandStored(CommandStored {
-                        machine_time_ms: machine_time_ms(),
-                        command_id: cmd.command_id.clone(),
-                        dispatch_attempt: cmd.dispatch_attempt,
-                    }),
-                    ReceiptClass::Stored,
-                )
+                })),
             }
-        };
-        let cj_seq = self
-            .cj
-            .append(&RecordBody { body: Some(body) }.encode_to_vec())?;
-        #[cfg(test)]
-        self.after_append(tests::AppendPoint::Cj);
-        let result = match class {
-            ReceiptClass::Stored => Accept::Stored { cj_seq },
-            ReceiptClass::Rejected => Accept::Rejected {
-                cj_seq,
-                reason: "unsupported_command",
-            },
-        };
-        let entry = ReceiptEntry {
+            .encode_to_vec(),
+        )?;
+        self.append_boundary(AppendBoundary::Cj)?;
+        Ok(seq)
+    }
+
+    fn append_command(
+        &mut self,
+        cmd: &Command,
+        command_id: String,
+        redelivered: bool,
+    ) -> Result<Accept, StoreError> {
+        let inbox_seq = self.inbox.append(&cmd.encode_to_vec())?;
+        self.append_boundary(AppendBoundary::Inbox)?;
+        let cj_seq = self.append_stored_fact(cmd)?;
+        self.append_receipt(ReceiptEntry {
             command_id,
             attempt: cmd.dispatch_attempt,
-            class,
+            class: ReceiptClass::Stored,
+            inbox_seq: Some(inbox_seq),
+            terminal: false,
+            transmitted: false,
+        })?;
+        Ok(if redelivered {
+            Accept::Redelivered { cj_seq }
+        } else {
+            Accept::Stored { cj_seq }
+        })
+    }
+
+    pub fn command_state(&self, command_id: &str) -> Result<Option<CommandState>, StoreError> {
+        self.ensure_open()?;
+        Ok(self
+            .index
+            .get(&receipt_id(command_id))
+            .map(|entry| CommandState {
+                attempt: entry.attempt,
+                class: entry.class.clone(),
+                inbox_seq: entry.inbox_seq,
+                terminal: entry.terminal,
+            }))
+    }
+
+    pub fn inbox_command(
+        &self,
+        command_id: &str,
+        attempt: u32,
+    ) -> Result<Option<Command>, StoreError> {
+        self.ensure_open()?;
+        let Some(entry) = self.index.get(&receipt_id(command_id)) else {
+            return Ok(None);
         };
-        self.append_receipt(entry)?;
-        Ok(result)
+        let Some(seq) = entry.inbox_seq else {
+            return Ok(None);
+        };
+        if entry.attempt != attempt || entry.terminal || entry.class != ReceiptClass::Stored {
+            return Ok(None);
+        }
+        let record = self.inbox.read_from(seq, 0)?.into_iter().next();
+        record
+            .map(|record| Command::decode(record.payload.as_slice()).map_err(StoreError::from))
+            .transpose()
+    }
+
+    pub fn append_cj_fact(&mut self, body: record_body::Body) -> Result<u64, StoreError> {
+        self.ensure_open()?;
+        let result = (|| {
+            let seq = self.cj.append(
+                &RecordBody {
+                    body: Some(body.clone()),
+                }
+                .encode_to_vec(),
+            )?;
+            self.append_boundary(AppendBoundary::Cj)?;
+            if let record_body::Body::TransmissionStarted(fact) = body {
+                self.record_transmission(&receipt_id(&fact.command_id))?;
+            }
+            Ok(seq)
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn record_transmission(&mut self, command_id: &str) -> Result<(), StoreError> {
+        if let Some(entry) = self.index.get(command_id)
+            && !entry.transmitted
+        {
+            let mut entry = entry.clone();
+            entry.transmitted = true;
+            self.append_receipt(entry)?;
+        }
+        Ok(())
+    }
+
+    pub fn mark_terminal(&mut self, command_id: &str, attempt: u32) -> Result<(), StoreError> {
+        self.ensure_open()?;
+        let result = (|| {
+            if let Some(entry) = self.index.get(&receipt_id(command_id))
+                && entry.attempt == attempt
+                && !entry.terminal
+            {
+                let mut entry = entry.clone();
+                entry.terminal = true;
+                self.append_receipt(entry)?;
+            }
+            self.release_inbox()
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+        }
+        result
+    }
+
+    fn release_inbox(&mut self) -> Result<(), StoreError> {
+        let floor = self
+            .index
+            .values()
+            .filter(|entry| !entry.terminal)
+            .filter_map(|entry| entry.inbox_seq)
+            .min()
+            .map_or(self.inbox.last_seq(), |seq| seq - 1);
+        self.inbox.ack(floor)?;
+        self.append_boundary(AppendBoundary::InboxAck)?;
+        self.inbox.compact()?;
+        self.append_boundary(AppendBoundary::InboxCompact)?;
+        Ok(())
+    }
+
+    pub fn ownership(&self) -> &OwnershipStore {
+        &self.ownership
+    }
+
+    pub fn ownership_mut(&mut self) -> Result<&mut OwnershipStore, StoreError> {
+        self.ensure_open()?;
+        Ok(&mut self.ownership)
+    }
+
+    fn append_boundary(&self, point: AppendBoundary) -> Result<(), StoreError> {
+        #[cfg(test)]
+        {
+            let test_point = match point {
+                AppendBoundary::Inbox => tests::AppendPoint::Inbox,
+                AppendBoundary::Cj => tests::AppendPoint::Cj,
+                AppendBoundary::Receipt => tests::AppendPoint::Receipt,
+                AppendBoundary::InboxAck => tests::AppendPoint::InboxAck,
+                AppendBoundary::InboxCompact => tests::AppendPoint::InboxCompact,
+            };
+            self.after_append(test_point);
+            if self.fail_after == Some(test_point) {
+                return Err(io::Error::other("injected write failure").into());
+            }
+        }
+        #[cfg(feature = "fault-injection")]
+        if let Some(probe) = &self.probe {
+            use crate::fault_injection::StoreAppendPoint;
+            probe.appended(match point {
+                AppendBoundary::Inbox => StoreAppendPoint::Inbox,
+                AppendBoundary::Cj => StoreAppendPoint::Cj,
+                AppendBoundary::Receipt => StoreAppendPoint::Receipt,
+                AppendBoundary::InboxAck => StoreAppendPoint::InboxAck,
+                AppendBoundary::InboxCompact => StoreAppendPoint::InboxCompact,
+            });
+        }
+        let _ = point;
+        Ok(())
     }
 
     pub fn cj_cursor(&self) -> Result<JournalCursor, StoreError> {
@@ -480,13 +737,22 @@ fn receipt_id(raw: &str) -> String {
     Uuid::parse_str(raw).map_or_else(|_| raw.to_owned(), |id| id.to_string())
 }
 
-fn open_journal(path: &Path) -> Result<Journal, StoreError> {
+pub(crate) fn open_journal(path: &Path) -> Result<Journal, StoreError> {
     let options = JournalOptions::default();
     if path.join("header").try_exists()? {
         Ok(Journal::open(path, options)?.0)
     } else {
         Ok(Journal::create(path, JournalId(Uuid::now_v7()), options)?)
     }
+}
+
+#[derive(Clone, Copy)]
+enum AppendBoundary {
+    Inbox,
+    Cj,
+    Receipt,
+    InboxAck,
+    InboxCompact,
 }
 
 #[cfg(test)]

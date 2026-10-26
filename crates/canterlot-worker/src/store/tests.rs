@@ -1,7 +1,7 @@
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use canterlot_proto::worker::v1::CancelInput;
+use canterlot_proto::worker::v1::{CancelInput, command};
 use tempfile::TempDir;
 
 use super::*;
@@ -19,6 +19,8 @@ pub(super) enum AppendPoint {
     Inbox,
     Cj,
     Receipt,
+    InboxAck,
+    InboxCompact,
 }
 
 thread_local! {
@@ -98,7 +100,7 @@ fn recover_after_crash(point: AppendPoint, rejected: bool, repair_crashes: &[App
     assert_eq!(matches!(receipt.class, ReceiptClass::Rejected), rejected);
 
     let mut redelivery = cmd.clone();
-    redelivery.dispatch_attempt += 1;
+
     redelivery.kind = if rejected {
         Some(command::Kind::CancelInput(CancelInput::default()))
     } else {
@@ -327,4 +329,166 @@ fn invalid_command_id_emits_one_warning_without_command_data() {
     assert!(log.contains("invalid_command_id"));
     assert!(!log.contains(&cmd.command_id));
     assert!(!log.contains(&cmd.execution_id));
+}
+
+fn assert_poisoned(store: &mut WorkerStore, cmd: &Command) {
+    assert!(matches!(
+        store.command_state(&cmd.command_id),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.inbox_command(&cmd.command_id, cmd.dispatch_attempt),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.mark_terminal(&cmd.command_id, cmd.dispatch_attempt),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.ownership_mut(),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.append_cj_fact(record_body::Body::CommandStored(CommandStored::default())),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(
+        store.accept_command(cmd),
+        Err(StoreError::NeedsReopen)
+    ));
+    assert!(matches!(store.cj_cursor(), Err(StoreError::NeedsReopen)));
+}
+
+#[test]
+fn fact_and_terminal_write_failures_require_reopen() {
+    use canterlot_proto::worker::v1::InputTransmissionStarted;
+    for point in [AppendPoint::Cj, AppendPoint::Receipt] {
+        let dir = private_dir();
+        let cmd = Command {
+            command_id: Uuid::now_v7().to_string(),
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+            ..Default::default()
+        };
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        store.accept_command(&cmd).unwrap();
+        store.fail_after = Some(point);
+        assert!(
+            store
+                .append_cj_fact(record_body::Body::TransmissionStarted(
+                    InputTransmissionStarted {
+                        command_id: cmd.command_id.clone(),
+                        dispatch_attempt: cmd.dispatch_attempt,
+                        machine_time_ms: 1,
+                    }
+                ))
+                .is_err()
+        );
+        assert_poisoned(&mut store, &cmd);
+        drop(store);
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        let mut next = cmd.clone();
+        next.dispatch_attempt += 1;
+        assert!(matches!(
+            store.accept_command(&next).unwrap(),
+            Accept::Rejected {
+                reason: "already_transmitted",
+                ..
+            }
+        ));
+    }
+    for point in [
+        AppendPoint::Receipt,
+        AppendPoint::InboxAck,
+        AppendPoint::InboxCompact,
+    ] {
+        let dir = private_dir();
+        let cmd = Command {
+            command_id: Uuid::now_v7().to_string(),
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+            ..Default::default()
+        };
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        store.accept_command(&cmd).unwrap();
+        store.fail_after = Some(point);
+        assert!(
+            store
+                .mark_terminal(&cmd.command_id, cmd.dispatch_attempt)
+                .is_err()
+        );
+        assert_poisoned(&mut store, &cmd);
+        drop(store);
+        let store = WorkerStore::open(dir.path()).unwrap();
+        assert!(
+            store
+                .command_state(&cmd.command_id)
+                .unwrap()
+                .unwrap()
+                .terminal
+        );
+        assert_eq!(store.inbox.acked_seq(), 1);
+        assert_eq!(store.inbox.first_seq(), 2);
+    }
+}
+
+#[test]
+fn terminal_crashes_at_every_boundary_finish_compaction_on_open() {
+    for point in [
+        AppendPoint::Receipt,
+        AppendPoint::InboxAck,
+        AppendPoint::InboxCompact,
+    ] {
+        let dir = private_dir();
+        let cmd = Command {
+            command_id: Uuid::now_v7().to_string(),
+            kind: Some(command::Kind::CancelInput(CancelInput::default())),
+            ..Default::default()
+        };
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        store.accept_command(&cmd).unwrap();
+        store.crash_after = Some(point);
+        assert!(
+            catch_unwind(AssertUnwindSafe(
+                || store.mark_terminal(&cmd.command_id, cmd.dispatch_attempt)
+            ))
+            .is_err()
+        );
+        drop(store);
+        for repair in [AppendPoint::InboxAck, AppendPoint::InboxCompact] {
+            OPEN_CRASH_AFTER.set(Some(repair));
+            assert!(catch_unwind(|| WorkerStore::open(dir.path())).is_err());
+        }
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        assert_eq!(store.inbox.acked_seq(), 1);
+        assert_eq!(store.inbox.first_seq(), 2);
+        assert!(
+            store
+                .command_state(&cmd.command_id)
+                .unwrap()
+                .unwrap()
+                .terminal
+        );
+        assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+    }
+}
+
+#[test]
+fn ownership_append_error_poisons_parent_store() {
+    use canterlot_proto::worker::ipc::Ownership;
+    let dir = private_dir();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let cmd = Command {
+        command_id: Uuid::now_v7().to_string(),
+        ..Default::default()
+    };
+    let record = Ownership {
+        execution_id: Uuid::now_v7().to_string(),
+        exec_dir: "x".repeat(MAX_MESSAGE_BYTES + 1),
+        ..Default::default()
+    };
+    assert!(store.ownership_mut().unwrap().append(record).is_err());
+    assert_poisoned(&mut store, &cmd);
+    drop(store);
+    let store = WorkerStore::open(dir.path()).unwrap();
+    assert!(store.ownership().live().is_empty());
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 0);
 }

@@ -59,7 +59,10 @@ fn assert_receipt(record: &Record, cmd: &Command, class: &str) {
         Some(i64::from(cmd.dispatch_attempt))
     );
     assert_eq!(receipt["class"].as_str(), Some(class));
-    assert_eq!(receipt.as_table().unwrap().len(), 3);
+    assert_eq!(receipt["terminal"].as_bool(), Some(class == "rejected"));
+    if class == "stored" {
+        assert!(receipt["inbox_seq"].as_integer().is_some());
+    }
 }
 
 #[test]
@@ -112,7 +115,6 @@ fn reopen_keeps_dedup_index() {
     let id = store.cj_journal_id().unwrap();
     store.accept_command(&cmd).unwrap();
     drop(store);
-    cmd.dispatch_attempt += 1;
     cmd.kind = None;
     let mut store = WorkerStore::open(dir.path()).unwrap();
     assert_eq!(store.cj_journal_id().unwrap(), id);
@@ -732,4 +734,518 @@ fn worker_store_refuses_insecure_existing_data_dir_without_chmod() {
     }
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
     assert!(WorkerStore::open(dir.path()).is_ok());
+}
+
+#[test]
+fn redispatched_attempt_gets_a_new_stored_receipt() {
+    use canterlot_worker::store::ReceiptClass;
+    let dir = private_dir();
+    let mut cmd = delivery();
+    cmd.dispatch_attempt = 1;
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(
+        store.accept_command(&cmd).unwrap(),
+        Accept::Stored { cj_seq: 1 }
+    );
+    let first = cmd.clone();
+    cmd.dispatch_attempt = 2;
+    cmd.execution_generation += 1;
+    assert_eq!(
+        store.accept_command(&cmd).unwrap(),
+        Accept::Redelivered { cj_seq: 2 }
+    );
+    for _ in 0..100 {
+        assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+    }
+    let state = store.command_state(&cmd.command_id).unwrap().unwrap();
+    assert_eq!(state.attempt, 2);
+    assert_eq!(state.class, ReceiptClass::Stored);
+    assert_eq!(state.inbox_seq, Some(2));
+    assert!(!state.terminal);
+    assert_eq!(
+        store.inbox_command(&cmd.command_id, 2).unwrap(),
+        Some(cmd.clone())
+    );
+    assert_eq!(store.inbox_command(&cmd.command_id, 1).unwrap(), None);
+    let cj = store.cj_records_from(1, usize::MAX).unwrap();
+    assert_eq!(cj.len(), 2);
+    for (record, attempt) in cj.iter().zip([1, 2]) {
+        assert!(matches!(&record.body.as_ref().unwrap().body,
+            Some(record_body::Body::CommandStored(fact)) if fact.dispatch_attempt == attempt));
+    }
+    drop(store);
+    let inbox: Vec<_> = records(dir.path(), "inbox")
+        .iter()
+        .map(|record| Command::decode(record.payload.as_slice()).unwrap())
+        .collect();
+    assert_eq!(inbox, [first, cmd.clone()]);
+    assert_eq!(records(dir.path(), "receipts").len(), 2);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.command_state(&cmd.command_id).unwrap(), Some(state));
+    assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+}
+
+#[test]
+fn stale_attempt_is_ignored_without_write() {
+    let dir = private_dir();
+    let mut cmd = delivery();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store.accept_command(&cmd).unwrap();
+    let state = store.command_state(&cmd.command_id).unwrap();
+    cmd.dispatch_attempt -= 1;
+    cmd.kind = None;
+    assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Stale);
+    assert_eq!(store.command_state(&cmd.command_id).unwrap(), state);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 1);
+    drop(store);
+    assert_eq!(records(dir.path(), "inbox").len(), 1);
+    assert_eq!(records(dir.path(), "receipts").len(), 1);
+}
+
+#[test]
+fn higher_attempt_after_transmission_is_rejected() {
+    use canterlot_proto::worker::v1::InputTransmissionStarted;
+    use canterlot_worker::store::ReceiptClass;
+    let dir = private_dir();
+    let mut cmd = delivery();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store.accept_command(&cmd).unwrap();
+    assert_eq!(
+        store
+            .append_cj_fact(record_body::Body::TransmissionStarted(
+                InputTransmissionStarted {
+                    command_id: cmd.command_id.clone(),
+                    dispatch_attempt: cmd.dispatch_attempt,
+                    machine_time_ms: 1,
+                }
+            ))
+            .unwrap(),
+        2
+    );
+    store.on_cj_ack(2).unwrap();
+    drop(store);
+    for attempt in [4, 5] {
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        cmd.dispatch_attempt = attempt;
+        assert!(matches!(
+            store.accept_command(&cmd).unwrap(),
+            Accept::Rejected {
+                reason: "already_transmitted",
+                ..
+            }
+        ));
+        let state = store.command_state(&cmd.command_id).unwrap().unwrap();
+        assert_eq!(state.attempt, attempt);
+        assert_eq!(state.class, ReceiptClass::Rejected);
+        assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+        store
+            .on_cj_ack(store.cj_cursor().unwrap().last_seq)
+            .unwrap();
+    }
+    let (inbox, _) = Journal::open(&dir.path().join("inbox"), JournalOptions::default()).unwrap();
+    assert_eq!(inbox.last_seq(), 1);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn crash_between_redelivery_appends_is_reconciled() {
+    use canterlot_worker::fault_injection::{StoreAppendPoint, StoreProbe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for point in [
+        StoreAppendPoint::Inbox,
+        StoreAppendPoint::Cj,
+        StoreAppendPoint::Receipt,
+    ] {
+        for repair in [
+            None,
+            Some(StoreAppendPoint::Cj),
+            Some(StoreAppendPoint::Receipt),
+        ] {
+            if point != StoreAppendPoint::Inbox && repair == Some(StoreAppendPoint::Cj) {
+                continue;
+            }
+            if point == StoreAppendPoint::Receipt && repair.is_some() {
+                continue;
+            }
+            let dir = private_dir();
+            let mut cmd = delivery();
+            cmd.dispatch_attempt = 1;
+            let mut store = WorkerStore::open(dir.path()).unwrap();
+            store.accept_command(&cmd).unwrap();
+            cmd.dispatch_attempt = 2;
+            let probe = StoreProbe::default();
+            probe.crash_after(point);
+            store = store.with_probe(probe);
+            assert!(catch_unwind(AssertUnwindSafe(|| store.accept_command(&cmd))).is_err());
+            drop(store);
+            if let Some(repair) = repair {
+                let probe = StoreProbe::default();
+                probe.crash_after(repair);
+                assert!(catch_unwind(|| WorkerStore::open_with_probe(dir.path(), probe)).is_err());
+            }
+            let mut store = WorkerStore::open(dir.path()).unwrap();
+            assert_eq!(
+                store
+                    .command_state(&cmd.command_id)
+                    .unwrap()
+                    .unwrap()
+                    .attempt,
+                2
+            );
+            assert_eq!(store.cj_records_from(1, usize::MAX).unwrap().len(), 2);
+            assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+            drop(store);
+            assert_eq!(records(dir.path(), "inbox").len(), 2);
+            assert_eq!(records(dir.path(), "receipts").len(), 2);
+        }
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn open_scans_only_the_unreferenced_inbox_tail() {
+    use canterlot_worker::fault_injection::StoreProbe;
+    let dir = private_dir();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    for _ in 0..20 {
+        store.accept_command(&delivery()).unwrap();
+    }
+    drop(store);
+    let probe = StoreProbe::default();
+    let store = WorkerStore::open_with_probe(dir.path(), probe.clone()).unwrap();
+    assert_eq!(probe.scanned_inbox_records(), 0);
+    drop(store);
+    let (mut inbox, _) =
+        Journal::open(&dir.path().join("inbox"), JournalOptions::default()).unwrap();
+    let cmd = delivery();
+    inbox.append(&cmd.encode_to_vec()).unwrap();
+    drop(inbox);
+    let probe = StoreProbe::default();
+    let store = WorkerStore::open_with_probe(dir.path(), probe.clone()).unwrap();
+    assert_eq!(probe.scanned_inbox_records(), 1);
+    assert_eq!(
+        store
+            .inbox_command(&cmd.command_id, cmd.dispatch_attempt)
+            .unwrap(),
+        Some(cmd)
+    );
+}
+
+#[test]
+fn terminal_commands_release_inbox_prefix() {
+    use canterlot_journal::JournalId;
+    let dir = private_dir();
+    let mut inbox = Journal::create(
+        &dir.path().join("inbox"),
+        JournalId(Uuid::now_v7()),
+        JournalOptions {
+            segment_max_bytes: 1,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let commands: Vec<_> = (0..4).map(|_| delivery()).collect();
+    for cmd in &commands {
+        inbox.append(&cmd.encode_to_vec()).unwrap();
+    }
+    drop(inbox);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store
+        .mark_terminal(&commands[1].command_id, commands[1].dispatch_attempt)
+        .unwrap();
+    drop(store);
+    let (inbox, _) = Journal::open(&dir.path().join("inbox"), JournalOptions::default()).unwrap();
+    assert_eq!(inbox.acked_seq(), 0);
+    assert_eq!(inbox.first_seq(), 1);
+    drop(inbox);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store
+        .mark_terminal(&commands[0].command_id, commands[0].dispatch_attempt - 1)
+        .unwrap();
+    assert!(
+        !store
+            .command_state(&commands[0].command_id)
+            .unwrap()
+            .unwrap()
+            .terminal
+    );
+    store
+        .mark_terminal(&commands[0].command_id, commands[0].dispatch_attempt)
+        .unwrap();
+    assert_eq!(
+        store
+            .inbox_command(&commands[0].command_id, commands[0].dispatch_attempt)
+            .unwrap(),
+        None
+    );
+    drop(store);
+    let (inbox, _) = Journal::open(&dir.path().join("inbox"), JournalOptions::default()).unwrap();
+    assert_eq!(inbox.acked_seq(), 2);
+    assert_eq!(inbox.first_seq(), 3);
+    drop(inbox);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    for cmd in &commands[2..] {
+        store
+            .mark_terminal(&cmd.command_id, cmd.dispatch_attempt)
+            .unwrap();
+    }
+    drop(store);
+    let (inbox, _) = Journal::open(&dir.path().join("inbox"), JournalOptions::default()).unwrap();
+    assert_eq!(inbox.acked_seq(), 4);
+    assert_eq!(inbox.first_seq(), 5);
+    drop(inbox);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    for cmd in &commands {
+        assert!(
+            store
+                .command_state(&cmd.command_id)
+                .unwrap()
+                .unwrap()
+                .terminal
+        );
+        assert_eq!(store.accept_command(cmd).unwrap(), Accept::Duplicate);
+    }
+}
+
+fn ownership_record(execution_id: Uuid) -> canterlot_proto::worker::ipc::Ownership {
+    use canterlot_proto::worker::ipc::{Ownership, OwnershipPhase};
+    Ownership {
+        execution_id: execution_id.to_string(),
+        generation: 1,
+        phase: OwnershipPhase::Spawning as i32,
+        exec_dir: "/private/execution".into(),
+        ipc_socket: "/private/execution/ipc.sock".into(),
+        secret_sha256: vec![42; 32],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn ownership_records_survive_reopen_latest_wins() {
+    use canterlot_proto::worker::ipc::OwnershipPhase;
+    let dir = private_dir();
+    let id = Uuid::now_v7();
+    let other = Uuid::now_v7();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let mut record = ownership_record(id);
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(record.clone())
+        .unwrap();
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(ownership_record(other))
+        .unwrap();
+    record.phase = OwnershipPhase::Attached as i32;
+    record.supervisor_pid = 123;
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(record.clone())
+        .unwrap();
+    drop(store);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.ownership().get(id), Some(&record));
+    assert_eq!(store.ownership().live().len(), 2);
+    record.phase = OwnershipPhase::Released as i32;
+    record.released_reason = "stopped".into();
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(record.clone())
+        .unwrap();
+    drop(store);
+    let store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.ownership().get(id), Some(&record));
+    assert_eq!(store.ownership().live().len(), 1);
+    assert_eq!(store.ownership().live()[0].execution_id, other.to_string());
+}
+
+#[test]
+fn ownership_journal_is_private_and_never_in_cj() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = private_dir();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store.accept_command(&delivery()).unwrap();
+    let before = store.cj_records_from(1, usize::MAX).unwrap();
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(ownership_record(Uuid::now_v7()))
+        .unwrap();
+    assert_eq!(store.cj_records_from(1, usize::MAX).unwrap(), before);
+    assert!(matches!(
+        Journal::open(&dir.path().join("ownership"), JournalOptions::default()),
+        Err(JournalError::Locked)
+    ));
+    assert_eq!(
+        fs::metadata(dir.path().join("ownership"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    for file in fs::read_dir(dir.path().join("ownership")).unwrap() {
+        assert_eq!(
+            file.unwrap().metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    store.on_cj_ack(1).unwrap();
+    drop(store);
+    let (ownership, _) =
+        Journal::open(&dir.path().join("ownership"), JournalOptions::default()).unwrap();
+    assert_eq!(ownership.acked_seq(), 0);
+    assert_eq!(ownership.last_seq(), 1);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn legacy_receipts_are_upgraded_with_one_full_inbox_scan() {
+    use canterlot_worker::fault_injection::StoreProbe;
+    let dir = private_dir();
+    let cmd = delivery();
+    let mut rejected = delivery();
+    rejected.kind = None;
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store.accept_command(&cmd).unwrap();
+    store.accept_command(&rejected).unwrap();
+    store.on_cj_ack(2).unwrap();
+    drop(store);
+    let (mut receipts, _) =
+        Journal::open(&dir.path().join("receipts"), JournalOptions::default()).unwrap();
+    for (command, class) in [(&cmd, "stored"), (&rejected, "rejected")] {
+        receipts
+            .append(
+                format!(
+                    "command_id = '{}'\nattempt = {}\nclass = '{}'\n",
+                    command.command_id, command.dispatch_attempt, class
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
+    drop(receipts);
+    let probe = StoreProbe::default();
+    let mut store = WorkerStore::open_with_probe(dir.path(), probe.clone()).unwrap();
+    assert_eq!(probe.scanned_inbox_records(), 1);
+    assert_eq!(
+        store
+            .command_state(&cmd.command_id)
+            .unwrap()
+            .unwrap()
+            .inbox_seq,
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .inbox_command(&cmd.command_id, cmd.dispatch_attempt)
+            .unwrap(),
+        Some(cmd.clone())
+    );
+    assert!(
+        store
+            .command_state(&rejected.command_id)
+            .unwrap()
+            .unwrap()
+            .terminal
+    );
+    assert_eq!(store.accept_command(&cmd).unwrap(), Accept::Duplicate);
+    drop(store);
+    let probe = StoreProbe::default();
+    let store = WorkerStore::open_with_probe(dir.path(), probe.clone()).unwrap();
+    assert_eq!(probe.scanned_inbox_records(), 0);
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 2);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn transmission_and_ownership_crashes_preserve_fsynced_records() {
+    use canterlot_proto::worker::v1::InputTransmissionStarted;
+    use canterlot_worker::fault_injection::{StoreAppendPoint, StoreProbe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    for point in [StoreAppendPoint::Cj, StoreAppendPoint::Receipt] {
+        let dir = private_dir();
+        let mut cmd = delivery();
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        store.accept_command(&cmd).unwrap();
+        let probe = StoreProbe::default();
+        probe.crash_after(point);
+        store = store.with_probe(probe);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| store.append_cj_fact(
+                record_body::Body::TransmissionStarted(InputTransmissionStarted {
+                    command_id: cmd.command_id.clone(),
+                    dispatch_attempt: cmd.dispatch_attempt,
+                    machine_time_ms: 1,
+                })
+            )))
+            .is_err()
+        );
+        drop(store);
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        store.on_cj_ack(2).unwrap();
+        drop(store);
+        let mut store = WorkerStore::open(dir.path()).unwrap();
+        cmd.dispatch_attempt += 1;
+        assert!(matches!(
+            store.accept_command(&cmd).unwrap(),
+            Accept::Rejected {
+                reason: "already_transmitted",
+                ..
+            }
+        ));
+    }
+    let dir = private_dir();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let id = Uuid::now_v7();
+    let record = ownership_record(id);
+    let probe = StoreProbe::default();
+    probe.crash_after(StoreAppendPoint::Ownership);
+    store = store.with_probe(probe);
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| store
+            .ownership_mut()
+            .unwrap()
+            .append(record.clone())))
+        .is_err()
+    );
+    drop(store);
+    let store = WorkerStore::open(dir.path()).unwrap();
+    assert_eq!(store.ownership().get(id), Some(&record));
+    assert_eq!(store.cj_cursor().unwrap().last_seq, 0);
+}
+
+#[test]
+fn redelivery_after_terminal_compaction_uses_a_new_inbox_sequence() {
+    let dir = private_dir();
+    let mut cmd = delivery();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    store.accept_command(&cmd).unwrap();
+    store
+        .mark_terminal(&cmd.command_id, cmd.dispatch_attempt)
+        .unwrap();
+    drop(store);
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    cmd.dispatch_attempt += 1;
+    assert_eq!(
+        store.accept_command(&cmd).unwrap(),
+        Accept::Redelivered { cj_seq: 2 }
+    );
+    let state = store.command_state(&cmd.command_id).unwrap().unwrap();
+    assert_eq!(state.inbox_seq, Some(2));
+    assert!(!state.terminal);
+    store
+        .mark_terminal(&cmd.command_id, cmd.dispatch_attempt - 1)
+        .unwrap();
+    assert_eq!(store.command_state(&cmd.command_id).unwrap(), Some(state));
+    assert_eq!(
+        store
+            .inbox_command(&cmd.command_id, cmd.dispatch_attempt)
+            .unwrap(),
+        Some(cmd)
+    );
 }

@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::{
     config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
     session_store::StoreThread,
-    store::{StoreError, WorkerStore},
+    store::{Accept, StoreError, WorkerStore},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -557,8 +557,13 @@ impl Worker {
                     dirty = false;
                 } else if let Some(command) = commands.pop_front() {
                     operation = Some(Box::pin(self.store.call(move |store| {
-                        store.as_mut().unwrap().accept_command(&command)?;
-                        Ok(StoreReply::Command)
+                        let changed = match store.as_mut().unwrap().accept_command(&command)? {
+                            Accept::Stored { .. }
+                            | Accept::Redelivered { .. }
+                            | Accept::Rejected { .. } => true,
+                            Accept::Duplicate | Accept::Stale | Accept::DroppedInvalidId => false,
+                        };
+                        Ok(StoreReply::Command(changed))
                     })));
                 }
             }
@@ -604,7 +609,7 @@ impl Worker {
                 result = async { operation.as_mut().unwrap().await }, if operation.is_some() => {
                     operation = None;
                     match result? {
-                        StoreReply::Command => dirty = true,
+                        StoreReply::Command(changed) => dirty |= changed,
                         StoreReply::Ack(up_to) => acknowledged = acknowledged.max(up_to),
                         StoreReply::Batch(from, result) => {
                             if from == next_seq { ready_batch = result.map(|batch| *batch); }
@@ -659,7 +664,7 @@ impl Worker {
 }
 
 enum StoreReply {
-    Command,
+    Command(bool),
     Ack(u64),
     Batch(u64, Option<Box<(ControlUp, u64)>>),
 }

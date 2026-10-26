@@ -6,6 +6,7 @@ compile_error!("fault-injection must not be built in release");
 pub mod config;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
+pub mod ownership;
 pub mod session;
 pub mod store;
 
