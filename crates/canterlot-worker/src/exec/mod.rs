@@ -65,9 +65,11 @@ pub(crate) struct ExecInfo {
     pub last_seq: u64,
     pub acked_seq: u64,
     pub retired: bool,
+    pub cj_terminal_seq: Option<u64>,
 }
 
 pub(crate) struct Shared {
+    pub route_lock: tokio::sync::Mutex<()>,
     pub config: ExecutionConfig,
     pub store: StoreClient,
     pub relay: mpsc::Sender<SjRelay>,
@@ -119,19 +121,56 @@ impl Shared {
         facts: Vec<Body>,
         terminal: Vec<(String, u32)>,
     ) -> Result<(), ExecError> {
-        self.store
+        let states = self
+            .store
             .call(move |store| {
                 let store = open(store)?;
+                let mut states = Vec::new();
                 for body in facts {
-                    store.append_cj_fact(body)?;
+                    let state = match &body {
+                        Body::ExecutionState(fact)
+                            if fact.state == "stopped" || fact.state == "failed" =>
+                        {
+                            Some(fact.clone())
+                        }
+                        _ => None,
+                    };
+                    let seq = store.append_cj_fact(body)?;
+                    if let Some(state) = state {
+                        states.push((seq, state));
+                    }
                 }
                 for (command_id, attempt) in terminal {
                     store.mark_terminal(&command_id, attempt)?;
                 }
-                Ok(())
+                Ok(states)
             })
             .await?;
+        self.remember_cj_states(states);
         Ok(())
+    }
+
+    fn remember_cj_states(&self, states: Vec<(u64, canterlot_proto::worker::v1::ExecutionState)>) {
+        for (seq, state) in states {
+            if let Ok(id) = Uuid::parse_str(&state.execution_id) {
+                let mut infos = self.infos.lock().expect("infos lock");
+                let info = infos.entry(id).or_insert_with(|| ExecInfo {
+                    conversation_id: Uuid::nil(),
+                    generation: state.generation,
+                    state: state.state.clone(),
+                    outcome: state.outcome.clone(),
+                    attached: false,
+                    sj_journal_id: None,
+                    last_seq: 0,
+                    acked_seq: 0,
+                    retired: false,
+                    cj_terminal_seq: None,
+                });
+                info.state = state.state;
+                info.outcome = state.outcome;
+                info.cj_terminal_seq = Some(seq);
+            }
+        }
     }
 
     pub(crate) fn with_info(&self, id: Uuid, change: impl FnOnce(&mut ExecInfo)) {
@@ -161,6 +200,7 @@ impl ExecutionManager {
         let (shutdown, shutdown_rx) = watch::channel(false);
         ExecutionManager {
             shared: Arc::new(Shared {
+                route_lock: tokio::sync::Mutex::new(()),
                 config,
                 store,
                 relay,
@@ -241,6 +281,14 @@ impl ExecutionManager {
         self.shared.hub.send_replace(Some(Arc::new(committed)));
     }
 
+    pub fn on_cj_ack(&self, up_to: u64) {
+        for info in self.shared.infos.lock().expect("infos lock").values_mut() {
+            if info.cj_terminal_seq.is_some_and(|seq| seq <= up_to) {
+                info.retired = true;
+            }
+        }
+    }
+
     pub fn on_sj_ack(&self, journal_id: Uuid, up_to: u64) {
         let execution = self
             .shared
@@ -263,6 +311,7 @@ impl ExecutionManager {
     }
 
     pub async fn startup_verify(&self) -> Result<Vec<Uuid>, ExecError> {
+        let _route = self.shared.route_lock.lock().await;
         let records = self
             .shared
             .store
@@ -275,6 +324,27 @@ impl ExecutionManager {
                     .collect::<Vec<_>>())
             })
             .await?;
+        let states = self
+            .shared
+            .store
+            .call(|store| {
+                let store = open(store)?;
+                let cursor = store.cj_cursor()?;
+                Ok(store
+                    .cj_records_from(cursor.acked_seq_known_to_worker + 1, usize::MAX)?
+                    .into_iter()
+                    .filter_map(|record| match record.body.and_then(|body| body.body) {
+                        Some(Body::ExecutionState(state))
+                            if state.state == "stopped" || state.state == "failed" =>
+                        {
+                            Some((record.seq, state))
+                        }
+                        _ => None,
+                    })
+                    .collect())
+            })
+            .await?;
+        self.shared.remember_cj_states(states);
         let mut attached = Vec::new();
         for record in records {
             let Ok(id) = Uuid::parse_str(&record.execution_id) else {
@@ -293,6 +363,7 @@ impl ExecutionManager {
                     last_seq: 0,
                     acked_seq: 0,
                     retired: false,
+                    cj_terminal_seq: None,
                 },
             );
             if manager::is_orphaned(&record) {
@@ -303,6 +374,16 @@ impl ExecutionManager {
             }
             match manager::verify(&self.shared, &record).await {
                 Ok(linked) => {
+                    let running = record.cli_pid != 0;
+                    self.shared.with_info(id, |info| {
+                        info.attached = true;
+                        info.sj_journal_id = Uuid::parse_str(&linked.attached.sj_journal_id).ok();
+                        info.last_seq = linked.attached.last_sj_seq;
+                        info.acked_seq = linked.attached.acked_sj_seq;
+                        if running {
+                            info.state = "running".into();
+                        }
+                    });
                     self.spawn_actor(id, Start::Reattach(Box::new((linked, record))));
                     attached.push(id);
                 }
@@ -318,12 +399,30 @@ impl ExecutionManager {
             .call(|store| Ok(open(store)?.stored_commands()?))
             .await?;
         for command in commands {
-            self.route(command).await?;
+            let Ok(id) = Uuid::parse_str(&command.execution_id) else {
+                continue;
+            };
+            let known = self
+                .shared
+                .infos
+                .lock()
+                .expect("infos lock")
+                .contains_key(&id);
+            // Непривязанные записи 1.2a остаются у сеанса до согласования exec_v1.
+            if known
+                || matches!(
+                    command.kind,
+                    Some(Kind::StartExecution(_) | Kind::StopExecution(_))
+                )
+            {
+                self.route(command).await?;
+            }
         }
         Ok(attached)
     }
 
     pub async fn handle(&self, command: Command, accept: Accept) -> Result<(), ExecError> {
+        let _route = self.shared.route_lock.lock().await;
         match accept {
             Accept::Stored { .. } | Accept::Redelivered { .. } => {}
             Accept::Duplicate => {
@@ -416,6 +515,7 @@ impl ExecutionManager {
                     last_seq: 0,
                     acked_seq: 0,
                     retired: false,
+                    cj_terminal_seq: None,
                 },
             );
         }

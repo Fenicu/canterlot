@@ -33,6 +33,10 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[path = "support/process_guard.rs"]
+mod process_guard;
+use process_guard::ProcessGuard;
+
 const WAIT: Duration = Duration::from_secs(15);
 
 fn sha(text: &str) -> String {
@@ -114,6 +118,7 @@ fn script(steps: &str) -> String {
 }
 
 struct Harness {
+    _guard: ProcessGuard,
     exec_dir: PathBuf,
     _root: TempDir,
     secret: Vec<u8>,
@@ -188,6 +193,7 @@ impl Harness {
         }
         let child = command.spawn().unwrap();
         Harness {
+            _guard: ProcessGuard::new(root.path()),
             exec_dir,
             _root: root,
             secret,

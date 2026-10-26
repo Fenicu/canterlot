@@ -27,6 +27,10 @@ use tempfile::TempDir;
 use tokio::{sync::mpsc, time::timeout};
 use uuid::Uuid;
 
+#[path = "support/process_guard.rs"]
+mod process_guard;
+use process_guard::ProcessGuard;
+
 const WAIT: Duration = Duration::from_secs(20);
 
 fn script(steps: &str) -> String {
@@ -144,6 +148,7 @@ fn deliver_command(
 }
 
 struct Env {
+    guard: ProcessGuard,
     root: TempDir,
     work: PathBuf,
     config: ExecutionConfig,
@@ -153,17 +158,14 @@ struct Env {
     bodies: Vec<Body>,
     seen: HashSet<(Uuid, u64)>,
     committed: HashMap<Uuid, u64>,
+    auto_ack: bool,
     execution: Uuid,
     conversation: Uuid,
 }
 
 impl Drop for Env {
     fn drop(&mut self) {
-        for pid in supervisors_of(self.root.path()) {
-            let _ = std::process::Command::new("kill")
-                .args(["-9", &pid.to_string()])
-                .status();
-        }
+        drop(self.manager.take());
     }
 }
 
@@ -190,6 +192,7 @@ impl Env {
         let (sender, relay) = mpsc::channel(64);
         let manager = ExecutionManager::new(config.clone(), thread.client(), sender);
         Env {
+            guard: ProcessGuard::new(root.path()),
             root,
             work,
             config,
@@ -199,6 +202,7 @@ impl Env {
             bodies: Vec::new(),
             seen: HashSet::new(),
             committed: HashMap::new(),
+            auto_ack: true,
             execution: Uuid::now_v7(),
             conversation: Uuid::now_v7(),
         }
@@ -256,7 +260,9 @@ impl Env {
                 }
                 let entry = self.committed.entry(batch.journal_id).or_default();
                 *entry = (*entry).max(last);
-                self.manager().on_sj_ack(batch.journal_id, last);
+                if self.auto_ack {
+                    self.manager().on_sj_ack(batch.journal_id, last);
+                }
                 true
             }
             _ => false,
@@ -277,9 +283,21 @@ impl Env {
         .await;
         assert!(
             outcome.unwrap_or(false),
-            "timed out waiting for: {what}; bodies: {:?}",
-            self.bodies.iter().map(kind).collect::<Vec<_>>()
+            "timed out waiting for: {what}; bodies: {:?}; supervisor logs: {}",
+            self.bodies.iter().map(describe).collect::<Vec<_>>(),
+            self.logs()
         );
+    }
+
+    fn logs(&self) -> String {
+        let mut text = String::new();
+        if let Ok(entries) = fs::read_dir(self.root.path().join("store/executions")) {
+            for entry in entries.flatten() {
+                text +=
+                    &fs::read_to_string(entry.path().join("supervisor.log")).unwrap_or_default();
+            }
+        }
+        text
     }
 
     async fn wait_running(&mut self) {
@@ -399,6 +417,15 @@ fn kind(body: &Body) -> &'static str {
         Body::JournalClosed(_) => "journal_closed",
         Body::CommandStored(_) => "command_stored",
         _ => "other",
+    }
+}
+
+fn describe(body: &Body) -> String {
+    match body {
+        Body::ExecutionState(f) => format!("execution_state({},{})", f.state, f.outcome),
+        Body::AcceptanceUnconfirmed(f) => format!("acceptance_unconfirmed({})", f.reason),
+        Body::AdapterDiagnostic(f) => format!("adapter_diagnostic({})", f.kind),
+        other => kind(other).to_owned(),
     }
 }
 
@@ -549,13 +576,6 @@ async fn start_rejected_for_unknown_harness_outside_roots_and_old_generation() {
             "workdir_not_allowed"
         ]
     );
-    for entry in fs::read_dir(env.root.path().join("store/executions")).unwrap() {
-        assert_eq!(
-            entry.unwrap().file_name().to_string_lossy(),
-            first.to_string(),
-            "a rejected start never creates an execution directory"
-        );
-    }
     env.manager().set_enabled(false);
     env.send(start_command(
         Uuid::now_v7(),
@@ -572,6 +592,13 @@ async fn start_rejected_for_unknown_harness_outside_roots_and_old_generation() {
     env.hub_session();
     env.execution = first;
     env.wait_running().await;
+    for entry in fs::read_dir(env.root.path().join("store/executions")).unwrap() {
+        assert_eq!(
+            entry.unwrap().file_name().to_string_lossy(),
+            first.to_string(),
+            "a rejected start never creates an execution directory"
+        );
+    }
     env.stop().await;
 }
 
@@ -614,6 +641,9 @@ async fn control_restart_reattaches_live_supervisor() {
         Some(before.supervisor_start_ticks)
     );
     assert!(env.manager().observations()[0].supervisor_attached);
+    let cursor = env.manager().journal_cursors().pop().unwrap();
+    assert!(cursor.last_seq >= env.committed[&Uuid::parse_str(&cursor.journal_id).unwrap()]);
+    assert!(cursor.acked_seq_known_to_worker > 0);
     env.hub_session();
     env.wait("answer completes", |b| finished(b, answer)).await;
     let text = env
@@ -652,7 +682,7 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
         executions.push(env.execution);
     }
     let mut unrelated = std::process::Command::new("sleep")
-        .arg("60")
+        .arg("10")
         .spawn()
         .unwrap();
     let sleeper = unrelated.id();
@@ -715,7 +745,6 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
             "ownership is kept"
         );
     }
-    unrelated.kill().unwrap();
     unrelated.wait().unwrap();
 }
 
@@ -726,19 +755,41 @@ async fn supervisor_death_reports_owner_lost() {
     env.start(1).await;
     env.wait_running().await;
     let record = env.ownership(env.execution).await.unwrap();
-    assert!(
-        std::process::Command::new("kill")
-            .args(["-9", &record.supervisor_pid.to_string()])
-            .status()
-            .unwrap()
-            .success()
-    );
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"detach_child":true}"#),
+    ))
+    .await;
+    env.wait("detached descendant", |b| finished(b, input))
+        .await;
+    let detached = processes()
+        .into_iter()
+        .find_map(|(pid, _, cmd)| {
+            (cmd.contains("__detach_sleep")
+                && fs::read_link(format!("/proc/{pid}/cwd"))
+                    .is_ok_and(|cwd| cwd.starts_with(env.root.path())))
+            .then_some(pid)
+        })
+        .expect("detached CLI descendant");
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
     let id = env.execution;
     env.wait_cj("owner_lost", |cj| owner_lost(cj, id) == 1)
         .await;
     tokio::time::sleep(Duration::from_millis(800)).await;
     assert_eq!(owner_lost(&env.cj().await, id), 1, "reported once");
     assert!(supervisors_of(env.root.path()).is_empty(), "no respawn");
+    assert!(
+        alive(detached),
+        "CLI descendant is left alone after supervisor death"
+    );
     assert_eq!(
         env.ownership(id).await.unwrap().phase,
         OwnershipPhase::Attached as i32,
@@ -881,6 +932,22 @@ async fn cancel_and_withdraw_before_handoff_are_answered_by_control_service() {
         !cj.iter()
             .any(|b| matches!(b, Body::CancelWon(f) if f.command_id == withdrawn.to_string()))
     );
+    env.thread()
+        .call(|store| {
+            let store = store.as_mut().unwrap();
+            let seq = store.cj_cursor()?.last_seq;
+            store.on_cj_ack(seq)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.close_manager().await;
+    env.reopen();
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        vec![env.execution]
+    );
+    env.hub_session();
     for target in [cancelled, withdrawn] {
         env.send(deliver_command(
             target,
@@ -976,7 +1043,7 @@ async fn interrupt_for_old_generation_is_rejected_stale() {
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 async fn stop_before_spawn_cancels_start() {
-    let env = Env::new().await;
+    let mut env = Env::new().await;
     env.manager().set_spawn_delay(Duration::from_millis(500));
     let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
     env.send(start.clone()).await;
@@ -1013,6 +1080,23 @@ async fn stop_before_spawn_cancels_start() {
     assert!(env.ownership(id).await.is_none());
     assert!(supervisors_of(env.root.path()).is_empty());
     assert!(env.terminal(&start).await && env.terminal(&stop).await);
+    assert_eq!(env.manager().observations()[0].outcome, "start_cancelled");
+    env.close_manager().await;
+    env.reopen();
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    assert_eq!(env.manager().observations()[0].outcome, "start_cancelled");
+    let up_to = env
+        .thread()
+        .call(|store| {
+            let store = store.as_mut().unwrap();
+            let up_to = store.cj_cursor()?.last_seq;
+            store.on_cj_ack(up_to)?;
+            Ok(up_to)
+        })
+        .await
+        .unwrap();
+    env.manager().on_cj_ack(up_to);
+    assert!(env.manager().observations().is_empty());
 }
 
 #[tokio::test]
@@ -1072,4 +1156,139 @@ async fn second_instance_is_refused_by_the_store_lock() {
         !text.contains(&env.root.path().to_string_lossy().into_owned()),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn terminal_sj_observation_and_cursor_remain_until_ack() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.auto_ack = false;
+    env.stop().await;
+    assert_eq!(env.manager().observations()[0].state, "stopped");
+    let cursor = env.manager().journal_cursors().pop().unwrap();
+    assert!(cursor.last_seq > cursor.acked_seq_known_to_worker);
+    env.manager().on_sj_ack(
+        Uuid::parse_str(&cursor.journal_id).unwrap(),
+        cursor.last_seq,
+    );
+    timeout(WAIT, async {
+        while !env.manager().observations().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(env.manager().journal_cursors().is_empty());
+}
+
+#[tokio::test]
+async fn timeout_cleans_supervisor_and_cli() {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(async {
+        let mut env = Env::new().await;
+        env.hub_session();
+        env.start(1).await;
+        env.wait_running().await;
+        let record = env.ownership(env.execution).await.unwrap();
+        assert_eq!(cli_children(record.supervisor_pid).len(), 1);
+        sender.send(env.root.path().to_path_buf()).unwrap();
+        timeout(Duration::from_millis(100), async move {
+            let _env = env;
+            std::future::pending::<()>().await;
+        })
+        .await
+    });
+    let root = receiver.await.unwrap();
+    assert!(task.await.unwrap().is_err());
+    assert!(supervisors_of(&root).is_empty());
+    assert!(!processes().iter().any(|(pid, _, _)| {
+        fs::read_link(format!("/proc/{pid}/exe"))
+            .is_ok_and(|exe| exe == Path::new(env!("CARGO_BIN_EXE_canterlot-worker")))
+            && fs::read_link(format!("/proc/{pid}/cwd")).is_ok_and(|cwd| cwd.starts_with(&root))
+    }));
+}
+
+#[tokio::test]
+async fn reattach_delivers_stored_input_missing_from_received_table() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let before = env.ownership(env.execution).await.unwrap();
+    let input = Uuid::now_v7();
+    let command = deliver_command(
+        input,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        "stored before handoff",
+    );
+    let copy = command.clone();
+    env.thread()
+        .call(move |store| Ok(store.as_mut().unwrap().accept_command(&copy)?))
+        .await
+        .unwrap();
+    env.close_manager().await;
+    env.reopen();
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        vec![env.execution]
+    );
+    env.hub_session();
+    env.wait("recovered input completes", |b| finished(b, input))
+        .await;
+    assert!(env.terminal(&command).await);
+    assert_eq!(
+        env.bodies
+            .iter()
+            .filter(
+                |b| matches!(b, Body::TransmissionStarted(f) if f.command_id == input.to_string())
+            )
+            .count(),
+        1
+    );
+    let after = env.ownership(env.execution).await.unwrap();
+    assert_eq!(
+        (before.supervisor_pid, before.supervisor_start_ticks),
+        (after.supervisor_pid, after.supervisor_start_ticks)
+    );
+    assert_eq!(cli_children(before.supervisor_pid).len(), 1);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn failed_spawn_observation_remains_until_cj_ack() {
+    let mut env = Env::new().await;
+    env.close_manager().await;
+    env.config.supervisor_exe = Some(env.root.path().join("missing-supervisor"));
+    env.reopen();
+    env.start(1).await;
+    env.wait_cj("spawn rejection", |cj| {
+        rejected_reasons(cj).contains(&"supervisor_spawn_failed".into())
+    })
+    .await;
+    timeout(WAIT, async {
+        while env.manager().observations()[0].state != "failed" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(env.manager().observations()[0].outcome, "start_rejected");
+    let up_to = env
+        .thread()
+        .call(|store| {
+            let store = store.as_mut().unwrap();
+            let seq = store.cj_cursor()?.last_seq;
+            store.on_cj_ack(seq)?;
+            Ok(seq)
+        })
+        .await
+        .unwrap();
+    env.manager().on_cj_ack(up_to);
+    assert!(env.manager().observations().is_empty());
+    assert!(supervisors_of(env.root.path()).is_empty());
 }

@@ -101,8 +101,7 @@ async fn block(
 }
 
 async fn completed(command: Uuid) -> io::Result<()> {
-    emit(json!({"type":"completed", "input_command_id":command})).await?;
-    phase(Phase::AwaitingInput).await
+    emit(json!({"type":"completed", "input_command_id":command})).await
 }
 
 async fn detach() -> io::Result<()> {
@@ -207,10 +206,14 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
         child.wait().await?;
         return Ok(());
     }
+    if profile == "__detach_sleep" {
+        tokio::time::sleep(Duration::from_secs(300)).await;
+        return Ok(());
+    }
     if profile == "__detach_fork" {
         // Два spawn вместо fork/pre_exec; последний потомок остаётся в новой сессии.
-        tokio::process::Command::new("sleep")
-            .arg("300")
+        tokio::process::Command::new(std::env::current_exe()?)
+            .args(["synthetic-cli", "--profile", "__detach_sleep"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -232,9 +235,11 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
             } => {
                 let turn = run_turn(command_id, text);
                 tokio::pin!(turn);
+                // Готовность объявляется после выхода из select активного хода.
                 tokio::select! {
                         result = &mut turn => {
                             if let Some(code) = result? { std::process::exit(code); }
+                            phase(Phase::AwaitingInput).await?;
                         }
                         line = lines.next_line() => {
                             let Some(line) = line? else { return Ok(()) };
@@ -243,6 +248,7 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
                                 Request::Interrupt { id } => {
                                     emit(json!({"type":"interrupted", "id":id})).await?;
                                     completed(command_id).await?;
+                                    phase(Phase::AwaitingInput).await?;
                                     if profile == "synthetic-exit-on-interrupt" { return Ok(()) }
                                 }
                                 Request::Input { .. } => return Err(io::Error::other("turn already active")),

@@ -23,6 +23,7 @@ use uuid::Uuid;
 
 use crate::{
     config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
+    exec::{ExecutionManager, SjRelay},
     session_store::StoreThread,
     store::{Accept, StoreError, WorkerStore},
 };
@@ -89,6 +90,7 @@ pub enum ErrorKind {
     StateDivergence,
     InvalidConfig,
     StoreThread,
+    Execution,
 }
 
 #[derive(Debug, Error)]
@@ -107,6 +109,8 @@ pub enum WorkerError {
     Hub { code: tonic::Code, message: String },
     #[error("store reopen failed ({kind:?}): {source}", kind = .0.kind(), source = .0)]
     Reopen(#[source] StoreError),
+    #[error("execution manager failed")]
+    Execution,
     #[error("store thread failed")]
     StoreThread,
     #[error("session receipt or handshake timed out")]
@@ -141,6 +145,7 @@ impl WorkerError {
             Self::StateDivergence => ErrorKind::StateDivergence,
             Self::InvalidConfig => ErrorKind::InvalidConfig,
             Self::StoreThread => ErrorKind::StoreThread,
+            Self::Execution => ErrorKind::Execution,
         }
     }
 }
@@ -161,6 +166,8 @@ pub struct Worker {
     config: WorkerConfig,
     store: StoreThread,
     state: watch::Sender<SessionState>,
+    manager: Option<ExecutionManager>,
+    relay: Option<mpsc::Receiver<SjRelay>>,
 }
 
 struct Pending {
@@ -201,6 +208,8 @@ impl Worker {
             config,
             store: StoreThread::new(store),
             state: watch::channel(SessionState::Disconnected).0,
+            manager: None,
+            relay: None,
         }
     }
 
@@ -215,6 +224,9 @@ impl Worker {
 
     pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
         let result = self.run_inner(shutdown).await;
+        if let Some(manager) = self.manager.take() {
+            manager.shutdown().await;
+        }
         let closed = self.store.close().await;
         result.and(closed)
     }
@@ -224,6 +236,15 @@ impl Worker {
         self.store
             .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
             .await?;
+        let (sender, relay) = mpsc::channel(8);
+        let manager =
+            ExecutionManager::new(self.config.execution.clone(), self.store.client(), sender);
+        manager
+            .startup_verify()
+            .await
+            .map_err(|_| WorkerError::Execution)?;
+        self.manager = Some(manager);
+        self.relay = Some(relay);
         let hub_url =
             url::Url::parse(&self.config.hub_url).map_err(|_| WorkerError::InvalidConfig)?;
         if hub_url.scheme() != "https"
@@ -498,6 +519,8 @@ impl Worker {
             })
             .await
             .map_err(|_| WorkerError::Timeout)??;
+        let exec_enabled = accepted.capabilities.iter().any(|cap| cap == "exec_v1");
+        self.manager.as_ref().unwrap().set_enabled(exec_enabled);
         let _keep_data_open = data_tx;
         self.transition(SessionState::Reconciling);
         check_generation(generation, &accepted)?;
@@ -518,6 +541,7 @@ impl Worker {
                 Ok(())
             })
             .await?;
+        self.manager.as_ref().unwrap().on_cj_ack(committed);
         let replay_end = cursor.last_seq;
         let mut acknowledged = committed;
         let mut received_ack = committed;
@@ -557,13 +581,8 @@ impl Worker {
                     dirty = false;
                 } else if let Some(command) = commands.pop_front() {
                     operation = Some(Box::pin(self.store.call(move |store| {
-                        let changed = match store.as_mut().unwrap().accept_command(&command)? {
-                            Accept::Stored { .. }
-                            | Accept::Redelivered { .. }
-                            | Accept::Rejected { .. } => true,
-                            Accept::Duplicate | Accept::Stale | Accept::DroppedInvalidId => false,
-                        };
-                        Ok(StoreReply::Command(changed))
+                        let accept = store.as_mut().unwrap().accept_command(&command)?;
+                        Ok(StoreReply::Command(Box::new(command), accept))
                     })));
                 }
             }
@@ -609,8 +628,18 @@ impl Worker {
                 result = async { operation.as_mut().unwrap().await }, if operation.is_some() => {
                     operation = None;
                     match result? {
-                        StoreReply::Command(changed) => dirty |= changed,
-                        StoreReply::Ack(up_to) => acknowledged = acknowledged.max(up_to),
+                        StoreReply::Command(command, accept) => {
+                            dirty |= matches!(accept, Accept::Stored { .. } | Accept::Redelivered { .. } | Accept::Rejected { .. });
+                            // Без exec_v1 сохраняется протокол воркеров 1.2a.
+                            if exec_enabled || matches!(command.kind, Some(command::Kind::StartExecution(_))) {
+                                self.manager.as_ref().unwrap().handle(*command, accept).await.map_err(|_| WorkerError::Execution)?;
+                                dirty = true;
+                            }
+                        },
+                        StoreReply::Ack(up_to) => {
+                            acknowledged = acknowledged.max(up_to);
+                            self.manager.as_ref().unwrap().on_cj_ack(up_to);
+                        },
                         StoreReply::Batch(from, result) => {
                             if from == next_seq { ready_batch = result.map(|batch| *batch); }
                             else { dirty = true; }
@@ -642,6 +671,7 @@ impl Worker {
                     });
                 }
                 _ = sleep_until(heartbeat_deadline) => {
+                    dirty = true;
                     if let Some(pending) = &mut pending_heartbeat {
                         heartbeat_outbound = Some(pending.resend(self.config.timers.heartbeat_ack)?);
                     } else {
@@ -664,7 +694,7 @@ impl Worker {
 }
 
 enum StoreReply {
-    Command(bool),
+    Command(Box<Command>, Accept),
     Ack(u64),
     Batch(u64, Option<Box<(ControlUp, u64)>>),
 }

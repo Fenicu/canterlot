@@ -33,6 +33,7 @@ type Downstream = Arc<Mutex<Option<mpsc::Sender<Result<ControlDown, Status>>>>>;
 #[derive(Clone)]
 pub struct Behavior {
     pub generation: Uuid,
+    pub capabilities: Vec<String>,
     pub committed: u64,
     pub heartbeat_ack: bool,
     pub range_ack: bool,
@@ -49,6 +50,7 @@ impl Default for Behavior {
     fn default() -> Self {
         Self {
             generation: Uuid::now_v7(),
+            capabilities: vec![],
             committed: 0,
             heartbeat_ack: true,
             range_ack: true,
@@ -79,7 +81,7 @@ impl Service {
     fn reply(&self, hello: &Hello) -> HelloReply {
         HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
-                capabilities: Vec::new(),
+                capabilities: self.behavior.capabilities.clone(),
                 restore_generation: self.behavior.generation.to_string(),
                 committed: vec![JournalCommitted {
                     journal_id: hello.cj_journal_id.clone(),

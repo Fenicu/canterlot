@@ -129,17 +129,21 @@ pub(super) async fn connect_attach(
             }
         }
     };
+    let deadline = tokio::time::Instant::now() + wait.unwrap_or(Duration::from_secs(5));
     let stream = match wait {
         Some(limit) => timeout(limit, connect)
             .await
             .map_err(|_| ExecError::AttachTimeout)??,
         None => connect.await?,
     };
-    if let Some(pid) = expected_pid {
-        let peer = stream.peer_cred()?;
-        if peer.pid().and_then(|p| u32::try_from(p).ok()) != Some(pid) {
-            return Err(ExecError::Verify("ipc_peer"));
-        }
+    let peer = stream.peer_cred()?;
+    if peer.uid() != rustix::process::getuid().as_raw() {
+        return Err(ExecError::Verify("ipc_uid"));
+    }
+    if let Some(pid) = expected_pid
+        && peer.pid().and_then(|p| u32::try_from(p).ok()) != Some(pid)
+    {
+        return Err(ExecError::Verify("ipc_peer"));
     }
     let (mut read, mut write) = stream.into_split();
     let attach = ControlToSupervisor {
@@ -151,8 +155,7 @@ pub(super) async fn connect_attach(
         })),
     };
     write_message(&mut write, &attach).await?;
-    let limit = wait.unwrap_or(Duration::from_secs(5));
-    let reply: SupervisorToControl = timeout(limit, read_message(&mut read))
+    let reply: SupervisorToControl = tokio::time::timeout_at(deadline, read_message(&mut read))
         .await
         .map_err(|_| ExecError::AttachTimeout)??;
     let Some(up::Msg::Attached(attached)) = reply.msg else {

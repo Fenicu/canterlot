@@ -610,6 +610,18 @@ impl WorkerStore {
                 let mut entry = entry.clone();
                 entry.terminal = true;
                 self.append_receipt(entry)?;
+            } else if !self.index.contains_key(&receipt_id(command_id))
+                && Uuid::parse_str(command_id).is_ok()
+            {
+                // Отмена может прийти раньше самого ввода; сохраняем её после compaction CJ.
+                self.append_receipt(ReceiptEntry {
+                    command_id: receipt_id(command_id),
+                    attempt,
+                    class: ReceiptClass::Stored,
+                    inbox_seq: None,
+                    terminal: true,
+                    transmitted: false,
+                })?;
             }
             self.release_inbox()
         })();

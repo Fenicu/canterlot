@@ -546,13 +546,21 @@ impl Supervisor {
             adapter.start(&spec, &*self.containment),
         )
         .await;
-        let Ok(Ok(started)) = outcome else {
-            tracing::warn!(
-                kind = "start_failed",
-                reason = "adapter_start",
-                "adapter start failed"
-            );
-            return self.begin_stop(StopCause::StartFailed, false);
+        let started = match outcome {
+            Ok(Ok(started)) => started,
+            other => {
+                let detail = match other {
+                    Ok(Err(error)) => error.to_string(),
+                    _ => "deadline".to_owned(),
+                };
+                tracing::warn!(
+                    kind = "start_failed",
+                    reason = "adapter_start",
+                    detail,
+                    "adapter start failed"
+                );
+                return self.begin_stop(StopCause::StartFailed, false);
+            }
         };
         let info = CliStarted {
             pid: started.cli_pid,

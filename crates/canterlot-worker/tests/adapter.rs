@@ -12,6 +12,9 @@ use canterlot_worker::{
 };
 use uuid::Uuid;
 
+#[path = "support/process_guard.rs"]
+mod process_guard;
+
 fn isolated(name: &str) {
     let output = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", "adapter_child", "--nocapture"])
@@ -66,6 +69,7 @@ async fn adapter_child() {
     };
     let group = TreeContainment::new().unwrap();
     let directory = tempfile::tempdir().unwrap();
+    let _guard = process_guard::ProcessGuard::new(directory.path());
     let spec = StartSpec {
         execution_id: Uuid::now_v7(),
         generation: 1,

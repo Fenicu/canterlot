@@ -6,6 +6,9 @@ use rustix::process::Signal;
 use std::{process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
+#[path = "support/process_guard.rs"]
+mod process_guard;
+
 fn ticks(pid: u32) -> u64 {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
     stat[stat.rfind(')').unwrap() + 1..]
@@ -59,6 +62,8 @@ async fn containment_child() {
     let Ok(case) = std::env::var("CANTERLOT_CONTAINMENT_CASE") else {
         return;
     };
+    let directory = tempfile::tempdir().unwrap();
+    let _guard = process_guard::ProcessGuard::new(directory.path());
     let group = TreeContainment::new().unwrap();
     assert_eq!(group.kind(), "tree");
     let unrelated: u32 = std::env::var("CANTERLOT_UNRELATED_PID")
@@ -69,6 +74,7 @@ async fn containment_child() {
     if case == "escaped_grandchild_is_tracked_and_terminated" {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"));
         command
+            .current_dir(directory.path())
             .args(["synthetic-cli", "--profile", "synthetic"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped());
@@ -109,16 +115,25 @@ async fn containment_child() {
             assert!(!std::path::Path::new(&format!("/proc/{}", member.pid)).exists());
         }
     } else {
-        let mut command = tokio::process::Command::new(if case == "zombies_are_not_members" {
-            "true"
-        } else {
-            "sleep"
-        });
-        if case != "zombies_are_not_members" {
-            command.arg("30");
-        }
+        let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"));
+        command
+            .args(["synthetic-cli", "--profile", "synthetic"])
+            .current_dir(directory.path())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null());
         group.prepare_command(&mut command);
         let mut child = command.spawn().unwrap();
+        if case == "zombies_are_not_members" {
+            let frame = serde_json::json!({"type":"input", "command_id":uuid::Uuid::now_v7(), "attempt":1,
+                "text":r#"{"synthetic":[{"exit":0}]}"#});
+            child
+                .stdin
+                .as_mut()
+                .unwrap()
+                .write_all(format!("{frame}\n").as_bytes())
+                .await
+                .unwrap();
+        }
         let pid = child.id().unwrap();
         if case == "zombies_are_not_members" {
             tokio::time::sleep(Duration::from_millis(100)).await;

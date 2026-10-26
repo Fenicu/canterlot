@@ -1316,3 +1316,82 @@ async fn duplicate_range_acks_do_not_extend_the_deadline() {
     .unwrap();
     stop_worker(stop, join).await;
 }
+
+#[tokio::test]
+async fn accepted_commands_are_routed_to_execution_manager() {
+    use canterlot_proto::worker::v1::{
+        DeliverInput, StartExecution, control_up, record_body::Body,
+    };
+    for enabled in [false, true] {
+        let (mut hub, store) = ProtocolHub::start(Behavior {
+            capabilities: if enabled {
+                vec!["exec_v1".into()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        })
+        .await;
+        let path = hub.config.data_dir.clone();
+        let (stop, mut state, join) = start(hub.config.clone(), store);
+        wait_state(&mut state, SessionState::Live).await;
+        let command = Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: Uuid::now_v7().to_string(),
+            execution_generation: 1,
+            kind: Some(if enabled {
+                command::Kind::DeliverInput(DeliverInput::default())
+            } else {
+                command::Kind::StartExecution(StartExecution {
+                    conversation_id: Uuid::now_v7().to_string(),
+                    harness: "synthetic".into(),
+                    workdir: path.to_string_lossy().into_owned(),
+                    native_conversation_id: String::new(),
+                })
+            }),
+        };
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::Command(command.clone())),
+        })
+        .await;
+        let mut facts = Vec::new();
+        timeout(Duration::from_secs(3), async {
+            while facts.len() < 2 {
+                if let Observed::Control(message) = hub.event().await
+                    && let Some(control_up::Msg::CjRecords(batch)) = message.msg
+                {
+                    facts.extend(
+                        batch
+                            .records
+                            .into_iter()
+                            .map(|r| r.body.unwrap().body.unwrap()),
+                    );
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(matches!(&facts[0], Body::CommandStored(f) if f.command_id == command.command_id));
+        if enabled {
+            assert!(
+                matches!(&facts[1], Body::DispatchDeferred(f) if f.reason == "generation_closed")
+            );
+        } else {
+            assert!(
+                matches!(&facts[1], Body::CommandRejected(f) if f.reason == "hub_capability_missing")
+            );
+        }
+        stop_worker(stop, join).await;
+        let store = WorkerStore::open(&path).unwrap();
+        assert!(
+            store
+                .command_state(&command.command_id)
+                .unwrap()
+                .unwrap()
+                .terminal
+        );
+        assert!(store.stored_commands().unwrap().is_empty());
+        assert!(!path.join("executions").exists());
+    }
+}

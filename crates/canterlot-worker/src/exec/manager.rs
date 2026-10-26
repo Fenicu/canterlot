@@ -243,16 +243,32 @@ pub(super) async fn reject(
     command: &Command,
     reason: &str,
 ) -> Result<(), ExecError> {
-    shared
-        .cj(
-            vec![Body::CommandRejected(CommandRejected {
-                command_id: command.command_id.clone(),
-                dispatch_attempt: command.dispatch_attempt,
-                reason: reason.into(),
-            })],
-            vec![(command.command_id.clone(), command.dispatch_attempt)],
-        )
-        .await
+    let id = Uuid::parse_str(&command.execution_id).ok();
+    let fact = Body::CommandRejected(CommandRejected {
+        command_id: command.command_id.clone(),
+        dispatch_attempt: command.dispatch_attempt,
+        reason: reason.into(),
+    });
+    let (command_id, attempt) = (command.command_id.clone(), command.dispatch_attempt);
+    let seq = shared
+        .store
+        .call(move |store| {
+            let store = open(store)?;
+            let seq = store.append_cj_fact(fact)?;
+            store.mark_terminal(&command_id, attempt)?;
+            Ok(seq)
+        })
+        .await?;
+    if let Some(id) = id
+        && matches!(command.kind, Some(Kind::StartExecution(_)))
+    {
+        shared.with_info(id, |info| {
+            info.state = "failed".into();
+            info.outcome = "start_rejected".into();
+            info.cj_terminal_seq = Some(seq);
+        });
+    }
+    Ok(())
 }
 
 pub(super) async fn reject_invalid(shared: &Shared, command: &Command) -> Result<(), ExecError> {
@@ -395,7 +411,7 @@ pub(super) struct Actor {
     start_cli_sent: bool,
     cli_started: bool,
     handed: HashSet<(Uuid, u32)>,
-    cancelled_local: HashSet<Uuid>,
+    cancelled_local: HashSet<(Uuid, u32)>,
     outbox: VecDeque<SjRelay>,
     last_seq: u64,
     acked_seq: u64,
@@ -501,6 +517,7 @@ impl Actor {
         self.journal_id = Uuid::parse_str(&attached.sj_journal_id).ok();
         self.last_seq = attached.last_sj_seq;
         self.acked_seq = attached.acked_sj_seq;
+        self.handed.clear();
         for input in &attached.received {
             if let Ok(id) = Uuid::parse_str(&input.command_id) {
                 self.handed.insert((id, input.dispatch_attempt));
@@ -545,6 +562,9 @@ impl Actor {
             }
         }
         self.drain_mailbox();
+        if *self.shutdown.borrow() {
+            return Ok(false);
+        }
         if self.stop_pending() {
             self.cancel_start().await?;
             return Ok(false);
@@ -588,6 +608,14 @@ impl Actor {
             Some(exe) => exe.clone(),
             None => std::env::current_exe()?,
         };
+        if *self.shutdown.borrow() {
+            return Ok(false);
+        }
+        self.drain_mailbox();
+        if self.stop_pending() {
+            self.cancel_start().await?;
+            return Ok(false);
+        }
         let pid = match spawn::spawn_supervisor(&exe, &dir) {
             Ok(pid) => pid,
             Err(_) => return self.spawn_failed(&command, true).await,
@@ -655,11 +683,6 @@ impl Actor {
             .await?;
         }
         reject(&self.shared, command, "supervisor_spawn_failed").await?;
-        self.shared.with_info(self.id, |info| {
-            info.state = "failed".into();
-            info.outcome = "start_rejected".into();
-            info.retired = true;
-        });
         self.released = true;
         Ok(false)
     }
@@ -688,6 +711,11 @@ impl Actor {
     }
 
     async fn cancel_start(&mut self) -> Result<(), ExecError> {
+        ownership_update(&self.shared, self.id, |record| {
+            record.phase = OwnershipPhase::Released as i32;
+            record.released_reason = "start_cancelled".into();
+        })
+        .await?;
         let mut terminal: Vec<(String, u32)> = self.start_command.iter().cloned().collect();
         let mut rest = Vec::new();
         for message in self.pending.drain(..) {
@@ -714,7 +742,6 @@ impl Actor {
         self.shared.with_info(self.id, |info| {
             info.state = "stopped".into();
             info.outcome = "start_cancelled".into();
-            info.retired = true;
         });
         self.released = true;
         self.pending.extend(rest.into_iter().map(Msg::Command));
@@ -791,6 +818,22 @@ impl Actor {
             Ok(linked) => {
                 self.relink(linked);
                 self.apply_hub().await?;
+                let id = self.id.to_string();
+                let stored = self
+                    .shared
+                    .store
+                    .call(move |store| {
+                        Ok(open(store)?
+                            .stored_commands()?
+                            .into_iter()
+                            .filter(|command| {
+                                command.execution_id == id
+                                    && matches!(command.kind, Some(Kind::DeliverInput(_)))
+                            })
+                            .collect::<Vec<_>>())
+                    })
+                    .await?;
+                self.pending.extend(stored.into_iter().map(Msg::Command));
                 let waiting: Vec<Command> = self.waiting.drain(..).collect();
                 self.pending.extend(waiting.into_iter().map(Msg::Command));
             }
@@ -1037,7 +1080,7 @@ impl Actor {
                 let Ok(cid) = Uuid::parse_str(&cid_text) else {
                     return Ok(());
                 };
-                if self.cancelled_local.contains(&cid) {
+                if self.cancelled_local.contains(&(cid, attempt)) {
                     return self.shared.cj(vec![], self_terminal).await;
                 }
                 if !live || command.execution_generation != self.generation {
@@ -1136,7 +1179,7 @@ impl Actor {
         let Ok(target_id) = Uuid::parse_str(target) else {
             return self.shared.cj(vec![], terminal_self(command)).await;
         };
-        if self.cancelled_local.contains(&target_id) {
+        if self.cancelled_local.contains(&(target_id, target_attempt)) {
             return self.shared.cj(vec![], terminal_self(command)).await;
         }
         let handed = self.handed.iter().any(|(id, _)| *id == target_id);
@@ -1157,7 +1200,7 @@ impl Actor {
             }
             return self.shared.cj(vec![], terminal_self(command)).await;
         }
-        self.cancelled_local.insert(target_id);
+        self.cancelled_local.insert((target_id, target_attempt));
         let fact = if cancel {
             Body::CancelWon(InputCancelWon {
                 command_id: target.to_owned(),

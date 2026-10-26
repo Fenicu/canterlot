@@ -60,12 +60,20 @@ struct Stat {
 
 fn stat(pid: u32) -> Result<Stat, ContainmentError> {
     let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    parse_stat(pid, &text)
+}
+
+fn parse_stat(pid: u32, text: &str) -> Result<Stat, ContainmentError> {
     // Завершающийся процесс иногда отдаёт пустой stat: считаем его исчезнувшим.
     if text.trim().is_empty() {
         return Err(io::Error::from(io::ErrorKind::NotFound).into());
     }
     let end = text.rfind(')').ok_or(ContainmentError::InvalidStat)?;
     let fields: Vec<_> = text[end + 1..].split_whitespace().collect();
+    // После удаления pid ядро может отдать stat с pgrp = -1.
+    if fields.get(2) == Some(&"-1") {
+        return Err(io::Error::from(io::ErrorKind::NotFound).into());
+    }
     let number = |index: usize| -> Result<u64, ContainmentError> {
         fields
             .get(index)
@@ -270,6 +278,18 @@ impl Containment for TreeContainment {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stat_without_process_group_is_a_disappeared_process() {
+        let error = parse_stat(42, "42 (worker) R 0 -1 -1 0 0 0 0 0 0 0 0 0 0 0 0 1 0 123")
+            .err()
+            .unwrap();
+        assert!(disappeared(&error));
+        assert!(matches!(
+            parse_stat(42, "invalid"),
+            Err(ContainmentError::InvalidStat)
+        ));
+    }
 
     #[test]
     fn disappearing_process_is_not_inspection_failure() {
