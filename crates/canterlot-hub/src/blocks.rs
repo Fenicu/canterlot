@@ -1,0 +1,257 @@
+use canterlot_proto::limits::{BLOCK_FINAL_INLINE_MAX_BYTES, MAX_BLOCK_DELTA_BYTES};
+use canterlot_proto::worker::v1::{
+    BlockDelta, BlockFinal, BlockIncomplete, BlockStarted, JournalClosed,
+};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use sqlx::PgConnection;
+use uuid::Uuid;
+
+use crate::events::{self, NewEvent, Scope};
+
+pub struct ExecutionRef {
+    pub execution_id: Uuid,
+    pub conversation_id: Uuid,
+    pub machine_id: Uuid,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BlockOutcome {
+    Applied,
+    Ignored(BlockIgnored),
+    Diagnosed(&'static str),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum BlockIgnored {
+    StaleRevision,
+    AfterFinal,
+    UnknownBlock,
+}
+
+pub fn checksum(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn id(value: &str) -> Result<Uuid, sqlx::Error> {
+    Uuid::parse_str(value)
+        .ok()
+        .filter(|id| !id.is_nil())
+        .ok_or_else(|| sqlx::Error::InvalidArgument("invalid block reference".into()))
+}
+fn optional_id(value: &str) -> Result<Option<Uuid>, sqlx::Error> {
+    if value.is_empty() {
+        Ok(None)
+    } else {
+        id(value).map(Some)
+    }
+}
+fn rev(value: u64) -> Result<i64, sqlx::Error> {
+    i64::try_from(value).map_err(|_| sqlx::Error::InvalidArgument("invalid block revision".into()))
+}
+
+#[derive(sqlx::FromRow)]
+struct Block {
+    block_id: Uuid,
+    rev: i64,
+    state: String,
+    content: String,
+    checksum: Option<String>,
+}
+async fn load(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    block_id: Uuid,
+) -> Result<Option<Block>, sqlx::Error> {
+    sqlx::query_as("select b.block_id, b.rev, b.state, b.content, b.checksum from blocks b join executions e on e.id = b.execution_id join conversations c on c.id = e.conversation_id where b.block_id = $1 and b.execution_id = $2 and b.conversation_id = $3 and c.machine_id = $4 for update of b")
+        .bind(block_id).bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_optional(conn).await
+}
+async fn emit(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    kind: &'static str,
+    payload: Value,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: run.conversation_id,
+            },
+            kind,
+            conversation_id: Some(run.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload,
+            correlation_id,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn start_block(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &BlockStarted,
+    correlation_id: Uuid,
+) -> Result<BlockOutcome, sqlx::Error> {
+    let block_id = id(&fact.block_id)?;
+    let exists: bool =
+        sqlx::query_scalar("select exists(select 1 from blocks where block_id = $1)")
+            .bind(block_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    if exists {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
+    }
+    if !matches!(
+        fact.kind.as_str(),
+        "text" | "reasoning" | "tool_call" | "tool_result" | "warning" | "error"
+    ) {
+        return Err(sqlx::Error::InvalidArgument("invalid block kind".into()));
+    }
+    let input = optional_id(&fact.input_command_id)?;
+    let parent = optional_id(&fact.parent_block_id)?;
+    let inserted = sqlx::query("insert into blocks (block_id, execution_id, conversation_id, kind, state, rev, input_command_id, parent_block_id) select $1, e.id, e.conversation_id, $4, 'streaming', $5, $6, $7 from executions e join conversations c on c.id = e.conversation_id where e.id = $2 and c.id = $3 and c.machine_id = $8 and ($6::uuid is null or exists (select 1 from commands cmd where cmd.id = $6 and cmd.execution_id = e.id and cmd.machine_id = $8 and cmd.kind = 'deliver_input')) and ($7::uuid is null or exists (select 1 from blocks b where b.block_id = $7 and b.execution_id = e.id)) on conflict (block_id) do nothing")
+        .bind(block_id).bind(run.execution_id).bind(run.conversation_id).bind(&fact.kind).bind(rev(fact.rev)?).bind(input).bind(parent).bind(run.machine_id).execute(&mut *conn).await?.rows_affected();
+    if inserted == 0 {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
+    }
+    emit(conn, run, "block_started", json!({"block_id": block_id, "rev": fact.rev, "kind": fact.kind, "input_command_id": input, "parent_block_id": parent}), correlation_id).await?;
+    Ok(BlockOutcome::Applied)
+}
+
+pub async fn apply_delta(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &BlockDelta,
+    correlation_id: Uuid,
+) -> Result<BlockOutcome, sqlx::Error> {
+    if fact.append.len() > MAX_BLOCK_DELTA_BYTES {
+        return Err(sqlx::Error::InvalidArgument("block delta limit".into()));
+    }
+    let block_id = id(&fact.block_id)?;
+    let Some(block) = load(conn, run, block_id).await? else {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
+    };
+    if block.state != "streaming" {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
+    }
+    let next = rev(fact.rev)?;
+    if next <= block.rev {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::StaleRevision));
+    }
+    if rev(fact.base_rev)? != block.rev {
+        emit(conn, run, "block_revision_gap", json!({"block_id": block_id, "current_rev": block.rev, "base_rev": fact.base_rev, "rev": fact.rev}), correlation_id).await?;
+        return Ok(BlockOutcome::Diagnosed("block_revision_gap"));
+    }
+    sqlx::query("update blocks set content = content || $2, rev = $3, updated_at = clock_timestamp() where block_id = $1")
+        .bind(block_id).bind(&fact.append).bind(next).execute(&mut *conn).await?;
+    emit(conn, run, "block_delta", json!({"block_id": block_id, "base_rev": fact.base_rev, "rev": fact.rev, "append": fact.append}), correlation_id).await?;
+    Ok(BlockOutcome::Applied)
+}
+
+pub async fn finalize(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &BlockFinal,
+    correlation_id: Uuid,
+) -> Result<BlockOutcome, sqlx::Error> {
+    if fact.text.len() > BLOCK_FINAL_INLINE_MAX_BYTES {
+        return Err(sqlx::Error::InvalidArgument("block final limit".into()));
+    }
+    let block_id = id(&fact.block_id)?;
+    let Some(block) = load(conn, run, block_id).await? else {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
+    };
+    if block.state == "final" {
+        if block.checksum.as_deref() == Some(fact.checksum.as_str()) {
+            return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
+        }
+        emit(
+            conn,
+            run,
+            "block_conflicting_final",
+            json!({"block_id": block_id, "rev": fact.rev}),
+            correlation_id,
+        )
+        .await?;
+        return Ok(BlockOutcome::Diagnosed("block_conflicting_final"));
+    }
+    let content = if fact.text_omitted {
+        &block.content
+    } else {
+        &fact.text
+    };
+    let mismatch = checksum(&block.content) != fact.checksum || checksum(content) != fact.checksum;
+    sqlx::query("update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp() where block_id = $1")
+        .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&fact.checksum).execute(&mut *conn).await?;
+    emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": fact.text, "checksum": fact.checksum, "text_omitted": fact.text_omitted}), correlation_id).await?;
+    if mismatch {
+        emit(
+            conn,
+            run,
+            "block_checksum_mismatch",
+            json!({"block_id": block_id, "rev": fact.rev}),
+            correlation_id,
+        )
+        .await?;
+        return Ok(BlockOutcome::Diagnosed("block_checksum_mismatch"));
+    }
+    Ok(BlockOutcome::Applied)
+}
+
+pub async fn mark_incomplete(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &BlockIncomplete,
+    correlation_id: Uuid,
+) -> Result<BlockOutcome, sqlx::Error> {
+    let block_id = id(&fact.block_id)?;
+    let Some(block) = load(conn, run, block_id).await? else {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
+    };
+    if block.state != "streaming" {
+        return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
+    }
+    sqlx::query("update blocks set state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp() where block_id = $1")
+        .bind(block_id).bind(rev(fact.rev)?).bind(&fact.reason).execute(&mut *conn).await?;
+    emit(
+        conn,
+        run,
+        "block_incomplete",
+        json!({"block_id": block_id, "rev": fact.rev, "reason": fact.reason}),
+        correlation_id,
+    )
+    .await?;
+    Ok(BlockOutcome::Applied)
+}
+
+pub async fn close_journal(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &JournalClosed,
+    correlation_id: Uuid,
+) -> Result<u64, sqlx::Error> {
+    let blocks: Vec<Block> = sqlx::query_as("select b.block_id, b.rev, b.state, b.content, b.checksum from blocks b join conversations c on c.id = b.conversation_id where b.execution_id = $1 and b.conversation_id = $2 and c.machine_id = $3 and b.state = 'streaming' order by b.block_id for update of b")
+        .bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_all(&mut *conn).await?;
+    let count = blocks.len() as u64;
+    for block in blocks {
+        mark_incomplete(
+            conn,
+            run,
+            &BlockIncomplete {
+                block_id: block.block_id.to_string(),
+                rev: block.rev as u64,
+                reason: fact.reason.clone(),
+            },
+            correlation_id,
+        )
+        .await?;
+    }
+    Ok(count)
+}

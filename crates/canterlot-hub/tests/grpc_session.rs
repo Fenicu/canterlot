@@ -314,7 +314,11 @@ async fn heartbeats_are_acked_while_a_large_batch_is_ingested(pool: PgPool) -> T
         .map(|seq| JournalRecord {
             seq,
             body: Some(RecordBody {
-                body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+                body: Some(record_body::Body::CommandStored(CommandStored {
+                    command_id: Uuid::now_v7().to_string(),
+                    dispatch_attempt: 0,
+                    machine_time_ms: 0,
+                })),
             }),
         })
         .collect();
@@ -383,7 +387,11 @@ async fn cj_batch_for_another_journal_ends_the_stream(pool: PgPool) -> TestResul
                 records: vec![JournalRecord {
                     seq: 1,
                     body: Some(RecordBody {
-                        body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+                        body: Some(record_body::Body::CommandStored(CommandStored {
+                            command_id: Uuid::now_v7().to_string(),
+                            dispatch_attempt: 0,
+                            machine_time_ms: 0,
+                        })),
                     }),
                 }],
             })),
@@ -409,10 +417,14 @@ async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> Te
     let journal_id = hello.cj_journal_id.clone();
     let (tx, mut control) = host.control(hello.clone()).await;
     accepted(&mut control).await;
-    let closed = |seq| JournalRecord {
+    let unknown_stored = |seq| JournalRecord {
         seq,
         body: Some(RecordBody {
-            body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+            body: Some(record_body::Body::CommandStored(CommandStored {
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 0,
+                machine_time_ms: 0,
+            })),
         }),
     };
     send(
@@ -420,7 +432,7 @@ async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> Te
         ControlUp {
             msg: Some(control_up::Msg::CjRecords(JournalRecords {
                 journal_id: journal_id.clone(),
-                records: vec![closed(1), closed(3)],
+                records: vec![unknown_stored(1), unknown_stored(3)],
             })),
         },
     )
@@ -454,7 +466,11 @@ async fn journal_gap_reconnect_resumes_from_committed_cursor(pool: PgPool) -> Te
         ControlUp {
             msg: Some(control_up::Msg::CjRecords(JournalRecords {
                 journal_id: journal_id.clone(),
-                records: vec![JournalRecord { seq: 1, body: None }, closed(2), closed(3)],
+                records: vec![
+                    JournalRecord { seq: 1, body: None },
+                    unknown_stored(2),
+                    unknown_stored(3),
+                ],
             })),
         },
     )
@@ -985,7 +1001,11 @@ async fn journal_ingestion_acks_both_streams(pool: PgPool) {
         records: vec![JournalRecord {
             seq: 1,
             body: Some(RecordBody {
-                body: Some(record_body::Body::JournalClosed(JournalClosed::default())),
+                body: Some(record_body::Body::CommandStored(CommandStored {
+                    command_id: Uuid::now_v7().to_string(),
+                    dispatch_attempt: 0,
+                    machine_time_ms: 0,
+                })),
             }),
         }],
     };

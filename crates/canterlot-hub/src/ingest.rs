@@ -4,7 +4,10 @@ use std::sync::{
 };
 
 use canterlot_proto::{
-    limits::check_record_batch,
+    limits::{
+        BLOCK_FINAL_INLINE_MAX_BYTES, MAX_BLOCK_DELTA_BYTES, MAX_SJ_BATCH_RECORDS,
+        check_record_batch,
+    },
     worker::v1::{JournalRecords, record_body::Body},
 };
 use prost::Message;
@@ -15,8 +18,10 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
+    blocks::{self, BlockOutcome, ExecutionRef},
     delivery::receipts::{
         InputReceipt, apply_input_receipt_in_tx, apply_run_finished_in_tx, sanitize_reason,
+        store_machine_time_in_tx,
     },
     events::{self, NewEvent, Scope},
     executions::{self, ExecutionError},
@@ -52,6 +57,8 @@ pub enum IngestError {
     UnknownRecord,
     #[error("foreign_journal")]
     ForeignJournal,
+    #[error("foreign_execution")]
+    ForeignExecution,
     #[error("journal_kind_mismatch")]
     JournalKindMismatch,
     #[error("batch_limit")]
@@ -139,6 +146,17 @@ impl Ingest {
     ) -> Result<IngestOutcome, IngestError> {
         require_active(&mut *self.pool.acquire().await?, machine_id, credential).await?;
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
+        if (kind == JournalKind::Sj && batch.records.len() > MAX_SJ_BATCH_RECORDS)
+            || batch.records.iter().any(|record| {
+                match record.body.as_ref().and_then(|body| body.body.as_ref()) {
+                    Some(Body::BlockDelta(fact)) => fact.append.len() > MAX_BLOCK_DELTA_BYTES,
+                    Some(Body::BlockFinal(fact)) => fact.text.len() > BLOCK_FINAL_INLINE_MAX_BYTES,
+                    _ => false,
+                }
+            })
+        {
+            return Err(IngestError::BatchLimit);
+        }
         let journal_id = parse_id(&batch.journal_id)?;
         if batch.records.iter().any(|record| record.seq == 0) {
             return Err(IngestError::InvalidRecord);
@@ -205,7 +223,21 @@ impl Ingest {
                 .as_ref()
                 .and_then(|body| body.body.as_ref())
                 .ok_or(IngestError::UnknownRecord)?;
-            let ignored = apply_body(&mut tx, machine_id, body, Uuid::now_v7()).await?;
+            let correlation_id = Uuid::now_v7();
+            let ignored = match apply_journal_body(
+                &mut tx,
+                machine_id,
+                kind,
+                journal_id,
+                record.seq,
+                body,
+                correlation_id,
+            )
+            .await?
+            {
+                Some(ignored) => ignored,
+                None => apply_body(&mut tx, machine_id, body, correlation_id).await?,
+            };
             sqlx::query("update journal_cursors set committed_seq = $3, last_record_digest = $4, updated_at = clock_timestamp() where machine_id = $1 and journal_id = $2")
                 .bind(machine_id).bind(journal_id).bind(seq).bind(&digest).execute(&mut *tx).await?;
             tx.commit().await?;
@@ -318,17 +350,29 @@ async fn apply_body(
             let dispatch_attempt = attempt(fact.dispatch_attempt)?;
             if let Some(target) = command(conn, machine_id, command_id).await? {
                 if target.kind == "deliver_input" {
-                    apply_input_receipt_in_tx(
+                    timed_receipt(
                         conn,
-                        command_id,
-                        dispatch_attempt,
+                        machine_id,
+                        &fact.command_id,
+                        fact.dispatch_attempt,
                         InputReceipt::Stored,
+                        fact.machine_time_ms,
                         correlation_id,
                     )
                     .await?;
                 } else {
-                    sqlx::query("update commands set delivery_state = 'stored_on_machine', stored_at = coalesce(stored_at, now()) where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'")
-                        .bind(command_id).bind(dispatch_attempt).execute(&mut *conn).await?;
+                    let machine_time = i64::try_from(fact.machine_time_ms)
+                        .map_err(|_| IngestError::InvalidRecord)?;
+                    sqlx::query("update commands set delivery_state = 'stored_on_machine', stored_at = coalesce(stored_at, now()), machine_stored_at_ms = coalesce(machine_stored_at_ms, $3) where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'")
+                        .bind(command_id).bind(dispatch_attempt).bind(machine_time).execute(&mut *conn).await?;
+                    store_machine_time_in_tx(
+                        conn,
+                        command_id,
+                        dispatch_attempt,
+                        &InputReceipt::Stored,
+                        machine_time,
+                    )
+                    .await?;
                 }
             }
         }
@@ -376,23 +420,25 @@ async fn apply_body(
             .await?
         }
         Body::TransmissionStarted(fact) => {
-            receipt(
+            timed_receipt(
                 conn,
                 machine_id,
                 &fact.command_id,
                 fact.dispatch_attempt,
                 InputReceipt::TransmissionStarted,
+                fact.machine_time_ms,
                 correlation_id,
             )
             .await?
         }
         Body::InputAccepted(fact) => {
-            receipt(
+            timed_receipt(
                 conn,
                 machine_id,
                 &fact.command_id,
                 fact.dispatch_attempt,
                 InputReceipt::Accepted,
+                fact.machine_time_ms,
                 correlation_id,
             )
             .await?
@@ -465,6 +511,22 @@ async fn apply_body(
             if owned.is_some() {
                 let outcome = (!fact.outcome.is_empty()).then_some(fact.outcome.as_str());
                 apply_execution_fact(conn, execution_id, to, outcome, correlation_id).await?;
+                let (state, stored_outcome): (String, Option<String>) =
+                    sqlx::query_as("select state, outcome from executions where id = $1")
+                        .bind(execution_id)
+                        .fetch_one(&mut *conn)
+                        .await?;
+                if state == to.as_str() {
+                    if to == ExecutionState::Running {
+                        sqlx::query("update executions set native_conversation_id = coalesce(nullif($2, ''), native_conversation_id) where id = $1")
+                            .bind(execution_id).bind(&fact.native_conversation_id).execute(&mut *conn).await?;
+                        sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = '{\"started\":true}' where execution_id = $1 and machine_id = $2 and kind = 'start_execution' and delivery_state <> 'completed'")
+                            .bind(execution_id).bind(machine_id).execute(&mut *conn).await?;
+                    } else if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
+                        sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = case when kind = 'stop_execution' then jsonb_build_object('outcome', $3::text) else jsonb_build_object('status', 'superseded') end, last_status = case when kind = 'interrupt' then 'superseded' else last_status end where execution_id = $1 and machine_id = $2 and kind in ('stop_execution', 'interrupt') and delivery_state <> 'completed'")
+                            .bind(execution_id).bind(machine_id).bind(stored_outcome).execute(&mut *conn).await?;
+                    }
+                }
             }
         }
         Body::RunFinished(fact) => {
@@ -474,16 +536,74 @@ async fn apply_body(
                 apply_run_finished_in_tx(conn, execution_id, command_id, correlation_id).await?;
             }
         }
+        Body::InterruptStatus(fact) => {
+            use canterlot_proto::worker::v1::InterruptState;
+            let command_id = parse_id(&fact.command_id)?;
+            let state =
+                InterruptState::try_from(fact.state).map_err(|_| IngestError::InvalidRecord)?;
+            let status = match state {
+                InterruptState::SentToAgent => "sent_to_agent",
+                InterruptState::Acknowledged => "acknowledged",
+                InterruptState::Completed => "completed",
+                InterruptState::NotApplicable => "not_applicable",
+                InterruptState::Superseded => "superseded",
+                InterruptState::RejectedStale => "rejected_stale",
+                InterruptState::Unspecified => return Err(IngestError::InvalidRecord),
+            };
+            if let Some(target) = command(conn, machine_id, command_id).await?
+                && target.kind == "interrupt"
+                && target.dispatch_attempt == attempt(fact.dispatch_attempt)?
+            {
+                let terminal = !matches!(
+                    state,
+                    InterruptState::SentToAgent | InterruptState::Acknowledged
+                );
+                sqlx::query("update commands set last_status = $2, delivery_state = case when $3 then 'completed' else delivery_state end, completed_at = case when $3 then coalesce(completed_at, now()) else completed_at end, result = case when $3 then jsonb_build_object('status', $2::text) else result end where id = $1")
+                    .bind(command_id).bind(status).bind(terminal).execute(&mut *conn).await?;
+                if let Some(execution_id) = target.execution_id
+                    && let Some(run) = owned_execution(conn, machine_id, execution_id, None).await?
+                {
+                    execution_event(
+                        conn,
+                        &run,
+                        "interrupt_state_changed",
+                        json!({"command_id": command_id, "status": status}),
+                        correlation_id,
+                    )
+                    .await?;
+                }
+            }
+        }
+        Body::WithdrawRefused(fact) => {
+            let command_id = parse_id(&fact.command_id)?;
+            if let Some(target) = command(conn, machine_id, command_id).await?
+                && target.kind == "withdraw_input"
+                && target.dispatch_attempt == attempt(fact.dispatch_attempt)?
+            {
+                sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = $2 where id = $1 and delivery_state <> 'completed'")
+                    .bind(command_id).bind(json!({"refused": sanitize_reason(&fact.reason)})).execute(&mut *conn).await?;
+            }
+        }
+        Body::AdapterDiagnostic(fact) => {
+            let execution_id = parse_id(&fact.execution_id)?;
+            if let Some(run) = owned_execution(conn, machine_id, execution_id, None).await? {
+                execution_event(
+                    conn,
+                    &run,
+                    "adapter_diagnostic",
+                    json!({"kind": fact.kind, "event_type": fact.event_type}),
+                    correlation_id,
+                )
+                .await?;
+            }
+        }
         Body::JournalClosed(_)
         | Body::BlockStarted(_)
         | Body::BlockDelta(_)
         | Body::BlockFinal(_)
         | Body::BlockIncomplete(_)
         | Body::PhaseChanged(_)
-        | Body::JournalOpened(_)
-        | Body::InterruptStatus(_)
-        | Body::WithdrawRefused(_)
-        | Body::AdapterDiagnostic(_) => return Ok(true),
+        | Body::JournalOpened(_) => return Err(IngestError::InvalidRecord),
     }
     Ok(false)
 }
@@ -591,7 +711,9 @@ impl Ingest {
                 match error {
                     IngestError::CredentialRevoked => tonic::Status::unauthenticated(message),
                     IngestError::BatchLimit => tonic::Status::resource_exhausted(message),
-                    IngestError::ForeignJournal => tonic::Status::permission_denied(message),
+                    IngestError::ForeignJournal | IngestError::ForeignExecution => {
+                        tonic::Status::permission_denied(message)
+                    }
                     IngestError::Database | IngestError::Execution => {
                         tonic::Status::internal(message)
                     }
@@ -640,4 +762,152 @@ impl crate::grpc::Ingest for Ingest {
         self.range_ack(machine_id, credential, JournalKind::Sj, records)
             .await
     }
+}
+
+async fn owned_execution(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    execution_id: Uuid,
+    generation: Option<u64>,
+) -> Result<Option<ExecutionRef>, IngestError> {
+    let generation = generation
+        .map(i64::try_from)
+        .transpose()
+        .map_err(|_| IngestError::InvalidRecord)?;
+    let conversation: Option<Uuid> = sqlx::query_scalar("select e.conversation_id from executions e join conversations c on c.id = e.conversation_id where e.id = $1 and c.machine_id = $2 and ($3::bigint is null or e.generation = $3)")
+        .bind(execution_id).bind(machine_id).bind(generation).fetch_optional(conn).await?;
+    Ok(conversation.map(|conversation_id| ExecutionRef {
+        execution_id,
+        conversation_id,
+        machine_id,
+    }))
+}
+
+async fn execution_event(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    kind: &'static str,
+    payload: serde_json::Value,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: run.conversation_id,
+            },
+            kind,
+            conversation_id: Some(run.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload,
+            correlation_id,
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn apply_journal_body(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    kind: JournalKind,
+    journal_id: Uuid,
+    seq: u64,
+    body: &Body,
+    correlation_id: Uuid,
+) -> Result<Option<bool>, IngestError> {
+    if let Body::JournalOpened(fact) = body {
+        if kind != JournalKind::Sj || seq != 1 {
+            return Err(IngestError::InvalidRecord);
+        }
+        let execution_id = parse_id(&fact.execution_id)?;
+        owned_execution(conn, machine_id, execution_id, Some(fact.generation))
+            .await?
+            .ok_or(IngestError::ForeignExecution)?;
+        sqlx::query("update journal_cursors set execution_id = $2 where journal_id = $1")
+            .bind(journal_id)
+            .bind(execution_id)
+            .execute(conn)
+            .await?;
+        return Ok(Some(false));
+    }
+    if !matches!(
+        body,
+        Body::BlockStarted(_)
+            | Body::BlockDelta(_)
+            | Body::BlockFinal(_)
+            | Body::BlockIncomplete(_)
+            | Body::PhaseChanged(_)
+            | Body::JournalClosed(_)
+    ) {
+        return Ok(None);
+    }
+    if kind != JournalKind::Sj {
+        return Err(IngestError::InvalidRecord);
+    }
+    let execution_id: Option<Uuid> =
+        sqlx::query_scalar("select execution_id from journal_cursors where journal_id = $1")
+            .bind(journal_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let execution_id = execution_id.ok_or(IngestError::InvalidRecord)?;
+    let run = owned_execution(conn, machine_id, execution_id, None)
+        .await?
+        .ok_or(IngestError::ForeignExecution)?;
+    let outcome = match body {
+        Body::BlockStarted(fact) => blocks::start_block(conn, &run, fact, correlation_id).await,
+        Body::BlockDelta(fact) => blocks::apply_delta(conn, &run, fact, correlation_id).await,
+        Body::BlockFinal(fact) => blocks::finalize(conn, &run, fact, correlation_id).await,
+        Body::BlockIncomplete(fact) => blocks::mark_incomplete(conn, &run, fact, correlation_id).await,
+        Body::PhaseChanged(fact) => {
+            if parse_id(&fact.execution_id)? != run.execution_id { return Err(IngestError::ForeignExecution); }
+            sqlx::query("update executions set phase = $2, phase_at = clock_timestamp() where id = $1")
+                .bind(run.execution_id).bind(&fact.phase).execute(&mut *conn).await?;
+            execution_event(conn, &run, "phase_changed", json!({"phase": fact.phase}), correlation_id).await?;
+            return Ok(Some(false));
+        }
+        Body::JournalClosed(fact) => {
+            if parse_id(&fact.execution_id)? != run.execution_id || owned_execution(conn, machine_id, run.execution_id, Some(fact.generation)).await?.is_none() { return Err(IngestError::ForeignExecution); }
+            blocks::close_journal(conn, &run, fact, correlation_id).await?;
+            sqlx::query("update journal_cursors set closed = true where journal_id = $1").bind(journal_id).execute(&mut *conn).await?;
+            execution_event(conn, &run, "journal_closed", json!({"reason": fact.reason, "generation": fact.generation, "journal_id": journal_id}), correlation_id).await?;
+            return Ok(Some(false));
+        }
+        _ => return Err(IngestError::InvalidRecord),
+    }.map_err(|error| match error { sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord, _ => IngestError::Database })?;
+    Ok(Some(matches!(outcome, BlockOutcome::Ignored(_))))
+}
+
+async fn timed_receipt(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    command_id: &str,
+    dispatch_attempt: u32,
+    receipt: InputReceipt,
+    machine_time_ms: u64,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let command_id = parse_id(command_id)?;
+    let dispatch_attempt = attempt(dispatch_attempt)?;
+    if command(conn, machine_id, command_id).await?.is_some() {
+        let machine_time_ms =
+            i64::try_from(machine_time_ms).map_err(|_| IngestError::InvalidRecord)?;
+        apply_input_receipt_in_tx(
+            conn,
+            command_id,
+            dispatch_attempt,
+            receipt.clone(),
+            correlation_id,
+        )
+        .await?;
+        store_machine_time_in_tx(
+            conn,
+            command_id,
+            dispatch_attempt,
+            &receipt,
+            machine_time_ms,
+        )
+        .await?;
+    }
+    Ok(())
 }

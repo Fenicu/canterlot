@@ -673,7 +673,7 @@ async fn receipt_mapping_and_run_finished(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn execution_facts_and_ignored_bodies_are_consumed(pool: PgPool) -> TestResult {
+async fn execution_facts_and_unknown_command_receipts_are_consumed(pool: PgPool) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let execution =
         executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
@@ -693,12 +693,12 @@ async fn execution_facts_and_ignored_bodies_are_consumed(pool: PgPool) -> TestRe
             fact("starting"),
             fact("running"),
             fact("created"),
-            record_body::Body::JournalClosed(JournalClosed::default()),
-            record_body::Body::BlockStarted(BlockStarted::default()),
-            record_body::Body::BlockDelta(BlockDelta::default()),
-            record_body::Body::BlockFinal(BlockFinal::default()),
-            record_body::Body::BlockIncomplete(BlockIncomplete::default()),
-            record_body::Body::PhaseChanged(PhaseChanged::default()),
+            stored(Uuid::now_v7()),
+            stored(Uuid::now_v7()),
+            stored(Uuid::now_v7()),
+            stored(Uuid::now_v7()),
+            stored(Uuid::now_v7()),
+            stored(Uuid::now_v7()),
         ],
     );
     assert_eq!(
@@ -810,10 +810,7 @@ async fn concurrent_registration_has_one_owner(pool: PgPool) -> TestResult {
     let first = testkit::seed(&pool).await;
     let second = testkit::seed(&pool).await;
     let journal = Uuid::now_v7();
-    let records = batch(
-        journal,
-        vec![record_body::Body::JournalClosed(JournalClosed::default())],
-    );
+    let records = batch(journal, vec![stored(Uuid::now_v7())]);
     let ingest = Ingest::new(pool.clone());
     let first_credential = first.credential_digest();
     let second_credential = second.credential_digest();
@@ -1064,7 +1061,7 @@ async fn late_start_rejection_for_stopped_execution_is_consumed(pool: PgPool) ->
                 dispatch_attempt: 0,
                 reason: "resource_limit".into(),
             }),
-            record_body::Body::JournalClosed(JournalClosed::default()),
+            stored(Uuid::now_v7()),
         ],
     );
     assert_eq!(
@@ -1439,12 +1436,30 @@ async fn journal_id_has_a_single_owner_in_the_schema(pool: PgPool) -> TestResult
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn ignored_records_are_counted_per_ingest(pool: PgPool) -> TestResult {
-    let (seed, _, _) = setup(&pool).await;
+    let (seed, execution, _) = setup(&pool).await;
+    let block_id = Uuid::now_v7().to_string();
     let records = batch(
         Uuid::now_v7(),
         vec![
-            record_body::Body::JournalClosed(JournalClosed::default()),
-            record_body::Body::PhaseChanged(PhaseChanged::default()),
+            opened(&execution),
+            record_body::Body::BlockStarted(BlockStarted {
+                block_id: block_id.clone(),
+                rev: 0,
+                kind: "text".into(),
+                ..Default::default()
+            }),
+            record_body::Body::BlockDelta(BlockDelta {
+                block_id: block_id.clone(),
+                base_rev: 0,
+                rev: 0,
+                append: "ignored".into(),
+            }),
+            record_body::Body::BlockDelta(BlockDelta {
+                block_id,
+                base_rev: 0,
+                rev: 0,
+                append: "ignored".into(),
+            }),
         ],
     );
     let first = Ingest::new(pool.clone());
@@ -1528,7 +1543,7 @@ async fn assert_isolated(
     let before = world(pool, victim.seed.conversation_id).await;
     let journal = Uuid::now_v7();
     let mut bodies = body(&victim);
-    bodies.push(record_body::Body::JournalClosed(JournalClosed::default()));
+    bodies.push(stored(Uuid::now_v7()));
     let count = bodies.len() as u64;
     let outcome = Ingest::new(pool.clone())
         .apply_batch(
@@ -1717,5 +1732,619 @@ async fn latest_record_replays_compare_committed_body_digest(pool: PgPool) -> Te
             .fetch_one(&pool)
             .await?;
     assert_eq!(retained, digest);
+    Ok(())
+}
+
+fn opened(execution: &executions::StartedExecution) -> record_body::Body {
+    record_body::Body::JournalOpened(JournalOpened {
+        execution_id: execution.execution_id.to_string(),
+        generation: execution.generation as u64,
+        supervisor_protocol_version: 1,
+    })
+}
+
+async fn control_command(
+    pool: &PgPool,
+    seed: &Seed,
+    execution: &executions::StartedExecution,
+    kind: &str,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("insert into commands (id, machine_id, conversation_id, execution_id, execution_generation, kind, payload, delivery_state) values ($1, $2, $3, $4, $5, $6, '{}', 'pending')")
+        .bind(id).bind(seed.machine_id).bind(seed.conversation_id).bind(execution.execution_id).bind(execution.generation).bind(kind).execute(pool).await.unwrap();
+    id
+}
+async fn command_result(pool: &PgPool, id: Uuid) -> (String, Option<String>, Option<Value>) {
+    sqlx::query_as("select delivery_state, last_status, result from commands where id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sj_batch_for_foreign_execution_is_rejected(pool: PgPool) -> TestResult {
+    let (victim, execution, _) = setup(&pool).await;
+    let attacker = testkit::seed(&pool).await;
+    let journal = Uuid::now_v7();
+    let before = world(&pool, victim.conversation_id).await;
+    let result = Ingest::new(pool.clone())
+        .apply_batch(
+            attacker.machine_id,
+            &attacker.credential_digest(),
+            JournalKind::Sj,
+            &batch(journal, vec![opened(&execution)]),
+        )
+        .await;
+    assert_eq!(result.unwrap_err().to_string(), "foreign_execution");
+    assert_eq!(world(&pool, victim.conversation_id).await, before);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("select count(*) from journal_cursors where journal_id = $1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?,
+        0
+    );
+    let mut wrong_generation = opened(&execution);
+    if let record_body::Body::JournalOpened(fact) = &mut wrong_generation {
+        fact.generation += 1;
+    }
+    let result = Ingest::new(pool.clone())
+        .apply_batch(
+            victim.machine_id,
+            &victim.credential_digest(),
+            JournalKind::Sj,
+            &batch(journal, vec![wrong_generation]),
+        )
+        .await;
+    assert_eq!(result.unwrap_err().to_string(), "foreign_execution");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sj_record_before_journal_opened_is_invalid(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let facts = vec![
+        record_body::Body::BlockStarted(BlockStarted {
+            block_id: Uuid::now_v7().to_string(),
+            kind: "text".into(),
+            ..Default::default()
+        }),
+        record_body::Body::BlockDelta(BlockDelta {
+            block_id: Uuid::now_v7().to_string(),
+            rev: 1,
+            ..Default::default()
+        }),
+        record_body::Body::BlockFinal(BlockFinal {
+            block_id: Uuid::now_v7().to_string(),
+            ..Default::default()
+        }),
+        record_body::Body::BlockIncomplete(BlockIncomplete {
+            block_id: Uuid::now_v7().to_string(),
+            ..Default::default()
+        }),
+        record_body::Body::PhaseChanged(PhaseChanged {
+            execution_id: execution.execution_id.to_string(),
+            phase: "idle".into(),
+        }),
+        record_body::Body::JournalClosed(JournalClosed {
+            execution_id: execution.execution_id.to_string(),
+            generation: execution.generation as u64,
+            reason: "normal_exit".into(),
+        }),
+    ];
+    for kind in [JournalKind::Sj, JournalKind::Cj] {
+        for fact in &facts {
+            let result = ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &seed.credential_digest(),
+                    kind,
+                    &batch(Uuid::now_v7(), vec![fact.clone()]),
+                )
+                .await;
+            assert!(matches!(result, Err(IngestError::InvalidRecord)));
+        }
+    }
+    assert!(matches!(
+        ingest
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &batch(Uuid::now_v7(), vec![opened(&execution)])
+            )
+            .await,
+        Err(IngestError::InvalidRecord)
+    ));
+    let journal = Uuid::now_v7();
+    let result = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(journal, vec![stored(Uuid::now_v7()), opened(&execution)]),
+        )
+        .await;
+    assert!(matches!(result, Err(IngestError::InvalidRecord)));
+    assert_eq!(cursor(&pool, journal).await, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn phase_changed_updates_execution_phase(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    let before = Utc::now();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    opened(&execution),
+                    record_body::Body::PhaseChanged(PhaseChanged {
+                        execution_id: execution.execution_id.to_string(),
+                        phase: "awaiting_input".into(),
+                    }),
+                ],
+            ),
+        )
+        .await?;
+    let row: (String, chrono::DateTime<Utc>) =
+        sqlx::query_as("select phase, phase_at from executions where id = $1")
+            .bind(execution.execution_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(row.0, "awaiting_input");
+    assert!(row.1 >= before);
+    assert_eq!(
+        sqlx::query_scalar::<_, Uuid>(
+            "select execution_id from journal_cursors where journal_id = $1"
+        )
+        .bind(journal)
+        .fetch_one(&pool)
+        .await?,
+        execution.execution_id
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from events where execution_id = $1 and kind = 'phase_changed'"
+        )
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await?,
+        1
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn execution_running_completes_start_command_and_records_native_id(
+    pool: PgPool,
+) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let execution = start_only(&pool, &seed).await;
+    let mut running = execution_fact(execution.execution_id, execution.generation, "running");
+    if let record_body::Body::ExecutionState(fact) = &mut running {
+        fact.native_conversation_id = "native-id".into();
+    }
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    opened(&execution),
+                    execution_fact(execution.execution_id, execution.generation, "starting"),
+                    running,
+                ],
+            ),
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, String>(
+            "select native_conversation_id from executions where id = $1"
+        )
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await?,
+        "native-id"
+    );
+    let command = command_result(&pool, execution.command_id).await;
+    assert_eq!(command.0, "completed");
+    assert_eq!(command.2, Some(json!({"started": true})));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn terminal_execution_completes_stop_and_interrupt_commands(pool: PgPool) -> TestResult {
+    for (state, outcome) in [("stopped", "normal_exit"), ("failed", "crashed")] {
+        let (seed, execution, _) = setup(&pool).await;
+        let stop = control_command(&pool, &seed, &execution, "stop_execution").await;
+        let stop2 = control_command(&pool, &seed, &execution, "stop_execution").await;
+        let interrupt = control_command(&pool, &seed, &execution, "interrupt").await;
+        let completed = control_command(&pool, &seed, &execution, "stop_execution").await;
+        sqlx::query("update commands set delivery_state = 'completed', result = '{\"prior\":true}' where id = $1").bind(completed).execute(&pool).await?;
+        let mut terminal = execution_fact(execution.execution_id, execution.generation, state);
+        if let record_body::Body::ExecutionState(fact) = &mut terminal {
+            fact.outcome = outcome.into();
+        }
+        Ingest::new(pool.clone())
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &batch(
+                    Uuid::now_v7(),
+                    vec![
+                        opened(&execution),
+                        execution_fact(execution.execution_id, execution.generation, "stopping"),
+                        terminal,
+                    ],
+                ),
+            )
+            .await?;
+        for id in [stop, stop2] {
+            let result = command_result(&pool, id).await;
+            assert_eq!(result.0, "completed");
+            assert_eq!(result.2, Some(json!({"outcome": outcome})));
+        }
+        let result = command_result(&pool, interrupt).await;
+        assert_eq!(result.0, "completed");
+        assert_eq!(result.1.as_deref(), Some("superseded"));
+        assert_eq!(
+            command_result(&pool, completed).await.2,
+            Some(json!({"prior":true}))
+        );
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn interrupt_statuses_complete_command_on_terminal_status(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    for (terminal, name) in [
+        (InterruptState::Completed, "completed"),
+        (InterruptState::NotApplicable, "not_applicable"),
+        (InterruptState::Superseded, "superseded"),
+        (InterruptState::RejectedStale, "rejected_stale"),
+    ] {
+        let command = control_command(&pool, &seed, &execution, "interrupt").await;
+        let journal = Uuid::now_v7();
+        for (index, status) in [
+            InterruptState::SentToAgent,
+            InterruptState::Acknowledged,
+            terminal,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut records = batch(
+                journal,
+                vec![record_body::Body::InterruptStatus(InterruptStatus {
+                    command_id: command.to_string(),
+                    dispatch_attempt: 0,
+                    state: status.into(),
+                })],
+            );
+            records.records[0].seq = index as u64 + 1;
+            ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &seed.credential_digest(),
+                    JournalKind::Sj,
+                    &records,
+                )
+                .await?;
+            let result = command_result(&pool, command).await;
+            assert_eq!(result.0, if index == 2 { "completed" } else { "pending" });
+            assert_eq!(
+                result.1.as_deref(),
+                Some(if index == 0 {
+                    "sent_to_agent"
+                } else if index == 1 {
+                    "acknowledged"
+                } else {
+                    name
+                })
+            );
+        }
+        assert_eq!(sqlx::query_scalar::<_, i64>("select count(*) from events where kind = 'interrupt_state_changed' and payload->>'command_id' = $1").bind(command.to_string()).fetch_one(&pool).await?, 3);
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn withdraw_refused_completes_withdraw_command(pool: PgPool) -> TestResult {
+    let (seed, execution, input) = setup(&pool).await;
+    let withdraw = control_command(&pool, &seed, &execution, "withdraw_input").await;
+    sqlx::query("update commands set target_command_id = $2 where id = $1")
+        .bind(withdraw)
+        .bind(input.command_id)
+        .execute(&pool)
+        .await?;
+    let before = snapshot(&pool, input.input_id).await;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![record_body::Body::WithdrawRefused(WithdrawRefused {
+                    command_id: withdraw.to_string(),
+                    dispatch_attempt: 0,
+                    reason: "already_transmitting".into(),
+                })],
+            ),
+        )
+        .await?;
+    let result = command_result(&pool, withdraw).await;
+    assert_eq!(result.0, "completed");
+    assert_eq!(result.2, Some(json!({"refused": "already_transmitting"})));
+    assert_eq!(snapshot(&pool, input.input_id).await, before);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_times_are_stored_from_records(pool: PgPool) -> TestResult {
+    let (seed, execution, input) = setup(&pool).await;
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    record_body::Body::CommandStored(CommandStored {
+                        command_id: execution.command_id.to_string(),
+                        dispatch_attempt: 0,
+                        machine_time_ms: 101,
+                    }),
+                    record_body::Body::CommandStored(CommandStored {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 1,
+                        machine_time_ms: 202,
+                    }),
+                    record_body::Body::TransmissionStarted(InputTransmissionStarted {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 1,
+                        machine_time_ms: 303,
+                    }),
+                    record_body::Body::InputAccepted(InputAccepted {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 1,
+                        machine_time_ms: 404,
+                    }),
+                ],
+            ),
+        )
+        .await?;
+    for (id, value) in [(execution.command_id, 101), (input.command_id, 202)] {
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("select machine_stored_at_ms from commands where id = $1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await?,
+            value
+        );
+    }
+    let times: (i64, i64) = sqlx::query_as(
+        "select transmitted_machine_ms, agent_confirmed_machine_ms from inputs where id = $1",
+    )
+    .bind(input.input_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(times, (303, 404));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn adapter_diagnostic_and_new_status_records_are_machine_scoped(pool: PgPool) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let attacker = testkit::seed(&pool).await;
+    let interrupt = control_command(&pool, &seed, &execution, "interrupt").await;
+    let withdraw = control_command(&pool, &seed, &execution, "withdraw_input").await;
+    let bodies = vec![
+        record_body::Body::InterruptStatus(InterruptStatus {
+            command_id: interrupt.to_string(),
+            dispatch_attempt: 0,
+            state: InterruptState::Completed.into(),
+        }),
+        record_body::Body::WithdrawRefused(WithdrawRefused {
+            command_id: withdraw.to_string(),
+            dispatch_attempt: 0,
+            reason: "already_transmitting".into(),
+        }),
+        record_body::Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: execution.execution_id.to_string(),
+            kind: "unknown_optional".into(),
+            event_type: "notice".into(),
+        }),
+    ];
+    let ingest = Ingest::new(pool.clone());
+    ingest
+        .apply_batch(
+            attacker.machine_id,
+            &attacker.credential_digest(),
+            JournalKind::Sj,
+            &batch(Uuid::now_v7(), bodies.clone()),
+        )
+        .await?;
+    assert_eq!(command_result(&pool, interrupt).await.0, "pending");
+    assert_eq!(command_result(&pool, withdraw).await.0, "pending");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from events where kind = 'adapter_diagnostic'"
+        )
+        .fetch_one(&pool)
+        .await?,
+        0
+    );
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(Uuid::now_v7(), bodies),
+        )
+        .await?;
+    let payload: Value =
+        sqlx::query_scalar("select payload from events where kind = 'adapter_diagnostic'")
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(
+        payload,
+        json!({"kind":"unknown_optional", "event_type":"notice"})
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_times_survive_late_receipts_and_reset_for_new_attempt(pool: PgPool) -> TestResult {
+    let (seed, _, input) = setup(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let time_fact = |attempt, time| {
+        record_body::Body::CommandStored(CommandStored {
+            command_id: input.command_id.to_string(),
+            dispatch_attempt: attempt,
+            machine_time_ms: time,
+        })
+    };
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    time_fact(1, 100),
+                    record_body::Body::InputWithdrawn(InputWithdrawn {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 1,
+                    }),
+                ],
+            ),
+        )
+        .await?;
+    assert!(matches!(
+        dispatch_next(
+            &pool,
+            seed.conversation_id,
+            GateInputs {
+                machine_available: true
+            },
+            Uuid::now_v7()
+        )
+        .await?,
+        DispatchOutcome::Dispatched { attempt: 2, .. }
+    ));
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "select machine_stored_at_ms from commands where id = $1"
+        )
+        .bind(input.command_id)
+        .fetch_one(&pool)
+        .await?,
+        None
+    );
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    time_fact(1, 999),
+                    record_body::Body::InputAccepted(InputAccepted {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 2,
+                        machine_time_ms: 400,
+                    }),
+                    time_fact(2, 200),
+                    record_body::Body::TransmissionStarted(InputTransmissionStarted {
+                        command_id: input.command_id.to_string(),
+                        dispatch_attempt: 2,
+                        machine_time_ms: 300,
+                    }),
+                    time_fact(2, 888),
+                ],
+            ),
+        )
+        .await?;
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<i64>>(
+            "select machine_stored_at_ms from commands where id = $1"
+        )
+        .bind(input.command_id)
+        .fetch_one(&pool)
+        .await?,
+        Some(200)
+    );
+    let row: (String, i64, i64) = sqlx::query_as("select state, transmitted_machine_ms, agent_confirmed_machine_ms from inputs where id = $1").bind(input.input_id).fetch_one(&pool).await?;
+    assert_eq!(row, ("accepted".into(), 300, 400));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn bound_sj_rejects_foreign_phase_and_close_without_effect(pool: PgPool) -> TestResult {
+    let (victim, victim_execution, _) = setup(&pool).await;
+    let (seed, execution, _) = setup(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(journal, vec![opened(&execution)]),
+        )
+        .await?;
+    let before = world(&pool, victim.conversation_id).await;
+    for body in [
+        record_body::Body::PhaseChanged(PhaseChanged {
+            execution_id: victim_execution.execution_id.to_string(),
+            phase: "awaiting_input".into(),
+        }),
+        record_body::Body::JournalClosed(JournalClosed {
+            execution_id: victim_execution.execution_id.to_string(),
+            generation: victim_execution.generation as u64,
+            reason: "foreign".into(),
+        }),
+    ] {
+        let mut records = batch(journal, vec![body]);
+        records.records[0].seq = 2;
+        assert!(matches!(
+            ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &seed.credential_digest(),
+                    JournalKind::Sj,
+                    &records
+                )
+                .await,
+            Err(IngestError::ForeignExecution)
+        ));
+        assert_eq!(cursor(&pool, journal).await, 1);
+        assert_eq!(world(&pool, victim.conversation_id).await, before);
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "select closed from journal_cursors where journal_id = $1"
+            )
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?
+        );
+    }
     Ok(())
 }
