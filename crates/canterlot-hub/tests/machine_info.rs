@@ -205,9 +205,66 @@ async fn failed_metrics_apply_does_not_end_the_stream(pool: PgPool) -> TestResul
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> TestResult {
+    use canterlot_hub::session::Availability;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
+
     let s = wire_seed(&pool).await;
+    // Фоновый проектор не должен фиксировать промежуточные состояния подключения.
+    let projector = Singleton::acquire(&pool.connect_options(), "machine_status")
+        .await?
+        .unwrap();
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
-    let c = connect(&hub, &s, Uuid::now_v7(), true, 1000).await;
+    let journal = Uuid::now_v7();
+    let c = connect(&hub, &s, journal, true, 1000).await;
+    let channel = Endpoint::from_shared(format!("https://{}", hub.addr))?
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(&hub.pki.ca_pem))
+                .domain_name("localhost"),
+        )?
+        .connect()
+        .await?;
+    let (data_tx, data_rx) = tokio::sync::mpsc::channel(1);
+    data_tx
+        .send(DataUp {
+            msg: Some(data_up::Msg::Hello(Hello {
+                installation_id: hub.installation.installation_id.to_string(),
+                restore_generation: hub.installation.restore_generation.to_string(),
+                machine_id: s.machine_id.to_string(),
+                connection_id: c.connection.to_string(),
+                cj_journal_id: journal.to_string(),
+                boot_id: Uuid::now_v7().to_string(),
+                protocol_version: 1,
+                stream_kind: StreamKind::Data as i32,
+                ..Default::default()
+            })),
+        })
+        .await?;
+    let mut request = tonic::Request::new(ReceiverStream::new(data_rx));
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {}", s.machine_id).parse()?);
+    let mut data = worker_data_client::WorkerDataClient::new(channel)
+        .data(request)
+        .await?
+        .into_inner();
+    assert!(matches!(
+        tokio::time::timeout(WAIT, data.message())
+            .await??
+            .unwrap()
+            .msg,
+        Some(data_down::Msg::HelloReply(HelloReply {
+            result: Some(hello_reply::Result::Accepted(_)),
+        }))
+    ));
+    tokio::time::timeout(WAIT, async {
+        while hub.registry.availability(s.machine_id) != Availability::Available {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
     machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
     let n = count(
         &pool,
@@ -215,10 +272,6 @@ async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> Tes
     )
     .await;
     assert_eq!(n, 1);
-    assert_eq!(
-        machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?,
-        0
-    );
     drop(c);
     tokio::time::timeout(WAIT, async {
         while hub.registry.session_info(s.machine_id).is_some() {
@@ -226,6 +279,7 @@ async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> Tes
         }
     })
     .await?;
+    machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
     machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
     assert_eq!(
         count(
@@ -237,6 +291,7 @@ async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> Tes
     );
     hub.shutdown.send(()).unwrap();
     hub.join.await??;
+    projector.release().await;
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
