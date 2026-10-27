@@ -427,7 +427,8 @@ async fn fired_message_respects_pause_and_holds(pool: PgPool) {
             s.conversation_id,
             GateInputs {
                 machine_available: true,
-                machine_reconciled: true
+                machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7()
         )

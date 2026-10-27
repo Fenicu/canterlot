@@ -12,7 +12,7 @@ use crate::{
     model::{InputState, PauseReason, RunSlot},
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum CancelOutcome {
     Cancelled,
@@ -20,7 +20,7 @@ pub enum CancelOutcome {
     TooLate { state: InputState },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StopOutcome {
     Requested {
@@ -29,7 +29,7 @@ pub enum StopOutcome {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StopExecutionOutcome {
     Requested { command_id: Uuid, force: bool },
@@ -37,7 +37,7 @@ pub enum StopExecutionOutcome {
     NothingToStop,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ContinueOutcome {
     pub removed: Vec<PauseReason>,
     pub remaining: Vec<PauseReason>,
@@ -358,16 +358,38 @@ pub async fn continue_queue(
     const OPERATION: &str = "continue_queue";
     let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
     let mut tx = pool.begin().await?;
-    let mut queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
+    let _queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
     if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
         tx.commit().await?;
         return Ok(outcome);
     }
+    let outcome = continue_queue_in_tx(&mut tx, owner_id, conversation_id, correlation_id).await?;
+    record(
+        &mut tx,
+        owner_id,
+        idempotency_key,
+        OPERATION,
+        &hash,
+        conversation_id,
+        &outcome,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+pub async fn continue_queue_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<ContinueOutcome, ControlError> {
+    let mut queue = lock_conversation(conn, owner_id, conversation_id).await?;
     let owner_lost: bool = sqlx::query_scalar(
         "select exists(select 1 from executions where conversation_id = $1 and state = 'owner_lost')",
     )
     .bind(conversation_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     let (remaining, removed): (Vec<_>, Vec<_>) = std::mem::take(&mut queue.pause_reasons.0)
         .into_iter()
@@ -378,10 +400,10 @@ pub async fn continue_queue(
     let outcome = ContinueOutcome { removed, remaining };
     queue.pause_reasons.0 = outcome.remaining.clone();
     queue
-        .save(&mut tx, &queue.slot()?, None, correlation_id)
+        .save(conn, &queue.slot()?, None, correlation_id)
         .await?;
     events::append(
-        &mut tx,
+        conn,
         queue_event(
             &queue,
             if outcome.remaining.is_empty() {
@@ -394,17 +416,6 @@ pub async fn continue_queue(
         ),
     )
     .await?;
-    record(
-        &mut tx,
-        owner_id,
-        idempotency_key,
-        OPERATION,
-        &hash,
-        conversation_id,
-        &outcome,
-    )
-    .await?;
-    tx.commit().await?;
     Ok(outcome)
 }
 

@@ -18,6 +18,7 @@ pub enum Point {
     BeforeSjCommit,
     BeforeAckSend,
     SchedulerBeforeSubmit,
+    ResumeAfterStart,
     DropBusNotice,
 }
 

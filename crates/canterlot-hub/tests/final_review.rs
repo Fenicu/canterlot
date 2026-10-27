@@ -57,6 +57,7 @@ async fn dispatch(pool: &PgPool, seed: &Seed) -> DispatchOutcome {
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -206,6 +207,7 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         correlation,
     )

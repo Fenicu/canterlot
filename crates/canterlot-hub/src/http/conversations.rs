@@ -21,6 +21,203 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(set_groups))
         .routes(routes!(set_crunch))
         .routes(routes!(read))
+        .routes(routes!(decision))
+        .routes(routes!(interrupt))
+        .routes(routes!(stop))
+        .routes(routes!(continue_queue))
+        .routes(routes!(cancel_input))
+        .routes(routes!(settings))
+        .routes(routes!(submit))
+        .routes(routes!(start_execution))
+        .routes(routes!(resume))
+}
+#[derive(Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ResumeBody {
+    #[serde(default)]
+    continue_queue: bool,
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/executions",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=201,description="Исполнение создано",body=crate::executions::StartedExecution)))]
+async fn start_execution(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<(StatusCode, Json<crate::executions::StartedExecution>), ApiError> {
+    let value = crate::executions::start_with_key(
+        &s.pool,
+        o.owner_id,
+        id,
+        &key,
+        (false, false),
+        c,
+        #[cfg(feature = "fault-injection")]
+        &s.scheduler.faults,
+    )
+    .await?;
+    s.dispatcher.trigger(id);
+    Ok((StatusCode::CREATED, Json(value)))
+}
+#[utoipa::path(post,path="/api/v1/conversations/{id}/resume",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=ResumeBody,responses((status=201,description="Исполнение возобновлено",body=crate::executions::StartedExecution)))]
+async fn resume(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<ResumeBody>,
+) -> Result<(StatusCode, Json<crate::executions::StartedExecution>), ApiError> {
+    let value = crate::executions::start_with_key(
+        &s.pool,
+        o.owner_id,
+        id,
+        &key,
+        (true, body.continue_queue),
+        c,
+        #[cfg(feature = "fault-injection")]
+        &s.scheduler.faults,
+    )
+    .await?;
+    s.dispatcher.trigger(id);
+    Ok((StatusCode::CREATED, Json(value)))
+}
+#[derive(Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SubmitBody {
+    content: Vec<crate::delivery::ContentBlock>,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
+    retry_of: Option<Uuid>,
+}
+#[utoipa::path(post,path="/api/v1/conversations/{id}/inputs",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=SubmitBody,responses((status=201,description="Сообщение в очереди",body=crate::delivery::SubmittedInput)))]
+async fn submit(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<SubmitBody>,
+) -> Result<(StatusCode, Json<crate::delivery::SubmittedInput>), ApiError> {
+    let result = conversations::submit_message(
+        &s.pool,
+        conversations::SubmitMessage {
+            owner_id: o.owner_id,
+            conversation_id: id,
+            key,
+            content: body.content,
+            attachment_ids: body.attachment_ids,
+            retry_of: body.retry_of,
+            received_at: chrono::Utc::now(),
+        },
+        c,
+    )
+    .await?;
+    s.dispatcher.trigger(id);
+    Ok((StatusCode::CREATED, Json(result)))
+}
+#[utoipa::path(patch,path="/api/v1/conversations/{id}/settings",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=conversations::SettingsPatch,responses((status=200,description="Настройки изменены",body=conversations::SettingsView)))]
+async fn settings(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(patch): ApiJson<conversations::SettingsPatch>,
+) -> Result<Json<conversations::SettingsView>, ApiError> {
+    Ok(Json(
+        conversations::change_settings(&s.pool, o.owner_id, id, &key, patch, c).await?,
+    ))
+}
+#[derive(Default, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct StopBody {
+    #[serde(default)]
+    force: bool,
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/interrupt",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Остановка запрошена",body=crate::delivery::control::StopOutcome)))]
+async fn interrupt(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::StopOutcome>, ApiError> {
+    let result = crate::delivery::control::request_stop(&s.pool, o.owner_id, id, &key, c).await?;
+    s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/stop",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=StopBody,responses((status=200,description="Остановка исполнения запрошена",body=crate::delivery::control::StopExecutionOutcome)))]
+async fn stop(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<StopBody>,
+) -> Result<Json<crate::delivery::control::StopExecutionOutcome>, ApiError> {
+    let result = crate::delivery::control::request_stop_execution(
+        &s.pool, o.owner_id, id, body.force, &key, c,
+    )
+    .await?;
+    s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/queue/continue",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Очередь продолжена",body=crate::delivery::control::ContinueOutcome)))]
+async fn continue_queue(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::ContinueOutcome>, ApiError> {
+    let result = crate::delivery::control::continue_queue(&s.pool, o.owner_id, id, &key, c).await?;
+    s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/inputs/{id}/cancel",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Отмена запрошена",body=crate::delivery::control::CancelOutcome)))]
+async fn cancel_input(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::CancelOutcome>, ApiError> {
+    let conversation: Option<Uuid> =
+        sqlx::query_scalar("select conversation_id from inputs where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
+    let result = crate::delivery::control::cancel_input(&s.pool, o.owner_id, id, &key, c).await?;
+    if let Some(id) = conversation {
+        s.dispatcher.trigger(id);
+    }
+    Ok(Json(result))
+}
+#[utoipa::path(post,path="/api/v1/conversations/{id}/requests/{request_id}/decision",tag="conversations",params(("id"=Uuid,Path),("request_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=501,description="Решение пока не поддерживается")))]
+async fn decision(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, _request_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(_key): IdempotencyKey,
+) -> Result<StatusCode, ApiError> {
+    let owned: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+    )
+    .bind(id)
+    .bind(o.owner_id)
+    .fetch_one(&s.pool)
+    .await?;
+    if !owned {
+        return Err(ApiError::new(ErrorCode::NotFound));
+    }
+    Err(ApiError::new(ErrorCode::NotImplemented))
 }
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
@@ -176,10 +373,15 @@ async fn get(
             .iter()
             .any(|h| matches!(h, crate::model::HoldView::CapabilityMissing { .. }))
     {
-        let input:Option<Uuid>=sqlx::query_scalar("select i.id from inputs i join commands cmd on cmd.id=i.command_id where i.conversation_id=$1 and i.state='queued' and (cmd.payload ? 'settings' or jsonb_array_length(coalesce(cmd.payload->'attachment_ids','[]'))>0) order by i.input_seq limit 1").bind(id).fetch_optional(&s.pool).await?;
+        let mut conn = s.pool.acquire().await?;
+        let input = conversations::capability_hold_input(&mut conn, id).await?;
         if let Some(input_id) = input {
             d.holds
                 .push(crate::model::HoldView::CapabilityMissing { input_id });
+            if let Some(reasons) = d.queue.hold_reasons.as_array_mut() {
+                reasons
+                    .push(serde_json::json!({"reason":"capability_missing","input_id":input_id}));
+            }
         }
     }
     Ok(Json(d))

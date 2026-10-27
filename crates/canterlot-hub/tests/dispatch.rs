@@ -55,6 +55,7 @@ async fn dispatch(pool: &PgPool, conversation_id: Uuid) -> DispatchOutcome {
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -87,6 +88,7 @@ async fn happy_path_dispatches_head_then_next_after_run_finished(pool: PgPool) -
             GateInputs {
                 machine_available: true,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             correlation_id
         )
@@ -301,6 +303,7 @@ async fn gate_reports_all_blocking_reasons(pool: PgPool) -> TestResult {
         GateInputs {
             machine_available: false,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -323,6 +326,7 @@ async fn gate_reports_all_blocking_reasons(pool: PgPool) -> TestResult {
             GateInputs {
                 machine_available: false,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7()
         )
@@ -477,6 +481,7 @@ async fn event_failure_rolls_back_dispatch(pool: PgPool) -> TestResult {
             GateInputs {
                 machine_available: true,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7()
         )

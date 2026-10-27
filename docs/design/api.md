@@ -101,6 +101,7 @@
 | `model_unknown` | 422 | `browser` | `never` | Модель отсутствует в каталоге харнесса |
 | `effort_not_allowed` | 422 | `browser` | `never` | Усилие недоступно для модели |
 | `permission_mode_unknown` | 422 | `browser` | `never` | Режим разрешений отсутствует в каталоге |
+| `settings_midsession_unsupported` | 422 | `browser` | `never` | Смена настроек во время исполнения не поддерживается |
 | `profile_unknown` | 422 | `browser` | `never` | Профиль инструкций отсутствует в каталоге |
 | `workdir_not_allowed` | 422 | `browser` | `never` | Рабочий каталог вне разрешённых корней |
 | `group_not_found` | 404 | `browser` | `never` | Группа не найдена |
@@ -110,6 +111,8 @@
 Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
+
+Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
 
 ## Маршруты и покрытие
 
@@ -166,3 +169,23 @@
 У машины `availability_since` соответствует `machines.availability_at`, `heartbeat_age_ms` берётся из Registry (при отсутствии соединения `null`). Предупреждения: `disk_usage_high` при использовании диска не ниже `[machines].disk_warn_pct`, `metrics_stale` при отсутствии или возрасте метрик не меньше `[machines].metrics_stale_after`, `limits_mismatch` при расхождении лимитов вложений.
 
 История принимает `provider`, `from`, `to` (RFC 3339), `tz` (имя зоны PostgreSQL, по умолчанию UTC). По умолчанию диапазон равен `[limits].history_days`, максимальный диапазон 366 дней, правая граница исключается. Неверная зона даёт `invalid_request`. `used_permille` хранится целым числом, `used_pct = used_permille / 10` вычисляется при чтении. Серии содержат `observed_at`, `used_permille`, `used_pct`.
+
+## Очередь, настройки, запуск и повтор
+
+| Метод и путь | Тело | Результат |
+| --- | --- | --- |
+| `POST /api/v1/conversations/{id}/inputs` | `content[]` (`{"type":"text","text"}`), `attachment_ids?`, `retry_of?` | 201, `SubmittedInput`; непустой `attachment_ids` до задачи 9 даёт `501 not_implemented` |
+| `POST /api/v1/inputs/{id}/cancel` | - | `CancelOutcome` |
+| `POST /api/v1/conversations/{id}/interrupt` | - | `StopOutcome`: пауза очереди, прерывание, отзыв |
+| `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome` |
+| `POST /api/v1/conversations/{id}/queue/continue` | - | `ContinueOutcome` |
+| `PATCH /api/v1/conversations/{id}/settings` | `model?`, `effort?`, `permission_mode?` | `{effective, pending, rev}` |
+| `POST /api/v1/conversations/{id}/executions` | - | 201, первый запуск |
+| `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение с последним `native_conversation_id`; с `continue_queue` снятие паузы в той же транзакции |
+| `POST /api/v1/conversations/{id}/requests/{request_id}/decision` | - | зарезервирован для плана 1.3c, `501 not_implemented` |
+
+Доменные функции отмены, остановки, продолжения и ввода сами ведут ключ идемпотентности; `settings`, `executions` и `resume` оборачивает `idempotency::run_in_tx`. Чужой идентификатор даёт `404 not_found`. После фиксации транзакции маршрут будит диспетчер разговора.
+
+Настройки проверяются как итоговая комбинация по сохранённому каталогу машины: модель, усилие этой модели, режим разрешений харнесса. Допустимое изменение попадает в `pending_settings`, увеличивает `settings_rev` и публикует `conversation_settings_changed {effective, pending, rev}` в области разговора. Диспетчер повторно проверяет комбинацию под блокировкой очереди, кладёт действующие значения в команду (`settings`, `settings_rev`) и снимает недопустимые ключи с событием, где добавлено `rejected:{keys, reason:"settings_unavailable"}`. `input_accepted` делает отправленные значения эффективными и убирает из ожидающих только ключи с тем же значением. Отказ до передачи с причиной `settings_unavailable` убирает ключи отклонённой команды и не ставит паузу. Ввод с настройками не уходит в сеанс без `pilot_v1`: он остаётся в очереди, а `detail` показывает вычисляемое удержание `capability_missing`.
+
+`retry_of` обязан указывать на ввод той же сессии в состоянии `acceptance_unconfirmed`, иначе `422 invalid_request`; значение входит в хеш запроса. Первый ввод сессии с автоматическим названием задаёт название: первые 60 символов по границе слова, пробелы сжимаются, запасное значение `Новая сессия`.

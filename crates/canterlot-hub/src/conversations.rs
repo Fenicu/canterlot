@@ -165,7 +165,7 @@ pub struct QueueView {
     pub queued: i32,
     #[schema(value_type=Vec<crate::model::PauseReason>)]
     pub pause_reasons: Value,
-    #[schema(value_type=Vec<HoldReason>)]
+    #[schema(value_type=Vec<HoldView>)]
     pub hold_reasons: Value,
 }
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -432,6 +432,23 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         counts: counts(conn, q.owner_id).await?,
     })
 }
+/// Голова очереди, команда которой несёт настройки или вложения: без `pilot_v1` в сеансе она не уйдёт.
+pub async fn capability_hold_input(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select i.id from inputs i join commands cmd on cmd.id=i.command_id
+         where i.conversation_id=$1 and i.state in ('queued','dispatched')
+           and ((i.state='queued' and (select pending_settings <> '{}'::jsonb from conversations where id=i.conversation_id))
+                or (i.state='dispatched' and cmd.payload ? 'settings')
+                or jsonb_array_length(coalesce(cmd.payload->'attachment_ids','[]')) > 0)
+         order by i.input_seq limit 1",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+}
 pub async fn detail(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -440,7 +457,7 @@ pub async fn detail(
     let Some(row) = load_row(conn, owner_id, id).await? else {
         return Ok(None);
     };
-    let i = item(&row)?;
+    let mut i = item(&row)?;
     let queue = sqlx::query("select hold_reasons from queue_state where conversation_id=$1")
         .bind(id)
         .fetch_optional(&mut *conn)
@@ -451,10 +468,12 @@ pub async fn detail(
         .map(|v| v.0.into_iter().map(HoldView::from).collect())
         .unwrap_or_default();
     let caps: Vec<String> = row.try_get("capabilities")?;
-    if !caps.iter().any(|c| c == "pilot_v1") {
-        let input:Option<Uuid>=sqlx::query_scalar("select i.id from inputs i join commands cmd on cmd.id=i.command_id where i.conversation_id=$1 and i.state='queued' and (cmd.payload ? 'settings' or jsonb_array_length(coalesce(cmd.payload->'attachment_ids','[]'))>0) order by i.input_seq limit 1").bind(id).fetch_optional(&mut *conn).await?;
-        if let Some(input_id) = input {
-            holds.push(HoldView::CapabilityMissing { input_id });
+    if !caps.iter().any(|c| c == "pilot_v1")
+        && let Some(input_id) = capability_hold_input(conn, id).await?
+    {
+        holds.push(HoldView::CapabilityMissing { input_id });
+        if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
+            reasons.push(json!({"reason":"capability_missing","input_id":input_id}));
         }
     }
     let execution=sqlx::query("select id,generation,state,outcome,native_conversation_id,created_at from executions where conversation_id=$1 and state not in ('stopped','failed')").bind(id).fetch_optional(&mut *conn).await?.map(|r|->Result<Value,sqlx::Error>{Ok(json!({"execution_id":r.try_get::<Uuid,_>("id")?,"generation":r.try_get::<i64,_>("generation")?,"state":r.try_get::<String,_>("state")?,"outcome":r.try_get::<Option<String>,_>("outcome")?,"native_conversation_id":r.try_get::<Option<String>,_>("native_conversation_id")?,"created_at":time(r.try_get("created_at")?)}))}).transpose()?;
@@ -634,7 +653,7 @@ pub(crate) async fn attribute_payload(
     p["counts"] = serde_json::to_value(counts(conn, owner).await?).expect("counts");
     Ok(p)
 }
-async fn emit_attributes(
+pub(crate) async fn emit_attributes(
     conn: &mut PgConnection,
     owner: Uuid,
     id: Uuid,
@@ -1024,4 +1043,389 @@ async fn set_crunch_in_tx(
     detail(conn, owner_id, id)
         .await?
         .ok_or(UpdateError::NotFound)
+}
+
+#[derive(Clone, Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SettingsPatch {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+}
+
+#[derive(thiserror::Error)]
+pub enum SettingsError {
+    #[error("not found")]
+    NotFound,
+    #[error("model unknown")]
+    ModelUnknown,
+    #[error("capability missing")]
+    CapabilityMissing,
+    #[error("effort not allowed")]
+    EffortNotAllowed,
+    #[error("permission mode unknown")]
+    PermissionModeUnknown,
+    #[error("settings midsession unsupported")]
+    MidsessionUnsupported,
+    #[error("idempotency conflict")]
+    IdempotencyConflict,
+    #[error("database error")]
+    Db(#[from] sqlx::Error),
+}
+impl std::fmt::Debug for SettingsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
+}
+impl From<idempotency::IdempotencyConflict> for SettingsError {
+    fn from(_: idempotency::IdempotencyConflict) -> Self {
+        Self::IdempotencyConflict
+    }
+}
+
+pub async fn change_settings(
+    pool: &PgPool,
+    owner_id: Uuid,
+    id: Uuid,
+    key: &str,
+    patch: SettingsPatch,
+    correlation_id: Uuid,
+) -> Result<SettingsView, SettingsError> {
+    let owned: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+    )
+    .bind(id)
+    .bind(owner_id)
+    .fetch_one(pool)
+    .await?;
+    if !owned {
+        return Err(SettingsError::NotFound);
+    }
+    let request = json!({"id": id, "settings": patch});
+    Ok(idempotency::run_in_tx(pool, owner_id, key, "change_settings", &request, Some(id), move |conn| Box::pin(async move {
+        sqlx::query("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
+                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
+                if !row.try_get::<Vec<String>, _>("capabilities")?.iter().any(|v| v == "pilot_v1") { return Err(SettingsError::CapabilityMissing); }
+        let mut pending: Value = row.try_get("pending_settings")?;
+        for (k, v) in [("model", patch.model), ("effort", patch.effort), ("permission_mode", patch.permission_mode)] { if let Some(v) = v { pending[k] = json!(v); } }
+        let model: String = pending.get("model").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("model")?);
+        let effort: String = pending.get("effort").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("effort")?);
+        let permission: String = pending.get("permission_mode").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("permission_mode")?);
+        let models: Option<Value> = row.try_get("models")?;
+        let m = models.as_ref().and_then(Value::as_array).and_then(|v| v.iter().find(|v| v["id"] == model)).ok_or(SettingsError::ModelUnknown)?;
+        if !m["efforts"].as_array().is_some_and(|v| v.iter().any(|v| v == &effort)) { return Err(SettingsError::EffortNotAllowed); }
+        let modes: Option<Value> = row.try_get("permission_modes")?;
+        if (pending.get("permission_mode").is_some() || !permission.is_empty()) && !modes.as_ref().and_then(Value::as_array).is_some_and(|v| v.iter().any(|v| v == &permission)) { return Err(SettingsError::PermissionModeUnknown); }
+        let live = executions::live(conn, id).await?.is_some();
+        if live && !row.try_get::<Option<bool>, _>("settings_midsession")?.unwrap_or(false) { return Err(SettingsError::MidsessionUnsupported); }
+        sqlx::query("update conversations set pending_settings=$2,settings_rev=settings_rev+1 where id=$1").bind(id).bind(&pending).execute(&mut *conn).await?;
+        let view = detail(conn, owner_id, id).await?.ok_or(SettingsError::NotFound)?.settings;
+        append(conn, Scope::Conversation { id }, "conversation_settings_changed", Some(id), serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?, correlation_id).await?;
+        Ok(view)
+    })).await?.value)
+}
+
+pub async fn promote_settings_in_tx(
+    conn: &mut PgConnection,
+    accepted_command_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    apply_sent_settings(conn, accepted_command_id, correlation_id, true).await
+}
+pub async fn drop_rejected_settings_in_tx(
+    conn: &mut PgConnection,
+    rejected_command_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    apply_sent_settings(conn, rejected_command_id, correlation_id, false).await
+}
+async fn apply_sent_settings(
+    conn: &mut PgConnection,
+    command: Uuid,
+    correlation: Uuid,
+    promote: bool,
+) -> Result<(), sqlx::Error> {
+    let Some((id, sent)): Option<(Uuid, Value)> = sqlx::query_as("select conversation_id,payload->'settings' from commands where id=$1 and payload ? 'settings'").bind(command).fetch_optional(&mut *conn).await? else { return Ok(()); };
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let row = sqlx::query("select owner_id,model,effort,permission_mode,pending_settings from conversations where id=$1 for update").bind(id).fetch_one(&mut *conn).await?;
+    let owner: Uuid = row.try_get("owner_id")?;
+    let mut pending: Value = row.try_get("pending_settings")?;
+    let mut model: String = row.try_get("model")?;
+    let mut effort: String = row.try_get("effort")?;
+    let mut permission: String = row.try_get("permission_mode")?;
+    let mut sent_keys = Vec::new();
+    for (key, effective) in [
+        ("model", &mut model),
+        ("effort", &mut effort),
+        ("permission_mode", &mut permission),
+    ] {
+        if let Some(value) = sent.get(key).and_then(Value::as_str) {
+            sent_keys.push(key);
+            if promote {
+                *effective = value.to_owned();
+            }
+            if pending.get(key).and_then(Value::as_str) == Some(value) {
+                pending
+                    .as_object_mut()
+                    .expect("settings object")
+                    .remove(key);
+            }
+        }
+    }
+    sqlx::query("update conversations set model=$2,effort=$3,permission_mode=$4,pending_settings=$5 where id=$1").bind(id).bind(model).bind(effort).bind(permission).bind(pending).execute(&mut *conn).await?;
+    let view = detail(conn, owner, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?
+        .settings;
+    let mut payload = serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+    if !promote {
+        payload["rejected"] = json!({"keys":sent_keys,"reason":"settings_unavailable"});
+    }
+    append(
+        conn,
+        Scope::Conversation { id },
+        "conversation_settings_changed",
+        Some(id),
+        payload,
+        correlation,
+    )
+    .await
+}
+
+pub(crate) async fn revalidate_pending_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    correlation: Uuid,
+) -> Result<(Value, i64), sqlx::Error> {
+    let row = sqlx::query("select c.owner_id,c.model,c.effort,c.permission_mode,c.pending_settings,c.settings_rev,h.models,h.permission_modes from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 for update of c").bind(id).fetch_one(&mut *conn).await?;
+    let mut pending: Value = row.try_get("pending_settings")?;
+    let rev = row.try_get("settings_rev")?;
+    if pending.as_object().is_none_or(|p| p.is_empty()) {
+        return Ok((pending, rev));
+    }
+    let owner: Uuid = row.try_get("owner_id")?;
+    let effective_model: String = row.try_get("model")?;
+    let effective_effort: String = row.try_get("effort")?;
+    let models: Option<Value> = row.try_get("models")?;
+    let modes: Option<Value> = row.try_get("permission_modes")?;
+    let mut rejected = Vec::new();
+    if let Some(model) = pending.get("model").and_then(Value::as_str)
+        && !models
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.iter().any(|m| m["id"] == model))
+    {
+        pending.as_object_mut().expect("settings").remove("model");
+        rejected.push("model");
+    }
+    let model = pending
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&effective_model);
+    let effort = pending
+        .get("effort")
+        .and_then(Value::as_str)
+        .unwrap_or(&effective_effort);
+    if !models
+        .as_ref()
+        .and_then(Value::as_array)
+        .and_then(|v| v.iter().find(|m| m["id"] == model))
+        .and_then(|m| m["efforts"].as_array())
+        .is_some_and(|v| v.iter().any(|e| e == effort))
+    {
+        let key = if pending.get("effort").is_some() {
+            "effort"
+        } else {
+            "model"
+        };
+        if pending
+            .as_object_mut()
+            .expect("settings")
+            .remove(key)
+            .is_some()
+        {
+            rejected.push(key);
+        }
+    }
+    if let Some(model) = pending.get("model").and_then(Value::as_str) {
+        let effort = pending
+            .get("effort")
+            .and_then(Value::as_str)
+            .unwrap_or(&effective_effort);
+        if !models
+            .as_ref()
+            .and_then(Value::as_array)
+            .and_then(|v| v.iter().find(|m| m["id"] == model))
+            .and_then(|m| m["efforts"].as_array())
+            .is_some_and(|v| v.iter().any(|e| e == effort))
+        {
+            pending.as_object_mut().expect("settings").remove("model");
+            rejected.push("model");
+        }
+    }
+    if let Some(mode) = pending.get("permission_mode").and_then(Value::as_str)
+        && !modes
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.iter().any(|m| m == mode))
+    {
+        pending
+            .as_object_mut()
+            .expect("settings")
+            .remove("permission_mode");
+        rejected.push("permission_mode");
+    }
+    let model = pending
+        .get("model")
+        .and_then(Value::as_str)
+        .unwrap_or(&effective_model);
+    let effort = pending
+        .get("effort")
+        .and_then(Value::as_str)
+        .unwrap_or(&effective_effort);
+    let effective_permission: String = row.try_get("permission_mode")?;
+    let permission = pending
+        .get("permission_mode")
+        .and_then(Value::as_str)
+        .unwrap_or(&effective_permission);
+    let valid_model = models
+        .as_ref()
+        .and_then(Value::as_array)
+        .and_then(|v| v.iter().find(|m| m["id"] == model))
+        .and_then(|m| m["efforts"].as_array())
+        .is_some_and(|v| v.iter().any(|e| e == effort));
+    let valid_permission = permission.is_empty()
+        || modes
+            .as_ref()
+            .and_then(Value::as_array)
+            .is_some_and(|v| v.iter().any(|m| m == permission));
+    if !valid_model || !valid_permission {
+        for key in ["model", "effort", "permission_mode"] {
+            if pending
+                .as_object_mut()
+                .expect("settings")
+                .remove(key)
+                .is_some()
+            {
+                rejected.push(key);
+            }
+        }
+    }
+    if !rejected.is_empty() {
+        sqlx::query("update conversations set pending_settings=$2 where id=$1")
+            .bind(id)
+            .bind(&pending)
+            .execute(&mut *conn)
+            .await?;
+        let view = detail(conn, owner, id)
+            .await?
+            .ok_or(sqlx::Error::RowNotFound)?
+            .settings;
+        let mut payload =
+            serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        payload["rejected"] = json!({"keys":rejected,"reason":"settings_unavailable"});
+        append(
+            conn,
+            Scope::Conversation { id },
+            "conversation_settings_changed",
+            Some(id),
+            payload,
+            correlation,
+        )
+        .await?;
+    }
+    Ok((pending, rev))
+}
+
+pub struct SubmitMessage {
+    pub owner_id: Uuid,
+    pub conversation_id: Uuid,
+    pub key: String,
+    pub content: Vec<crate::delivery::ContentBlock>,
+    pub attachment_ids: Vec<Uuid>,
+    pub retry_of: Option<Uuid>,
+    pub received_at: DateTime<Utc>,
+}
+
+pub async fn submit_message(
+    pool: &PgPool,
+    req: SubmitMessage,
+    correlation_id: Uuid,
+) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
+    let mut tx = pool.begin().await?;
+    match submit_message_in_tx(&mut tx, &req, correlation_id).await {
+        Ok(value) => {
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(crate::delivery::SubmitError::KeyRaceLost) => {
+            tx.rollback().await?;
+            let mut tx = pool.begin().await?;
+            let value = submit_message_in_tx(&mut tx, &req, correlation_id).await?;
+            tx.commit().await?;
+            Ok(value)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+pub async fn submit_message_in_tx(
+    conn: &mut PgConnection,
+    req: &SubmitMessage,
+    correlation_id: Uuid,
+) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
+    let owned: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+    )
+    .bind(req.conversation_id)
+    .bind(req.owner_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !owned {
+        return Err(crate::delivery::SubmitError::ConversationNotFound);
+    }
+    crate::delivery::submit::submit_message_input_in_tx(
+        conn,
+        &crate::delivery::SubmitInput {
+            owner_id: req.owner_id,
+            conversation_id: req.conversation_id,
+            idempotency_key: req.key.clone(),
+            content: req.content.clone(),
+            received_at: req.received_at,
+            correlation_id,
+        },
+        &req.attachment_ids,
+        req.retry_of,
+    )
+    .await
+}
+
+pub(crate) async fn auto_title_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    id: Uuid,
+    content: &[crate::delivery::ContentBlock],
+) -> Result<bool, sqlx::Error> {
+    let text = content
+        .iter()
+        .flat_map(|b| match b {
+            crate::delivery::ContentBlock::Text { text } => text.split_whitespace(),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut title: String = text.chars().take(60).collect();
+    if text.chars().nth(60).is_some_and(|c| !c.is_whitespace())
+        && let Some(i) = title.rfind(char::is_whitespace)
+    {
+        title.truncate(i);
+    }
+    let title = if title.trim().is_empty() {
+        "Новая сессия"
+    } else {
+        title.trim()
+    };
+    Ok(sqlx::query("update conversations set title=$3,updated_at=clock_timestamp() where id=$1 and owner_id=$2 and title_source='auto'").bind(id).bind(owner).bind(title).execute(conn).await?.rows_affected() == 1)
 }

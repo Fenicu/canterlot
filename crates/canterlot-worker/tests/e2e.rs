@@ -204,6 +204,7 @@ impl Fixture {
             GateInputs {
                 machine_available: true,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7(),
         )

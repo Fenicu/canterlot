@@ -339,6 +339,55 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/executions": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "start_execution",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "201": {
+            "description": "Исполнение создано",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartedExecution"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/groups": {
       "put": {
         "tags": [
@@ -398,6 +447,163 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/inputs": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "submit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SubmitBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Сообщение в очереди",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SubmittedInput"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/interrupt": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "interrupt",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Остановка запрошена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/queue/continue": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "continue_queue",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Очередь продолжена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ContinueOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/read": {
       "post": {
         "tags": [
@@ -428,6 +634,116 @@
         "responses": {
           "204": {
             "description": "Прочитанность сохранена"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/requests/{request_id}/decision": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "decision",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "request_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "501": {
+            "description": "Решение пока не поддерживается"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/resume": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "resume",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResumeBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Исполнение возобновлено",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StartedExecution"
+                }
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
@@ -559,6 +875,124 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/settings": {
+      "patch": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "settings",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SettingsPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Настройки изменены",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SettingsView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/stop": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "stop",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/StopBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Остановка исполнения запрошена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StopExecutionOutcome"
                 }
               }
             }
@@ -739,6 +1173,55 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/inputs/{id}/cancel": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "cancel_input",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Отмена запрошена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelOutcome"
                 }
               }
             }
@@ -1426,6 +1909,55 @@
           }
         }
       },
+      "CancelOutcome": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "cancelled"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "cancel_requested"
+            ],
+            "properties": {
+              "cancel_requested": {
+                "type": "object",
+                "required": [
+                  "cancel_command_id"
+                ],
+                "properties": {
+                  "cancel_command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "too_late"
+            ],
+            "properties": {
+              "too_late": {
+                "type": "object",
+                "required": [
+                  "state"
+                ],
+                "properties": {
+                  "state": {
+                    "$ref": "#/components/schemas/InputState"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
       "ConfigView": {
         "type": "object",
         "required": [
@@ -1488,6 +2020,27 @@
             }
           }
         ]
+      },
+      "ContinueOutcome": {
+        "type": "object",
+        "required": [
+          "removed",
+          "remaining"
+        ],
+        "properties": {
+          "remaining": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PauseReason"
+            }
+          },
+          "removed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PauseReason"
+            }
+          }
+        }
       },
       "ConversationDetail": {
         "allOf": [
@@ -1851,6 +2404,7 @@
           "model_unknown",
           "effort_not_allowed",
           "permission_mode_unknown",
+          "settings_midsession_unsupported",
           "profile_unknown",
           "workdir_not_allowed",
           "group_not_found",
@@ -2270,184 +2824,6 @@
           }
         }
       },
-      "HoldReason": {
-        "oneOf": [
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "run_in_progress"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "awaiting_user_request"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "context_maintenance"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "no_live_execution"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "execution_starting"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "reason"
-            ],
-            "properties": {
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "storage_low"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "conflict_conversation_id",
-              "reason"
-            ],
-            "properties": {
-              "conflict_conversation_id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "workdir_busy"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "input_id",
-              "reason"
-            ],
-            "properties": {
-              "input_id": {
-                "type": "string",
-                "format": "uuid"
-              },
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "attachments_pending"
-                ]
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "provider",
-              "window",
-              "wake_at",
-              "reason"
-            ],
-            "properties": {
-              "provider": {
-                "type": "string"
-              },
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "quota_exhausted"
-                ]
-              },
-              "wake_at": {
-                "type": "string",
-                "format": "date-time"
-              },
-              "window": {
-                "type": "string"
-              }
-            }
-          },
-          {
-            "type": "object",
-            "required": [
-              "provider",
-              "reason"
-            ],
-            "properties": {
-              "provider": {
-                "type": "string"
-              },
-              "reason": {
-                "type": "string",
-                "enum": [
-                  "weekly_reserve"
-                ]
-              },
-              "resets_at": {
-                "type": [
-                  "string",
-                  "null"
-                ],
-                "format": "date-time"
-              }
-            }
-          }
-        ]
-      },
       "HoldView": {
         "oneOf": [
           {
@@ -2663,6 +3039,19 @@
               }
             }
           }
+        ]
+      },
+      "InputState": {
+        "type": "string",
+        "enum": [
+          "queued",
+          "dispatched",
+          "on_machine",
+          "transmitting",
+          "accepted",
+          "acceptance_unconfirmed",
+          "cancelled",
+          "rejected"
         ]
       },
       "JobState": {
@@ -3433,7 +3822,7 @@
           "hold_reasons": {
             "type": "array",
             "items": {
-              "$ref": "#/components/schemas/HoldReason"
+              "$ref": "#/components/schemas/HoldView"
             }
           },
           "pause_reasons": {
@@ -3457,6 +3846,15 @@
           "seq": {
             "type": "string",
             "pattern": "^[0-9]+$"
+          }
+        },
+        "additionalProperties": false
+      },
+      "ResumeBody": {
+        "type": "object",
+        "properties": {
+          "continue_queue": {
+            "type": "boolean"
           }
         },
         "additionalProperties": false
@@ -3570,6 +3968,30 @@
           }
         }
       },
+      "SettingsPatch": {
+        "type": "object",
+        "properties": {
+          "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permission_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "SettingsView": {
         "type": "object",
         "required": [
@@ -3607,6 +4029,155 @@
           "generation": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "StopBody": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "StopExecutionOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "required": [
+                  "command_id",
+                  "force"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "force": {
+                    "type": "boolean"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "already_requested"
+            ],
+            "properties": {
+              "already_requested": {
+                "type": "object",
+                "required": [
+                  "command_id"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "string",
+            "enum": [
+              "nothing_to_stop"
+            ]
+          }
+        ]
+      },
+      "StopOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "properties": {
+                  "interrupt_command_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid"
+                  },
+                  "withdraw_command_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "SubmitBody": {
+        "type": "object",
+        "required": [
+          "content"
+        ],
+        "properties": {
+          "attachment_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContentBlock"
+            }
+          },
+          "retry_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SubmittedInput": {
+        "type": "object",
+        "required": [
+          "input_id",
+          "input_seq",
+          "command_id",
+          "state"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "input_seq": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "$ref": "#/components/schemas/InputState"
           }
         }
       },

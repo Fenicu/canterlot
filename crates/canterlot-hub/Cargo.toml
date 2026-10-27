@@ -19,6 +19,7 @@ fault-injection = []
 [dev-dependencies]
 canterlot-hub = { path = ".", features = ["testkit"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"] }
+rustix = { version = "1.1.6", features = ["process"] }
 tokio = { version = "1.54.1", features = ["process", "sync", "test-util", "time"] }
 
 [dependencies]

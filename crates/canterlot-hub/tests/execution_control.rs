@@ -88,6 +88,7 @@ async fn dispatch(pool: &PgPool, seed: &Seed, machine_reconciled: bool) -> Dispa
         GateInputs {
             machine_available: true,
             machine_reconciled,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )

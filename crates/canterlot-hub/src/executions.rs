@@ -18,6 +18,8 @@ pub struct StartedExecution {
 
 #[derive(Debug, Error)]
 pub enum ExecutionError {
+    #[error("idempotency conflict")]
+    IdempotencyConflict,
     #[error("execution {execution_id} is already live")]
     AlreadyLive { execution_id: Uuid },
     #[error("conversation not found")]
@@ -31,6 +33,76 @@ pub enum ExecutionError {
     },
     #[error(transparent)]
     Db(#[from] sqlx::Error),
+}
+impl From<crate::idempotency::IdempotencyConflict> for ExecutionError {
+    fn from(_: crate::idempotency::IdempotencyConflict) -> Self {
+        Self::IdempotencyConflict
+    }
+}
+
+pub async fn start_with_key(
+    pool: &PgPool,
+    owner: Uuid,
+    id: Uuid,
+    key: &str,
+    options: (bool, bool),
+    correlation: Uuid,
+    #[cfg(feature = "fault-injection")] faults: &crate::fault_injection::Faults,
+) -> Result<StartedExecution, ExecutionError> {
+    let (resume, continue_queue) = options;
+    let owned: bool = sqlx::query_scalar(
+        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_one(pool)
+    .await?;
+    if !owned {
+        return Err(ExecutionError::ConversationNotFound);
+    }
+    #[cfg(feature = "fault-injection")]
+    let faults = faults.clone();
+    let operation = if resume { "resume" } else { "start_execution" };
+    let request = json!({"conversation_id":id,"continue_queue":continue_queue});
+    Ok(crate::idempotency::run_in_tx(
+        pool,
+        owner,
+        key,
+        operation,
+        &request,
+        Some(id),
+        move |conn| {
+            Box::pin(async move {
+                let started =
+                    start_in_tx(conn, owner, id, &StartOptions { resume }, correlation).await?;
+                #[cfg(feature = "fault-injection")]
+                if resume {
+                    faults
+                        .pause(crate::fault_injection::Point::ResumeAfterStart)
+                        .await;
+                    if faults.take_drop(
+                        crate::fault_injection::Point::ResumeAfterStart,
+                        &id.to_string(),
+                    ) {
+                        return Err(ExecutionError::Db(sqlx::Error::InvalidArgument(
+                            "resume fault".into(),
+                        )));
+                    }
+                }
+                if continue_queue {
+                    crate::delivery::control::continue_queue_in_tx(conn, owner, id, correlation)
+                        .await
+                        .map_err(|e| match e {
+                            crate::delivery::control::ControlError::Db(e) => ExecutionError::Db(e),
+                            _ => ExecutionError::ConversationNotFound,
+                        })?;
+                }
+                Ok::<_, ExecutionError>(started)
+            })
+        },
+    )
+    .await?
+    .value)
 }
 
 pub async fn start(
@@ -80,7 +152,7 @@ pub async fn start_in_tx(
     use sqlx::Row;
     let machine_id: Uuid = row.try_get("machine_id")?;
     let native: Option<String> = if options.resume {
-        sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 order by generation desc limit 1")
+        sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 and native_conversation_id is not null order by generation desc limit 1")
             .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
     } else {
         None

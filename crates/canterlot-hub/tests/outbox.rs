@@ -411,6 +411,7 @@ async fn pending_commands_are_sent_in_created_at_order(pool: PgPool) {
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -651,6 +652,7 @@ async fn restart_redelivers_pending_commands(pool: PgPool) {
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -948,6 +950,7 @@ async fn revoked_outbox_backstop_blocks_pending_command_before_notification(pool
         GateInputs {
             machine_available: true,
             machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
         },
         Uuid::now_v7(),
     )
@@ -958,4 +961,23 @@ async fn revoked_outbox_backstop_blocks_pending_command_before_notification(pool
     }
     assert_eq!(state(&pool, submitted.command_id).await.0, "pending");
     stop(hub).await;
+}
+
+#[test]
+fn settings_are_withheld_if_reconnected_session_lacks_pilot_v1() {
+    let row = canterlot_hub::outbox::CommandRow {
+        id: Uuid::now_v7(),
+        machine_id: Uuid::now_v7(),
+        conversation_id: Some(Uuid::now_v7()),
+        execution_id: Some(Uuid::now_v7()),
+        execution_generation: Some(1),
+        kind: "deliver_input".into(),
+        payload: json!({"input_id":Uuid::now_v7(),"conversation_id":Uuid::now_v7(),"content":[{"type":"text","text":"text"}],"settings":{"effort":"low"},"settings_rev":1}),
+        dispatch_attempt: 1,
+    };
+    let registry = canterlot_hub::session::Registry::new(Default::default());
+    assert!(matches!(
+        canterlot_hub::outbox::to_proto_for_session(&row, &registry),
+        Err(canterlot_hub::outbox::OutboxError::CapabilityMissing)
+    ));
 }

@@ -173,6 +173,19 @@ pub async fn apply_input_receipt_in_tx(
         return Ok(ApplyOutcome::Ignored(ignored));
     }
     let mut slot = queue.slot()?;
+    match &receipt {
+        InputReceipt::Accepted => {
+            crate::conversations::promote_settings_in_tx(conn, command_id, correlation_id).await?
+        }
+        InputReceipt::ExplicitRejection { reason }
+        | InputReceipt::RejectedBeforeTransmission { reason }
+            if reason == "settings_unavailable" =>
+        {
+            crate::conversations::drop_rejected_settings_in_tx(conn, command_id, correlation_id)
+                .await?
+        }
+        _ => {}
+    }
     let mut delivery = target.delivery_state.as_str();
     let reason = receipt.reason().map(sanitize_reason);
     let mut reject_reason = None;

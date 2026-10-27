@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ContentBlock, ControlDown, DeliverInput, Interrupt, StartExecution,
-        StopExecution, TextBlock, WithdrawInput, command, content_block, control_down,
+        CancelInput, Command, ContentBlock, ControlDown, DeliverInput, Interrupt, SettingsOverride,
+        StartExecution, StopExecution, TextBlock, WithdrawInput, command, content_block,
+        control_down,
     },
 };
 use prost::Message;
@@ -46,6 +47,10 @@ pub enum OutboxError {
     InvalidCommand,
     #[error("resource_limit")]
     ResourceLimit,
+    #[error("capability_missing")]
+    CapabilityMissing,
+    #[error("session_changed")]
+    SessionChanged,
 }
 
 #[derive(Deserialize)]
@@ -54,6 +59,14 @@ struct InputPayload {
     input_id: Uuid,
     conversation_id: Uuid,
     content: Vec<submit::ContentBlock>,
+    settings: Option<SettingsPayload>,
+    settings_rev: Option<i64>,
+}
+#[derive(Deserialize)]
+struct SettingsPayload {
+    model: Option<String>,
+    effort: Option<String>,
+    permission_mode: Option<String>,
 }
 
 fn text(payload: &Value, key: &str) -> Result<String, OutboxError> {
@@ -76,10 +89,38 @@ fn target(payload: &Value) -> Result<(String, u32), OutboxError> {
 }
 
 pub fn to_proto_for_session(row: &CommandRow, registry: &Registry) -> Result<Command, OutboxError> {
-    let mut command = to_proto(row)?;
-    if registry.has_capability(row.machine_id, crate::session::CAPABILITY_PILOT_V1)
-        && let Some(command::Kind::StartExecution(start)) = &mut command.kind
+    let pilot = registry.has_capability(row.machine_id, crate::session::CAPABILITY_PILOT_V1);
+    to_proto_with_capability(row, pilot)
+}
+
+fn to_proto_for_connection(
+    row: &CommandRow,
+    registry: &Registry,
+    connection: Uuid,
+) -> Result<Command, OutboxError> {
+    let capabilities = registry
+        .capabilities_for_connection(row.machine_id, connection)
+        .ok_or(OutboxError::SessionChanged)?;
+    let pilot = capabilities
+        .iter()
+        .any(|capability| capability == crate::session::CAPABILITY_PILOT_V1);
+    to_proto_with_capability(row, pilot)
+}
+
+fn to_proto_with_capability(row: &CommandRow, pilot: bool) -> Result<Command, OutboxError> {
+    if row.kind == "deliver_input"
+        && !pilot
+        && (row.payload.get("settings").is_some()
+            || row
+                .payload
+                .get("attachment_ids")
+                .and_then(Value::as_array)
+                .is_some_and(|ids| !ids.is_empty()))
     {
+        return Err(OutboxError::CapabilityMissing);
+    }
+    let mut command = to_proto(row)?;
+    if pilot && let Some(command::Kind::StartExecution(start)) = &mut command.kind {
         start.capabilities = vec![crate::session::CAPABILITY_PILOT_V1.into()];
     }
     if command.encoded_len() > MAX_MESSAGE_BYTES {
@@ -93,6 +134,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         "deliver_input" => {
             let payload: InputPayload = serde_json::from_value(row.payload.clone())
                 .map_err(|_| OutboxError::InvalidCommand)?;
+            let _revision = payload.settings_rev;
             command::Kind::DeliverInput(DeliverInput {
                 input_id: payload.input_id.to_string(),
                 conversation_id: payload.conversation_id.to_string(),
@@ -105,7 +147,11 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                         },
                     })
                     .collect(),
-                ..Default::default()
+                settings: payload.settings.map(|s| SettingsOverride {
+                    model: s.model.unwrap_or_default(),
+                    effort: s.effort.unwrap_or_default(),
+                    permission_mode: s.permission_mode.unwrap_or_default(),
+                }),
             })
         }
         "start_execution" => command::Kind::StartExecution(StartExecution {
@@ -405,12 +451,16 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             } else if registry.availability(machine) != Availability::Available {
                 continue;
             }
-            let command = match to_proto_for_session(&row, &registry) {
+            let command = match to_proto_for_connection(&row, &registry, connection) {
                 Ok(command) => command,
+                Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => continue,
                 Err(error) => {
                     let reason = match error {
                         OutboxError::ResourceLimit => "resource_limit",
                         OutboxError::InvalidCommand => "unsupported_command",
+                        OutboxError::CapabilityMissing | OutboxError::SessionChanged => {
+                            unreachable!()
+                        }
                     };
                     tokio::select! {
                         biased;

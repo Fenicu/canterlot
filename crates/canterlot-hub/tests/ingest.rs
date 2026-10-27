@@ -207,6 +207,7 @@ async fn setup_for(pool: &PgPool, seed: &Seed) -> (executions::StartedExecution,
             GateInputs {
                 machine_available: true,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7(),
         )
@@ -2249,6 +2250,7 @@ async fn machine_times_survive_late_receipts_and_reset_for_new_attempt(pool: PgP
             GateInputs {
                 machine_available: true,
                 machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into()],
             },
             Uuid::now_v7()
         )

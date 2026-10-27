@@ -118,6 +118,7 @@ async fn dispatch(pool: &PgPool, registry: &Registry, conversation: Uuid) {
             GateInputs {
                 machine_available: registry.availability(machine) == Availability::Available,
                 machine_reconciled: registry.is_reconciled(machine),
+                session_capabilities: registry.capabilities(machine),
             },
             Uuid::now_v7(),
         )

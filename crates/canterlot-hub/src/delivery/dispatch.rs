@@ -9,10 +9,11 @@ use crate::{
     model::{ExecutionState, HoldReason, PauseReason, RunSlot},
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GateInputs {
     pub machine_available: bool,
     pub machine_reconciled: bool,
+    pub session_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub enum BlockReason {
     NoLiveRunningExecution,
     MachineUnavailable,
     MachineNotReconciled,
+    CapabilityMissing { input_id: Uuid },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,6 +106,19 @@ pub async fn dispatch_next(
         tx.commit().await?;
         return Ok(DispatchOutcome::Empty);
     };
+    let (pending, rev) =
+        crate::conversations::revalidate_pending_in_tx(&mut tx, conversation_id, correlation_id)
+            .await?;
+    if pending.as_object().is_some_and(|v| !v.is_empty())
+        && !gate.session_capabilities.iter().any(|v| v == "pilot_v1")
+    {
+        tx.commit().await?;
+        return Ok(DispatchOutcome::Blocked(vec![
+            BlockReason::CapabilityMissing { input_id },
+        ]));
+    }
+    sqlx::query("update commands set payload=case when $2::jsonb='{}'::jsonb then payload-'settings'-'settings_rev' else (payload-'settings'-'settings_rev') || jsonb_build_object('settings',$2::jsonb,'settings_rev',$3::bigint) end where id=$1")
+        .bind(command_id).bind(&pending).bind(rev).execute(&mut *tx).await?;
     let (execution_id, generation, _) = live.ok_or(sqlx::Error::RowNotFound)?;
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,

@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use crate::{
     config::SchedulerConfig,
-    delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
+    conversations::{SubmitMessage, submit_message_in_tx},
+    delivery::{ContentBlock, SubmitError},
     dispatcher::Dispatcher,
     events::{self, NewEvent, Scope},
     idempotency,
@@ -433,16 +434,18 @@ impl Scheduler {
             let result = if let Some(input_id) = existing {
                 Ok(input_id)
             } else {
-                submit_input_in_tx(
+                submit_message_in_tx(
                     &mut tx,
-                    &SubmitInput {
+                    &SubmitMessage {
                         owner_id: job.owner_id,
                         conversation_id: message.conversation_id,
-                        idempotency_key: key.clone(),
+                        key: key.clone(),
                         content: message.content.clone(),
+                        attachment_ids: vec![],
+                        retry_of: None,
                         received_at: job.run_at,
-                        correlation_id: Uuid::now_v7(),
                     },
+                    Uuid::now_v7(),
                 )
                 .await
                 .map(|s| s.input_id)

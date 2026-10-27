@@ -40,7 +40,7 @@ pub struct SubmitInput {
     pub correlation_id: Uuid,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct SubmittedInput {
     pub input_id: Uuid,
     pub input_seq: i64,
@@ -251,10 +251,16 @@ enum Attempt {
     LostRace,
 }
 
-fn request_hash(req: &SubmitInput) -> Vec<u8> {
+fn request_hash(req: &SubmitInput, attachments: &[Uuid], retry_of: Option<Uuid>) -> Vec<u8> {
+    if attachments.is_empty() && retry_of.is_none() {
+        return idempotency::request_hash(
+            OPERATION,
+            &json!({"conversation_id":req.conversation_id,"content":req.content}),
+        );
+    }
     idempotency::request_hash(
         OPERATION,
-        &json!({"conversation_id": req.conversation_id, "content": req.content}),
+        &json!({"conversation_id": req.conversation_id, "content": req.content, "attachment_ids": attachments, "retry_of": retry_of}),
     )
 }
 
@@ -275,9 +281,9 @@ async fn resolve_race(
 
 pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedInput, SubmitError> {
     validate_content(&req)?;
-    let hash = request_hash(&req);
+    let hash = request_hash(&req, &[], None);
     let mut tx = pool.begin().await?;
-    match submit_attempt(&mut tx, &req, &hash).await {
+    match submit_attempt(&mut tx, &req, &hash, None, false).await {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;
             Ok(submitted)
@@ -303,8 +309,37 @@ pub async fn submit_input_in_tx(
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
-    let hash = request_hash(req);
-    match submit_attempt(tx, req, &hash).await? {
+    let hash = request_hash(req, &[], None);
+    match submit_attempt(tx, req, &hash, None, false).await? {
+        Attempt::Submitted(submitted) => Ok(submitted),
+        Attempt::LostRace => Err(SubmitError::KeyRaceLost),
+    }
+}
+
+pub(crate) async fn submit_message_input_in_tx(
+    tx: &mut PgConnection,
+    req: &SubmitInput,
+    attachments: &[Uuid],
+    retry_of: Option<Uuid>,
+) -> Result<SubmittedInput, SubmitError> {
+    if !tx.is_in_transaction() {
+        return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
+    }
+    let hash = request_hash(req, attachments, retry_of);
+    idempotency::validate_key(&req.idempotency_key)
+        .map_err(|reason| SubmitError::InvalidRequest { reason })?;
+    match idempotency::lookup(tx, req.owner_id, &req.idempotency_key, OPERATION, &hash).await? {
+        Begin::Replay(response) => return replay(response),
+        Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
+        Begin::New => {}
+    }
+    if !attachments.is_empty() {
+        return Err(SubmitError::InvalidRequest {
+            reason: "attachments_unavailable",
+        });
+    }
+    validate_content(req)?;
+    match submit_attempt(tx, req, &hash, retry_of, true).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -314,6 +349,8 @@ async fn submit_attempt(
     conn: &mut PgConnection,
     req: &SubmitInput,
     hash: &[u8],
+    retry_of: Option<Uuid>,
+    auto_title: bool,
 ) -> Result<Attempt, SubmitError> {
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
@@ -330,6 +367,14 @@ async fn submit_attempt(
     }
     if closed {
         return Err(SubmitError::ConversationClosed);
+    }
+    if let Some(id) = retry_of {
+        let valid: bool = sqlx::query_scalar("select exists(select 1 from inputs where id=$1 and conversation_id=$2 and state='acceptance_unconfirmed')").bind(id).bind(req.conversation_id).fetch_one(&mut *conn).await?;
+        if !valid {
+            return Err(SubmitError::InvalidRequest {
+                reason: "invalid_retry",
+            });
+        }
     }
     let submitted = SubmittedInput {
         input_id: Uuid::now_v7(),
@@ -370,8 +415,8 @@ async fn submit_attempt(
     .await?;
     sqlx::query(
         "insert into inputs (id, conversation_id, owner_id, input_seq, idempotency_key,
-                             content, state, command_id, received_at)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+                             content, state, command_id, received_at, retry_of)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
     )
     .bind(submitted.input_id)
     .bind(req.conversation_id)
@@ -382,8 +427,21 @@ async fn submit_attempt(
     .bind(submitted.state.as_str())
     .bind(submitted.command_id)
     .bind(req.received_at)
+    .bind(retry_of)
     .execute(&mut *conn)
     .await?;
+
+    let title_changed = if auto_title && input_seq == 1 {
+        crate::conversations::auto_title_in_tx(
+            conn,
+            req.owner_id,
+            req.conversation_id,
+            &req.content,
+        )
+        .await?
+    } else {
+        false
+    };
 
     let event = events::append(
         conn,
@@ -405,6 +463,16 @@ async fn submit_attempt(
         },
     )
     .await?;
+
+    if title_changed {
+        crate::conversations::emit_attributes(
+            conn,
+            req.owner_id,
+            req.conversation_id,
+            req.correlation_id,
+        )
+        .await?;
+    }
 
     sqlx::query("update inputs set created_seq=$2,created_at=$3 where id=$1")
         .bind(submitted.input_id)

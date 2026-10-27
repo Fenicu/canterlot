@@ -109,11 +109,28 @@ error_codes! {
     ModelUnknown => "model_unknown", 422, Browser, Never, "Модель отсутствует в каталоге харнесса";
     EffortNotAllowed => "effort_not_allowed", 422, Browser, Never, "Усилие недоступно для модели";
     PermissionModeUnknown => "permission_mode_unknown", 422, Browser, Never, "Режим разрешений отсутствует в каталоге";
+    SettingsMidsessionUnsupported => "settings_midsession_unsupported", 422, Browser, Never, "Смена настроек во время исполнения не поддерживается";
     ProfileUnknown => "profile_unknown", 422, Browser, Never, "Профиль инструкций отсутствует в каталоге";
     WorkdirNotAllowed => "workdir_not_allowed", 422, Browser, Never, "Рабочий каталог вне разрешённых корней";
     GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
     GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
     ArchiveActive => "archive_active", 409, Browser, Never, "В сессии есть активная работа";
+}
+
+impl From<crate::conversations::SettingsError> for ApiError {
+    fn from(error: crate::conversations::SettingsError) -> Self {
+        use crate::conversations::SettingsError as E;
+        Self::new(match error {
+            E::NotFound => ErrorCode::NotFound,
+            E::ModelUnknown => ErrorCode::ModelUnknown,
+            E::CapabilityMissing => ErrorCode::CapabilityMissing,
+            E::EffortNotAllowed => ErrorCode::EffortNotAllowed,
+            E::PermissionModeUnknown => ErrorCode::PermissionModeUnknown,
+            E::MidsessionUnsupported => ErrorCode::SettingsMidsessionUnsupported,
+            E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            E::Db(error) => return error.into(),
+        })
+    }
 }
 
 impl From<crate::scheduler::ScheduleError> for ApiError {
@@ -276,6 +293,16 @@ impl From<SubmitError> for ApiError {
         match error {
             SubmitError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             SubmitError::KeyRaceLost => ApiError::new(ErrorCode::Internal),
+            SubmitError::InvalidRequest {
+                reason: "attachments_unavailable",
+            } => ApiError::new(ErrorCode::NotImplemented),
+            SubmitError::InvalidRequest {
+                reason: "invalid_retry",
+            } => {
+                let mut error = ApiError::new(ErrorCode::InvalidRequest);
+                error.status = StatusCode::UNPROCESSABLE_ENTITY;
+                error
+            }
             SubmitError::InvalidRequest { .. } | SubmitError::InvalidContent { .. } => {
                 ApiError::new(ErrorCode::InvalidRequest)
             }
@@ -302,6 +329,7 @@ impl From<ControlError> for ApiError {
 impl From<ExecutionError> for ApiError {
     fn from(error: ExecutionError) -> Self {
         match error {
+            ExecutionError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             ExecutionError::AlreadyLive { .. } => ApiError::new(ErrorCode::ExecutionAlreadyLive),
             ExecutionError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
             ExecutionError::ConversationClosed => ApiError::new(ErrorCode::ConversationClosed),

@@ -72,6 +72,28 @@ impl Registry {
             .is_some_and(|e| e.capabilities.iter().any(|c| c == capability))
     }
 
+    pub fn capabilities(&self, machine_id: Uuid) -> Vec<String> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .map(|entry| entry.capabilities.clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn capabilities_for_connection(
+        &self,
+        machine_id: Uuid,
+        connection_id: Uuid,
+    ) -> Option<Vec<String>> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .filter(|entry| entry.info.connection_id == connection_id)
+            .map(|entry| entry.capabilities.clone())
+    }
+
     pub fn observe_clock(
         &self,
         machine_id: Uuid,
@@ -469,6 +491,28 @@ impl Drop for DataLease {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn session_capabilities_follow_the_current_connection() {
+        let registry = Registry::new(HubTimers::default());
+        let machine = Uuid::now_v7();
+        let connection = Uuid::now_v7();
+        let (lease, _commands) = registry.register(machine, connection, vec![]).unwrap();
+        let caps = vec!["exec_v1".to_owned(), "pilot_v1".to_owned()];
+        registry.mark_accepted(machine, connection, &caps);
+        assert_eq!(registry.capabilities(machine), caps);
+        assert_eq!(
+            registry.capabilities_for_connection(machine, connection),
+            Some(caps)
+        );
+        assert!(
+            registry
+                .capabilities_for_connection(machine, Uuid::now_v7())
+                .is_none()
+        );
+        drop(lease);
+        assert!(registry.capabilities(machine).is_empty());
+    }
 
     #[tokio::test]
     async fn accepted_requires_reconciliation_only_with_exec_v1() {
