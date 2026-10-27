@@ -1035,7 +1035,7 @@ async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
-    let _gate = e2e_gate::acquire().await;
+    let _gate = e2e_gate::acquire_exclusive().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
