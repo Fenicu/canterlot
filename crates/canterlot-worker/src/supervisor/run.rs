@@ -302,18 +302,30 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn event_loop(&mut self, server: IpcServer) -> Result<ExitCode, SupervisorError> {
+    async fn event_loop(&mut self, mut server: IpcServer) -> Result<ExitCode, SupervisorError> {
         let (accepted_tx, mut accepted) = mpsc::channel::<IpcConnection>(8);
-        tokio::spawn(async move {
-            while let Ok(connection) = server.accept().await {
-                if accepted_tx.send(connection).await.is_err() {
-                    break;
+        let accept_task = tokio::spawn(async move {
+            let period = Duration::from_secs(5);
+            let mut socket_check = tokio::time::interval_at(Instant::now() + period, period);
+            socket_check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tokio::select! {
+                    connection = server.accept() => {
+                        let Ok(connection) = connection else { break };
+                        if accepted_tx.send(connection).await.is_err() { break; }
+                    }
+                    _ = socket_check.tick() => {
+                        if server.restore_socket().await.is_err() {
+                            tracing::warn!(kind = "ipc_restore_failed", "ipc socket restore failed");
+                        }
+                    }
                 }
             }
         });
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
             if let Some(code) = self.after_event().await? {
+                accept_task.abort();
                 return Ok(code);
             }
             let wake = self.next_wake();
@@ -491,13 +503,30 @@ impl Supervisor {
             tracing::info!(kind = "attached", "control attached");
             return Ok(());
         }
-        if matches!(self.lifecycle, Lifecycle::Draining { .. })
-            && !matches!(
-                message,
-                down::Msg::ShipFrom(_) | down::Msg::SjAck(_) | down::Msg::Attach(_)
-            )
-        {
-            return Ok(());
+        if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+            match message {
+                down::Msg::Cancel(cancel) => {
+                    self.closed_input_reply(
+                        &cancel.target_command_id,
+                        cancel.target_dispatch_attempt,
+                        "cancel_won",
+                    );
+                    return Ok(());
+                }
+                down::Msg::Withdraw(withdraw) => {
+                    self.closed_input_reply(
+                        &withdraw.target_command_id,
+                        withdraw.target_dispatch_attempt,
+                        "input_withdrawn",
+                    );
+                    return Ok(());
+                }
+                down::Msg::Deliver(_)
+                | down::Msg::ShipFrom(_)
+                | down::Msg::SjAck(_)
+                | down::Msg::Attach(_) => {}
+                _ => return Ok(()),
+            }
         }
         match message {
             down::Msg::Attach(_) => self.drop_connection(id),
@@ -641,10 +670,9 @@ impl Supervisor {
             "generation_mismatch"
         } else if self.inputs.contains_key(&key) || self.transmitted.contains(&id) {
             "duplicate"
-        } else if matches!(
-            self.lifecycle,
-            Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
-        ) {
+        } else if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+            "execution_closed"
+        } else if matches!(self.lifecycle, Lifecycle::Stopping(_)) {
             "execution_stopped"
         } else if self
             .cancel_marks
@@ -673,6 +701,19 @@ impl Supervisor {
             "accepted_for_gate"
         };
         self.send(ack(command.command_id, attempt, result));
+    }
+
+    fn closed_input_reply(&mut self, target: &str, attempt: u32, result: &str) {
+        let result = if Uuid::parse_str(target).is_ok_and(|id| self.transmitted.contains(&id)) {
+            "not_applicable"
+        } else {
+            result
+        };
+        self.send(up::Msg::DeliverAck(DeliverAck {
+            command_id: target.into(),
+            dispatch_attempt: attempt,
+            result: result.into(),
+        }));
     }
 
     fn on_cancel(&mut self, target: &str, attempt: u32) -> Result<(), SupervisorError> {

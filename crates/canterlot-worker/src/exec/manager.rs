@@ -15,7 +15,7 @@ use canterlot_proto::{
             control_to_supervisor as down, supervisor_to_control as up,
         },
         v1::{
-            CancelInput, Command, CommandRejected, ExecutionState, InputCancelWon,
+            CancelInput, Command, CommandRejected, ExecutionState, InputCancelLost, InputCancelWon,
             InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, StartExecution,
             WithdrawInput, command::Kind, record_body::Body,
         },
@@ -218,15 +218,34 @@ pub(super) async fn verify(
     if sha256(&secret) != record.secret_sha256 {
         return Err(ExecError::Verify("secret"));
     }
-    let linked = spawn::connect_attach(
-        Path::new(&record.ipc_socket),
-        &secret,
-        id,
-        record.generation,
-        Some(record.supervisor_pid),
-        None,
-    )
-    .await?;
+    let deadline = Instant::now() + shared.config.supervisor.attach_wait;
+    let linked = loop {
+        let attempt = spawn::connect_attach(
+            Path::new(&record.ipc_socket),
+            &secret,
+            id,
+            record.generation,
+            Some(record.supervisor_pid),
+            None,
+        );
+        let result = tokio::time::timeout_at(deadline, attempt)
+            .await
+            .unwrap_or(Err(ExecError::AttachTimeout));
+        match result {
+            Ok(linked) => break linked,
+            Err(error) => {
+                if Instant::now() >= deadline
+                    || !procfs::is_same_process(
+                        record.supervisor_pid,
+                        record.supervisor_start_ticks,
+                    )
+                {
+                    return Err(error);
+                }
+                sleep_until(deadline.min(Instant::now() + RECONNECT_EVERY)).await;
+            }
+        }
+    };
     let attached = &linked.attached;
     if attached.pid != record.supervisor_pid
         || attached.start_ticks != record.supervisor_start_ticks
@@ -1132,7 +1151,7 @@ impl Actor {
     async fn on_deliver_ack(&mut self, ack: DeliverAck) -> Result<(), ExecError> {
         let terminal = vec![(ack.command_id.clone(), ack.dispatch_attempt)];
         let fact = match ack.result.as_str() {
-            "generation_mismatch" | "execution_stopped" => {
+            "generation_mismatch" | "execution_stopped" | "execution_closed" => {
                 Body::DispatchDeferred(InputDispatchDeferred {
                     command_id: ack.command_id,
                     dispatch_attempt: ack.dispatch_attempt,
@@ -1143,6 +1162,19 @@ impl Actor {
                 command_id: ack.command_id,
                 dispatch_attempt: ack.dispatch_attempt,
                 reason: "unsupported_command".into(),
+            }),
+            "cancel_won" => Body::CancelWon(InputCancelWon {
+                command_id: ack.command_id,
+                dispatch_attempt: ack.dispatch_attempt,
+            }),
+            "input_withdrawn" => Body::InputWithdrawn(InputWithdrawn {
+                command_id: ack.command_id,
+                dispatch_attempt: ack.dispatch_attempt,
+            }),
+            "not_applicable" => Body::CancelLost(InputCancelLost {
+                command_id: ack.command_id,
+                dispatch_attempt: ack.dispatch_attempt,
+                reason: "transmission_started".into(),
             }),
             _ => return Ok(()),
         };

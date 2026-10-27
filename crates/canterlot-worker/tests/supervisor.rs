@@ -1270,6 +1270,98 @@ async fn no_second_cli_is_ever_started() {
 }
 
 #[tokio::test]
+async fn wave2_n1_draining_answers_without_extending_closed_journal() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    let transmitted = Uuid::now_v7();
+    harness
+        .deliver(transmitted, 1, &script(r#"{"delta":"x"},{"hang":true}"#))
+        .await;
+    harness
+        .wait_records("transmitted", |b| {
+            b.iter().any(|b| matches!(b, Body::TransmissionStarted(_)))
+        })
+        .await;
+    harness.auto_ack = false;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            force: true,
+            ..Default::default()
+        }))
+        .await;
+    timeout(WAIT, async {
+        while !harness
+            .records
+            .values()
+            .any(|b| matches!(b, Body::JournalClosed(_)))
+        {
+            let committed_seq = harness.records.last_key_value().map_or(0, |(seq, _)| *seq);
+            harness
+                .send(down::Msg::ShipFrom(ShipFrom { committed_seq }))
+                .await;
+            harness.pump(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+
+    let closed = *harness.records.last_key_value().unwrap().0;
+    for _ in 0..50 {
+        let target = Uuid::now_v7();
+        let ack = harness.deliver(target, 1, "late").await;
+        assert_eq!(
+            (ack.command_id, ack.dispatch_attempt, ack.result.as_str()),
+            (target.to_string(), 1, "execution_closed")
+        );
+        assert_eq!(
+            harness.deliver(transmitted, 1, "duplicate").await.result,
+            "duplicate"
+        );
+        for (target, cancel, expected) in [
+            (target, true, "cancel_won"),
+            (Uuid::now_v7(), false, "input_withdrawn"),
+            (transmitted, true, "not_applicable"),
+            (transmitted, false, "not_applicable"),
+        ] {
+            let message = if cancel {
+                down::Msg::Cancel(canterlot_proto::worker::v1::CancelInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                })
+            } else {
+                down::Msg::Withdraw(canterlot_proto::worker::v1::WithdrawInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                })
+            };
+            harness.send(message).await;
+            let up::Msg::DeliverAck(ack) = harness
+                .next_message(|m| matches!(m, up::Msg::DeliverAck(_)))
+                .await
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                (ack.command_id, ack.dispatch_attempt, ack.result.as_str()),
+                (target.to_string(), 1, expected)
+            );
+        }
+    }
+    harness
+        .send(down::Msg::ShipFrom(ShipFrom {
+            committed_seq: closed - 1,
+        }))
+        .await;
+    while harness.pump(Duration::from_millis(100)).await {}
+    assert_eq!(*harness.records.last_key_value().unwrap().0, closed);
+    harness
+        .send(down::Msg::SjAck(SjAck { up_to_seq: closed }))
+        .await;
+    assert!(timeout(WAIT, harness.wait_exit()).await.unwrap().success());
+}
+
+#[tokio::test]
 async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;

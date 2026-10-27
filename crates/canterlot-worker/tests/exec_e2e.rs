@@ -1439,6 +1439,201 @@ async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
 }
 
 #[test]
+fn wave2_n3_runtime_wipe_and_replacement() {
+    for case in ["canterlot", "runtime", "replacement"] {
+        let runtime = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "wave2_n3_runtime_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CANTERLOT_WAVE2_RUNTIME_CASE", case)
+            .env("XDG_RUNTIME_DIR", runtime.path().join("runtime"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+#[ignore]
+async fn wave2_n3_runtime_child(pool: PgPool) {
+    use canterlot_proto::worker::ipc::{self, control_to_supervisor::Msg};
+    use canterlot_worker::supervisor::ipc::{read_message, write_message};
+    use std::os::unix::fs::MetadataExt;
+    let Ok(case) = std::env::var("CANTERLOT_WAVE2_RUNTIME_CASE") else {
+        return;
+    };
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
+    let socket = runtime
+        .join("canterlot")
+        .join(format!("{}.sock", fixture.execution));
+    let old = fs::metadata(&socket).unwrap();
+    fixture.stop_worker().await;
+    if case == "replacement" {
+        fs::remove_file(&socket).unwrap();
+        let replacement = tokio::net::UnixListener::bind(&socket).unwrap();
+        assert_ne!(fs::metadata(&socket).unwrap().ino(), old.ino());
+        drop(replacement);
+    } else {
+        fs::remove_dir_all(if case == "runtime" {
+            runtime.clone()
+        } else {
+            runtime.join("canterlot")
+        })
+        .unwrap();
+    }
+    fixture.config.execution.supervisor.attach_wait = Duration::from_secs(8);
+    fixture.start_worker().await;
+    assert_eq!(
+        fixture.state().await,
+        "running",
+        "live supervisor was declared owner_lost"
+    );
+    fixture.assert_same_processes(identities);
+    assert_eq!(
+        fs::metadata(runtime.join("canterlot"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    assert_eq!(
+        fs::metadata(&socket).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let input = fixture
+        .submit(json!({"synthetic":[{"delta":"tail"},{"hang":true}]}).to_string())
+        .await;
+    until("tail delivered", async || {
+        fixture.command_done(input.command_id).await
+    })
+    .await;
+    fixture.wait_deltas(1).await;
+    fixture.stop_worker().await;
+    let mut connection = tokio::net::UnixStream::connect(&socket).await.unwrap();
+    write_message(
+        &mut connection,
+        &ipc::ControlToSupervisor {
+            msg: Some(Msg::Attach(ipc::Attach {
+                protocol_version: 1,
+                secret: fs::read(fixture.exec_dir().join("secret")).unwrap(),
+                execution_id: fixture.execution.to_string(),
+                generation: 1,
+            })),
+        },
+    )
+    .await
+    .unwrap();
+    let reply: ipc::SupervisorToControl = read_message(&mut connection).await.unwrap();
+    assert!(matches!(
+        reply.msg,
+        Some(ipc::supervisor_to_control::Msg::Attached(_))
+    ));
+    write_message(
+        &mut connection,
+        &ipc::ControlToSupervisor {
+            msg: Some(Msg::Stop(ipc::StopRequest {
+                force: true,
+                ..Default::default()
+            })),
+        },
+    )
+    .await
+    .unwrap();
+    until("draining", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .any(|b| matches!(b, Body::JournalClosed(_)))
+    })
+    .await;
+    drop(connection);
+    assert!(same_process(identities.0));
+    fs::remove_dir_all(&runtime).unwrap();
+    fixture.start_worker().await;
+    fixture.wait_state("stopped").await;
+    until("tail shipped", async || {
+        fixture.event_count("journal_closed").await == 1
+    })
+    .await;
+    assert_eq!(
+        blocks::read_text(
+            &mut pool.acquire().await.unwrap(),
+            sqlx::query_scalar::<_, Uuid>("select block_id from blocks where execution_id = $1")
+                .bind(fixture.execution)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        )
+        .await
+        .unwrap(),
+        "tail"
+    );
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave2_n1_draining_delivery_releases_slot(pool: PgPool) {
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
+    let stop = fixture.stop_execution(true).await;
+    let resume = timeout(WAIT, paused).await.unwrap().unwrap();
+    until("draining", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .any(|b| matches!(b, Body::JournalClosed(_)))
+    })
+    .await;
+    // Хаб ещё видит running; снимаем только пользовательскую паузу для позднего dispatch.
+    sqlx::query("update queue_state set pause_reasons = '[]' where conversation_id = $1")
+        .bind(fixture.conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let input = fixture.submit("late".into()).await;
+    timeout(
+        Duration::from_secs(5),
+        until("deferred", async || {
+            sqlx::query_scalar::<_, bool>(
+                "select last_status = 'dispatch_deferred' from commands where id = $1",
+            )
+            .bind(input.command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap_or(false)
+        }),
+    )
+    .await
+    .expect("draining delivery has no receipt");
+    assert_eq!(fixture.input_state(input.input_id).await, "queued");
+    assert_eq!(fixture.slot().await, "free");
+    assert!(fixture.cli_receipts(input.command_id).is_empty());
+    let result: Value = sqlx::query_scalar("select result from commands where id = $1")
+        .bind(input.command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(result["reason"], "generation_closed");
+    resume.send(()).unwrap();
+    until("stop completed", async || fixture.command_done(stop).await).await;
+    fixture.finish().await;
+}
+
+#[test]
 fn wave_w_d2_runtime_socket_paths() {
     for case in ["short", "long"] {
         let runtime = tempfile::tempdir().unwrap();

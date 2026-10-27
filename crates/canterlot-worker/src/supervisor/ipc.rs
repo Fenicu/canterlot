@@ -2,9 +2,9 @@ use std::{
     fs, io,
     os::unix::{
         ffi::OsStrExt,
-        fs::{MetadataExt, PermissionsExt},
+        fs::{DirBuilderExt, MetadataExt, PermissionsExt},
     },
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use canterlot_proto::limits::IPC_MAX_MESSAGE_BYTES;
@@ -85,6 +85,8 @@ pub fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 
 pub struct IpcServer {
     listener: UnixListener,
+    socket: PathBuf,
+    identity: (u64, u64),
     secret: Vec<u8>,
     uid: u32,
 }
@@ -132,11 +134,32 @@ impl IpcServer {
         }
         let listener = UnixListener::bind(socket)?;
         fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
+        let metadata = fs::symlink_metadata(socket)?;
         Ok(IpcServer {
             listener,
+            socket: socket.to_path_buf(),
+            identity: (metadata.dev(), metadata.ino()),
             secret,
             uid,
         })
+    }
+
+    pub(crate) async fn restore_socket(&mut self) -> Result<(), IpcError> {
+        if fs::symlink_metadata(&self.socket)
+            .is_ok_and(|metadata| (metadata.dev(), metadata.ino()) == self.identity)
+        {
+            return Ok(());
+        }
+        let parent = self.socket.parent().ok_or(IpcError::Directory)?;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+        if !fs::symlink_metadata(parent)?.is_dir() {
+            return Err(IpcError::Directory);
+        }
+        *self = Self::bind_socket(&self.socket, self.secret.clone(), self.uid).await?;
+        Ok(())
     }
 
     pub fn secret_matches(&self, candidate: &[u8]) -> bool {

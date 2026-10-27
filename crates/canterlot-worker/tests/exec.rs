@@ -690,6 +690,7 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
     let mut originals = supervisors_of(env.root.path());
     assert_eq!(originals.len(), 3);
     env.close_manager().await;
+    env.config.supervisor.attach_wait = Duration::from_millis(250);
     env.reopen();
     for (index, id) in executions.iter().copied().enumerate() {
         let mut record = env.ownership(id).await.unwrap();
@@ -709,7 +710,9 @@ async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
             .await
             .unwrap();
     }
+    let verify_started = std::time::Instant::now();
     assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    assert!(verify_started.elapsed() >= env.config.supervisor.attach_wait);
     let cj = env.cj().await;
     for id in &executions {
         assert_eq!(
@@ -1156,6 +1159,63 @@ async fn second_instance_is_refused_by_the_store_lock() {
         !text.contains(&env.root.path().to_string_lossy().into_owned()),
         "{text}"
     );
+}
+
+#[tokio::test]
+async fn wave2_n1_closed_replies_are_durable_cj_receipts() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.auto_ack = false;
+    env.stop().await;
+    for _ in 0..50 {
+        for cancel in [true, false] {
+            let target = Uuid::now_v7();
+            let delivery = deliver_command(target, 1, env.execution, 1, env.conversation, "late");
+            env.send(delivery.clone()).await;
+            env.wait_cj("closed delivery", |b| b.iter().any(|b| matches!(b, Body::DispatchDeferred(f) if f.command_id == target.to_string() && f.reason == "generation_closed"))).await;
+            let kind = if cancel {
+                Kind::CancelInput(CancelInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                })
+            } else {
+                Kind::WithdrawInput(WithdrawInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                })
+            };
+            let control = command(Uuid::now_v7(), 1, env.execution, 1, kind);
+            env.send(control.clone()).await;
+            env.wait_cj("closed control", |b| {
+                b.iter().any(|b| match b {
+                    Body::CancelWon(f) if cancel => f.command_id == target.to_string(),
+                    Body::InputWithdrawn(f) if !cancel => f.command_id == target.to_string(),
+                    _ => false,
+                })
+            })
+            .await;
+            assert!(env.terminal(&delivery).await && env.terminal(&control).await);
+        }
+    }
+    let cursor = env.manager().journal_cursors().pop().unwrap();
+    assert_eq!(
+        env.committed[&Uuid::parse_str(&cursor.journal_id).unwrap()],
+        cursor.last_seq
+    );
+    env.manager().on_sj_ack(
+        Uuid::parse_str(&cursor.journal_id).unwrap(),
+        cursor.last_seq,
+    );
+    timeout(WAIT, async {
+        while !env.manager().observations().is_empty() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(env.guard.members().is_empty());
 }
 
 #[tokio::test]
