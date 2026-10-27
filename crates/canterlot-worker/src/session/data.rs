@@ -38,7 +38,22 @@ pub(super) fn committed(
     Ok(committed)
 }
 
+pub(super) fn session_committed(
+    hello: &Hello,
+    accepted: &Accepted,
+    manager: &ExecutionManager,
+) -> Result<HashMap<Uuid, u64>, WorkerError> {
+    let mut cursors = committed(hello, accepted)?;
+    for local in manager.journal_cursors() {
+        let id = Uuid::parse_str(&local.journal_id).map_err(|_| WorkerError::Protocol)?;
+        cursors.entry(id).or_insert(local.acked_seq_known_to_worker);
+    }
+    Ok(cursors)
+}
+
 pub(super) struct Stream {
+    pub pilot: bool,
+    pub diagnostics: JournalDiagnostics,
     #[cfg(feature = "fault-injection")]
     pub probe: crate::fault_injection::SessionProbe,
     pub client: Client,
@@ -58,6 +73,8 @@ pub(super) async fn run(
     mut active: watch::Receiver<bool>,
 ) -> Result<(), WorkerError> {
     let Stream {
+        pilot,
+        diagnostics,
         #[cfg(feature = "fault-injection")]
         probe,
         mut client,
@@ -79,7 +96,7 @@ pub(super) async fn run(
             relay,
             timers,
             &mut active,
-            cursors,
+            (cursors, pilot, diagnostics.clone()),
         )
         .await
         .unwrap_err();
@@ -101,9 +118,22 @@ pub(super) async fn run(
                 let cursor = store
                     .call(|slot| Ok(slot.as_ref().ok_or(WorkerError::StoreThread)?.cj_cursor()?))
                     .await?;
-                hello.cursors = std::iter::once(cursor)
-                    .chain(manager.journal_cursors())
+                let cj_id =
+                    Uuid::parse_str(&cursor.journal_id).map_err(|_| WorkerError::Protocol)?;
+                let cj_pilot = store
+                    .call(move |slot| {
+                        Ok(slot
+                            .as_ref()
+                            .ok_or(WorkerError::StoreThread)?
+                            .journal_next_requires_pilot(cj_id)?)
+                    })
+                    .await?;
+                hello.cursors = (pilot || !cj_pilot)
+                    .then_some(cursor)
+                    .into_iter()
+                    .chain(manager.permitted_cursors(pilot).await?)
                     .collect();
+                hello.machine_time_ms = crate::machine::now_ms();
                 let (sender, rx) = mpsc::channel(1);
                 send(
                     &sender,
@@ -130,7 +160,7 @@ pub(super) async fn run(
                 let generation = Uuid::parse_str(&hello.restore_generation)
                     .map_err(|_| WorkerError::Protocol)?;
                 check_generation(generation, &accepted)?;
-                let committed = committed(&hello, &accepted)?;
+                let committed = session_committed(&hello, &accepted, manager)?;
                 // Старые элементы восстанавливаются сопровождением от durable cursor.
                 while relay.try_recv().is_ok() {}
                 if *active.borrow() {
@@ -184,8 +214,10 @@ async fn ship(
     relay: &mut mpsc::Receiver<SjRelay>,
     timers: &WorkerTimers,
     active: &mut watch::Receiver<bool>,
-    cursors: HashMap<Uuid, u64>,
+    session: (HashMap<Uuid, u64>, bool, JournalDiagnostics),
 ) -> Result<(), WorkerError> {
+    let (cursors, pilot, diagnostics) = session;
+    let mut withheld = std::collections::HashSet::new();
     let mut pending: VecDeque<Range> = VecDeque::new();
     let mut sent = cursors.clone();
     let mut acknowledged = cursors;
@@ -216,8 +248,13 @@ async fn ship(
             batch = relay.recv(), if *active.borrow() && ready.is_empty() && pending.len() < 8 => {
                 let Some(batch) = batch else { return Err(WorkerError::Execution); };
                 let journal = batch.journal_id;
+                if withheld.contains(&journal){continue}
                 let after = sent.get(&journal).copied().unwrap_or(0);
-                let records: Vec<_> = batch.records.into_iter().filter(|r| r.seq > after).collect();
+                let mut records: Vec<_> = batch.records.into_iter().filter(|r| r.seq > after).collect();
+                if !pilot && let Some(index)=records.iter().position(|r|r.body.as_ref().is_some_and(crate::store::requires_pilot)) {
+                    records.truncate(index);
+                    if withheld.insert(journal){diagnostics.withheld(journal);}
+                }
                 if records.is_empty() { continue; }
                 if records[0].seq != after + 1 {
                     manager.replay_sj(journal, after);

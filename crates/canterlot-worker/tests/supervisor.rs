@@ -1487,3 +1487,183 @@ async fn wave_w_group_commit_keeps_stopped_crash_boundary_durable() {
             .any(|(_, b)| matches!(b, Body::JournalClosed(_)))
     );
 }
+
+async fn pilot_supervisor_case(case: &str) {
+    let mut h = Harness::start(&[]).await;
+    h.attach_and_ship(0).await;
+    h.send(down::Msg::StartCli(StartCli {
+        profile: "synthetic".into(),
+        workdir: h._root.path().to_string_lossy().into_owned(),
+        model: "synthetic-large".into(),
+        pilot_v1: case != "limit_facts_are_dropped_and_counted_without_pilot_v1",
+        ..Default::default()
+    }))
+    .await;
+    h.next_message(|m| matches!(m, up::Msg::CliStarted(_)))
+        .await;
+    let id = Uuid::now_v7();
+    let steps = match case {
+        "context_exhausted_fails_the_execution_with_its_outcome" => r#"{"context_exhausted":true}"#,
+        "deliver_files_reach_the_adapter_as_local_files" => r#"{"read_attachment":0}"#,
+        "phase_detail_and_block_fields_reach_sj" => {
+            r#"{"tool":{"name":"Read","summary":"private summary"}}"#
+        }
+        "run_finished_carries_usage_context_and_duration" => {
+            r#"{"delta":"answer"},{"delay_ms":30},{"usage":{"model":"synthetic-small","agent":"Explore","input":120,"output":40}}"#
+        }
+        "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj" => {
+            r#"{"delta":"must not run"}"#
+        }
+        _ => {
+            r#"{"delta":"before"},{"limit_observed":{"window":"weekly","used_permille":960,"resets_in_ms":1000}},{"delta":"after"},{"limit_reached":{"window":"five_hour","resets_in_ms":5000}}"#
+        }
+    };
+    let mut command = h.command(id, 1, &script(steps), 1);
+    let mut files = vec![];
+    if case == "deliver_files_reach_the_adapter_as_local_files" {
+        let path = h.exec_dir.join("file");
+        fs::write(&path, b"attachment").unwrap();
+        files.push(canterlot_proto::worker::ipc::LocalFile {
+            path: path.to_string_lossy().into_owned(),
+            name: "file".into(),
+            mime: "text/plain".into(),
+            size: 10,
+            image: false,
+        });
+    }
+    if case == "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj" {
+        let Some(Kind::DeliverInput(input)) = &mut command.kind else {
+            panic!()
+        };
+        input.settings = Some(canterlot_proto::worker::v1::SettingsOverride {
+            model: "invalid".into(),
+            ..Default::default()
+        });
+    }
+    h.send(down::Msg::Deliver(canterlot_proto::worker::ipc::Deliver {
+        command: Some(command),
+        files,
+    }))
+    .await;
+    let bodies = h
+        .wait_records("pilot result", |b| {
+            if case == "context_exhausted_fails_the_execution_with_its_outcome" {
+                b.iter().any(|r| state(r, "failed"))
+            } else if case == "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj" {
+                b.iter().any(|r| matches!(r, Body::InputRejected(_)))
+            } else {
+                run_finished(b, id)
+            }
+        })
+        .await;
+    match case {
+        "phase_detail_and_block_fields_reach_sj" => {
+            assert!(bodies.iter().any(|b| matches!(b,
+                Body::PhaseChanged(f) if f.tool_name == "Read" && f.summary == "private summary")));
+            assert!(bodies.iter().any(|b| matches!(b,
+                Body::BlockStarted(f) if f.agent == "main"
+                    && f.model == "synthetic-large"
+                    && f.tool_name == "Read"
+                    && f.summary == "private summary")));
+            assert!(bodies.iter().any(|b| matches!(b,
+                Body::BlockFinal(f) if f.summary == "private summary")));
+        }
+        "run_finished_carries_usage_context_and_duration" => {
+            let f = bodies
+                .iter()
+                .find_map(|b| {
+                    if let Body::RunFinished(f) = b {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            assert_eq!(f.usage.len(), 1);
+            assert_eq!(f.usage[0].input_tokens, 120);
+            assert_eq!(f.usage[0].agent, "Explore");
+            assert_eq!(f.context_tokens, 160);
+            assert_eq!(f.context_window_tokens, 200000);
+            assert!(f.duration_ms >= 30);
+            assert!(f.machine_time_ms > 1_700_000_000_000);
+        }
+        "limit_reached_precedes_run_finished_in_sj" => {
+            let reached = index(&bodies, |b| matches!(b, Body::LimitReached(_))).unwrap();
+            let finished = index(&bodies, |b| matches!(b, Body::RunFinished(_))).unwrap();
+            assert!(reached < finished);
+            let Body::LimitReached(f) = &bodies[reached] else {
+                panic!()
+            };
+            assert_eq!(f.input_command_id, id.to_string());
+            assert_eq!(f.provider, "claude");
+            assert!(f.resets_at_ms > 0);
+        }
+        "limit_observed_is_journaled_in_order_with_blocks" => {
+            let before = index(
+                &bodies,
+                |b| matches!(b, Body::BlockDelta(f) if f.append == "before"),
+            );
+            let observed = index(
+                &bodies,
+                |b| matches!(b, Body::LimitObserved(f) if f.used_permille == 960 && f.provider == "claude"),
+            );
+            let after = index(
+                &bodies,
+                |b| matches!(b, Body::BlockDelta(f) if f.append == "after"),
+            );
+            let (before, observed, after) = (before.unwrap(), observed.unwrap(), after.unwrap());
+            assert!(before < observed && observed < after);
+        }
+        "context_exhausted_fails_the_execution_with_its_outcome" => {
+            assert!(bodies.iter().any(|b| matches!(b,
+                Body::ExecutionState(f) if f.state == "failed" && f.outcome == "context_exhausted")));
+        }
+        "deliver_files_reach_the_adapter_as_local_files" => {
+            let hash = format!("sha256:{}", sha("attachment"));
+            assert!(
+                bodies
+                    .iter()
+                    .any(|b| matches!(b, Body::BlockDelta(f) if f.append == hash))
+            );
+        }
+        "limit_facts_are_dropped_and_counted_without_pilot_v1" => {
+            assert!(
+                !bodies
+                    .iter()
+                    .any(|b| matches!(b, Body::LimitObserved(_) | Body::LimitReached(_)))
+            );
+            let dropped = bodies
+                .iter()
+                .filter(|b| matches!(b,
+                    Body::AdapterDiagnostic(f) if f.kind == "capability_missing" && f.event_type == "limit_fact_dropped"))
+                .count();
+            assert_eq!(dropped, 2);
+        }
+        "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj" => {
+            assert_eq!(transmissions(&bodies, id), 0);
+            assert!(bodies.iter().any(|b| matches!(b,
+                Body::InputRejected(f) if f.reason == "settings_unavailable")));
+            assert!(!h.stdin_log.exists() || fs::read_to_string(&h.stdin_log).unwrap().is_empty());
+        }
+        _ => unreachable!(),
+    }
+    h.shutdown().await;
+}
+macro_rules! pilot_supervisor_tests {
+    ($($name:ident),* $(,)?) => {$(
+        #[tokio::test]
+        async fn $name() {
+            pilot_supervisor_case(stringify!($name)).await;
+        }
+    )*};
+}
+pilot_supervisor_tests!(
+    phase_detail_and_block_fields_reach_sj,
+    run_finished_carries_usage_context_and_duration,
+    limit_reached_precedes_run_finished_in_sj,
+    limit_observed_is_journaled_in_order_with_blocks,
+    context_exhausted_fails_the_execution_with_its_outcome,
+    deliver_files_reach_the_adapter_as_local_files,
+    limit_facts_are_dropped_and_counted_without_pilot_v1,
+    unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj
+);

@@ -1,0 +1,97 @@
+use crate::{adapter::HarnessCatalog, config::WorkerConfig};
+use canterlot_proto::{
+    limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT},
+    worker::v1::{HarnessInfo, InstructionProfile, MachineReport, ModelInfo},
+};
+use std::time::{SystemTime, UNIX_EPOCH};
+pub mod limits;
+pub mod metrics;
+
+pub fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> MachineReport {
+    let mut profiles = vec![InstructionProfile {
+        name: "owner".into(),
+        title: "Как у владельца".into(),
+        description: String::new(),
+        harnesses: catalog.iter().map(|c| c.harness.into()).collect(),
+    }];
+    profiles.extend(
+        config
+            .instruction_profiles
+            .iter()
+            .filter(|p| p.name != "owner")
+            .map(|p| InstructionProfile {
+                name: p.name.clone(),
+                title: p.title.clone(),
+                description: p.description.clone(),
+                harnesses: p.harnesses.clone(),
+            }),
+    );
+    let mut roots: Vec<_> = config
+        .execution
+        .allowed_workdir_roots
+        .iter()
+        .filter_map(|r| r.canonicalize().ok())
+        .map(|r| r.to_string_lossy().into_owned())
+        .collect();
+    roots.sort();
+    roots.dedup();
+    MachineReport {
+        worker_version: env!("CARGO_PKG_VERSION").into(),
+        allowed_roots: roots,
+        harnesses: catalog
+            .iter()
+            .map(|c| HarnessInfo {
+                harness: c.harness.into(),
+                provider: c.provider.into(),
+                title: c.title.into(),
+                images: c.images,
+                settings_midsession: c.settings_midsession,
+                permission_modes: c.permission_modes.iter().map(|s| (*s).into()).collect(),
+                models: c
+                    .models
+                    .iter()
+                    .map(|m| ModelInfo {
+                        id: m.id.into(),
+                        title: m.title.into(),
+                        efforts: m.efforts.iter().map(|s| (*s).into()).collect(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+        profiles,
+        max_attachment_bytes: MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: MAX_ATTACHMENTS_PER_INPUT as u32,
+        containment: "tree".into(),
+        os: os_line(),
+    }
+}
+fn os_line() -> String {
+    let release = std::fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let field = |name: &str| {
+        release
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix(&format!("{name}="))
+                    .map(|v| v.trim_matches(['\'', '"']))
+            })
+            .unwrap_or("unknown")
+    };
+    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    format!(
+        "{} {} · {}",
+        field("NAME"),
+        field("VERSION_ID"),
+        kernel
+            .trim()
+            .split('.')
+            .take(2)
+            .collect::<Vec<_>>()
+            .join(".")
+    )
+}

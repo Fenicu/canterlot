@@ -56,7 +56,7 @@ async fn worker_without_exec_capability_echo_rejects_start() {
     let Observed::Hello(hello, _) = hub.event().await else {
         panic!("missing hello")
     };
-    assert_eq!(hello.optional_capabilities, ["exec_v1"]);
+    assert_eq!(hello.optional_capabilities, ["exec_v1", "pilot_v1"]);
     hub.send(ControlDown {
         msg: Some(control_down::Msg::Command(start_command(
             Uuid::now_v7(),
@@ -135,7 +135,7 @@ async fn reconcile_waits_for_the_cj_prefix_ack() {
 
 #[cfg(feature = "synthetic-adapter")]
 #[path = "process_guard.rs"]
-mod process_guard;
+pub(super) mod process_guard;
 
 #[cfg(feature = "synthetic-adapter")]
 fn execution_config(config: &mut WorkerConfig) {

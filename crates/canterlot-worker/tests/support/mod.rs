@@ -90,7 +90,13 @@ impl Service {
     fn reply(&self, hello: &Hello) -> HelloReply {
         HelloReply {
             result: Some(hello_reply::Result::Accepted(Accepted {
-                capabilities: self.behavior.capabilities.clone(),
+                capabilities: self
+                    .behavior
+                    .capabilities
+                    .iter()
+                    .filter(|c| hello.optional_capabilities.contains(c))
+                    .cloned()
+                    .collect(),
                 restore_generation: self.behavior.generation.to_string(),
                 committed: hello
                     .cursors
@@ -440,6 +446,16 @@ impl ProtocolHub {
     pub async fn send(&self, message: ControlDown) {
         let sender = self.downstream.lock().unwrap().clone().unwrap();
         sender.send(Ok(message)).await.unwrap();
+    }
+
+    #[cfg(feature = "synthetic-adapter")]
+    pub async fn poll_limits(&self, provider: &str) {
+        self.send(ControlDown {
+            msg: Some(control_down::Msg::PollLimits(PollLimits {
+                provider: provider.into(),
+            })),
+        })
+        .await;
     }
 
     pub async fn send_data(&self, message: DataDown) {

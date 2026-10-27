@@ -1399,3 +1399,371 @@ async fn accepted_commands_are_routed_to_execution_manager() {
 
 #[path = "support/task8.rs"]
 mod task8;
+
+async fn pilot_worker() -> (
+    ProtocolHub,
+    watch::Sender<bool>,
+    JoinHandle<Result<(), WorkerError>>,
+    canterlot_worker::session::LimitsCache,
+) {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    hub.config.machine.metrics_interval = Duration::from_millis(45);
+    let worker = Worker::new(hub.config.clone(), store);
+    let cache = worker.limits_cache();
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown));
+    (hub, stop, join, cache)
+}
+async fn next_pilot(
+    hub: &mut ProtocolHub,
+    wanted: impl Fn(&canterlot_proto::worker::v1::control_up::Msg) -> bool,
+) -> canterlot_proto::worker::v1::control_up::Msg {
+    loop {
+        if let Observed::Control(message) = hub.event().await
+            && let Some(msg) = message.msg
+            && wanted(&msg)
+        {
+            return msg;
+        }
+    }
+}
+#[tokio::test]
+async fn machine_report_follows_accepted_only_when_pilot_capability_is_echoed() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    for pilot in [false, true] {
+        let (mut hub, store) = ProtocolHub::start(Behavior {
+            capabilities: if pilot {
+                vec!["pilot_v1".into()]
+            } else {
+                vec![]
+            },
+            ..Default::default()
+        })
+        .await;
+        let (stop, _, join) = start(hub.config.clone(), store);
+        let mut reports = 0;
+        let mut hellos = 0;
+        let until = tokio::time::Instant::now() + Duration::from_millis(200);
+        while tokio::time::Instant::now() < until {
+            match hub.event().await {
+                Observed::Hello(h, _) => {
+                    assert!(h.optional_capabilities.contains(&"pilot_v1".into()));
+                    hellos += 1
+                }
+                Observed::Control(m) if matches!(m.msg, Some(Msg::MachineReport(_))) => {
+                    assert_eq!(hellos, 2);
+                    reports += 1
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(reports, usize::from(pilot));
+        stop_worker(stop, join).await;
+    }
+}
+#[tokio::test]
+async fn metrics_arrive_every_interval_without_delaying_heartbeats() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    let (mut hub, stop, join, _) = pilot_worker().await;
+    let mut samples = vec![];
+    let mut beats = vec![];
+    while samples.len() < 4 {
+        if let Observed::Control(m) = hub.event().await {
+            match m.msg {
+                Some(Msg::MachineMetrics(sample)) => {
+                    assert!(sample.machine_time_ms > 0);
+                    samples.push(tokio::time::Instant::now())
+                }
+                Some(Msg::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
+                _ => {}
+            }
+        }
+    }
+    assert!(beats.len() >= 3);
+    assert!(
+        samples
+            .windows(2)
+            .all(|w| w[1] - w[0] < Duration::from_millis(160))
+    );
+    assert!(
+        beats
+            .windows(2)
+            .all(|w| w[1] - w[0] < Duration::from_millis(100))
+    );
+    stop_worker(stop, join).await;
+}
+#[tokio::test]
+async fn full_control_queue_drops_metrics_not_heartbeats() {
+    use canterlot_proto::worker::v1::{ControlUp, Heartbeat, MachineMetrics, control_up::Msg};
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    tx.try_send(ControlUp {
+        msg: Some(Msg::Heartbeat(Heartbeat {
+            seq: 1,
+            machine_time_ms: 1,
+        })),
+    })
+    .unwrap();
+    assert!(!canterlot_worker::session::try_send_metrics(
+        &tx,
+        MachineMetrics::default()
+    ));
+    assert!(matches!(rx.recv().await.unwrap().msg,Some(Msg::Heartbeat(h)) if h.seq==1));
+    tx.try_send(ControlUp {
+        msg: Some(Msg::Heartbeat(Heartbeat {
+            seq: 2,
+            machine_time_ms: 2,
+        })),
+    })
+    .unwrap();
+    assert!(matches!(rx.recv().await.unwrap().msg,Some(Msg::Heartbeat(h)) if h.seq==2));
+}
+#[cfg(feature = "synthetic-adapter")]
+#[tokio::test]
+async fn poll_limits_request_is_answered_from_the_source() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let dir = hub.config.data_dir.join("synthetic-limits");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("claude.json"),r#"{"five_hour":{"used_permille":3,"resets_at_ms":1800000000000},"weekly":{"used_permille":960}}"#).unwrap();
+    let (stop, _, join) = start(hub.config.clone(), store);
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+    hub.poll_limits("claude").await;
+    let Msg::LimitsReport(report) =
+        next_pilot(&mut hub, |m| matches!(m, Msg::LimitsReport(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(report.observations.len(), 2);
+    assert_eq!(report.observations[0].provider, "claude");
+    assert_eq!(report.observations[0].used_permille, 3);
+    assert!(report.observations[0].observed_machine_ms > 0);
+    assert_eq!(report.observations[1].used_permille, 960);
+    stop_worker(stop, join).await;
+}
+#[tokio::test]
+async fn report_is_resent_after_reconnect_and_metrics_resume() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    let (mut hub, stop, join, _) = pilot_worker().await;
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineMetrics(_))).await;
+    hub.fail(tonic::Status::unavailable("outage")).await;
+    let mut hello = false;
+    let mut reports = 0;
+    let mut at = None;
+    loop {
+        match hub.event().await {
+            Observed::Hello(_, _) => hello = true,
+            Observed::Control(m) => match m.msg {
+                Some(Msg::MachineReport(_)) => {
+                    assert!(hello);
+                    reports += 1;
+                    at = Some(tokio::time::Instant::now())
+                }
+                Some(Msg::MachineMetrics(_)) if at.is_some() => break,
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    assert_eq!(reports, 1);
+    assert!(at.unwrap().elapsed() < Duration::from_millis(160));
+    stop_worker(stop, join).await;
+}
+#[tokio::test]
+async fn limits_snapshot_is_cached_volatile_and_replaced_by_the_latest() {
+    use canterlot_proto::worker::v1::{LimitObservation, LimitsSnapshot, control_up::Msg};
+    let (mut hub, stop, join, cache) = pilot_worker().await;
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+    for used in [960, 40] {
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::LimitsSnapshot(LimitsSnapshot {
+                provider: "claude".into(),
+                current: vec![LimitObservation {
+                    used_permille: used,
+                    ..Default::default()
+                }],
+                weekly_reserve_active: used == 960,
+            })),
+        })
+        .await;
+        timeout(Duration::from_secs(2), async {
+            loop {
+                if cache.get("claude").is_some_and(|s| {
+                    s.observations[0].used_permille == used
+                        && s.weekly_reserve_active == (used == 960)
+                }) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+    assert!(cache.get("codex").is_none());
+    stop_worker(stop, join).await;
+    let empty = canterlot_worker::session::LimitsCache::default();
+    assert!(empty.get("claude").is_none());
+}
+#[cfg(feature = "synthetic-adapter")]
+#[tokio::test]
+async fn journal_with_pilot_records_is_withheld_from_a_session_without_pilot_v1_and_others_keep_shipping()
+ {
+    use canterlot_proto::worker::v1::{
+        ContentBlock, DeliverInput, LimitObservation, StartExecution, TextBlock, control_up::Msg,
+        data_up, record_body::Body,
+    };
+    let (mut hub, mut store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["exec_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let _guard = task8::process_guard::ProcessGuard::new(&hub.config.data_dir);
+    hub.config.execution.allowed_workdir_roots = vec![hub.config.data_dir.clone()];
+    hub.config.execution.supervisor_exe = Some(env!("CARGO_BIN_EXE_canterlot-worker").into());
+    let journal = store.cj_journal_id().unwrap().to_string();
+    store
+        .append_cj_fact(Body::LimitObserved(LimitObservation {
+            provider: "claude".into(),
+            used_permille: 960,
+            ..Default::default()
+        }))
+        .unwrap();
+    assert!(
+        store
+            .journal_next_requires_pilot(Uuid::parse_str(&journal).unwrap())
+            .unwrap()
+    );
+    let (stop, _, join) = start(hub.config.clone(), store);
+    next_pilot(&mut hub, |m| matches!(m, Msg::ReconcileReport(_))).await;
+    let execution = Uuid::now_v7().to_string();
+    let conversation = Uuid::now_v7().to_string();
+    let cmd = |kind| Command {
+        command_id: Uuid::now_v7().to_string(),
+        dispatch_attempt: 1,
+        execution_id: execution.clone(),
+        execution_generation: 1,
+        kind: Some(kind),
+    };
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(cmd(
+            command::Kind::StartExecution(StartExecution {
+                conversation_id: conversation.clone(),
+                harness: "synthetic".into(),
+                workdir: hub.config.data_dir.to_string_lossy().into_owned(),
+                ..Default::default()
+            }),
+        ))),
+    })
+    .await;
+    let deliver = cmd(command::Kind::DeliverInput(DeliverInput {
+        input_id: Uuid::now_v7().to_string(),
+        conversation_id: conversation,
+        content: vec![ContentBlock {
+            block: Some(canterlot_proto::worker::v1::content_block::Block::Text(
+                TextBlock {
+                    text: "answer".into(),
+                },
+            )),
+        }],
+        ..Default::default()
+    }));
+    let input_id = deliver.command_id.clone();
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::Command(deliver)),
+    })
+    .await;
+    let mut beats = 0;
+    let mut finished = false;
+    while beats < 4 || !finished {
+        match hub.event().await {
+            Observed::Hello(h, _) => assert!(!h.cursors.iter().any(|c| c.journal_id == journal)),
+            Observed::Control(m) => match m.msg {
+                Some(Msg::CjRecords(b)) => assert_ne!(b.journal_id, journal),
+                Some(Msg::Heartbeat(_)) => beats += 1,
+                _ => {}
+            },
+            Observed::Data(m) => {
+                if let Some(data_up::Msg::SjRecords(b)) = m.msg {
+                    assert_ne!(b.journal_id, journal);
+                    finished|=b.records.iter().any(|r|matches!(r.body.as_ref().and_then(|b|b.body.as_ref()),Some(Body::RunFinished(f)) if f.input_command_id==input_id));
+                }
+            }
+        }
+    }
+    stop_worker(stop, join).await;
+}
+#[tokio::test]
+async fn acked_cj_prefix_does_not_diverge_when_the_journal_is_withheld() {
+    use canterlot_proto::worker::v1::{
+        InputTransmissionStarted, LimitObservation, control_up::Msg, record_body::Body,
+    };
+    let (mut hub, mut store) = ProtocolHub::start(Behavior::default()).await;
+    store
+        .append_cj_fact(Body::TransmissionStarted(InputTransmissionStarted {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            machine_time_ms: 1,
+        }))
+        .unwrap();
+    store.on_cj_ack(1).unwrap();
+    store
+        .append_cj_fact(Body::LimitObserved(LimitObservation {
+            provider: "claude".into(),
+            ..Default::default()
+        }))
+        .unwrap();
+    let journal = store.cj_journal_id().unwrap().to_string();
+    let (stop, mut state, join) = start(hub.config.clone(), store);
+    wait_state(&mut state, SessionState::Live).await;
+    let mut beats = 0;
+    while beats < 2 {
+        match hub.event().await {
+            Observed::Control(m) => match m.msg {
+                Some(Msg::CjRecords(b)) => assert_ne!(b.journal_id, journal),
+                Some(Msg::Heartbeat(_)) => beats += 1,
+                _ => {}
+            },
+            Observed::Hello(h, _) => assert!(!h.cursors.iter().any(|c| c.journal_id == journal)),
+            _ => {}
+        }
+    }
+    stop_worker(stop, join).await;
+}
+#[tokio::test]
+async fn hello_and_heartbeat_carry_the_machine_clock() {
+    use canterlot_proto::worker::v1::control_up::Msg;
+    let (mut hub, stop, join, _) = pilot_worker().await;
+    let now = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    };
+    let mut hellos = 0;
+    loop {
+        match hub.event().await {
+            Observed::Hello(h, _) => {
+                hellos += 1;
+                assert!(h.machine_time_ms > now() - 5000 && h.machine_time_ms <= now() + 1000)
+            }
+            Observed::Control(m) => {
+                if let Some(Msg::Heartbeat(h)) = m.msg {
+                    assert!(h.machine_time_ms > now() - 5000 && h.machine_time_ms <= now() + 1000);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(hellos, 2);
+    stop_worker(stop, join).await;
+}

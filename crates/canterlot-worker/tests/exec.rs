@@ -511,6 +511,22 @@ async fn start_execution_spawns_supervisor_and_relays_running() {
 }
 
 #[tokio::test]
+async fn execution_probes_carry_supervisor_and_cli_identities() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let probes = env.manager().probes();
+    assert_eq!(probes.len(), 1);
+    assert_eq!(probes[0].execution_id, env.execution);
+    assert_eq!(probes[0].members.len(), 2);
+    for (pid, start_ticks) in &probes[0].members {
+        assert_eq!(ticks(*pid), Some(*start_ticks));
+    }
+    env.stop().await;
+}
+
+#[tokio::test]
 async fn ownership_is_durable_before_cli_start() {
     let mut env = Env::new().await;
     env.hub_session();

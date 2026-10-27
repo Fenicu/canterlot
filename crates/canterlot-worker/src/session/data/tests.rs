@@ -120,7 +120,7 @@ async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
                 ..Default::default()
             },
             &mut active,
-            HashMap::new(),
+            (HashMap::new(), true, JournalDiagnostics::default()),
         )
         .await;
         manager.shutdown().await;
@@ -193,7 +193,7 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
                 ..Default::default()
             },
             &mut active,
-            HashMap::new(),
+            (HashMap::new(), true, JournalDiagnostics::default()),
         )
         .await;
         manager.shutdown().await;
@@ -265,7 +265,11 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
             &mut relay,
             &WorkerTimers::default(),
             &mut active,
-            HashMap::from([(journal, 2)]),
+            (
+                HashMap::from([(journal, 2)]),
+                true,
+                JournalDiagnostics::default(),
+            ),
         )
         .await;
         manager.shutdown().await;
@@ -287,4 +291,93 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
     drop(sender);
     thread.close().await.unwrap();
     assert_eq!(first, 3, "stale batch skipped the committed prefix");
+}
+
+#[tokio::test]
+async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contiguous() {
+    let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(8);
+    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let hidden = Uuid::now_v7();
+    let mixed = Uuid::now_v7();
+    let ordinary = Uuid::now_v7();
+    let fact = |seq| JournalRecord {
+        seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::LimitObserved(LimitObservation {
+                provider: "claude".into(),
+                ..Default::default()
+            })),
+        }),
+    };
+    for (id, records) in [
+        (hidden, vec![fact(4)]),
+        (mixed, vec![record(1, 0), fact(2), record(3, 0)]),
+        (ordinary, vec![record(1, 0)]),
+    ] {
+        sender
+            .send(SjRelay {
+                journal_id: id,
+                records,
+            })
+            .await
+            .unwrap();
+    }
+    let diagnostics = JournalDiagnostics::default();
+    let check = diagnostics.clone();
+    let (shutdown, mut shutdown_rx) = watch::channel(false);
+    let task = tokio::spawn(async move {
+        let (stop, mut active) = watch::channel(true);
+        let timers = WorkerTimers::default();
+        let ship = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &timers,
+            &mut active,
+            (HashMap::from([(hidden, 3)]), false, diagnostics),
+        );
+        let result = tokio::select! {result=ship=>result,_=shutdown_rx.changed()=>Ok(())};
+        drop(stop);
+        manager.shutdown().await;
+        result
+    });
+    let mut batches = Vec::new();
+    while batches.len() < 2 {
+        if let Observed::Data(m) = hub.event().await
+            && let Some(data_up::Msg::SjRecords(batch)) = m.msg
+        {
+            batches.push(batch);
+        }
+    }
+    assert!(batches.iter().any(|b| b.journal_id == ordinary.to_string()));
+    assert!(batches.iter().any(|b| b.journal_id == mixed.to_string()
+        && b.records.len() == 1
+        && b.records[0].seq == 1));
+    assert!(batches.iter().all(|b| {
+        b.journal_id != hidden.to_string()
+            && b.records
+                .iter()
+                .all(|r| !r.body.as_ref().is_some_and(crate::store::requires_pilot))
+    }));
+    assert_eq!(check.0.lock().unwrap().len(), 2);
+    sender
+        .send(SjRelay {
+            journal_id: hidden,
+            records: vec![fact(4)],
+        })
+        .await
+        .unwrap();
+    shutdown.send(true).unwrap();
+    timeout(Duration::from_secs(2), task)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    drop(sender);
+    assert_eq!(check.0.lock().unwrap().len(), 2);
+    thread.close().await.unwrap();
 }

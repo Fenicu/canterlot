@@ -55,6 +55,19 @@ cases!(
     oversized_input_is_rejected_before_writing,
     capabilities_describe_profiles,
     wave_w_member_signals_use_supplied_containment,
+    blocks_carry_agent_and_model,
+    model_step_switches_model_for_following_blocks,
+    subagent_step_emits_child_blocks_with_parent_agent_and_model,
+    subagent_call_block_carries_task_summary_and_children_carry_the_name,
+    usage_step_accumulates_per_model_and_agent,
+    default_usage_is_derived_from_text,
+    limit_steps_emit_observed_and_reached_with_resets_at,
+    context_exhausted_step_ends_the_turn_with_the_marker,
+    settings_in_transmission_change_the_model_before_the_turn,
+    unsupported_setting_is_rejected_before_any_byte_reaches_the_cli,
+    read_attachment_step_echoes_the_file_sha256,
+    catalog_lists_synthetic_harnesses_with_models_and_efforts,
+    synthetic_codex_profile_has_provider_codex,
 );
 
 async fn event(adapter: &mut SyntheticAdapter) -> AdapterEvent {
@@ -80,13 +93,26 @@ async fn adapter_child() {
         workdir: directory.path().into(),
         native_conversation_id: None,
         profile: "synthetic".into(),
+        model: if case == "blocks_carry_agent_and_model" {
+            "synthetic-small"
+        } else {
+            "synthetic-large"
+        }
+        .into(),
+        effort: "medium".into(),
+        permission_mode: "owner".into(),
+        instruction_profile: "owner".into(),
     };
     let make = |profile: &str| {
         SyntheticAdapter::new(profile)
             .with_executable(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker")))
             .with_transmit_deadline(Duration::from_millis(250))
     };
-    let mut adapter = make("synthetic");
+    let mut adapter = make(if case == "synthetic_codex_profile_has_provider_codex" {
+        "synthetic-codex"
+    } else {
+        "synthetic"
+    });
     let started = adapter.start(&spec, &group).await.unwrap();
     assert!(started.native_conversation_id.starts_with("synthetic-"));
     assert!(
@@ -100,6 +126,8 @@ async fn adapter_child() {
         command_id: Uuid::now_v7(),
         attempt: 1,
         text: text.into(),
+        files: vec![],
+        settings: None,
     };
 
     match case.as_str() {
@@ -183,7 +211,8 @@ async fn adapter_child() {
                     "{:?}",
                     AdapterEvent::BlockFinal {
                         block_id: Uuid::now_v7(),
-                        text: secret.into()
+                        text: secret.into(),
+                        summary: Some(secret.into())
                     }
                 )
                 .contains(secret)
@@ -243,8 +272,9 @@ async fn adapter_child() {
                 ));
                 if profile == "synthetic" {
                     loop {
-                        if let AdapterEvent::RunFinished { input_command_id } =
-                            event(&mut adapter).await
+                        if let AdapterEvent::RunFinished {
+                            input_command_id, ..
+                        } = event(&mut adapter).await
                         {
                             assert_eq!(input_command_id, transmission.command_id);
                             break;
@@ -273,6 +303,9 @@ async fn adapter_child() {
                     }
                 }
             }
+        }
+        name if PILOT_CASES.contains(&name) => {
+            pilot_case(name, &mut adapter, &directory, &input).await;
         }
         _ => {
             let text = match case.as_str() {
@@ -326,7 +359,9 @@ async fn adapter_child() {
                         assert_eq!(kind, "unknown_event");
                         diagnostic = Some((event_type, required));
                     }
-                    AdapterEvent::RunFinished { input_command_id } => {
+                    AdapterEvent::RunFinished {
+                        input_command_id, ..
+                    } => {
                         assert_eq!(input_command_id, transmission.command_id);
                         break;
                     }
@@ -416,5 +451,313 @@ impl Containment for ObservedContainment {
         grace: Duration,
     ) -> Result<Termination, canterlot_worker::containment::ContainmentError> {
         self.tree.terminate(grace).await
+    }
+}
+
+const PILOT_CASES: &[&str] = &[
+    "blocks_carry_agent_and_model",
+    "model_step_switches_model_for_following_blocks",
+    "subagent_step_emits_child_blocks_with_parent_agent_and_model",
+    "subagent_call_block_carries_task_summary_and_children_carry_the_name",
+    "usage_step_accumulates_per_model_and_agent",
+    "default_usage_is_derived_from_text",
+    "limit_steps_emit_observed_and_reached_with_resets_at",
+    "context_exhausted_step_ends_the_turn_with_the_marker",
+    "settings_in_transmission_change_the_model_before_the_turn",
+    "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli",
+    "read_attachment_step_echoes_the_file_sha256",
+    "catalog_lists_synthetic_harnesses_with_models_and_efforts",
+    "synthetic_codex_profile_has_provider_codex",
+];
+
+async fn pilot_case(
+    name: &str,
+    adapter: &mut SyntheticAdapter,
+    directory: &tempfile::TempDir,
+    input: &impl Fn(&str) -> Transmission,
+) {
+    use canterlot_worker::adapter::{LimitFact, LimitWindow, LocalFile, SettingsChange, catalog};
+    use serde_json::json;
+    if name == "catalog_lists_synthetic_harnesses_with_models_and_efforts" {
+        let entries = catalog();
+        assert_eq!(entries.len(), 3);
+        for entry in entries {
+            assert!(!entry.title.is_empty());
+            assert!(entry.images && entry.settings_midsession);
+            assert!(!entry.permission_modes.is_empty());
+            assert!(
+                entry
+                    .models
+                    .iter()
+                    .any(|m| m.id == "synthetic-large" && m.efforts.contains(&"high"))
+            );
+        }
+        return;
+    }
+    if name == "synthetic_codex_profile_has_provider_codex" {
+        assert!(registry("synthetic-codex").is_some());
+        assert_eq!(
+            catalog()
+                .iter()
+                .find(|e| e.harness == "synthetic-codex")
+                .unwrap()
+                .provider,
+            "codex"
+        );
+        return;
+    }
+    let script = match name {
+        "model_step_switches_model_for_following_blocks" => {
+            json!({"synthetic":[{"delta":"first"},{"model":"synthetic-small"},{"delta":"second"}]})
+        }
+        "subagent_step_emits_child_blocks_with_parent_agent_and_model"
+        | "subagent_call_block_carries_task_summary_and_children_carry_the_name" => {
+            json!({"synthetic":[{"subagent":{"name":"Explore","model":"synthetic-small","task":"private task","steps":[{"delay_ms":200},{"delta":"child"}]}}]})
+        }
+        "usage_step_accumulates_per_model_and_agent" => {
+            json!({"synthetic":[{"usage":{"model":"synthetic-small","agent":"Explore","input":120,"output":40,"cache_read":10,"cache_write":2}},{"usage":{"model":"synthetic-small","agent":"Explore","input":4,"output":8,"cache_read":1,"cache_write":3}},{"usage":{"model":"synthetic-large","agent":"main","input":2,"output":3}}]})
+        }
+        "limit_steps_emit_observed_and_reached_with_resets_at" => {
+            json!({"synthetic":[{"limit_observed":{"window":"weekly","used_permille":960,"resets_in_ms":3600000}},{"limit_reached":{"window":"five_hour","resets_in_ms":5000}}]})
+        }
+        "context_exhausted_step_ends_the_turn_with_the_marker" => {
+            json!({"synthetic":[{"context_exhausted":true},{"delta":"must not run"}]})
+        }
+        "read_attachment_step_echoes_the_file_sha256" => {
+            json!({"synthetic":[{"read_attachment":0}]})
+        }
+        _ => json!("abcd🦄efg"),
+    };
+    let text = script
+        .as_str()
+        .map(str::to_owned)
+        .unwrap_or_else(|| script.to_string());
+    let mut transmission = input(&text);
+    if name == "settings_in_transmission_change_the_model_before_the_turn" {
+        transmission.settings = Some(SettingsChange {
+            model: Some("synthetic-small".into()),
+            ..Default::default()
+        });
+    }
+    if name == "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli" {
+        for setting in [
+            SettingsChange {
+                model: Some("invalid".into()),
+                ..Default::default()
+            },
+            SettingsChange {
+                effort: Some("invalid".into()),
+                ..Default::default()
+            },
+            SettingsChange {
+                permission_mode: Some("invalid".into()),
+                ..Default::default()
+            },
+            SettingsChange {
+                model: Some("synthetic-small".into()),
+                effort: Some("high".into()),
+                permission_mode: None,
+            },
+        ] {
+            transmission.settings = Some(setting);
+            assert!(
+                matches!(adapter.transmit(&transmission).await, TransmitOutcome::Rejected(reason) if reason == "settings_unavailable")
+            );
+        }
+        transmission.settings = None;
+    }
+    let payload = b"private attachment";
+    if name == "read_attachment_step_echoes_the_file_sha256" {
+        let path = directory.path().join("file");
+        std::fs::write(&path, payload).unwrap();
+        transmission.files.push(LocalFile {
+            path,
+            name: "private".into(),
+            mime: "text/plain".into(),
+            size: payload.len() as u64,
+            image: false,
+        });
+        assert!(!format!("{:?}", transmission.files).contains("private"));
+    }
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    assert!(matches!(
+        adapter.transmit(&transmission).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let mut events = vec![];
+    let mut stamps = vec![];
+    loop {
+        let e = event(adapter).await;
+        stamps.push(std::time::Instant::now());
+        let done = matches!(
+            e,
+            AdapterEvent::RunFinished { .. } | AdapterEvent::ContextExhausted
+        );
+        events.push(e);
+        if done {
+            break;
+        }
+    }
+    let blocks: Vec<_> = events
+        .iter()
+        .filter_map(|e| {
+            if let AdapterEvent::BlockStarted {
+                block_id,
+                agent,
+                model,
+                parent,
+                tool_name,
+                summary,
+                ..
+            } = e
+            {
+                Some((block_id, agent, model, parent, tool_name, summary))
+            } else {
+                None
+            }
+        })
+        .collect();
+    match name {
+        "blocks_carry_agent_and_model" => {
+            assert!(!blocks.is_empty());
+            assert!(
+                blocks
+                    .iter()
+                    .all(|b| b.1 == "main" && b.2 == "synthetic-small")
+            );
+        }
+        "model_step_switches_model_for_following_blocks" => {
+            assert_eq!(blocks.len(), 2);
+            assert_eq!(blocks[0].2, "synthetic-large");
+            assert_eq!(blocks[1].2, "synthetic-small");
+        }
+        "settings_in_transmission_change_the_model_before_the_turn" => {
+            assert!(blocks.iter().all(|b| b.2 == "synthetic-small"))
+        }
+        "subagent_step_emits_child_blocks_with_parent_agent_and_model"
+        | "subagent_call_block_carries_task_summary_and_children_carry_the_name" => {
+            let call = blocks
+                .iter()
+                .find(|b| b.4.as_deref() == Some("Agent"))
+                .unwrap();
+            assert_eq!(call.1, "main");
+            assert_eq!(call.5.as_deref(), Some("private task"));
+            let child = blocks.iter().find(|b| b.1 == "Explore").unwrap();
+            assert_eq!(child.2, "synthetic-small");
+            assert_eq!(*child.3, Some(*call.0));
+            let call_pos = events
+                .iter()
+                .position(
+                    |e| matches!(e,AdapterEvent::BlockStarted {block_id,..} if block_id == call.0),
+                )
+                .unwrap();
+            assert!(
+                matches!(&events[call_pos+1], AdapterEvent::BlockStarted {agent,model,..} if agent == "Explore" && model == "synthetic-small")
+            );
+            // Первый дочерний блок виден до того, как вложенные шаги (задержка 200 мс) начнут выдавать вывод.
+            let delta_pos = events
+                .iter()
+                .position(
+                    |e| matches!(e, AdapterEvent::BlockDelta { append, .. } if append == "child"),
+                )
+                .unwrap();
+            assert!(stamps[delta_pos] - stamps[call_pos + 1] >= Duration::from_millis(150));
+        }
+        "usage_step_accumulates_per_model_and_agent" => {
+            let AdapterEvent::RunFinished {
+                usage,
+                context_tokens,
+                context_window_tokens,
+                ..
+            } = events.last().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(usage.len(), 2);
+            let row = usage.iter().find(|u| u.agent == "Explore").unwrap();
+            assert_eq!(
+                (
+                    row.input_tokens,
+                    row.output_tokens,
+                    row.cache_read_tokens,
+                    row.cache_write_tokens
+                ),
+                (124, 48, 11, 5)
+            );
+            assert!(*context_tokens > 0);
+            assert_eq!(*context_window_tokens, 200000);
+        }
+        "default_usage_is_derived_from_text" => {
+            let AdapterEvent::RunFinished {
+                usage,
+                context_tokens,
+                ..
+            } = events.last().unwrap()
+            else {
+                panic!()
+            };
+            assert_eq!(usage.len(), 1);
+            assert_eq!(usage[0].input_tokens, 2);
+            assert_eq!(usage[0].output_tokens, 2);
+            assert_eq!(*context_tokens, 4);
+        }
+        "limit_steps_emit_observed_and_reached_with_resets_at" => {
+            let facts: Vec<_> = events
+                .iter()
+                .filter_map(|e| {
+                    if let AdapterEvent::Limit(f) = e {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(
+                matches!(facts[0],LimitFact::Observed{window:LimitWindow::Weekly,used_permille:960,resets_at_ms:Some(at)} if *at>=before+3600000)
+            );
+            assert!(
+                matches!(facts[1],LimitFact::Reached{window:LimitWindow::FiveHour,resets_at_ms:Some(at)} if *at>=before+5000)
+            );
+            assert!(events.iter().any(
+                |e| matches!(e,AdapterEvent::BlockFinal{text,..} if text=="usage limit reached")
+            ));
+        }
+        "context_exhausted_step_ends_the_turn_with_the_marker" => {
+            assert!(matches!(
+                events.last(),
+                Some(AdapterEvent::ContextExhausted)
+            ));
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, AdapterEvent::RunFinished { .. }))
+            );
+        }
+        "read_attachment_step_echoes_the_file_sha256" => {
+            use sha2::{Digest, Sha256};
+            let hash = format!(
+                "sha256:{}",
+                Sha256::digest(payload)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<String>()
+            );
+            assert!(
+                events
+                    .iter()
+                    .any(|e| matches!(e,AdapterEvent::BlockDelta{append,..} if append == &hash))
+            );
+        }
+        "unsupported_setting_is_rejected_before_any_byte_reaches_the_cli" => {
+            assert!(
+                events
+                    .iter()
+                    .all(|e| !matches!(e, AdapterEvent::Diagnostic { .. }))
+            );
+        }
+        _ => unreachable!(),
     }
 }

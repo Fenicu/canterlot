@@ -30,6 +30,10 @@ pub struct StartSpec {
     pub workdir: PathBuf,
     pub native_conversation_id: Option<String>,
     pub profile: String,
+    pub model: String,
+    pub effort: String,
+    pub permission_mode: String,
+    pub instruction_profile: String,
 }
 #[derive(Debug)]
 pub struct Started {
@@ -41,6 +45,8 @@ pub struct Transmission {
     pub command_id: Uuid,
     pub attempt: u32,
     pub text: String,
+    pub files: Vec<LocalFile>,
+    pub settings: Option<SettingsChange>,
 }
 impl fmt::Debug for Transmission {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -89,14 +95,70 @@ pub enum BlockKind {
     Warning,
     Error,
 }
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ModelUsage {
+    pub model: String,
+    pub agent: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LimitWindow {
+    FiveHour,
+    Weekly,
+}
+#[derive(Clone, Debug)]
+pub enum LimitFact {
+    Observed {
+        window: LimitWindow,
+        used_permille: u16,
+        resets_at_ms: Option<u64>,
+    },
+    Reached {
+        window: LimitWindow,
+        resets_at_ms: Option<u64>,
+    },
+}
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SettingsChange {
+    pub model: Option<String>,
+    pub effort: Option<String>,
+    pub permission_mode: Option<String>,
+}
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct LocalFile {
+    pub path: PathBuf,
+    pub name: String,
+    pub mime: String,
+    pub size: u64,
+    pub image: bool,
+}
+impl fmt::Debug for LocalFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalFile")
+            .field("size", &self.size)
+            .finish()
+    }
+}
 #[derive(Clone)]
 pub enum AdapterEvent {
-    Phase(Phase),
+    Phase {
+        phase: Phase,
+        tool_name: Option<String>,
+        summary: Option<String>,
+    },
     BlockStarted {
         block_id: Uuid,
         kind: BlockKind,
         input_command_id: Option<Uuid>,
         parent: Option<Uuid>,
+        agent: String,
+        model: String,
+        tool_name: Option<String>,
+        summary: Option<String>,
     },
     BlockDelta {
         block_id: Uuid,
@@ -105,10 +167,16 @@ pub enum AdapterEvent {
     BlockFinal {
         block_id: Uuid,
         text: String,
+        summary: Option<String>,
     },
     RunFinished {
         input_command_id: Uuid,
+        usage: Vec<ModelUsage>,
+        context_tokens: u64,
+        context_window_tokens: u64,
     },
+    Limit(LimitFact),
+    ContextExhausted,
     Diagnostic {
         kind: &'static str,
         event_type: String,
@@ -122,43 +190,44 @@ pub enum AdapterEvent {
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Phase(phase) => f.debug_tuple("Phase").field(phase).finish(),
+            Self::Phase { phase, .. } => f
+                .debug_struct("Phase")
+                .field("phase", phase)
+                .finish_non_exhaustive(),
             Self::BlockStarted {
                 block_id,
                 kind,
-                input_command_id,
                 parent,
+                ..
             } => f
                 .debug_struct("BlockStarted")
                 .field("block_id", block_id)
                 .field("kind", kind)
-                .field("input_command_id", input_command_id)
                 .field("parent", parent)
-                .finish(),
+                .finish_non_exhaustive(),
             Self::BlockDelta { block_id, append } => f
                 .debug_struct("BlockDelta")
                 .field("block_id", block_id)
                 .field("append_bytes", &append.len())
                 .finish(),
-            Self::BlockFinal { block_id, text } => f
+            Self::BlockFinal { block_id, text, .. } => f
                 .debug_struct("BlockFinal")
                 .field("block_id", block_id)
                 .field("text_bytes", &text.len())
-                .finish(),
-            Self::RunFinished { input_command_id } => f
+                .finish_non_exhaustive(),
+            Self::RunFinished {
+                input_command_id, ..
+            } => f
                 .debug_struct("RunFinished")
                 .field("input_command_id", input_command_id)
-                .finish(),
-            Self::Diagnostic {
-                kind,
-                event_type,
-                required,
-            } => f
+                .finish_non_exhaustive(),
+            Self::Limit(fact) => f.debug_tuple("Limit").field(fact).finish(),
+            Self::ContextExhausted => f.write_str("ContextExhausted"),
+            Self::Diagnostic { kind, required, .. } => f
                 .debug_struct("Diagnostic")
                 .field("kind", kind)
-                .field("event_type", event_type)
                 .field("required", required)
-                .finish(),
+                .finish_non_exhaustive(),
             Self::ProcessExited { code, signal } => f
                 .debug_struct("ProcessExited")
                 .field("code", code)
@@ -166,6 +235,56 @@ impl fmt::Debug for AdapterEvent {
                 .finish(),
         }
     }
+}
+pub struct ModelCatalog {
+    pub id: &'static str,
+    pub title: &'static str,
+    pub efforts: Vec<&'static str>,
+}
+pub struct HarnessCatalog {
+    pub harness: &'static str,
+    pub provider: &'static str,
+    pub title: &'static str,
+    pub images: bool,
+    pub settings_midsession: bool,
+    pub permission_modes: Vec<&'static str>,
+    pub models: Vec<ModelCatalog>,
+}
+pub fn catalog() -> Vec<HarnessCatalog> {
+    #[cfg(feature = "synthetic-adapter")]
+    return [
+        "synthetic",
+        "synthetic-exit-on-interrupt",
+        "synthetic-codex",
+    ]
+    .into_iter()
+    .map(|harness| HarnessCatalog {
+        harness,
+        provider: canterlot_proto::harness::provider_of(harness).expect("known harness"),
+        title: match harness {
+            "synthetic-codex" => "Синтетический Codex",
+            "synthetic-exit-on-interrupt" => "Синтетический с выходом при прерывании",
+            _ => "Синтетический",
+        },
+        images: true,
+        settings_midsession: true,
+        permission_modes: vec!["owner", "ask", "bypass", "read_only"],
+        models: vec![
+            ModelCatalog {
+                id: "synthetic-large",
+                title: "Большая синтетическая",
+                efforts: vec!["low", "medium", "high"],
+            },
+            ModelCatalog {
+                id: "synthetic-small",
+                title: "Малая синтетическая",
+                efforts: vec!["low", "medium"],
+            },
+        ],
+    })
+    .collect();
+    #[cfg(not(feature = "synthetic-adapter"))]
+    Vec::new()
 }
 #[derive(Clone, Copy)]
 pub enum CloseMode {
@@ -196,6 +315,9 @@ pub trait Adapter: Send {
         spec: &StartSpec,
         group: &dyn Containment,
     ) -> Result<Started, AdapterError>;
+    fn validate_transmission(&self, _input: &Transmission) -> Result<(), &'static str> {
+        Ok(())
+    }
     async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome;
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
@@ -212,7 +334,10 @@ pub fn registry_with_deadline(
     transmit_deadline: Duration,
 ) -> Option<Box<dyn Adapter>> {
     #[cfg(feature = "synthetic-adapter")]
-    if matches!(profile, "synthetic" | "synthetic-exit-on-interrupt") {
+    if matches!(
+        profile,
+        "synthetic" | "synthetic-exit-on-interrupt" | "synthetic-codex"
+    ) {
         return Some(Box::new(
             synthetic::SyntheticAdapter::new(profile).with_transmit_deadline(transmit_deadline),
         ));

@@ -37,8 +37,8 @@ use super::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterEvent, CloseMode, InterruptOutcome, Phase, StartSpec, Transmission,
-        TransmitOutcome, registry_with_deadline,
+        Adapter, AdapterEvent, CloseMode, InterruptOutcome, LimitFact, LimitWindow, LocalFile,
+        Phase, SettingsChange, StartSpec, Transmission, TransmitOutcome, registry_with_deadline,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
 };
@@ -67,6 +67,8 @@ struct Input {
     state: InputState,
     text: String,
     accepted: bool,
+    files: Vec<LocalFile>,
+    settings: Option<SettingsChange>,
 }
 
 #[derive(Clone)]
@@ -81,6 +83,7 @@ enum StopCause {
         signal: Option<i32>,
     },
     ProtocolIncompatible,
+    ContextExhausted,
 }
 
 struct StopState {
@@ -120,6 +123,9 @@ struct Supervisor {
     cancel_marks: HashMap<Uuid, u32>,
     reported: HashSet<(Uuid, u32, &'static str)>,
     active_turn: Option<Uuid>,
+    turn_started: Option<Instant>,
+    pilot_v1: bool,
+    provider: String,
     open_blocks: BTreeMap<Uuid, u64>,
     known_interrupts: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
@@ -224,6 +230,9 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         cancel_marks: HashMap::new(),
         reported: HashSet::new(),
         active_turn: None,
+        turn_started: None,
+        pilot_v1: false,
+        provider: String::new(),
         open_blocks: BTreeMap::new(),
         known_interrupts: HashSet::new(),
         pending_interrupts: Vec::new(),
@@ -532,7 +541,7 @@ impl Supervisor {
         match message {
             down::Msg::Attach(_) => self.drop_connection(id),
             down::Msg::StartCli(start) => self.start_cli(start).await?,
-            down::Msg::Deliver(deliver) => self.on_deliver(deliver.command),
+            down::Msg::Deliver(deliver) => self.on_deliver(deliver),
             down::Msg::Cancel(cancel) => {
                 self.on_cancel(&cancel.target_command_id, cancel.target_dispatch_attempt)?
             }
@@ -598,6 +607,10 @@ impl Supervisor {
             );
             return self.begin_stop(StopCause::StartFailed, false);
         };
+        self.pilot_v1 = start.pilot_v1;
+        self.provider = canterlot_proto::harness::provider_of(&start.profile)
+            .unwrap_or_default()
+            .into();
         let spec = StartSpec {
             execution_id: self.spec.execution_id,
             generation: self.spec.generation,
@@ -605,6 +618,10 @@ impl Supervisor {
             native_conversation_id: (!start.native_conversation_id.is_empty())
                 .then(|| start.native_conversation_id.clone()),
             profile: start.profile.clone(),
+            model: start.model,
+            effort: start.effort,
+            permission_mode: start.permission_mode,
+            instruction_profile: start.instruction_profile,
         };
         let outcome = timeout(
             timers.ready_deadline,
@@ -651,7 +668,8 @@ impl Supervisor {
         Ok(())
     }
 
-    fn on_deliver(&mut self, command: Option<canterlot_proto::worker::v1::Command>) {
+    fn on_deliver(&mut self, deliver: canterlot_proto::worker::ipc::Deliver) {
+        let command = deliver.command;
         let ack = |command_id: String, attempt: u32, result: &str| {
             up::Msg::DeliverAck(DeliverAck {
                 command_id,
@@ -687,6 +705,8 @@ impl Supervisor {
                     state: InputState::Cancelled,
                     text: String::new(),
                     accepted: false,
+                    files: Vec::new(),
+                    settings: None,
                 },
             );
             "duplicate"
@@ -697,6 +717,29 @@ impl Supervisor {
                     state: InputState::Queued,
                     text,
                     accepted: false,
+                    files: deliver
+                        .files
+                        .into_iter()
+                        .map(|f| LocalFile {
+                            path: f.path.into(),
+                            name: f.name,
+                            mime: f.mime,
+                            size: f.size,
+                            image: f.image,
+                        })
+                        .collect(),
+                    settings: match &command.kind {
+                        Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => {
+                            input.settings.as_ref().map(|settings| SettingsChange {
+                                model: (!settings.model.is_empty()).then(|| settings.model.clone()),
+                                effort: (!settings.effort.is_empty())
+                                    .then(|| settings.effort.clone()),
+                                permission_mode: (!settings.permission_mode.is_empty())
+                                    .then(|| settings.permission_mode.clone()),
+                            })
+                        }
+                        _ => None,
+                    },
                 },
             );
             self.queue.push_back(key);
@@ -760,6 +803,8 @@ impl Supervisor {
                     state: InputState::Cancelled,
                     text: String::new(),
                     accepted: false,
+                    files: Vec::new(),
+                    settings: None,
                 },
             );
             self.record(Body::CancelWon(InputCancelWon {
@@ -795,6 +840,8 @@ impl Supervisor {
                         state: InputState::Withdrawn,
                         text: String::new(),
                         accepted: false,
+                        files: Vec::new(),
+                        settings: None,
                     },
                 );
                 self.record(Body::InputWithdrawn(InputWithdrawn {
@@ -859,8 +906,27 @@ impl Supervisor {
                 continue;
             }
             let text = std::mem::take(&mut input.text);
+            let transmission = Transmission {
+                command_id: key.0,
+                attempt: key.1,
+                text,
+                files: std::mem::take(&mut input.files),
+                settings: input.settings.take(),
+            };
+            if let Some(adapter) = self.adapter.as_ref()
+                && let Err(reason) = adapter.validate_transmission(&transmission)
+            {
+                input.state = InputState::Done;
+                self.record(Body::InputRejected(InputRejected {
+                    command_id: key.0.to_string(),
+                    dispatch_attempt: key.1,
+                    reason: reason.into(),
+                }))?;
+                continue;
+            }
             input.state = InputState::Transmitting;
             self.transmitted.insert(key.0);
+            self.turn_started = Some(Instant::now());
             self.sj
                 .intent(Body::TransmissionStarted(InputTransmissionStarted {
                     command_id: key.0.to_string(),
@@ -870,11 +936,6 @@ impl Supervisor {
             self.faults.abort_at("before_first_byte");
             self.ready = false;
             self.active_turn = Some(key.0);
-            let transmission = Transmission {
-                command_id: key.0,
-                attempt: key.1,
-                text,
-            };
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
             };
@@ -920,9 +981,18 @@ impl Supervisor {
 
     async fn on_adapter_event(&mut self, event: AdapterEvent) -> Result<(), SupervisorError> {
         match event {
-            AdapterEvent::Phase(phase) => {
+            AdapterEvent::Phase {
+                phase,
+                tool_name,
+                summary,
+            } => {
                 let ready = matches!(phase, Phase::AwaitingInput);
-                self.phase_record(phase)?;
+                self.record(Body::PhaseChanged(PhaseChanged {
+                    execution_id: self.spec.execution_id.to_string(),
+                    phase: snake(&phase),
+                    tool_name: tool_name.unwrap_or_default(),
+                    summary: summary.unwrap_or_default(),
+                }))?;
                 if ready {
                     self.ready = true;
                 }
@@ -932,6 +1002,10 @@ impl Supervisor {
                 kind,
                 input_command_id,
                 parent,
+                agent,
+                model,
+                tool_name,
+                summary,
             } => {
                 self.open_blocks.insert(block_id, 1);
                 self.record(Body::BlockStarted(BlockStarted {
@@ -942,7 +1016,10 @@ impl Supervisor {
                         .map(|id| id.to_string())
                         .unwrap_or_default(),
                     parent_block_id: parent.map(|id| id.to_string()).unwrap_or_default(),
-                    ..Default::default()
+                    agent,
+                    model,
+                    tool_name: tool_name.unwrap_or_default(),
+                    summary: summary.unwrap_or_default(),
                 }))?;
             }
             AdapterEvent::BlockDelta { block_id, append } => {
@@ -967,7 +1044,11 @@ impl Supervisor {
                 }
                 self.open_blocks.insert(block_id, rev);
             }
-            AdapterEvent::BlockFinal { block_id, text } => {
+            AdapterEvent::BlockFinal {
+                block_id,
+                text,
+                summary,
+            } => {
                 let Some(rev) = self.open_blocks.remove(&block_id) else {
                     return Ok(());
                 };
@@ -978,20 +1059,42 @@ impl Supervisor {
                     checksum: checksum(&text),
                     text: if omitted { String::new() } else { text },
                     text_omitted: omitted,
-                    ..Default::default()
+                    summary: summary.unwrap_or_default(),
                 }))?;
             }
-            AdapterEvent::RunFinished { input_command_id } => {
+            AdapterEvent::RunFinished {
+                input_command_id,
+                usage,
+                context_tokens,
+                context_window_tokens,
+            } => {
                 let reason = if self.pending_interrupts.is_empty() {
                     "turn_ended"
                 } else {
                     "interrupted"
                 };
                 self.close_blocks(reason)?;
+                let duration_ms = self.turn_started.take().map_or(0, |at| {
+                    u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
+                });
                 self.record(Body::RunFinished(RunFinished {
                     execution_id: self.spec.execution_id.to_string(),
                     input_command_id: input_command_id.to_string(),
-                    ..Default::default()
+                    usage: usage
+                        .into_iter()
+                        .map(|u| canterlot_proto::worker::v1::ModelUsage {
+                            model: u.model,
+                            agent: u.agent,
+                            input_tokens: u.input_tokens,
+                            output_tokens: u.output_tokens,
+                            cache_read_tokens: u.cache_read_tokens,
+                            cache_write_tokens: u.cache_write_tokens,
+                        })
+                        .collect(),
+                    context_tokens,
+                    context_window_tokens,
+                    duration_ms,
+                    machine_time_ms: now_ms(),
                 }))?;
                 self.active_turn = None;
                 for ((command, _), input) in self.inputs.iter_mut() {
@@ -1000,6 +1103,54 @@ impl Supervisor {
                     }
                 }
                 self.complete_interrupts()?;
+            }
+            AdapterEvent::Limit(fact) => {
+                if !self.pilot_v1 {
+                    self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                        execution_id: self.spec.execution_id.to_string(),
+                        kind: "capability_missing".into(),
+                        event_type: "limit_fact_dropped".into(),
+                    }))?;
+                } else {
+                    let window = |w| match w {
+                        LimitWindow::FiveHour => {
+                            canterlot_proto::worker::v1::LimitWindow::FiveHour as i32
+                        }
+                        LimitWindow::Weekly => {
+                            canterlot_proto::worker::v1::LimitWindow::Weekly as i32
+                        }
+                    };
+                    let body = match fact {
+                        LimitFact::Observed {
+                            window: w,
+                            used_permille,
+                            resets_at_ms,
+                        } => Body::LimitObserved(canterlot_proto::worker::v1::LimitObservation {
+                            provider: self.provider.clone(),
+                            window: window(w),
+                            used_permille: u32::from(used_permille),
+                            resets_at_ms: resets_at_ms.unwrap_or(0),
+                            observed_machine_ms: now_ms(),
+                        }),
+                        LimitFact::Reached {
+                            window: w,
+                            resets_at_ms,
+                        } => Body::LimitReached(canterlot_proto::worker::v1::LimitReached {
+                            execution_id: self.spec.execution_id.to_string(),
+                            provider: self.provider.clone(),
+                            window: window(w),
+                            resets_at_ms: resets_at_ms.unwrap_or(0),
+                            input_command_id: self
+                                .active_turn
+                                .map(|id| id.to_string())
+                                .unwrap_or_default(),
+                        }),
+                    };
+                    self.record(body)?;
+                }
+            }
+            AdapterEvent::ContextExhausted => {
+                self.begin_stop(StopCause::ContextExhausted, false)?;
             }
             AdapterEvent::Diagnostic {
                 event_type,
@@ -1235,6 +1386,7 @@ impl Supervisor {
                 ("stopped", "start_cancelled", "stopped")
             }
             StopCause::StartFailed => ("failed", "start_failed", "start_failed"),
+            StopCause::ContextExhausted => ("failed", "context_exhausted", "context_exhausted"),
             StopCause::ProtocolIncompatible => {
                 ("failed", "protocol_incompatible", "protocol_incompatible")
             }

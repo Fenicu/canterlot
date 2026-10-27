@@ -335,9 +335,15 @@ impl Fixture {
                 )]
             );
         }
+        // Хаб асинхронно дописывает события машины; счётчики и события читаем одним снимком.
+        let mut snapshot = self.pool.begin().await.unwrap();
+        sqlx::query("set transaction isolation level repeatable read")
+            .execute(&mut *snapshot)
+            .await
+            .unwrap();
         let scopes: Vec<(String, i64)> =
             sqlx::query_as("select scope, last_seq from scope_counters order by scope")
-                .fetch_all(&self.pool)
+                .fetch_all(&mut *snapshot)
                 .await
                 .unwrap();
         assert!(!scopes.is_empty());
@@ -346,11 +352,12 @@ impl Fixture {
                 "select scope_seq from events where scope = $1 order by scope_seq",
             )
             .bind(scope)
-            .fetch_all(&self.pool)
+            .fetch_all(&mut *snapshot)
             .await
             .unwrap();
             assert_eq!(seqs, (1..=last).collect::<Vec<_>>());
         }
+        snapshot.rollback().await.unwrap();
         assert!(self.snapshot().cursor.acked_seq_known_to_worker <= committed);
     }
 

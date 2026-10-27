@@ -78,6 +78,7 @@ pub(crate) struct Shared {
     pub hub: watch::Sender<Option<Arc<HashMap<Uuid, u64>>>>,
     pub shutdown: watch::Receiver<bool>,
     pub infos: Mutex<HashMap<Uuid, ExecInfo>>,
+    pub probes: Mutex<HashMap<Uuid, crate::machine::metrics::ExecutionProbe>>,
     pub actors: Mutex<HashMap<Uuid, mpsc::UnboundedSender<Msg>>>,
     pub tasks: Mutex<Vec<JoinHandle<()>>>,
     pub runtime_dir: Option<PathBuf>,
@@ -96,6 +97,31 @@ pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, 
 }
 
 impl Shared {
+    pub(crate) fn remember_ownership(&self, record: &canterlot_proto::worker::ipc::Ownership) {
+        let Ok(id) = Uuid::parse_str(&record.execution_id) else {
+            return;
+        };
+        let mut probes = self.probes.lock().expect("probes lock");
+        if record.phase == canterlot_proto::worker::ipc::OwnershipPhase::Released as i32 {
+            probes.remove(&id);
+            return;
+        }
+        let members = [
+            (record.supervisor_pid, record.supervisor_start_ticks),
+            (record.cli_pid, record.cli_start_ticks),
+        ]
+        .into_iter()
+        .filter(|(pid, ticks)| *pid > 0 && *ticks > 0)
+        .collect();
+        probes.insert(
+            id,
+            crate::machine::metrics::ExecutionProbe {
+                execution_id: id,
+                members,
+            },
+        );
+    }
+
     pub(crate) async fn data_dir(&self) -> Result<&PathBuf, ExecError> {
         self.data_dir
             .get_or_try_init(|| async {
@@ -216,6 +242,7 @@ impl ExecutionManager {
                 hub: watch::channel(None).0,
                 shutdown: shutdown_rx,
                 infos: Mutex::default(),
+                probes: Mutex::default(),
                 actors: Mutex::default(),
                 tasks: Mutex::default(),
                 runtime_dir: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
@@ -251,6 +278,44 @@ impl ExecutionManager {
         for task in tasks {
             let _ = task.await;
         }
+    }
+
+    pub fn probes(&self) -> Vec<crate::machine::metrics::ExecutionProbe> {
+        let mut probes: Vec<_> = self
+            .shared
+            .probes
+            .lock()
+            .expect("probes lock")
+            .values()
+            .cloned()
+            .collect();
+        probes.sort_by_key(|p| p.execution_id);
+        probes
+    }
+
+    pub(crate) async fn permitted_cursors(
+        &self,
+        pilot: bool,
+    ) -> Result<Vec<JournalCursor>, WorkerError> {
+        let cursors = self.journal_cursors();
+        if pilot {
+            return Ok(cursors);
+        }
+        self.shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let mut permitted = Vec::new();
+                for cursor in cursors {
+                    let id =
+                        Uuid::parse_str(&cursor.journal_id).map_err(|_| WorkerError::Protocol)?;
+                    if !store.journal_next_requires_pilot(id)? {
+                        permitted.push(cursor);
+                    }
+                }
+                Ok(permitted)
+            })
+            .await
     }
 
     pub fn observations(&self) -> Vec<ExecutionObservation> {
@@ -374,6 +439,7 @@ impl ExecutionManager {
             .await?;
         let mut attached = Vec::new();
         for record in records {
+            self.shared.remember_ownership(&record);
             let Ok(id) = Uuid::parse_str(&record.execution_id) else {
                 continue;
             };

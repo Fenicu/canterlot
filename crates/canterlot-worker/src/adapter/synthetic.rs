@@ -35,9 +35,12 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
         "ready" => return Ok(Frame::Ready(string("native_conversation_id")?)),
         "accepted" => return Ok(Frame::Accepted(uuid("command_id")?)),
         "interrupted" => return Ok(Frame::Interrupted(uuid("id")?)),
-        "phase" => AdapterEvent::Phase(
-            serde_json::from_value(value["phase"].clone()).map_err(|_| AdapterError::Protocol)?,
-        ),
+        "phase" => AdapterEvent::Phase {
+            phase: serde_json::from_value(value["phase"].clone())
+                .map_err(|_| AdapterError::Protocol)?,
+            tool_name: value["tool_name"].as_str().map(str::to_owned),
+            summary: value["summary"].as_str().map(str::to_owned),
+        },
         "block_started" => {
             let local_id = uuid("block_id")?;
             if blocks.contains_key(&local_id) {
@@ -65,6 +68,10 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                     .map(|_| uuid("input_command_id"))
                     .transpose()?,
                 parent,
+                agent: string("agent")?,
+                model: string("model")?,
+                tool_name: value["tool_name"].as_str().map(str::to_owned),
+                summary: value["summary"].as_str().map(str::to_owned),
             }
         }
         "block_delta" => {
@@ -84,12 +91,45 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                 .get(&uuid("block_id")?)
                 .ok_or(AdapterError::Protocol)?,
             text: string("text")?,
+            summary: value["summary"].as_str().map(str::to_owned),
         },
         "completed" => {
             let input_command_id = uuid("input_command_id")?;
             blocks.clear();
-            AdapterEvent::RunFinished { input_command_id }
+            AdapterEvent::RunFinished {
+                input_command_id,
+                usage: serde_json::from_value(value["usage"].clone())
+                    .map_err(|_| AdapterError::Protocol)?,
+                context_tokens: value["context_tokens"]
+                    .as_u64()
+                    .ok_or(AdapterError::Protocol)?,
+                context_window_tokens: value["context_window_tokens"]
+                    .as_u64()
+                    .ok_or(AdapterError::Protocol)?,
+            }
         }
+        "limit_observed" | "limit_reached" => {
+            let window = serde_json::from_value(value["window"].clone())
+                .map_err(|_| AdapterError::Protocol)?;
+            let resets_at_ms = value["resets_at_ms"].as_u64();
+            AdapterEvent::Limit(if value["type"] == "limit_observed" {
+                let used = value["used_permille"]
+                    .as_u64()
+                    .filter(|v| *v <= 1000)
+                    .ok_or(AdapterError::Protocol)?;
+                LimitFact::Observed {
+                    window,
+                    used_permille: used as u16,
+                    resets_at_ms,
+                }
+            } else {
+                LimitFact::Reached {
+                    window,
+                    resets_at_ms,
+                }
+            })
+        }
+        "context_exhausted" => AdapterEvent::ContextExhausted,
         _ => AdapterEvent::Diagnostic {
             kind: "unknown_event",
             event_type: string("type")?,
@@ -114,6 +154,7 @@ pub struct SyntheticAdapter {
     cli: Option<Member>,
     started: bool,
     active: bool,
+    settings: SettingsChange,
 }
 
 impl SyntheticAdapter {
@@ -130,6 +171,11 @@ impl SyntheticAdapter {
             cli: None,
             started: false,
             active: false,
+            settings: SettingsChange {
+                model: Some("synthetic-large".into()),
+                effort: Some("medium".into()),
+                permission_mode: Some("owner".into()),
+            },
         }
     }
     pub fn with_executable(mut self, executable: PathBuf) -> Self {
@@ -214,6 +260,32 @@ impl Adapter for SyntheticAdapter {
         if group.populated()? {
             return Err(AdapterError::AlreadyStarted);
         }
+        self.settings = SettingsChange {
+            model: Some(
+                if spec.model.is_empty() {
+                    "synthetic-large"
+                } else {
+                    &spec.model
+                }
+                .into(),
+            ),
+            effort: Some(
+                if spec.effort.is_empty() {
+                    "medium"
+                } else {
+                    &spec.effort
+                }
+                .into(),
+            ),
+            permission_mode: Some(
+                if spec.permission_mode.is_empty() {
+                    "owner"
+                } else {
+                    &spec.permission_mode
+                }
+                .into(),
+            ),
+        };
         self.started = true;
         let executable = match &self.executable {
             Some(path) => path.clone(),
@@ -221,7 +293,13 @@ impl Adapter for SyntheticAdapter {
         };
         let mut command = tokio::process::Command::new(executable);
         command
-            .args(["synthetic-cli", "--profile", &self.profile])
+            .args([
+                "synthetic-cli",
+                "--profile",
+                &self.profile,
+                "--model",
+                self.settings.model.as_deref().unwrap(),
+            ])
             .current_dir(&spec.workdir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -292,12 +370,53 @@ impl Adapter for SyntheticAdapter {
         }
     }
 
+    fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
+        let Some(change) = &input.settings else {
+            return Ok(());
+        };
+        let model = change.model.as_ref().or(self.settings.model.as_ref());
+        let effort = change.effort.as_ref().or(self.settings.effort.as_ref());
+        let permission = change
+            .permission_mode
+            .as_ref()
+            .or(self.settings.permission_mode.as_ref());
+        let valid = catalog()
+            .into_iter()
+            .find(|c| c.harness == self.profile)
+            .is_some_and(|c| {
+                permission.is_some_and(|p| c.permission_modes.contains(&p.as_str()))
+                    && c.models.iter().any(|m| {
+                        Some(m.id) == model.map(String::as_str)
+                            && effort.is_some_and(|e| m.efforts.contains(&e.as_str()))
+                    })
+            });
+        if valid {
+            Ok(())
+        } else {
+            Err("settings_unavailable")
+        }
+    }
     async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome {
+        if let Err(reason) = self.validate_transmission(input) {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+
         if input.text.len() > canterlot_proto::limits::MAX_INPUT_TEXT_BYTES {
             return TransmitOutcome::Rejected("input size limit exceeded".into());
         }
         if self.stdin.is_none() {
             return TransmitOutcome::Rejected("adapter not running".into());
+        }
+        if let Some(change) = &input.settings {
+            if change.model.is_some() {
+                self.settings.model = change.model.clone();
+            }
+            if change.effort.is_some() {
+                self.settings.effort = change.effort.clone();
+            }
+            if change.permission_mode.is_some() {
+                self.settings.permission_mode = change.permission_mode.clone();
+            }
         }
         let deadline = self.transmit_deadline;
         self.active = true;
@@ -307,6 +426,8 @@ impl Adapter for SyntheticAdapter {
                     command_id: input.command_id,
                     attempt: input.attempt,
                     text: input.text.clone(),
+                    files: input.files.clone(),
+                    settings: input.settings.clone(),
                 })
                 .await
                 .is_err()

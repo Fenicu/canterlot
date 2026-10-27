@@ -30,7 +30,60 @@ use crate::{
 
 mod data;
 
-pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1"];
+pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1"];
+
+#[derive(Clone)]
+pub struct CachedLimits {
+    pub observations: Vec<LimitObservation>,
+    pub weekly_reserve_active: bool,
+    pub received_at: Instant,
+}
+#[derive(Clone, Default)]
+pub struct LimitsCache(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, CachedLimits>>>,
+);
+impl LimitsCache {
+    pub fn get(&self, provider: &str) -> Option<CachedLimits> {
+        self.0
+            .lock()
+            .expect("limits cache lock")
+            .get(provider)
+            .cloned()
+    }
+    pub fn update(&self, snapshot: LimitsSnapshot) {
+        self.0.lock().expect("limits cache lock").insert(
+            snapshot.provider,
+            CachedLimits {
+                observations: snapshot.current,
+                weekly_reserve_active: snapshot.weekly_reserve_active,
+                received_at: Instant::now(),
+            },
+        );
+    }
+}
+#[derive(Clone, Default)]
+pub(super) struct JournalDiagnostics(
+    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+);
+impl JournalDiagnostics {
+    pub(super) fn withheld(&self, journal: Uuid) {
+        if self
+            .0
+            .lock()
+            .expect("journal diagnostics lock")
+            .insert(journal)
+        {
+            tracing::warn!(journal_id=%journal,kind="journal_withheld","journal capability missing");
+        }
+    }
+}
+
+pub fn try_send_metrics(tx: &mpsc::Sender<ControlUp>, metrics: MachineMetrics) -> bool {
+    let message = ControlUp {
+        msg: Some(control_up::Msg::MachineMetrics(metrics)),
+    };
+    message.encoded_len() <= MAX_MESSAGE_BYTES && tx.try_send(message).is_ok()
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SessionState {
@@ -174,6 +227,12 @@ pub struct Worker {
     state: watch::Sender<SessionState>,
     manager: Option<ExecutionManager>,
     relay: Option<mpsc::Receiver<SjRelay>>,
+    limits_cache: LimitsCache,
+    limits_source: std::sync::Arc<dyn crate::machine::limits::LimitsSource>,
+    metrics: std::sync::Arc<std::sync::Mutex<crate::machine::metrics::MetricsCollector>>,
+    metrics_task: Option<
+        tokio::task::JoinHandle<Result<MachineMetrics, crate::machine::metrics::MetricsError>>,
+    >,
 }
 
 struct Pending {
@@ -210,7 +269,23 @@ impl Pending {
 
 impl Worker {
     pub fn new(config: WorkerConfig, store: WorkerStore) -> Worker {
+        #[cfg(feature = "synthetic-adapter")]
+        let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> = std::sync::Arc::new(
+            crate::machine::limits::FileLimitsSource::new(config.data_dir.clone()),
+        );
+        #[cfg(not(feature = "synthetic-adapter"))]
+        let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> =
+            std::sync::Arc::new(crate::machine::limits::NoLimitsSource);
+        let metrics = crate::machine::metrics::MetricsCollector::new(
+            config.data_dir.clone(),
+            config.execution.allowed_workdir_roots.clone(),
+            "/proc".into(),
+        );
         Self {
+            limits_cache: LimitsCache::default(),
+            limits_source: source,
+            metrics: std::sync::Arc::new(std::sync::Mutex::new(metrics)),
+            metrics_task: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -219,6 +294,17 @@ impl Worker {
             manager: None,
             relay: None,
         }
+    }
+
+    pub fn limits_cache(&self) -> LimitsCache {
+        self.limits_cache.clone()
+    }
+    pub fn with_limits_source(
+        mut self,
+        source: std::sync::Arc<dyn crate::machine::limits::LimitsSource>,
+    ) -> Self {
+        self.limits_source = source;
+        self
     }
 
     pub fn state(&self) -> watch::Receiver<SessionState> {
@@ -237,6 +323,9 @@ impl Worker {
 
     pub async fn run(mut self, shutdown: watch::Receiver<bool>) -> Result<(), WorkerError> {
         let result = self.run_inner(shutdown).await;
+        if let Some(task) = self.metrics_task.take() {
+            let _ = task.await;
+        }
         if let Some(manager) = self.manager.take() {
             manager.shutdown().await;
         }
@@ -278,6 +367,7 @@ impl Worker {
             timers.backoff_reset_after,
             timers.http2_keepalive_interval,
             timers.http2_keepalive_timeout,
+            self.config.machine.metrics_interval,
         ]
         .contains(&Duration::ZERO)
             || timers.backoff_min > timers.backoff_max
@@ -308,6 +398,9 @@ impl Worker {
                 }
                 result = self.attempt(&boot_id, &mut live_since) => result,
             };
+            if let Some(task) = self.metrics_task.take() {
+                let _ = task.await;
+            }
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
             if let WorkerError::Hub { code, .. } = &error {
@@ -455,16 +548,31 @@ impl Worker {
         .map_err(|_| WorkerError::Timeout)??;
         self.transition(SessionState::Handshaking);
         tracing::info!(%connection_id, "session connected");
-        let hello = Hello {
-            machine_time_ms: 0,
+        let cj_pilot = self
+            .store
+            .call(|slot| {
+                let store = slot.as_ref().unwrap();
+                Ok(store.journal_next_requires_pilot(store.cj_journal_id()?)?)
+            })
+            .await?;
+        let initial_sj = self
+            .manager
+            .as_ref()
+            .unwrap()
+            .permitted_cursors(false)
+            .await?;
+        let mut hello = Hello {
+            machine_time_ms: crate::machine::now_ms(),
             installation_id: self.config.installation_id.to_string(),
             machine_id: self.config.machine_id.to_string(),
             restore_generation: generation.to_string(),
             protocol_version: PROTOCOL_VERSION,
             connection_id: connection_id.to_string(),
             cj_journal_id: cursor.journal_id.clone(),
-            cursors: std::iter::once(cursor.clone())
-                .chain(self.manager.as_ref().unwrap().journal_cursors())
+            cursors: (!cj_pilot)
+                .then_some(cursor.clone())
+                .into_iter()
+                .chain(initial_sj)
                 .collect(),
             boot_id: boot_id.to_owned(),
             stream_kind: StreamKind::Control as i32,
@@ -483,6 +591,7 @@ impl Worker {
         let (tx, rx) = mpsc::channel(1);
         let (data_tx, data_rx) = mpsc::channel(8);
         let (mut inbound, data_inbound, accepted) = timeout(self.config.timers.handshake, async {
+            hello.machine_time_ms = crate::machine::now_ms();
             send(
                 &tx,
                 ControlUp {
@@ -496,7 +605,7 @@ impl Worker {
                 .await
                 .map_err(status_error)?
                 .into_inner();
-            let accepted = match inbound
+            let mut accepted = match inbound
                 .message()
                 .await
                 .map_err(status_error)?
@@ -506,12 +615,18 @@ impl Worker {
                 _ => return Err(WorkerError::Protocol),
             };
             check_generation(generation, &accepted)?;
-            let mut hello = hello.clone();
+            let pilot = accepted.capabilities.iter().any(|c| c == "pilot_v1");
+            if pilot {
+                hello.cursors = std::iter::once(cursor.clone())
+                    .chain(self.manager.as_ref().unwrap().journal_cursors())
+                    .collect();
+            }
             hello.stream_kind = StreamKind::Data as i32;
+            hello.machine_time_ms = crate::machine::now_ms();
             send(
                 &data_tx,
                 DataUp {
-                    msg: Some(data_up::Msg::Hello(hello)),
+                    msg: Some(data_up::Msg::Hello(hello.clone())),
                 },
                 self.config.timers.handshake,
             )
@@ -533,19 +648,55 @@ impl Worker {
             if data_accepted.restore_generation != accepted.restore_generation {
                 return Err(WorkerError::RestoreGenerationChanged);
             }
+            for remote in data_accepted.committed {
+                if !accepted
+                    .committed
+                    .iter()
+                    .any(|c| c.journal_id == remote.journal_id)
+                {
+                    accepted.committed.push(remote);
+                }
+            }
             Ok((inbound, data_inbound, accepted))
         })
         .await
         .map_err(|_| WorkerError::Timeout)??;
+        let pilot = accepted.capabilities.iter().any(|cap| cap == "pilot_v1");
+        let diagnostics = JournalDiagnostics::default();
+        if cj_pilot && !pilot {
+            diagnostics
+                .withheld(Uuid::parse_str(&cursor.journal_id).map_err(|_| WorkerError::Protocol)?);
+        }
+        if !pilot {
+            for local in self.manager.as_ref().unwrap().journal_cursors() {
+                if !hello
+                    .cursors
+                    .iter()
+                    .any(|c| c.journal_id == local.journal_id)
+                {
+                    diagnostics.withheld(
+                        Uuid::parse_str(&local.journal_id).map_err(|_| WorkerError::Protocol)?,
+                    );
+                }
+            }
+        }
         let exec_enabled = accepted.capabilities.iter().any(|cap| cap == "exec_v1");
         self.manager.as_ref().unwrap().set_enabled(exec_enabled);
         self.transition(SessionState::Reconciling);
         check_generation(generation, &accepted)?;
+        let withheld_cj = cj_pilot && !pilot;
         let committed = accepted
             .committed
             .iter()
             .find(|c| c.journal_id == cursor.journal_id)
-            .map_or(0, |c| c.committed_seq);
+            .map_or(
+                if withheld_cj {
+                    cursor.acked_seq_known_to_worker
+                } else {
+                    0
+                },
+                |c| c.committed_seq,
+            );
         if committed > cursor.last_seq
             || committed < cursor.acked_seq_known_to_worker
             || cursor.first_stored_seq > committed.saturating_add(1)
@@ -559,7 +710,11 @@ impl Worker {
             })
             .await?;
         self.manager.as_ref().unwrap().on_cj_ack(committed);
-        let replay_end = cursor.last_seq;
+        let replay_end = if withheld_cj {
+            committed
+        } else {
+            cursor.last_seq
+        };
         let mut acknowledged = committed;
         let mut received_ack = committed;
         let mut next_seq = committed + 1;
@@ -577,6 +732,25 @@ impl Worker {
         let mut report_outbound = None;
         let mut report_created = false;
         let mut reconciled = false;
+        let mut machine_outbound = if pilot {
+            let config = self.config.clone();
+            Some(ControlUp {
+                msg: Some(control_up::Msg::MachineReport(
+                    tokio::task::spawn_blocking(move || {
+                        crate::machine::build_report(&config, &crate::adapter::catalog())
+                    })
+                    .await
+                    .map_err(|_| WorkerError::StoreThread)?,
+                )),
+            })
+        } else {
+            None
+        };
+        let mut metrics_at = Instant::now() + self.config.machine.metrics_interval;
+        let mut polls: VecDeque<String> = VecDeque::new();
+        let mut limits_outbound = None;
+        type LimitsFuture = Pin<Box<dyn Future<Output = Vec<LimitObservation>> + Send>>;
+        let mut limits_operation: Option<LimitsFuture> = None;
         let session_state = self.state.clone();
         let manager = self.manager.as_ref().unwrap();
         let (data_state, mut data_attached) = watch::channel(true);
@@ -585,11 +759,17 @@ impl Worker {
             data::Stream {
                 #[cfg(feature = "fault-injection")]
                 probe: self.probe.clone(),
+                pilot,
+                diagnostics: diagnostics.clone(),
                 client: data,
                 hello: hello.clone(),
                 tx: data_tx,
                 inbound: data_inbound,
-                committed: data::committed(&hello, &accepted)?,
+                committed: data::session_committed(
+                    &hello,
+                    &accepted,
+                    self.manager.as_ref().unwrap(),
+                )?,
             },
             manager,
             self.relay.as_mut().unwrap(),
@@ -605,12 +785,33 @@ impl Worker {
             Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send + 'a>>;
         let mut execution_operation: Option<ExecutionFuture<'_>> = None;
         loop {
+            if limits_operation.is_none()
+                && limits_outbound.is_none()
+                && let Some(provider) = polls.pop_front()
+            {
+                let source = self.limits_source.clone();
+                limits_operation = Some(Box::pin(async move { source.poll(&provider).await }));
+            }
             if !report_created && acknowledged >= replay_end {
                 report_created = true;
                 if exec_enabled {
                     let report = ControlUp {
                         msg: Some(control_up::Msg::ReconcileReport(ReconcileReport {
-                            executions: manager.observations(),
+                            executions: manager
+                                .observations()
+                                .into_iter()
+                                .map(|mut observation| {
+                                    if !pilot
+                                        && !hello
+                                            .cursors
+                                            .iter()
+                                            .any(|c| c.journal_id == observation.sj_journal_id)
+                                    {
+                                        observation.sj_journal_id.clear();
+                                    }
+                                    observation
+                                })
+                                .collect(),
                         })),
                     };
                     if report.encoded_len() > MAX_MESSAGE_BYTES {
@@ -618,7 +819,11 @@ impl Worker {
                     }
                     report_outbound = Some(report);
                 } else {
-                    manager.on_hub_session(data::committed(&hello, &accepted)?);
+                    manager.on_hub_session(data::session_committed(
+                        &hello,
+                        &accepted,
+                        self.manager.as_ref().unwrap(),
+                    )?);
                     activate_data.send_replace(true);
                     reconciled = true;
                     if *data_attached.borrow() {
@@ -636,9 +841,17 @@ impl Worker {
                 } else if dirty && ready_batch.is_none() && pending_batches.len() < 8 {
                     let from = next_seq;
                     operation = Some(Box::pin(self.store.call(move |store| {
+                        let store = store.as_ref().unwrap();
+                        let withheld = !pilot
+                            && store
+                                .cj_records_from(from, 0)?
+                                .first()
+                                .and_then(|r| r.body.as_ref())
+                                .is_some_and(crate::store::requires_pilot);
                         Ok(StoreReply::Batch(
                             from,
-                            batch(store.as_ref().unwrap(), from)?.map(Box::new),
+                            batch_for_session(store, from, pilot)?.map(Box::new),
+                            withheld,
                         ))
                     })));
                     dirty = false;
@@ -656,13 +869,17 @@ impl Worker {
                 .map_or(heartbeat_at, |p| p.deadline.unwrap());
             let batch_deadline = pending_batches.front().and_then(|p| p.deadline);
             let can_send = heartbeat_outbound.is_some()
+                || machine_outbound.is_some()
+                || limits_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
             tokio::select! {
-                message = inbound.message(), if commands.len() < 32 => {
+                message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
+                        Some(control_down::Msg::PollLimits(request)) if pilot => {polls.push_back(request.provider);}
+                        Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
@@ -709,7 +926,8 @@ impl Worker {
                             acknowledged = acknowledged.max(up_to);
                             self.manager.as_ref().unwrap().on_cj_ack(up_to);
                         },
-                        StoreReply::Batch(from, result) => {
+                        StoreReply::Batch(from, result,withheld) => {
+                            if withheld {diagnostics.withheld(Uuid::parse_str(&journal_id).map_err(|_|WorkerError::Protocol)?);}
                             if from == next_seq { ready_batch = result.map(|batch| *batch); }
                             else { dirty = true; }
                         }
@@ -722,9 +940,11 @@ impl Worker {
                 }
                 permit = tx.reserve(), if can_send => {
                     let permit = permit.map_err(|_| WorkerError::Transport)?;
-                    let message = if let Some(message) = heartbeat_outbound.take() { message }
+                    let mut message = if let Some(message) = heartbeat_outbound.take() { message }
+                    else if let Some(message)=machine_outbound.take() {message}
+                    else if let Some(message)=limits_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
-                        manager.on_hub_session(data::committed(&hello, &accepted)?);
+                        manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
                         reconciled = true;
                         if *data_attached.borrow() {
@@ -744,7 +964,22 @@ impl Worker {
                         message
                     };
                     if message.encoded_len() > MAX_MESSAGE_BYTES { return Err(WorkerError::Protocol); }
+                    if let Some(control_up::Msg::Heartbeat(heartbeat))=&mut message.msg {heartbeat.machine_time_ms=crate::machine::now_ms();}
                     permit.send(message);
+                }
+                _ = sleep_until(metrics_at), if pilot => {
+                    metrics_at=Instant::now()+self.config.machine.metrics_interval;
+                    if self.metrics_task.is_none() {
+                        let metrics=self.metrics.clone();let probes=manager.probes();
+                        self.metrics_task=Some(tokio::task::spawn_blocking(move||metrics.lock().expect("metrics lock").sample(&probes)));
+                    }
+                }
+                result = async {self.metrics_task.as_mut().unwrap().await}, if self.metrics_task.is_some() => {
+                    self.metrics_task=None;
+                    if let Ok(Ok(sample))=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
+                }
+                observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
+                    limits_operation=None;limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
@@ -767,7 +1002,7 @@ impl Worker {
                         heartbeat_seq += 1;
                         #[cfg(feature = "fault-injection")]
                         self.probe.sent(heartbeat_seq);
-                        let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq, machine_time_ms: 0 })) };
+                        let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq, machine_time_ms: crate::machine::now_ms() })) };
                         heartbeat_outbound = Some(message.clone());
                         pending_heartbeat = Some(Pending::new(message, heartbeat_seq, self.config.timers.heartbeat_ack));
                         heartbeat_at = Instant::now() + self.config.timers.heartbeat;
@@ -787,7 +1022,7 @@ impl Worker {
 enum StoreReply {
     Command(Box<Command>, Accept),
     Ack(u64),
-    Batch(u64, Option<Box<(ControlUp, u64)>>),
+    Batch(u64, Option<Box<(ControlUp, u64)>>, bool),
 }
 
 fn batch_first(message: &ControlUp) -> u64 {
@@ -843,7 +1078,11 @@ fn transition(sender: &watch::Sender<SessionState>, state: SessionState) {
     sender.send_replace(state);
 }
 
-fn batch(store: &WorkerStore, from: u64) -> Result<Option<(ControlUp, u64)>, WorkerError> {
+fn batch_for_session(
+    store: &WorkerStore,
+    from: u64,
+    pilot: bool,
+) -> Result<Option<(ControlUp, u64)>, WorkerError> {
     let mut batch = JournalRecords {
         journal_id: store.cj_journal_id()?.to_string(),
         records: vec![],
@@ -853,6 +1092,14 @@ fn batch(store: &WorkerStore, from: u64) -> Result<Option<(ControlUp, u64)>, Wor
         .into_iter()
         .take(256)
     {
+        if !pilot
+            && record
+                .body
+                .as_ref()
+                .is_some_and(crate::store::requires_pilot)
+        {
+            break;
+        }
         batch.records.push(record);
         if check_record_batch(&batch).is_err() {
             batch.records.pop();

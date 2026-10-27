@@ -7,6 +7,13 @@
 //! Скрипт: {"synthetic":[{"delta":"..."},{"delay_ms":1},{"tool":{"name":"..."}},
 //! {"error":"..."},{"unknown":{"event_type":"...","required":false}},
 //! {"exit":0},{"detach_child":true},{"hang":true}]}.
+//! Шаги: {"model":"synthetic-small"}, {"subagent":{"name":"Explore",
+//! "model":"synthetic-small","task":"…","steps":[…]}},
+//! {"usage":{"model":"…","agent":"main","input":120,"output":40,
+//! "cache_read":10,"cache_write":0}}, {"limit_observed":{"window":"weekly",
+//! "used_permille":960,"resets_in_ms":3600000}}, {"limit_reached":{
+//! "window":"five_hour","resets_in_ms":5000}}, {"context_exhausted":true},
+//! {"read_attachment":0}. Ввод также несёт files и settings.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
 use serde::{Deserialize, Serialize};
@@ -15,7 +22,8 @@ use std::{io, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use uuid::Uuid;
 
-use super::{BlockKind, Phase};
+use super::{BlockKind, LocalFile, ModelUsage, Phase, SettingsChange};
+use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -24,6 +32,10 @@ pub(super) enum Request {
         command_id: Uuid,
         attempt: u32,
         text: String,
+        #[serde(default)]
+        files: Vec<LocalFile>,
+        #[serde(default)]
+        settings: Option<SettingsChange>,
     },
     Interrupt {
         id: Uuid,
@@ -84,38 +96,81 @@ async fn phase(phase: Phase) -> io::Result<()> {
     emit(json!({"type":"phase", "phase":phase})).await
 }
 
-async fn begin(id: Uuid, kind: BlockKind, command: Uuid, parent: Option<Uuid>) -> io::Result<()> {
-    emit(json!({"type":"block_started", "block_id":id, "kind":kind, "input_command_id":command, "parent":parent})).await
+struct Lane {
+    agent: String,
+    model: String,
+    parent: Option<Uuid>,
+    text_id: Option<Uuid>,
+    accumulated: String,
 }
-
+struct Turn {
+    command: Uuid,
+    files: Vec<LocalFile>,
+    accepted: bool,
+    usage: std::collections::BTreeMap<(String, String), ModelUsage>,
+    output_chars: u64,
+    exhausted: bool,
+}
+impl Turn {
+    async fn begin(
+        &self,
+        id: Uuid,
+        kind: BlockKind,
+        lane: &Lane,
+        tool_name: Option<&str>,
+        summary: Option<&str>,
+    ) -> io::Result<()> {
+        emit(json!({"type":"block_started","block_id":id,"kind":kind,"input_command_id":self.command,"parent":lane.parent,"agent":lane.agent,"model":lane.model,"tool_name":tool_name,"summary":summary})).await
+    }
+    async fn block(
+        &mut self,
+        kind: BlockKind,
+        text: &str,
+        lane: &Lane,
+        tool_name: Option<&str>,
+        summary: Option<&str>,
+    ) -> io::Result<Uuid> {
+        let id = Uuid::now_v7();
+        self.begin(id, kind, lane, tool_name, summary).await?;
+        delta(id, text).await?;
+        finish(id, text, summary).await?;
+        Ok(id)
+    }
+}
 async fn delta(id: Uuid, text: &str) -> io::Result<()> {
     for chunk in split(text, canterlot_proto::limits::MAX_BLOCK_DELTA_BYTES) {
-        emit(json!({"type":"block_delta", "block_id":id, "append":chunk})).await?;
+        emit(json!({"type":"block_delta","block_id":id,"append":chunk})).await?;
     }
     Ok(())
 }
-
-async fn finish(id: Uuid, text: &str) -> io::Result<()> {
-    emit(json!({"type":"block_final", "block_id":id, "text":text})).await
+async fn finish(id: Uuid, text: &str, summary: Option<&str>) -> io::Result<()> {
+    emit(json!({"type":"block_final","block_id":id,"text":text,"summary":summary})).await
 }
-
-async fn block(
-    kind: BlockKind,
-    command: Uuid,
-    text: &str,
-    parent: Option<Uuid>,
-) -> io::Result<Uuid> {
-    let id = Uuid::now_v7();
-    begin(id, kind, command, parent).await?;
+async fn close_text(lane: &mut Lane) -> io::Result<()> {
+    if let Some(id) = lane.text_id.take() {
+        finish(id, &std::mem::take(&mut lane.accumulated), None).await?;
+    }
+    Ok(())
+}
+async fn text_delta(turn: &mut Turn, lane: &mut Lane, text: &str) -> io::Result<()> {
+    let id = if let Some(id) = lane.text_id {
+        id
+    } else {
+        let id = Uuid::now_v7();
+        turn.begin(id, BlockKind::Text, lane, None, None).await?;
+        lane.text_id = Some(id);
+        id
+    };
     delta(id, text).await?;
-    finish(id, text).await?;
-    Ok(id)
+    lane.accumulated.push_str(text);
+    turn.output_chars = turn
+        .output_chars
+        .saturating_add(text.chars().count() as u64);
+    Ok(())
 }
-
-async fn completed(command: Uuid) -> io::Result<()> {
-    emit(json!({"type":"completed", "input_command_id":command})).await
+async fn completed(command: Uuid, usage: Vec<ModelUsage>, context_tokens: u64) -> io::Result<()> {
+    emit(json!({"type":"completed","input_command_id":command,"usage":usage,"context_tokens":context_tokens,"context_window_tokens":200000})).await
 }
-
 async fn detach() -> io::Result<()> {
     let mut launcher = tokio::process::Command::new(std::env::current_exe()?);
     launcher
@@ -130,83 +185,279 @@ async fn detach() -> io::Result<()> {
     Ok(())
 }
 
-async fn run_turn(command: Uuid, text: String) -> io::Result<Option<i32>> {
+fn run_steps<'a>(
+    turn: &'a mut Turn,
+    lane: &'a mut Lane,
+    steps: Vec<Value>,
+    depth: usize,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<Option<i32>>> + Send + 'a>> {
+    Box::pin(async move {
+        if depth > 32 {
+            return Err(io::Error::other("script nesting exceeded"));
+        }
+        for step in steps {
+            if let Some(delay) = step["delay_ms"].as_u64() {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+                continue;
+            }
+            if step["hang"].as_bool() == Some(true) {
+                std::future::pending::<()>().await;
+            }
+            if let Some(code) = step["exit"].as_i64() {
+                return Ok(Some(i32::try_from(code).unwrap_or(1)));
+            }
+            if !turn.accepted {
+                emit(json!({"type":"accepted","command_id":turn.command})).await?;
+                phase(Phase::Generating).await?;
+                turn.accepted = true;
+            }
+            if let Some(text) = step["delta"].as_str() {
+                text_delta(turn, lane, text).await?;
+            } else if let Some(model) = step["model"].as_str() {
+                close_text(lane).await?;
+                lane.model = model.into();
+            } else if let Some(tool) = step.get("tool") {
+                let name = tool["name"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid tool step"))?;
+                let summary = tool["summary"].as_str();
+                emit(json!({"type":"phase","phase":"running_tool","tool_name":name,"summary":summary})).await?;
+                let call = turn
+                    .block(BlockKind::ToolCall, name, lane, Some(name), summary)
+                    .await?;
+                let result_lane = Lane {
+                    parent: Some(call),
+                    agent: lane.agent.clone(),
+                    model: lane.model.clone(),
+                    text_id: None,
+                    accumulated: String::new(),
+                };
+                turn.block(
+                    BlockKind::ToolResult,
+                    "ok",
+                    &result_lane,
+                    Some(name),
+                    summary,
+                )
+                .await?;
+                phase(Phase::Generating).await?;
+            } else if let Some(sub) = step.get("subagent") {
+                let name = sub["name"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid subagent"))?;
+                let model = sub["model"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid subagent"))?;
+                let task = sub["task"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid subagent"))?;
+                let call = Uuid::now_v7();
+                turn.begin(call, BlockKind::ToolCall, lane, Some("Agent"), Some(task))
+                    .await?;
+                let mut child = Lane {
+                    agent: name.into(),
+                    model: model.into(),
+                    parent: Some(call),
+                    text_id: None,
+                    accumulated: String::new(),
+                };
+                let first = Uuid::now_v7();
+                turn.begin(first, BlockKind::Text, &child, None, None)
+                    .await?;
+                child.text_id = Some(first);
+                let steps = sub["steps"]
+                    .as_array()
+                    .cloned()
+                    .ok_or_else(|| io::Error::other("invalid subagent"))?;
+                if let Some(code) = run_steps(turn, &mut child, steps, depth + 1).await? {
+                    return Ok(Some(code));
+                }
+                if turn.exhausted {
+                    return Ok(None);
+                }
+                close_text(&mut child).await?;
+                finish(call, "", Some(task)).await?;
+                let result_lane = Lane {
+                    parent: Some(call),
+                    agent: lane.agent.clone(),
+                    model: lane.model.clone(),
+                    text_id: None,
+                    accumulated: String::new(),
+                };
+                turn.block(
+                    BlockKind::ToolResult,
+                    "ok",
+                    &result_lane,
+                    Some("Agent"),
+                    Some(task),
+                )
+                .await?;
+            } else if let Some(usage) = step.get("usage") {
+                let model = usage["model"].as_str().unwrap_or(&lane.model).to_owned();
+                let agent = usage["agent"].as_str().unwrap_or(&lane.agent).to_owned();
+                let row = turn
+                    .usage
+                    .entry((model.clone(), agent.clone()))
+                    .or_insert(ModelUsage {
+                        model,
+                        agent,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        cache_read_tokens: 0,
+                        cache_write_tokens: 0,
+                    });
+                row.input_tokens = row
+                    .input_tokens
+                    .saturating_add(usage["input"].as_u64().unwrap_or(0));
+                row.output_tokens = row
+                    .output_tokens
+                    .saturating_add(usage["output"].as_u64().unwrap_or(0));
+                row.cache_read_tokens = row
+                    .cache_read_tokens
+                    .saturating_add(usage["cache_read"].as_u64().unwrap_or(0));
+                row.cache_write_tokens = row
+                    .cache_write_tokens
+                    .saturating_add(usage["cache_write"].as_u64().unwrap_or(0));
+            } else if let Some((kind, fact)) = step
+                .get("limit_observed")
+                .map(|f| ("limit_observed", f))
+                .or_else(|| step.get("limit_reached").map(|f| ("limit_reached", f)))
+            {
+                if kind == "limit_reached" {
+                    turn.block(BlockKind::Error, "usage limit reached", lane, None, None)
+                        .await?;
+                }
+                let resets = fact["resets_in_ms"]
+                    .as_u64()
+                    .map(|ms| crate::machine::now_ms().saturating_add(ms));
+                emit(json!({"type":kind,"window":fact["window"],"used_permille":fact["used_permille"],"resets_at_ms":resets})).await?;
+            } else if step["context_exhausted"].as_bool() == Some(true) {
+                emit(json!({"type":"context_exhausted"})).await?;
+                turn.exhausted = true;
+                return Ok(None);
+            } else if let Some(index) = step["read_attachment"].as_u64() {
+                let file = turn
+                    .files
+                    .get(index as usize)
+                    .ok_or_else(|| io::Error::other("missing attachment"))?;
+                let bytes = tokio::fs::read(&file.path).await?;
+                let hash = format!(
+                    "sha256:{}",
+                    Sha256::digest(bytes)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
+                text_delta(turn, lane, &hash).await?;
+            } else if let Some(error) = step["error"].as_str() {
+                turn.block(BlockKind::Error, error, lane, None, None)
+                    .await?;
+            } else if let Some(unknown) = step.get("unknown") {
+                let event_type = unknown["event_type"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid unknown step"))?;
+                emit(json!({"type":event_type,"required":unknown["required"].as_bool().unwrap_or(false)})).await?;
+            } else if step["detach_child"].as_bool() == Some(true) {
+                detach().await?;
+            } else {
+                return Err(io::Error::other("invalid script step"));
+            }
+        }
+        Ok(None)
+    })
+}
+async fn run_turn(
+    command: Uuid,
+    text: String,
+    files: Vec<LocalFile>,
+    model: &str,
+    context: &mut u64,
+) -> io::Result<Option<i32>> {
     let steps = if text.starts_with("{\"synthetic\":") {
         let value: Value =
             serde_json::from_str(&text).map_err(|_| io::Error::other("invalid script"))?;
-        value
-            .get("synthetic")
-            .and_then(Value::as_array)
+        value["synthetic"]
+            .as_array()
             .cloned()
             .ok_or_else(|| io::Error::other("invalid script"))?
     } else {
         let chars: Vec<_> = text.chars().collect();
-        (0..3).map(|i| json!({"delta":chars[chars.len()*i/3..chars.len()*(i+1)/3].iter().collect::<String>()})).collect()
+        (0..3).map(|i|json!({"delta":chars[chars.len()*i/3..chars.len()*(i+1)/3].iter().collect::<String>()})).collect()
     };
-    let mut accepted = false;
-    let mut text_id = None;
-    let mut accumulated = String::new();
-    for step in steps {
-        if let Some(delay) = step.get("delay_ms").and_then(Value::as_u64) {
-            tokio::time::sleep(Duration::from_millis(delay)).await;
-            continue;
-        }
-        if step.get("hang").and_then(Value::as_bool) == Some(true) {
-            std::future::pending::<()>().await;
-        }
-        if let Some(code) = step.get("exit").and_then(Value::as_i64) {
-            return Ok(Some(i32::try_from(code).unwrap_or(1)));
-        }
-        if !accepted {
-            emit(json!({"type":"accepted", "command_id":command})).await?;
-            phase(Phase::Generating).await?;
-            accepted = true;
-        }
-        if let Some(text) = step.get("delta").and_then(Value::as_str) {
-            let id = if let Some(id) = text_id {
-                id
-            } else {
-                let id = Uuid::now_v7();
-                begin(id, BlockKind::Text, command, None).await?;
-                text_id = Some(id);
-                id
-            };
-            delta(id, text).await?;
-            accumulated.push_str(text);
-        } else if let Some(tool) = step.get("tool") {
-            phase(Phase::RunningTool).await?;
-            let name = tool
-                .get("name")
-                .and_then(Value::as_str)
-                .ok_or_else(|| io::Error::other("invalid tool step"))?;
-            let call = block(BlockKind::ToolCall, command, name, None).await?;
-            block(BlockKind::ToolResult, command, "ok", Some(call)).await?;
-            phase(Phase::Generating).await?;
-        } else if let Some(error) = step.get("error").and_then(Value::as_str) {
-            block(BlockKind::Error, command, error, None).await?;
-        } else if let Some(unknown) = step.get("unknown") {
-            let event_type = unknown
-                .get("event_type")
-                .and_then(Value::as_str)
-                .ok_or_else(|| io::Error::other("invalid unknown step"))?;
-            emit(json!({"type":event_type, "required":unknown.get("required").and_then(Value::as_bool).unwrap_or(false)})).await?;
-        } else if step.get("detach_child").and_then(Value::as_bool) == Some(true) {
-            detach().await?;
-        } else {
-            return Err(io::Error::other("invalid script step"));
-        }
+    let mut turn = Turn {
+        command,
+        files,
+        accepted: false,
+        usage: Default::default(),
+        output_chars: 0,
+        exhausted: false,
+    };
+    let mut lane = Lane {
+        agent: "main".into(),
+        model: model.into(),
+        parent: None,
+        text_id: None,
+        accumulated: String::new(),
+    };
+    if let Some(code) = run_steps(&mut turn, &mut lane, steps, 0).await? {
+        return Ok(Some(code));
     }
-    if !accepted {
-        emit(json!({"type":"accepted", "command_id":command})).await?;
+    if turn.exhausted {
+        return Ok(None);
     }
-    if let Some(id) = text_id {
-        finish(id, &accumulated).await?;
+    if !turn.accepted {
+        emit(json!({"type":"accepted","command_id":command})).await?;
     }
-    completed(command).await?;
+    close_text(&mut lane).await?;
+    if turn.usage.is_empty() {
+        turn.usage.insert(
+            (lane.model.clone(), "main".into()),
+            ModelUsage {
+                model: lane.model,
+                agent: "main".into(),
+                input_tokens: text.chars().count() as u64 / 4,
+                output_tokens: turn.output_chars / 4,
+                cache_read_tokens: 0,
+                cache_write_tokens: 0,
+            },
+        );
+    }
+    let usage: Vec<_> = turn.usage.into_values().collect();
+    for row in &usage {
+        *context = context
+            .saturating_add(row.input_tokens)
+            .saturating_add(row.output_tokens)
+            .saturating_add(row.cache_read_tokens)
+            .saturating_add(row.cache_write_tokens);
+    }
+    completed(command, usage, *context).await?;
     Ok(None)
 }
 
-pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
+pub async fn run(
+    profile: &str,
+    native_id: Option<String>,
+    model: Option<String>,
+) -> io::Result<()> {
+    #[cfg(feature = "fault-injection")]
+    if profile == "__burn_parent" {
+        let mut child = tokio::process::Command::new(std::env::current_exe()?)
+            .args(["synthetic-cli", "--profile", "__burn"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .spawn()?;
+        emit(json!({"child_pid":child.id()})).await?;
+        child.wait().await?;
+        return Ok(());
+    }
+    #[cfg(feature = "fault-injection")]
+    if profile == "__burn" {
+        loop {
+            std::hint::spin_loop();
+        }
+    }
     if profile == "__detach_session" {
         rustix::process::setsid().map_err(io::Error::from)?;
         let mut child = tokio::process::Command::new(std::env::current_exe()?)
@@ -232,10 +483,17 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
             .spawn()?;
         return Ok(());
     }
-    if !matches!(profile, "synthetic" | "synthetic-exit-on-interrupt") {
+    if !matches!(
+        profile,
+        "synthetic" | "synthetic-exit-on-interrupt" | "synthetic-codex"
+    ) {
         return Err(io::Error::other("unknown synthetic profile"));
     }
     emit(json!({"type":"ready", "native_conversation_id":native_id.unwrap_or_else(|| format!("synthetic-{}", Uuid::now_v7()))})).await?;
+    let mut model = model
+        .filter(|m| !m.is_empty())
+        .unwrap_or_else(|| "synthetic-large".into());
+    let mut context_tokens = 0;
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         log_input(&line);
@@ -243,9 +501,18 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
             serde_json::from_str(&line).map_err(|_| io::Error::other("invalid request"))?;
         match request {
             Request::Input {
-                command_id, text, ..
+                command_id,
+                text,
+                files,
+                settings,
+                ..
             } => {
-                let turn = run_turn(command_id, text);
+                if let Some(change) = settings
+                    && let Some(next) = change.model
+                {
+                    model = next;
+                }
+                let turn = run_turn(command_id, text, files, &model, &mut context_tokens);
                 tokio::pin!(turn);
                 // Готовность объявляется после выхода из select активного хода.
                 tokio::select! {
@@ -259,7 +526,7 @@ pub async fn run(profile: &str, native_id: Option<String>) -> io::Result<()> {
                             match serde_json::from_str::<Request>(&line).map_err(|_| io::Error::other("invalid request"))? {
                                 Request::Interrupt { id } => {
                                     emit(json!({"type":"interrupted", "id":id})).await?;
-                                    completed(command_id).await?;
+                                    completed(command_id,vec![],0).await?;
                                     phase(Phase::AwaitingInput).await?;
                                     if profile == "synthetic-exit-on-interrupt" { return Ok(()) }
                                 }

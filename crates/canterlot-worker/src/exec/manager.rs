@@ -105,18 +105,21 @@ async fn ownership_update(
     id: Uuid,
     change: impl FnOnce(&mut Ownership) + Send + 'static,
 ) -> Result<(), ExecError> {
-    shared
+    let record = shared
         .store
         .call(move |store| {
             let store = open(store)?;
             let Some(mut record) = store.ownership().get(id).cloned() else {
-                return Ok(());
+                return Ok(None);
             };
             change(&mut record);
-            store.ownership_mut()?.append(record)?;
-            Ok(())
+            store.ownership_mut()?.append(record.clone())?;
+            Ok(Some(record))
         })
         .await?;
+    if let Some(record) = record {
+        shared.remember_ownership(&record);
+    }
     Ok(())
 }
 
@@ -786,7 +789,11 @@ impl Actor {
                 profile: start.harness.clone(),
                 workdir: workdir.to_string_lossy().into_owned(),
                 native_conversation_id: start.native_conversation_id.clone(),
-                ..Default::default()
+                model: start.model.clone(),
+                effort: start.effort.clone(),
+                permission_mode: start.permission_mode.clone(),
+                instruction_profile: start.instruction_profile.clone(),
+                pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
             }))
             .await;
         Ok(())

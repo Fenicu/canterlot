@@ -345,6 +345,7 @@ dependencies = [
  "canterlot-proto",
  "chrono",
  "clap",
+ "crc32c",
  "humantime-serde",
  "prost",
  "rand",
