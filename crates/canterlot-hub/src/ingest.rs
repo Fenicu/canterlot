@@ -438,6 +438,8 @@ impl Ingest {
             return Ok(IngestOutcome::Committed { up_to_seq });
         }
         let mut tx = self.pool.begin().await?;
+        // Порядок SJ: credentials SHARE → journal_cursors → queue_state → scope_counters/events.
+        // Отзыв/ротация: machines NO KEY UPDATE → credentials; FK KEY SHARE курсора с этим совместим.
         require_active(&mut tx, machine_id, credential).await?;
         let mut locked = false;
         let mut initial_seq = up_to_seq;
@@ -452,6 +454,16 @@ impl Ingest {
                 let rows = sqlx::query_as("select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1 for update")
                     .bind(journal_id).fetch_all(&mut *tx).await?;
                 (up_to_seq, last_digest) = checked_cursor(machine_id, JournalKind::Sj, rows)?;
+                let opened = batch.records.iter().find_map(|record| {
+                    match record.body.as_ref().and_then(|body| body.body.as_ref()) {
+                        Some(Body::JournalOpened(fact)) if record.seq == 1 => {
+                            Uuid::parse_str(&fact.execution_id).ok()
+                        }
+                        _ => None,
+                    }
+                });
+                sqlx::query("select q.conversation_id from queue_state q join executions e on e.conversation_id = q.conversation_id join conversations c on c.id = q.conversation_id where e.id = coalesce((select execution_id from journal_cursors where journal_id = $1), $2) and c.machine_id = $3 for update of q")
+                    .bind(journal_id).bind(opened).bind(machine_id).fetch_optional(&mut *tx).await?;
                 initial_seq = up_to_seq;
                 locked = true;
             }

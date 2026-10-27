@@ -112,6 +112,112 @@ fn delta(id: Uuid, rev: u64, text: String) -> Body {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wave2_n2_sj_batch_and_stop_share_lock_order(pool: PgPool) -> TestResult {
+    use canterlot_hub::delivery::control;
+    use std::time::Duration;
+    use tokio::time::{sleep, timeout};
+
+    let mut run = Run::new(&pool).await;
+    let block = Uuid::now_v7();
+    run.send(vec![
+        run.opened(),
+        run.state("starting", ""),
+        run.state("running", ""),
+        start(block),
+    ])
+    .await;
+    sqlx::raw_sql("create function gate_stop_event() returns trigger language plpgsql as $$ begin perform pg_advisory_xact_lock(20927); return new; end $$;
+        create trigger gate_stop_event before update on queue_state for each row execute function gate_stop_event()")
+        .execute(&pool).await?;
+    for round in 0..50 {
+        sqlx::query("update queue_state set pause_reasons = '[]' where conversation_id = $1")
+            .bind(run.seed.conversation_id)
+            .execute(&pool)
+            .await?;
+        let mut gate = pool.acquire().await?;
+        sqlx::query("select pg_advisory_lock(20927)")
+            .execute(&mut *gate)
+            .await?;
+        let stop_pool = pool.clone();
+        let owner = run.seed.owner_id;
+        let conversation = run.seed.conversation_id;
+        let stop = tokio::spawn(async move {
+            if round % 2 == 0 {
+                control::request_stop(
+                    &stop_pool,
+                    owner,
+                    conversation,
+                    &Uuid::now_v7().to_string(),
+                    Uuid::now_v7(),
+                )
+                .await
+                .map(|_| ())
+            } else {
+                control::request_stop_execution(
+                    &stop_pool,
+                    owner,
+                    conversation,
+                    false,
+                    &Uuid::now_v7().to_string(),
+                    Uuid::now_v7(),
+                )
+                .await
+                .map(|_| ())
+            }
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_scalar::<_, bool>("select exists(select 1 from pg_locks l join pg_stat_activity a using(pid) where a.datname = current_database() and l.locktype = 'advisory' and not l.granted)").fetch_one(&pool).await.unwrap() { break; }
+                sleep(Duration::from_millis(2)).await;
+            }
+        }).await.expect("stop did not reach the queue gate");
+        let batch = run.batch(vec![
+            delta(block, round + 1, "x".into()),
+            Body::PhaseChanged(PhaseChanged {
+                execution_id: run.execution.execution_id.to_string(),
+                phase: "thinking".into(),
+            }),
+        ]);
+        let ingest = Ingest::new(pool.clone());
+        let machine = run.seed.machine_id;
+        let credential = run.seed.credential_digest();
+        let send = tokio::spawn(async move {
+            ingest
+                .apply_batch(machine, &credential, JournalKind::Sj, &batch)
+                .await
+        });
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if sqlx::query_scalar::<_, bool>("select exists(select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and query like '%queue_state%' and query like '%for update%' and query not like '%pg_stat_activity%')").fetch_one(&pool).await.unwrap() { break; }
+                sleep(Duration::from_millis(2)).await;
+            }
+        }).await.expect("SJ did not reach its queue lock");
+        sqlx::query("select pg_advisory_unlock(20927)")
+            .execute(&mut *gate)
+            .await?;
+        let (stop, send) =
+            timeout(Duration::from_secs(5), async { tokio::join!(stop, send) }).await?;
+        let stop = stop?;
+        let send = send?;
+        let deadlocks: i64 = sqlx::query_scalar(
+            "select deadlocks from pg_stat_database where datname = current_database()",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(
+            stop.is_ok() && send.is_ok(),
+            "iteration {round}: stop={stop:?}, SJ={send:?}, PostgreSQL deadlocks={deadlocks}"
+        );
+        assert_eq!(
+            send?,
+            IngestOutcome::Committed { up_to_seq: run.seq },
+            "iteration {round}"
+        );
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn created_can_lose_owner_before_first_sj(pool: PgPool) -> TestResult {
     let run = Run::new(&pool).await;
     executions::set_state(
