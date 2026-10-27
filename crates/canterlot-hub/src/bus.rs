@@ -33,15 +33,18 @@ fn databases() -> &'static Mutex<HashMap<String, usize>> {
 }
 
 impl EventBus {
+    pub fn local() -> Self {
+        BUS.get_or_init(|| Self {
+            sender: broadcast::channel(256).0,
+            listener: None,
+            #[cfg(feature = "fault-injection")]
+            faults: Default::default(),
+        })
+        .clone()
+    }
+
     pub fn spawn(pool: PgPool, multi_process: bool, shutdown: watch::Receiver<bool>) -> Self {
-        let mut bus = BUS
-            .get_or_init(|| Self {
-                sender: broadcast::channel(256).0,
-                listener: None,
-                #[cfg(feature = "fault-injection")]
-                faults: Default::default(),
-            })
-            .clone();
+        let mut bus = Self::local();
         let database = pool
             .connect_options()
             .get_database()

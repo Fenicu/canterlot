@@ -4002,7 +4002,9 @@
               "const": "subscribe"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             },
             "scope": {
               "$ref": "#/$defs/Scope"
@@ -4025,7 +4027,9 @@
               "const": "unsubscribe"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
             }
           },
           "required": [
@@ -4061,7 +4065,8 @@
               "const": "subscribed"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "scope": {
               "$ref": "#/$defs/Scope"
@@ -4085,7 +4090,8 @@
               "const": "event"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "event": {
               "oneOf": [
@@ -4214,7 +4220,8 @@
               "const": "resync_required"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "reason": {
               "enum": [
@@ -4241,7 +4248,8 @@
               "const": "lagged"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "cursor": {
               "$ref": "#/$defs/Seq"
@@ -4261,7 +4269,8 @@
               "const": "unsubscribed"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             }
           },
           "required": [
@@ -4293,7 +4302,8 @@
               "const": "error"
             },
             "id": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "code": {
               "enum": [

@@ -2293,3 +2293,15 @@ async fn db_error_logging_helper_returns_only_sqlstate_and_constraint(pool: PgPo
     assert!(!text(&response).contains("LEAK-DETAIL-MARKER"));
     assert!(!log_text().contains("LEAK-DETAIL-MARKER"));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ws_without_upgrade_headers_uses_api_error_envelope(pool: PgPool) {
+    let (deps, _directory) = test_app_deps(pool, test_http_config(), None).await;
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let response = client.send(Method::GET, "/api/v1/ws", None, None).await;
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    let body: serde_json::Value = response.json();
+    assert_eq!(body["error"]["code"], "invalid_request");
+    assert_eq!(response.headers["cache-control"], "no-store");
+    assert!(response.headers.contains_key("x-server-time-ms"));
+}

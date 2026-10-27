@@ -34,6 +34,7 @@ pub mod scheduler;
 pub mod session;
 pub mod singleton;
 pub mod snapshot;
+pub mod subscriptions;
 
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;

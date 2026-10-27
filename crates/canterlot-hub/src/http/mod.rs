@@ -36,6 +36,7 @@ pub mod machines;
 pub mod openapi;
 pub mod scheduled;
 pub mod snapshot;
+pub mod ws;
 
 /// Размер одного тела `PATCH` загрузки вложения; объявляется в `GET /api/v1/config`.
 pub const UPLOAD_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
@@ -72,6 +73,7 @@ pub struct AppState {
     pub machines: Arc<MachinesConfig>,
     pub manifest: Arc<PathBuf>,
     pub user_header: HeaderName,
+    pub ws_tasks: tokio_util::task::TaskTracker,
     pub shutdown: CancellationToken,
 }
 
@@ -92,6 +94,7 @@ impl AppState {
             machines: Arc::new(deps.machines),
             manifest: Arc::new(deps.manifest),
             user_header,
+            ws_tasks: tokio_util::task::TaskTracker::new(),
             shutdown: deps.shutdown,
         }
     }
@@ -119,6 +122,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(limits::routes())
         .merge(snapshot::routes())
         .merge(history::routes())
+        .merge(ws::routes())
 }
 
 pub fn router(state: AppState) -> Router {
@@ -152,7 +156,21 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
     let config = (*state.http).clone();
-    serve_router(router(state), listener, config, shutdown).await
+    let stopping = state.shutdown.clone();
+    let drain = state.ws_tasks.clone();
+    let tasks = state.ws_tasks.clone();
+    let stop_after = stopping.clone();
+    let result = serve_router(router(state), listener, config, async move {
+        shutdown.await;
+        stopping.cancel();
+        drain.close();
+        drain.wait().await;
+    })
+    .await;
+    stop_after.cancel();
+    tasks.close();
+    tasks.wait().await;
+    result
 }
 
 /// Обслуживает готовый роутер; адрес собеседника берётся из сокета (`ConnectInfo`).

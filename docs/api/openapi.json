@@ -2109,6 +2109,29 @@
         }
       }
     },
+    "/api/v1/ws": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "upgrade",
+        "responses": {
+          "101": {
+            "description": "WSS canterlot.v1; кадры ClientOp / ServerOp в events.schema.json"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [

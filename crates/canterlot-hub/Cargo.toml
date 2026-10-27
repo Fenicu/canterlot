@@ -13,7 +13,7 @@ name = "canterlot-hub"
 path = "src/main.rs"
 
 [features]
-testkit = ["dep:rcgen", "dep:tower", "dep:http-body-util", "hyper-util/client-legacy"]
+testkit = ["dep:rcgen", "dep:tower", "dep:http-body-util", "hyper-util/client-legacy", "dep:tokio-tungstenite"]
 fault-injection = []
 
 [dev-dependencies]
@@ -48,6 +48,7 @@ tempfile = "3.27.0"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
+tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"], optional = true }
 tokio-util = { version = "0.7.20", features = ["rt"] }
 toml = "1.1.8"
 tonic = { version = "0.14.6", features = ["tls-ring"] }

@@ -619,3 +619,73 @@ impl TestClient {
         }
     }
 }
+
+pub struct TestWs {
+    pub stream: tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+    pub close_code: Option<u16>,
+}
+impl TestWs {
+    pub async fn connect(
+        addr: std::net::SocketAddr,
+        origin: &str,
+        user: Option<&str>,
+    ) -> Result<Self, tokio_tungstenite::tungstenite::Error> {
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let mut request = format!("ws://{addr}/api/v1/ws").into_client_request()?;
+        request.headers_mut().insert("origin", origin.parse()?);
+        request
+            .headers_mut()
+            .insert("sec-websocket-protocol", "canterlot.v1".parse()?);
+        if let Some(user) = user {
+            request.headers_mut().insert("remote-user", user.parse()?);
+        }
+        let socket = tokio::net::TcpStream::connect(addr).await?;
+        let (stream, response) = tokio_tungstenite::client_async(request, socket).await?;
+        assert_eq!(response.headers()["sec-websocket-protocol"], "canterlot.v1");
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        assert!(response.headers().contains_key("x-server-time-ms"));
+        Ok(Self {
+            stream,
+            close_code: None,
+        })
+    }
+    pub async fn send(&mut self, value: Value) {
+        use futures_util::SinkExt;
+        assert!(
+            self.stream
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    value.to_string().into()
+                ))
+                .await
+                .is_ok(),
+            "WS send"
+        );
+    }
+    pub async fn next(&mut self, timeout: std::time::Duration) -> Option<Value> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+        tokio::time::timeout(timeout, async {
+            loop {
+                match self.stream.next().await {
+                    Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).ok(),
+                    Some(Ok(Message::Close(frame))) => {
+                        self.close_code = frame.map(|f| f.code.into());
+                        let _ = self.stream.flush().await;
+                        return None;
+                    }
+                    Some(Ok(Message::Ping(_))) => {
+                        let _ = self.stream.flush().await;
+                    }
+                    Some(Ok(_)) => {}
+                    _ => return None,
+                }
+            }
+        })
+        .await
+        .ok()
+        .flatten()
+    }
+    pub async fn close(mut self) {
+        let _ = self.stream.close(None).await;
+    }
+}
