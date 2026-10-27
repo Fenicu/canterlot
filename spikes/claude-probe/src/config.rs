@@ -12,6 +12,7 @@ pub const SCRATCH_ROOT: &str = "/tmp/canterlot-stage0/claude-code";
 pub struct Config {
     pub claude: PathBuf,
     pub model: String,
+    pub permission_mode: String,
     pub effort: Option<String>,
     pub evidence_dir: PathBuf,
     pub scratch_root: PathBuf,
@@ -41,6 +42,8 @@ impl Config {
         Ok(Self {
             claude,
             model: std::env::var("CANTERLOT_MODEL").unwrap_or_else(|_| "haiku".to_owned()),
+            permission_mode: std::env::var("CANTERLOT_PERMISSION_MODE")
+                .unwrap_or_else(|_| "manual".to_owned()),
             effort: Some(std::env::var("CANTERLOT_EFFORT").unwrap_or_else(|_| "low".to_owned()))
                 .filter(|e| !e.is_empty()),
             evidence_dir,
@@ -114,7 +117,7 @@ impl Config {
         args.push("--permission-prompt-tool".to_owned());
         args.push(self.permission_tool());
         args.push("--permission-mode".to_owned());
-        args.push("manual".to_owned());
+        args.push(self.permission_mode.clone());
         args.push("--model".to_owned());
         args.push(self.model.clone());
         if let Some(effort) = &self.effort {
@@ -249,6 +252,7 @@ mod tests {
         let cfg = Config {
             claude: PathBuf::from("/opt/cli/claude"),
             model: "haiku".into(),
+            permission_mode: "manual".into(),
             effort: None,
             evidence_dir: PathBuf::from("/tmp/e"),
             scratch_root: PathBuf::from("/tmp/s"),

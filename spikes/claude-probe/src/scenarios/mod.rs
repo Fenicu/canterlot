@@ -78,11 +78,13 @@ impl Ctx {
     pub async fn new(cfg: &Config, name: &str, policy: Policy) -> anyhow::Result<Self> {
         let cwd = cfg.scratch_root.join(name);
         fresh_dir(&cwd)?;
-        let git = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(&cwd)
-            .status()?;
-        anyhow::ensure!(git.success(), "git init failed");
+        if name != "question" {
+            let git = std::process::Command::new("git")
+                .args(["init", "-q"])
+                .current_dir(&cwd)
+                .status()?;
+            anyhow::ensure!(git.success(), "git init failed");
+        }
         let ipc_dir = cfg.scratch_root.join(".ipc").join(name);
         fresh_dir(&ipc_dir)?;
         let socket = ipc_dir.join("perm.sock");
