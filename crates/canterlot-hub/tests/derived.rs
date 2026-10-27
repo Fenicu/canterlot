@@ -34,6 +34,10 @@ async fn migration_and_startup_project_old_terminal_conversations_without_events
         .execute(&pool)
         .await
         .unwrap();
+    sqlx::raw_sql(include_str!("../migrations/0011_conversations_ui.sql"))
+        .execute(&pool)
+        .await
+        .unwrap();
     let (stop, task, _) = projector(
         &pool,
         ActivityConfig {
@@ -381,7 +385,7 @@ async fn derived_changed_carries_queue_summary_and_last_activity_and_copies_it_t
     );
     assert_eq!(
         payload["settings"],
-        json!({"model":null,"effort":null,"permission_mode":null})
+        json!({"model":"","effort":"","permission_mode":""})
     );
     assert_eq!(payload["crunch"], json!({"enabled":false}));
 }

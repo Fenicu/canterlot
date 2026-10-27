@@ -121,7 +121,31 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            ..Default::default()
+            model: row
+                .payload
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            effort: row
+                .payload
+                .get("effort")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            permission_mode: row
+                .payload
+                .get("permission_mode")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            instruction_profile: row
+                .payload
+                .get("instruction_profile")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            capabilities: vec![],
         }),
         "cancel_input" => {
             let (target_command_id, target_dispatch_attempt) = target(&row.payload)?;

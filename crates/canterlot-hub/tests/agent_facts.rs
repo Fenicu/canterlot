@@ -137,10 +137,18 @@ async fn migration_0008_backfills_created_seq_from_events_or_creation_order(
         sqlx::raw_sql(sql).execute(&pool).await?;
     }
     let s = testkit::seed(&pool).await;
-    let e = executions::start(&pool, s.owner_id, s.conversation_id, Uuid::now_v7()).await?;
+    let execution_id = Uuid::now_v7();
+    // Историческая фикстура использует только столбцы схемы до 0008.
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,1,'created')",
+    )
+    .bind(execution_id)
+    .bind(s.conversation_id)
+    .execute(&pool)
+    .await?;
     for n in 0..3 {
         let b = Uuid::now_v7();
-        sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_at) values($1,$2,$3,'text','final',0,now()+make_interval(secs=>$4))").bind(b).bind(e.execution_id).bind(s.conversation_id).bind(n as f64).execute(&pool).await?;
+        sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_at) values($1,$2,$3,'text','final',0,now()+make_interval(secs=>$4))").bind(b).bind(execution_id).bind(s.conversation_id).bind(n as f64).execute(&pool).await?;
         if n == 2 {
             sqlx::query("insert into events(id,scope,scope_seq,kind,conversation_id,payload,correlation_id) values($1,$2,7,'block_started',$3,$4,$5)").bind(Uuid::now_v7()).bind(Scope::Conversation{id:s.conversation_id}.key()).bind(s.conversation_id).bind(json!({"block_id":b})).bind(Uuid::now_v7()).execute(&pool).await?;
         }

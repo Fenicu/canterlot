@@ -22,7 +22,7 @@ use crate::{
     singleton::Singleton,
 };
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ActivityState {
     Idle,
@@ -48,7 +48,7 @@ impl ActivityState {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Evidence {
     Idle {
@@ -440,8 +440,8 @@ async fn refresh_with_metrics(
         .bind(conversation_id)
         .fetch_one(&mut *tx)
         .await?;
-    let (owner_id, read_seq): (Uuid, i64) =
-        sqlx::query_as("select owner_id,last_read_seq from conversations where id=$1 for update")
+    let (owner_id, read_seq, model, effort, permission, crunch): (Uuid, i64, String, String, String, bool) =
+        sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled from conversations where id=$1 for update")
             .bind(conversation_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -470,6 +470,10 @@ async fn refresh_with_metrics(
             && old.try_get::<Value, _>("pause_reasons")? == pauses
             && old.try_get::<Value, _>("hold_reasons")? == holds
             && old.try_get::<Option<DateTime<Utc>>, _>("last_activity_at")? == last_activity
+            && old.try_get::<String, _>("effective_model")? == model
+            && old.try_get::<String, _>("effective_effort")? == effort
+            && old.try_get::<String, _>("effective_permission_mode")? == permission
+            && old.try_get::<bool, _>("crunch_enabled")? == crunch
         {
             tx.commit().await?;
             return Ok(Refresh::Unchanged);
@@ -480,9 +484,9 @@ async fn refresh_with_metrics(
         .bind(last_activity)
         .execute(&mut *tx)
         .await?;
-    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at) values($1,$2,$3,$4,$5,$6,$7,$8,$9) on conflict(conversation_id) do update set activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,updated_at=clock_timestamp()")
-        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).execute(&mut *tx).await?;
-    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":{"model":null,"effort":null,"permission_mode":null},"crunch":{"enabled":false}});
+    sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) on conflict(conversation_id) do update set activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
+        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).execute(&mut *tx).await?;
+    let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":{"model":model,"effort":effort,"permission_mode":permission},"crunch":{"enabled":crunch}});
     for scope in [
         Scope::Conversation {
             id: conversation_id,

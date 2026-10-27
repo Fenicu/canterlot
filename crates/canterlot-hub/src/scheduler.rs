@@ -602,3 +602,20 @@ impl Scheduler {
 fn log_error(e: &sqlx::Error) {
     tracing::error!(kind="scheduler_db_error",error=%crate::dberr::describe(e),"scheduler operation failed");
 }
+
+pub(crate) async fn publish_archive_cancellations(
+    conn: &mut PgConnection,
+    ids: &[Uuid],
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let jobs = sqlx::query_as::<_, JobRow>(
+        "select * from scheduled_jobs where id=any($1) and kind='message' order by id",
+    )
+    .bind(ids)
+    .fetch_all(&mut *conn)
+    .await?;
+    for job in jobs {
+        changed(conn, &job.message()?, correlation_id).await?;
+    }
+    Ok(())
+}

@@ -114,7 +114,7 @@ impl FromStr for ExecutionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum PauseReason {
     UserStop,
@@ -174,7 +174,7 @@ impl FromStr for PauseReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum HoldReason {
     RunInProgress,
@@ -242,7 +242,7 @@ impl FromStr for HoldReason {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "reason", rename_all = "snake_case")]
 pub enum HoldView {
     RunInProgress,

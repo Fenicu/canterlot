@@ -24,10 +24,14 @@ use crate::{
 
 pub mod auth;
 mod connection;
+pub mod conversations;
 pub mod error;
 pub mod extract;
+pub mod groups;
 pub mod health;
 pub mod layers;
+pub mod limits;
+pub mod machines;
 pub mod openapi;
 pub mod scheduled;
 
@@ -107,6 +111,10 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .merge(health::routes())
         .merge(scheduled::routes())
+        .merge(conversations::routes())
+        .merge(groups::routes())
+        .merge(machines::routes())
+        .merge(limits::routes())
 }
 
 pub fn router(state: AppState) -> Router {

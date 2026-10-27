@@ -107,7 +107,7 @@ async fn start_creates_generation_and_command(pool: PgPool) -> TestResult {
             .0
             .contains(&HoldReason::ExecutionStarting)
     );
-    assert!(queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution));
+    assert!(!queue.hold_reasons.0.contains(&HoldReason::NoLiveExecution));
     assert!(queue.pause_reasons.0.is_empty());
     let event: (String, i64, String, Uuid, Uuid, Uuid, Value) = sqlx::query_as(
         "select scope, scope_seq, kind, conversation_id, execution_id, correlation_id,

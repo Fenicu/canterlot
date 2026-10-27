@@ -9,7 +9,7 @@ use crate::{
     model::{ExecutionState, HoldReason, PauseReason, RunSlot},
 };
 
-#[derive(Debug)]
+#[derive(Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct StartedExecution {
     pub execution_id: Uuid,
     pub generation: i64,
@@ -40,33 +40,62 @@ pub async fn start(
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
     let mut tx = pool.begin().await?;
+    let started = start_in_tx(
+        &mut tx,
+        owner_id,
+        conversation_id,
+        &StartOptions { resume: false },
+        correlation_id,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(started)
+}
+
+pub struct StartOptions {
+    pub resume: bool,
+}
+
+pub async fn start_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    options: &StartOptions,
+    correlation_id: Uuid,
+) -> Result<StartedExecution, ExecutionError> {
     let mut queue: LockedQueue = sqlx::query_as(
         "select * from queue_state
          where conversation_id = $1 for update",
     )
     .bind(conversation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or(ExecutionError::ConversationNotFound)?;
-    let (machine_id, harness, workdir): (Uuid, String, String) = sqlx::query_as(
-        "select machine_id, harness, workdir from conversations where id = $1 and owner_id = $2",
-    )
-    .bind(conversation_id)
-    .bind(owner_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .ok_or(ExecutionError::ConversationNotFound)?;
+    let row = sqlx::query("select * from conversations where id=$1 and owner_id=$2")
+        .bind(conversation_id)
+        .bind(owner_id)
+        .fetch_optional(&mut *conn)
+        .await?
+        .ok_or(ExecutionError::ConversationNotFound)?;
+    use sqlx::Row;
+    let machine_id: Uuid = row.try_get("machine_id")?;
+    let native: Option<String> = if options.resume {
+        sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 order by generation desc limit 1")
+            .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
+    } else {
+        None
+    };
     if queue.closed {
         return Err(ExecutionError::ConversationClosed);
     }
-    if let Some((execution_id, _, _)) = live(&mut tx, conversation_id).await? {
+    if let Some((execution_id, _, _)) = live(conn, conversation_id).await? {
         return Err(ExecutionError::AlreadyLive { execution_id });
     }
     let generation: i64 = sqlx::query_scalar(
         "select coalesce(max(generation), 0) + 1 from executions where conversation_id = $1",
     )
     .bind(conversation_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     let started = StartedExecution {
         execution_id: Uuid::now_v7(),
@@ -80,7 +109,7 @@ pub async fn start(
     .bind(started.execution_id)
     .bind(conversation_id)
     .bind(generation)
-    .execute(&mut *tx)
+    .execute(&mut *conn)
     .await?;
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id,
@@ -92,24 +121,31 @@ pub async fn start(
     .bind(conversation_id)
     .bind(started.execution_id)
     .bind(generation)
-    .bind(json!({"harness": harness, "workdir": workdir}))
-    .execute(&mut *tx)
+    .bind(json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
+        "model":row.try_get::<String,_>("model")?,"effort":row.try_get::<String,_>("effort")?,
+        "permission_mode":row.try_get::<String,_>("permission_mode")?,"instruction_profile":row.try_get::<String,_>("instruction_profile")?,
+        "native_conversation_id":native}))
+    .execute(&mut *conn)
     .await?;
     sqlx::query("select pg_notify('canterlot_outbox', $1::text)")
         .bind(machine_id.to_string())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
+    queue
+        .hold_reasons
+        .0
+        .retain(|r| *r != HoldReason::NoLiveExecution);
     add_once(&mut queue.hold_reasons.0, HoldReason::ExecutionStarting);
     queue
         .save(
-            &mut tx,
+            conn,
             &queue.slot()?,
             Some(started.execution_id),
             correlation_id,
         )
         .await?;
     events::append(
-        &mut tx,
+        conn,
         state_event(
             conversation_id,
             started.execution_id,
@@ -120,7 +156,6 @@ pub async fn start(
         ),
     )
     .await?;
-    tx.commit().await?;
     Ok(started)
 }
 

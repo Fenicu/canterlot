@@ -57,6 +57,391 @@
         }
       }
     },
+    "/api/v1/conversations": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "filter",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "q",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Список сессий",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ListPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Сессия создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Created"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}": {
+      "get": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сессия",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Attributes"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Атрибуты изменены",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/crunch": {
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "set_crunch",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CrunchSetting"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Кранч изменён",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/groups": {
+      "put": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "set_groups",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupsBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Группы изменены",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/read": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "read",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReadBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Прочитанность сохранена"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/scheduled": {
       "get": {
         "tags": [
@@ -174,6 +559,412 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/groups": {
+      "get": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Группы",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/Group"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Группа создана",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/groups/{id}": {
+      "delete": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "delete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Группа удалена"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "groups"
+        ],
+        "operationId": "update",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/GroupPatch"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Группа изменена",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/limits": {
+      "get": {
+        "tags": [
+          "limits"
+        ],
+        "operationId": "current",
+        "responses": {
+          "200": {
+            "description": "Текущие лимиты",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ProviderView"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/limits/history": {
+      "get": {
+        "tags": [
+          "limits"
+        ],
+        "operationId": "history",
+        "parameters": [
+          {
+            "name": "provider",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "from",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "tz",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Расход и история лимитов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/History"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "description": "Машины владельца",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/MachineView"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{id}": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "get",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Машина",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MachineView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/machines/{id}/workdirs/recent": {
+      "get": {
+        "tags": [
+          "machines"
+        ],
+        "operationId": "recent",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Недавние каталоги",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Workdirs"
                 }
               }
             }
@@ -494,6 +1285,18 @@
   },
   "components": {
     "schemas": {
+      "ActivityState": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "working",
+          "waiting_for_user",
+          "stalled",
+          "quota_paused",
+          "failed",
+          "stopped"
+        ]
+      },
       "ActivityView": {
         "type": "object",
         "required": [
@@ -520,6 +1323,97 @@
           "scheduled",
           "live_execution"
         ]
+      },
+      "AttributeView": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "title_source",
+          "pinned",
+          "archived",
+          "groups",
+          "machine",
+          "harness",
+          "workdir",
+          "created_at"
+        ],
+        "properties": {
+          "archived": {
+            "type": "boolean"
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "harness": {
+            "$ref": "#/components/schemas/HarnessRef"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "machine": {
+            "$ref": "#/components/schemas/MachineRef"
+          },
+          "pinned": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          },
+          "title_source": {
+            "type": "string"
+          },
+          "workdir": {
+            "type": "string"
+          }
+        }
+      },
+      "Attributes": {
+        "type": "object",
+        "properties": {
+          "archived": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "force": {
+            "type": "boolean"
+          },
+          "pinned": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "AuthView": {
         "type": "object",
@@ -595,6 +1489,249 @@
           }
         ]
       },
+      "ConversationDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttributeView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "model",
+              "effort",
+              "permission_mode",
+              "activity",
+              "unread_count",
+              "queue",
+              "settings",
+              "crunch",
+              "holds"
+            ],
+            "properties": {
+              "activity": {
+                "$ref": "#/components/schemas/ActivityView"
+              },
+              "crunch": {
+                "$ref": "#/components/schemas/CrunchDetail"
+              },
+              "effort": {
+                "type": "string"
+              },
+              "execution": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/LiveExecutionView"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "holds": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/HoldView"
+                }
+              },
+              "last_activity_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "permission_mode": {
+                "type": "string"
+              },
+              "queue": {
+                "$ref": "#/components/schemas/QueueView"
+              },
+              "settings": {
+                "$ref": "#/components/schemas/SettingsView"
+              },
+              "unread_count": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          }
+        ]
+      },
+      "Counts": {
+        "type": "object",
+        "required": [
+          "all",
+          "pinned",
+          "archived",
+          "groups"
+        ],
+        "properties": {
+          "all": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "archived": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/GroupCount"
+            }
+          },
+          "pinned": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "CreateBody": {
+        "type": "object",
+        "required": [
+          "machine_id",
+          "harness",
+          "workdir",
+          "model",
+          "effort"
+        ],
+        "properties": {
+          "color": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "crunch": {
+            "$ref": "#/components/schemas/CrunchSetting"
+          },
+          "effort": {
+            "type": "string"
+          },
+          "group_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          "harness": {
+            "type": "string"
+          },
+          "instruction_profile": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "machine_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "model": {
+            "type": "string"
+          },
+          "permission_mode": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "start": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workdir": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "Created": {
+        "type": "object",
+        "required": [
+          "conversation_id"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/StartedExecution"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        }
+      },
+      "CrunchDetail": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "resume_pending"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "reserve_override_until": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "resume_pending": {
+            "type": "boolean"
+          },
+          "resume_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "CrunchSetting": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "resume_text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "CrunchView": {
+        "type": "object",
+        "required": [
+          "enabled"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          }
+        }
+      },
       "DefaultsView": {
         "type": "object",
         "required": [
@@ -602,6 +1739,52 @@
         ],
         "properties": {
           "crunch_resume_text": {
+            "type": "string"
+          }
+        }
+      },
+      "DiskView": {
+        "type": "object",
+        "required": [
+          "label",
+          "total_bytes",
+          "free_bytes"
+        ],
+        "properties": {
+          "free_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "label": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "EffectiveSettings": {
+        "type": "object",
+        "required": [
+          "model",
+          "effort",
+          "permission_mode",
+          "instruction_profile"
+        ],
+        "properties": {
+          "effort": {
+            "type": "string"
+          },
+          "instruction_profile": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "permission_mode": {
             "type": "string"
           }
         }
@@ -659,7 +1842,20 @@
           "invalid_state",
           "not_pending",
           "schedule_time_out_of_range",
-          "too_many_scheduled"
+          "too_many_scheduled",
+          "machine_not_found",
+          "machine_unavailable",
+          "capability_missing",
+          "limits_mismatch",
+          "harness_unknown",
+          "model_unknown",
+          "effort_not_allowed",
+          "permission_mode_unknown",
+          "profile_unknown",
+          "workdir_not_allowed",
+          "group_not_found",
+          "group_name_taken",
+          "archive_active"
         ]
       },
       "ErrorDetails": {
@@ -696,6 +1892,777 @@
           "cli_start",
           "adapter_protocol",
           "agent_service"
+        ]
+      },
+      "Evidence": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "kind"
+            ],
+            "properties": {
+              "background_work": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int32",
+                "minimum": 0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "idle"
+                ]
+              },
+              "last_turn_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "phase",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "working"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "phase_since": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "summary": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "tool_name": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "phase",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "waiting_for_user"
+                ]
+              },
+              "phase": {
+                "type": "string"
+              },
+              "question": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "last_event_at",
+              "phase",
+              "link",
+              "kind"
+            ],
+            "properties": {
+              "cpu_busy": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stalled"
+                ]
+              },
+              "last_event_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "link": {
+                "type": "string"
+              },
+              "phase": {
+                "type": "string"
+              },
+              "process_alive": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "quota_paused"
+                ]
+              },
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              },
+              "until": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "window": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "failed"
+                ]
+              },
+              "reason": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "outcome",
+              "kind"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "stopped"
+                ]
+              },
+              "outcome": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      },
+      "Group": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "position",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          },
+          "position": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "GroupBody": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupCount": {
+        "type": "object",
+        "required": [
+          "id",
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "GroupPatch": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "position": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
+      "GroupsBody": {
+        "type": "object",
+        "required": [
+          "group_ids"
+        ],
+        "properties": {
+          "group_ids": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "HarnessRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "provider"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "HarnessView": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "provider",
+          "images",
+          "settings_midsession",
+          "permission_modes",
+          "models"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "images": {
+            "type": "boolean"
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelView"
+            }
+          },
+          "permission_modes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "provider": {
+            "type": "string"
+          },
+          "settings_midsession": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "History": {
+        "type": "object",
+        "required": [
+          "usage",
+          "series"
+        ],
+        "properties": {
+          "series": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderSeries"
+            }
+          },
+          "usage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UsageDay"
+            }
+          }
+        }
+      },
+      "HoldReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "run_in_progress"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "awaiting_user_request"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "context_maintenance"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "no_live_execution"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "execution_starting"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "storage_low"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "conflict_conversation_id",
+              "reason"
+            ],
+            "properties": {
+              "conflict_conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "workdir_busy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_id",
+              "reason"
+            ],
+            "properties": {
+              "input_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "attachments_pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "provider",
+              "window",
+              "wake_at",
+              "reason"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "quota_exhausted"
+                ]
+              },
+              "wake_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "window": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "provider",
+              "reason"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "weekly_reserve"
+                ]
+              },
+              "resets_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            }
+          }
+        ]
+      },
+      "HoldView": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "run_in_progress"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "awaiting_user_request"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "context_maintenance"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "no_live_execution"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "execution_starting"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "storage_low"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "conflict_conversation_id",
+              "reason"
+            ],
+            "properties": {
+              "conflict_conversation_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "workdir_busy"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_id",
+              "reason"
+            ],
+            "properties": {
+              "input_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "machine_reason": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "attachments_pending"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "provider",
+              "window",
+              "wake_at",
+              "reason"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "quota_exhausted"
+                ]
+              },
+              "wake_at": {
+                "type": "string",
+                "format": "date-time"
+              },
+              "window": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "provider",
+              "reason"
+            ],
+            "properties": {
+              "provider": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "weekly_reserve"
+                ]
+              },
+              "resets_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "machine_not_reconciled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_id",
+              "reason"
+            ],
+            "properties": {
+              "input_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "capability_missing"
+                ]
+              }
+            }
+          }
         ]
       },
       "JobState": {
@@ -778,6 +2745,249 @@
           }
         }
       },
+      "ListItem": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttributeView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "model",
+              "effort",
+              "permission_mode",
+              "activity",
+              "unread_count",
+              "queue",
+              "crunch"
+            ],
+            "properties": {
+              "activity": {
+                "$ref": "#/components/schemas/ActivityView"
+              },
+              "crunch": {
+                "$ref": "#/components/schemas/CrunchView"
+              },
+              "effort": {
+                "type": "string"
+              },
+              "last_activity_at": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "model": {
+                "type": "string"
+              },
+              "permission_mode": {
+                "type": "string"
+              },
+              "queue": {
+                "$ref": "#/components/schemas/QueueView"
+              },
+              "unread_count": {
+                "type": "integer",
+                "format": "int32"
+              }
+            }
+          }
+        ]
+      },
+      "ListPage": {
+        "type": "object",
+        "required": [
+          "items",
+          "counts"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListItem"
+            }
+          },
+          "next_cursor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "LiveExecutionView": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "generation",
+          "state",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "native_conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "MachineRef": {
+        "type": "object",
+        "required": [
+          "id",
+          "name"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "MachineView": {
+        "type": "object",
+        "required": [
+          "id",
+          "name",
+          "availability",
+          "capabilities",
+          "allowed_roots",
+          "limits_ok",
+          "harnesses",
+          "profiles",
+          "sessions",
+          "warnings"
+        ],
+        "properties": {
+          "allowed_roots": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "availability": {
+            "type": "string"
+          },
+          "availability_since": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "containment": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "harnesses": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HarnessView"
+            }
+          },
+          "heartbeat_age_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limits_ok": {
+            "type": "boolean"
+          },
+          "metrics": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/MetricsView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "os": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "profiles": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProfileView"
+            }
+          },
+          "sessions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SessionView"
+            }
+          },
+          "warnings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MachineWarning"
+            }
+          },
+          "worker_version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "MachineWarning": {
+        "type": "string",
+        "enum": [
+          "disk_usage_high",
+          "metrics_stale",
+          "limits_mismatch"
+        ]
+      },
       "MachinesView": {
         "type": "object",
         "required": [
@@ -813,6 +3023,94 @@
           }
         }
       },
+      "MetricsView": {
+        "type": "object",
+        "required": [
+          "observed_at",
+          "machine_time_ms",
+          "cpu_cores",
+          "cpu_permille",
+          "mem_total_bytes",
+          "mem_available_bytes",
+          "load1_centi",
+          "load5_centi",
+          "load15_centi",
+          "disks",
+          "executions"
+        ],
+        "properties": {
+          "cpu_cores": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "cpu_permille": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "disks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiskView"
+            }
+          },
+          "executions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProcessView"
+            }
+          },
+          "load15_centi": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "load1_centi": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "load5_centi": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "machine_time_ms": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mem_available_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mem_total_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "observed_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ModelView": {
+        "type": "object",
+        "required": [
+          "id",
+          "title",
+          "efforts"
+        ],
+        "properties": {
+          "efforts": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "PatchScheduled": {
         "type": "object",
         "properties": {
@@ -834,6 +3132,154 @@
           }
         },
         "additionalProperties": false
+      },
+      "PauseReason": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "user_stop"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "fatal_error"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "process_exited"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "provider": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "limit_reached"
+                ]
+              },
+              "resets_at": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "format": "date-time"
+              },
+              "window": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "input_id",
+              "reason"
+            ],
+            "properties": {
+              "input_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "unconfirmed_delivery"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "owner_lost"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "restore_pending"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "Point": {
+        "type": "object",
+        "required": [
+          "observed_at",
+          "used_permille",
+          "used_pct"
+        ],
+        "properties": {
+          "observed_at": {
+            "type": "string"
+          },
+          "used_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "used_permille": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
       },
       "ProbeReason": {
         "type": "string",
@@ -861,6 +3307,159 @@
             "$ref": "#/components/schemas/ProbeStatus"
           }
         }
+      },
+      "ProcessView": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "alive",
+          "cpu_permille",
+          "rss_bytes"
+        ],
+        "properties": {
+          "alive": {
+            "type": "boolean"
+          },
+          "cpu_permille": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "rss_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ProfileView": {
+        "type": "object",
+        "required": [
+          "name",
+          "title",
+          "description",
+          "harnesses"
+        ],
+        "properties": {
+          "description": {
+            "type": "string"
+          },
+          "harnesses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "ProviderSeries": {
+        "type": "object",
+        "required": [
+          "provider",
+          "five_hour",
+          "weekly"
+        ],
+        "properties": {
+          "five_hour": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Point"
+            }
+          },
+          "provider": {
+            "type": "string"
+          },
+          "weekly": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Point"
+            }
+          }
+        }
+      },
+      "ProviderView": {
+        "type": "object",
+        "required": [
+          "provider",
+          "weekly_reserve_active"
+        ],
+        "properties": {
+          "five_hour": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "provider": {
+            "type": "string"
+          },
+          "weekly": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "weekly_reserve_active": {
+            "type": "boolean"
+          }
+        }
+      },
+      "QueueView": {
+        "type": "object",
+        "required": [
+          "queued",
+          "pause_reasons",
+          "hold_reasons"
+        ],
+        "properties": {
+          "hold_reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HoldReason"
+            }
+          },
+          "pause_reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PauseReason"
+            }
+          },
+          "queued": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "ReadBody": {
+        "type": "object",
+        "required": [
+          "seq"
+        ],
+        "properties": {
+          "seq": {
+            "type": "string",
+            "pattern": "^[0-9]+$"
+          }
+        },
+        "additionalProperties": false
       },
       "Retry": {
         "type": "string",
@@ -948,6 +3547,172 @@
           },
           "state": {
             "$ref": "#/components/schemas/JobState"
+          }
+        }
+      },
+      "SessionView": {
+        "type": "object",
+        "required": [
+          "conversation_id",
+          "title",
+          "activity_state"
+        ],
+        "properties": {
+          "activity_state": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "SettingsView": {
+        "type": "object",
+        "required": [
+          "effective",
+          "pending",
+          "rev"
+        ],
+        "properties": {
+          "effective": {
+            "$ref": "#/components/schemas/EffectiveSettings"
+          },
+          "pending": {},
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "StartedExecution": {
+        "type": "object",
+        "required": [
+          "execution_id",
+          "generation",
+          "command_id"
+        ],
+        "properties": {
+          "command_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "generation": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "UsageDay": {
+        "type": "object",
+        "required": [
+          "day",
+          "provider",
+          "conversation_id",
+          "model",
+          "agent",
+          "runs",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens",
+          "weekly_delta_permille",
+          "overlapped_runs"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "day": {
+            "type": "string",
+            "format": "date"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "overlapped_runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "runs": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "weekly_delta_permille": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "WindowView": {
+        "type": "object",
+        "required": [
+          "used_permille",
+          "used_pct",
+          "observed_at"
+        ],
+        "properties": {
+          "observed_at": {
+            "type": "string"
+          },
+          "resets_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "used_pct": {
+            "type": "number",
+            "format": "double"
+          },
+          "used_permille": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "Workdirs": {
+        "type": "object",
+        "required": [
+          "workdirs"
+        ],
+        "properties": {
+          "workdirs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           }
         }
       },

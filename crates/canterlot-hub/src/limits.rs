@@ -351,7 +351,7 @@ pub(crate) async fn push_machine_snapshot(
     }
     Ok(())
 }
-#[derive(Debug, sqlx::FromRow, Serialize)]
+#[derive(Debug, sqlx::FromRow, Serialize, utoipa::ToSchema)]
 pub struct UsageDay {
     pub day: NaiveDate,
     pub provider: String,

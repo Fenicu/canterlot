@@ -33,7 +33,13 @@ pub async fn apply_report(
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
     let mut tx = pool.begin().await?;
+    crate::conversations::lock_owner(&mut tx, owner_id).await?;
     machine(&mut tx, owner_id, machine_id).await?;
+    let previous: Vec<(Uuid, String, String, String)> = sqlx::query_as(
+        "select c.id,c.harness,coalesce(h.title,'Неизвестный харнесс'),coalesce(h.provider,'')
+         from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
+         where c.machine_id=$1 and c.owner_id=$2 order by c.id",
+    ).bind(machine_id).bind(owner_id).fetch_all(&mut *tx).await?;
     sqlx::query("update machines set capabilities=array['pilot_v1'],worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6 where id=$1")
  .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).execute(&mut *tx).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
@@ -55,6 +61,38 @@ pub async fn apply_report(
     }
     for p in &report.profiles {
         sqlx::query("insert into machine_profiles(machine_id,name,title,description,harnesses) values($1,$2,$3,$4,$5)").bind(machine_id).bind(&p.name).bind(&p.title).bind(&p.description).bind(json!(p.harnesses)).execute(&mut *tx).await?;
+    }
+    let mut updates = Vec::new();
+    for (id, harness, old_title, old_provider) in previous {
+        let current = report.harnesses.iter().find(|h| h.harness == harness);
+        let title = current.map_or("Неизвестный харнесс", |h| {
+            h.title.as_str()
+        });
+        let provider = current.map_or("", |h| h.provider.as_str());
+        if title != old_title || provider != old_provider {
+            let payload = crate::conversations::attribute_payload(&mut tx, owner_id, id).await?;
+            crate::conversations::append(
+                &mut tx,
+                Scope::Conversation { id },
+                "conversation_updated",
+                Some(id),
+                payload.clone(),
+                correlation_id,
+            )
+            .await?;
+            updates.push((id, payload));
+        }
+    }
+    for (id, payload) in updates {
+        crate::conversations::append(
+            &mut tx,
+            Scope::Conversations { owner_id },
+            "conversation_updated",
+            Some(id),
+            payload,
+            correlation_id,
+        )
+        .await?;
     }
     emit(&mut tx,owner_id,"machine_report_updated",json!({"machine_id":machine_id,"worker_version":report.worker_version,"capabilities":["pilot_v1"],"limits_ok":report.max_attachment_bytes==MAX_ATTACHMENT_BYTES&&report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT}),correlation_id).await?;
     tx.commit().await

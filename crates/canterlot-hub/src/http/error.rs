@@ -101,6 +101,19 @@ error_codes! {
     NotPending => "not_pending", 409, Browser, Never, "Отложенное сообщение уже обработано";
     ScheduleTimeOutOfRange => "schedule_time_out_of_range", 422, Browser, Never, "Время отправки вне допустимого диапазона";
     TooManyScheduled => "too_many_scheduled", 409, Browser, Never, "Слишком много отложенных сообщений";
+    MachineNotFound => "machine_not_found", 404, Browser, Never, "Машина не найдена";
+    MachineUnavailable => "machine_unavailable", 409, Delivery, AfterCondition, "Машина недоступна";
+    CapabilityMissing => "capability_missing", 409, Delivery, AfterCondition, "Требуется обновление воркера";
+    LimitsMismatch => "limits_mismatch", 409, Browser, Never, "Лимиты вложений машины не совпадают";
+    HarnessUnknown => "harness_unknown", 422, Browser, Never, "Харнесс отсутствует в каталоге машины";
+    ModelUnknown => "model_unknown", 422, Browser, Never, "Модель отсутствует в каталоге харнесса";
+    EffortNotAllowed => "effort_not_allowed", 422, Browser, Never, "Усилие недоступно для модели";
+    PermissionModeUnknown => "permission_mode_unknown", 422, Browser, Never, "Режим разрешений отсутствует в каталоге";
+    ProfileUnknown => "profile_unknown", 422, Browser, Never, "Профиль инструкций отсутствует в каталоге";
+    WorkdirNotAllowed => "workdir_not_allowed", 422, Browser, Never, "Рабочий каталог вне разрешённых корней";
+    GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
+    GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
+    ArchiveActive => "archive_active", 409, Browser, Never, "В сессии есть активная работа";
 }
 
 impl From<crate::scheduler::ScheduleError> for ApiError {
@@ -295,5 +308,65 @@ impl From<ExecutionError> for ApiError {
             ExecutionError::InvalidTransition { .. } => ApiError::new(ErrorCode::InvalidState),
             ExecutionError::Db(error) => error.into(),
         }
+    }
+}
+
+impl From<crate::conversations::CreateError> for ApiError {
+    fn from(e: crate::conversations::CreateError) -> Self {
+        use crate::conversations::CreateError as E;
+        Self::new(match e {
+            E::MachineNotFound => ErrorCode::MachineNotFound,
+            E::MachineUnavailable => ErrorCode::MachineUnavailable,
+            E::CapabilityMissing => ErrorCode::CapabilityMissing,
+            E::HarnessUnknown => ErrorCode::HarnessUnknown,
+            E::ModelUnknown => ErrorCode::ModelUnknown,
+            E::EffortNotAllowed => ErrorCode::EffortNotAllowed,
+            E::PermissionModeUnknown => ErrorCode::PermissionModeUnknown,
+            E::ProfileUnknown => ErrorCode::ProfileUnknown,
+            E::WorkdirNotAllowed => ErrorCode::WorkdirNotAllowed,
+            E::GroupNotFound => ErrorCode::GroupNotFound,
+            E::Invalid(_) => ErrorCode::InvalidRequest,
+            E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            E::Db(e) => return e.into(),
+        })
+    }
+}
+impl From<crate::conversations::UpdateError> for ApiError {
+    fn from(e: crate::conversations::UpdateError) -> Self {
+        use crate::conversations::UpdateError as E;
+        Self::new(match e {
+            E::NotFound => ErrorCode::NotFound,
+            E::GroupNotFound => ErrorCode::GroupNotFound,
+            E::Invalid(_) => ErrorCode::InvalidRequest,
+            E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            E::ArchiveActive(reasons) => {
+                return Self::new(ErrorCode::ArchiveActive).with_details(
+                    ErrorDetails::archive_active(
+                        reasons
+                            .into_iter()
+                            .filter_map(|r| match r {
+                                "crunch" => Some(ArchiveReason::Crunch),
+                                "scheduled" => Some(ArchiveReason::Scheduled),
+                                "live_execution" => Some(ArchiveReason::LiveExecution),
+                                _ => None,
+                            })
+                            .collect(),
+                    ),
+                );
+            }
+            E::Db(e) => return e.into(),
+        })
+    }
+}
+impl From<crate::groups::GroupError> for ApiError {
+    fn from(e: crate::groups::GroupError) -> Self {
+        use crate::groups::GroupError as E;
+        Self::new(match e {
+            E::NotFound => ErrorCode::NotFound,
+            E::NameTaken => ErrorCode::GroupNameTaken,
+            E::Invalid => ErrorCode::InvalidRequest,
+            E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            E::Db(e) => return e.into(),
+        })
     }
 }

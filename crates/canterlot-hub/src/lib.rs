@@ -8,6 +8,7 @@ pub mod background;
 pub mod blocks;
 pub mod bus;
 pub mod config;
+pub mod conversations;
 pub mod db;
 pub mod dberr;
 pub mod delivery;
@@ -16,6 +17,7 @@ pub mod events;
 pub mod executions;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
+pub mod groups;
 pub mod grpc;
 pub mod http;
 pub mod idempotency;
