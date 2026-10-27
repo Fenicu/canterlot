@@ -1,6 +1,9 @@
 use std::{
     fs, io,
-    os::unix::fs::{MetadataExt, PermissionsExt},
+    os::unix::{
+        ffi::OsStrExt,
+        fs::{MetadataExt, PermissionsExt},
+    },
     path::Path,
 };
 
@@ -24,6 +27,15 @@ pub enum IpcError {
     Decode,
     #[error("ipc directory must be private and owned by the current user")]
     Directory,
+    #[error("ipc_path_too_long")]
+    PathTooLong,
+}
+
+pub(crate) fn validate_socket_path(socket: &Path) -> Result<(), IpcError> {
+    if socket.as_os_str().as_bytes().len() > 107 {
+        return Err(IpcError::PathTooLong);
+    }
+    Ok(())
 }
 
 pub async fn read_message<M: Message + Default, R: AsyncRead + Unpin>(
@@ -98,20 +110,28 @@ impl IpcServer {
         secret: Vec<u8>,
         uid: u32,
     ) -> Result<IpcServer, IpcError> {
-        let metadata = fs::metadata(exec_dir)?;
+        Self::bind_socket(&exec_dir.join("ipc.sock"), secret, uid).await
+    }
+
+    pub(crate) async fn bind_socket(
+        socket: &Path,
+        secret: Vec<u8>,
+        uid: u32,
+    ) -> Result<IpcServer, IpcError> {
+        validate_socket_path(socket)?;
+        let metadata = fs::metadata(socket.parent().ok_or(IpcError::Directory)?)?;
         if metadata.permissions().mode() & 0o077 != 0
             || metadata.uid() != rustix::process::getuid().as_raw()
         {
             return Err(IpcError::Directory);
         }
-        let socket = exec_dir.join("ipc.sock");
-        match fs::remove_file(&socket) {
+        match fs::remove_file(socket) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
-        let listener = UnixListener::bind(&socket)?;
-        fs::set_permissions(&socket, fs::Permissions::from_mode(0o600))?;
+        let listener = UnixListener::bind(socket)?;
+        fs::set_permissions(socket, fs::Permissions::from_mode(0o600))?;
         Ok(IpcServer {
             listener,
             secret,

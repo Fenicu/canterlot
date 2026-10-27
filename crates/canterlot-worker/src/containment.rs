@@ -41,6 +41,7 @@ pub trait Containment: Send + Sync {
     fn prepare_command(&self, command: &mut Command);
     fn members(&self) -> Result<Vec<Member>, ContainmentError>;
     fn populated(&self) -> Result<bool, ContainmentError>;
+    fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError>;
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
 }
 
@@ -229,6 +230,10 @@ impl Containment for TreeContainment {
         }
         members.sort_by_key(|m| m.pid);
         Ok(members)
+    }
+
+    fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError> {
+        TreeContainment::signal_member(self, member, signal)
     }
 
     fn populated(&self) -> Result<bool, ContainmentError> {

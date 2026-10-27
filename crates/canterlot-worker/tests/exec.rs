@@ -1169,6 +1169,12 @@ async fn terminal_sj_observation_and_cursor_remain_until_ack() {
     assert_eq!(env.manager().observations()[0].state, "stopped");
     let cursor = env.manager().journal_cursors().pop().unwrap();
     assert!(cursor.last_seq > cursor.acked_seq_known_to_worker);
+    let dir = env
+        .root
+        .path()
+        .join("store/executions")
+        .join(env.execution.to_string());
+    assert!(dir.exists());
     env.manager().on_sj_ack(
         Uuid::parse_str(&cursor.journal_id).unwrap(),
         cursor.last_seq,
@@ -1181,6 +1187,7 @@ async fn terminal_sj_observation_and_cursor_remain_until_ack() {
     .await
     .unwrap();
     assert!(env.manager().journal_cursors().is_empty());
+    assert!(!dir.exists());
 }
 
 #[tokio::test]
@@ -1267,7 +1274,7 @@ async fn failed_spawn_observation_remains_until_cj_ack() {
     env.reopen();
     env.start(1).await;
     env.wait_cj("spawn rejection", |cj| {
-        rejected_reasons(cj).contains(&"supervisor_spawn_failed".into())
+        rejected_reasons(cj).contains(&"supervisor_start_failed".into())
     })
     .await;
     timeout(WAIT, async {
@@ -1291,4 +1298,217 @@ async fn failed_spawn_observation_remains_until_cj_ack() {
     env.manager().on_cj_ack(up_to);
     assert!(env.manager().observations().is_empty());
     assert!(supervisors_of(env.root.path()).is_empty());
+}
+
+#[tokio::test]
+async fn wave_w_owner_lost_retires_only_after_cj_ack_across_restart() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    assert!(env.manager().journal_cursors().is_empty());
+    assert_eq!(env.manager().observations()[0].state, "owner_lost");
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    let seq = env
+        .thread()
+        .call(|store| {
+            let store = store.as_mut().unwrap();
+            let seq = store.cj_cursor()?.last_seq;
+            store.on_cj_ack(seq)?;
+            Ok(seq)
+        })
+        .await
+        .unwrap();
+    env.manager().on_cj_ack(seq);
+    assert!(env.manager().observations().is_empty());
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    assert!(env.manager().observations().is_empty());
+    assert!(env.manager().journal_cursors().is_empty());
+    assert!(env.ownership(id).await.is_some());
+}
+
+#[tokio::test]
+async fn wave_w_cancelled_start_survives_cj_compaction_and_restart() {
+    let mut env = Env::new().await;
+    let stop = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        1,
+        Kind::StopExecution(StopExecution { force: false }),
+    );
+    env.send(stop).await;
+    env.thread()
+        .call(|store| {
+            let store = store.as_mut().unwrap();
+            store.on_cj_ack(store.cj_cursor()?.last_seq)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
+    env.send(start.clone()).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(env.terminal(&start).await);
+    assert!(env.guard.members().is_empty());
+    assert!(env.ownership(env.execution).await.is_none());
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn wave_w_failed_control_writes_are_retried_after_reattach() {
+    for control in ["cancel", "withdraw", "interrupt", "stop"] {
+        let mut env = Env::new().await;
+        env.hub_session();
+        env.start(1).await;
+        env.wait_running().await;
+        let target = Uuid::now_v7();
+        let input = deliver_command(
+            target,
+            1,
+            env.execution,
+            1,
+            env.conversation,
+            &script(r#"{"delta":"x"},{"hang":true}"#),
+        );
+        env.send(input).await;
+        env.wait("intent", |b| {
+            b.iter().any(
+                |b| matches!(b, Body::TransmissionStarted(f) if f.command_id == target.to_string()),
+            )
+        })
+        .await;
+        let kind = match control {
+            "cancel" => Kind::CancelInput(CancelInput {
+                target_command_id: target.to_string(),
+                target_dispatch_attempt: 1,
+            }),
+            "withdraw" => Kind::WithdrawInput(WithdrawInput {
+                target_command_id: target.to_string(),
+                target_dispatch_attempt: 1,
+            }),
+            "interrupt" => Kind::Interrupt(Interrupt {}),
+            _ => Kind::StopExecution(StopExecution { force: true }),
+        };
+        let cmd = command(Uuid::now_v7(), 1, env.execution, 1, kind);
+        env.manager().fail_next_ipc_send();
+        env.send(cmd.clone()).await;
+        env.wait("retried control", |b| {
+            b.iter().any(|b| match (control, b) {
+                ("cancel", Body::CancelLost(f)) => f.command_id == target.to_string(),
+                ("withdraw", Body::WithdrawRefused(f)) => f.command_id == target.to_string(),
+                ("interrupt", Body::InterruptStatus(f)) => f.command_id == cmd.command_id,
+                ("stop", Body::JournalClosed(_)) => true,
+                _ => false,
+            })
+        })
+        .await;
+        assert!(env.terminal(&cmd).await);
+        if control != "stop" {
+            env.stop().await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn wave_w_acceptance_unconfirmed_and_cancel_lost_release_inbox() {
+    let mut env = Env::new().await;
+    env.close_manager().await;
+    env.config.supervisor.transmit_deadline = Duration::from_millis(150);
+    env.reopen();
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let id = Uuid::now_v7();
+    let input = deliver_command(
+        id,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"hang":true}"#),
+    );
+    env.send(input.clone()).await;
+    env.wait("unconfirmed", |b| {
+        b.iter()
+            .any(|b| matches!(b, Body::AcceptanceUnconfirmed(f) if f.command_id == id.to_string()))
+    })
+    .await;
+    assert!(env.terminal(&input).await);
+    assert_eq!(env.stored_commands().await, 0);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    let target = Uuid::now_v7();
+    let mut commands = vec![deliver_command(
+        target,
+        1,
+        id,
+        1,
+        env.conversation,
+        "pending",
+    )];
+    commands.push(command(
+        Uuid::now_v7(),
+        1,
+        id,
+        1,
+        Kind::CancelInput(CancelInput {
+            target_command_id: target.to_string(),
+            target_dispatch_attempt: 1,
+        }),
+    ));
+    commands.push(command(
+        Uuid::now_v7(),
+        1,
+        id,
+        1,
+        Kind::WithdrawInput(WithdrawInput {
+            target_command_id: target.to_string(),
+            target_dispatch_attempt: 1,
+        }),
+    ));
+    for cmd in &commands {
+        env.send(cmd.clone()).await;
+    }
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    for cmd in &commands {
+        assert!(!env.terminal(cmd).await);
+    }
+    assert_eq!(env.stored_commands().await, 3);
+    assert!(!env.cj().await.iter().any(|b| matches!(
+        b,
+        Body::DispatchDeferred(_) | Body::CancelWon(_) | Body::InputWithdrawn(_)
+    )));
 }

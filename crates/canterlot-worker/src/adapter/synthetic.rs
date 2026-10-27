@@ -13,7 +13,7 @@ use tokio::{
 use uuid::Uuid;
 
 use super::{synthetic_cli::Request, *};
-use crate::containment::{Member, TreeContainment};
+use crate::containment::Member;
 
 enum Frame {
     Ready(String),
@@ -112,7 +112,6 @@ pub struct SyntheticAdapter {
     pending: VecDeque<AdapterEvent>,
     exited: Option<watch::Receiver<bool>>,
     cli: Option<Member>,
-    tree: Option<TreeContainment>,
     started: bool,
     active: bool,
 }
@@ -129,7 +128,6 @@ impl SyntheticAdapter {
             pending: VecDeque::new(),
             exited: None,
             cli: None,
-            tree: None,
             started: false,
             active: false,
         }
@@ -179,9 +177,13 @@ impl SyntheticAdapter {
             Ok(())
         }).await.map_err(|_| AdapterError::Deadline)?
     }
-    fn signal(&self, signal: rustix::process::Signal) -> Result<(), AdapterError> {
-        if let (Some(tree), Some(member)) = (&self.tree, &self.cli) {
-            tree.signal_member(member, signal)?;
+    fn signal(
+        &self,
+        group: &dyn Containment,
+        signal: rustix::process::Signal,
+    ) -> Result<(), AdapterError> {
+        if let Some(member) = &self.cli {
+            group.signal_member(member, signal)?;
         }
         Ok(())
     }
@@ -213,7 +215,6 @@ impl Adapter for SyntheticAdapter {
             return Err(AdapterError::AlreadyStarted);
         }
         self.started = true;
-        self.tree = Some(TreeContainment::new()?);
         let executable = match &self.executable {
             Some(path) => path.clone(),
             None => std::env::current_exe()?,
@@ -285,7 +286,7 @@ impl Adapter for SyntheticAdapter {
                 cli_start_ticks: member.start_ticks,
             }),
             _ => {
-                self.close(CloseMode::Force).await?;
+                self.close(CloseMode::Force, group).await?;
                 Err(AdapterError::Protocol)
             }
         }
@@ -383,7 +384,11 @@ impl Adapter for SyntheticAdapter {
         }
     }
 
-    async fn close(&mut self, mode: CloseMode) -> Result<(), AdapterError> {
+    async fn close(
+        &mut self,
+        mode: CloseMode,
+        group: &dyn Containment,
+    ) -> Result<(), AdapterError> {
         self.stdin.take();
         if self.cli.is_none() {
             return Ok(());
@@ -391,13 +396,16 @@ impl Adapter for SyntheticAdapter {
         if matches!(mode, CloseMode::Graceful) && self.wait_exit(self.close_grace).await.is_ok() {
             return Ok(());
         }
-        self.signal(if matches!(mode, CloseMode::Force) {
-            rustix::process::Signal::KILL
-        } else {
-            rustix::process::Signal::TERM
-        })?;
+        self.signal(
+            group,
+            if matches!(mode, CloseMode::Force) {
+                rustix::process::Signal::KILL
+            } else {
+                rustix::process::Signal::TERM
+            },
+        )?;
         if self.wait_exit(self.close_grace).await.is_err() {
-            self.signal(rustix::process::Signal::KILL)?;
+            self.signal(group, rustix::process::Signal::KILL)?;
             self.wait_exit(self.close_grace).await?;
         }
         self.active = false;

@@ -54,6 +54,7 @@ cases!(
     one_adapter_never_starts_a_second_cli,
     oversized_input_is_rejected_before_writing,
     capabilities_describe_profiles,
+    wave_w_member_signals_use_supplied_containment,
 );
 
 async fn event(adapter: &mut SyntheticAdapter) -> AdapterEvent {
@@ -67,7 +68,10 @@ async fn adapter_child() {
     let Ok(case) = std::env::var("CANTERLOT_ADAPTER_CASE") else {
         return;
     };
-    let group = TreeContainment::new().unwrap();
+    let group = ObservedContainment {
+        tree: TreeContainment::new().unwrap(),
+        signals: std::sync::atomic::AtomicUsize::new(0),
+    };
     let directory = tempfile::tempdir().unwrap();
     let _guard = process_guard::ProcessGuard::new(directory.path());
     let spec = StartSpec {
@@ -99,6 +103,16 @@ async fn adapter_child() {
     };
 
     match case.as_str() {
+        "wave_w_member_signals_use_supplied_containment" => {
+            assert!(matches!(
+                adapter
+                    .transmit(&input(r#"{"synthetic":[{"delta":"x"},{"hang":true}]}"#))
+                    .await,
+                TransmitOutcome::Accepted(_)
+            ));
+            adapter.close(CloseMode::Force, &group).await.unwrap();
+            assert!(group.signals.load(std::sync::atomic::Ordering::Relaxed) > 0);
+        }
         "capabilities_describe_profiles" => {
             use canterlot_worker::adapter::Support;
             let capabilities = adapter.capabilities();
@@ -188,7 +202,7 @@ async fn adapter_child() {
         }
         "resume_keeps_native_id" => {
             let id = started.native_conversation_id;
-            adapter.close(CloseMode::Graceful).await.unwrap();
+            adapter.close(CloseMode::Graceful, &group).await.unwrap();
             let mut resumed = make("synthetic");
             let resumed_spec = StartSpec {
                 native_conversation_id: Some(id.clone()),
@@ -202,11 +216,11 @@ async fn adapter_child() {
                     .native_conversation_id,
                 id
             );
-            resumed.close(CloseMode::Graceful).await.unwrap();
+            resumed.close(CloseMode::Graceful, &group).await.unwrap();
         }
         "interrupt_keeps_process_by_default_and_exits_in_exit_profile" => {
             for profile in ["synthetic", "synthetic-exit-on-interrupt"] {
-                adapter.close(CloseMode::Graceful).await.unwrap();
+                adapter.close(CloseMode::Graceful, &group).await.unwrap();
                 adapter = make(profile);
                 let started = adapter
                     .start(
@@ -357,9 +371,50 @@ async fn adapter_child() {
             }
         }
     }
-    adapter.close(CloseMode::Force).await.unwrap();
+    adapter.close(CloseMode::Force, &group).await.unwrap();
     assert!(matches!(
         group.terminate(Duration::from_millis(100)).await.unwrap(),
         Termination::Empty
     ));
+}
+
+struct ObservedContainment {
+    tree: TreeContainment,
+    signals: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl Containment for ObservedContainment {
+    fn kind(&self) -> &'static str {
+        self.tree.kind()
+    }
+    fn prepare_command(&self, command: &mut tokio::process::Command) {
+        self.tree.prepare_command(command);
+    }
+    fn members(
+        &self,
+    ) -> Result<
+        Vec<canterlot_worker::containment::Member>,
+        canterlot_worker::containment::ContainmentError,
+    > {
+        self.tree.members()
+    }
+    fn populated(&self) -> Result<bool, canterlot_worker::containment::ContainmentError> {
+        self.tree.populated()
+    }
+    fn signal_member(
+        &self,
+        member: &canterlot_worker::containment::Member,
+        signal: rustix::process::Signal,
+    ) -> Result<bool, canterlot_worker::containment::ContainmentError> {
+        self.signals
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.tree.signal_member(member, signal)
+    }
+    async fn terminate(
+        &self,
+        grace: Duration,
+    ) -> Result<Termination, canterlot_worker::containment::ContainmentError> {
+        self.tree.terminate(grace).await
+    }
 }

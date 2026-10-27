@@ -24,6 +24,9 @@ pub(super) struct Sj {
     journal: Journal,
     journal_id: Uuid,
     ship: Option<Ship>,
+    pending: Vec<Vec<u8>>,
+    #[cfg(test)]
+    commits: usize,
 }
 
 impl Sj {
@@ -38,6 +41,9 @@ impl Sj {
             journal,
             journal_id,
             ship: None,
+            pending: Vec::new(),
+            #[cfg(test)]
+            commits: 0,
         })
     }
 
@@ -55,11 +61,27 @@ impl Sj {
 
     pub fn append(&mut self, body: Body) -> Result<u64, SupervisorError> {
         let payload = RecordBody { body: Some(body) }.encode_to_vec();
-        Ok(self.journal.append(&payload)?)
+        self.pending.push(payload);
+        Ok(self.journal.last_seq() + self.pending.len() as u64)
     }
 
-    pub fn shipping(&self) -> bool {
-        self.ship.is_some()
+    pub fn flush(&mut self) -> Result<(), SupervisorError> {
+        if !self.pending.is_empty() {
+            let payloads: Vec<&[u8]> = self.pending.iter().map(Vec::as_slice).collect();
+            self.journal.append_batch(&payloads)?;
+            self.pending.clear();
+            #[cfg(test)]
+            {
+                self.commits += 1;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn intent(&mut self, body: Body) -> Result<(), SupervisorError> {
+        self.flush()?;
+        self.append(body)?;
+        self.flush()
     }
 
     pub fn enable_ship(&mut self, committed: u64) {
@@ -130,5 +152,36 @@ impl Sj {
             journal_id: batch.journal_id,
             records: batch.records,
         }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn burst_shares_commit_but_intent_has_its_own_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sj = Sj::create(root.path()).unwrap();
+        for _ in 0..3 {
+            sj.append(Body::PhaseChanged(Default::default())).unwrap();
+        }
+        assert_eq!(sj.journal.last_seq(), 0);
+        sj.flush().unwrap();
+        assert_eq!((sj.last_seq(), sj.commits), (3, 1));
+        sj.append(Body::PhaseChanged(Default::default())).unwrap();
+        sj.intent(Body::TransmissionStarted(Default::default()))
+            .unwrap();
+        assert_eq!((sj.last_seq(), sj.commits), (5, 3));
+        assert!(matches!(
+            RecordBody::decode(
+                sj.journal.read_from(5, usize::MAX).unwrap()[0]
+                    .payload
+                    .as_slice()
+            )
+            .unwrap()
+            .body,
+            Some(Body::TransmissionStarted(_))
+        ));
     }
 }

@@ -1,10 +1,10 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     path::PathBuf,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -74,16 +74,19 @@ pub(crate) struct Shared {
     pub store: StoreClient,
     pub relay: mpsc::Sender<SjRelay>,
     pub enabled: AtomicBool,
+    pub cj_acked: AtomicU64,
     pub hub: watch::Sender<Option<Arc<HashMap<Uuid, u64>>>>,
     pub shutdown: watch::Receiver<bool>,
     pub infos: Mutex<HashMap<Uuid, ExecInfo>>,
     pub actors: Mutex<HashMap<Uuid, mpsc::UnboundedSender<Msg>>>,
     pub tasks: Mutex<Vec<JoinHandle<()>>>,
-    pub cancelled_starts: Mutex<HashSet<Uuid>>,
+    pub runtime_dir: Option<PathBuf>,
     pub data_dir: OnceCell<PathBuf>,
     pub boot_id: OnceCell<String>,
     #[cfg(feature = "fault-injection")]
     pub spawn_delay: Mutex<std::time::Duration>,
+    #[cfg(feature = "fault-injection")]
+    pub fail_sends: Mutex<usize>,
 }
 
 pub(crate) fn open(store: &mut Option<WorkerStore>) -> Result<&mut WorkerStore, WorkerError> {
@@ -129,7 +132,10 @@ impl Shared {
                 for body in facts {
                     let state = match &body {
                         Body::ExecutionState(fact)
-                            if fact.state == "stopped" || fact.state == "failed" =>
+                            if matches!(
+                                fact.state.as_str(),
+                                "stopped" | "failed" | "owner_lost"
+                            ) =>
                         {
                             Some(fact.clone())
                         }
@@ -169,6 +175,7 @@ impl Shared {
                 info.state = state.state;
                 info.outcome = state.outcome;
                 info.cj_terminal_seq = Some(seq);
+                info.retired = seq <= self.cj_acked.load(Ordering::Relaxed);
             }
         }
     }
@@ -205,16 +212,19 @@ impl ExecutionManager {
                 store,
                 relay,
                 enabled: AtomicBool::new(true),
+                cj_acked: AtomicU64::new(0),
                 hub: watch::channel(None).0,
                 shutdown: shutdown_rx,
                 infos: Mutex::default(),
                 actors: Mutex::default(),
                 tasks: Mutex::default(),
-                cancelled_starts: Mutex::default(),
+                runtime_dir: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
                 #[cfg(feature = "fault-injection")]
                 spawn_delay: Mutex::new(std::time::Duration::ZERO),
+                #[cfg(feature = "fault-injection")]
+                fail_sends: Mutex::new(0),
             }),
             shutdown,
         }
@@ -223,6 +233,11 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn set_spawn_delay(&self, delay: std::time::Duration) {
         *self.shared.spawn_delay.lock().expect("delay lock") = delay;
+    }
+
+    #[cfg(feature = "fault-injection")]
+    pub fn fail_next_ipc_send(&self) {
+        *self.shared.fail_sends.lock().expect("send fault lock") += 1;
     }
 
     pub fn set_enabled(&self, enabled: bool) {
@@ -263,7 +278,7 @@ impl ExecutionManager {
         let infos = self.shared.infos.lock().expect("infos lock");
         let mut list: Vec<_> = infos
             .values()
-            .filter(|info| !info.retired)
+            .filter(|info| !info.retired && info.attached)
             .filter_map(|info| {
                 info.sj_journal_id.map(|journal| JournalCursor {
                     journal_id: journal.to_string(),
@@ -282,6 +297,7 @@ impl ExecutionManager {
     }
 
     pub fn on_cj_ack(&self, up_to: u64) {
+        self.shared.cj_acked.fetch_max(up_to, Ordering::Relaxed);
         for info in self.shared.infos.lock().expect("infos lock").values_mut() {
             if info.cj_terminal_seq.is_some_and(|seq| seq <= up_to) {
                 info.retired = true;
@@ -290,6 +306,14 @@ impl ExecutionManager {
     }
 
     pub fn on_sj_ack(&self, journal_id: Uuid, up_to: u64) {
+        self.send_journal(journal_id, Msg::SjAck(up_to));
+    }
+
+    pub(crate) fn replay_sj(&self, journal_id: Uuid, committed: u64) {
+        self.send_journal(journal_id, Msg::Replay(committed));
+    }
+
+    fn send_journal(&self, journal_id: Uuid, message: Msg) {
         let execution = self
             .shared
             .infos
@@ -306,12 +330,13 @@ impl ExecutionManager {
                 .get(&id)
                 .cloned()
         }) {
-            let _ = sender.send(Msg::SjAck(up_to));
+            let _ = sender.send(message);
         }
     }
 
     pub async fn startup_verify(&self) -> Result<Vec<Uuid>, ExecError> {
         let _route = self.shared.route_lock.lock().await;
+        manager::cleanup_released(&self.shared).await?;
         let records = self
             .shared
             .store
@@ -335,7 +360,10 @@ impl ExecutionManager {
                     .into_iter()
                     .filter_map(|record| match record.body.and_then(|body| body.body) {
                         Some(Body::ExecutionState(state))
-                            if state.state == "stopped" || state.state == "failed" =>
+                            if matches!(
+                                state.state.as_str(),
+                                "stopped" | "failed" | "owner_lost"
+                            ) =>
                         {
                             Some((record.seq, state))
                         }
@@ -344,7 +372,6 @@ impl ExecutionManager {
                     .collect())
             })
             .await?;
-        self.shared.remember_cj_states(states);
         let mut attached = Vec::new();
         for record in records {
             let Ok(id) = Uuid::parse_str(&record.execution_id) else {
@@ -418,6 +445,7 @@ impl ExecutionManager {
                 self.route(command).await?;
             }
         }
+        self.shared.remember_cj_states(states);
         Ok(attached)
     }
 
@@ -480,15 +508,16 @@ impl ExecutionManager {
             let _ = sender.send(Msg::Command(command));
             return Ok(());
         }
-        let known = shared
+        let (known, cancelled) = shared
             .store
-            .call(move |store| Ok(open(store)?.ownership().get(id).is_some()))
+            .call(move |store| {
+                let store = open(store)?;
+                Ok((
+                    store.ownership().get(id).is_some(),
+                    store.start_cancelled(id),
+                ))
+            })
             .await?;
-        let cancelled = shared
-            .cancelled_starts
-            .lock()
-            .expect("cancelled lock")
-            .contains(&id);
         if known || cancelled {
             return shared
                 .cj(

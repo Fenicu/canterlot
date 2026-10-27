@@ -582,6 +582,8 @@ impl Worker {
         let (activate_data, data_active) = watch::channel(false);
         let data_loop = data::run(
             data::Stream {
+                #[cfg(feature = "fault-injection")]
+                probe: self.probe.clone(),
                 client: data,
                 hello: hello.clone(),
                 tx: data_tx,

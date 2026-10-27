@@ -234,3 +234,57 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
     drop(sender);
     thread.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        sj_ack: false,
+        ..Default::default()
+    })
+    .await;
+    let (tx, mut inbound) = link(&hub).await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(8);
+    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let journal = Uuid::now_v7();
+    for seq in [7, 3] {
+        sender
+            .send(SjRelay {
+                journal_id: journal,
+                records: vec![record(seq, 0)],
+            })
+            .await
+            .unwrap();
+    }
+    let (stop, mut active) = watch::channel(true);
+    let task = tokio::spawn(async move {
+        let result = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &WorkerTimers::default(),
+            &mut active,
+            HashMap::from([(journal, 2)]),
+        )
+        .await;
+        manager.shutdown().await;
+        result
+    });
+    let first = timeout(Duration::from_secs(3), async {
+        loop {
+            if let Observed::Data(message) = hub.event().await
+                && let Some(data_up::Msg::SjRecords(batch)) = message.msg
+            {
+                break batch.records[0].seq;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    drop(stop);
+    task.await.unwrap().unwrap_err();
+    drop(sender);
+    thread.close().await.unwrap();
+    assert_eq!(first, 3, "stale batch skipped the committed prefix");
+}

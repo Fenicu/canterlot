@@ -94,7 +94,7 @@ enum Lifecycle {
     Starting,
     Running,
     Stopping(StopState),
-    Draining { deadline: Instant, outcome: String },
+    Draining { outcome: String },
 }
 
 struct Supervisor {
@@ -192,7 +192,12 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
     }
     let containment: Arc<dyn Containment> = Arc::new(TreeContainment::new()?);
     let sj = Sj::create(&exec_dir)?;
-    let server = IpcServer::bind(&exec_dir, secret.clone()).await?;
+    let socket = spec
+        .ipc_socket
+        .clone()
+        .unwrap_or_else(|| exec_dir.join("ipc.sock"));
+    let server =
+        IpcServer::bind_socket(&socket, secret.clone(), rustix::process::getuid().as_raw()).await?;
     let pid = std::process::id();
     let start_ticks = crate::containment::start_ticks(pid)?;
     let mut supervisor = Supervisor {
@@ -232,6 +237,9 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         supervisor_protocol_version: IPC_PROTOCOL_VERSION,
     }))?;
     supervisor.state_record("starting", "", "")?;
+    while supervisor.faults.attach_held() {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     tracing::info!(execution_id = %supervisor.spec.execution_id, journal_id = %supervisor.sj.journal_id(), "supervisor started");
     match supervisor.event_loop(server).await {
         Ok(code) => Ok(code),
@@ -248,6 +256,18 @@ async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> Ad
         Some(adapter) if !gone => adapter.next_event().await,
         _ => std::future::pending().await,
     }
+}
+
+async fn ready_adapter_event(adapter: &mut Option<Box<dyn Adapter>>) -> Option<AdapterEvent> {
+    let adapter = adapter.as_mut()?;
+    let mut event = adapter.next_event();
+    std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(match event.as_mut().poll(cx) {
+            std::task::Poll::Ready(event) => Some(event),
+            std::task::Poll::Pending => None,
+        })
+    })
+    .await
 }
 
 async fn terminate_result(
@@ -300,7 +320,14 @@ impl Supervisor {
             tokio::select! {
                 Some(connection) = accepted.recv() => self.on_connection(connection, &control_tx),
                 Some(control) = control_rx.recv() => self.on_control(control).await?,
-                event = adapter_event(&mut self.adapter, self.adapter_exited) => self.on_adapter_event(event).await?,
+                event = adapter_event(&mut self.adapter, self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. })) => {
+                    self.on_adapter_event(event).await?;
+                    for _ in 0..63 {
+                        if self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. }) { break; }
+                        let Some(event) = ready_adapter_event(&mut self.adapter).await else { break; };
+                        self.on_adapter_event(event).await?;
+                    }
+                },
                 result = terminate_result(&mut self.terminate) => self.on_terminate(result).await?,
                 () = async { match wake { Some(at) => sleep_until(at).await, None => std::future::pending().await } } => {
                     self.attach_deadline = None;
@@ -314,7 +341,6 @@ impl Supervisor {
         let mut consider = |at: Instant| wake = Some(wake.map_or(at, |current| current.min(at)));
         match &self.lifecycle {
             Lifecycle::Stopping(state) if self.terminate.is_none() => consider(state.next_round),
-            Lifecycle::Draining { deadline, .. } => consider(*deadline),
             _ => {}
         }
         if !self.queue.is_empty() && self.faults.gate_held(&self.exec_dir) {
@@ -327,18 +353,19 @@ impl Supervisor {
     }
 
     async fn after_event(&mut self) -> Result<Option<ExitCode>, SupervisorError> {
+        self.sj.flush()?;
         self.drive_stop().await?;
         self.try_transmit().await?;
+        self.sj.flush()?;
         self.pump_shipping();
-        if let Lifecycle::Draining { deadline, outcome } = &self.lifecycle {
-            let waiting = self.attached.is_some() && self.sj.shipping() && !self.sj.fully_acked();
-            if !waiting || Instant::now() >= *deadline {
-                let reason = outcome.clone();
-                self.send(up::Msg::Exited(Exited { reason }));
-                self.conns.clear();
-                tokio::time::sleep(Duration::from_millis(50)).await;
-                return Ok(Some(ExitCode::SUCCESS));
-            }
+        if let Lifecycle::Draining { outcome } = &self.lifecycle
+            && self.sj.fully_acked()
+        {
+            let reason = outcome.clone();
+            self.send(up::Msg::Exited(Exited { reason }));
+            self.conns.clear();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            return Ok(Some(ExitCode::SUCCESS));
         }
         Ok(None)
     }
@@ -462,6 +489,14 @@ impl Supervisor {
                 received,
             }));
             tracing::info!(kind = "attached", "control attached");
+            return Ok(());
+        }
+        if matches!(self.lifecycle, Lifecycle::Draining { .. })
+            && !matches!(
+                message,
+                down::Msg::ShipFrom(_) | down::Msg::SjAck(_) | down::Msg::Attach(_)
+            )
+        {
             return Ok(());
         }
         match message {
@@ -604,13 +639,13 @@ impl Supervisor {
             || command.execution_generation != self.spec.generation
         {
             "generation_mismatch"
+        } else if self.inputs.contains_key(&key) || self.transmitted.contains(&id) {
+            "duplicate"
         } else if matches!(
             self.lifecycle,
             Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
         ) {
             "execution_stopped"
-        } else if self.inputs.contains_key(&key) || self.transmitted.contains(&id) {
-            "duplicate"
         } else if self
             .cancel_marks
             .get(&id)
@@ -783,11 +818,12 @@ impl Supervisor {
             let text = std::mem::take(&mut input.text);
             input.state = InputState::Transmitting;
             self.transmitted.insert(key.0);
-            self.record(Body::TransmissionStarted(InputTransmissionStarted {
-                command_id: key.0.to_string(),
-                dispatch_attempt: key.1,
-                machine_time_ms: now_ms(),
-            }))?;
+            self.sj
+                .intent(Body::TransmissionStarted(InputTransmissionStarted {
+                    command_id: key.0.to_string(),
+                    dispatch_attempt: key.1,
+                    machine_time_ms: now_ms(),
+                }))?;
             self.faults.abort_at("before_first_byte");
             self.ready = false;
             self.active_turn = Some(key.0);
@@ -1076,7 +1112,7 @@ impl Supervisor {
                 } else {
                     CloseMode::Graceful
                 };
-                let _ = adapter.close(mode).await;
+                let _ = adapter.close(mode, &*self.containment).await;
             }
         }
         let grace = if force {
@@ -1085,9 +1121,12 @@ impl Supervisor {
             self.spec.timers.stop_grace
         };
         let fake = self.faults.take_survivor();
+        let error = self.faults.take_error();
         let containment = self.containment.clone();
         self.terminate = Some(tokio::spawn(async move {
-            if fake {
+            if error {
+                Err(ContainmentError::Process(rustix::io::Errno::PERM))
+            } else if fake {
                 Ok(Termination::Survivors(vec![Member {
                     pid: 0,
                     start_ticks: 0,
@@ -1111,7 +1150,7 @@ impl Supervisor {
         }
         let survivors = match &result {
             Ok(Ok(Termination::Survivors(members))) => members.len(),
-            _ => 0,
+            _ => usize::MAX,
         };
         let report = match &mut self.lifecycle {
             Lifecycle::Stopping(state) => {
@@ -1194,6 +1233,9 @@ impl Supervisor {
             }
         }
         self.state_record(terminal, outcome, "")?;
+        if self.faults.will_abort("after_stopped_before_closed") {
+            self.sj.flush()?;
+        }
         self.faults.abort_at("after_stopped_before_closed");
         self.record(Body::JournalClosed(JournalClosed {
             execution_id: self.spec.execution_id.to_string(),
@@ -1201,7 +1243,6 @@ impl Supervisor {
             reason: outcome.into(),
         }))?;
         self.lifecycle = Lifecycle::Draining {
-            deadline: Instant::now() + self.spec.timers.stop_grace,
             outcome: outcome.into(),
         };
         tracing::info!(kind = "execution_closed", outcome, "execution closed");

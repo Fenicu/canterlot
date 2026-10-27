@@ -39,6 +39,8 @@ pub(super) fn committed(
 }
 
 pub(super) struct Stream {
+    #[cfg(feature = "fault-injection")]
+    pub probe: crate::fault_injection::SessionProbe,
     pub client: Client,
     pub hello: Hello,
     pub tx: mpsc::Sender<DataUp>,
@@ -56,12 +58,16 @@ pub(super) async fn run(
     mut active: watch::Receiver<bool>,
 ) -> Result<(), WorkerError> {
     let Stream {
+        #[cfg(feature = "fault-injection")]
+        probe,
         mut client,
         mut hello,
         mut tx,
         mut inbound,
         committed: mut cursors,
     } = stream;
+    #[cfg(feature = "fault-injection")]
+    probe.data_attached();
     hello.stream_kind = StreamKind::Data as i32;
     let mut cap = timers.backoff_min;
     let mut live_since = Instant::now();
@@ -137,6 +143,8 @@ pub(super) async fn run(
             .and_then(|result| result);
             match result {
                 Ok((sender, stream, committed)) => {
+                    #[cfg(feature = "fault-injection")]
+                    probe.data_attached();
                     tx = sender;
                     inbound = stream;
                     cursors = committed;
@@ -211,6 +219,10 @@ async fn ship(
                 let after = sent.get(&journal).copied().unwrap_or(0);
                 let records: Vec<_> = batch.records.into_iter().filter(|r| r.seq > after).collect();
                 if records.is_empty() { continue; }
+                if records[0].seq != after + 1 {
+                    manager.replay_sj(journal, after);
+                    continue;
+                }
                 ready = pack(journal, records)?;
             }
             permit = tx.reserve(), if retry.is_some() || (!ready.is_empty() && pending.len() < 8) => {

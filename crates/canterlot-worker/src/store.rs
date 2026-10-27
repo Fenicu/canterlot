@@ -100,6 +100,7 @@ pub struct WorkerStore {
     ownership: OwnershipStore,
     index: HashMap<String, ReceiptEntry>,
     hub: HubState,
+    cancelled_starts: HashSet<Uuid>,
     #[cfg(test)]
     crash_after: Option<tests::AppendPoint>,
 }
@@ -189,6 +190,11 @@ impl WorkerStore {
             }
         }
         let ownership = OwnershipStore::open(&data_dir.join("ownership"))?;
+        let cancelled_starts = match fs::read_to_string(data_dir.join("cancelled_starts.toml")) {
+            Ok(text) => toml::from_str::<CancelledStarts>(&text)?.executions,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => HashSet::new(),
+            Err(error) => return Err(error.into()),
+        };
         let hub = match fs::read_to_string(data_dir.join("hub.toml")) {
             Ok(text) => toml::from_str(&text)?,
             Err(error) if error.kind() == io::ErrorKind::NotFound => HubState::default(),
@@ -207,6 +213,7 @@ impl WorkerStore {
             ownership,
             index: HashMap::new(),
             hub,
+            cancelled_starts,
             #[cfg(test)]
             crash_after: tests::take_open_crash_point(),
         };
@@ -266,6 +273,12 @@ impl WorkerStore {
             for record in self.cj.read_from(from_seq, MAX_MESSAGE_BYTES)? {
                 from_seq = record.seq + 1;
                 match RecordBody::decode(record.payload.as_slice())?.body {
+                    Some(record_body::Body::ExecutionState(fact)) => {
+                        self.remember_cancelled_start(&fact)?;
+                        if fact.state == "owner_lost" && record.seq <= self.cj.acked_seq() {
+                            self.retire_owner_lost(&fact.execution_id)?;
+                        }
+                    }
                     Some(record_body::Body::CommandStored(fact)) => facts.push((
                         receipt_id(&fact.command_id),
                         fact.dispatch_attempt,
@@ -578,6 +591,9 @@ impl WorkerStore {
                 .encode_to_vec(),
             )?;
             self.append_boundary(AppendBoundary::Cj)?;
+            if let record_body::Body::ExecutionState(fact) = &body {
+                self.remember_cancelled_start(fact)?;
+            }
             if let record_body::Body::TransmissionStarted(fact) = body {
                 self.record_transmission(&receipt_id(&fact.command_id))?;
             }
@@ -650,6 +666,39 @@ impl WorkerStore {
         &self.ownership
     }
 
+    pub fn start_cancelled(&self, execution: Uuid) -> bool {
+        self.cancelled_starts.contains(&execution)
+    }
+
+    fn remember_cancelled_start(
+        &mut self,
+        fact: &canterlot_proto::worker::v1::ExecutionState,
+    ) -> Result<(), StoreError> {
+        if fact.state == "stopped" && fact.outcome == "start_cancelled" {
+            let id = Uuid::parse_str(&fact.execution_id)?;
+            if self.cancelled_starts.insert(id) {
+                write_private_atomic(
+                    &self.data_dir.join("cancelled_starts.toml"),
+                    toml::to_string(&CancelledStarts {
+                        executions: self.cancelled_starts.clone(),
+                    })?
+                    .as_bytes(),
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    fn retire_owner_lost(&mut self, execution: &str) -> Result<(), StoreError> {
+        if let Some(mut record) = self.ownership.get(Uuid::parse_str(execution)?).cloned()
+            && record.released_reason != "owner_lost_reported"
+        {
+            record.released_reason = "owner_lost_reported".into();
+            self.ownership.append(record)?;
+        }
+        Ok(())
+    }
+
     pub fn ownership_mut(&mut self) -> Result<&mut OwnershipStore, StoreError> {
         self.ensure_open()?;
         Ok(&mut self.ownership)
@@ -717,6 +766,25 @@ impl WorkerStore {
         self.ensure_open()?;
         let result = (|| {
             self.cj.ack(up_to)?;
+            let mut next = self.cj.first_seq();
+            while next <= up_to {
+                let records = self.cj_records_from(next, MAX_MESSAGE_BYTES)?;
+                if records.is_empty() {
+                    break;
+                }
+                for record in records {
+                    next = record.seq + 1;
+                    if record.seq > up_to {
+                        break;
+                    }
+                    if let Some(record_body::Body::ExecutionState(fact)) =
+                        record.body.and_then(|body| body.body)
+                        && fact.state == "owner_lost"
+                    {
+                        self.retire_owner_lost(&fact.execution_id)?;
+                    }
+                }
+            }
             self.cj.compact()?;
             Ok(())
         })();
@@ -769,6 +837,34 @@ impl WorkerStore {
         self.hub = hub;
         Ok(())
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct CancelledStarts {
+    executions: HashSet<Uuid>,
+}
+
+pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing parent"))?;
+    let temporary = parent.join(format!(".snapshot-{}.tmp", Uuid::now_v7()));
+    let result = (|| -> io::Result<()> {
+        let mut file = OpenOptions::new()
+            .mode(0o600)
+            .write(true)
+            .create_new(true)
+            .open(&temporary)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temporary, path)?;
+        File::open(parent)?.sync_all()
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    Ok(result?)
 }
 
 fn machine_time_ms() -> u64 {

@@ -153,6 +153,16 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(pool: &PgPool, profile: &str, env: &[(&str, &str)]) -> Self {
+        Self::new_with(pool, profile, env, false, true).await
+    }
+
+    async fn new_with(
+        pool: &PgPool,
+        profile: &str,
+        env: &[(&str, &str)],
+        long_dir: bool,
+        auto_start: bool,
+    ) -> Self {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let root = tempfile::tempdir().unwrap();
         let guard = Arc::new(ProcessGuard::new(root.path()));
@@ -201,7 +211,11 @@ impl Fixture {
             machine_id: machine.machine_id,
             installation_id: hub.installation.installation_id,
             restore_generation: hub.installation.restore_generation,
-            data_dir: root.path().join("store"),
+            data_dir: if long_dir {
+                root.path().join("d".repeat(80)).join("store")
+            } else {
+                root.path().join("store")
+            },
             timers: WorkerTimers {
                 handshake: Duration::from_secs(5),
                 heartbeat: Duration::from_millis(100),
@@ -214,12 +228,12 @@ impl Fixture {
             execution: ExecutionConfig {
                 allowed_workdir_roots: vec![workdir.clone()],
                 supervisor_exe: Some(wrapper),
+                spawn_timeout: Duration::from_secs(2),
                 supervisor: SupervisorTimers {
                     stop_grace: Duration::from_millis(500),
                     stop_retry: Duration::from_millis(300),
                     ..Default::default()
                 },
-                ..Default::default()
             },
         };
         let owner = hub.installation.owner_id;
@@ -248,6 +262,9 @@ impl Fixture {
             history,
         };
         fixture.start_worker().await;
+        if !auto_start {
+            return fixture;
+        }
         let started = executions::start(pool, owner, conversation, Uuid::now_v7())
             .await
             .unwrap();
@@ -416,7 +433,8 @@ impl Fixture {
                 .fetch_all(&self.pool)
                 .await
                 .unwrap();
-        assert_eq!(states, ["streaming"]);
+        assert_eq!(states.len(), 1);
+        assert!(matches!(states[0].as_str(), "streaming" | "final"));
     }
 
     async fn event_count(&self, kind: &str) -> i64 {
@@ -480,11 +498,15 @@ impl Fixture {
         }
     }
 
-    fn sj_snapshot(&self) -> (TempDir, Journal) {
+    fn sj_snapshot(&self) -> Option<(TempDir, Journal)> {
         for _ in 0..100 {
             // Открытый inode переживает compaction; временные файлы ACK не входят в снимок.
-            let sources: std::io::Result<Vec<_>> = fs::read_dir(self.exec_dir().join("sj"))
-                .unwrap()
+            let entries = match fs::read_dir(self.exec_dir().join("sj")) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return None,
+                Err(error) => panic!("SJ snapshot failed: {}", error.kind()),
+            };
+            let sources: std::io::Result<Vec<_>> = entries
                 .filter_map(|entry| match entry {
                     Ok(entry) => {
                         let name = entry.file_name();
@@ -514,7 +536,7 @@ impl Fixture {
                 && report.corrupted_tail.is_none()
                 && journal.is_sealed().is_none()
             {
-                return (copy, journal);
+                return Some((copy, journal));
             }
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -522,29 +544,43 @@ impl Fixture {
     }
 
     fn sj(&self) -> (Uuid, u64, Vec<Body>) {
-        let (_copy, journal) = self.sj_snapshot();
-        let mut next = journal.first_seq();
+        let disk = self.sj_snapshot();
+        let batches = self
+            .hub
+            .as_ref()
+            .map(|hub| hub.faults.batches())
+            .unwrap_or_default();
+        let journal_id = disk.as_ref().map(|(_, j)| j.id().0).unwrap_or_else(|| {
+            batches
+                .iter()
+                .find(|b| b.records.iter().any(|r| r.sj_fact.is_some()))
+                .map(|b| Uuid::parse_str(&b.journal_id).unwrap())
+                .expect("missing SJ trace")
+        });
+        let mut last_seq = disk.as_ref().map_or(0, |(_, j)| j.last_seq());
         let mut bodies = BTreeMap::new();
-        while next <= journal.last_seq() {
-            for record in journal.read_from(next, 524288).unwrap() {
-                next = record.seq + 1;
-                bodies.insert(
-                    record.seq,
-                    RecordBody::decode(record.payload.as_slice())
-                        .unwrap()
-                        .body
-                        .unwrap(),
-                );
+        if let Some((_, journal)) = &disk {
+            let mut next = journal.first_seq();
+            while next <= journal.last_seq() {
+                for record in journal.read_from(next, 524288).unwrap() {
+                    next = record.seq + 1;
+                    bodies.insert(
+                        record.seq,
+                        RecordBody::decode(record.payload.as_slice())
+                            .unwrap()
+                            .body
+                            .unwrap(),
+                    );
+                }
             }
         }
         // После ACK сегмент удалён; метаданные принятых записей объединяются по seq.
-        for batch in self
-            .faults()
-            .batches()
+        for batch in batches
             .iter()
-            .filter(|b| b.journal_id == journal.id().0.to_string())
+            .filter(|b| b.journal_id == journal_id.to_string())
         {
             for record in &batch.records {
+                last_seq = last_seq.max(record.seq);
                 let body = match &record.sj_fact {
                     Some(SjFact::TransmissionStarted(id, attempt)) => Body::TransmissionStarted(
                         canterlot_proto::worker::v1::InputTransmissionStarted {
@@ -573,11 +609,7 @@ impl Fixture {
                 bodies.entry(record.seq).or_insert(body);
             }
         }
-        (
-            journal.id().0,
-            journal.last_seq(),
-            bodies.into_values().collect(),
-        )
+        (journal_id, last_seq, bodies.into_values().collect())
     }
 
     async fn assert_cursor(&self, closed: bool) {
@@ -707,6 +739,10 @@ impl Fixture {
             until("journal closed", async || sqlx::query_scalar::<_, bool>("select coalesce(bool_or(closed), false) from journal_cursors where execution_id = $1")
                 .bind(self.execution).fetch_one(&self.pool).await.unwrap()).await;
             self.assert_cursor(true).await;
+            until("acked execution directory removed", async || {
+                !self.exec_dir().exists()
+            })
+            .await;
         }
         self.stop_worker().await;
         let hub = self.hub.take().unwrap();
@@ -1244,5 +1280,359 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
     assert_eq!(fixture.slot().await, "running");
     assert_eq!(fixture.cli_receipts(input.command_id), [1]);
     fixture.assert_contiguous().await;
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture
+        .submit(json!({"synthetic":[{"delta":"x"},{"hang":true}]}).to_string())
+        .await;
+    fixture.wait_deltas(1).await;
+    fixture.assert_cursor(false).await;
+    assert!(fixture.guard.signal(identities.0, Signal::KILL));
+    fixture.wait_state("owner_lost").await;
+    fixture.stop_worker().await;
+    fixture.start_worker().await;
+    assert_eq!(fixture.state().await, "owner_lost");
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture
+        .submit(json!({"synthetic":[{"delta":"x"},{"hang":true}]}).to_string())
+        .await;
+    fixture.wait_deltas(1).await;
+    fixture.assert_cursor(false).await;
+    fixture.stop_worker().await;
+    assert!(fixture.guard.signal(identities.0, Signal::KILL));
+    until("supervisor died", async || !same_process(identities.0)).await;
+    fixture.start_worker().await;
+    fixture.wait_state("owner_lost").await;
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor(pool: PgPool) {
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
+    for index in 0..40 {
+        steps.push(json!({"delta":format!("b{index:02}| ")}));
+        steps.push(json!({"delay_ms":20}));
+    }
+    steps.push(json!({"exit":0}));
+    fixture.submit(json!({"synthetic":steps}).to_string()).await;
+    fixture.wait_deltas(1).await;
+    let hub = fixture.hub.take().unwrap();
+    let addr = hub.addr;
+    let pki = hub.pki.clone();
+    let faults = hub.faults.clone();
+    hub.shutdown.send(()).unwrap();
+    timeout(WAIT, hub.join).await.unwrap().unwrap().unwrap();
+    fixture.stop_worker().await;
+    until("local journal closed", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .any(|b| matches!(b, Body::JournalClosed(_)))
+    })
+    .await;
+    sleep(Duration::from_secs(2)).await;
+    assert!(
+        same_process(identities.0),
+        "draining supervisor exited without ACK"
+    );
+    assert!(!same_process(identities.1));
+    fixture.hub =
+        Some(spawn_test_hub_with_faults(pool.clone(), hub_timers(), Some(addr), pki, faults).await);
+    fixture.start_worker().await;
+    fixture.wait_state("stopped").await;
+    until("closed ingested", async || {
+        fixture.event_count("journal_closed").await == 1
+    })
+    .await;
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
+    let mut fixture = Fixture::new(
+        &pool,
+        "synthetic",
+        &[("CANTERLOT_FAULT_ABORT_AT", "before_first_byte")],
+    )
+    .await;
+    fixture.faults().drop_next_acks(100);
+    let input = fixture.submit("hello".into()).await;
+    fixture.wait_state("owner_lost").await;
+    assert_eq!(transmissions(&fixture.sj().2, input.command_id), [1]);
+    assert_eq!(fixture.input_state(input.input_id).await, "on_machine");
+    fixture.stop_worker().await;
+    fixture.faults().drop_next_acks(0);
+    fixture.start_worker().await;
+    sleep(Duration::from_millis(500)).await;
+    fixture.stop_worker().await;
+    let store = WorkerStore::open(&fixture.config.data_dir).unwrap();
+    assert!(
+        !store
+            .command_state(&input.command_id.to_string())
+            .unwrap()
+            .unwrap()
+            .terminal
+    );
+    assert!(!store.cj_records_from(store.cj_cursor().unwrap().first_stored_seq, usize::MAX).unwrap().iter().any(|r|
+        matches!(r.body.as_ref().and_then(|b| b.body.as_ref()), Some(Body::DispatchDeferred(f)) if f.command_id == input.command_id.to_string())));
+    drop(store);
+    fixture.start_worker().await;
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture
+        .faults()
+        .set_sj_batch_pause(Duration::from_millis(200));
+    let mut steps: Vec<Value> = (0..3000).map(|_| json!({"delta":"x"})).collect();
+    steps.push(json!({"hang":true}));
+    fixture.submit(json!({"synthetic":steps}).to_string()).await;
+    until("3000 local deltas", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .filter(|b| matches!(b, Body::BlockDelta(_)))
+            .count()
+            == 3000
+    })
+    .await;
+    let stop = fixture.stop_execution(true).await;
+    until("local journal closed", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .any(|b| matches!(b, Body::JournalClosed(_)))
+    })
+    .await;
+    sleep(Duration::from_secs(2)).await;
+    assert!(
+        same_process(identities.0),
+        "draining supervisor exited behind backlog"
+    );
+    fixture.faults().set_sj_batch_pause(Duration::ZERO);
+    fixture.wait_state("stopped").await;
+    until("stop completed", async || fixture.command_done(stop).await).await;
+    until("closed ingested", async || {
+        fixture.event_count("journal_closed").await == 1
+    })
+    .await;
+    fixture.finish().await;
+}
+
+#[test]
+fn wave_w_d2_runtime_socket_paths() {
+    for case in ["short", "long"] {
+        let runtime = tempfile::tempdir().unwrap();
+        let path = if case == "long" {
+            runtime.path().join("r".repeat(100))
+        } else {
+            runtime.path().to_path_buf()
+        };
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "wave_w_runtime_child",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env("CANTERLOT_W_RUNTIME_CASE", case)
+            .env("XDG_RUNTIME_DIR", path)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "runtime {case}: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+#[ignore]
+async fn wave_w_runtime_child(pool: PgPool) {
+    let Ok(case) = std::env::var("CANTERLOT_W_RUNTIME_CASE") else {
+        return;
+    };
+    let mut fixture = Fixture::new_with(&pool, "synthetic", &[], true, false).await;
+    let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    fixture.execution = started.execution_id;
+    fixture.start_command = started.command_id;
+    if case == "short" {
+        fixture.wait_state("running").await;
+        let socket_dir =
+            PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).join("canterlot");
+        assert_eq!(
+            fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let socket = socket_dir.join(format!("{}.sock", fixture.execution));
+        assert!(socket.exists());
+        assert!(!fixture.exec_dir().join("ipc.sock").exists());
+        fixture.finish().await;
+        assert!(!socket.exists());
+    } else {
+        fixture.wait_state("failed").await;
+        let result: (String, Value) =
+            sqlx::query_as("select delivery_state, result from commands where id = $1")
+                .bind(started.command_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            result,
+            ("completed".into(), json!({"rejected":"ipc_path_too_long"}))
+        );
+        let outcome: Option<String> =
+            sqlx::query_scalar("select outcome from executions where id = $1")
+                .bind(started.execution_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(outcome.as_deref(), Some("start_rejected"));
+        assert!(fixture.guard.members().is_empty());
+        assert!(matches!(
+            control::request_stop_execution(
+                &pool,
+                fixture.owner,
+                fixture.conversation,
+                false,
+                &Uuid::now_v7().to_string(),
+                Uuid::now_v7()
+            )
+            .await
+            .unwrap(),
+            StopExecutionOutcome::NothingToStop
+        ));
+        let next = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
+            .await
+            .unwrap();
+        fixture.execution = next.execution_id;
+        fixture.wait_state("failed").await;
+        fixture.stop_worker().await;
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
+    let (script, expected) = answer(1200, 0);
+    let input = fixture.submit(script).await;
+    let resume = timeout(WAIT, paused).await.unwrap().unwrap();
+    until("local backlog", async || {
+        fixture
+            .sj()
+            .2
+            .iter()
+            .filter(|b| matches!(b, Body::BlockDelta(_)))
+            .count()
+            == 1200
+    })
+    .await;
+    let hellos = fixture.session_probe.data_attaches();
+    fixture.faults().fail_data(Code::Cancelled);
+    resume.send(()).unwrap();
+    fixture.assert_answer(&input, &expected, 1200).await;
+    assert_eq!(
+        fixture.session_probe.data_attaches(),
+        hellos + 1,
+        "stale batches forced another handshake"
+    );
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPool) {
+    let mut fixture = Fixture::new_with(
+        &pool,
+        "synthetic",
+        &[("CANTERLOT_FAULT_HOLD_AT", "before_attach")],
+        false,
+        false,
+    )
+    .await;
+    let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    fixture.execution = started.execution_id;
+    fixture.start_command = started.command_id;
+    until("own supervisor spawned", async || {
+        !fixture.guard.members().is_empty()
+    })
+    .await;
+    let members = fixture.guard.members();
+    assert_eq!(members.len(), 1);
+    assert!(is_supervisor(members[0].0));
+    fixture.wait_state("failed").await;
+    let result: Value = sqlx::query_scalar("select result from commands where id = $1")
+        .bind(started.command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(result, json!({"rejected":"supervisor_start_failed"}));
+    assert!(!same_process(members[0]));
+    assert!(fixture.guard.members().is_empty());
+    assert!(matches!(
+        control::request_stop_execution(
+            &pool,
+            fixture.owner,
+            fixture.conversation,
+            false,
+            &Uuid::now_v7().to_string(),
+            Uuid::now_v7()
+        )
+        .await
+        .unwrap(),
+        StopExecutionOutcome::NothingToStop
+    ));
+    fixture.stop_worker().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn wave_w_spawning_ownership_reports_owner_lost_from_created(pool: PgPool) {
+    let mut fixture = Fixture::new_with(&pool, "synthetic", &[], false, false).await;
+    fixture.stop_worker().await;
+    let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    fixture.execution = started.execution_id;
+    let mut store = WorkerStore::open(&fixture.config.data_dir).unwrap();
+    store
+        .ownership_mut()
+        .unwrap()
+        .append(canterlot_proto::worker::ipc::Ownership {
+            execution_id: started.execution_id.to_string(),
+            conversation_id: fixture.conversation.to_string(),
+            generation: 1,
+            phase: canterlot_proto::worker::ipc::OwnershipPhase::Spawning as i32,
+            ..Default::default()
+        })
+        .unwrap();
+    drop(store);
+    fixture.start_worker().await;
+    fixture.wait_state("owner_lost").await;
+    assert!(fixture.guard.members().is_empty());
     fixture.finish().await;
 }

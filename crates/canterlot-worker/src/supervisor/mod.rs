@@ -43,6 +43,8 @@ pub struct SupervisorSpec {
     pub conversation_id: Uuid,
     pub protocol_version: u32,
     #[serde(default)]
+    pub ipc_socket: Option<PathBuf>,
+    #[serde(default)]
     pub timers: SupervisorTimers,
 }
 
@@ -76,10 +78,19 @@ impl SupervisorFaults {
         Self
     }
     pub fn abort_at(&self, _point: &str) {}
+    pub fn will_abort(&self, _point: &str) -> bool {
+        false
+    }
     pub fn gate_held(&self, _exec_dir: &Path) -> bool {
         false
     }
+    pub fn attach_held(&self) -> bool {
+        false
+    }
     pub fn take_survivor(&self) -> bool {
+        false
+    }
+    pub fn take_error(&self) -> bool {
         false
     }
 }

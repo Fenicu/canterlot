@@ -12,9 +12,16 @@ use canterlot_proto::worker::v1::{Command, JournalCursor};
 pub struct SessionProbe {
     sent: Arc<Mutex<std::collections::HashMap<u64, Instant>>>,
     acks: Arc<Mutex<Vec<std::time::Duration>>>,
+    data_attaches: Arc<AtomicU64>,
 }
 
 impl SessionProbe {
+    pub(crate) fn data_attached(&self) {
+        self.data_attaches.fetch_add(1, Ordering::Relaxed);
+    }
+    pub fn data_attaches(&self) -> u64 {
+        self.data_attaches.load(Ordering::Relaxed)
+    }
     pub(crate) fn sent(&self, seq: u64) {
         self.sent
             .lock()
@@ -105,7 +112,9 @@ pub struct StoreSnapshot {
 pub struct SupervisorFaults {
     abort_at: Option<String>,
     hold_gate: bool,
+    hold_attach: bool,
     survivors: std::sync::atomic::AtomicU32,
+    errors: std::sync::atomic::AtomicU32,
 }
 
 impl SupervisorFaults {
@@ -113,6 +122,13 @@ impl SupervisorFaults {
         Self {
             abort_at: std::env::var("CANTERLOT_FAULT_ABORT_AT").ok(),
             hold_gate: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref() == Ok("before_gate"),
+            hold_attach: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref() == Ok("before_attach"),
+            errors: std::sync::atomic::AtomicU32::new(
+                std::env::var("CANTERLOT_FAULT_TERMINATE_ERRORS")
+                    .ok()
+                    .and_then(|value| value.parse().ok())
+                    .unwrap_or(0),
+            ),
             survivors: std::sync::atomic::AtomicU32::new(
                 std::env::var("CANTERLOT_FAULT_TERMINATE_SURVIVORS")
                     .ok()
@@ -128,12 +144,27 @@ impl SupervisorFaults {
         }
     }
 
+    pub fn will_abort(&self, point: &str) -> bool {
+        self.abort_at.as_deref() == Some(point)
+    }
+
     pub fn gate_held(&self, exec_dir: &std::path::Path) -> bool {
         self.hold_gate && !exec_dir.join("fault_release").exists()
+    }
+    pub fn attach_held(&self) -> bool {
+        self.hold_attach
     }
 
     pub fn take_survivor(&self) -> bool {
         self.survivors
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    pub fn take_error(&self) -> bool {
+        self.errors
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |left| {
                 left.checked_sub(1)
             })

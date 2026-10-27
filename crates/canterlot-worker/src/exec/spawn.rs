@@ -1,7 +1,7 @@
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -26,18 +26,53 @@ use uuid::Uuid;
 use super::ExecError;
 use crate::{
     config::SupervisorTimers,
-    supervisor::ipc::{read_message, write_message},
+    supervisor::ipc::{IpcError, read_message, validate_socket_path, write_message},
 };
 
 pub(super) struct Prepared {
     pub dir: PathBuf,
     pub secret: [u8; 32],
+    pub socket: PathBuf,
 }
 
 pub(super) struct Linked {
     pub read: OwnedReadHalf,
     pub write: OwnedWriteHalf,
     pub attached: Attached,
+}
+
+pub(super) struct Spawned(Option<tokio::process::Child>);
+
+impl Spawned {
+    pub fn id(&self) -> Option<u32> {
+        self.0.as_ref().and_then(tokio::process::Child::id)
+    }
+
+    pub async fn kill(&mut self) -> std::io::Result<()> {
+        if let Some(child) = &mut self.0 {
+            child.kill().await?;
+        }
+        Ok(())
+    }
+
+    pub fn detach(mut self) {
+        if let Some(mut child) = self.0.take() {
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+    }
+}
+
+impl Drop for Spawned {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.start_kill();
+            tokio::spawn(async move {
+                let _ = child.wait().await;
+            });
+        }
+    }
 }
 
 fn private_file(path: &Path, content: &[u8]) -> std::io::Result<()> {
@@ -60,7 +95,30 @@ pub(super) fn prepare(
     generation: u64,
     conversation_id: Uuid,
     timers: &SupervisorTimers,
-) -> std::io::Result<Prepared> {
+    runtime_dir: Option<&Path>,
+) -> Result<Prepared, ExecError> {
+    let dir = data_dir.join("executions").join(execution_id.to_string());
+    let socket = match runtime_dir {
+        Some(runtime) => runtime
+            .join("canterlot")
+            .join(format!("{execution_id}.sock")),
+        None => dir.join("ipc.sock"),
+    };
+    validate_socket_path(&socket)?;
+    if let Some(runtime) = runtime_dir {
+        let path = runtime.join("canterlot");
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&path)?;
+        let metadata = fs::symlink_metadata(&path)?;
+        if !metadata.is_dir()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != rustix::process::getuid().as_raw()
+        {
+            return Err(IpcError::Directory.into());
+        }
+    }
     let root = data_dir.join("executions");
     fs::DirBuilder::new()
         .recursive(true)
@@ -71,7 +129,7 @@ pub(super) fn prepare(
     match fs::remove_dir_all(&dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+        Err(error) => return Err(error.into()),
     }
     fs::DirBuilder::new().mode(0o700).create(&dir)?;
     let secret: [u8; 32] = rand::random();
@@ -84,18 +142,24 @@ pub(super) fn prepare(
         millis(timers.stop_grace),
         millis(timers.stop_retry),
     );
+    let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
+    let spec = format!("ipc_socket = {socket_spec}\n{spec}");
     private_file(&dir.join("spec.toml"), spec.as_bytes())?;
-    Ok(Prepared { dir, secret })
+    Ok(Prepared {
+        dir,
+        secret,
+        socket,
+    })
 }
 
 /// Сопровождение запускается отдельным процессом без привязки к жизни этого; ждём его только ради zombie.
-pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<u32> {
+pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<Spawned> {
     let log = OpenOptions::new()
         .create(true)
         .append(true)
         .mode(0o600)
         .open(dir.join("supervisor.log"))?;
-    let mut child = tokio::process::Command::new(exe)
+    tokio::process::Command::new(exe)
         .arg("supervise")
         .arg("--exec-dir")
         .arg(dir)
@@ -103,23 +167,18 @@ pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<u32> {
         .stdout(log.try_clone()?)
         .stderr(log)
         .kill_on_drop(false)
-        .spawn()?;
-    let pid = child.id().ok_or(std::io::ErrorKind::NotFound)?;
-    tokio::spawn(async move {
-        let _ = child.wait().await;
-    });
-    Ok(pid)
+        .spawn()
+        .map(|child| Spawned(Some(child)))
 }
 
 pub(super) async fn connect_attach(
-    dir: &Path,
+    socket: &Path,
     secret: &[u8],
     execution_id: Uuid,
     generation: u64,
     expected_pid: Option<u32>,
     wait: Option<Duration>,
 ) -> Result<Linked, ExecError> {
-    let socket = dir.join("ipc.sock");
     let connect = async {
         loop {
             match UnixStream::connect(&socket).await {

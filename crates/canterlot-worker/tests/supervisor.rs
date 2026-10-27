@@ -1268,3 +1268,125 @@ async fn no_second_cli_is_ever_started() {
     assert!(harness.wait_exit().await.success());
     assert!(children_of(harness.pid, "synthetic-cli").is_empty());
 }
+
+#[tokio::test]
+async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    harness.auto_ack = false;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            force: true,
+        }))
+        .await;
+    harness
+        .wait_records("closed", |b| {
+            b.iter().any(|b| matches!(b, Body::JournalClosed(_)))
+        })
+        .await;
+    let closed = *harness.records.last_key_value().unwrap().0;
+    for target in [Uuid::now_v7(), Uuid::now_v7()] {
+        harness
+            .send(down::Msg::Cancel(
+                canterlot_proto::worker::v1::CancelInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                },
+            ))
+            .await;
+        harness
+            .send(down::Msg::Withdraw(
+                canterlot_proto::worker::v1::WithdrawInput {
+                    target_command_id: target.to_string(),
+                    target_dispatch_attempt: 1,
+                },
+            ))
+            .await;
+    }
+    harness
+        .send(down::Msg::Interrupt(
+            canterlot_proto::worker::ipc::InterruptRequest {
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 1,
+            },
+        ))
+        .await;
+    harness
+        .send(down::Msg::ShipFrom(ShipFrom {
+            committed_seq: closed,
+        }))
+        .await;
+    while harness.pump(Duration::from_millis(100)).await {}
+    assert_eq!(
+        harness.records.last_key_value().unwrap().0,
+        &closed,
+        "records appended after journal_closed"
+    );
+    harness.conn = None;
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(harness.child.try_wait().unwrap().is_none());
+    harness.auto_ack = true;
+    harness.attach_and_ship(closed - 1).await;
+    assert!(timeout(WAIT, harness.wait_exit()).await.unwrap().success());
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn wave_w_containment_errors_report_survivors_before_retry() {
+    let mut harness = Harness::start(&[("CANTERLOT_FAULT_TERMINATE_ERRORS", "2")]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            force: true,
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("containment error diagnostic", |b| {
+            b.iter().any(
+                |b| matches!(b, Body::AdapterDiagnostic(f) if f.kind == "containment_survivors"),
+            )
+        })
+        .await;
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| state(b, "stopped") || state(b, "failed"))
+    );
+    assert!(harness.child.try_wait().unwrap().is_none());
+    harness
+        .wait_records("closed after retry", |b| {
+            b.iter().any(|b| matches!(b, Body::JournalClosed(_)))
+        })
+        .await;
+    assert!(timeout(WAIT, harness.wait_exit()).await.unwrap().success());
+}
+
+#[cfg(feature = "fault-injection")]
+#[tokio::test]
+async fn wave_w_group_commit_keeps_stopped_crash_boundary_durable() {
+    let mut harness =
+        Harness::start(&[("CANTERLOT_FAULT_ABORT_AT", "after_stopped_before_closed")]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            force: true,
+        }))
+        .await;
+    assert!(!timeout(WAIT, harness.wait_exit()).await.unwrap().success());
+    let bodies = read_sj(&harness.exec_dir);
+    assert!(matches!(bodies.last(), Some((_, Body::ExecutionState(f))) if f.state == "stopped"));
+    assert!(
+        !bodies
+            .iter()
+            .any(|(_, b)| matches!(b, Body::JournalClosed(_)))
+    );
+}

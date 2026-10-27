@@ -199,7 +199,8 @@ pub trait Adapter: Send {
     async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome;
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
-    async fn close(&mut self, mode: CloseMode) -> Result<(), AdapterError>;
+    async fn close(&mut self, mode: CloseMode, group: &dyn Containment)
+    -> Result<(), AdapterError>;
 }
 
 pub fn registry(profile: &str) -> Option<Box<dyn Adapter>> {

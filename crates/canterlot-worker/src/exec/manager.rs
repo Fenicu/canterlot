@@ -41,6 +41,7 @@ const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 pub(crate) enum Msg {
     Command(Command),
     SjAck(u64),
+    Replay(u64),
 }
 
 pub(super) struct SpawnRequest {
@@ -118,6 +119,43 @@ async fn ownership_update(
     Ok(())
 }
 
+pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
+    let records = shared
+        .store
+        .call(|store| Ok(open(store)?.ownership().released()))
+        .await?;
+    let root = shared.data_dir().await?.join("executions");
+    for record in records {
+        let Ok(id) = Uuid::parse_str(&record.execution_id) else {
+            continue;
+        };
+        let dir = root.join(id.to_string());
+        if Path::new(&record.exec_dir) != dir {
+            continue;
+        }
+        if procfs::is_same_process(record.supervisor_pid, record.supervisor_start_ticks) {
+            continue;
+        }
+        if dir.exists() {
+            let spec = fs::read_to_string(dir.join("spec.toml"))
+                .ok()
+                .and_then(|text| toml::from_str::<crate::supervisor::SupervisorSpec>(&text).ok());
+            if let Some(spec) = spec {
+                let socket = spec.ipc_socket.unwrap_or_else(|| dir.join("ipc.sock"));
+                if socket == Path::new(&record.ipc_socket) {
+                    match fs::remove_file(socket) {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+            }
+            fs::remove_dir_all(dir)?;
+        }
+    }
+    Ok(())
+}
+
 pub(super) async fn report_owner_lost(
     shared: &Shared,
     id: Uuid,
@@ -136,7 +174,9 @@ pub(super) async fn report_owner_lost(
         )
         .await?;
     ownership_update(shared, id, |record| {
-        record.released_reason = ORPHANED.into();
+        if record.released_reason != "owner_lost_reported" {
+            record.released_reason = ORPHANED.into();
+        }
     })
     .await?;
     shared.with_info(id, |info| {
@@ -162,18 +202,24 @@ pub(super) async fn verify(
         .await?
         .join("executions")
         .join(id.to_string());
-    if Path::new(&record.exec_dir) != dir || Path::new(&record.ipc_socket) != dir.join("ipc.sock") {
+    if Path::new(&record.exec_dir) != dir {
         return Err(ExecError::Verify("exec_dir"));
     }
     if !procfs::is_same_process(record.supervisor_pid, record.supervisor_start_ticks) {
         return Err(ExecError::Verify("supervisor_process"));
     }
     let secret = fs::read(dir.join("secret"))?;
+    let spec: crate::supervisor::SupervisorSpec =
+        toml::from_str(&fs::read_to_string(dir.join("spec.toml"))?)
+            .map_err(|_| ExecError::Verify("spec"))?;
+    if Path::new(&record.ipc_socket) != spec.ipc_socket.unwrap_or_else(|| dir.join("ipc.sock")) {
+        return Err(ExecError::Verify("ipc_socket"));
+    }
     if sha256(&secret) != record.secret_sha256 {
         return Err(ExecError::Verify("secret"));
     }
     let linked = spawn::connect_attach(
-        &dir,
+        Path::new(&record.ipc_socket),
         &secret,
         id,
         record.generation,
@@ -266,6 +312,7 @@ pub(super) async fn reject(
             info.state = "failed".into();
             info.outcome = "start_rejected".into();
             info.cj_terminal_seq = Some(seq);
+            info.retired = seq <= shared.cj_acked.load(Ordering::Relaxed);
         });
     }
     Ok(())
@@ -294,6 +341,19 @@ fn terminal_self(command: &Command) -> Vec<(String, u32)> {
     vec![(command.command_id.clone(), command.dispatch_attempt)]
 }
 
+async fn defer_unhanded(shared: &Shared, command: &Command) -> Result<(), ExecError> {
+    shared
+        .cj(
+            vec![Body::DispatchDeferred(InputDispatchDeferred {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: command.dispatch_attempt,
+                reason: "generation_closed".into(),
+            })],
+            terminal_self(command),
+        )
+        .await
+}
+
 /// Исполнения нет, оно закрыто или потеряно: управляющая служба отвечает сама.
 pub(super) async fn answer_without_execution(
     shared: &Shared,
@@ -305,19 +365,25 @@ pub(super) async fn answer_without_execution(
         None => None,
     };
     let (cid, attempt) = (command.command_id.clone(), command.dispatch_attempt);
-    match &command.kind {
-        Some(Kind::DeliverInput(_)) => {
-            shared
-                .cj(
-                    vec![Body::DispatchDeferred(InputDispatchDeferred {
-                        command_id: cid.clone(),
-                        dispatch_attempt: attempt,
-                        reason: "generation_closed".into(),
-                    })],
-                    terminal_self(command),
-                )
-                .await
+    if matches!(
+        command.kind,
+        Some(Kind::DeliverInput(_) | Kind::CancelInput(_) | Kind::WithdrawInput(_))
+    ) {
+        let owned = match id {
+            Some(id) => {
+                shared
+                    .store
+                    .call(move |store| Ok(open(store)?.ownership().get(id).is_some()))
+                    .await?
+            }
+            None => false,
+        };
+        if owned {
+            return Ok(());
         }
+    }
+    match &command.kind {
+        Some(Kind::DeliverInput(_)) => defer_unhanded(shared, command).await,
         Some(Kind::CancelInput(CancelInput {
             target_command_id,
             target_dispatch_attempt,
@@ -371,13 +437,6 @@ pub(super) async fn answer_without_execution(
                 .await
         }
         Some(Kind::StopExecution(_)) if known.is_none() => {
-            if let Some(id) = id {
-                shared
-                    .cancelled_starts
-                    .lock()
-                    .expect("cancelled lock")
-                    .insert(id);
-            }
             shared
                 .cj(
                     vec![Body::ExecutionState(ExecutionState {
@@ -404,6 +463,7 @@ pub(super) struct Actor {
     waiting: VecDeque<Command>,
     link: Option<Link>,
     exec_dir: Option<PathBuf>,
+    ipc_socket: Option<PathBuf>,
     supervisor: Option<(u32, u64)>,
     journal_id: Option<Uuid>,
     start_command: Option<(String, u32)>,
@@ -442,6 +502,7 @@ impl Actor {
             waiting: VecDeque::new(),
             link: None,
             exec_dir: None,
+            ipc_socket: None,
             supervisor: None,
             journal_id: None,
             start_command: None,
@@ -495,13 +556,23 @@ impl Actor {
     async fn run_inner(&mut self, start: Start) -> Result<(), ExecError> {
         match start {
             Start::Spawn(request) => {
-                if !self.spawn_sequence(*request).await? {
-                    return Ok(());
+                let command = request.command.clone();
+                match self.spawn_sequence(*request).await {
+                    Ok(true) => {}
+                    Ok(false) => return Ok(()),
+                    Err(error) if self.supervisor.is_none() => {
+                        tracing::warn!(execution_id = %self.id, error_kind = ?std::mem::discriminant(&error), "supervisor start failed");
+                        self.spawn_failed(&command, true, "supervisor_start_failed")
+                            .await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
                 }
             }
             Start::Reattach(adopt) => {
                 let (linked, record) = *adopt;
                 self.exec_dir = Some(PathBuf::from(&record.exec_dir));
+                self.ipc_socket = Some(PathBuf::from(&record.ipc_socket));
                 self.supervisor = Some((record.supervisor_pid, record.supervisor_start_ticks));
                 self.cli_started = record.cli_pid != 0;
                 self.start_cli_sent = self.cli_started;
@@ -517,7 +588,6 @@ impl Actor {
         self.journal_id = Uuid::parse_str(&attached.sj_journal_id).ok();
         self.last_seq = attached.last_sj_seq;
         self.acked_seq = attached.acked_sj_seq;
-        self.handed.clear();
         for input in &attached.received {
             if let Ok(id) = Uuid::parse_str(&input.command_id) {
                 self.handed.insert((id, input.dispatch_attempt));
@@ -573,17 +643,36 @@ impl Actor {
         let timers = self.shared.config.supervisor.clone();
         let data_dir = self.shared.data_dir().await?.clone();
         let generation = self.generation;
+        let runtime_dir = self.shared.runtime_dir.clone();
         let prepared = tokio::task::spawn_blocking(move || {
-            spawn::prepare(&data_dir, id, generation, conversation_id, &timers)
+            spawn::prepare(
+                &data_dir,
+                id,
+                generation,
+                conversation_id,
+                &timers,
+                runtime_dir.as_deref(),
+            )
         })
         .await
         .map_err(|_| ExecError::Shutdown)?;
         let prepared = match prepared {
             Ok(prepared) => prepared,
-            Err(_) => return self.spawn_failed(&command, false).await,
+            Err(error) => {
+                let reason = if matches!(
+                    error,
+                    ExecError::Ipc(crate::supervisor::ipc::IpcError::PathTooLong)
+                ) {
+                    "ipc_path_too_long"
+                } else {
+                    "supervisor_start_failed"
+                };
+                return self.spawn_failed(&command, false, reason).await;
+            }
         };
         let dir = prepared.dir.clone();
         self.exec_dir = Some(dir.clone());
+        self.ipc_socket = Some(prepared.socket.clone());
         let boot_id = self.shared.boot_id().await?.clone();
         let record = Ownership {
             execution_id: id.to_string(),
@@ -591,7 +680,7 @@ impl Actor {
             conversation_id: conversation_id.to_string(),
             boot_id,
             exec_dir: dir.to_string_lossy().into_owned(),
-            ipc_socket: dir.join("ipc.sock").to_string_lossy().into_owned(),
+            ipc_socket: prepared.socket.to_string_lossy().into_owned(),
             secret_sha256: sha256(&prepared.secret),
             ipc_protocol_version: IPC_PROTOCOL_VERSION,
             phase: OwnershipPhase::Spawning as i32,
@@ -616,12 +705,17 @@ impl Actor {
             self.cancel_start().await?;
             return Ok(false);
         }
-        let pid = match spawn::spawn_supervisor(&exe, &dir) {
-            Ok(pid) => pid,
-            Err(_) => return self.spawn_failed(&command, true).await,
+        let mut child = match spawn::spawn_supervisor(&exe, &dir) {
+            Ok(child) => child,
+            Err(_) => {
+                return self
+                    .spawn_failed(&command, true, "supervisor_start_failed")
+                    .await;
+            }
         };
+        let pid = child.id().ok_or(ExecError::Verify("child_pid"))?;
         let linked = match spawn::connect_attach(
-            &dir,
+            &prepared.socket,
             &prepared.secret,
             id,
             generation,
@@ -632,8 +726,10 @@ impl Actor {
         {
             Ok(linked) => linked,
             Err(_) => {
-                self.finish_orphan().await?;
-                return Ok(false);
+                child.kill().await?;
+                return self
+                    .spawn_failed(&command, true, "supervisor_start_failed")
+                    .await;
             }
         };
         let (supervisor_pid, ticks, journal) = (
@@ -649,6 +745,7 @@ impl Actor {
         })
         .await?;
         self.supervisor = Some((supervisor_pid, ticks));
+        child.detach();
         self.relink(linked);
         self.drain_mailbox();
         if self.stop_pending() {
@@ -664,17 +761,23 @@ impl Actor {
         start: &StartExecution,
         workdir: &Path,
     ) -> Result<(), ExecError> {
-        self.start_cli_sent = true;
-        self.send(down::Msg::StartCli(StartCli {
-            profile: start.harness.clone(),
-            workdir: workdir.to_string_lossy().into_owned(),
-            native_conversation_id: start.native_conversation_id.clone(),
-        }))
-        .await;
+        self.start_cli_sent = self
+            .send(down::Msg::StartCli(StartCli {
+                profile: start.harness.clone(),
+                workdir: workdir.to_string_lossy().into_owned(),
+                native_conversation_id: start.native_conversation_id.clone(),
+            }))
+            .await;
         Ok(())
     }
 
-    async fn spawn_failed(&mut self, command: &Command, owned: bool) -> Result<bool, ExecError> {
+    async fn spawn_failed(
+        &mut self,
+        command: &Command,
+        owned: bool,
+        reason: &str,
+    ) -> Result<bool, ExecError> {
+        reject(&self.shared, command, reason).await?;
         if owned {
             ownership_update(&self.shared, self.id, |record| {
                 record.phase = OwnershipPhase::Released as i32;
@@ -682,7 +785,6 @@ impl Actor {
             })
             .await?;
         }
-        reject(&self.shared, command, "supervisor_spawn_failed").await?;
         self.released = true;
         Ok(false)
     }
@@ -702,12 +804,7 @@ impl Actor {
                     ..
                 })
             )
-        }) || self
-            .shared
-            .cancelled_starts
-            .lock()
-            .expect("cancelled lock")
-            .contains(&self.id)
+        })
     }
 
     async fn cancel_start(&mut self) -> Result<(), ExecError> {
@@ -764,6 +861,9 @@ impl Actor {
 
     async fn main_loop(&mut self) -> Result<(), ExecError> {
         loop {
+            if *self.shutdown.borrow() {
+                return Ok(());
+            }
             while let Some(message) = self.pending.pop_front() {
                 self.on_msg(message).await?;
             }
@@ -774,6 +874,7 @@ impl Actor {
             tokio::select! {
                 biased;
                 _ = self.shutdown.changed() => return Ok(()),
+                _ = self.hub_rx.changed() => self.apply_hub().await?,
                 message = self.rx.recv() => match message {
                     Some(message) => self.on_msg(message).await?,
                     None => return Ok(()),
@@ -788,7 +889,6 @@ impl Actor {
                         permit.send(batch);
                     }
                 }
-                _ = self.hub_rx.changed() => self.apply_hub().await?,
                 () = reconnect_timer(self.reconnect_at) => self.check_link().await?,
             }
         }
@@ -813,7 +913,12 @@ impl Actor {
             return self.finish_orphan().await;
         };
         let secret = fs::read(dir.join("secret")).unwrap_or_default();
-        match spawn::connect_attach(&dir, &secret, self.id, self.generation, Some(pid), None).await
+        let socket = self
+            .ipc_socket
+            .clone()
+            .unwrap_or_else(|| dir.join("ipc.sock"));
+        match spawn::connect_attach(&socket, &secret, self.id, self.generation, Some(pid), None)
+            .await
         {
             Ok(linked) => {
                 self.relink(linked);
@@ -826,10 +931,7 @@ impl Actor {
                         Ok(open(store)?
                             .stored_commands()?
                             .into_iter()
-                            .filter(|command| {
-                                command.execution_id == id
-                                    && matches!(command.kind, Some(Kind::DeliverInput(_)))
-                            })
+                            .filter(|command| command.execution_id == id)
                             .collect::<Vec<_>>())
                     })
                     .await?;
@@ -843,6 +945,29 @@ impl Actor {
     }
 
     async fn send(&mut self, message: down::Msg) -> bool {
+        #[cfg(feature = "fault-injection")]
+        {
+            let fail = matches!(
+                message,
+                down::Msg::Deliver(_)
+                    | down::Msg::Cancel(_)
+                    | down::Msg::Withdraw(_)
+                    | down::Msg::Interrupt(_)
+                    | down::Msg::Stop(_)
+            ) && {
+                let mut count = self.shared.fail_sends.lock().expect("send fault lock");
+                if *count > 0 {
+                    *count -= 1;
+                    true
+                } else {
+                    false
+                }
+            };
+            if fail {
+                self.link_lost();
+                return false;
+            }
+        }
         let Some(link) = &mut self.link else {
             return false;
         };
@@ -884,13 +1009,13 @@ impl Actor {
             self.shared
                 .with_info(self.id, |info| info.acked_seq = acked);
         }
-        if self.link.is_some() {
-            self.send(down::Msg::SjAck(SjAck { up_to_seq: up_to }))
-                .await;
-        }
-        if self
-            .closed_seq
-            .is_some_and(|closed| self.acked_seq >= closed)
+        let delivered = self
+            .send(down::Msg::SjAck(SjAck { up_to_seq: up_to }))
+            .await;
+        if delivered
+            && self
+                .closed_seq
+                .is_some_and(|closed| self.acked_seq >= closed)
         {
             self.release().await?;
         }
@@ -911,6 +1036,25 @@ impl Actor {
             record.released_reason = outcome;
         })
         .await?;
+        if let Some((pid, ticks)) = self.supervisor {
+            while procfs::is_same_process(pid, ticks) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }
+        if let Some(socket) = &self.ipc_socket {
+            match fs::remove_file(socket) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        if let Some(dir) = &self.exec_dir {
+            match fs::remove_dir_all(dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
         self.shared.with_info(self.id, |info| {
             info.retired = true;
             info.attached = false;
@@ -923,6 +1067,14 @@ impl Actor {
         match message {
             Msg::Command(command) => self.on_command(command).await,
             Msg::SjAck(up_to) => self.on_ack(up_to).await,
+            Msg::Replay(committed) => {
+                self.outbox.clear();
+                self.send(down::Msg::ShipFrom(ShipFrom {
+                    committed_seq: committed,
+                }))
+                .await;
+                Ok(())
+            }
         }
     }
 
@@ -947,6 +1099,15 @@ impl Actor {
                     }
                 });
                 self.mark_start_terminal().await?;
+                if self.closed_seq.is_none() {
+                    self.closed_seq = Some(self.last_seq);
+                }
+                if self
+                    .closed_seq
+                    .is_some_and(|closed| self.acked_seq >= closed)
+                {
+                    self.release().await?;
+                }
             }
         }
         Ok(())
@@ -1005,6 +1166,12 @@ impl Actor {
                 }
                 Body::InputRejected(fact) => {
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
+                }
+                Body::AcceptanceUnconfirmed(fact) => {
+                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt))
+                }
+                Body::CancelLost(fact) => {
+                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt))
                 }
                 Body::CancelWon(fact) => {
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
@@ -1084,13 +1251,19 @@ impl Actor {
                     return self.shared.cj(vec![], self_terminal).await;
                 }
                 if !live || command.execution_generation != self.generation {
+                    if live && !self.handed.iter().any(|(id, _)| *id == cid) {
+                        return defer_unhanded(&self.shared, &command).await;
+                    }
                     return answer_without_execution(&self.shared, &command).await;
                 }
-                if self.handed.insert((cid, attempt)) {
-                    self.send(down::Msg::Deliver(Deliver {
-                        command: Some(command),
+                self.handed.insert((cid, attempt));
+                if !self
+                    .send(down::Msg::Deliver(Deliver {
+                        command: Some(command.clone()),
                     }))
-                    .await;
+                    .await
+                {
+                    self.waiting.push_back(command);
                 }
                 Ok(())
             }
@@ -1122,11 +1295,16 @@ impl Actor {
             }
             Some(Kind::Interrupt(_)) => {
                 if live && command.execution_generation == self.generation {
-                    self.send(down::Msg::Interrupt(InterruptRequest {
-                        command_id: cid_text,
-                        dispatch_attempt: attempt,
-                    }))
-                    .await;
+                    if !self
+                        .send(down::Msg::Interrupt(InterruptRequest {
+                            command_id: cid_text,
+                            dispatch_attempt: attempt,
+                        }))
+                        .await
+                    {
+                        self.waiting.push_back(command);
+                        return Ok(());
+                    }
                     self.shared.cj(vec![], self_terminal).await
                 } else if command.execution_generation != self.generation {
                     self.interrupt_status(&command, InterruptState::RejectedStale)
@@ -1137,13 +1315,17 @@ impl Actor {
                 }
             }
             Some(Kind::StopExecution(stop)) => {
-                if live {
-                    self.send(down::Msg::Stop(StopRequest {
-                        command_id: cid_text,
-                        dispatch_attempt: attempt,
-                        force: stop.force,
-                    }))
-                    .await;
+                if live
+                    && !self
+                        .send(down::Msg::Stop(StopRequest {
+                            command_id: cid_text,
+                            dispatch_attempt: attempt,
+                            force: stop.force,
+                        }))
+                        .await
+                {
+                    self.waiting.push_back(command);
+                    return Ok(());
                 }
                 self.shared.cj(vec![], self_terminal).await
             }
@@ -1196,9 +1378,12 @@ impl Actor {
                         target_dispatch_attempt: target_attempt,
                     })
                 };
-                self.send(message).await;
+                if self.send(message).await {
+                    return self.shared.cj(vec![], terminal_self(command)).await;
+                }
             }
-            return self.shared.cj(vec![], terminal_self(command)).await;
+            self.waiting.push_back(command.clone());
+            return Ok(());
         }
         self.cancelled_local.insert((target_id, target_attempt));
         let fact = if cancel {
@@ -1235,5 +1420,65 @@ async fn reconnect_timer(at: Option<Instant>) {
     match at {
         Some(at) => sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ExecutionConfig, exec::ExecutionManager, session_store::StoreThread,
+        store::WorkerStore,
+    };
+    use canterlot_proto::worker::v1::{DeliverInput, InputCancelLost, JournalRecord, RecordBody};
+
+    #[tokio::test]
+    async fn cancel_lost_releases_pending_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let cid = Uuid::now_v7().to_string();
+        store
+            .accept_command(&Command {
+                command_id: cid.clone(),
+                dispatch_attempt: 1,
+                execution_id: id.to_string(),
+                execution_generation: 1,
+                kind: Some(Kind::DeliverInput(DeliverInput::default())),
+            })
+            .unwrap();
+        assert!(!store.command_state(&cid).unwrap().unwrap().terminal);
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let journal = Uuid::now_v7();
+        actor.journal_id = Some(journal);
+        actor
+            .on_batch(SjBatch {
+                journal_id: journal.to_string(),
+                records: vec![JournalRecord {
+                    seq: 1,
+                    body: Some(RecordBody {
+                        body: Some(Body::CancelLost(InputCancelLost {
+                            command_id: cid.clone(),
+                            dispatch_attempt: 1,
+                            reason: "transmission_started".into(),
+                        })),
+                    }),
+                }],
+            })
+            .await
+            .unwrap();
+        assert!(
+            thread
+                .call(move |store| Ok(open(store)?.command_state(&cid)?.unwrap().terminal))
+                .await
+                .unwrap()
+        );
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
     }
 }
