@@ -189,6 +189,7 @@ impl HttpConfig {
                 return Err(invalid());
             }
         }
+        validate_user_header(&self.user_header).ok_or_else(invalid)?;
         if let Some(logout) = &self.logout_url {
             let uri = absolute_http_uri(logout).ok_or_else(invalid)?;
             if uri.scheme_str() != Some("https") {
@@ -203,6 +204,36 @@ impl HttpConfig {
         }
         Ok(())
     }
+}
+
+/// Имя заголовка личности: обычное имя, не из служебных и не из семейств `x-forwarded-*`, `x-canterlot-*`.
+fn validate_user_header(name: &str) -> Option<()> {
+    let name = axum::http::HeaderName::from_bytes(name.as_bytes()).ok()?;
+    let name = name.as_str();
+    const RESERVED: &[&str] = &[
+        "host",
+        "origin",
+        "cookie",
+        "authorization",
+        "proxy-authorization",
+        "forwarded",
+        "x-real-ip",
+        "true-client-ip",
+        "cf-connecting-ip",
+        "x-originating-ip",
+        "content-type",
+        "content-length",
+        "transfer-encoding",
+        "connection",
+        "upgrade",
+        "idempotency-key",
+        "x-correlation-id",
+    ];
+    let forbidden = RESERVED.contains(&name)
+        || name.starts_with("x-forwarded-")
+        || name.starts_with("x-canterlot-")
+        || name.starts_with("sec-");
+    (!forbidden).then_some(())
 }
 
 fn absolute_http_uri(value: &str) -> Option<tonic::codegen::http::Uri> {

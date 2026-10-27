@@ -5,7 +5,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 ## Состояние
 
 - Этап 0 завершён: оба CLI проходят обязательный набор возможностей, сводка в `docs/stage0/README.md`.
-- Этап 1.1 (фундамент) завершён: транспорт gRPC выбран (ADR-0001), локальный журнал (ADR-0002), контракт хаб–воркер v1, ядро доставки хаба на PostgreSQL. Этап 1.2a добавляет gRPC-сеансы, доставку команд и квитанций. HTTP/WS, исполнение команд агентом и PWA ещё не реализованы.
+- Этап 1.1 (фундамент) завершён: транспорт gRPC выбран (ADR-0001), локальный журнал (ADR-0002), контракт хаб–воркер v1, ядро доставки хаба на PostgreSQL. Этап 1.2a добавляет gRPC-сеансы, доставку команд и квитанций. Этап 1.3a добавляет HTTP-ядро хаба: вход по заголовку прокси, CSRF, формат ошибок, идемпотентные изменения, проверки живости и OpenAPI; остальные маршруты, WSS и PWA добавляются следующими задачами.
 
 ## Структура
 
@@ -17,6 +17,11 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `crates/canterlot-hub/` | Хаб: PostgreSQL, gRPC-сервер, диспетчер, outbox, факты агента и данные машин |
 | `crates/canterlot-hub/src/{runs,limits}.rs` | Ходы, расход по моделям и агентам, снимки лимитов и история |
 | `crates/canterlot-hub/src/{machine_info,singleton}.rs` | Каталог и метрики машин, проекция доступности и блокировки фоновых служб |
+| `crates/canterlot-hub/src/http/` | HTTP хаба на axum: вход по заголовку прокси, CSRF и Origin, ошибки, `healthz`/`readyz`, `me`, `config`, OpenAPI |
+| `crates/canterlot-hub/src/{background,dberr}.rs` | Единое место запуска фоновых служб; безопасное описание ошибок базы данных |
+| `docs/api/openapi.json` | Машиночитаемый контракт API, генерируется `scripts/gen-openapi.sh` |
+| `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка заголовков Caddy и Authelia |
+| `docs/adr/0004-browser-auth-forward-auth.md` | Вход браузера через прокси с forward-auth |
 | `spikes/` | Прототипы этапа 0, не продуктовый код |
 | `docs/stage0/` | Отчёты этапа 0: матрица возможностей, доказательства, ограничения |
 | `crates/canterlot-proto/src/harness.rs` | Единая таблица харнессов и провайдеров |
@@ -94,7 +99,7 @@ http2_keepalive_timeout = "10s"
 
 Обновление: сначала хаб, затем воркер. Откат хаба ниже уже использованной воркером capability не поддерживается.
 
-Таблицы пилота в `hub.toml` необязательны; показаны значения по умолчанию. В задаче 1 добавлен контракт конфигурации, HTTP-сервер и фоновые службы подключаются последующими задачами этапа 1.3a. Таблица `[http]` отсутствует по умолчанию; при её наличии обязательны непустые `trusted_proxies`, `owner_login`, `allowed_origins`.
+Таблицы пилота в `hub.toml` необязательны; показаны значения по умолчанию. Таблица `[http]` отсутствует по умолчанию: без неё хаб обслуживает только gRPC. При её наличии хаб слушает `listen` и требует непустые `trusted_proxies`, `owner_login`, `allowed_origins`; ниже раздел «HTTP: вход, CSRF и Caddy».
 
 ```toml
 [http]
@@ -296,6 +301,46 @@ canterlot-hub machine rotate-token --config ~/.config/canterlot/hub.toml --machi
 Этот флаг очищает привязку CJ; без него ротация сохраняет её. Сверка оставшихся
 нетерминальных исполнений относится к следующему этапу; сброс не подтверждает их завершение.
 `machine add` создаёт новую идентичность без привязки CJ.
+
+## HTTP: вход, CSRF и Caddy
+
+Хаб слушает обычный HTTP во внутренней сети; TLS и вход пользователя обеспечивает Caddy с Authelia (`forward_auth`). Хаб сам никого не аутентифицирует, он доверяет заголовку прокси при строгих условиях (ADR-0004):
+
+- заголовок `user_header` (по умолчанию `Remote-User`) принимается, только если TCP-адрес собеседника входит в `trusted_proxies`; `X-Forwarded-*` не читается никогда;
+- при заданном `proxy_secret_file` запрос обязан нести `X-Canterlot-Proxy` с тем же значением. Секрет нужен, когда у веб-хоста общий адрес для всех контейнеров (NAT) и один адрес доверенного прокси ещё не доказывает, что запрос прошёл через Authelia. Создайте его без перевода строки: `umask 077; openssl rand -hex 32 | tr -d '\n' > proxy-secret` (в файле допустимы только видимые ASCII-символы, не менее 32);
+- значение заголовка личности должно равняться `owner_login`; пустой, повторённый или отсутствующий заголовок даёт `401`, чужой логин от доверенного прокси даёт `403`;
+- изменяющий запрос несёт `Origin` из `allowed_origins`, заголовок `X-Canterlot-Client: 1` и `Idempotency-Key`; заголовков CORS хаб не отправляет, `OPTIONS` получает `405`.
+
+`GET /healthz` (живость) и `GET /readyz` (база отвечает, запись установки совпадает с манифестом) не требуют личности. Лимит JSON-тела задаёт `max_json_body_bytes`. Каждая строка журнала запросов содержит только метод, шаблон маршрута, статус, задержку и `correlation_id`; заголовки, query и тела в журнал не попадают.
+
+Caddy должен убрать служебные заголовки, присланные клиентом, до `forward_auth` и добавить секрет к запросу к хабу. Директивы `route` сохраняют порядок записи: без неё `request_header` выполнился бы после `forward_auth` и стёр бы только что скопированные заголовки.
+
+```caddyfile
+chat.example {
+    route {
+        request_header -Remote-User
+        request_header -Remote-Groups
+        request_header -Remote-Name
+        request_header -Remote-Email
+        request_header -X-Canterlot-Proxy
+
+        forward_auth authelia:9091 {
+            uri /api/authz/forward-auth
+            copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+        }
+
+        reverse_proxy hub:8080 {
+            header_up X-Canterlot-Proxy {file./run/secrets/canterlot-proxy}
+        }
+    }
+}
+```
+
+Authelia должна защищать весь хост, включая `/api/` и WSS. Адрес Caddy (или сеть контейнера) укажите в `trusted_proxies`. WSS-соединение живёт не дольше `[http.ws].max_connection_age`, после чего хаб закрывает его кодом 4401, а клиент переподключается через прокси и заново проходит проверку.
+
+Приёмка развёртывания, один раз и после каждого изменения Caddy: `scripts/check-proxy.sh https://chat.example cookies.txt`. Скрипт отправляет `GET /api/v1/me` с действующей сессией Authelia и поддельными `Remote-User: attacker` и `X-Canterlot-Proxy: forged`, затем тот же запрос без сессии. Он завершается ненулевым кодом, если ответ не состоит из `owner_id` и `login` владельца или если запрос без сессии дошёл до хаба. Файл `cookies.txt` — jar в формате curl (`curl -c`) с сессией Authelia; необязательная переменная `EXPECTED_LOGIN` сверяет `login`.
+
+Контракт API: `docs/api/openapi.json` (отдаётся как `GET /api/v1/openapi.json`) генерируется командой `canterlot-hub openapi`; `scripts/gen-openapi.sh` обновляет файл, а тест `openapi_is_served_and_committed_file_matches_generated` падает, пока файл устарел. Таблица кодов ошибок: `docs/design/api.md`.
 
 ## Обновление контракта пилота
 

@@ -1,0 +1,577 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "canterlot hub API",
+    "description": "HTTP и WSS контракт хаба. Личность задаёт прокси перед хабом; изменяющим запросам нужны Origin, X-Canterlot-Client: 1 и Idempotency-Key.",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/v1/config": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Лимиты и пороги, которыми клиент проверяет ввод до отправки.",
+        "operationId": "config",
+        "responses": {
+          "200": {
+            "description": "Настройки для клиента",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConfigView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет личности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой пользователь",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/me": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Личность владельца; PWA привязывает к `owner_id` локальные данные.",
+        "operationId": "me",
+        "responses": {
+          "200": {
+            "description": "Владелец",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeView"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Нет личности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой пользователь",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/openapi.json": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Машиночитаемый контракт API (`docs/api/openapi.json`).",
+        "operationId": "openapi_json",
+        "responses": {
+          "200": {
+            "description": "Документ OpenAPI",
+            "content": {
+              "application/json": {}
+            }
+          },
+          "401": {
+            "description": "Нет личности",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Чужой пользователь",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Живость процесса: без личности и без обращения к базе.",
+        "operationId": "healthz",
+        "responses": {
+          "200": {
+            "description": "Процесс жив",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/readyz": {
+      "get": {
+        "tags": [
+          "health"
+        ],
+        "summary": "Готовность: база отвечает, а запись установки совпадает с состоянием процесса и манифестом.",
+        "operationId": "readyz",
+        "responses": {
+          "200": {
+            "description": "Хаб готов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeView"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "База недоступна или установка не совпадает",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProbeView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ActivityView": {
+        "type": "object",
+        "required": [
+          "stalled_generating_secs",
+          "stalled_tool_secs"
+        ],
+        "properties": {
+          "stalled_generating_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "stalled_tool_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ArchiveReason": {
+        "type": "string",
+        "enum": [
+          "crunch",
+          "scheduled",
+          "live_execution"
+        ]
+      },
+      "AuthView": {
+        "type": "object",
+        "properties": {
+          "logout_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "ConfigView": {
+        "type": "object",
+        "required": [
+          "schema_version",
+          "limits",
+          "ws",
+          "activity",
+          "machines",
+          "limit_thresholds",
+          "defaults",
+          "auth"
+        ],
+        "properties": {
+          "activity": {
+            "$ref": "#/components/schemas/ActivityView"
+          },
+          "auth": {
+            "$ref": "#/components/schemas/AuthView"
+          },
+          "defaults": {
+            "$ref": "#/components/schemas/DefaultsView"
+          },
+          "limit_thresholds": {
+            "$ref": "#/components/schemas/LimitThresholdsView"
+          },
+          "limits": {
+            "$ref": "#/components/schemas/LimitsView"
+          },
+          "machines": {
+            "$ref": "#/components/schemas/MachinesView"
+          },
+          "schema_version": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "ws": {
+            "$ref": "#/components/schemas/WsView"
+          }
+        }
+      },
+      "DefaultsView": {
+        "type": "object",
+        "required": [
+          "crunch_resume_text"
+        ],
+        "properties": {
+          "crunch_resume_text": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "code",
+          "message",
+          "scope",
+          "retry",
+          "correlation_id"
+        ],
+        "properties": {
+          "code": {
+            "$ref": "#/components/schemas/ErrorCode"
+          },
+          "correlation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "details": {
+            "$ref": "#/components/schemas/ErrorDetails"
+          },
+          "message": {
+            "type": "string"
+          },
+          "retry": {
+            "$ref": "#/components/schemas/Retry"
+          },
+          "scope": {
+            "$ref": "#/components/schemas/ErrorScope"
+          }
+        }
+      },
+      "ErrorCode": {
+        "type": "string",
+        "enum": [
+          "unauthenticated",
+          "forbidden_user",
+          "origin_rejected",
+          "invalid_request",
+          "invalid_offset",
+          "not_found",
+          "method_not_allowed",
+          "idempotency_conflict",
+          "resource_limit",
+          "not_implemented",
+          "too_many_requests",
+          "db_unavailable",
+          "internal",
+          "queue_full",
+          "conversation_closed",
+          "execution_already_live",
+          "invalid_state"
+        ]
+      },
+      "ErrorDetails": {
+        "type": "object",
+        "description": "Закрытый словарь дополнительных полей: только перечисления и числа, без пользовательского текста.",
+        "properties": {
+          "reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ArchiveReason"
+            }
+          }
+        }
+      },
+      "ErrorEnvelope": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "$ref": "#/components/schemas/ErrorBody"
+          }
+        }
+      },
+      "ErrorScope": {
+        "type": "string",
+        "enum": [
+          "browser",
+          "auth",
+          "hub_db",
+          "delivery",
+          "worker_disk",
+          "cli_start",
+          "adapter_protocol",
+          "agent_service"
+        ]
+      },
+      "LimitThresholdsView": {
+        "type": "object",
+        "required": [
+          "weekly_reserve_pct",
+          "warn_pcts",
+          "stale_after_secs"
+        ],
+        "properties": {
+          "stale_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "warn_pcts": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "weekly_reserve_pct": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "LimitsView": {
+        "type": "object",
+        "required": [
+          "max_input_text_bytes",
+          "max_input_meta_bytes",
+          "max_attachment_bytes",
+          "max_attachments_per_input",
+          "queue_limit",
+          "upload_chunk_bytes"
+        ],
+        "properties": {
+          "max_attachment_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_attachments_per_input": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_input_meta_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "max_input_text_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "queue_limit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "upload_chunk_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "MachinesView": {
+        "type": "object",
+        "required": [
+          "disk_warn_pct",
+          "metrics_stale_after_secs"
+        ],
+        "properties": {
+          "disk_warn_pct": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "metrics_stale_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "MeView": {
+        "type": "object",
+        "required": [
+          "owner_id",
+          "login"
+        ],
+        "properties": {
+          "login": {
+            "type": "string"
+          },
+          "owner_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
+      "ProbeReason": {
+        "type": "string",
+        "enum": [
+          "database"
+        ]
+      },
+      "ProbeStatus": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "not_ready"
+        ]
+      },
+      "ProbeView": {
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "properties": {
+          "reason": {
+            "$ref": "#/components/schemas/ProbeReason"
+          },
+          "status": {
+            "$ref": "#/components/schemas/ProbeStatus"
+          }
+        }
+      },
+      "Retry": {
+        "type": "string",
+        "enum": [
+          "safe_same_key",
+          "explicit_new_operation",
+          "after_condition",
+          "never"
+        ]
+      },
+      "WsView": {
+        "type": "object",
+        "required": [
+          "path",
+          "protocol",
+          "delta_window_ms"
+        ],
+        "properties": {
+          "delta_window_ms": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "path": {
+            "type": "string"
+          },
+          "protocol": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

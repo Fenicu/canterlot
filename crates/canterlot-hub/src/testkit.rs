@@ -3,16 +3,100 @@ use uuid::Uuid;
 
 use crate::model::HoldReason;
 
+pub const TEST_OWNER_LOGIN: &str = "owner";
+pub const TEST_ORIGIN: &str = "https://chat.test";
+
 pub struct TestHub {
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
     pub addr: std::net::SocketAddr,
+    pub http_addr: Option<std::net::SocketAddr>,
+    pub app: Option<crate::http::AppState>,
     pub pki: tls::TestPki,
     pub installation: crate::installation::Installation,
     pub registry: crate::session::Registry,
     pub dispatcher: crate::dispatcher::Dispatcher,
     pub shutdown: tokio::sync::oneshot::Sender<()>,
     pub join: tokio::task::JoinHandle<Result<(), tonic::transport::Error>>,
+}
+
+impl TestHub {
+    pub fn http_addr(&self) -> std::net::SocketAddr {
+        self.http_addr.expect("the test hub was started with HTTP")
+    }
+
+    pub fn app(&self) -> &crate::http::AppState {
+        self.app
+            .as_ref()
+            .expect("the test hub was started with HTTP")
+    }
+}
+
+/// Конфигурация HTTP для тестов: доверен только 127.0.0.1, владелец `owner`.
+pub fn test_http_config() -> crate::config::HttpConfig {
+    crate::config::HttpConfig {
+        trusted_proxies: vec!["127.0.0.1/32".parse().expect("test proxy network")],
+        owner_login: TEST_OWNER_LOGIN.into(),
+        allowed_origins: vec![TEST_ORIGIN.into()],
+        ..Default::default()
+    }
+}
+
+/// Установка с манифестом во временном каталоге; каталог должен жить, пока жив хаб.
+async fn test_installation(
+    pool: &PgPool,
+) -> (
+    crate::installation::Installation,
+    std::path::PathBuf,
+    tempfile::TempDir,
+) {
+    use crate::installation;
+    let directory = tempfile::tempdir().expect("test installation directory");
+    let manifest = directory.path().join("manifest");
+    let existing: Option<installation::Installation> =
+        sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
+            .fetch_optional(pool)
+            .await
+            .expect("test installation lookup");
+    if let Some(existing) = existing {
+        std::fs::write(&manifest, format!(
+            "installation_id = \"{}\"\nrestore_generation = \"{}\"\nrestore_in_progress = false\n",
+            existing.installation_id, existing.restore_generation,
+        )).expect("test manifest");
+    } else {
+        installation::init(pool, &manifest)
+            .await
+            .expect("test installation init");
+    }
+    let installation = installation::check(pool, &manifest)
+        .await
+        .expect("test installation check");
+    (installation, manifest, directory)
+}
+
+/// Зависимости HTTP-слоя для тестов, которые собирают `AppState` сами.
+pub async fn test_app_deps(
+    pool: PgPool,
+    http: crate::config::HttpConfig,
+    proxy_secret: Option<Vec<u8>>,
+) -> (crate::http::AppDeps, tempfile::TempDir) {
+    let (installation, manifest, directory) = test_installation(&pool).await;
+    let timers = crate::config::HubTimers::default();
+    let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
+    let deps = crate::http::AppDeps {
+        pool,
+        registry: crate::session::Registry::new(timers),
+        installation,
+        dispatcher,
+        http,
+        proxy_secret,
+        limits: Default::default(),
+        activity: Default::default(),
+        machines: Default::default(),
+        manifest,
+        shutdown: tokio_util::sync::CancellationToken::new(),
+    };
+    (deps, directory)
 }
 
 pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> TestHub {
@@ -24,6 +108,28 @@ pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> T
         timers,
         listener,
         tls::test_pki(),
+        None,
+        #[cfg(feature = "fault-injection")]
+        Default::default(),
+    )
+    .await
+}
+
+/// Хаб с gRPC и HTTP на случайных портах loopback; HTTP использует `http`.
+pub async fn spawn_test_hub_http(
+    pool: PgPool,
+    timers: crate::config::HubTimers,
+    http: crate::config::HttpConfig,
+) -> TestHub {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("test listener");
+    spawn_on(
+        pool,
+        timers,
+        listener,
+        tls::test_pki(),
+        Some(http),
         #[cfg(feature = "fault-injection")]
         Default::default(),
     )
@@ -42,7 +148,7 @@ pub async fn spawn_test_hub_with_faults(
         tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test listener");
-    spawn_on(pool, timers, listener, pki, faults).await
+    spawn_on(pool, timers, listener, pki, None, faults).await
 }
 
 async fn spawn_on(
@@ -50,31 +156,17 @@ async fn spawn_on(
     timers: crate::config::HubTimers,
     listener: tokio::net::TcpListener,
     pki: tls::TestPki,
+    http: Option<crate::config::HttpConfig>,
     #[cfg(feature = "fault-injection")] faults: crate::fault_injection::Faults,
 ) -> TestHub {
-    use crate::{dispatcher, grpc, ingest, installation, outbox, session::Registry};
-    let directory = tempfile::tempdir().expect("test installation directory");
-    let manifest = directory.path().join("manifest");
-    let existing: Option<installation::Installation> =
-        sqlx::query_as("select installation_id, restore_generation, owner_id from installation")
-            .fetch_optional(&pool)
-            .await
-            .expect("test installation lookup");
-    if let Some(existing) = existing {
-        std::fs::write(&manifest, format!(
-            "installation_id = \"{}\"\nrestore_generation = \"{}\"\nrestore_in_progress = false\n",
-            existing.installation_id, existing.restore_generation,
-        )).expect("test manifest");
-    } else {
-        installation::init(&pool, &manifest)
-            .await
-            .expect("test installation init");
-    }
-    let installation = installation::check(&pool, &manifest)
-        .await
-        .expect("test installation check");
+    use crate::{
+        background::{Background, BackgroundDeps},
+        dispatcher, grpc, ingest,
+        session::Registry,
+    };
+    let (installation, manifest, directory) = test_installation(&pool).await;
     let registry = Registry::new(timers.clone());
-    let (dispatcher, rx) = dispatcher::Dispatcher::channel();
+    let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
     let ingest = ingest::Ingest::new(pool.clone())
@@ -93,40 +185,81 @@ async fn spawn_on(
     let key = pki.server_key_pem.clone();
     let addr = listener.local_addr().expect("test address");
     let (shutdown, stop) = tokio::sync::oneshot::channel();
-    let (stopping, stopped) = tokio::sync::watch::channel(false);
-    let outbox = tokio::spawn(outbox::run(
-        pool.clone(),
-        registry.clone(),
-        timers.clone(),
-        stopped.clone(),
-    ));
-    let projection = tokio::spawn(crate::machine_info::run_status_projection(
-        pool.clone(),
-        registry.clone(),
-        stopped.clone(),
-    ));
-    let dispatch = tokio::spawn(dispatcher::run(pool, registry.clone(), rx, timers, stopped));
+    let root = tokio_util::sync::CancellationToken::new();
+    let background = Background::start(BackgroundDeps {
+        pool: pool.clone(),
+        registry: registry.clone(),
+        timers,
+        dispatch_rx,
+    });
+    let (http_addr, app, http_listener) = match http {
+        Some(config) => {
+            let secret = config
+                .proxy_secret_file
+                .as_deref()
+                .map(|path| crate::http::load_proxy_secret(path).expect("test proxy secret"));
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("test http listener");
+            let app = crate::http::AppState::new(crate::http::AppDeps {
+                pool: pool.clone(),
+                registry: registry.clone(),
+                installation,
+                dispatcher: dispatcher.clone(),
+                http: config,
+                proxy_secret: secret,
+                limits: Default::default(),
+                activity: Default::default(),
+                machines: Default::default(),
+                manifest,
+                shutdown: root.clone(),
+            });
+            (
+                Some(listener.local_addr().expect("test http address")),
+                Some(app),
+                Some(listener),
+            )
+        }
+        None => (None, None, None),
+    };
+    let http_app = app.clone();
+    let root_for_http = root.clone();
     let join = tokio::spawn(async move {
-        let signal = stopping.clone();
+        let _manifest_dir = directory;
+        let trigger = root.clone();
+        tokio::spawn(async move {
+            let _ = stop.await;
+            trigger.cancel();
+        });
         #[cfg(feature = "fault-injection")]
         let serve = grpc::serve_test_with_goaway;
         #[cfg(not(feature = "fault-injection"))]
         let serve = grpc::serve_with_listener;
-        let result = serve(state, listener, &cert, &key, async move {
-            let _ = stop.await;
-            let _ = signal.send(true);
-        })
-        .await;
-        let _ = stopping.send(true);
-        outbox.await.expect("test outbox task");
-        dispatch.await.expect("test dispatcher task");
-        projection.await.expect("test machine status task");
+        let grpc_root = root.clone();
+        let grpc_serving = async move {
+            let result = serve(state, listener, &cert, &key, root.clone().cancelled_owned()).await;
+            grpc_root.cancel();
+            result
+        };
+        let http_root = root_for_http;
+        let http_serving = async move {
+            if let (Some(app), Some(listener)) = (http_app, http_listener) {
+                crate::http::serve(app, listener, http_root.clone().cancelled_owned())
+                    .await
+                    .expect("test http server");
+                http_root.cancel();
+            }
+        };
+        let (result, ()) = tokio::join!(grpc_serving, http_serving);
+        background.stop().await.expect("test background services");
         result
     });
     TestHub {
         #[cfg(feature = "fault-injection")]
         faults,
         addr,
+        http_addr,
+        app,
         pki,
         installation,
         registry,
@@ -271,4 +404,202 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
     crate::machine_info::apply_report(pool, owner, machine_id, &report, Uuid::now_v7())
         .await
         .expect("seed catalog");
+}
+
+use axum::{
+    Router,
+    body::{Body, Bytes},
+    extract::ConnectInfo,
+    http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
+};
+use serde::de::DeserializeOwned;
+use serde_json::Value;
+
+pub struct TestResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+impl TestResponse {
+    pub fn json<T: DeserializeOwned>(&self) -> T {
+        serde_json::from_slice(&self.body).expect("response body is JSON")
+    }
+}
+
+#[derive(Clone)]
+enum Target {
+    InProcess {
+        router: Router,
+        peer: Option<std::net::SocketAddr>,
+    },
+    Socket {
+        addr: std::net::SocketAddr,
+        source: Option<std::net::IpAddr>,
+    },
+}
+
+/// HTTP-клиент для тестов: напрямую в роутер (адрес собеседника задаётся) или по настоящему сокету
+/// (исходный адрес можно выбрать из 127.0.0.0/8).
+#[derive(Clone)]
+pub struct TestClient {
+    target: Target,
+    headers: Vec<(HeaderName, HeaderValue)>,
+}
+
+impl TestClient {
+    pub fn in_process(router: Router) -> Self {
+        Self {
+            target: Target::InProcess {
+                router,
+                peer: Some("127.0.0.1:40000".parse().expect("test peer")),
+            },
+            headers: Vec::new(),
+        }
+    }
+
+    pub async fn over_socket(addr: std::net::SocketAddr) -> Self {
+        Self {
+            target: Target::Socket { addr, source: None },
+            headers: Vec::new(),
+        }
+    }
+
+    /// Добавляет заголовок; повторное имя даёт второе значение, а не замену.
+    pub fn with_header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((
+            HeaderName::from_bytes(name.as_bytes()).expect("test header name"),
+            HeaderValue::from_bytes(value.as_bytes()).expect("test header value"),
+        ));
+        self
+    }
+
+    /// Заголовки, с которыми прокси пропускает владельца: личность, Origin и CSRF-заголовок.
+    pub fn as_owner(self) -> Self {
+        self.with_header("Remote-User", TEST_OWNER_LOGIN)
+            .with_header("Origin", TEST_ORIGIN)
+            .with_header("X-Canterlot-Client", "1")
+    }
+
+    /// Адрес собеседника для запросов напрямую в роутер.
+    pub fn with_peer(mut self, peer: std::net::SocketAddr) -> Self {
+        if let Target::InProcess { peer: slot, .. } = &mut self.target {
+            *slot = Some(peer);
+        }
+        self
+    }
+
+    /// Запрос без `ConnectInfo`, как при неверной сборке сервера.
+    pub fn without_peer(mut self) -> Self {
+        if let Target::InProcess { peer: slot, .. } = &mut self.target {
+            *slot = None;
+        }
+        self
+    }
+
+    /// Исходный адрес сокета клиента.
+    pub fn from_source(mut self, source: std::net::IpAddr) -> Self {
+        if let Target::Socket { source: slot, .. } = &mut self.target {
+            *slot = Some(source);
+        }
+        self
+    }
+
+    pub async fn send(
+        &self,
+        method: Method,
+        path: &str,
+        key: Option<&str>,
+        body: Option<Value>,
+    ) -> TestResponse {
+        let bytes = body.map(|body| serde_json::to_vec(&body).expect("test body"));
+        self.send_with(method, path, key, bytes).await
+    }
+
+    /// Тело как есть, с типом `application/json`.
+    pub async fn send_raw(
+        &self,
+        method: Method,
+        path: &str,
+        key: Option<&str>,
+        body: Vec<u8>,
+    ) -> TestResponse {
+        self.send_with(method, path, key, Some(body)).await
+    }
+
+    async fn send_with(
+        &self,
+        method: Method,
+        path: &str,
+        key: Option<&str>,
+        body: Option<Vec<u8>>,
+    ) -> TestResponse {
+        let mut builder = Request::builder().method(method).uri(path);
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        if let Some(key) = key {
+            builder = builder.header(
+                "idempotency-key",
+                HeaderValue::from_bytes(key.as_bytes()).expect("test key"),
+            );
+        }
+        let payload = match body {
+            Some(bytes) => {
+                builder = builder.header("content-type", "application/json");
+                Body::from(bytes)
+            }
+            None => Body::empty(),
+        };
+        let mut request = builder.body(payload).expect("test request");
+        match &self.target {
+            Target::InProcess { router, peer } => {
+                use tower::ServiceExt;
+                if let Some(peer) = peer {
+                    request.extensions_mut().insert(ConnectInfo(*peer));
+                }
+                let response = router
+                    .clone()
+                    .oneshot(request)
+                    .await
+                    .expect("infallible router");
+                let (parts, body) = response.into_parts();
+                TestResponse {
+                    status: parts.status,
+                    headers: parts.headers,
+                    body: axum::body::to_bytes(body, usize::MAX)
+                        .await
+                        .expect("response body"),
+                }
+            }
+            Target::Socket { addr, source } => {
+                use http_body_util::BodyExt;
+                use hyper_util::{
+                    client::legacy::{Client, connect::HttpConnector},
+                    rt::TokioExecutor,
+                };
+                let mut connector = HttpConnector::new();
+                connector.set_local_address(*source);
+                let client: Client<_, Body> = Client::builder(TokioExecutor::new())
+                    .pool_max_idle_per_host(0)
+                    .build(connector);
+                let (mut parts, body) = request.into_parts();
+                parts.uri = format!("http://{addr}{path}").parse().expect("test uri");
+                parts
+                    .headers
+                    .entry("host")
+                    .or_insert(HeaderValue::from_str(&addr.to_string()).expect("test host"));
+                let response = client
+                    .request(Request::from_parts(parts, body))
+                    .await
+                    .expect("test socket request");
+                let (parts, body) = response.into_parts();
+                TestResponse {
+                    status: parts.status,
+                    headers: parts.headers,
+                    body: body.collect().await.expect("response body").to_bytes(),
+                }
+            }
+        }
+    }
 }

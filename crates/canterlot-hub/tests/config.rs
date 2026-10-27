@@ -78,6 +78,29 @@ fn readme_documents_running_both_services() {
     assert!(!readme.contains("сетевой сервер ещё не запускается"));
 }
 
+#[test]
+fn readme_hub_toml_examples_load_without_worker_tables() {
+    let readme = include_str!("../../../README.md");
+    let hub_part = readme
+        .split("На машине воркера сохраните `worker.toml`")
+        .next()
+        .unwrap();
+    let mut config = String::new();
+    for block in hub_part.split("```toml\n").skip(1) {
+        config.push_str(block.split("\n```").next().unwrap());
+        config.push('\n');
+    }
+    assert!(config.contains("[http]") && config.contains("[timers]"));
+    assert!(
+        !config.contains("[execution"),
+        "worker.toml table in the hub example"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, config).unwrap();
+    HubConfig::load(&path).unwrap();
+}
+
 const PILOT_BASE: &str = "database_url_file = 'db'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert'\ntls_key = 'key'\nmanifest = 'manifest'\n";
 const HTTP_BASE: &str = "[http]\ntrusted_proxies = ['127.0.0.0/8', '::1/128']\nowner_login = 'owner'\nallowed_origins = ['https://chat.example:8443']\n";
 

@@ -1,7 +1,8 @@
-use serde::Serialize;
+use futures_util::future::BoxFuture;
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use sqlx::PgConnection;
+use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
 #[derive(Debug, PartialEq)]
@@ -79,5 +80,87 @@ pub(crate) fn validate_key(key: &str) -> Result<(), &'static str> {
         Err("invalid_idempotency_key")
     } else {
         Ok(())
+    }
+}
+
+/// Тот же ключ уже занят другой операцией или другим запросом.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdempotencyConflict;
+
+#[derive(Debug, PartialEq)]
+pub struct Outcome<T> {
+    pub value: T,
+    pub replayed: bool,
+}
+
+/// Выполняет изменение без собственной обработки ключа в одной транзакции с записью ключа.
+/// Повтор возвращает сохранённый ответ без запуска `op`; потерянная гонка за ключ откатывает
+/// все эффекты `op` и повторяет ответ победителя.
+pub async fn run_in_tx<T, E, F>(
+    pool: &PgPool,
+    owner_id: Uuid,
+    key: &str,
+    operation: &str,
+    request: &impl Serialize,
+    conversation_id: Option<Uuid>,
+    op: F,
+) -> Result<Outcome<T>, E>
+where
+    T: Serialize + DeserializeOwned,
+    E: From<sqlx::Error> + From<IdempotencyConflict>,
+    F: for<'c> FnOnce(&'c mut PgConnection) -> BoxFuture<'c, Result<T, E>>,
+{
+    let hash = request_hash(operation, request);
+    let replay = |stored: Value| -> Result<Outcome<T>, E> {
+        serde_json::from_value(stored)
+            .map(|value| Outcome {
+                value,
+                replayed: true,
+            })
+            .map_err(|error| E::from(sqlx::Error::Decode(Box::new(error))))
+    };
+    let mut tx = pool.begin().await?;
+    match lookup(&mut tx, owner_id, key, operation, &hash).await? {
+        Begin::Replay(stored) => {
+            tx.rollback().await?;
+            return replay(stored);
+        }
+        Begin::Conflict => {
+            tx.rollback().await?;
+            return Err(IdempotencyConflict.into());
+        }
+        Begin::New => {}
+    }
+    let value = match op(&mut tx).await {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            return Err(error);
+        }
+    };
+    let response =
+        serde_json::to_value(&value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+    if record(
+        &mut tx,
+        owner_id,
+        key,
+        operation,
+        &hash,
+        &response,
+        conversation_id,
+    )
+    .await?
+    {
+        tx.commit().await?;
+        return Ok(Outcome {
+            value,
+            replayed: false,
+        });
+    }
+    tx.rollback().await?;
+    let mut conn = pool.acquire().await?;
+    match lookup(&mut conn, owner_id, key, operation, &hash).await? {
+        Begin::Replay(stored) => replay(stored),
+        Begin::New | Begin::Conflict => Err(IdempotencyConflict.into()),
     }
 }

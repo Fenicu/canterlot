@@ -3,7 +3,9 @@
 use std::{fs, io::Write, path::PathBuf, process::ExitCode};
 
 use canterlot_hub::{
-    config::HubConfig, db, dispatcher, grpc, ingest, installation, machines, outbox,
+    background::{Background, BackgroundDeps},
+    config::HubConfig,
+    db, dispatcher, grpc, http, ingest, installation, machines,
     session::Registry,
 };
 use clap::{Parser, Subcommand};
@@ -31,6 +33,8 @@ enum Command {
         command: MachineCommand,
     },
     Serve(ConfigArgs),
+    /// Печатает документ OpenAPI (содержимое docs/api/openapi.json) без конфига и базы.
+    Openapi,
 }
 
 #[derive(Subcommand)]
@@ -72,6 +76,10 @@ async fn main() -> ExitCode {
 
 async fn run(args: Args) -> Result<(), String> {
     let config = match &args.command {
+        Command::Openapi => {
+            return write!(std::io::stdout().lock(), "{}", http::openapi::render())
+                .map_err(|_| "output_error".to_owned());
+        }
         Command::Init(config) | Command::Serve(config) => config,
         Command::Machine { command } => match command {
             MachineCommand::Add { config, .. }
@@ -128,6 +136,7 @@ async fn run(args: Args) -> Result<(), String> {
                 .map_err(|error| error.to_string())?;
             serve(pool.clone(), config, installation).await?;
         }
+        Command::Openapi => unreachable!("handled before the config is loaded"),
         Command::Machine { command } => {
             let installation = installation::check(&pool, &config.manifest)
                 .await
@@ -186,46 +195,100 @@ async fn serve(
     let key = fs::read_to_string(&config.tls_key).map_err(|_| "tls_key_file_error".to_owned())?;
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .map_err(|_| "signal_error".to_owned())?;
-    let registry = Registry::new(config.timers.clone());
-    let (dispatcher, rx) = dispatcher::Dispatcher::channel();
-    let mut state = grpc::HubGrpc::new(
-        pool.clone(),
-        registry.clone(),
-        installation,
-        config.timers.clone(),
-    );
+    let HubConfig {
+        grpc_listen,
+        manifest,
+        timers,
+        http: http_config,
+        limits,
+        activity,
+        machines,
+        ..
+    } = config;
+    let http_parts = match http_config {
+        Some(http_config) => {
+            let secret = http_config
+                .proxy_secret_file
+                .as_deref()
+                .map(http::load_proxy_secret)
+                .transpose()
+                .map_err(str::to_owned)?;
+            let listener = tokio::net::TcpListener::bind(http_config.listen)
+                .await
+                .map_err(|_| "http_bind_error".to_owned())?;
+            Some((http_config, secret, listener))
+        }
+        None => {
+            tracing::info!(kind = "http_disabled", "no [http] table, serving gRPC only");
+            None
+        }
+    };
+    let registry = Registry::new(timers.clone());
+    let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
+    let mut state =
+        grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
     state.ingest = std::sync::Arc::new(
         ingest::Ingest::new(pool.clone())
-            .with_dispatcher(dispatcher)
+            .with_dispatcher(dispatcher.clone())
             .with_registry(registry.clone())
-            .with_limits(config.limits),
+            .with_limits(limits.clone()),
     );
-    let (shutdown, stopped) = tokio::sync::watch::channel(false);
-    let outbox = tokio::spawn(outbox::run(
-        pool.clone(),
-        registry.clone(),
-        config.timers.clone(),
-        stopped.clone(),
-    ));
-    let projection = tokio::spawn(canterlot_hub::machine_info::run_status_projection(
-        pool.clone(),
-        registry.clone(),
-        stopped.clone(),
-    ));
-    let dispatch = tokio::spawn(dispatcher::run(pool, registry, rx, config.timers, stopped));
-    let signal = shutdown.clone();
-    let result = grpc::serve(state, config.grpc_listen, &cert, &key, async move {
+    let background = Background::start(BackgroundDeps {
+        pool: pool.clone(),
+        registry: registry.clone(),
+        timers,
+        dispatch_rx,
+    });
+    let root = tokio_util::sync::CancellationToken::new();
+    let trigger = root.clone();
+    tokio::spawn(async move {
         tokio::select! {
             _ = sigterm.recv() => {},
             _ = tokio::signal::ctrl_c() => {},
         }
-        let _ = signal.send(true);
-    })
-    .await;
-    let _ = shutdown.send(true);
-    let (outbox, dispatch, projection) = tokio::join!(outbox, dispatch, projection);
-    projection.map_err(|_| "machine_status_task_error".to_owned())?;
-    outbox.map_err(|_| "outbox_task_error".to_owned())?;
-    dispatch.map_err(|_| "dispatcher_task_error".to_owned())?;
-    result.map_err(|_| "grpc_server_error".to_owned())
+        trigger.cancel();
+    });
+    // Любой из серверов, завершившись, останавливает второй.
+    let grpc_root = root.clone();
+    let grpc_serving = async {
+        let result = grpc::serve(
+            state,
+            grpc_listen,
+            &cert,
+            &key,
+            grpc_root.clone().cancelled_owned(),
+        )
+        .await;
+        grpc_root.cancel();
+        result.map_err(|_| "grpc_server_error".to_owned())
+    };
+    let http_root = root.clone();
+    let http_serving = async move {
+        let Some((http_config, proxy_secret, listener)) = http_parts else {
+            return Ok(());
+        };
+        let app = http::AppState::new(http::AppDeps {
+            pool,
+            registry,
+            installation,
+            dispatcher,
+            http: http_config,
+            proxy_secret,
+            limits,
+            activity,
+            machines,
+            manifest,
+            shutdown: http_root.clone(),
+        });
+        let result = http::serve(app, listener, http_root.clone().cancelled_owned()).await;
+        http_root.cancel();
+        result.map_err(|_| "http_server_error".to_owned())
+    };
+    let (grpc_result, http_result) = tokio::join!(grpc_serving, http_serving);
+    background
+        .stop()
+        .await
+        .map_err(|failed| failed.0.to_owned())?;
+    http_result?;
+    grpc_result
 }
