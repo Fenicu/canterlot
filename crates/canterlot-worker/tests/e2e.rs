@@ -122,6 +122,9 @@ impl Fixture {
         let ca_cert = directory.path().join("ca.pem");
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let config = WorkerConfig {
+            machine: Default::default(),
+            instruction_profiles: Vec::new(),
+            attachments: Default::default(),
             hub_url: proxy.url.clone(),
             ca_cert,
             token_file,

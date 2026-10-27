@@ -22,6 +22,7 @@ fn deliver_input(text: String) -> Command {
             content: vec![ContentBlock {
                 block: Some(content_block::Block::Text(TextBlock { text })),
             }],
+            ..Default::default()
         })),
     }
 }
@@ -146,6 +147,7 @@ fn hello_has_no_credential_field() {
         }],
         boot_id: "019a1b10-0000-7000-8000-00000000000a".into(),
         stream_kind: StreamKind::Control as i32,
+        ..Default::default()
     };
     assert_eq!(
         Hello::decode(hello.encode_to_vec().as_slice()).unwrap(),
@@ -429,6 +431,7 @@ fn exec_records_roundtrip() {
         kind: "text".into(),
         input_command_id: "command".into(),
         parent_block_id: "parent".into(),
+        ..Default::default()
     });
     assert_roundtrip(CommandStored {
         command_id: "command".into(),
@@ -452,6 +455,7 @@ fn exec_records_roundtrip() {
         text: String::new(),
         checksum: "a".repeat(64),
         text_omitted: true,
+        ..Default::default()
     };
     assert_roundtrip(final_block.clone());
     let mut batch = record_batch("é".repeat(MAX_BLOCK_DELTA_BYTES / 2));
@@ -527,9 +531,11 @@ fn ipc_messages_roundtrip_and_limit() {
             profile: "synthetic".into(),
             workdir: "/tmp/w".into(),
             native_conversation_id: "native".into(),
+            ..Default::default()
         }),
         ipc::control_to_supervisor::Msg::Deliver(ipc::Deliver {
             command: Some(deliver_input("hello".into())),
+            ..Default::default()
         }),
         ipc::control_to_supervisor::Msg::Cancel(CancelInput {
             target_command_id: "command".into(),
@@ -597,6 +603,7 @@ fn ipc_messages_roundtrip_and_limit() {
     }
     let mut deliver = ipc::Deliver {
         command: Some(deliver_input("x".repeat(IPC_MAX_MESSAGE_BYTES - 1000))),
+        ..Default::default()
     };
     let padding = IPC_MAX_MESSAGE_BYTES - deliver.encoded_len();
     let Some(command::Kind::DeliverInput(input)) = &mut deliver.command.as_mut().unwrap().kind
@@ -648,6 +655,7 @@ fn block_and_deliver_payloads_are_redacted_in_debug() {
     };
     let deliver = ipc::Deliver {
         command: Some(deliver_input(marker.into())),
+        ..Default::default()
     };
     assert_eq!(
         format!("{delta:?}"),
@@ -784,4 +792,501 @@ fn ipc_authentication_debug_redacts_secret_and_verifier() {
         assert!(!debug.contains(&format!("{secret:?}")));
         assert!(debug.contains(&secret.len().to_string()));
     }
+}
+
+#[test]
+fn pilot_records_roundtrip() {
+    use canterlot_proto::worker::v1::*;
+    let observation = LimitObservation {
+        provider: "claude".into(),
+        window: LimitWindow::FiveHour as i32,
+        used_permille: 954,
+        resets_at_ms: 123456,
+        observed_machine_ms: 123000,
+    };
+    for (tag, body) in [
+        (23, record_body::Body::LimitObserved(observation.clone())),
+        (
+            24,
+            record_body::Body::LimitReached(LimitReached {
+                execution_id: "execution".into(),
+                provider: "claude".into(),
+                window: LimitWindow::Weekly as i32,
+                resets_at_ms: 456789,
+                input_command_id: "input".into(),
+            }),
+        ),
+        (
+            25,
+            record_body::Body::AttachmentReady(AttachmentReady {
+                command_id: "command".into(),
+                dispatch_attempt: 2,
+                attachment_id: "attachment".into(),
+            }),
+        ),
+        (
+            26,
+            record_body::Body::AttachmentFailed(AttachmentFailed {
+                command_id: "command".into(),
+                dispatch_attempt: 3,
+                attachment_id: "attachment".into(),
+                reason: "hub_unreachable".into(),
+                retryable: true,
+            }),
+        ),
+    ] {
+        let record = RecordBody { body: Some(body) };
+        assert_eq!(
+            &record.encode_to_vec()[..2],
+            &[((tag << 3 | 2) & 127) as u8 | 128, 1]
+        );
+        assert_roundtrip(record);
+    }
+    let report = MachineReport {
+        worker_version: "0.1.0".into(),
+        allowed_roots: vec!["/tmp/w".into()],
+        harnesses: vec![HarnessInfo {
+            harness: "claude_code".into(),
+            provider: "claude".into(),
+            title: "Клод".into(),
+            images: true,
+            settings_midsession: true,
+            permission_modes: vec!["bypass".into()],
+            models: vec![ModelInfo {
+                id: "model".into(),
+                title: "Модель".into(),
+                efforts: vec!["high".into()],
+            }],
+        }],
+        profiles: vec![InstructionProfile {
+            name: "owner".into(),
+            title: "Как у владельца".into(),
+            description: "Инструкции владельца".into(),
+            harnesses: vec!["claude_code".into()],
+        }],
+        max_attachment_bytes: 104_857_600,
+        max_attachments_per_input: 10,
+        containment: "process_group".into(),
+        os: "Debian 13 · 6.12".into(),
+    };
+    let metrics = MachineMetrics {
+        machine_time_ms: 123456,
+        cpu_cores: 8,
+        cpu_permille: 125,
+        mem_total_bytes: 16000,
+        mem_available_bytes: 8000,
+        disks: vec![DiskUsage {
+            label: "data".into(),
+            total_bytes: 10000,
+            free_bytes: 5000,
+        }],
+        load1_centi: 123,
+        load5_centi: 45,
+        load15_centi: 67,
+        executions: vec![ExecutionProcess {
+            execution_id: "execution".into(),
+            alive: true,
+            cpu_permille: 80,
+            rss_bytes: 1000,
+        }],
+    };
+    let limits = LimitsReport {
+        observations: vec![observation],
+    };
+    assert_roundtrip(report.clone());
+    assert_roundtrip(metrics.clone());
+    assert_roundtrip(limits.clone());
+    for (tag, msg) in [
+        (5, control_up::Msg::MachineReport(report)),
+        (6, control_up::Msg::MachineMetrics(metrics)),
+        (7, control_up::Msg::LimitsReport(limits)),
+    ] {
+        let message = ControlUp { msg: Some(msg) };
+        assert_eq!(message.encode_to_vec()[0], tag << 3 | 2);
+        assert_roundtrip(message);
+    }
+    let poll = PollLimits {
+        provider: "codex".into(),
+    };
+    assert_roundtrip(poll.clone());
+    let message = ControlDown {
+        msg: Some(control_down::Msg::PollLimits(poll)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 5 << 3 | 2);
+    assert_roundtrip(message);
+    assert_roundtrip(FetchAttachmentRequest {
+        attachment_id: "attachment".into(),
+        offset: 131072,
+    });
+    for (number, name) in [
+        (0, "LIMIT_WINDOW_UNSPECIFIED"),
+        (1, "LIMIT_WINDOW_FIVE_HOUR"),
+        (2, "LIMIT_WINDOW_WEEKLY"),
+    ] {
+        assert_eq!(LimitWindow::try_from(number).unwrap().as_str_name(), name);
+    }
+}
+
+#[test]
+fn attachment_chunk_and_refs_fit_message_limits() {
+    use canterlot_proto::{limits::*, worker::v1::*};
+    assert_eq!(MAX_ATTACHMENT_BYTES, 104_857_600);
+    assert_eq!(MAX_ATTACHMENTS_PER_INPUT, 10);
+    assert_eq!(MAX_ATTACHMENT_NAME_BYTES, 255);
+    assert_eq!(MAX_METRICS_EXECUTIONS, 256);
+    let chunk = AttachmentChunk {
+        offset: 131072,
+        data: vec![42; MAX_FILE_CHUNK_BYTES],
+        last: true,
+    };
+    assert!(chunk.encoded_len() <= MAX_MESSAGE_BYTES);
+    assert_roundtrip(chunk);
+    let mut command = deliver_input("é".repeat(MAX_INPUT_TEXT_BYTES / 2));
+    let Some(command::Kind::DeliverInput(input)) = &mut command.kind else {
+        unreachable!()
+    };
+    input
+        .content
+        .extend((0..MAX_ATTACHMENTS_PER_INPUT).map(|_| ContentBlock {
+            block: Some(content_block::Block::Attachment(AttachmentRef {
+                attachment_id: "019a1b10-0000-7000-8000-000000000001".into(),
+                name: "x".repeat(MAX_ATTACHMENT_NAME_BYTES),
+                mime: "application/octet-stream".into(),
+                size: MAX_ATTACHMENT_BYTES,
+                sha256: "a".repeat(64),
+                image: false,
+            })),
+        }));
+    input.settings = Some(SettingsOverride {
+        model: "model".into(),
+        effort: "high".into(),
+        permission_mode: "bypass".into(),
+    });
+    assert_eq!(check_deliver_input(&command), Ok(()));
+    assert_roundtrip(command);
+}
+
+#[test]
+fn pilot_payloads_are_redacted_in_debug() {
+    use canterlot_proto::worker::{ipc, v1::*};
+    let marker = "PRIVATE_PILOT_MARKER_123";
+    let attachment = AttachmentRef {
+        attachment_id: marker.into(),
+        name: marker.into(),
+        mime: marker.into(),
+        size: 987654,
+        sha256: marker.into(),
+        image: true,
+    };
+    let chunk = AttachmentChunk {
+        data: marker.as_bytes().to_vec(),
+        ..Default::default()
+    };
+    let file = ipc::LocalFile {
+        path: marker.into(),
+        name: marker.into(),
+        mime: marker.into(),
+        size: 987654,
+        image: true,
+    };
+    for debug in [
+        format!("{attachment:?}"),
+        format!("{chunk:?}"),
+        format!("{file:?}"),
+    ] {
+        assert!(!debug.contains(marker));
+        assert!(debug.contains("987654") || debug.contains(&marker.len().to_string()));
+    }
+    let deliver = ipc::Deliver {
+        command: None,
+        files: vec![file],
+    };
+    assert_roundtrip(deliver.clone());
+    assert!(!format!("{deliver:?}").contains(marker));
+    for debug in [
+        format!(
+            "{:?}",
+            BlockStarted {
+                summary: marker.into(),
+                tool_name: marker.into(),
+                agent: marker.into(),
+                model: marker.into(),
+                ..Default::default()
+            }
+        ),
+        format!(
+            "{:?}",
+            BlockFinal {
+                summary: marker.into(),
+                text: marker.into(),
+                ..Default::default()
+            }
+        ),
+        format!(
+            "{:?}",
+            PhaseChanged {
+                summary: marker.into(),
+                tool_name: marker.into(),
+                ..Default::default()
+            }
+        ),
+    ] {
+        assert!(!debug.contains(marker));
+    }
+}
+
+#[test]
+fn n_minus_one_decoders_skip_new_fields() {
+    use canterlot_proto::worker::v1::*;
+    #[derive(Clone, PartialEq, Message)]
+    struct OldRunFinished {
+        #[prost(string, tag = "1")]
+        execution_id: String,
+        #[prost(string, tag = "2")]
+        input_command_id: String,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct OldBlockStarted {
+        #[prost(string, tag = "1")]
+        block_id: String,
+        #[prost(uint64, tag = "2")]
+        rev: u64,
+        #[prost(string, tag = "3")]
+        kind: String,
+        #[prost(string, tag = "4")]
+        input_command_id: String,
+        #[prost(string, tag = "5")]
+        parent_block_id: String,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct OldStartExecution {
+        #[prost(string, tag = "1")]
+        conversation_id: String,
+        #[prost(string, tag = "2")]
+        harness: String,
+        #[prost(string, tag = "3")]
+        workdir: String,
+        #[prost(string, tag = "4")]
+        native_conversation_id: String,
+    }
+    let old = OldRunFinished {
+        execution_id: "execution".into(),
+        input_command_id: "input".into(),
+    };
+    let new = RunFinished {
+        execution_id: old.execution_id.clone(),
+        input_command_id: old.input_command_id.clone(),
+        usage: vec![ModelUsage {
+            model: "model".into(),
+            agent: "main".into(),
+            input_tokens: 100,
+            output_tokens: 30,
+            cache_read_tokens: 10,
+            cache_write_tokens: 5,
+        }],
+        context_tokens: 1000,
+        context_window_tokens: 200000,
+        duration_ms: 1234,
+        machine_time_ms: 123456,
+    };
+    assert_eq!(
+        OldRunFinished::decode(new.encode_to_vec().as_slice()).unwrap(),
+        old
+    );
+    assert_roundtrip(new);
+    let old = OldBlockStarted {
+        block_id: "block".into(),
+        rev: 2,
+        kind: "tool".into(),
+        input_command_id: "input".into(),
+        parent_block_id: "parent".into(),
+    };
+    let new = BlockStarted {
+        block_id: old.block_id.clone(),
+        rev: old.rev,
+        kind: old.kind.clone(),
+        input_command_id: old.input_command_id.clone(),
+        parent_block_id: old.parent_block_id.clone(),
+        agent: "main".into(),
+        model: "model".into(),
+        tool_name: "shell".into(),
+        summary: "Проверка".into(),
+    };
+    assert_eq!(
+        OldBlockStarted::decode(new.encode_to_vec().as_slice()).unwrap(),
+        old
+    );
+    assert_roundtrip(new);
+    let old = OldStartExecution {
+        conversation_id: "conversation".into(),
+        harness: "codex".into(),
+        workdir: "/tmp/w".into(),
+        native_conversation_id: "native".into(),
+    };
+    let new = StartExecution {
+        conversation_id: old.conversation_id.clone(),
+        harness: old.harness.clone(),
+        workdir: old.workdir.clone(),
+        native_conversation_id: old.native_conversation_id.clone(),
+        model: "model".into(),
+        effort: "high".into(),
+        permission_mode: "bypass".into(),
+        instruction_profile: "owner".into(),
+        capabilities: vec!["pilot_v1".into()],
+    };
+    assert_eq!(
+        OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
+        old
+    );
+    assert_roundtrip(new);
+}
+
+#[test]
+fn provider_table_maps_harnesses() {
+    use canterlot_proto::harness::*;
+    assert_eq!(provider_of("synthetic-codex"), Some("codex"));
+    assert_eq!(provider_of("unknown"), None);
+    assert_eq!(
+        harnesses_of("claude"),
+        ["claude_code", "synthetic", "synthetic-exit-on-interrupt"]
+    );
+    assert_eq!(harnesses_of("codex"), ["codex", "synthetic-codex"]);
+    assert!(harnesses_of("unknown").is_empty());
+    for &(harness, provider) in HARNESS_PROVIDERS {
+        assert_eq!(provider_of(harness), Some(provider));
+    }
+}
+
+#[test]
+fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip() {
+    use canterlot_proto::worker::{ipc, v1::*};
+    let start = StartExecution {
+        capabilities: vec!["pilot_v1".into()],
+        ..Default::default()
+    };
+    assert_eq!(start.encode_to_vec(), b"\x4a\x08pilot_v1");
+    assert_roundtrip(start);
+    let report = MachineReport {
+        os: "Debian 13 · 6.12".into(),
+        ..Default::default()
+    };
+    assert_eq!(report.encode_to_vec()[0], 8 << 3 | 2);
+    assert_roundtrip(report);
+    let snapshot = LimitsSnapshot {
+        provider: "claude".into(),
+        current: vec![LimitObservation {
+            provider: "claude".into(),
+            window: LimitWindow::Weekly as i32,
+            used_permille: 954,
+            resets_at_ms: 123456,
+            observed_machine_ms: 123000,
+        }],
+        weekly_reserve_active: true,
+    };
+    assert_roundtrip(snapshot.clone());
+    let message = ControlDown {
+        msg: Some(control_down::Msg::LimitsSnapshot(snapshot)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 6 << 3 | 2);
+    assert_roundtrip(message);
+    assert_roundtrip(ipc::StartCli {
+        profile: "synthetic".into(),
+        workdir: "/tmp/w".into(),
+        native_conversation_id: "native".into(),
+        model: "model".into(),
+        effort: "high".into(),
+        permission_mode: "bypass".into(),
+        instruction_profile: "owner".into(),
+        pilot_v1: true,
+    });
+    assert_roundtrip(PhaseChanged {
+        execution_id: "execution".into(),
+        phase: "executing_tool".into(),
+        tool_name: "shell".into(),
+        summary: "Проверка".into(),
+    });
+    assert_roundtrip(BlockFinal {
+        summary: "Готово".into(),
+        ..Default::default()
+    });
+}
+
+#[test]
+fn hello_and_heartbeat_carry_machine_time_and_old_decoders_skip_it() {
+    use canterlot_proto::worker::v1::Heartbeat;
+    #[derive(Clone, PartialEq, Message)]
+    struct OldHello {
+        #[prost(string, tag = "1")]
+        installation_id: String,
+        #[prost(string, tag = "2")]
+        machine_id: String,
+        #[prost(string, tag = "3")]
+        restore_generation: String,
+        #[prost(uint32, tag = "4")]
+        protocol_version: u32,
+        #[prost(string, repeated, tag = "5")]
+        required_capabilities: Vec<String>,
+        #[prost(string, repeated, tag = "6")]
+        optional_capabilities: Vec<String>,
+        #[prost(string, tag = "7")]
+        connection_id: String,
+        #[prost(string, tag = "8")]
+        cj_journal_id: String,
+        #[prost(message, repeated, tag = "9")]
+        cursors: Vec<JournalCursor>,
+        #[prost(string, tag = "10")]
+        boot_id: String,
+        #[prost(enumeration = "StreamKind", tag = "11")]
+        stream_kind: i32,
+    }
+    #[derive(Clone, PartialEq, Message)]
+    struct OldHeartbeat {
+        #[prost(uint64, tag = "1")]
+        seq: u64,
+    }
+    for stream_kind in [StreamKind::Control, StreamKind::Data] {
+        let old = OldHello {
+            installation_id: "installation".into(),
+            machine_id: "machine".into(),
+            restore_generation: "restore".into(),
+            protocol_version: 1,
+            required_capabilities: vec!["journal_v1".into()],
+            optional_capabilities: vec!["pilot_v1".into()],
+            connection_id: "connection".into(),
+            cj_journal_id: "cj".into(),
+            cursors: vec![JournalCursor {
+                journal_id: "sj".into(),
+                first_stored_seq: 1,
+                last_seq: 3,
+                acked_seq_known_to_worker: 2,
+            }],
+            boot_id: "boot".into(),
+            stream_kind: stream_kind as i32,
+        };
+        let mut bytes = old.encode_to_vec();
+        bytes.extend([0x60, 0x96, 0x01]);
+        let hello = Hello::decode(bytes.as_slice()).unwrap();
+        assert_eq!(hello.machine_time_ms, 150);
+        assert_eq!(
+            OldHello::decode(hello.encode_to_vec().as_slice()).unwrap(),
+            old
+        );
+        assert_roundtrip(hello);
+    }
+    let heartbeat = Heartbeat {
+        seq: 9,
+        machine_time_ms: 150,
+    };
+    assert_eq!(heartbeat.encode_to_vec(), [8, 9, 16, 150, 1]);
+    assert_eq!(
+        OldHeartbeat::decode(heartbeat.encode_to_vec().as_slice()).unwrap(),
+        OldHeartbeat { seq: 9 }
+    );
+    assert_eq!(
+        Heartbeat::decode([8, 9].as_slice())
+            .unwrap()
+            .machine_time_ms,
+        0
+    );
+    assert_roundtrip(heartbeat);
 }

@@ -927,7 +927,11 @@ async fn apply_body(
                 .await?;
             }
         }
-        Body::JournalClosed(_)
+        Body::LimitObserved(_)
+        | Body::LimitReached(_)
+        | Body::AttachmentReady(_)
+        | Body::AttachmentFailed(_)
+        | Body::JournalClosed(_)
         | Body::BlockStarted(_)
         | Body::BlockDelta(_)
         | Body::BlockFinal(_)

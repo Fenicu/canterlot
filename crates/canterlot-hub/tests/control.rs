@@ -800,7 +800,11 @@ async fn continue_removes_only_releasable_reasons_and_preserves_holds(pool: PgPo
         PauseReason::UserStop,
         PauseReason::FatalError,
         PauseReason::ProcessExited,
-        PauseReason::LimitReached,
+        PauseReason::LimitReached {
+            provider: None,
+            window: None,
+            resets_at: None,
+        },
         PauseReason::OwnerLost,
         PauseReason::UnconfirmedDelivery {
             input_id: head.input_id,

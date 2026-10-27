@@ -55,6 +55,11 @@ message StartCli {
   string profile = 1;
   string workdir = 2;
   string native_conversation_id = 3;
+  string model = 4;
+  string effort = 5;
+  string permission_mode = 6;
+  string instruction_profile = 7;
+  bool pilot_v1 = 8;
 }
 
 message CliStarted {
@@ -65,6 +70,7 @@ message CliStarted {
 
 message Deliver {
   canterlot.worker.v1.Command command = 1;
+  repeated LocalFile files = 2;
 }
 
 message DeliverAck {
@@ -124,4 +130,12 @@ message Ownership {
   uint32 ipc_protocol_version = 13;
   OwnershipPhase phase = 14;
   string released_reason = 15;
+}
+
+message LocalFile {
+  string path = 1;
+  string name = 2;
+  string mime = 3;
+  uint64 size = 4;
+  bool image = 5;
 }

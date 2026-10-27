@@ -386,6 +386,7 @@ async fn ack_never_exceeds_commit(pool: PgPool) -> TestResult {
             record_body::Body::RunFinished(RunFinished {
                 execution_id: execution.execution_id.to_string(),
                 input_command_id: input.command_id.to_string(),
+                ..Default::default()
             }),
         ],
     );
@@ -629,6 +630,7 @@ async fn receipt_mapping_and_run_finished(pool: PgPool) -> TestResult {
             "run_finished" => record_body::Body::RunFinished(RunFinished {
                 execution_id: execution.execution_id.to_string(),
                 input_command_id: command_id,
+                ..Default::default()
             }),
             _ => unreachable!(),
         };
@@ -1642,6 +1644,7 @@ async fn records_of_one_machine_never_affect_another_machine(pool: PgPool) -> Te
         vec![record_body::Body::RunFinished(RunFinished {
             execution_id: v.execution.execution_id.to_string(),
             input_command_id: input(v),
+            ..Default::default()
         })]
     })
     .await;
@@ -1828,6 +1831,7 @@ async fn sj_record_before_journal_opened_is_invalid(pool: PgPool) -> TestResult 
         record_body::Body::PhaseChanged(PhaseChanged {
             execution_id: execution.execution_id.to_string(),
             phase: "idle".into(),
+            ..Default::default()
         }),
         record_body::Body::JournalClosed(JournalClosed {
             execution_id: execution.execution_id.to_string(),
@@ -1890,6 +1894,7 @@ async fn phase_changed_updates_execution_phase(pool: PgPool) -> TestResult {
                     record_body::Body::PhaseChanged(PhaseChanged {
                         execution_id: execution.execution_id.to_string(),
                         phase: "awaiting_input".into(),
+                        ..Default::default()
                     }),
                 ],
             ),
@@ -2317,6 +2322,7 @@ async fn bound_sj_rejects_foreign_phase_and_close_without_effect(pool: PgPool) -
         record_body::Body::PhaseChanged(PhaseChanged {
             execution_id: victim_execution.execution_id.to_string(),
             phase: "awaiting_input".into(),
+            ..Default::default()
         }),
         record_body::Body::JournalClosed(JournalClosed {
             execution_id: victim_execution.execution_id.to_string(),

@@ -118,7 +118,7 @@ impl WorkerControl for HubGrpc {
                     Next::Inbound(next) => {
                         let Some(message) = next.map_err(|error| session_log.error(error))? else { break; };
                         match message.msg {
-                            Some(control_up::Msg::Heartbeat(Heartbeat { seq })) => {
+                            Some(control_up::Msg::Heartbeat(Heartbeat { seq, .. })) => {
                                 if !state.registry.heartbeat(machine_id, lease.key) { break; }
                                 yield checked(ControlDown { msg: Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq })) })?;
                             }

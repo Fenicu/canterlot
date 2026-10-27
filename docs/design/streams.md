@@ -19,10 +19,17 @@
 | точки продолжения `control` | по `CJ`: первый хранимый номер, последний номер, последний номер, подтверждённый хабом |
 | точки продолжения `data` | по каждому `SJ` (`journal_id`): те же три номера |
 | `boot_id` | диагностика и сверка перезагрузки |
+| `machine_time_ms` | часы машины в обоих `Hello`; смещение уточняется по `Heartbeat.machine_time_ms`, итог хода содержит `RunFinished.machine_time_ms` |
 
 Ответ хаба: принят или отказ с причиной, текущий `restore_generation` хаба, закоммиченный номер только по журналам, которые воркер назвал в этом `Hello` (`cj_journal_id` и `cursors`). Журналы, не названные воркером, в `Accepted.committed` не добавляются; для нового журнала закоммиченный номер равен нулю.
 
 Возможность `exec_v1` согласуется только через `Hello.optional_capabilities`; в `required_capabilities` она не поддерживается и приводит к `unknown_required_capability`. `Accepted.capabilities` повторяет только известные хабу необязательные возможности из запроса; отсутствие поля означает пустой список. После handshake воркер передаёт по `control` сообщение `ReconcileReport`: для каждого исполнения `execution_id`, `generation`, `state`, `outcome`, `supervisor_attached`, `sj_journal_id`. Это последнее наблюдение для сверки, а устойчивые факты исполнения доставляются записями журналов.
+
+Необязательная возможность `pilot_v1` предлагается в `Hello.optional_capabilities` и действует только после повторения в `Accepted.capabilities`. После принятия такого сеанса воркер посылает `MachineReport`: версию, разрешённые корни, каталог харнессов и моделей, профили инструкций, ограничения вложений, механизм containment и ОС. Ограничения `MAX_ATTACHMENT_BYTES = 104_857_600` и `MAX_ATTACHMENTS_PER_INPUT = 10` берутся из `canterlot-proto::limits`; расхождение с хабом отключает вложения для машины. `MachineMetrics` описан в [execution.md](execution.md) §3.
+
+`PollLimits { provider }` просит одну машину опросить источник сейчас. `LimitsReport` содержит заменяемые наблюдения опроса; `LimitObservation { provider, window, used_permille, resets_at_ms, observed_machine_ms }` использует окна `five_hour` и `weekly`, нулевое время сброса означает неизвестное. Устойчивые `limit_observed` и `limit_reached` пишет только `SJ` сопровождения, чей `StartExecution.capabilities` содержал `pilot_v1`. Хаб рассылает `LimitsSnapshot { provider, current, weekly_reserve_active }` всем согласованным сеансам с этим провайдером в каталоге; воркер хранит последний снимок только в памяти для будущей пометки модели.
+
+Журнал, у которого следующая неподтверждённая запись является вариантом `pilot_v1`, не отправляется через сеанс без этой возможности: диапазон не пропускается, однократно фиксируется диагностика `journal_withheld`. `attachment_ready` и `attachment_failed` пишутся в `CJ` только для команд из согласованного сеанса. Порядок обновления: хаб первым, затем воркер; откат хаба ниже уже использованной возможности не поддерживается.
 
 ### Автомат сеанса (сторона воркера; хаб ведёт зеркальную копию)
 
@@ -96,14 +103,13 @@ Heartbeat: воркер шлёт `heartbeat` каждые 5 с по `control`, �
 | Команда | Адресат | Создаётся в `PG-tx` | Итоговые квитанции |
 | --- | --- | --- | --- |
 | `start_execution` | машина, новое поколение | старта или resume | `started`, `start_rejected(reason)`, `start_failed` |
-| `deliver_input` | поколение | отправки ввода; выдача при `dispatch` | статусы ввода ([delivery.md](delivery.md) §2) |
+| `deliver_input` | поколение | отправки ввода; выдача при `dispatch`; блоки `TextBlock` и `AttachmentRef`, необязательные настройки `SettingsOverride` | статусы ввода ([delivery.md](delivery.md) §2); готовность файлов через `attachment_ready`/`attachment_failed` в `CJ` |
 | `cancel_input`, `withdraw_input` | команда ввода | отмены или постановки паузы | `cancel_won`/`cancel_lost`, `withdrawn`/`too_late` |
 | `deliver_decision` | поколение и `request_id` | решения | статусы решения ([delivery.md](delivery.md) §5) |
 | `interrupt` | поколение | остановки хода | статусы прерывания ([delivery.md](delivery.md) §4) |
 | `stop_execution`, `force_stop` | поколение | остановки исполнения; полная остановка всех агентов машины (§18) = отдельное явное действие, создающее `stop_execution` для каждого её исполнения | жизненный цикл ([execution.md](execution.md) §1) |
 | `allow_shared_workdir` | пара исполнений | решения владельца | `granted`, `refused(reason)` |
 | `resolve_owner_lost` | исполнение | административного решения | жизненный цикл |
-| `deliver_attachment` | исполнение | выдачи ввода с вложениями | `file_ready_for_agent`, `failed(reason)` |
 | `delete_conversation_local` | машина | удаления разговора | `local_cleanup_done` |
 | `reconcile` | машина или команда | сверки | факты сверки |
 
@@ -185,7 +191,9 @@ stateDiagram-v2
 
 ## 4. Подписки браузера (§8.1, §8.2, §8.5, §12.3)
 
-Один WSS-канал на вкладку; подписки на области `conversation_list` (разговоры и машины владельца) и `conversation:{id}` (история и состояния одного разговора). Событие: версия схемы, ID, область, `scope_seq` (строкой, если выходит за безопасную точность JavaScript), время фиксации, ID разговора и исполнения, тип, полезная нагрузка, correlation ID. Хаб отправляет только закоммиченные факты; повтор доставки допустим, повторное применение результата не меняет.
+Один WSS-канал на вкладку; внутренние области: `owner:{id}:conversations`, `owner:{id}:machines`, `conversation:{id}`. Поле `scope` снаружи содержит только `conversations`, `machines`, `conversation:<uuid>`. Конверт события: `v`, `id`, `scope`, `scope_seq`, `committed_at`, `kind`, `payload`, `correlation_id`. Все номера последовательности, включая курсоры снимков, `created_seq`, `feed_seq` и `seq` в запросах, всегда десятичные строки. Время передаётся в RFC 3339 UTC с миллисекундами. Хаб отправляет только закоммиченные факты; повтор доставки допустим, повторное применение результата не меняет.
+
+Соседние дельты одного блока объединяются в пределах окна 25 мс, без перескока через другие события: `scope_seq_from` и `committed_at_from` берутся из первой, конечные `scope_seq` и `committed_at` из последней, `id` и `correlation_id` из первой. Одиночное событие имеет одинаковые начальные и конечные значения. Внутренние виды вне `CLIENT_KINDS` заменяются на `hidden` без payload с сохранением настоящего номера; соседние заполнители также могут покрывать непрерывный диапазон. Правило применяется к WSS и `GET /events`, поэтому пропусков в курсоре нет. Словарь видов: [api.md](api.md).
 
 **Предложение** по границе snapshot: `scope_seq` выдаётся из счётчика области, который обновляется в том же `PG-tx`, что и факт, и остаётся заблокированным до commit; snapshot читает материализованное состояние и значение счётчика в одной транзакции с единым снимком. Причина: блокировка счётчика упорядочивает commit фактов одной области, поэтому снимок всегда содержит префикс `1..B`, а всё после `B` есть в журнале событий; глобальный sequence БД такого порядка не доказывает (§8.2). Проверяется конкурентным тестом AT-B-04.
 
@@ -328,22 +336,24 @@ stateDiagram-v2
 
 ### Машина
 
+Ссылки `AttachmentRef { attachment_id, name, mime, size, sha256, image }` входят в `deliver_input`. Отдельной команды доставки файла нет. Воркер инициирует `WorkerData.FetchAttachment(FetchAttachmentRequest { attachment_id, offset })` по каналу данных, с теми же TLS и аутентификацией машины. Ответ является потоком `AttachmentChunk { offset, data, last }`, `data` не больше `MAX_FILE_CHUNK_BYTES = 131_072`. Хаб проверяет связь вложения с вводом этой машины; максимум четыре потока на машину, воркер одновременно загружает не более двух файлов. Файлы живут в `data_dir/executions/<execution_id>/attachments/`, никогда в репозитории. Проверенные опубликованные пути передаются сопровождению как `Deliver.files: LocalFile { path, name, mime, size, image }`.
+
 Состояние на пару (вложение, исполнение):
 
 | Состояние | Смысл |
 | --- | --- |
-| `pending` | `deliver_attachment` записана в `CJ` |
+| `pending` | `deliver_input` с `AttachmentRef` записана в `CJ` |
 | `fetching` | содержимое загружается во временный файл каталога исполнения |
 | `verifying` | проверка длины и checksum |
-| `published` | файл durable-опубликован под безопасным сгенерированным именем; хабу ушло `file_ready_for_agent` |
+| `published` | файл durable-опубликован под безопасным сгенерированным именем; хабу ушло `attachment_ready` |
 | `failed` | ошибка с причиной и признаком повторяемости |
-| `removed` | удалён при удалении разговора |
+| `removed` | удалён после терминального состояния исполнения и подтверждения его журнала |
 
 **Предложение**: воркер сам загружает содержимое ограниченным RPC с продолжением по смещению (chunks ≤ 128 КиБ, ограниченная параллельность). Причина: все RPC инициирует воркер (§4.3), а продолжение по смещению делает повтор дешёвым.
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: deliver_attachment
+    [*] --> pending: deliver_input
     pending --> published: already_published_same_checksum
     pending --> fetching: fetch_started
     fetching --> fetching: chunk_written
@@ -352,20 +362,20 @@ stateDiagram-v2
     verifying --> published: checksum_ok_and_durable
     verifying --> failed: checksum_mismatch
     failed --> pending: retry
-    published --> removed: conversation_deleted
+    published --> removed: execution_terminal_and_acked
     removed --> [*]
 ```
 
 | Из | Событие | Условие | Действие | В |
 | --- | --- | --- | --- | --- |
-| `pending` | `already_published_same_checksum` | файл с тем же checksum уже опубликован | повторная квитанция `file_ready_for_agent` (AT-F-16) | `published` |
+| `pending` | `already_published_same_checksum` | файл с тем же checksum уже опубликован | повторная квитанция `attachment_ready` (AT-F-16) | `published` |
 | `pending` | `fetch_started` | | временный файл в каталоге исполнения | `fetching` |
 | `fetching` | `transfer_interrupted` | разрыв | продолжение с последнего записанного смещения | `pending` |
-| `verifying` | `checksum_ok_and_durable` | длина и checksum совпали; fsync файла, rename в безопасное имя, fsync каталога | `CJ`: квитанция; хабу `file_ready_for_agent`; пользовательское имя файла только в метаданных и никогда в shell-команде | `published` |
+| `verifying` | `checksum_ok_and_durable` | длина и checksum совпали; fsync файла, rename в безопасное имя, fsync каталога | `CJ`: квитанция; хабу `attachment_ready`; пользовательское имя файла только в метаданных и никогда в shell-команде | `published` |
 | `verifying` | `checksum_mismatch` | | временный файл удалён; ввод удерживается `attachments_pending` с причиной | `failed` |
 | любое до `published` | отмена или отзыв ввода | | временный файл удалён; доступным агенту не отмечается (AT-F-07) | `failed` или `removed` |
 
-Опубликованные файлы живут до удаления разговора ([recovery.md](recovery.md) R6). Канал вложений не блокирует управление и обычный чат (§13.1, AT-H-03).
+Копии на машине удаляются после терминального состояния исполнения и подтверждения его журнала; blob хаба остаётся, пока на него ссылаются вводы разговора. Ошибка загрузки передаётся в `CJ` как `attachment_failed { command_id, dispatch_attempt, attachment_id, reason, retryable }`, готовность как `attachment_ready { command_id, dispatch_attempt, attachment_id }`. Канал вложений не блокирует управление и обычный чат (§13.1, AT-H-03).
 
 **Инварианты**
 
@@ -375,6 +385,6 @@ stateDiagram-v2
 - F-4: ввод не передаётся, пока все его вложения не `published` на машине; повтор доставки файла не создаёт второй передачи ввода (AT-F-16).
 - F-5: сборка orphan не удаляет содержимое из-под подтверждённой ссылки (AT-F-17).
 
-**Терминальные состояния**: на хабе `released`, `failed`, `cancelled` (и `ready` до снятия ссылок); на машине `removed`. Поздний chunk после `failed` или `cancelled` отклоняется; повторный `complete` после `ready` возвращает прежний результат; повторная `deliver_attachment` после `published` возвращает прежнюю квитанцию.
+**Терминальные состояния**: на хабе `released`, `failed`, `cancelled` (и `ready` до снятия ссылок); на машине `removed`. Поздний chunk после `failed` или `cancelled` отклоняется; повторный `complete` после `ready` возвращает прежний результат; повторная `deliver_input` после `published` возвращает прежнюю квитанцию.
 
 **Проверки**: AT-F-07, AT-F-15…AT-F-17, AT-H-03, AT-H-10.

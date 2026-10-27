@@ -456,6 +456,7 @@ impl Worker {
         self.transition(SessionState::Handshaking);
         tracing::info!(%connection_id, "session connected");
         let hello = Hello {
+            machine_time_ms: 0,
             installation_id: self.config.installation_id.to_string(),
             machine_id: self.config.machine_id.to_string(),
             restore_generation: generation.to_string(),
@@ -766,7 +767,7 @@ impl Worker {
                         heartbeat_seq += 1;
                         #[cfg(feature = "fault-injection")]
                         self.probe.sent(heartbeat_seq);
-                        let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq })) };
+                        let message = ControlUp { msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: heartbeat_seq, machine_time_ms: 0 })) };
                         heartbeat_outbound = Some(message.clone());
                         pending_heartbeat = Some(Pending::new(message, heartbeat_seq, self.config.timers.heartbeat_ack));
                         heartbeat_at = Instant::now() + self.config.timers.heartbeat;

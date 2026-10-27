@@ -76,7 +76,7 @@ impl fmt::Debug for crate::worker::ipc::Deliver {
                 .iter()
                 .map(|block| match &block.block {
                     Some(content_block::Block::Text(text)) => text.text.len(),
-                    None => 0,
+                    Some(content_block::Block::Attachment(_)) | None => 0,
                 })
                 .sum(),
             _ => 0,
@@ -109,6 +109,54 @@ impl fmt::Debug for crate::worker::ipc::Ownership {
             .field("generation", &self.generation)
             .field("phase", &self.phase)
             .field("secret_sha256_bytes", &self.secret_sha256.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::AttachmentRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AttachmentRef")
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::AttachmentChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AttachmentChunk")
+            .field("data_bytes", &self.data.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::ipc::LocalFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalFile")
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::BlockStarted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BlockStarted")
+            .field("block_id", &self.block_id)
+            .field("rev", &self.rev)
+            .field("agent_bytes", &self.agent.len())
+            .field("model_bytes", &self.model.len())
+            .field("tool_name_bytes", &self.tool_name.len())
+            .field("summary_bytes", &self.summary.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::PhaseChanged {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PhaseChanged")
+            .field("execution_id", &self.execution_id)
+            .field("phase", &self.phase)
+            .field("tool_name_bytes", &self.tool_name.len())
+            .field("summary_bytes", &self.summary.len())
             .finish()
     }
 }

@@ -41,6 +41,9 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let data_dir = directory.path().join("store");
     let store = WorkerStore::open(&data_dir).unwrap();
     let config = WorkerConfig {
+        machine: Default::default(),
+        instruction_profiles: Vec::new(),
+        attachments: Default::default(),
         hub_url: format!("https://localhost:{}", hub.addr.port()),
         ca_cert,
         token_file,
@@ -1345,6 +1348,7 @@ async fn accepted_commands_are_routed_to_execution_manager() {
                     harness: "synthetic".into(),
                     workdir: path.to_string_lossy().into_owned(),
                     native_conversation_id: String::new(),
+                    ..Default::default()
                 })
             }),
         };

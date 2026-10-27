@@ -321,6 +321,7 @@ async fn submit_attempt(
                     },
                 })
                 .collect(),
+            ..Default::default()
         })),
     };
     check_deliver_input(&command).map_err(|error| {

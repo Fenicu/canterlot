@@ -38,6 +38,7 @@ use crate::{
 const ORPHANED: &str = "owner_lost";
 const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Msg {
     Command(Command),
     SjAck(u64),
@@ -785,6 +786,7 @@ impl Actor {
                 profile: start.harness.clone(),
                 workdir: workdir.to_string_lossy().into_owned(),
                 native_conversation_id: start.native_conversation_id.clone(),
+                ..Default::default()
             }))
             .await;
         Ok(())
@@ -1292,6 +1294,7 @@ impl Actor {
                 if !self
                     .send(down::Msg::Deliver(Deliver {
                         command: Some(command.clone()),
+                        ..Default::default()
                     }))
                     .await
                 {

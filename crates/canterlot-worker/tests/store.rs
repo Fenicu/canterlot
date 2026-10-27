@@ -37,6 +37,7 @@ fn delivery() -> Command {
                     text: "Привет, агент!".into(),
                 })),
             }],
+            ..Default::default()
         })),
     }
 }
@@ -224,6 +225,7 @@ fn all_known_command_kinds_store_full_payloads() {
             harness: "codex".into(),
             workdir: "/tmp/work".into(),
             native_conversation_id: "native".into(),
+            ..Default::default()
         }),
         command::Kind::StopExecution(StopExecution { force: true }),
     ];
@@ -1248,4 +1250,58 @@ fn redelivery_after_terminal_compaction_uses_a_new_inbox_sequence() {
             .unwrap(),
         Some(cmd)
     );
+}
+
+#[test]
+fn pilot_worker_sections_parse_strictly() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.toml");
+    fs::write(&path, config_text()).unwrap();
+    let config = load(&path).unwrap();
+    assert_eq!(config.machine.metrics_interval, Duration::from_secs(30));
+    assert!(config.instruction_profiles.is_empty());
+    assert_eq!(config.attachments.fetch_parallelism, 2);
+    assert_eq!(config.attachments.fetch_retry, Duration::from_secs(2));
+    assert_eq!(config.attachments.fetch_attempts, 5);
+    assert_eq!(
+        config.attachments.fetch_backoff_cap,
+        Duration::from_secs(30)
+    );
+    let extra = "[machine]\nmetrics_interval = '5s'\n[attachments]\nfetch_parallelism = 1\nfetch_retry = '250ms'\nfetch_attempts = 3\nfetch_backoff_cap = '10s'\n[[instruction_profiles]]\nname = 'executor'\ntitle = 'Исполнитель'\ndescription = 'Без персоны'\nharnesses = ['claude_code', 'codex']\n";
+    fs::write(&path, format!("{}\n{extra}", config_text())).unwrap();
+    let config = load(&path).unwrap();
+    assert_eq!(config.machine.metrics_interval, Duration::from_secs(5));
+    assert_eq!(config.attachments.fetch_parallelism, 1);
+    assert_eq!(config.attachments.fetch_retry, Duration::from_millis(250));
+    assert_eq!(config.attachments.fetch_attempts, 3);
+    assert_eq!(
+        config.attachments.fetch_backoff_cap,
+        Duration::from_secs(10)
+    );
+    let profile = &config.instruction_profiles[0];
+    assert_eq!(profile.name, "executor");
+    assert_eq!(profile.title, "Исполнитель");
+    assert_eq!(profile.description, "Без персоны");
+    assert_eq!(profile.harnesses, ["claude_code", "codex"]);
+    for extra in [
+        "[machine]\nunknown = true",
+        "[machine]\nmetrics_interval = 30",
+        "[attachments]\nunknown = true",
+        "[attachments]\nfetch_retry = 2",
+        "[[instruction_profiles]]\nname = 'executor'\nunknown = true",
+    ] {
+        fs::write(&path, format!("{}\n{extra}\n", config_text())).unwrap();
+        assert!(load(&path).is_err());
+    }
+}
+
+#[test]
+fn profile_names_are_unique_and_never_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("worker.toml");
+    for names in [vec!["owner"], vec!["executor", "executor"]] {
+        let extra: String = names.iter().map(|name| format!("\n[[instruction_profiles]]\nname = '{name}'\ntitle = 'Исполнитель'\ndescription = ''\nharnesses = ['codex']\n")).collect();
+        fs::write(&path, format!("{}{extra}", config_text())).unwrap();
+        assert!(load(&path).is_err());
+    }
 }

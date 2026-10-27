@@ -265,6 +265,16 @@ impl WorkerControl for Service {
 
 #[tonic::async_trait]
 impl WorkerData for Service {
+    type FetchAttachmentStream =
+        ReceiverStream<Result<canterlot_proto::worker::v1::AttachmentChunk, Status>>;
+
+    async fn fetch_attachment(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
+    ) -> Result<Response<Self::FetchAttachmentStream>, Status> {
+        Err(Status::unimplemented("attachment fetch is not implemented"))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,
@@ -380,6 +390,9 @@ impl ProtocolHub {
                 .await
         });
         let config = WorkerConfig {
+            machine: Default::default(),
+            instruction_profiles: Vec::new(),
+            attachments: Default::default(),
             hub_url: format!("https://localhost:{}", address.port()),
             ca_cert,
             token_file,

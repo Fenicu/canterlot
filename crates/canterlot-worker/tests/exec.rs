@@ -120,6 +120,8 @@ fn start_command(
             harness: harness.into(),
             workdir: workdir.to_string_lossy().into_owned(),
             native_conversation_id: String::new(),
+
+            ..Default::default()
         }),
     )
 }
@@ -143,6 +145,8 @@ fn deliver_command(
             content: vec![ContentBlock {
                 block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
             }],
+
+            ..Default::default()
         }),
     )
 }

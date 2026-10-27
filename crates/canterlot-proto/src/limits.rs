@@ -2,6 +2,11 @@ use prost::Message;
 
 use crate::worker::v1::{Command, JournalRecords, command, content_block};
 
+pub const MAX_ATTACHMENT_BYTES: u64 = 104_857_600;
+pub const MAX_ATTACHMENTS_PER_INPUT: usize = 10;
+pub const MAX_ATTACHMENT_NAME_BYTES: usize = 255;
+pub const MAX_METRICS_EXECUTIONS: usize = 256;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
 pub const MAX_INPUT_TEXT_BYTES: usize = 262_144;
@@ -38,7 +43,7 @@ pub fn check_deliver_input(cmd: &Command) -> Result<(), LimitError> {
         .iter()
         .map(|block| match &block.block {
             Some(content_block::Block::Text(text)) => text.text.len(),
-            None => 0,
+            Some(content_block::Block::Attachment(_)) | None => 0,
         })
         .sum();
     if text_bytes > MAX_INPUT_TEXT_BYTES {

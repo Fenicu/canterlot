@@ -205,6 +205,9 @@ impl Fixture {
         fs::write(&wrapper, script).unwrap();
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
         let config = WorkerConfig {
+            machine: Default::default(),
+            instruction_profiles: Vec::new(),
+            attachments: Default::default(),
             hub_url: format!("https://localhost:{}", hub.addr.port()),
             ca_cert,
             token_file,

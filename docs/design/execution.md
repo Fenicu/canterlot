@@ -23,7 +23,7 @@
 | Состояние | `outcome` |
 | --- | --- |
 | `stopped` | `user_stop`, `normal_exit`, `machine_rebooted` (§9.4 «прерванным»), `start_cancelled`, `force_stopped` |
-| `failed` | `start_rejected`, `start_failed`, `cli_incompatible`, `auth_required`, `crashed`, `protocol_incompatible`, `storage_failure`, `supervisor_died`, `admin_resolved` |
+| `failed` | `start_rejected`, `start_failed`, `cli_incompatible`, `auth_required`, `crashed`, `protocol_incompatible`, `storage_failure`, `supervisor_died`, `admin_resolved`, `context_exhausted` |
 
 ```mermaid
 stateDiagram-v2
@@ -166,6 +166,8 @@ stateDiagram-v2
 **Проверки**: AT-A-11, AT-C-08.
 
 ## 3. Связь с машиной (§6.1, §8.4, §8.6 п. 7)
+
+`MachineMetrics` передаётся по `control` как заменяемый снимок, по умолчанию каждые 30 с: `machine_time_ms`, `cpu_cores`, `cpu_permille`, `mem_total_bytes`, `mem_available_bytes`, `disks { label, total_bytes, free_bytes }`, `load1_centi`, `load5_centi`, `load15_centi`, `executions { execution_id, alive, cpu_permille, rss_bytes }`. Диски помечаются только `data` и `root_<n>`; путей, содержимого чата и окружения здесь нет. Число исполнений ограничено `MAX_METRICS_EXECUTIONS = 256`. Метрики не заменяют heartbeat и не доказывают принадлежность процесса без проверки времени старта. `MachineReport.os` содержит строку ОС и ядра, например `Debian 13 · 6.12`.
 
 Вычисляется хабом по монотонным часам: время с последнего прикладного heartbeat на канале управления и наличие обоих потоков. Пороги настраиваемые, исходно: heartbeat каждые 5 с, `degraded` после 15 с, `unavailable` после 30 с. HTTP/2 keepalive проверяет транспорт и heartbeat не заменяет.
 

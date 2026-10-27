@@ -90,6 +90,7 @@ fn start(id: Uuid) -> Body {
         kind: "text".into(),
         input_command_id: String::new(),
         parent_block_id: String::new(),
+        ..Default::default()
     })
 }
 fn delta(id: Uuid, base: u64, rev: u64, text: &str) -> Body {
@@ -107,6 +108,7 @@ fn final_fact(id: Uuid, rev: u64, text: &str) -> Body {
         text: text.into(),
         checksum: hash(text),
         text_omitted: false,
+        ..Default::default()
     })
 }
 async fn block(pool: &PgPool, id: Uuid) -> (String, i64, String, Option<String>) {
@@ -270,6 +272,7 @@ async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> Te
         text: String::new(),
         checksum: hash(&content),
         text_omitted: true,
+        ..Default::default()
     })])
     .await;
     let row = block(&pool, id).await;
@@ -291,6 +294,7 @@ async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> Te
             checksum: hash("missing"),
             text_omitted: true,
             text: String::new(),
+            ..Default::default()
         }),
     ])
     .await;

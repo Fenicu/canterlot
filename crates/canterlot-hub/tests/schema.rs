@@ -266,7 +266,11 @@ async fn model_enums_roundtrip(_pool: PgPool) {
             json!({"reason": "process_exited"}),
         ),
         (
-            PauseReason::LimitReached,
+            PauseReason::LimitReached {
+                provider: None,
+                window: None,
+                resets_at: None,
+            },
             "limit_reached",
             json!({"reason": "limit_reached"}),
         ),
@@ -512,4 +516,122 @@ async fn execution_columns_exist(pool: PgPool) -> Result<(), sqlx::Error> {
         .bind(input_id).fetch_one(&pool).await?;
     assert_eq!(times, (1000, 1001, 1002));
     Ok(())
+}
+
+#[test]
+fn quota_hold_and_limit_pause_json_roundtrip() {
+    use chrono::{DateTime, Utc};
+    let at: DateTime<Utc> = "2026-10-27T12:00:00Z".parse().unwrap();
+    let quota = HoldReason::QuotaExhausted {
+        provider: "claude".into(),
+        window: "five_hour".into(),
+        wake_at: at,
+    };
+    assert_eq!(quota.as_str(), "quota_exhausted");
+    assert_json_roundtrip(
+        quota,
+        json!({"reason":"quota_exhausted", "provider":"claude", "window":"five_hour", "wake_at":"2026-10-27T12:00:00.000Z"}),
+    );
+    let reserve = HoldReason::WeeklyReserve {
+        provider: "codex".into(),
+        resets_at: Some(at),
+    };
+    assert_eq!(reserve.as_str(), "weekly_reserve");
+    assert_json_roundtrip(
+        reserve,
+        json!({"reason":"weekly_reserve", "provider":"codex", "resets_at":"2026-10-27T12:00:00.000Z"}),
+    );
+    assert_json_roundtrip(
+        HoldReason::WeeklyReserve {
+            provider: "claude".into(),
+            resets_at: None,
+        },
+        json!({"reason":"weekly_reserve", "provider":"claude", "resets_at":null}),
+    );
+    let pause = PauseReason::LimitReached {
+        provider: Some("claude".into()),
+        window: Some("weekly".into()),
+        resets_at: Some(at),
+    };
+    assert_eq!(pause.as_str(), "limit_reached");
+    assert_json_roundtrip(
+        pause,
+        json!({"reason":"limit_reached", "provider":"claude", "window":"weekly", "resets_at":"2026-10-27T12:00:00.000Z"}),
+    );
+    for name in ["quota_exhausted", "weekly_reserve"] {
+        assert!(name.parse::<HoldReason>().is_err());
+    }
+}
+
+#[test]
+fn legacy_limit_reached_pause_json_still_parses() {
+    let pause: PauseReason = serde_json::from_str(r#"{"reason":"limit_reached"}"#).unwrap();
+    assert_eq!(
+        pause,
+        PauseReason::LimitReached {
+            provider: None,
+            window: None,
+            resets_at: None
+        }
+    );
+    assert_eq!(
+        serde_json::to_value(pause).unwrap(),
+        json!({"reason":"limit_reached"})
+    );
+}
+
+#[test]
+fn derived_holds_serialise_in_the_view_but_never_parse_as_stored_holds() {
+    use canterlot_hub::model::HoldView;
+    let input_id = Uuid::now_v7();
+    for (view, expected) in [
+        (
+            HoldView::MachineNotReconciled,
+            json!({"reason":"machine_not_reconciled"}),
+        ),
+        (
+            HoldView::CapabilityMissing { input_id },
+            json!({"reason":"capability_missing", "input_id":input_id}),
+        ),
+    ] {
+        assert_eq!(serde_json::to_value(view).unwrap(), expected);
+        assert!(serde_json::from_value::<HoldReason>(expected).is_err());
+    }
+    for reason in ["machine_not_reconciled", "capability_missing"] {
+        assert!(reason.parse::<HoldReason>().is_err());
+    }
+    let view = HoldView::AttachmentsPending {
+        input_id,
+        reason: Some("hub_unreachable".into()),
+    };
+    assert_eq!(
+        serde_json::to_value(view).unwrap(),
+        json!({"reason":"attachments_pending", "input_id":input_id, "machine_reason":"hub_unreachable"})
+    );
+    for stored in [
+        HoldReason::RunInProgress,
+        HoldReason::AwaitingUserRequest,
+        HoldReason::ContextMaintenance,
+        HoldReason::NoLiveExecution,
+        HoldReason::ExecutionStarting,
+        HoldReason::StorageLow,
+        HoldReason::WorkdirBusy {
+            conflict_conversation_id: input_id,
+        },
+        HoldReason::AttachmentsPending { input_id },
+        HoldReason::QuotaExhausted {
+            provider: "claude".into(),
+            window: "five_hour".into(),
+            wake_at: "2026-10-27T12:00:00Z".parse().unwrap(),
+        },
+        HoldReason::WeeklyReserve {
+            provider: "codex".into(),
+            resets_at: None,
+        },
+    ] {
+        assert_eq!(
+            serde_json::to_value(HoldView::from(stored.clone())).unwrap(),
+            serde_json::to_value(stored).unwrap()
+        );
+    }
 }

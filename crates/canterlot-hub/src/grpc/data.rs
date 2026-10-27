@@ -9,6 +9,15 @@ use super::{
 
 #[tonic::async_trait]
 impl WorkerData for HubGrpc {
+    type FetchAttachmentStream = ReplyStream<canterlot_proto::worker::v1::AttachmentChunk>;
+
+    async fn fetch_attachment(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
+    ) -> Result<Response<Self::FetchAttachmentStream>, Status> {
+        Err(Status::unimplemented("attachment fetch is not implemented"))
+    }
+
     type DataStream = ReplyStream<DataDown>;
 
     async fn data(

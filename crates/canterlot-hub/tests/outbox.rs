@@ -193,6 +193,7 @@ impl Worker {
             record_body::Body::RunFinished(RunFinished {
                 execution_id: command.execution_id.clone(),
                 input_command_id: command.command_id.clone(),
+                ..Default::default()
             }),
         ];
         self.data

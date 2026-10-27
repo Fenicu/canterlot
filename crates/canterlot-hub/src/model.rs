@@ -1,5 +1,6 @@
 use std::str::FromStr;
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -119,8 +120,18 @@ pub enum PauseReason {
     UserStop,
     FatalError,
     ProcessExited,
-    LimitReached,
-    UnconfirmedDelivery { input_id: Uuid },
+    LimitReached {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[serde(with = "optional_utc_time")]
+        resets_at: Option<DateTime<Utc>>,
+    },
+    UnconfirmedDelivery {
+        input_id: Uuid,
+    },
     OwnerLost,
     RestorePending,
 }
@@ -131,7 +142,7 @@ impl PauseReason {
             Self::UserStop => "user_stop",
             Self::FatalError => "fatal_error",
             Self::ProcessExited => "process_exited",
-            Self::LimitReached => "limit_reached",
+            Self::LimitReached { .. } => "limit_reached",
             Self::UnconfirmedDelivery { .. } => "unconfirmed_delivery",
             Self::OwnerLost => "owner_lost",
             Self::RestorePending => "restore_pending",
@@ -147,7 +158,11 @@ impl FromStr for PauseReason {
             "user_stop" => Ok(Self::UserStop),
             "fatal_error" => Ok(Self::FatalError),
             "process_exited" => Ok(Self::ProcessExited),
-            "limit_reached" => Ok(Self::LimitReached),
+            "limit_reached" => Ok(Self::LimitReached {
+                provider: None,
+                window: None,
+                resets_at: None,
+            }),
             "unconfirmed_delivery" => Err(ModelError::MissingReasonData("unconfirmed_delivery")),
             "owner_lost" => Ok(Self::OwnerLost),
             "restore_pending" => Ok(Self::RestorePending),
@@ -168,8 +183,23 @@ pub enum HoldReason {
     NoLiveExecution,
     ExecutionStarting,
     StorageLow,
-    WorkdirBusy { conflict_conversation_id: Uuid },
-    AttachmentsPending { input_id: Uuid },
+    WorkdirBusy {
+        conflict_conversation_id: Uuid,
+    },
+    AttachmentsPending {
+        input_id: Uuid,
+    },
+    QuotaExhausted {
+        provider: String,
+        window: String,
+        #[serde(with = "utc_time")]
+        wake_at: DateTime<Utc>,
+    },
+    WeeklyReserve {
+        provider: String,
+        #[serde(default, with = "optional_utc_time")]
+        resets_at: Option<DateTime<Utc>>,
+    },
 }
 
 impl HoldReason {
@@ -183,6 +213,8 @@ impl HoldReason {
             Self::StorageLow => "storage_low",
             Self::WorkdirBusy { .. } => "workdir_busy",
             Self::AttachmentsPending { .. } => "attachments_pending",
+            Self::QuotaExhausted { .. } => "quota_exhausted",
+            Self::WeeklyReserve { .. } => "weekly_reserve",
         }
     }
 }
@@ -200,10 +232,88 @@ impl FromStr for HoldReason {
             "storage_low" => Ok(Self::StorageLow),
             "workdir_busy" => Err(ModelError::MissingReasonData("workdir_busy")),
             "attachments_pending" => Err(ModelError::MissingReasonData("attachments_pending")),
+            "quota_exhausted" => Err(ModelError::MissingReasonData("quota_exhausted")),
+            "weekly_reserve" => Err(ModelError::MissingReasonData("weekly_reserve")),
             _ => Err(ModelError::UnknownValue {
                 kind: "hold reason",
                 value: value.into(),
             }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum HoldView {
+    RunInProgress,
+    AwaitingUserRequest,
+    ContextMaintenance,
+    NoLiveExecution,
+    ExecutionStarting,
+    StorageLow,
+    WorkdirBusy {
+        conflict_conversation_id: Uuid,
+    },
+    AttachmentsPending {
+        input_id: Uuid,
+        #[serde(
+            default,
+            rename = "machine_reason",
+            skip_serializing_if = "Option::is_none"
+        )]
+        reason: Option<String>,
+    },
+    QuotaExhausted {
+        provider: String,
+        window: String,
+        #[serde(with = "utc_time")]
+        wake_at: DateTime<Utc>,
+    },
+    WeeklyReserve {
+        provider: String,
+        #[serde(default, with = "optional_utc_time")]
+        resets_at: Option<DateTime<Utc>>,
+    },
+    MachineNotReconciled,
+    CapabilityMissing {
+        input_id: Uuid,
+    },
+}
+
+impl From<HoldReason> for HoldView {
+    fn from(reason: HoldReason) -> Self {
+        match reason {
+            HoldReason::RunInProgress => Self::RunInProgress,
+            HoldReason::AwaitingUserRequest => Self::AwaitingUserRequest,
+            HoldReason::ContextMaintenance => Self::ContextMaintenance,
+            HoldReason::NoLiveExecution => Self::NoLiveExecution,
+            HoldReason::ExecutionStarting => Self::ExecutionStarting,
+            HoldReason::StorageLow => Self::StorageLow,
+            HoldReason::WorkdirBusy {
+                conflict_conversation_id,
+            } => Self::WorkdirBusy {
+                conflict_conversation_id,
+            },
+            HoldReason::AttachmentsPending { input_id } => Self::AttachmentsPending {
+                input_id,
+                reason: None,
+            },
+            HoldReason::QuotaExhausted {
+                provider,
+                window,
+                wake_at,
+            } => Self::QuotaExhausted {
+                provider,
+                window,
+                wake_at,
+            },
+            HoldReason::WeeklyReserve {
+                provider,
+                resets_at,
+            } => Self::WeeklyReserve {
+                provider,
+                resets_at,
+            },
         }
     }
 }
@@ -332,5 +442,47 @@ impl FromStr for DeliveryState {
                 value: value.into(),
             }),
         }
+    }
+}
+
+mod utc_time {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &DateTime<Utc>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<DateTime<Utc>, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+mod optional_utc_time {
+    use super::*;
+
+    pub fn serialize<S: serde::Serializer>(
+        value: &Option<DateTime<Utc>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        value
+            .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))
+            .serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<DateTime<Utc>>, D::Error> {
+        Option::<String>::deserialize(deserializer)?
+            .map(|value| value.parse().map_err(serde::de::Error::custom))
+            .transpose()
     }
 }

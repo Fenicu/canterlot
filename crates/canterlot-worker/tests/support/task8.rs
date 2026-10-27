@@ -85,6 +85,7 @@ fn start_command(execution: Uuid, conversation: Uuid, work: &Path) -> Command {
             harness: "synthetic".into(),
             workdir: work.to_string_lossy().into_owned(),
             native_conversation_id: String::new(),
+            ..Default::default()
         })),
     }
 }

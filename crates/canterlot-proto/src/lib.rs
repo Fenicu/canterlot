@@ -10,6 +10,7 @@ pub mod worker {
     }
 }
 
+pub mod harness;
 pub mod limits;
 
 mod redacted_debug;

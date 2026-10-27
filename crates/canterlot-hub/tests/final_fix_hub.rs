@@ -176,6 +176,7 @@ async fn wave2_n2_sj_batch_and_stop_share_lock_order(pool: PgPool) -> TestResult
             Body::PhaseChanged(PhaseChanged {
                 execution_id: run.execution.execution_id.to_string(),
                 phase: "thinking".into(),
+                ..Default::default()
             }),
         ]);
         let ingest = Ingest::new(pool.clone());
@@ -341,6 +342,7 @@ async fn terminal_execution_clears_phase_and_counts_late_phase(pool: PgPool) -> 
             Body::PhaseChanged(PhaseChanged {
                 execution_id: run.execution.execution_id.to_string(),
                 phase: "thinking".into(),
+                ..Default::default()
             })
         };
         run.send(vec![
@@ -360,6 +362,7 @@ async fn terminal_execution_clears_phase_and_counts_late_phase(pool: PgPool) -> 
         run.send(vec![Body::PhaseChanged(PhaseChanged {
             execution_id: run.execution.execution_id.to_string(),
             phase: "thinking".into(),
+            ..Default::default()
         })])
         .await;
         let phase: Option<String> =

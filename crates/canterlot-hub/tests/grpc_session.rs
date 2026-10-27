@@ -345,7 +345,10 @@ async fn heartbeats_are_acked_while_a_large_batch_is_ingested(pool: PgPool) -> T
         send(
             &tx,
             ControlUp {
-                msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq })),
+                msg: Some(control_up::Msg::Heartbeat(Heartbeat {
+                    seq,
+                    ..Default::default()
+                })),
             },
         )
         .await;
@@ -546,7 +549,10 @@ async fn heartbeat(tx: &mpsc::Sender<ControlUp>, stream: &mut Streaming<ControlD
     send(
         tx,
         ControlUp {
-            msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq })),
+            msg: Some(control_up::Msg::Heartbeat(Heartbeat {
+                seq,
+                ..Default::default()
+            })),
         },
     )
     .await;
@@ -1215,7 +1221,10 @@ async fn first_message_must_be_hello_on_both_streams(pool: PgPool) {
     send(
         &tx,
         ControlUp {
-            msg: Some(control_up::Msg::Heartbeat(Heartbeat { seq: 1 })),
+            msg: Some(control_up::Msg::Heartbeat(Heartbeat {
+                seq: 1,
+                ..Default::default()
+            })),
         },
     )
     .await;

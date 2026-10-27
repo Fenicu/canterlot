@@ -22,6 +22,12 @@ pub struct WorkerConfig {
     pub timers: WorkerTimers,
     #[serde(default)]
     pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub machine: MachineConfig,
+    #[serde(default)]
+    pub instruction_profiles: Vec<ProfileConfig>,
+    #[serde(default)]
+    pub attachments: WorkerAttachmentsConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -221,6 +227,14 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
     {
         return Err(invalid_url());
     }
+    let mut names = std::collections::BTreeSet::new();
+    if config
+        .instruction_profiles
+        .iter()
+        .any(|profile| profile.name == "owner" || !names.insert(&profile.name))
+    {
+        return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+    }
     Ok(config)
 }
 
@@ -251,4 +265,50 @@ pub fn read_token(path: &Path) -> Result<String, ConfigError> {
     file.read_to_string(&mut token)
         .map_err(|error| file_io(path, error))?;
     Ok(token.trim().to_owned())
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MachineConfig {
+    #[serde(with = "humantime_serde")]
+    pub metrics_interval: Duration,
+}
+
+impl Default for MachineConfig {
+    fn default() -> Self {
+        Self {
+            metrics_interval: Duration::from_secs(30),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ProfileConfig {
+    pub name: String,
+    pub title: String,
+    pub description: String,
+    pub harnesses: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct WorkerAttachmentsConfig {
+    pub fetch_parallelism: usize,
+    #[serde(with = "humantime_serde")]
+    pub fetch_retry: Duration,
+    pub fetch_attempts: u32,
+    #[serde(with = "humantime_serde")]
+    pub fetch_backoff_cap: Duration,
+}
+
+impl Default for WorkerAttachmentsConfig {
+    fn default() -> Self {
+        Self {
+            fetch_parallelism: 2,
+            fetch_retry: Duration::from_secs(2),
+            fetch_attempts: 5,
+            fetch_backoff_cap: Duration::from_secs(30),
+        }
+    }
 }

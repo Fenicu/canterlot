@@ -163,6 +163,16 @@ impl WorkerControl for Proxy {
 
 #[tonic::async_trait]
 impl WorkerData for Proxy {
+    type FetchAttachmentStream =
+        ReceiverStream<Result<canterlot_proto::worker::v1::AttachmentChunk, Status>>;
+
+    async fn fetch_attachment(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
+    ) -> Result<Response<Self::FetchAttachmentStream>, Status> {
+        Err(Status::unimplemented("attachment fetch is not implemented"))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,

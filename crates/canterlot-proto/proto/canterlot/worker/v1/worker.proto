@@ -9,6 +9,7 @@ service WorkerControl {
 
 service WorkerData {
   rpc Data(stream DataUp) returns (stream DataDown);
+  rpc FetchAttachment(FetchAttachmentRequest) returns (stream AttachmentChunk);
 }
 
 enum StreamKind {
@@ -41,6 +42,7 @@ message Hello {
   repeated JournalCursor cursors = 9;
   string boot_id = 10;
   StreamKind stream_kind = 11;
+  uint64 machine_time_ms = 12;
 }
 
 message JournalCursor {
@@ -80,6 +82,9 @@ message ControlUp {
     JournalRecords cj_records = 2;
     Heartbeat heartbeat = 3;
     ReconcileReport reconcile_report = 4;
+    MachineReport machine_report = 5;
+    MachineMetrics machine_metrics = 6;
+    LimitsReport limits_report = 7;
   }
 }
 
@@ -102,6 +107,8 @@ message ControlDown {
     Command command = 2;
     JournalRangeAck cj_ack = 3;
     HeartbeatAck heartbeat_ack = 4;
+    PollLimits poll_limits = 5;
+    LimitsSnapshot limits_snapshot = 6;
   }
 }
 
@@ -121,6 +128,7 @@ message DataDown {
 
 message Heartbeat {
   uint64 seq = 1;
+  uint64 machine_time_ms = 2;
 }
 
 message HeartbeatAck {
@@ -161,11 +169,13 @@ message DeliverInput {
   string input_id = 1;
   string conversation_id = 2;
   repeated ContentBlock content = 3;
+  SettingsOverride settings = 4;
 }
 
 message ContentBlock {
   oneof block {
     TextBlock text = 1;
+    AttachmentRef attachment = 2;
   }
 }
 
@@ -190,6 +200,11 @@ message StartExecution {
   string harness = 2;
   string workdir = 3;
   string native_conversation_id = 4;
+  string model = 5;
+  string effort = 6;
+  string permission_mode = 7;
+  string instruction_profile = 8;
+  repeated string capabilities = 9;
 }
 
 message StopExecution {
@@ -220,6 +235,10 @@ message RecordBody {
     InterruptStatus interrupt_status = 20;
     WithdrawRefused withdraw_refused = 21;
     AdapterDiagnostic adapter_diagnostic = 22;
+    LimitObservation limit_observed = 23;
+    LimitReached limit_reached = 24;
+    AttachmentReady attachment_ready = 25;
+    AttachmentFailed attachment_failed = 26;
   }
 }
 
@@ -292,6 +311,11 @@ message ExecutionState {
 message RunFinished {
   string execution_id = 1;
   string input_command_id = 2;
+  repeated ModelUsage usage = 3;
+  uint64 context_tokens = 4;
+  uint64 context_window_tokens = 5;
+  uint64 duration_ms = 6;
+  uint64 machine_time_ms = 7;
 }
 
 message JournalClosed {
@@ -306,6 +330,10 @@ message BlockStarted {
   string kind = 3;
   string input_command_id = 4;
   string parent_block_id = 5;
+  string agent = 6;
+  string model = 7;
+  string tool_name = 8;
+  string summary = 9;
 }
 
 message BlockDelta {
@@ -321,6 +349,7 @@ message BlockFinal {
   string text = 3;
   string checksum = 4;
   bool text_omitted = 5;
+  string summary = 6;
 }
 
 message BlockIncomplete {
@@ -332,6 +361,8 @@ message BlockIncomplete {
 message PhaseChanged {
   string execution_id = 1;
   string phase = 2;
+  string tool_name = 3;
+  string summary = 4;
 }
 
 message JournalOpened {
@@ -366,4 +397,150 @@ message AdapterDiagnostic {
   string execution_id = 1;
   string kind = 2;
   string event_type = 3;
+}
+
+// Необязательная возможность pilot_v1 предлагается в Hello и повторяется в Accepted.
+message MachineReport {
+  string worker_version = 1;
+  repeated string allowed_roots = 2;
+  repeated HarnessInfo harnesses = 3;
+  repeated InstructionProfile profiles = 4;
+  uint64 max_attachment_bytes = 5;
+  uint32 max_attachments_per_input = 6;
+  string containment = 7;
+  string os = 8;
+}
+
+message HarnessInfo {
+  string harness = 1;
+  string provider = 2;
+  string title = 3;
+  bool images = 4;
+  bool settings_midsession = 5;
+  repeated string permission_modes = 6;
+  repeated ModelInfo models = 7;
+}
+
+message ModelInfo {
+  string id = 1;
+  string title = 2;
+  repeated string efforts = 3;
+}
+
+message InstructionProfile {
+  string name = 1;
+  string title = 2;
+  string description = 3;
+  repeated string harnesses = 4;
+}
+
+message MachineMetrics {
+  uint64 machine_time_ms = 1;
+  uint32 cpu_cores = 2;
+  uint32 cpu_permille = 3;
+  uint64 mem_total_bytes = 4;
+  uint64 mem_available_bytes = 5;
+  repeated DiskUsage disks = 6;
+  uint32 load1_centi = 7;
+  uint32 load5_centi = 8;
+  uint32 load15_centi = 9;
+  repeated ExecutionProcess executions = 10;
+}
+
+message DiskUsage {
+  string label = 1;
+  uint64 total_bytes = 2;
+  uint64 free_bytes = 3;
+}
+
+message ExecutionProcess {
+  string execution_id = 1;
+  bool alive = 2;
+  uint32 cpu_permille = 3;
+  uint64 rss_bytes = 4;
+}
+
+enum LimitWindow {
+  LIMIT_WINDOW_UNSPECIFIED = 0;
+  LIMIT_WINDOW_FIVE_HOUR = 1;
+  LIMIT_WINDOW_WEEKLY = 2;
+}
+
+message LimitObservation {
+  string provider = 1;
+  LimitWindow window = 2;
+  uint32 used_permille = 3;
+  uint64 resets_at_ms = 4;
+  uint64 observed_machine_ms = 5;
+}
+
+message LimitsReport {
+  repeated LimitObservation observations = 1;
+}
+
+message PollLimits {
+  string provider = 1;
+}
+
+message LimitsSnapshot {
+  string provider = 1;
+  repeated LimitObservation current = 2;
+  bool weekly_reserve_active = 3;
+}
+
+message LimitReached {
+  string execution_id = 1;
+  string provider = 2;
+  LimitWindow window = 3;
+  uint64 resets_at_ms = 4;
+  string input_command_id = 5;
+}
+
+message ModelUsage {
+  string model = 1;
+  string agent = 2;
+  uint64 input_tokens = 3;
+  uint64 output_tokens = 4;
+  uint64 cache_read_tokens = 5;
+  uint64 cache_write_tokens = 6;
+}
+
+message SettingsOverride {
+  string model = 1;
+  string effort = 2;
+  string permission_mode = 3;
+}
+
+message AttachmentRef {
+  string attachment_id = 1;
+  string name = 2;
+  string mime = 3;
+  uint64 size = 4;
+  string sha256 = 5;
+  bool image = 6;
+}
+
+message FetchAttachmentRequest {
+  string attachment_id = 1;
+  uint64 offset = 2;
+}
+
+message AttachmentChunk {
+  uint64 offset = 1;
+  bytes data = 2;
+  bool last = 3;
+}
+
+message AttachmentReady {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string attachment_id = 3;
+}
+
+message AttachmentFailed {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  string attachment_id = 3;
+  string reason = 4;
+  bool retryable = 5;
 }

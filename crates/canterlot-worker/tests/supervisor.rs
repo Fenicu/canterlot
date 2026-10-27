@@ -264,6 +264,7 @@ impl Harness {
             profile: profile.into(),
             workdir,
             native_conversation_id: String::new(),
+            ..Default::default()
         }))
         .await;
         self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
@@ -282,6 +283,7 @@ impl Harness {
                 content: vec![ContentBlock {
                     block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
                 }],
+                ..Default::default()
             })),
         }
     }
@@ -294,6 +296,7 @@ impl Harness {
     async fn deliver_command(&mut self, command: Command) -> DeliverAck {
         self.send(down::Msg::Deliver(canterlot_proto::worker::ipc::Deliver {
             command: Some(command),
+            ..Default::default()
         }))
         .await;
         match self
@@ -587,6 +590,7 @@ async fn intent_is_durable_before_first_byte_and_never_repeated() {
     harness
         .send(down::Msg::Deliver(canterlot_proto::worker::ipc::Deliver {
             command: Some(command),
+            ..Default::default()
         }))
         .await;
     let status = harness.wait_exit().await;
@@ -1036,6 +1040,7 @@ async fn unknown_profile_fails_start() {
             profile: "no-such-adapter".into(),
             workdir: harness._root.path().to_string_lossy().into_owned(),
             native_conversation_id: String::new(),
+            ..Default::default()
         }))
         .await;
     let bodies = harness

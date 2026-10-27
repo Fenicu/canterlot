@@ -43,6 +43,7 @@ use crate::{
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
 };
 
+#[allow(clippy::large_enum_variant)]
 enum Control {
     Message(u64, ControlToSupervisor),
     Closed(u64),
@@ -174,10 +175,10 @@ fn input_text(command: &canterlot_proto::worker::v1::Command) -> Option<String> 
             .content
             .iter()
             .filter_map(|block| {
-                block
-                    .block
-                    .as_ref()
-                    .map(|content_block::Block::Text(text)| text.text.as_str())
+                block.block.as_ref().and_then(|block| match block {
+                    content_block::Block::Text(text) => Some(text.text.as_str()),
+                    content_block::Block::Attachment(_) => None,
+                })
             })
             .collect::<Vec<_>>()
             .join("\n"),
@@ -645,6 +646,7 @@ impl Supervisor {
         self.record(Body::PhaseChanged(PhaseChanged {
             execution_id: self.spec.execution_id.to_string(),
             phase: snake(&phase),
+            ..Default::default()
         }))?;
         Ok(())
     }
@@ -940,6 +942,7 @@ impl Supervisor {
                         .map(|id| id.to_string())
                         .unwrap_or_default(),
                     parent_block_id: parent.map(|id| id.to_string()).unwrap_or_default(),
+                    ..Default::default()
                 }))?;
             }
             AdapterEvent::BlockDelta { block_id, append } => {
@@ -975,6 +978,7 @@ impl Supervisor {
                     checksum: checksum(&text),
                     text: if omitted { String::new() } else { text },
                     text_omitted: omitted,
+                    ..Default::default()
                 }))?;
             }
             AdapterEvent::RunFinished { input_command_id } => {
@@ -987,6 +991,7 @@ impl Supervisor {
                 self.record(Body::RunFinished(RunFinished {
                     execution_id: self.spec.execution_id.to_string(),
                     input_command_id: input_command_id.to_string(),
+                    ..Default::default()
                 }))?;
                 self.active_turn = None;
                 for ((command, _), input) in self.inputs.iter_mut() {
