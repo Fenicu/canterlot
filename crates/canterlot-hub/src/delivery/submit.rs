@@ -24,7 +24,7 @@ use crate::{
 const OPERATION: &str = "submit_input";
 pub const QUEUE_LIMIT: i64 = 100;
 
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
     Text { text: String },
@@ -188,18 +188,61 @@ impl From<sqlx::Error> for SubmitError {
 fn validate_content(req: &SubmitInput) -> Result<(), SubmitError> {
     idempotency::validate_key(&req.idempotency_key)
         .map_err(|reason| SubmitError::InvalidRequest { reason })?;
-    if req.content.iter().all(|block| match block {
+    validate_scheduled_content(&req.content)
+}
+
+pub(crate) fn validate_scheduled_content(content: &[ContentBlock]) -> Result<(), SubmitError> {
+    if content.iter().all(|block| match block {
         ContentBlock::Text { text } => text.is_empty(),
     }) {
         return Err(SubmitError::InvalidContent { reason: "empty" });
     }
-    if req.content.iter().any(|block| match block {
+    if content.iter().any(|block| match block {
         ContentBlock::Text { text } => text.contains('\0'),
     }) {
         return Err(SubmitError::InvalidContent {
             reason: "nul_character",
         });
     }
+    // Резервируем заголовок будущей выдачи до привязки исполнения.
+    let command = Command {
+        command_id: Uuid::nil().to_string(),
+        dispatch_attempt: i32::MAX as u32,
+        execution_id: Uuid::nil().to_string(),
+        execution_generation: i64::MAX as u64,
+        kind: Some(command::Kind::DeliverInput(DeliverInput {
+            input_id: Uuid::nil().to_string(),
+            conversation_id: Uuid::nil().to_string(),
+            content: content
+                .iter()
+                .map(|block| match block {
+                    ContentBlock::Text { text } => ProtoContentBlock {
+                        block: Some(content_block::Block::Text(TextBlock { text: text.clone() })),
+                    },
+                })
+                .collect(),
+            ..Default::default()
+        })),
+    };
+    check_deliver_input(&command).map_err(|error| {
+        let (kind, limit, actual) = match error {
+            LimitError::InputText { actual } => {
+                (LimitKind::InputText, MAX_INPUT_TEXT_BYTES, actual)
+            }
+            LimitError::InputMeta { actual } => {
+                (LimitKind::InputMeta, MAX_INPUT_META_BYTES, actual)
+            }
+            LimitError::Message { actual } => (LimitKind::Message, MAX_MESSAGE_BYTES, actual),
+            LimitError::EventBatch { .. } => {
+                unreachable!("command check cannot return an event batch limit")
+            }
+        };
+        SubmitError::ResourceLimit {
+            kind,
+            limit,
+            actual,
+        }
+    })?;
     Ok(())
 }
 
@@ -277,17 +320,9 @@ async fn submit_attempt(
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
         Begin::New => {}
     }
-
     let (input_seq, closed, machine_id): (i64, bool, Uuid) = sqlx::query_as(
-        "select q.next_input_seq, q.closed, c.machine_id from queue_state q
-         join conversations c on c.id = q.conversation_id
-         where q.conversation_id = $1 and c.owner_id = $2 for update of q",
-    )
-    .bind(req.conversation_id)
-    .bind(req.owner_id)
-    .fetch_optional(&mut *conn)
-    .await?
-    .ok_or(SubmitError::ConversationNotFound)?;
+        "select q.next_input_seq, q.closed, c.machine_id from queue_state q join conversations c on c.id = q.conversation_id where q.conversation_id = $1 and c.owner_id = $2 for update of q")
+        .bind(req.conversation_id).bind(req.owner_id).fetch_optional(&mut *conn).await?.ok_or(SubmitError::ConversationNotFound)?;
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
@@ -296,53 +331,12 @@ async fn submit_attempt(
     if closed {
         return Err(SubmitError::ConversationClosed);
     }
-
     let submitted = SubmittedInput {
         input_id: Uuid::now_v7(),
         input_seq,
         command_id: Uuid::now_v7(),
         state: InputState::Queued,
     };
-    // Резервируем заголовок будущей выдачи до привязки исполнения.
-    let command = Command {
-        command_id: submitted.command_id.to_string(),
-        dispatch_attempt: i32::MAX as u32,
-        execution_id: Uuid::nil().to_string(),
-        execution_generation: i64::MAX as u64,
-        kind: Some(command::Kind::DeliverInput(DeliverInput {
-            input_id: submitted.input_id.to_string(),
-            conversation_id: req.conversation_id.to_string(),
-            content: req
-                .content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => ProtoContentBlock {
-                        block: Some(content_block::Block::Text(TextBlock { text: text.clone() })),
-                    },
-                })
-                .collect(),
-            ..Default::default()
-        })),
-    };
-    check_deliver_input(&command).map_err(|error| {
-        let (kind, limit, actual) = match error {
-            LimitError::InputText { actual } => {
-                (LimitKind::InputText, MAX_INPUT_TEXT_BYTES, actual)
-            }
-            LimitError::InputMeta { actual } => {
-                (LimitKind::InputMeta, MAX_INPUT_META_BYTES, actual)
-            }
-            LimitError::Message { actual } => (LimitKind::Message, MAX_MESSAGE_BYTES, actual),
-            LimitError::EventBatch { .. } => {
-                unreachable!("command check cannot return an event batch limit")
-            }
-        };
-        SubmitError::ResourceLimit {
-            kind,
-            limit,
-            actual,
-        }
-    })?;
     let queued: i64 = sqlx::query_scalar(
         "select count(*) from inputs where conversation_id = $1
          and state in ('queued', 'dispatched', 'on_machine')",

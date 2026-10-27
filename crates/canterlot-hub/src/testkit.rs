@@ -83,11 +83,14 @@ pub async fn test_app_deps(
     let (installation, manifest, directory) = test_installation(&pool).await;
     let timers = crate::config::HubTimers::default();
     let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
+    let scheduler =
+        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default());
     let deps = crate::http::AppDeps {
         pool,
         registry: crate::session::Registry::new(timers),
         installation,
         dispatcher,
+        scheduler,
         http,
         proxy_secret,
         limits: Default::default(),
@@ -186,11 +189,23 @@ async fn spawn_on(
     let addr = listener.local_addr().expect("test address");
     let (shutdown, stop) = tokio::sync::oneshot::channel();
     let root = tokio_util::sync::CancellationToken::new();
+    let scheduler =
+        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default());
+    #[cfg(feature = "fault-injection")]
+    let scheduler = {
+        let mut scheduler = scheduler;
+        scheduler.faults = faults.clone();
+        scheduler
+    };
     let background = Background::start(BackgroundDeps {
         pool: pool.clone(),
         registry: registry.clone(),
         timers,
         dispatch_rx,
+        scheduler: scheduler.clone(),
+        activity: Default::default(),
+        machines: Default::default(),
+        multi_process: http.as_ref().is_some_and(|config| config.multi_process),
     });
     let (http_addr, app, http_listener) = match http {
         Some(config) => {
@@ -206,6 +221,7 @@ async fn spawn_on(
                 registry: registry.clone(),
                 installation,
                 dispatcher: dispatcher.clone(),
+                scheduler,
                 http: config,
                 proxy_secret: secret,
                 limits: Default::default(),

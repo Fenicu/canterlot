@@ -502,12 +502,20 @@ async fn serve_starts_http_beside_grpc_and_stops_on_shutdown(pool: PgPool) {
 async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPool) {
     let timers = HubTimers::default();
     let registry = canterlot_hub::session::Registry::new(timers.clone());
-    let (_dispatcher, dispatch_rx) = canterlot_hub::dispatcher::Dispatcher::channel();
+    let (dispatcher, dispatch_rx) = canterlot_hub::dispatcher::Dispatcher::channel();
     let background = Background::start(BackgroundDeps {
         pool: pool.clone(),
         registry,
         timers,
         dispatch_rx,
+        scheduler: canterlot_hub::scheduler::Scheduler::new(
+            pool.clone(),
+            dispatcher,
+            Default::default(),
+        ),
+        activity: Default::default(),
+        machines: Default::default(),
+        multi_process: false,
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     tokio::time::timeout(Duration::from_secs(10), background.stop())

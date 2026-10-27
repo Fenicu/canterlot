@@ -202,6 +202,7 @@ async fn serve(
         http: http_config,
         limits,
         activity,
+        scheduler: scheduler_config,
         machines,
         ..
     } = config;
@@ -225,6 +226,12 @@ async fn serve(
     };
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
+    let scheduler = canterlot_hub::scheduler::Scheduler::new(
+        pool.clone(),
+        dispatcher.clone(),
+        scheduler_config,
+    )
+    .with_history_days(limits.history_days);
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
     state.ingest = std::sync::Arc::new(
@@ -238,6 +245,12 @@ async fn serve(
         registry: registry.clone(),
         timers,
         dispatch_rx,
+        scheduler: scheduler.clone(),
+        activity: activity.clone(),
+        machines: machines.clone(),
+        multi_process: http_parts
+            .as_ref()
+            .is_some_and(|(config, _, _)| config.multi_process),
     });
     let root = tokio_util::sync::CancellationToken::new();
     let trigger = root.clone();
@@ -272,6 +285,7 @@ async fn serve(
             registry,
             installation,
             dispatcher,
+            scheduler,
             http: http_config,
             proxy_secret,
             limits,

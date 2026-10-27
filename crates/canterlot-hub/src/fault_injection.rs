@@ -17,6 +17,8 @@ pub enum Point {
     BeforeCjCommit,
     BeforeSjCommit,
     BeforeAckSend,
+    SchedulerBeforeSubmit,
+    DropBusNotice,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +129,7 @@ pub struct BatchTrace {
 #[derive(Default)]
 struct Trace {
     pauses: HashMap<Point, VecDeque<oneshot::Sender<oneshot::Sender<()>>>>,
+    drops: HashMap<(Point, String), usize>,
     drop_acks: usize,
     drop_sj_acks: usize,
     sj_batch_pause: std::time::Duration,
@@ -158,6 +161,30 @@ impl Default for Faults {
 }
 
 impl Faults {
+    pub fn drop_next_at(&self, point: Point, scope: &str) {
+        *self
+            .trace
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .drops
+            .entry((point, scope.into()))
+            .or_default() += 1;
+    }
+
+    pub(crate) fn take_drop(&self, point: Point, scope: &str) -> bool {
+        let mut trace = self.trace.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = trace.drops.get_mut(&(point, scope.into()))
+            && *count > 0
+        {
+            *count -= 1;
+            if *count == 0 {
+                trace.drops.remove(&(point, scope.into()));
+            }
+            return true;
+        }
+        false
+    }
+
     pub fn goaway(&self) {
         let _ = self.goaway.send(());
     }

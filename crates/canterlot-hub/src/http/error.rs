@@ -98,6 +98,25 @@ error_codes! {
     ConversationClosed => "conversation_closed", 409, Delivery, Never, "Разговор закрыт";
     ExecutionAlreadyLive => "execution_already_live", 409, Delivery, AfterCondition, "Исполнение уже запущено";
     InvalidState => "invalid_state", 409, Delivery, Never, "Действие недопустимо в текущем состоянии";
+    NotPending => "not_pending", 409, Browser, Never, "Отложенное сообщение уже обработано";
+    ScheduleTimeOutOfRange => "schedule_time_out_of_range", 422, Browser, Never, "Время отправки вне допустимого диапазона";
+    TooManyScheduled => "too_many_scheduled", 409, Browser, Never, "Слишком много отложенных сообщений";
+}
+
+impl From<crate::scheduler::ScheduleError> for ApiError {
+    fn from(error: crate::scheduler::ScheduleError) -> Self {
+        use crate::scheduler::ScheduleError as E;
+        match error {
+            E::NotFound => Self::new(ErrorCode::NotFound),
+            E::NotPending => Self::new(ErrorCode::NotPending),
+            E::TimeOutOfRange => Self::new(ErrorCode::ScheduleTimeOutOfRange),
+            E::TooManyPending => Self::new(ErrorCode::TooManyScheduled),
+            E::InvalidContent(_) => Self::new(ErrorCode::InvalidRequest),
+            E::AttachmentsUnavailable => Self::new(ErrorCode::NotImplemented),
+            E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
+            E::Db(error) => error.into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ToSchema)]

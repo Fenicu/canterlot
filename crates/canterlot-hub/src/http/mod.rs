@@ -29,6 +29,7 @@ pub mod extract;
 pub mod health;
 pub mod layers;
 pub mod openapi;
+pub mod scheduled;
 
 /// Размер одного тела `PATCH` загрузки вложения; объявляется в `GET /api/v1/config`.
 pub const UPLOAD_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
@@ -41,6 +42,7 @@ pub struct AppDeps {
     pub registry: Registry,
     pub installation: Installation,
     pub dispatcher: Dispatcher,
+    pub scheduler: crate::scheduler::Scheduler,
     pub http: HttpConfig,
     pub proxy_secret: Option<Vec<u8>>,
     pub limits: LimitsConfig,
@@ -56,6 +58,7 @@ pub struct AppState {
     pub registry: Registry,
     pub installation: Installation,
     pub dispatcher: Dispatcher,
+    pub scheduler: crate::scheduler::Scheduler,
     pub http: Arc<HttpConfig>,
     pub proxy_secret: Option<Arc<Vec<u8>>>,
     pub limits: Arc<LimitsConfig>,
@@ -75,6 +78,7 @@ impl AppState {
             registry: deps.registry,
             installation: deps.installation,
             dispatcher: deps.dispatcher,
+            scheduler: deps.scheduler,
             http: Arc::new(deps.http),
             proxy_secret: deps.proxy_secret.map(Arc::new),
             limits: Arc::new(deps.limits),
@@ -100,7 +104,9 @@ pub fn load_proxy_secret(path: &Path) -> Result<Vec<u8>, &'static str> {
 
 /// Все маршруты, которые попадают и в роутер, и в документ OpenAPI; новые задачи сливают сюда свои.
 pub fn api_routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().merge(health::routes())
+    OpenApiRouter::new()
+        .merge(health::routes())
+        .merge(scheduled::routes())
 }
 
 pub fn router(state: AppState) -> Router {

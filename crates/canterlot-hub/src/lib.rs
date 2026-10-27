@@ -3,8 +3,10 @@
 #[cfg(all(feature = "fault-injection", not(debug_assertions)))]
 compile_error!("fault-injection must not be built in release");
 
+pub mod activity;
 pub mod background;
 pub mod blocks;
+pub mod bus;
 pub mod config;
 pub mod db;
 pub mod dberr;
@@ -25,6 +27,7 @@ pub mod machines;
 pub mod model;
 pub mod outbox;
 pub mod runs;
+pub mod scheduler;
 pub mod session;
 pub mod singleton;
 

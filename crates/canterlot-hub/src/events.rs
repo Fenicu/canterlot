@@ -46,7 +46,7 @@ pub struct StoredEvent {
 
 /// Вызывать в транзакции изменения состояния; блокировка счётчика удерживается до commit.
 pub async fn append(conn: &mut PgConnection, ev: NewEvent) -> Result<StoredEvent, sqlx::Error> {
-    sqlx::query_as(
+    let stored: StoredEvent = sqlx::query_as(
         "with next_seq as (
              insert into scope_counters (scope, last_seq) values ($1, 1)
              on conflict (scope) do update set last_seq = scope_counters.last_seq + 1
@@ -65,8 +65,20 @@ pub async fn append(conn: &mut PgConnection, ev: NewEvent) -> Result<StoredEvent
     .bind(ev.execution_id)
     .bind(ev.payload)
     .bind(ev.correlation_id)
-    .fetch_one(conn)
-    .await
+    .fetch_one(&mut *conn)
+    .await?;
+    crate::bus::appended(conn, &stored.scope, &stored.kind, stored.scope_seq).await?;
+    Ok(stored)
+}
+
+pub async fn purge_older_than(pool: &PgPool, age: std::time::Duration) -> Result<u64, sqlx::Error> {
+    Ok(sqlx::query(
+        "delete from events where committed_at < clock_timestamp() - $1 * interval '1 second'",
+    )
+    .bind(age.as_secs_f64())
+    .execute(pool)
+    .await?
+    .rows_affected())
 }
 
 #[derive(Debug)]
