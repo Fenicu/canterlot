@@ -1,0 +1,466 @@
+#[path = "support/task3.rs"]
+mod support;
+use canterlot_hub::{
+    config::HubTimers,
+    events::Scope,
+    machine_info::{self, MetricsOutcome},
+    singleton::Singleton,
+    testkit,
+};
+use canterlot_proto::worker::v1::*;
+use chrono::Utc;
+use serde_json::Value;
+use sqlx::PgPool;
+use support::*;
+use uuid::Uuid;
+type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn report_replaces_harnesses_and_profiles_and_stores_capabilities(
+    pool: PgPool,
+) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let mut r = report();
+    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
+    r.harnesses[0].harness = "synthetic-codex".into();
+    r.harnesses[0].provider = "codex".into();
+    r.profiles[0].name = "other".into();
+    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
+    assert_eq!(
+        count(&pool, "select count(*) from machine_harnesses").await,
+        1
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from machine_profiles where name='other'"
+        )
+        .await,
+        1
+    );
+    let row: (Vec<String>, Value, String, String, String) = sqlx::query_as(
+        "select capabilities,allowed_roots,worker_version,containment,os from machines where id=$1",
+    )
+    .bind(s.machine_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(
+        row,
+        (
+            vec!["pilot_v1".into()],
+            serde_json::json!(["/tmp"]),
+            "test".into(),
+            "process_group".into(),
+            "linux".into()
+        )
+    );
+    let n: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind='machine_report_updated' and scope=$1",
+    )
+    .bind(
+        Scope::Machines {
+            owner_id: s.owner_id,
+        }
+        .key(),
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(n, 2);
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn report_with_mismatching_attachment_limits_flags_the_machine(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let mut r = report();
+    r.max_attachment_bytes -= 1;
+    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
+    assert_eq!(
+        count(&pool, "select count(*) from machines where not limits_ok").await,
+        1
+    );
+    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &report(), Uuid::now_v7()).await?;
+    assert_eq!(
+        count(&pool, "select count(*) from machines where not limits_ok").await,
+        0
+    );
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn metrics_upsert_keeps_latest_and_appends_a_machines_event(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    for ms in [1000, 2000] {
+        assert_eq!(
+            machine_info::apply_metrics(
+                &pool,
+                s.owner_id,
+                s.machine_id,
+                &metrics(ms),
+                Uuid::now_v7()
+            )
+            .await?,
+            MetricsOutcome::Stored
+        );
+    }
+    assert!(matches!(
+        machine_info::apply_metrics(
+            &pool,
+            s.owner_id,
+            s.machine_id,
+            &metrics(1500),
+            Uuid::now_v7()
+        )
+        .await?,
+        MetricsOutcome::Ignored(_)
+    ));
+    assert_eq!(
+        count(&pool, "select machine_time_ms from machine_metrics").await,
+        2000
+    );
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='machine_metrics'"
+        )
+        .await,
+        2
+    );
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn invalid_metrics_are_ignored_without_ending_the_stream(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let mut c = connect(&hub, &s, Uuid::now_v7(), true, 1000).await;
+    let mut bad = metrics(1000);
+    bad.cpu_permille = 1001;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineMetrics(bad)),
+    })
+    .await?;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineMetrics(metrics(2000))),
+    })
+    .await?;
+    wait_until(
+        &pool,
+        "select count(*) from machine_metrics where machine_time_ms=2000",
+    )
+    .await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::Heartbeat(Heartbeat {
+            seq: 7,
+            machine_time_ms: 2001,
+        })),
+    })
+    .await?;
+    let down = tokio::time::timeout(WAIT, c.stream.message())
+        .await??
+        .unwrap();
+    assert!(matches!(
+        down.msg,
+        Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq: 7 }))
+    ));
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='machine_metrics'"
+        )
+        .await,
+        1
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_metrics_apply_does_not_end_the_stream(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    sqlx::raw_sql("create function fail_metrics() returns trigger language plpgsql as $$ begin raise exception 'metrics_outage'; end $$; create trigger fail_metrics before insert on machine_metrics for each row execute function fail_metrics();").execute(&pool).await?;
+    let mut c = connect(&hub, &s, Uuid::now_v7(), true, 1000).await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineMetrics(metrics(2000))),
+    })
+    .await?;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::Heartbeat(Heartbeat {
+            seq: 9,
+            machine_time_ms: 2001,
+        })),
+    })
+    .await?;
+    let down = tokio::time::timeout(WAIT, c.stream.message())
+        .await??
+        .unwrap();
+    assert!(matches!(
+        down.msg,
+        Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq: 9 }))
+    ));
+    assert_eq!(
+        count(&pool, "select count(*) from machine_metrics").await,
+        0
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn availability_projection_emits_one_event_per_change(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let c = connect(&hub, &s, Uuid::now_v7(), true, 1000).await;
+    machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
+    let n = count(
+        &pool,
+        "select count(*) from events where kind='machine_availability_changed'",
+    )
+    .await;
+    assert_eq!(n, 1);
+    assert_eq!(
+        machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?,
+        0
+    );
+    drop(c);
+    tokio::time::timeout(WAIT, async {
+        while hub.registry.session_info(s.machine_id).is_some() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await?;
+    machine_info::project_availability(&pool, &hub.registry, Uuid::now_v7()).await?;
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='machine_availability_changed'"
+        )
+        .await,
+        2
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hub_start_resets_stored_availability(pool: PgPool) -> TestResult {
+    let _s = testkit::seed(&pool).await;
+    sqlx::query("update machines set availability='available'")
+        .execute(&pool)
+        .await?;
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let p = pool.clone();
+    let task = tokio::spawn(machine_info::run_status_projection(p, registry(), rx));
+    wait_until(
+        &pool,
+        "select count(*) from machines where availability='unavailable'",
+    )
+    .await;
+    stop.send(true)?;
+    task.await?;
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='machine_availability_changed'"
+        )
+        .await,
+        1
+    );
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn metrics_of_one_machine_never_touch_another(pool: PgPool) -> TestResult {
+    let a = testkit::seed(&pool).await;
+    let b = Run::new(&pool).await;
+    let mut m = metrics(1000);
+    m.executions.push(ExecutionProcess {
+        execution_id: b.execution.execution_id.to_string(),
+        alive: true,
+        ..Default::default()
+    });
+    assert!(matches!(
+        machine_info::apply_metrics(&pool, a.owner_id, a.machine_id, &m, Uuid::now_v7()).await?,
+        MetricsOutcome::Ignored(_)
+    ));
+    assert_eq!(
+        count(&pool, "select count(*) from machine_metrics").await,
+        0
+    );
+    let mut invalid = metrics(2000);
+    invalid.disks[0].label = "/private/path".into();
+    assert!(matches!(
+        machine_info::apply_metrics(&pool, a.owner_id, a.machine_id, &invalid, Uuid::now_v7())
+            .await?,
+        MetricsOutcome::Ignored(_)
+    ));
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn pilot_capability_is_echoed_and_stored_per_session(pool: PgPool) -> TestResult {
+    let a = wire_seed(&pool).await;
+    let b = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let _a = connect(&hub, &a, Uuid::now_v7(), true, 1000).await;
+    let _b = connect(&hub, &b, Uuid::now_v7(), false, 1000).await;
+    assert!(hub.registry.has_capability(a.machine_id, "pilot_v1"));
+    assert!(!hub.registry.has_capability(b.machine_id, "pilot_v1"));
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let journal = Uuid::now_v7();
+    sqlx::raw_sql("create function fail_report() returns trigger language plpgsql as $$ begin raise exception 'report_outage'; end $$; create trigger fail_report before insert on machine_harnesses for each row execute function fail_report();").execute(&pool).await?;
+    let mut c = connect(&hub, &s, journal, true, 1000).await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineReport(report())),
+    })
+    .await?;
+    let result = tokio::time::timeout(WAIT, c.stream.message()).await?;
+    assert!(result.is_err());
+    assert_eq!(
+        count(&pool, "select count(*) from machine_harnesses").await,
+        0
+    );
+    drop(c);
+    sqlx::query("drop trigger fail_report on machine_harnesses")
+        .execute(&pool)
+        .await?;
+    let c = connect(&hub, &s, journal, true, 2000).await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineReport(report())),
+    })
+    .await?;
+    wait_until(&pool, "select count(*) from machine_harnesses").await;
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='machine_report_updated'"
+        )
+        .await,
+        1
+    );
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn singleton_lock_is_held_on_a_dedicated_connection_and_loss_stops_the_service(
+    pool: PgPool,
+) -> TestResult {
+    let options = pool.connect_options();
+    let mut first = Singleton::acquire(&options, "test").await?.unwrap();
+    assert!(Singleton::acquire(&options, "test").await?.is_none());
+    assert!(first.still_held().await);
+    let pid:i32=sqlx::query_scalar("select pid from pg_locks where locktype='advisory' and database=(select oid from pg_database where datname=current_database())").fetch_one(&pool).await?;
+    sqlx::query("select pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(&pool)
+        .await?;
+    assert!(!first.still_held().await);
+    first.release().await;
+    let second = Singleton::acquire(&options, "test").await?.unwrap();
+    second.release().await;
+    let _s = testkit::seed(&pool).await;
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(machine_info::run_status_projection(
+        pool.clone(),
+        registry(),
+        rx,
+    ));
+    let pid=tokio::time::timeout(WAIT,async {loop {let pid:Option<i32>=sqlx::query_scalar("select pid from pg_locks where locktype='advisory' and database=(select oid from pg_database where datname=current_database())").fetch_optional(&pool).await.unwrap();if let Some(pid)=pid {break pid;} tokio::time::sleep(std::time::Duration::from_millis(10)).await;}}).await?;
+    sqlx::query("select pg_terminate_backend($1)")
+        .bind(pid)
+        .execute(&pool)
+        .await?;
+    tokio::time::timeout(WAIT, task).await??;
+    drop(stop);
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn passive_hub_does_not_reset_stored_availability(pool: PgPool) -> TestResult {
+    let _s = testkit::seed(&pool).await;
+    let lock = Singleton::acquire(&pool.connect_options(), "machine_status")
+        .await?
+        .unwrap();
+    sqlx::query("update machines set availability='available'")
+        .execute(&pool)
+        .await?;
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(machine_info::run_status_projection(
+        pool.clone(),
+        registry(),
+        rx,
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert!(!task.is_finished());
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from machines where availability='available'"
+        )
+        .await,
+        1
+    );
+    stop.send(true)?;
+    tokio::time::timeout(WAIT, task).await??;
+    lock.release().await;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn passive_hub_takes_over_when_the_holder_leaves(pool: PgPool) -> TestResult {
+    let _s = testkit::seed(&pool).await;
+    let lock = Singleton::acquire(&pool.connect_options(), "machine_status")
+        .await?
+        .unwrap();
+    sqlx::query("update machines set availability='available'")
+        .execute(&pool)
+        .await?;
+    let (stop, rx) = tokio::sync::watch::channel(false);
+    let task = tokio::spawn(machine_info::run_status_projection(
+        pool.clone(),
+        registry(),
+        rx,
+    ));
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    lock.release().await;
+    wait_until(
+        &pool,
+        "select count(*) from machines where availability='unavailable'",
+    )
+    .await;
+    stop.send(true)?;
+    tokio::time::timeout(WAIT, task).await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn report_and_metrics_reach_the_hub_over_the_control_stream(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let c = connect(
+        &hub,
+        &s,
+        Uuid::now_v7(),
+        true,
+        Utc::now().timestamp_millis() as u64,
+    )
+    .await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineReport(report())),
+    })
+    .await?;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineMetrics(metrics(2000))),
+    })
+    .await?;
+    wait_until(&pool, "select count(*) from machine_metrics").await;
+    assert_eq!(
+        count(&pool, "select count(*) from machine_harnesses").await,
+        1
+    );
+    let times:Vec<String>=sqlx::query_scalar("select kind from events where kind in ('machine_report_updated','machine_metrics') order by scope_seq").fetch_all(&pool).await?;
+    assert_eq!(times, vec!["machine_report_updated", "machine_metrics"]);
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}

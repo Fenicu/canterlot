@@ -75,6 +75,19 @@ fn target(payload: &Value) -> Result<(String, u32), OutboxError> {
     Ok((id, attempt))
 }
 
+pub fn to_proto_for_session(row: &CommandRow, registry: &Registry) -> Result<Command, OutboxError> {
+    let mut command = to_proto(row)?;
+    if registry.has_capability(row.machine_id, crate::session::CAPABILITY_PILOT_V1)
+        && let Some(command::Kind::StartExecution(start)) = &mut command.kind
+    {
+        start.capabilities = vec![crate::session::CAPABILITY_PILOT_V1.into()];
+    }
+    if command.encoded_len() > MAX_MESSAGE_BYTES {
+        return Err(OutboxError::ResourceLimit);
+    }
+    Ok(command)
+}
+
 pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
     let kind = match row.kind.as_str() {
         "deliver_input" => {
@@ -368,7 +381,7 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             } else if registry.availability(machine) != Availability::Available {
                 continue;
             }
-            let command = match to_proto(&row) {
+            let command = match to_proto_for_session(&row, &registry) {
                 Ok(command) => command,
                 Err(error) => {
                     let reason = match error {

@@ -81,6 +81,7 @@ impl WorkerControl for HubGrpc {
             if let Some(hello_reply::Result::Accepted(accepted)) = &reply.result {
                 state.registry.mark_accepted(machine_id, connection_id, &accepted.capabilities);
             }
+            state.registry.observe_clock(machine_id,hello.machine_time_ms,chrono::Utc::now());
             let reply = checked(ControlDown { msg: Some(control_down::Msg::HelloReply(reply)) })?;
             #[cfg(feature = "fault-injection")]
             let mut failures = state.faults.failures();
@@ -118,9 +119,23 @@ impl WorkerControl for HubGrpc {
                     Next::Inbound(next) => {
                         let Some(message) = next.map_err(|error| session_log.error(error))? else { break; };
                         match message.msg {
-                            Some(control_up::Msg::Heartbeat(Heartbeat { seq, .. })) => {
+                            Some(control_up::Msg::Heartbeat(Heartbeat { seq, machine_time_ms, .. })) => {
+                                state.registry.observe_clock(machine_id,machine_time_ms,chrono::Utc::now());
                                 if !state.registry.heartbeat(machine_id, lease.key) { break; }
                                 yield checked(ControlDown { msg: Some(control_down::Msg::HeartbeatAck(HeartbeatAck { seq })) })?;
+                            }
+                            Some(control_up::Msg::MachineReport(report)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_PILOT_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                lane.submit_report(report).map_err(|error|session_log.error(error))?;
+                            }
+                            Some(control_up::Msg::MachineMetrics(metrics)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_PILOT_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                state.registry.observe_clock(machine_id,metrics.machine_time_ms,chrono::Utc::now());
+                                lane.submit_metrics(metrics);
+                            }
+                            Some(control_up::Msg::LimitsReport(report)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_PILOT_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                lane.submit_limits(report);
                             }
                             Some(control_up::Msg::CjRecords(records)) => {
                                 if Uuid::parse_str(&records.journal_id).ok() != cj_journal {

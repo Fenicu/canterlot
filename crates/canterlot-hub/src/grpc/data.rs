@@ -79,6 +79,7 @@ impl WorkerData for HubGrpc {
                 state.registry.revoke(machine_id, connection_id);
                 Err(session_log.error(Status::unauthenticated("credential_revoked")))?;
             }
+            state.registry.observe_clock(machine_id,hello.machine_time_ms,chrono::Utc::now());
             tracing::info!(kind = "session_accepted", reason = "handshake_accepted", machine_id = %machine_id,
                 connection_id = %connection_id, stream = "data", "session accepted");
             session_log.accepted = true;

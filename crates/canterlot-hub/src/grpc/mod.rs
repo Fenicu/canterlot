@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     config::HubTimers,
     installation::Installation,
-    session::{CAPABILITY_EXEC_V1, Registry},
+    session::{CAPABILITY_EXEC_V1, CAPABILITY_PILOT_V1, Registry},
 };
 
 mod auth;
@@ -30,12 +30,29 @@ mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
 pub const KNOWN_CAPABILITIES: &[&str] = &[];
-pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[CAPABILITY_EXEC_V1];
+pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[CAPABILITY_EXEC_V1, CAPABILITY_PILOT_V1];
 
 #[tonic::async_trait]
 /// ACK возвращается только после commit всех записей диапазона.
 pub trait Ingest: Send + Sync {
     async fn reconcile(&self, machine_id: Uuid, report: ReconcileReport) -> Result<(), Status>;
+    async fn machine_report(
+        &self,
+        _machine_id: Uuid,
+        _report: MachineReport,
+    ) -> Result<(), Status> {
+        Ok(())
+    }
+    async fn machine_metrics(
+        &self,
+        _machine_id: Uuid,
+        _metrics: MachineMetrics,
+    ) -> Result<(), Status> {
+        Ok(())
+    }
+    async fn limits_report(&self, _machine_id: Uuid, _report: LimitsReport) -> Result<(), Status> {
+        Ok(())
+    }
     async fn cj_records(
         &self,
         machine_id: uuid::Uuid,
@@ -73,6 +90,16 @@ enum LaneKind {
 enum IngestJob {
     Records(JournalRecords),
     Reconcile(ReconcileReport),
+    MachineReport(MachineReport),
+    MachineMetrics(MachineMetrics),
+    LimitsReport(LimitsReport),
+}
+
+/// Метрики и опрос лимитов теряются без остановки потока: следующий образец заменит их.
+fn volatile(result: Result<(), Status>) {
+    if result.is_err() {
+        tracing::warn!(kind = "volatile_ingest_failed", "volatile ingest failed");
+    }
 }
 
 /// Приём журнала потока в отдельной задаче: подтверждения уходят строго по порядку,
@@ -81,6 +108,7 @@ struct IngestLane {
     batches: mpsc::Sender<IngestJob>,
     acks: mpsc::Receiver<Result<Option<JournalRangeAck>, Status>>,
     _stop: DropGuard,
+    limits: tokio::sync::watch::Sender<Option<LimitsReport>>,
 }
 
 impl IngestLane {
@@ -92,6 +120,7 @@ impl IngestLane {
     ) -> Self {
         let (batches, mut queue) = mpsc::channel::<IngestJob>(INGEST_BACKLOG);
         let (reply, acks) = mpsc::channel(INGEST_BACKLOG);
+        let (limits, mut latest) = tokio::sync::watch::channel(None);
         let stop = CancellationToken::new();
         let cancelled = stop.clone();
         tokio::spawn(async move {
@@ -99,20 +128,37 @@ impl IngestLane {
                 biased;
                 _ = cancelled.cancelled() => None,
                 records = queue.recv() => records,
+                changed=latest.changed()=>if changed.is_ok(){latest.borrow_and_update().clone().map(IngestJob::LimitsReport)}else{None},
             } {
                 let applied = async {
                     match job {
-                        IngestJob::Records(records) => match kind {
-                            LaneKind::Cj => {
-                                ingest.cj_records(machine_id, &credential, records).await
+                        IngestJob::Records(records) => Some(
+                            match kind {
+                                LaneKind::Cj => {
+                                    ingest.cj_records(machine_id, &credential, records).await
+                                }
+                                LaneKind::Sj => {
+                                    ingest.sj_records(machine_id, &credential, records).await
+                                }
                             }
-                            LaneKind::Sj => {
-                                ingest.sj_records(machine_id, &credential, records).await
-                            }
-                        }
-                        .map(Some),
+                            .map(Some),
+                        ),
                         IngestJob::Reconcile(report) => {
-                            ingest.reconcile(machine_id, report).await.map(|()| None)
+                            Some(ingest.reconcile(machine_id, report).await.map(|()| None))
+                        }
+                        // Отчёт машины применяется по порядку; сбой закрывает поток, воркер пришлёт отчёт заново.
+                        IngestJob::MachineReport(report) => ingest
+                            .machine_report(machine_id, report)
+                            .await
+                            .err()
+                            .map(Err),
+                        IngestJob::MachineMetrics(metrics) => {
+                            volatile(ingest.machine_metrics(machine_id, metrics).await);
+                            None
+                        }
+                        IngestJob::LimitsReport(report) => {
+                            volatile(ingest.limits_report(machine_id, report).await);
+                            None
                         }
                     }
                 };
@@ -120,6 +166,9 @@ impl IngestLane {
                     biased;
                     _ = cancelled.cancelled() => break,
                     result = applied => result,
+                };
+                let Some(result) = result else {
+                    continue;
                 };
                 let failed = result.is_err();
                 if reply.send(result).await.is_err() || failed {
@@ -131,6 +180,7 @@ impl IngestLane {
             batches,
             acks,
             _stop: stop.drop_guard(),
+            limits,
         }
     }
 
@@ -146,6 +196,19 @@ impl IngestLane {
         self.batches
             .try_send(IngestJob::Reconcile(report))
             .map_err(|_| Status::resource_exhausted("ingest_backlog"))
+    }
+
+    #[allow(clippy::result_large_err)]
+    fn submit_report(&self, report: MachineReport) -> Result<(), Status> {
+        self.batches
+            .try_send(IngestJob::MachineReport(report))
+            .map_err(|_| Status::resource_exhausted("ingest_backlog"))
+    }
+    fn submit_metrics(&self, metrics: MachineMetrics) {
+        let _ = self.batches.try_send(IngestJob::MachineMetrics(metrics));
+    }
+    fn submit_limits(&self, report: LimitsReport) {
+        self.limits.send_replace(Some(report));
     }
 
     async fn next_ack(&mut self) -> Option<Result<Option<JournalRangeAck>, Status>> {
@@ -198,7 +261,8 @@ impl HubGrpc {
         installation: Installation,
         timers: HubTimers,
     ) -> Self {
-        let ingest = Arc::new(crate::ingest::Ingest::new(pool.clone()));
+        let ingest =
+            Arc::new(crate::ingest::Ingest::new(pool.clone()).with_registry(registry.clone()));
         Self {
             pool,
             registry,

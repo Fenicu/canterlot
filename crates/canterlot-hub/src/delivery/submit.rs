@@ -391,7 +391,7 @@ async fn submit_attempt(
     .execute(&mut *conn)
     .await?;
 
-    events::append(
+    let event = events::append(
         conn,
         NewEvent {
             scope: Scope::Conversation {
@@ -412,6 +412,12 @@ async fn submit_attempt(
     )
     .await?;
 
+    sqlx::query("update inputs set created_seq=$2,created_at=$3 where id=$1")
+        .bind(submitted.input_id)
+        .bind(event.scope_seq)
+        .bind(event.committed_at)
+        .execute(&mut *conn)
+        .await?;
     let response =
         serde_json::to_value(&submitted).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
     if idempotency::record(

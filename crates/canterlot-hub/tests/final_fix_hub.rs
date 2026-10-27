@@ -608,7 +608,7 @@ async fn delta_and_incomplete_need_no_content_select_privilege(pool: PgPool) -> 
         format!("grant all on all tables in schema public to {role}"),
         format!("revoke select on blocks from {role}"),
         format!(
-            "grant select (block_id, execution_id, conversation_id, rev, state, checksum, revision_gap) on blocks to {role}"
+            "grant select (block_id, execution_id, conversation_id, kind, rev, state, checksum, revision_gap, line_count) on blocks to {role}"
         ),
         format!("set local role {role}"),
     ] {

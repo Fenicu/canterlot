@@ -293,7 +293,7 @@ pub async fn apply_input_receipt_in_tx(
             .save(conn, &slot, target.execution_id, correlation_id)
             .await?;
     }
-    events::append(
+    let event = events::append(
         conn,
         NewEvent {
             scope: Scope::Conversation {
@@ -307,6 +307,19 @@ pub async fn apply_input_receipt_in_tx(
         },
     )
     .await?;
+    if matches!(
+        input_state,
+        InputState::Transmitting
+            | InputState::Accepted
+            | InputState::AcceptanceUnconfirmed
+            | InputState::Rejected
+    ) {
+        sqlx::query("update inputs set feed_seq=coalesce(feed_seq,$2) where id=$1")
+            .bind(target.input_id)
+            .bind(event.scope_seq)
+            .execute(&mut *conn)
+            .await?;
+    }
     Ok(ApplyOutcome::Applied { input_state })
 }
 

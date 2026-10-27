@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 use std::{fs, io::Write, path::PathBuf, process::ExitCode};
 
 use canterlot_hub::{
@@ -192,13 +194,22 @@ async fn serve(
         installation,
         config.timers.clone(),
     );
-    state.ingest =
-        std::sync::Arc::new(ingest::Ingest::new(pool.clone()).with_dispatcher(dispatcher));
+    state.ingest = std::sync::Arc::new(
+        ingest::Ingest::new(pool.clone())
+            .with_dispatcher(dispatcher)
+            .with_registry(registry.clone())
+            .with_limits(config.limits),
+    );
     let (shutdown, stopped) = tokio::sync::watch::channel(false);
     let outbox = tokio::spawn(outbox::run(
         pool.clone(),
         registry.clone(),
         config.timers.clone(),
+        stopped.clone(),
+    ));
+    let projection = tokio::spawn(canterlot_hub::machine_info::run_status_projection(
+        pool.clone(),
+        registry.clone(),
         stopped.clone(),
     ));
     let dispatch = tokio::spawn(dispatcher::run(pool, registry, rx, config.timers, stopped));
@@ -212,7 +223,8 @@ async fn serve(
     })
     .await;
     let _ = shutdown.send(true);
-    let (outbox, dispatch) = tokio::join!(outbox, dispatch);
+    let (outbox, dispatch, projection) = tokio::join!(outbox, dispatch, projection);
+    projection.map_err(|_| "machine_status_task_error".to_owned())?;
     outbox.map_err(|_| "outbox_task_error".to_owned())?;
     dispatch.map_err(|_| "dispatcher_task_error".to_owned())?;
     result.map_err(|_| "grpc_server_error".to_owned())

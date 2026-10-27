@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -13,6 +13,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::config::HubTimers;
+
+pub const CAPABILITY_PILOT_V1: &str = "pilot_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 
@@ -42,6 +44,8 @@ struct SessionEntry {
     revoked: Arc<AtomicBool>,
     credential: Vec<u8>,
     reconciled: bool,
+    capabilities: Vec<String>,
+    clock_samples: VecDeque<chrono::Duration>,
 }
 
 #[derive(Clone)]
@@ -58,6 +62,64 @@ impl Registry {
             timers,
             changes: broadcast::channel(256).0,
         }
+    }
+
+    pub fn has_capability(&self, machine_id: Uuid, capability: &str) -> bool {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)
+            .is_some_and(|e| e.capabilities.iter().any(|c| c == capability))
+    }
+
+    pub fn observe_clock(
+        &self,
+        machine_id: Uuid,
+        machine_ms: u64,
+        received_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        if machine_ms == 0 {
+            return;
+        }
+        let Some(at) = i64::try_from(machine_ms)
+            .ok()
+            .and_then(chrono::DateTime::from_timestamp_millis)
+        else {
+            return;
+        };
+        let mut entries = self.entries.lock().expect("session registry lock");
+        if let Some(entry) = entries.get_mut(&machine_id) {
+            let received_at =
+                chrono::DateTime::from_timestamp_micros(received_at.timestamp_micros())
+                    .expect("valid clock sample");
+            entry.clock_samples.push_back(received_at - at);
+            if entry.clock_samples.len() > 8 {
+                entry.clock_samples.pop_front();
+            }
+        }
+    }
+
+    pub fn clock_offset(&self, machine_id: Uuid) -> Option<chrono::Duration> {
+        self.entries
+            .lock()
+            .expect("session registry lock")
+            .get(&machine_id)?
+            .clock_samples
+            .iter()
+            .min()
+            .copied()
+    }
+
+    pub fn to_hub_time(
+        &self,
+        machine_id: Uuid,
+        machine_ms: u64,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        if machine_ms == 0 {
+            return None;
+        }
+        chrono::DateTime::from_timestamp_millis(i64::try_from(machine_ms).ok()?)?
+            .checked_add_signed(self.clock_offset(machine_id)?)
     }
 
     pub fn availability(&self, machine_id: Uuid) -> Availability {
@@ -81,6 +143,15 @@ impl Registry {
         connection_id: Uuid,
         capabilities: &[String],
     ) {
+        {
+            let mut entries = self.entries.lock().expect("session registry lock");
+            if let Some(entry) = entries
+                .get_mut(&machine_id)
+                .filter(|entry| entry.info.connection_id == connection_id)
+            {
+                entry.capabilities = capabilities.to_vec();
+            }
+        }
         if !capabilities
             .iter()
             .any(|capability| capability == CAPABILITY_EXEC_V1)
@@ -223,6 +294,8 @@ impl Registry {
             revoked: revoked.clone(),
             credential,
             reconciled: false,
+            capabilities: Vec::new(),
+            clock_samples: VecDeque::new(),
         };
         self.refresh(&mut entry);
         entries.insert(machine_id, entry);

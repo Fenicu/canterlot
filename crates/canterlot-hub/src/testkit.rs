@@ -77,7 +77,10 @@ async fn spawn_on(
     let (dispatcher, rx) = dispatcher::Dispatcher::channel();
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
-    let ingest = ingest::Ingest::new(pool.clone()).with_dispatcher(dispatcher.clone());
+    let ingest = ingest::Ingest::new(pool.clone())
+        .with_dispatcher(dispatcher.clone())
+        .with_registry(registry.clone())
+        .with_limits(Default::default());
     #[cfg(feature = "fault-injection")]
     let ingest = {
         state.faults = faults.clone();
@@ -97,6 +100,11 @@ async fn spawn_on(
         timers.clone(),
         stopped.clone(),
     ));
+    let projection = tokio::spawn(crate::machine_info::run_status_projection(
+        pool.clone(),
+        registry.clone(),
+        stopped.clone(),
+    ));
     let dispatch = tokio::spawn(dispatcher::run(pool, registry.clone(), rx, timers, stopped));
     let join = tokio::spawn(async move {
         let signal = stopping.clone();
@@ -112,6 +120,7 @@ async fn spawn_on(
         let _ = stopping.send(true);
         outbox.await.expect("test outbox task");
         dispatch.await.expect("test dispatcher task");
+        projection.await.expect("test machine status task");
         result
     });
     TestHub {
@@ -221,4 +230,45 @@ pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) 
         .await
         .expect("commit seed conversation");
     conversation_id
+}
+
+pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
+    let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
+        .bind(machine_id)
+        .fetch_one(pool)
+        .await
+        .expect("catalog machine");
+    let report = canterlot_proto::worker::v1::MachineReport {
+        worker_version: "test".into(),
+        allowed_roots: vec!["/tmp".into()],
+        containment: "process_group".into(),
+        os: "linux".into(),
+        max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
+        harnesses: vec![canterlot_proto::worker::v1::HarnessInfo {
+            harness: "synthetic".into(),
+            provider: "claude".into(),
+            title: "Тестовый".into(),
+            images: true,
+            settings_midsession: true,
+            permission_modes: vec!["bypass".into()],
+            models: ["synthetic-small", "synthetic-large"]
+                .into_iter()
+                .map(|id| canterlot_proto::worker::v1::ModelInfo {
+                    id: id.into(),
+                    title: "Тестовая модель".into(),
+                    efforts: vec!["low".into(), "high".into()],
+                })
+                .collect(),
+        }],
+        profiles: vec![canterlot_proto::worker::v1::InstructionProfile {
+            name: "owner".into(),
+            title: "Как у владельца".into(),
+            description: String::new(),
+            harnesses: vec!["synthetic".into()],
+        }],
+    };
+    crate::machine_info::apply_report(pool, owner, machine_id, &report, Uuid::now_v7())
+        .await
+        .expect("seed catalog");
 }

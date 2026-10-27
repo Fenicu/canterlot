@@ -9,12 +9,14 @@ use uuid::Uuid;
 pub enum Scope {
     Conversations { owner_id: Uuid },
     Conversation { id: Uuid },
+    Machines { owner_id: Uuid },
 }
 
 impl Scope {
     pub fn key(&self) -> String {
         match self {
             Self::Conversations { owner_id } => format!("owner:{owner_id}:conversations"),
+            Self::Machines { owner_id } => format!("owner:{owner_id}:machines"),
             Self::Conversation { id } => format!("conversation:{id}"),
         }
     }
