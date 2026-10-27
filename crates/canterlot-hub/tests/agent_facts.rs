@@ -1025,11 +1025,13 @@ async fn concurrent_runs_keep_overlap_and_do_not_deadlock(pool: PgPool) -> TestR
     let ms = Utc::now().timestamp_millis();
     let fa = finished(&a, ia.command_id, ms + 1000);
     let fb = finished(&b, ib.command_id, ms + 1000);
+    // Пересечение считается по часам хаба: оба хода сначала начинаются, затем одновременно завершаются.
     let both = async {
         tokio::join!(
-            a.send(vec![accepted(ia.command_id, ms), fa]),
-            b.send(vec![accepted(ib.command_id, ms), fb])
+            a.send(vec![accepted(ia.command_id, ms)]),
+            b.send(vec![accepted(ib.command_id, ms)])
         );
+        tokio::join!(a.send(vec![fa]), b.send(vec![fb]));
     };
     tokio::time::timeout(WAIT, both).await?;
     assert_eq!(
