@@ -75,6 +75,9 @@ async fn main() -> ExitCode {
 }
 
 async fn run(args: Args) -> Result<(), String> {
+    if matches!(&args.command, Command::Serve(_)) {
+        http::layers::install_panic_hook();
+    }
     let config = match &args.command {
         Command::Openapi => {
             return write!(std::io::stdout().lock(), "{}", http::openapi::render())

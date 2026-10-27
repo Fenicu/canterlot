@@ -111,6 +111,9 @@ owner_login = "owner"
 user_header = "Remote-User"
 allowed_origins = ["https://chat.example"]
 max_json_body_bytes = 524288
+header_read_timeout = "10s" # Также предел простоя HTTP keep-alive.
+body_read_timeout = "30s"
+max_connections = 256
 multi_process = false
 # Рекомендуется: читаемый файл не короче 32 байт.
 # proxy_secret_file = "proxy-secret"

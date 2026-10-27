@@ -111,3 +111,18 @@ pub(crate) async fn not_found() -> ApiError {
 pub(crate) async fn method_not_allowed() -> ApiError {
     ApiError::new(ErrorCode::MethodNotAllowed)
 }
+
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let thread = std::thread::current();
+        let (file, line) = info.location().map_or(("unknown", 0), |location| {
+            (location.file(), location.line())
+        });
+        tracing::error!(
+            kind = "panic",
+            location = %format_args!("{file}:{line}"),
+            thread = thread.name().unwrap_or("unnamed"),
+            "panic"
+        );
+    }));
+}

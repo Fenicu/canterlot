@@ -307,6 +307,7 @@ dependencies = [
  "clap",
  "futures-util",
  "getrandom 0.4.3",
+ "http-body",
  "http-body-util",
  "humantime-serde",
  "hyper-util",

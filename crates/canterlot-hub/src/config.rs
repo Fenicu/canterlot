@@ -145,6 +145,11 @@ pub struct HttpConfig {
     pub user_header: String,
     pub allowed_origins: Vec<String>,
     pub max_json_body_bytes: usize,
+    #[serde(with = "humantime_serde")]
+    pub header_read_timeout: Duration,
+    #[serde(with = "humantime_serde")]
+    pub body_read_timeout: Duration,
+    pub max_connections: usize,
     pub ws: WsConfig,
     pub proxy_secret_file: Option<PathBuf>,
     pub logout_url: Option<String>,
@@ -160,6 +165,9 @@ impl Default for HttpConfig {
             user_header: "Remote-User".into(),
             allowed_origins: Vec::new(),
             max_json_body_bytes: 524288,
+            header_read_timeout: Duration::from_secs(10),
+            body_read_timeout: Duration::from_secs(30),
+            max_connections: 256,
             ws: WsConfig::default(),
             proxy_secret_file: None,
             logout_url: None,
@@ -178,6 +186,10 @@ impl HttpConfig {
         if self.trusted_proxies.is_empty()
             || self.owner_login.trim().is_empty()
             || self.allowed_origins.is_empty()
+            || self.header_read_timeout.is_zero()
+            || self.body_read_timeout.is_zero()
+            || self.max_connections == 0
+            || self.max_connections > tokio::sync::Semaphore::MAX_PERMITS
         {
             return Err(invalid());
         }

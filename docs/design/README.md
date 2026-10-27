@@ -47,15 +47,16 @@
 
 Все пути соблюдают один порядок:
 
-1. Строка `scheduled_jobs`, только при захвате задания планировщиком, всегда первой.
-2. `machines` / `machine_credentials`.
-3. `journal_cursors`, только при приёме журналов.
-4. `provider_limits`, по возрастанию имени провайдера.
-5. `queue_state`, по возрастанию `conversation_id`.
-6. Строки `conversations`, по возрастанию ID.
-7. `attachments`, по возрастанию ID.
-8. `conversation_derived`.
-9. `scope_counters` через `events::append`: сначала `conversation:{id}` по возрастанию ID, затем `owner:{id}:conversations`, затем `owner:{id}:machines`.
+1. `pg_advisory_xact_lock` в `idempotency::run_in_tx`: первые 64 бита SHA-256 от `canterlot:idempotency:` + UUID владельца (16 байт) + ключ; первая блокировка транзакции, до чтения сохранённого ответа и callback. Коллизия лишь сериализует независимые ключи.
+2. Строка `scheduled_jobs`, только при захвате задания планировщиком, до остальных доменных строк.
+3. `machines` / `machine_credentials`.
+4. `journal_cursors`, только при приёме журналов.
+5. `provider_limits`, по возрастанию имени провайдера.
+6. `queue_state`, по возрастанию `conversation_id`.
+7. Строки `conversations`, по возрастанию ID.
+8. `attachments`, по возрастанию ID.
+9. `conversation_derived`.
+10. `scope_counters` через `events::append`: сначала `conversation:{id}` по возрастанию ID, затем `owner:{id}:conversations`, затем `owner:{id}:machines`.
 
 Под блокировкой `queue_state` нельзя ждать строку `scheduled_jobs`: отмена и обновление заданий используют `FOR UPDATE SKIP LOCKED`. Заблокированное задание уже обрабатывается; обработчик перечитывает «кранч» и удержания под блокировкой очереди и возвращает `Cancelled`, если удержание снято. Задание сброса недели без удержания проверяет `crunch_enabled` и `resume_pending`.
 

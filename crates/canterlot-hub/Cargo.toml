@@ -13,7 +13,7 @@ name = "canterlot-hub"
 path = "src/main.rs"
 
 [features]
-testkit = ["dep:rcgen", "dep:tower", "dep:hyper-util", "dep:http-body-util"]
+testkit = ["dep:rcgen", "dep:tower", "dep:http-body-util", "hyper-util/client-legacy"]
 fault-injection = []
 
 [dev-dependencies]
@@ -30,9 +30,10 @@ chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 futures-util = "0.3.34"
 getrandom = "0.4.3"
+http-body = "1.1.0"
 http-body-util = { version = "0.1.5", optional = true }
 humantime-serde = "1.1.1"
-hyper-util = { version = "0.1.21", features = ["client-legacy", "http1", "tokio"], optional = true }
+hyper-util = { version = "0.1.21", features = ["http1", "server-auto", "service", "tokio"] }
 ipnet = { version = "2.12.2", features = ["serde"] }
 prost = "0.14.4"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"], optional = true }

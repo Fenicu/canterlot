@@ -267,6 +267,7 @@ async fn harness_from(deps: http::AppDeps, dir: tempfile::TempDir) -> Harness {
     tokio::spawn(http::serve_router(
         router,
         listener,
+        (*state.http).clone(),
         state.shutdown.clone().cancelled_owned(),
     ));
     Harness {
@@ -2097,6 +2098,7 @@ async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
         let pool = pool.clone();
         let barrier = barrier.clone();
         tokio::spawn(async move {
+            barrier.wait().await;
             run_in_tx::<Effect, TestError, _>(
                 &pool,
                 owner,
@@ -2106,7 +2108,6 @@ async fn run_in_tx_executes_once_for_concurrent_same_key(pool: PgPool) {
                 None,
                 move |conn| {
                     Box::pin(async move {
-                        barrier.wait().await;
                         let id: Uuid = sqlx::query_scalar(
                             "insert into probe_effects (tag) values ($1) returning id",
                         )

@@ -120,6 +120,16 @@ where
             .map_err(|error| E::from(sqlx::Error::Decode(Box::new(error))))
     };
     let mut tx = pool.begin().await?;
+    let mut lock_hash = Sha256::new();
+    lock_hash.update(b"canterlot:idempotency:");
+    lock_hash.update(owner_id.as_bytes());
+    lock_hash.update(key.as_bytes());
+    let lock_id = i64::from_be_bytes(lock_hash.finalize()[..8].try_into().expect("eight bytes"));
+    // Первая блокировка транзакции: ключ идемпотентности, затем общий порядок доменных строк.
+    sqlx::query("select pg_advisory_xact_lock($1)")
+        .bind(lock_id)
+        .execute(&mut *tx)
+        .await?;
     match lookup(&mut tx, owner_id, key, operation, &hash).await? {
         Begin::Replay(stored) => {
             tx.rollback().await?;

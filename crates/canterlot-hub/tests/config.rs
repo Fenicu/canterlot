@@ -117,6 +117,9 @@ fn pilot_sections_parse_with_defaults() {
     assert_eq!(http.listen.to_string(), "127.0.0.1:8080");
     assert_eq!(http.user_header, "Remote-User");
     assert_eq!(http.max_json_body_bytes, 524288);
+    assert_eq!(http.header_read_timeout, D::from_secs(10));
+    assert_eq!(http.body_read_timeout, D::from_secs(30));
+    assert_eq!(http.max_connections, 256);
     assert!(!http.multi_process);
     assert_eq!(http.ws.max_connection_age, D::from_secs(1800));
     assert_eq!(
@@ -344,5 +347,32 @@ fn trusted_proxy_cidrs_parse_v4_v6_and_reject_garbage() {
         let http = HTTP_BASE.replace("['127.0.0.0/8', '::1/128']", &format!("['{cidr}']"));
         fs::write(&path, format!("{PILOT_BASE}{http}")).unwrap();
         assert!(HubConfig::load(&path).is_err(), "accepted {cidr}");
+    }
+}
+
+#[test]
+fn http_connection_limits_parse_and_reject_disabled_bounds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, format!("{PILOT_BASE}{HTTP_BASE}header_read_timeout = '75ms'\nbody_read_timeout = '150ms'\nmax_connections = 2\n")).unwrap();
+    let http = HubConfig::load(&path).unwrap().http.unwrap();
+    assert_eq!(
+        http.header_read_timeout,
+        std::time::Duration::from_millis(75)
+    );
+    assert_eq!(
+        http.body_read_timeout,
+        std::time::Duration::from_millis(150)
+    );
+    assert_eq!(http.max_connections, 2);
+    for extra in [
+        "header_read_timeout = '0s'",
+        "body_read_timeout = '0s'",
+        "max_connections = 0",
+        "header_read_timeout = 10",
+        "body_read_timeout = 30",
+    ] {
+        fs::write(&path, format!("{PILOT_BASE}{HTTP_BASE}{extra}\n")).unwrap();
+        assert!(HubConfig::load(&path).is_err(), "{extra}");
     }
 }

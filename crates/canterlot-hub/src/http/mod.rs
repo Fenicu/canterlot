@@ -1,6 +1,5 @@
 use std::{
     future::Future,
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -24,6 +23,7 @@ use crate::{
 };
 
 pub mod auth;
+mod connection;
 pub mod error;
 pub mod extract;
 pub mod health;
@@ -139,7 +139,8 @@ pub async fn serve(
     listener: TcpListener,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    serve_router(router(state), listener, shutdown).await
+    let config = (*state.http).clone();
+    serve_router(router(state), listener, config, shutdown).await
 }
 
 /// Обслуживает готовый роутер; адрес собеседника берётся из сокета (`ConnectInfo`).
@@ -147,28 +148,8 @@ pub async fn serve(
 pub async fn serve_router(
     router: Router,
     listener: TcpListener,
+    config: HttpConfig,
     shutdown: impl Future<Output = ()> + Send + 'static,
 ) -> std::io::Result<()> {
-    let stop = CancellationToken::new();
-    let signal = stop.clone();
-    let serving = axum::serve(
-        listener,
-        router.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move { signal.cancelled().await });
-    let mut serving = std::pin::pin!(std::future::IntoFuture::into_future(serving));
-    tokio::select! {
-        result = &mut serving => return result,
-        () = shutdown => stop.cancel(),
-    }
-    match tokio::time::timeout(SHUTDOWN_GRACE, serving).await {
-        Ok(result) => result,
-        Err(_) => {
-            tracing::warn!(
-                kind = "http_shutdown_timeout",
-                "open requests were abandoned"
-            );
-            Ok(())
-        }
-    }
+    connection::serve(router, listener, config, shutdown).await
 }
