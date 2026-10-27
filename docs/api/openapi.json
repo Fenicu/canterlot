@@ -280,6 +280,80 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/blocks/{block_id}": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "block",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "offset",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Текст блока; смещения в байтах UTF-8",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BlockPage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/crunch": {
       "put": {
         "tags": [
@@ -322,6 +396,50 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/delegation": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "delegation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Вызовы субагентов",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DelegationNode"
+                  }
                 }
               }
             }
@@ -430,6 +548,81 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ConversationDetail"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/conversations/{id}/history": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "page",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "before",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Окно истории в порядке scope_seq",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPage"
                 }
               }
             }
@@ -758,6 +951,56 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/runs/{run_id}": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "run_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сведения о ходе",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RunInfo"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/scheduled": {
       "get": {
         "tags": [
@@ -951,6 +1194,59 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/snapshot": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "conversation",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "history_limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Снимок разговора и граница журнала",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot_ConversationSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/stop": {
       "post": {
         "tags": [
@@ -993,6 +1289,66 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/StopExecutionOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/events": {
+      "get": {
+        "tags": [
+          "events"
+        ],
+        "operationId": "range",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "after",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Диапазон событий либо требование нового снимка",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RangeResponse"
                 }
               }
             }
@@ -1693,6 +2049,66 @@
         }
       }
     },
+    "/api/v1/snapshot/conversations": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "conversations",
+        "responses": {
+          "200": {
+            "description": "Снимок списка и граница журнала",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot_ListSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/snapshot/machines": {
+      "get": {
+        "tags": [
+          "snapshots"
+        ],
+        "operationId": "machines",
+        "responses": {
+          "200": {
+            "description": "Снимок машин и граница журнала",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Snapshot_MachinesSnapshot"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/healthz": {
       "get": {
         "tags": [
@@ -1807,6 +2223,39 @@
           "live_execution"
         ]
       },
+      "AttachmentView": {
+        "type": "object",
+        "required": [
+          "attachment_id",
+          "name",
+          "mime",
+          "size",
+          "sha256",
+          "image"
+        ],
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "image": {
+            "type": "boolean"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "AttributeView": {
         "type": "object",
         "required": [
@@ -1902,6 +2351,154 @@
         "type": "object",
         "properties": {
           "logout_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BlockPage": {
+        "type": "object",
+        "required": [
+          "content",
+          "offset",
+          "total_bytes",
+          "state",
+          "rev"
+        ],
+        "properties": {
+          "checksum": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "next_offset": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "state": {
+            "type": "string"
+          },
+          "total_bytes": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "BlockView": {
+        "type": "object",
+        "required": [
+          "id",
+          "block_kind",
+          "agent",
+          "model",
+          "state",
+          "created_seq",
+          "created_at",
+          "started_at",
+          "line_count",
+          "content",
+          "content_truncated",
+          "content_bytes",
+          "rev",
+          "revision_gap"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "block_kind": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "content_bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "content_truncated": {
+            "type": "boolean"
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_seq": {
+            "type": "string"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "incomplete_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "input_command_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "line_count": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "parent_block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "rev": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "revision_gap": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_name": {
             "type": [
               "string",
               "null"
@@ -2021,6 +2618,25 @@
           }
         ]
       },
+      "ContextInfo": {
+        "type": "object",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "window_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
       "ContinueOutcome": {
         "type": "object",
         "required": [
@@ -2111,6 +2727,32 @@
             }
           }
         ]
+      },
+      "ConversationSnapshot": {
+        "type": "object",
+        "required": [
+          "detail",
+          "queue",
+          "history",
+          "scheduled"
+        ],
+        "properties": {
+          "detail": {
+            "$ref": "#/components/schemas/ConversationDetail"
+          },
+          "history": {
+            "$ref": "#/components/schemas/HistoryPage"
+          },
+          "queue": {
+            "$ref": "#/components/schemas/QueueView"
+          },
+          "scheduled": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduledMessage"
+            }
+          }
+        }
       },
       "Counts": {
         "type": "object",
@@ -2293,6 +2935,63 @@
         "properties": {
           "crunch_resume_text": {
             "type": "string"
+          }
+        }
+      },
+      "DelegationNode": {
+        "type": "object",
+        "required": [
+          "block_id",
+          "state",
+          "started_at"
+        ],
+        "properties": {
+          "block_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "parent_block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string"
+          },
+          "subagent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SubagentRef"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "task": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tool_name": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -2824,6 +3523,32 @@
           }
         }
       },
+      "HistoryPage": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimelineItem"
+            }
+          },
+          "next_after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "HoldView": {
         "oneOf": [
           {
@@ -3041,6 +3766,49 @@
           }
         ]
       },
+      "InputContentBlock": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "text",
+              "type"
+            ],
+            "properties": {
+              "text": {
+                "type": "string"
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "text"
+                ]
+              }
+            }
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/AttachmentView"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "type": "string",
+                    "enum": [
+                      "attachment"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
+      },
       "InputState": {
         "type": "string",
         "enum": [
@@ -3053,6 +3821,61 @@
           "cancelled",
           "rejected"
         ]
+      },
+      "InputView": {
+        "type": "object",
+        "required": [
+          "id",
+          "idempotency_key",
+          "content",
+          "attachments",
+          "state",
+          "created_seq",
+          "created_at"
+        ],
+        "properties": {
+          "attachments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AttachmentView"
+            }
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputContentBlock"
+            }
+          },
+          "created_at": {
+            "type": "string"
+          },
+          "created_seq": {
+            "type": "string"
+          },
+          "feed_seq": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "idempotency_key": {
+            "type": "string"
+          },
+          "retry_of": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
       },
       "JobState": {
         "type": "string",
@@ -3204,6 +4027,42 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "ListSnapshot": {
+        "type": "object",
+        "required": [
+          "items",
+          "truncated",
+          "counts",
+          "groups",
+          "limits"
+        ],
+        "properties": {
+          "counts": {
+            "$ref": "#/components/schemas/Counts"
+          },
+          "groups": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Group"
+            }
+          },
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListItem"
+            }
+          },
+          "limits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProviderView"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
           }
         }
       },
@@ -3377,6 +4236,20 @@
           "limits_mismatch"
         ]
       },
+      "MachinesSnapshot": {
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MachineView"
+            }
+          }
+        }
+      },
       "MachinesView": {
         "type": "object",
         "required": [
@@ -3478,6 +4351,41 @@
           }
         }
       },
+      "ModelUsageView": {
+        "type": "object",
+        "required": [
+          "model",
+          "agent",
+          "input_tokens",
+          "output_tokens",
+          "cache_read_tokens",
+          "cache_write_tokens"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "cache_read_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "cache_write_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "input_tokens": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "model": {
+            "type": "string"
+          },
+          "output_tokens": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "ModelView": {
         "type": "object",
         "required": [
@@ -3496,6 +4404,30 @@
             "type": "string"
           },
           "title": {
+            "type": "string"
+          }
+        }
+      },
+      "PartView": {
+        "type": "object",
+        "required": [
+          "block_id",
+          "agent",
+          "model",
+          "kind"
+        ],
+        "properties": {
+          "agent": {
+            "type": "string"
+          },
+          "block_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "model": {
             "type": "string"
           }
         }
@@ -3837,6 +4769,39 @@
           }
         }
       },
+      "RangeResponse": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "events",
+              "head"
+            ],
+            "properties": {
+              "events": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/WireEvent"
+                }
+              },
+              "head": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "resync_required"
+            ],
+            "properties": {
+              "resync_required": {
+                "$ref": "#/components/schemas/ResyncRequired"
+              }
+            }
+          }
+        ]
+      },
       "ReadBody": {
         "type": "object",
         "required": [
@@ -3859,6 +4824,28 @@
         },
         "additionalProperties": false
       },
+      "ResyncReason": {
+        "type": "string",
+        "enum": [
+          "cursor_too_old",
+          "cursor_ahead"
+        ]
+      },
+      "ResyncRequired": {
+        "type": "object",
+        "required": [
+          "reason",
+          "oldest_available_seq"
+        ],
+        "properties": {
+          "oldest_available_seq": {
+            "type": "string"
+          },
+          "reason": {
+            "$ref": "#/components/schemas/ResyncReason"
+          }
+        }
+      },
       "Retry": {
         "type": "string",
         "enum": [
@@ -3866,6 +4853,159 @@
           "explicit_new_operation",
           "after_condition",
           "never"
+        ]
+      },
+      "RunInfo": {
+        "type": "object",
+        "required": [
+          "run_id",
+          "input_id",
+          "started_at",
+          "usage",
+          "parts"
+        ],
+        "properties": {
+          "compactions": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          },
+          "context": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ContextInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "finished_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "input_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "limit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/RunLimit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "parts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PartView"
+            }
+          },
+          "run_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "usage": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelUsageView"
+            }
+          }
+        }
+      },
+      "RunLimit": {
+        "type": "object",
+        "required": [
+          "provider",
+          "weekly_delta_permille",
+          "exact"
+        ],
+        "properties": {
+          "exact": {
+            "type": "boolean"
+          },
+          "provider": {
+            "type": "string"
+          },
+          "weekly_delta_permille": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "RunSlot": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "free"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "dispatching"
+            ],
+            "properties": {
+              "dispatching": {
+                "type": "object",
+                "required": [
+                  "input_id",
+                  "attempt"
+                ],
+                "properties": {
+                  "attempt": {
+                    "type": "integer",
+                    "format": "int32"
+                  },
+                  "input_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "running"
+            ],
+            "properties": {
+              "running": {
+                "type": "object",
+                "required": [
+                  "input_id"
+                ],
+                "properties": {
+                  "input_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
         ]
       },
       "ScheduleBody": {
@@ -4010,6 +5150,130 @@
           }
         }
       },
+      "Snapshot_ConversationSnapshot": {
+        "type": "object",
+        "required": [
+          "scope",
+          "cursor",
+          "data"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "required": [
+              "detail",
+              "queue",
+              "history",
+              "scheduled"
+            ],
+            "properties": {
+              "detail": {
+                "$ref": "#/components/schemas/ConversationDetail"
+              },
+              "history": {
+                "$ref": "#/components/schemas/HistoryPage"
+              },
+              "queue": {
+                "$ref": "#/components/schemas/QueueView"
+              },
+              "scheduled": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ScheduledMessage"
+                }
+              }
+            }
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "Snapshot_ListSnapshot": {
+        "type": "object",
+        "required": [
+          "scope",
+          "cursor",
+          "data"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "required": [
+              "items",
+              "truncated",
+              "counts",
+              "groups",
+              "limits"
+            ],
+            "properties": {
+              "counts": {
+                "$ref": "#/components/schemas/Counts"
+              },
+              "groups": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/Group"
+                }
+              },
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ListItem"
+                }
+              },
+              "limits": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ProviderView"
+                }
+              },
+              "truncated": {
+                "type": "boolean"
+              }
+            }
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
+      "Snapshot_MachinesSnapshot": {
+        "type": "object",
+        "required": [
+          "scope",
+          "cursor",
+          "data"
+        ],
+        "properties": {
+          "cursor": {
+            "type": "string"
+          },
+          "data": {
+            "type": "object",
+            "required": [
+              "items"
+            ],
+            "properties": {
+              "items": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/MachineView"
+                }
+              }
+            }
+          },
+          "scope": {
+            "type": "string"
+          }
+        }
+      },
       "StartedExecution": {
         "type": "object",
         "required": [
@@ -4126,6 +5390,21 @@
           }
         ]
       },
+      "SubagentRef": {
+        "type": "object",
+        "required": [
+          "name",
+          "model"
+        ],
+        "properties": {
+          "model": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "SubmitBody": {
         "type": "object",
         "required": [
@@ -4180,6 +5459,52 @@
             "$ref": "#/components/schemas/InputState"
           }
         }
+      },
+      "TimelineItem": {
+        "oneOf": [
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/InputView"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "input"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/BlockView"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "block"
+                    ]
+                  }
+                }
+              }
+            ]
+          }
+        ]
       },
       "UsageDay": {
         "type": "object",
@@ -4267,6 +5592,69 @@
             "format": "double"
           },
           "used_permille": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "WireEvent": {
+        "type": "object",
+        "required": [
+          "v",
+          "id",
+          "scope",
+          "scope_seq",
+          "scope_seq_from",
+          "committed_at",
+          "committed_at_from",
+          "kind",
+          "payload",
+          "correlation_id"
+        ],
+        "properties": {
+          "committed_at": {
+            "type": "string"
+          },
+          "committed_at_from": {
+            "type": "string"
+          },
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "correlation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "execution_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "payload": {},
+          "scope": {
+            "type": "string"
+          },
+          "scope_seq": {
+            "type": "string"
+          },
+          "scope_seq_from": {
+            "type": "string"
+          },
+          "v": {
             "type": "integer",
             "format": "int32",
             "minimum": 0

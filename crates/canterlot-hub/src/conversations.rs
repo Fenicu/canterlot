@@ -432,6 +432,15 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         counts: counts(conn, q.owner_id).await?,
     })
 }
+pub(crate) async fn snapshot_items(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+) -> Result<Vec<ListItem>, sqlx::Error> {
+    let mut q = sqlx::QueryBuilder::new(SELECT);
+    q.push(" where c.owner_id=").push_bind(owner_id)
+        .push(" order by c.pinned desc,c.pinned_at desc nulls last,d.last_activity_at desc nulls last,c.id limit 501");
+    q.build().fetch_all(conn).await?.iter().map(item).collect()
+}
 /// Голова очереди, команда которой несёт настройки или вложения: без `pilot_v1` в сеансе она не уйдёт.
 pub async fn capability_hold_input(
     conn: &mut PgConnection,

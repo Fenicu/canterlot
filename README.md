@@ -22,6 +22,10 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `crates/canterlot-hub/src/{activity,bus,scheduler}.rs` | Проекция активности и непрочитанного, шина уведомлений и транзакционный планировщик |
 | `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
 | `crates/canterlot-hub/src/http/{conversations,groups,machines,limits}.rs` | HTTP сессий и групп, чтение машин, лимитов и недавних каталогов |
+| `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
+| `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
+| `crates/canterlot-hub/src/http/{snapshot,history}.rs` | GET снимков, истории и диапазона событий с заглушками внутренних видов |
+| `docs/api/events.schema.json` | JSON Schema 2020-12 событий браузера и кадров canterlot.v1 |
 | `crates/canterlot-hub/src/http/scheduled.rs` | Создание, список, изменение и отмена отложенных сообщений |
 | `docs/api/openapi.json` | Машиночитаемый контракт API, генерируется `scripts/gen-openapi.sh` |
 | `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка заголовков Caddy и Authelia |
@@ -358,6 +362,8 @@ Authelia должна защищать весь хост, включая `/api/`
 Управление очередью доступно через `POST /api/v1/inputs/{id}/cancel`, `POST /api/v1/conversations/{id}/interrupt`, `POST /api/v1/conversations/{id}/stop` и `POST /api/v1/conversations/{id}/queue/continue`. Маршрут решения запроса зарезервирован и возвращает `not_implemented`.
 
 `POST /api/v1/conversations/{id}/inputs` ставит текст в очередь; `retry_of` ссылается на неподтверждённый ввод той же сессии. Вложения пока возвращают `not_implemented`. `PATCH /api/v1/conversations/{id}/settings` сохраняет изменения для следующего ввода; они становятся эффективными после подтверждения воркера. `POST /api/v1/conversations/{id}/executions` запускает исполнение, а `POST /api/v1/conversations/{id}/resume` продолжает сессию с последним native ID и при запросе снимает паузу очереди в той же транзакции.
+
+Чтения: `GET /api/v1/snapshot/conversations`, `GET /api/v1/snapshot/machines`, `GET /api/v1/conversations/{id}/snapshot`, `/history`, `/blocks/{block_id}`, `/runs/{run_id}`, `/delegation`. Снимок и его курсор читаются в одной `REPEATABLE READ` транзакции; `GET /api/v1/events?scope=&after=&limit=` восстанавливает хвост с сохранением номеров внутренних событий через `hidden`. При устаревшем или опережающем курсоре нужен новый снимок. Подробные поля и ограничения: `docs/design/api.md`; схема событий: `docs/api/events.schema.json`. Новых таблиц конфигурации в задаче 7a нет: действуют `[http]` и пороги `[machines]`.
 
 ## Обновление контракта пилота
 

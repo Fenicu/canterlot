@@ -29,11 +29,13 @@ pub mod error;
 pub mod extract;
 pub mod groups;
 pub mod health;
+pub mod history;
 pub mod layers;
 pub mod limits;
 pub mod machines;
 pub mod openapi;
 pub mod scheduled;
+pub mod snapshot;
 
 /// Размер одного тела `PATCH` загрузки вложения; объявляется в `GET /api/v1/config`.
 pub const UPLOAD_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
@@ -115,6 +117,8 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(groups::routes())
         .merge(machines::routes())
         .merge(limits::routes())
+        .merge(snapshot::routes())
+        .merge(history::routes())
 }
 
 pub fn router(state: AppState) -> Router {

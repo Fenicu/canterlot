@@ -76,18 +76,18 @@ pub enum MachineWarning {
 pub struct Workdirs {
     pub workdirs: Vec<String>,
 }
-async fn load(
+pub(crate) async fn load_stored(
     conn: &mut PgConnection,
-    s: &AppState,
+    config: &crate::config::MachinesConfig,
     owner: Uuid,
     id: Uuid,
-) -> Result<MachineView, ApiError> {
+) -> Result<MachineView, sqlx::Error> {
     let r = sqlx::query("select * from machines where id=$1 and owner_id=$2")
         .bind(id)
         .bind(owner)
         .fetch_optional(&mut *conn)
         .await?
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
+        .ok_or(sqlx::Error::RowNotFound)?;
     let harnesses =
         sqlx::query("select * from machine_harnesses where machine_id=$1 order by harness")
             .bind(id)
@@ -133,7 +133,7 @@ async fn load(
                 let free = d["free_bytes"].as_u64().unwrap_or(total);
                 total > 0
                     && u128::from(total.saturating_sub(free)) * 100
-                        >= u128::from(total) * u128::from(s.machines.disk_warn_pct)
+                        >= u128::from(total) * u128::from(config.disk_warn_pct)
             })
         });
         if disk_high {
@@ -141,7 +141,7 @@ async fn load(
         }
         if (Utc::now() - at)
             .to_std()
-            .is_ok_and(|age| age >= s.machines.metrics_stale_after)
+            .is_ok_and(|age| age >= config.metrics_stale_after)
         {
             warnings.push(MachineWarning::MetricsStale)
         }
@@ -162,10 +162,7 @@ async fn load(
         availability_since: r
             .try_get::<Option<DateTime<Utc>>, _>("availability_at")?
             .map(conversations::time),
-        heartbeat_age_ms: s
-            .registry
-            .session_info(id)
-            .map(|i| i.last_heartbeat.elapsed().as_millis().min(u64::MAX as u128) as u64),
+        heartbeat_age_ms: None,
         capabilities: r.try_get("capabilities")?,
         os: r.try_get("os")?,
         allowed_roots: roots.0,
@@ -178,6 +175,24 @@ async fn load(
         sessions,
         warnings,
     })
+}
+async fn load(
+    conn: &mut PgConnection,
+    s: &AppState,
+    owner: Uuid,
+    id: Uuid,
+) -> Result<MachineView, ApiError> {
+    let mut view = load_stored(conn, &s.machines, owner, id)
+        .await
+        .map_err(|e| match e {
+            sqlx::Error::RowNotFound => ApiError::new(ErrorCode::NotFound),
+            e => ApiError::from(e),
+        })?;
+    view.heartbeat_age_ms = s
+        .registry
+        .session_info(id)
+        .map(|i| i.last_heartbeat.elapsed().as_millis().min(u64::MAX as u128) as u64);
+    Ok(view)
 }
 #[utoipa::path(get,path="/api/v1/machines",tag="machines",responses((status=200,description="Машины владельца",body=Vec<MachineView>)))]
 async fn list(State(s): State<AppState>, o: Owner) -> Result<Json<Vec<MachineView>>, ApiError> {

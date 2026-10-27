@@ -218,3 +218,196 @@ impl fmt::Debug for StoredEvent {
             .finish()
     }
 }
+
+pub const CLIENT_KINDS: &[&str] = &[
+    "input_queued",
+    "input_state_changed",
+    "queue_state_changed",
+    "queue_paused",
+    "execution_state_changed",
+    "phase_changed",
+    "run_finished",
+    "interrupt_state_changed",
+    "block_started",
+    "block_delta",
+    "block_final",
+    "block_incomplete",
+    "adapter_diagnostic",
+    "state_divergence",
+    "block_revision_gap",
+    "block_checksum_mismatch",
+    "block_conflicting_final",
+    "conversation_created",
+    "conversation_updated",
+    "conversation_settings_changed",
+    "crunch_changed",
+    "crunch_held",
+    "crunch_woken",
+    "derived_changed",
+    "group_changed",
+    "scheduled_changed",
+    "limits_changed",
+    "limit_reached",
+    "attachment_state_changed",
+    "request_opened",
+    "request_closed",
+    "request_decided",
+    "machine_availability_changed",
+    "machine_report_updated",
+    "machine_metrics",
+    "hidden",
+];
+
+pub fn is_client_visible(kind: &str) -> bool {
+    CLIENT_KINDS.contains(&kind)
+}
+
+pub fn wire_scope(scope: &Scope) -> String {
+    match scope {
+        Scope::Conversations { .. } => "conversations".into(),
+        Scope::Machines { .. } => "machines".into(),
+        Scope::Conversation { id } => format!("conversation:{id}"),
+    }
+}
+
+#[derive(serde::Serialize, utoipa::ToSchema)]
+pub struct WireEvent {
+    pub v: u8,
+    pub id: Uuid,
+    pub scope: String,
+    pub scope_seq: String,
+    pub scope_seq_from: String,
+    pub committed_at: String,
+    pub committed_at_from: String,
+    pub kind: String,
+    pub conversation_id: Option<Uuid>,
+    pub execution_id: Option<Uuid>,
+    pub payload: Value,
+    pub correlation_id: Uuid,
+}
+
+impl fmt::Debug for WireEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WireEvent")
+            .field("id", &self.id)
+            .field("scope", &self.scope)
+            .field("scope_seq", &self.scope_seq)
+            .field("kind", &self.kind)
+            .field("payload", &redacted_payload(&self.payload))
+            .finish()
+    }
+}
+
+fn payload_seqs(value: &mut Value) {
+    match value {
+        Value::Object(map) => {
+            for (key, value) in map {
+                if (key == "seq" || key.ends_with("_seq")) && value.is_number() {
+                    *value = Value::String(value.to_string());
+                } else {
+                    payload_seqs(value);
+                }
+            }
+        }
+        Value::Array(items) => items.iter_mut().for_each(payload_seqs),
+        _ => {}
+    }
+}
+
+pub fn project_for_client(events: Vec<StoredEvent>) -> Vec<WireEvent> {
+    let mut result: Vec<WireEvent> = Vec::with_capacity(events.len());
+    let mut previous_scope = String::new();
+    let mut previous_seq = None;
+    for e in events {
+        let hidden = e.kind == "hidden" || !is_client_visible(&e.kind);
+        let at = crate::conversations::time(e.committed_at);
+        if hidden
+            && previous_scope == e.scope
+            && previous_seq == e.scope_seq.checked_sub(1)
+            && let Some(last) = result.last_mut().filter(|last| last.kind == "hidden")
+        {
+            last.scope_seq = e.scope_seq.to_string();
+            last.committed_at = at;
+            previous_seq = Some(e.scope_seq);
+            continue;
+        }
+        let scope = if e.scope.starts_with("conversation:") {
+            e.scope.clone()
+        } else if e.scope.ends_with(":machines") {
+            "machines".into()
+        } else {
+            "conversations".into()
+        };
+        previous_scope = e.scope;
+        previous_seq = Some(e.scope_seq);
+        let mut payload = if hidden {
+            serde_json::json!({})
+        } else {
+            e.payload
+        };
+        payload_seqs(&mut payload);
+        result.push(WireEvent {
+            v: 1,
+            id: e.id,
+            scope,
+            scope_seq: e.scope_seq.to_string(),
+            scope_seq_from: e.scope_seq.to_string(),
+            committed_at: at.clone(),
+            committed_at_from: at,
+            kind: if hidden { "hidden".into() } else { e.kind },
+            conversation_id: if hidden { None } else { e.conversation_id },
+            execution_id: if hidden { None } else { e.execution_id },
+            payload,
+            correlation_id: e.correlation_id,
+        });
+    }
+    result
+}
+
+pub struct EventRange {
+    pub head: i64,
+    pub result: ReadAfter,
+    pub cursor_ahead: bool,
+}
+
+pub async fn range(
+    pool: &PgPool,
+    scope: &Scope,
+    after: i64,
+    limit: i64,
+) -> Result<EventRange, sqlx::Error> {
+    if after < 0 || !(1..=256).contains(&limit) {
+        return Err(sqlx::Error::InvalidArgument("invalid event range".into()));
+    }
+    let mut tx = crate::snapshot::begin(pool).await?;
+    let head = boundary(&mut tx, scope).await?;
+    let oldest: Option<i64> =
+        sqlx::query_scalar("select min(scope_seq) from events where scope=$1")
+            .bind(scope.key())
+            .fetch_one(&mut *tx)
+            .await?;
+    let cursor_ahead = after > head;
+    let oldest = oldest.unwrap_or(head.saturating_add(1));
+    let result = if cursor_ahead || after < oldest - 1 {
+        ReadAfter::ResyncRequired {
+            oldest_available_seq: oldest,
+        }
+    } else {
+        ReadAfter::Events(
+            sqlx::query_as(
+                "select * from events where scope=$1 and scope_seq>$2 order by scope_seq limit $3",
+            )
+            .bind(scope.key())
+            .bind(after)
+            .bind(limit)
+            .fetch_all(&mut *tx)
+            .await?,
+        )
+    };
+    tx.commit().await?;
+    Ok(EventRange {
+        head,
+        result,
+        cursor_ahead,
+    })
+}

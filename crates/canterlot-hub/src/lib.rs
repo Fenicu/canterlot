@@ -19,6 +19,7 @@ pub mod executions;
 pub mod fault_injection;
 pub mod groups;
 pub mod grpc;
+pub mod history;
 pub mod http;
 pub mod idempotency;
 pub mod ingest;
@@ -32,6 +33,7 @@ pub mod runs;
 pub mod scheduler;
 pub mod session;
 pub mod singleton;
+pub mod snapshot;
 
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;

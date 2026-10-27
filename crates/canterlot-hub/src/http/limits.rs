@@ -38,6 +38,16 @@ pub struct ProviderView {
     pub five_hour: Option<WindowView>,
     pub weekly_reserve_active: bool,
 }
+impl From<limits::ProviderLimits> for ProviderView {
+    fn from(p: limits::ProviderLimits) -> Self {
+        Self {
+            provider: p.provider,
+            weekly: p.weekly.map(window),
+            five_hour: p.five_hour.map(window),
+            weekly_reserve_active: p.weekly_reserve_active,
+        }
+    }
+}
 #[derive(Deserialize, IntoParams)]
 pub struct HistoryParams {
     pub provider: Option<String>,

@@ -318,7 +318,7 @@ impl From<HoldReason> for HoldView {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RunSlot {
     Free,
@@ -445,7 +445,7 @@ impl FromStr for DeliveryState {
     }
 }
 
-mod utc_time {
+pub(crate) mod utc_time {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(
@@ -464,7 +464,7 @@ mod utc_time {
     }
 }
 
-mod optional_utc_time {
+pub(crate) mod optional_utc_time {
     use super::*;
 
     pub fn serialize<S: serde::Serializer>(
