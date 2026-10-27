@@ -58,7 +58,7 @@ struct Block {
     block_id: Uuid,
     rev: i64,
     state: String,
-    content: String,
+    revision_gap: bool,
     checksum: Option<String>,
 }
 async fn load(
@@ -66,7 +66,7 @@ async fn load(
     run: &ExecutionRef,
     block_id: Uuid,
 ) -> Result<Option<Block>, sqlx::Error> {
-    sqlx::query_as("select b.block_id, b.rev, b.state, b.content, b.checksum from blocks b join executions e on e.id = b.execution_id join conversations c on c.id = e.conversation_id where b.block_id = $1 and b.execution_id = $2 and b.conversation_id = $3 and c.machine_id = $4 for update of b")
+    sqlx::query_as("select b.block_id, b.rev, b.state, b.revision_gap, b.checksum from blocks b join executions e on e.id = b.execution_id join conversations c on c.id = e.conversation_id where b.block_id = $1 and b.execution_id = $2 and b.conversation_id = $3 and c.machine_id = $4 for update of b")
         .bind(block_id).bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_optional(conn).await
 }
 async fn emit(
@@ -146,11 +146,24 @@ pub async fn apply_delta(
         return Ok(BlockOutcome::Ignored(BlockIgnored::StaleRevision));
     }
     if rev(fact.base_rev)? != block.rev {
+        sqlx::query("update blocks set revision_gap = true where block_id = $1")
+            .bind(block_id)
+            .execute(&mut *conn)
+            .await?;
         emit(conn, run, "block_revision_gap", json!({"block_id": block_id, "current_rev": block.rev, "base_rev": fact.base_rev, "rev": fact.rev}), correlation_id).await?;
         return Ok(BlockOutcome::Diagnosed("block_revision_gap"));
     }
-    sqlx::query("update blocks set content = content || $2, rev = $3, updated_at = clock_timestamp() where block_id = $1")
-        .bind(block_id).bind(&fact.append).bind(next).execute(&mut *conn).await?;
+    sqlx::query("insert into block_chunks (block_id, seq, text) values ($1, $2, $3)")
+        .bind(block_id)
+        .bind(next)
+        .bind(&fact.append)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("update blocks set rev = $2, updated_at = clock_timestamp() where block_id = $1")
+        .bind(block_id)
+        .bind(next)
+        .execute(&mut *conn)
+        .await?;
     emit(conn, run, "block_delta", json!({"block_id": block_id, "base_rev": fact.base_rev, "rev": fact.rev, "append": fact.append}), correlation_id).await?;
     Ok(BlockOutcome::Applied)
 }
@@ -182,12 +195,40 @@ pub async fn finalize(
         .await?;
         return Ok(BlockOutcome::Diagnosed("block_conflicting_final"));
     }
+    let accumulated = read_text(conn, block_id).await?;
     let content = if fact.text_omitted {
-        &block.content
+        &accumulated
     } else {
         &fact.text
     };
-    let mismatch = checksum(&block.content) != fact.checksum || checksum(content) != fact.checksum;
+    let mismatch = checksum(&accumulated) != fact.checksum || checksum(content) != fact.checksum;
+    if fact.text_omitted && (block.revision_gap || mismatch) {
+        sqlx::query("update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp() where block_id = $1")
+            .bind(block_id).bind(content).bind(rev(fact.rev)?).execute(&mut *conn).await?;
+        if mismatch {
+            emit(
+                conn,
+                run,
+                "block_checksum_mismatch",
+                json!({"block_id": block_id, "rev": fact.rev}),
+                correlation_id,
+            )
+            .await?;
+        }
+        emit(
+            conn,
+            run,
+            "block_incomplete",
+            json!({"block_id": block_id, "rev": fact.rev, "reason": "revision_gap"}),
+            correlation_id,
+        )
+        .await?;
+        return Ok(BlockOutcome::Diagnosed(if mismatch {
+            "block_checksum_mismatch"
+        } else {
+            "block_revision_gap"
+        }));
+    }
     sqlx::query("update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp() where block_id = $1")
         .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&fact.checksum).execute(&mut *conn).await?;
     emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": fact.text, "checksum": fact.checksum, "text_omitted": fact.text_omitted}), correlation_id).await?;
@@ -218,7 +259,7 @@ pub async fn mark_incomplete(
     if block.state != "streaming" {
         return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
     }
-    sqlx::query("update blocks set state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp() where block_id = $1")
+    sqlx::query("update blocks set content = coalesce((select string_agg(text, '' order by seq) from block_chunks where block_id = $1), ''), state = 'incomplete', rev = $2, incomplete_reason = $3, updated_at = clock_timestamp() where block_id = $1")
         .bind(block_id).bind(rev(fact.rev)?).bind(&fact.reason).execute(&mut *conn).await?;
     emit(
         conn,
@@ -237,7 +278,7 @@ pub async fn close_journal(
     fact: &JournalClosed,
     correlation_id: Uuid,
 ) -> Result<u64, sqlx::Error> {
-    let blocks: Vec<Block> = sqlx::query_as("select b.block_id, b.rev, b.state, b.content, b.checksum from blocks b join conversations c on c.id = b.conversation_id where b.execution_id = $1 and b.conversation_id = $2 and c.machine_id = $3 and b.state = 'streaming' order by b.block_id for update of b")
+    let blocks: Vec<Block> = sqlx::query_as("select b.block_id, b.rev, b.state, b.revision_gap, b.checksum from blocks b join conversations c on c.id = b.conversation_id where b.execution_id = $1 and b.conversation_id = $2 and c.machine_id = $3 and b.state = 'streaming' order by b.block_id for update of b")
         .bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_all(&mut *conn).await?;
     let count = blocks.len() as u64;
     for block in blocks {
@@ -254,4 +295,9 @@ pub async fn close_journal(
         .await?;
     }
     Ok(count)
+}
+
+pub async fn read_text(conn: &mut PgConnection, block_id: Uuid) -> Result<String, sqlx::Error> {
+    sqlx::query_scalar("select case when state = 'streaming' then coalesce((select string_agg(text, '' order by seq) from block_chunks where block_id = $1), '') else content end from blocks where block_id = $1")
+        .bind(block_id).fetch_one(conn).await
 }

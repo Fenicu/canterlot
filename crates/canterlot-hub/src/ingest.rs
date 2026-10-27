@@ -170,8 +170,16 @@ impl Ingest {
             }
             if matches!(
                 worker_state,
-                ExecutionState::Stopped | ExecutionState::Failed
+                ExecutionState::Stopped | ExecutionState::Failed | ExecutionState::OwnerLost
             ) {
+                if *worker_state != ExecutionState::OwnerLost {
+                    let journal_id = Uuid::parse_str(&observation.sj_journal_id).ok();
+                    let closed: bool = sqlx::query_scalar("select exists(select 1 from journal_cursors where execution_id = $1 and journal_id = $2 and closed)")
+                        .bind(id).bind(journal_id).fetch_one(&mut *tx).await?;
+                    if !closed {
+                        continue;
+                    }
+                }
                 apply_body(
                     &mut tx,
                     machine_id,
@@ -207,6 +215,8 @@ impl Ingest {
                     correlation_id,
                 )
                 .await?;
+                complete_unsuccessful_start(&mut tx, execution_id, machine_id, "owner_lost")
+                    .await?;
                 events::append(
                     &mut tx,
                     NewEvent {
@@ -241,8 +251,21 @@ impl Ingest {
         kind: JournalKind,
         batch: &JournalRecords,
     ) -> Result<IngestOutcome, IngestError> {
+        self.apply_batch_report(machine_id, credential, kind, batch)
+            .await
+            .0
+    }
+
+    async fn apply_batch_report(
+        &self,
+        machine_id: Uuid,
+        credential: &[u8],
+        kind: JournalKind,
+        batch: &JournalRecords,
+    ) -> (Result<IngestOutcome, IngestError>, Option<u64>) {
+        let mut prefix = None;
         let result = self
-            .apply_batch_inner(machine_id, credential, kind, batch)
+            .apply_batch_inner(machine_id, credential, kind, batch, &mut prefix)
             .await;
         match &result {
             Err(error) => tracing::warn!(kind = %error, machine_id = %machine_id,
@@ -253,7 +276,7 @@ impl Ingest {
             }
             _ => {}
         }
-        result
+        (result, prefix)
     }
 
     async fn apply_batch_inner(
@@ -262,6 +285,7 @@ impl Ingest {
         credential: &[u8],
         kind: JournalKind,
         batch: &JournalRecords,
+        prefix: &mut Option<u64>,
     ) -> Result<IngestOutcome, IngestError> {
         require_active(&mut *self.pool.acquire().await?, machine_id, credential).await?;
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
@@ -287,6 +311,19 @@ impl Ingest {
         .fetch_all(&self.pool)
         .await?;
         let (mut up_to_seq, mut last_digest) = checked_cursor(machine_id, kind, rows)?;
+        if kind == JournalKind::Sj {
+            let outcome = self
+                .apply_sj_batch(
+                    machine_id,
+                    credential,
+                    batch,
+                    (up_to_seq, last_digest),
+                    prefix,
+                )
+                .await?;
+            self.trigger_dispatcher(machine_id).await?;
+            return Ok(outcome);
+        }
         for record in &batch.records {
             // Записи старше снимка не требуют сравнения с последним digest.
             if record.seq < up_to_seq {
@@ -366,6 +403,154 @@ impl Ingest {
                 self.ignored.fetch_add(1, Ordering::Relaxed);
             }
         }
+        self.trigger_dispatcher(machine_id).await?;
+        Ok(IngestOutcome::Committed { up_to_seq })
+    }
+
+    async fn apply_sj_batch(
+        &self,
+        machine_id: Uuid,
+        credential: &[u8],
+        batch: &JournalRecords,
+        snapshot: (u64, Option<Vec<u8>>),
+        prefix: &mut Option<u64>,
+    ) -> Result<IngestOutcome, IngestError> {
+        let journal_id = parse_id(&batch.journal_id)?;
+        let (mut up_to_seq, mut last_digest) = snapshot;
+        let pending: Vec<_> = batch
+            .records
+            .iter()
+            .filter_map(|record| {
+                if record.seq < up_to_seq {
+                    return None;
+                }
+                let digest = record
+                    .body
+                    .as_ref()
+                    .map(|body| Sha256::digest(body.encode_to_vec()).to_vec());
+                if record.seq == up_to_seq && (last_digest.is_none() || last_digest == digest) {
+                    return None;
+                }
+                Some((record, digest))
+            })
+            .collect();
+        if pending.is_empty() {
+            return Ok(IngestOutcome::Committed { up_to_seq });
+        }
+        let mut tx = self.pool.begin().await?;
+        require_active(&mut tx, machine_id, credential).await?;
+        let mut locked = false;
+        let mut initial_seq = up_to_seq;
+        let mut ignored_count = 0;
+        let mut failure = None;
+        let mut gap = None;
+        for (record, digest) in pending {
+            sqlx::query("savepoint sj_record").execute(&mut *tx).await?;
+            if !locked {
+                sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, 'sj', 0) on conflict do nothing")
+                    .bind(machine_id).bind(journal_id).execute(&mut *tx).await?;
+                let rows = sqlx::query_as("select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1 for update")
+                    .bind(journal_id).fetch_all(&mut *tx).await?;
+                (up_to_seq, last_digest) = checked_cursor(machine_id, JournalKind::Sj, rows)?;
+                initial_seq = up_to_seq;
+                locked = true;
+            }
+            if record.seq <= up_to_seq {
+                if record.seq == up_to_seq && last_digest.is_some() && last_digest != digest {
+                    let owner_id =
+                        sqlx::query_scalar("select owner_id from machines where id = $1")
+                            .bind(machine_id)
+                            .fetch_one(&mut *tx)
+                            .await?;
+                    events::append(
+                        &mut tx,
+                        NewEvent {
+                            scope: Scope::Conversations { owner_id },
+                            kind: "journal_record_mismatch",
+                            conversation_id: None,
+                            execution_id: None,
+                            payload: json!({"journal_id": journal_id, "seq": record.seq}),
+                            correlation_id: Uuid::now_v7(),
+                        },
+                    )
+                    .await?;
+                }
+                sqlx::query("release savepoint sj_record")
+                    .execute(&mut *tx)
+                    .await?;
+                continue;
+            }
+            if record.seq > up_to_seq + 1 {
+                sqlx::query("rollback to savepoint sj_record")
+                    .execute(&mut *tx)
+                    .await?;
+                gap = Some(record.seq);
+                break;
+            }
+            let result = async {
+                i64::try_from(record.seq).map_err(|_| IngestError::InvalidRecord)?;
+                let body = record
+                    .body
+                    .as_ref()
+                    .and_then(|body| body.body.as_ref())
+                    .ok_or(IngestError::UnknownRecord)?;
+                let correlation_id = Uuid::now_v7();
+                match apply_journal_body(
+                    &mut tx,
+                    machine_id,
+                    JournalKind::Sj,
+                    journal_id,
+                    record.seq,
+                    body,
+                    correlation_id,
+                )
+                .await?
+                {
+                    Some(ignored) => Ok(ignored),
+                    None => apply_body(&mut tx, machine_id, body, correlation_id).await,
+                }
+            }
+            .await;
+            match result {
+                Ok(ignored) => {
+                    sqlx::query("release savepoint sj_record")
+                        .execute(&mut *tx)
+                        .await?;
+                    up_to_seq = record.seq;
+                    last_digest = digest;
+                    ignored_count += u64::from(ignored);
+                }
+                Err(error) => {
+                    sqlx::query("rollback to savepoint sj_record")
+                        .execute(&mut *tx)
+                        .await?;
+                    failure = Some(error);
+                    break;
+                }
+            }
+        }
+        if up_to_seq > initial_seq {
+            sqlx::query("update journal_cursors set committed_seq = $2, last_record_digest = $3, updated_at = clock_timestamp() where journal_id = $1")
+                .bind(journal_id).bind(up_to_seq as i64).bind(last_digest).execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        self.ignored.fetch_add(ignored_count, Ordering::Relaxed);
+        if let Some(error) = failure {
+            if up_to_seq > initial_seq {
+                *prefix = Some(up_to_seq);
+            }
+            return Err(error);
+        }
+        if let Some(got_seq) = gap {
+            return Ok(IngestOutcome::Gap {
+                committed_seq: up_to_seq,
+                got_seq,
+            });
+        }
+        Ok(IngestOutcome::Committed { up_to_seq })
+    }
+
+    async fn trigger_dispatcher(&self, machine_id: Uuid) -> Result<(), IngestError> {
         if let Some(dispatcher) = &self.dispatcher {
             for conversation in
                 crate::dispatcher::queued_conversations(&self.pool, Some(machine_id)).await?
@@ -373,7 +558,7 @@ impl Ingest {
                 dispatcher.trigger(conversation);
             }
         }
-        Ok(IngestOutcome::Committed { up_to_seq })
+        Ok(())
     }
 }
 
@@ -641,7 +826,21 @@ async fn apply_body(
                             .bind(execution_id).bind(&fact.native_conversation_id).execute(&mut *conn).await?;
                         sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = '{\"started\":true}' where execution_id = $1 and machine_id = $2 and kind = 'start_execution' and delivery_state <> 'completed'")
                             .bind(execution_id).bind(machine_id).execute(&mut *conn).await?;
-                    } else if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
+                    } else if matches!(
+                        to,
+                        ExecutionState::Stopped
+                            | ExecutionState::Failed
+                            | ExecutionState::OwnerLost
+                    ) {
+                        complete_unsuccessful_start(
+                            conn,
+                            execution_id,
+                            machine_id,
+                            stored_outcome.as_deref().unwrap_or("owner_lost"),
+                        )
+                        .await?;
+                    }
+                    if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
                         sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = case when kind = 'stop_execution' then jsonb_build_object('outcome', $3::text) else jsonb_build_object('status', 'superseded') end, last_status = case when kind = 'interrupt' then 'superseded' else last_status end where execution_id = $1 and machine_id = $2 and kind in ('stop_execution', 'interrupt') and delivery_state <> 'completed'")
                             .bind(execution_id).bind(machine_id).bind(stored_outcome).execute(&mut *conn).await?;
                     }
@@ -822,25 +1021,29 @@ impl Ingest {
         kind: JournalKind,
         batch: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
-        let outcome = self
-            .apply_batch(machine_id, credential, kind, &batch)
-            .await
-            .map_err(|error| {
-                let message = error.to_string();
-                match error {
-                    IngestError::CredentialRevoked => tonic::Status::unauthenticated(message),
-                    IngestError::BatchLimit => tonic::Status::resource_exhausted(message),
-                    IngestError::ForeignJournal | IngestError::ForeignExecution => {
-                        tonic::Status::permission_denied(message)
-                    }
-                    IngestError::Database | IngestError::Execution => {
-                        tonic::Status::internal(message)
-                    }
-                    IngestError::UnknownRecord
-                    | IngestError::InvalidRecord
-                    | IngestError::JournalKindMismatch => tonic::Status::invalid_argument(message),
+        let (result, prefix) = self
+            .apply_batch_report(machine_id, credential, kind, &batch)
+            .await;
+        if let Some(up_to_seq) = prefix {
+            return Ok(canterlot_proto::worker::v1::JournalRangeAck {
+                journal_id: batch.journal_id,
+                up_to_seq,
+            });
+        }
+        let outcome = result.map_err(|error| {
+            let message = error.to_string();
+            match error {
+                IngestError::CredentialRevoked => tonic::Status::unauthenticated(message),
+                IngestError::BatchLimit => tonic::Status::resource_exhausted(message),
+                IngestError::ForeignJournal | IngestError::ForeignExecution => {
+                    tonic::Status::permission_denied(message)
                 }
-            })?;
+                IngestError::Database | IngestError::Execution => tonic::Status::internal(message),
+                IngestError::UnknownRecord
+                | IngestError::InvalidRecord
+                | IngestError::JournalKindMismatch => tonic::Status::invalid_argument(message),
+            }
+        })?;
         match outcome {
             IngestOutcome::Committed { up_to_seq } => {
                 Ok(canterlot_proto::worker::v1::JournalRangeAck {
@@ -998,8 +1201,11 @@ async fn apply_journal_body(
         Body::BlockIncomplete(fact) => blocks::mark_incomplete(conn, &run, fact, correlation_id).await,
         Body::PhaseChanged(fact) => {
             if parse_id(&fact.execution_id)? != run.execution_id { return Err(IngestError::ForeignExecution); }
-            sqlx::query("update executions set phase = $2, phase_at = clock_timestamp() where id = $1")
-                .bind(run.execution_id).bind(&fact.phase).execute(&mut *conn).await?;
+            sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+                .bind(run.conversation_id).execute(&mut *conn).await?;
+            let changed = sqlx::query("update executions set phase = $2, phase_at = clock_timestamp() where id = $1 and state not in ('stopped', 'failed')")
+                .bind(run.execution_id).bind(&fact.phase).execute(&mut *conn).await?.rows_affected();
+            if changed == 0 { return Ok(Some(true)); }
             execution_event(conn, &run, "phase_changed", json!({"phase": fact.phase}), correlation_id).await?;
             return Ok(Some(false));
         }
@@ -1046,5 +1252,16 @@ async fn timed_receipt(
         )
         .await?;
     }
+    Ok(())
+}
+
+async fn complete_unsuccessful_start(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    machine_id: Uuid,
+    outcome: &str,
+) -> Result<(), IngestError> {
+    sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = jsonb_build_object('started', false, 'outcome', $3::text) where execution_id = $1 and machine_id = $2 and kind = 'start_execution' and delivery_state <> 'completed'")
+        .bind(execution_id).bind(machine_id).bind(outcome).execute(conn).await?;
     Ok(())
 }

@@ -106,6 +106,20 @@ fn observation(run: &StartedExecution, state: &str, outcome: &str) -> ExecutionO
     }
 }
 
+async fn closed_observation(
+    pool: &PgPool,
+    seed: &Seed,
+    run: &StartedExecution,
+    state: &str,
+    outcome: &str,
+) -> ExecutionObservation {
+    let observation = observation(run, state, outcome);
+    sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, execution_id, closed) values ($1, $2, 'sj', $3, true)")
+        .bind(seed.machine_id).bind(Uuid::parse_str(&observation.sj_journal_id).unwrap()).bind(run.execution_id)
+        .execute(pool).await.unwrap();
+    observation
+}
+
 async fn execution_state(pool: &PgPool, id: Uuid) -> String {
     sqlx::query_scalar("select state from executions where id = $1")
         .bind(id)
@@ -313,11 +327,13 @@ async fn reconcile_refreshes_observed_execution(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn reconcile_applies_worker_terminal_state_as_late_fact(pool: PgPool) -> TestResult {
+async fn reconcile_applies_worker_terminal_state_as_late_fact_after_sj_close(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Stopping).await;
     let report = ReconcileReport {
-        executions: vec![observation(&run, "stopped", "user_stop")],
+        executions: vec![closed_observation(&pool, &seed, &run, "stopped", "user_stop").await],
     };
     let ingest = Ingest::new(pool.clone());
     ingest.reconcile(seed.machine_id, &report).await?;
@@ -598,14 +614,18 @@ async fn reconcile_preserves_generation_and_machine_boundaries(pool: PgPool) -> 
 }
 
 #[sqlx::test(migrations = "./migrations")]
-async fn reconcile_diagnoses_illegal_terminal_transition(pool: PgPool) -> TestResult {
+async fn reconcile_diagnoses_illegal_terminal_transition_after_sj_close(
+    pool: PgPool,
+) -> TestResult {
     let seed = testkit::seed(&pool).await;
     let run = start(&pool, &seed, ExecutionState::Running).await;
     Ingest::new(pool.clone())
         .reconcile(
             seed.machine_id,
             &ReconcileReport {
-                executions: vec![observation(&run, "stopped", "user_stop")],
+                executions: vec![
+                    closed_observation(&pool, &seed, &run, "stopped", "user_stop").await,
+                ],
             },
         )
         .await?;

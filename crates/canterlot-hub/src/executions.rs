@@ -200,7 +200,7 @@ pub async fn set_state_in_tx(
         ExecutionState::OwnerLost => add_once(&mut queue.pause_reasons.0, PauseReason::OwnerLost),
         _ => {}
     }
-    sqlx::query("update executions set state = $2, outcome = $3, updated_at = now() where id = $1")
+    sqlx::query("update executions set state = $2, outcome = $3, phase = case when $2 in ('stopped', 'failed') then null else phase end, phase_at = case when $2 in ('stopped', 'failed') then null else phase_at end, updated_at = now() where id = $1")
         .bind(execution_id)
         .bind(to.as_str())
         .bind(outcome)
@@ -248,7 +248,7 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
     use ExecutionState::*;
     matches!(
         (from, to, outcome),
-        (Created, Created | Starting, None)
+        (Created, Created | Starting | OwnerLost, None)
             | (Created, Stopped, Some("start_cancelled"))
             | (Created, Failed, Some("start_rejected"))
             | (Starting, Running | Stopping | OwnerLost, None)

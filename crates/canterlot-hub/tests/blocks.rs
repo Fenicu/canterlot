@@ -110,11 +110,17 @@ fn final_fact(id: Uuid, rev: u64, text: &str) -> Body {
     })
 }
 async fn block(pool: &PgPool, id: Uuid) -> (String, i64, String, Option<String>) {
-    sqlx::query_as("select content, rev, state, incomplete_reason from blocks where block_id = $1")
-        .bind(id)
-        .fetch_one(pool)
+    let mut conn = pool.acquire().await.unwrap();
+    let text = canterlot_hub::blocks::read_text(&mut conn, id)
         .await
-        .unwrap()
+        .unwrap();
+    let (rev, state, reason) =
+        sqlx::query_as("select rev, state, incomplete_reason from blocks where block_id = $1")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await
+            .unwrap();
+    (text, rev, state, reason)
 }
 async fn events(pool: &PgPool, id: Uuid) -> Vec<(String, i64, Value)> {
     sqlx::query_as("select kind, scope_seq, payload from events where payload->>'block_id' = $1 order by scope_seq").bind(id.to_string()).fetch_all(pool).await.unwrap()
