@@ -22,7 +22,7 @@
 
 Ответ хаба: принят или отказ с причиной, текущий `restore_generation` хаба, закоммиченный номер только по журналам, которые воркер назвал в этом `Hello` (`cj_journal_id` и `cursors`). Журналы, не названные воркером, в `Accepted.committed` не добавляются; для нового журнала закоммиченный номер равен нулю.
 
-Возможность `exec_v1` согласуется через `Hello.required_capabilities` или `Hello.optional_capabilities`. `Accepted.capabilities` повторяет только известные хабу необязательные возможности из запроса; отсутствие поля означает пустой список. После handshake воркер передаёт по `control` сообщение `ReconcileReport`: для каждого исполнения `execution_id`, `generation`, `state`, `outcome`, `supervisor_attached`, `sj_journal_id`. Это последнее наблюдение для сверки, а устойчивые факты исполнения доставляются записями журналов.
+Возможность `exec_v1` согласуется только через `Hello.optional_capabilities`; в `required_capabilities` она не поддерживается и приводит к `unknown_required_capability`. `Accepted.capabilities` повторяет только известные хабу необязательные возможности из запроса; отсутствие поля означает пустой список. После handshake воркер передаёт по `control` сообщение `ReconcileReport`: для каждого исполнения `execution_id`, `generation`, `state`, `outcome`, `supervisor_attached`, `sj_journal_id`. Это последнее наблюдение для сверки, а устойчивые факты исполнения доставляются записями журналов.
 
 ### Автомат сеанса (сторона воркера; хаб ведёт зеркальную копию)
 
@@ -32,9 +32,9 @@ stateDiagram-v2
     disconnected --> connecting: connect_attempt
     connecting --> handshaking: transport_ready
     connecting --> backoff: transport_failed
-    handshaking --> reconciling: handshake_accepted
+    handshaking --> reconciling: session_accepted
     handshaking --> restore_reconciling: restore_generation_changed
-    handshaking --> rejected: handshake_rejected
+    handshaking --> rejected: session_rejected
     handshaking --> backoff: handshake_timeout
     reconciling --> live: reconciliation_complete
     restore_reconciling --> live: machine_reconciled_new_generation
@@ -53,9 +53,9 @@ stateDiagram-v2
 | --- | --- | --- | --- | --- |
 | `disconnected`, `backoff` | `connect_attempt` | | новый `connection_id`; TLS с обязательной проверкой | `connecting` |
 | `connecting` | `transport_ready` | соединения установлены | открыть `control`, затем `data`; первые сообщения; timeout согласования 10 с (§8.6 п. 4) | `handshaking` |
-| `handshaking` | `handshake_accepted` | оба потока прошли согласование с одним `connection_id` и одной аутентифицированной установкой; `installation_id` и `restore_generation` совпадают; обязательные возможности известны | хаб: сеанс машины `reconciling`, удержание `machine_not_reconciled` остаётся | `reconciling` |
+| `handshaking` | `session_accepted` | оба потока прошли согласование с одним `connection_id` и одной аутентифицированной установкой; `installation_id` и `restore_generation` совпадают; обязательные возможности известны | хаб: сеанс машины `reconciling`, удержание `machine_not_reconciled` остаётся | `reconciling` |
 | `handshaking` | `restore_generation_changed` | поколение хаба ≠ поколению воркера | обычный replay команд не выполняется; воркер не компактирует журналы и принимает только сообщения сверки ([recovery.md](recovery.md) R7) | `restore_reconciling` |
-| `handshaking` | `handshake_rejected` | см. причины ниже | | `rejected` |
+| `handshaking` | `session_rejected` | см. причины ниже | | `rejected` |
 | `reconciling` | (внутри) | | воркер повторяет неподтверждённые записи журналов; хаб пересылает команды без `command_stored` и запрашивает статусы нетерминальных команд; сверка исполнений ([recovery.md](recovery.md) R1) | `reconciling` |
 | `reconciling` | `reconciliation_complete` | replay дошёл до конца журналов на момент handshake, исполнения сверены | хаб снимает `machine_not_reconciled`; найденные неподтверждённые приёмы ставят паузу | `live` |
 | `live` | `data_stream_failed` | поток данных завершился, управление живо | **Предложение**: поток данных переоткрывается под тем же `connection_id` и снова проходит согласование. Причина: управление несёт heartbeat и прерывание, его незачем рвать из-за проблем канала данных. Связь `degraded`, новые запуски и выдача запрещены | `control_only` |
@@ -160,6 +160,8 @@ stateDiagram-v2
 
 Правила хаба: запись с уже известным ключом не вставляется повторно, но подтверждается (AT-C-04); ACK накопительный по журналу и отправляется только после commit (AT-H-02); при разрыве нумерации хаб не коммитит дальше разрыва и запрашивает повтор с первого недостающего номера; записи разговора, удалённого tombstone, получают конечную квитанцию `conversation_deleted`, которая засчитывается как ACK (AT-F-19).
 
+Хаб применяет пакет `SJ` одной транзакцией, блокируя `journal_cursors` раньше `queue_state`; для каждой записи создаётся `SAVEPOINT`. Ошибка откатывает только текущую запись; применённый префикс и его курсор коммитятся вместе, затем подтверждаются. Ошибочная запись остаётся неподтверждённой: повтор без продвижения закрывает поток с прежней диагностикой. ACK никогда не опережает commit. Дубликаты по прежнему пропускаются, включая проверку digest последней записи.
+
 Совместимость записей: новые виды `RecordBody` отправляются, только если обе стороны объявили в handshake совпадающую необязательную возможность (`optional_capabilities`). Запись неизвестного вида от воркера той же `protocol_version` хаб не применяет и не подтверждает: приём этого журнала останавливается намеренно (отравленная запись, `unknown_record`), поток закрывается с `InvalidArgument`, остановка видна в диагностике. Повтор той же записи после reconnect даёт тот же результат до обновления хаба или воркера. Запись с `seq = 0` отклоняется как `invalid_record`; запись курсора журнала создаётся только вместе с первой применённой записью.
 
 Повреждение: при открытии журнала проверяются контрольные суммы; действительный префикс сохраняется, повреждённый хвост переносится в карантин, хабу уходит факт `journal_tail_corrupted(journal_id, from_seq)`, в UI видна возможная неполнота. Команды, чей результат мог находиться в повреждённой области, считаются `acceptance_unconfirmed` (README, вопрос 13) (AT-C-12).
@@ -248,7 +250,7 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> streaming: block_started
     streaming --> streaming: delta_applied
-    streaming --> stale: revision_gap
+    streaming --> stale: block_revision_gap
     stale --> streaming: content_refetched
     stale --> final: final_received
     streaming --> final: final_received
@@ -261,13 +263,13 @@ stateDiagram-v2
 | --- | --- | --- | --- | --- |
 | нет | `block_started` | | блок с `block_id`, типом и связями | `streaming` |
 | `streaming` | `delta_applied` | `base_rev` = текущей ревизии | дописать, ревизия = `rev`; дельта с `rev` ≤ текущей игнорируется (AT-B-02) | `streaming` |
-| `streaming` | `revision_gap` | `base_rev` > текущей | HTTP-запрос актуального содержимого блока | `stale` |
+| `streaming` | `block_revision_gap` | `base_rev` > текущей | HTTP-запрос актуального содержимого блока | `stale` |
 | `stale` | `content_refetched` | | заменить содержимое и ревизию | `streaming` |
 | `streaming`, `stale` | `final_received` | | заменить содержимое финалом, проверить checksum; поздние дельты игнорируются (AT-B-01, AT-B-03) | `final` |
 | `streaming` | `block_interrupted` | ошибка агента, прерывание хода, запись `journal_closed` исполнения без финала блока | пометить незавершённым, индикатор набора остановлен по подтверждённому итогу (AT-B-08) | `incomplete` |
 | `incomplete` | `late_final_received` | финал из журнала того же исполнения пришёл позже | заменить финалом; исполнение не оживает | `final` |
 
-На хабе блок материализуется: накопленное содержимое и ревизия, дельты применяются в порядке журнала. Расхождение checksum финала с накопленным текстом: финал побеждает, фиксируется диагностика `block_checksum_mismatch`. **Предложение**: оставшиеся `streaming`-блоки помечаются `incomplete` по записи `journal_closed` (или по факту полного replay журнала умершего сопровождения), а не по статусу на канале управления. Причина: каналы не упорядочены между собой, и ранняя пометка дала бы лишний переход `incomplete` → `final`.
+На хабе потоковый текст хранится добавлением строк `block_chunks(block_id, seq, text)` с ключом `(block_id, seq)`; `seq` — ревизия принятой дельты. Дельты применяются в порядке журнала без чтения и переписывания накопленного текста. `blocks::read_text` читает потоковый блок конкатенацией фрагментов по `seq`. При финале и при `incomplete` текст материализуется в `blocks.content`. Разрыв ревизий сохраняется как признак блока. Полный текст финала побеждает накопленный; расхождение checksum даёт `block_checksum_mismatch`. При `text_omitted = true` после разрыва ревизий или при несовпадении checksum блок получает `incomplete` с причиной `revision_gap`, а не `final`; частичный текст остаётся доступен. Обнаруженный разрыв даёт событие `block_revision_gap`. **Предложение**: оставшиеся `streaming`-блоки помечаются `incomplete` по записи `journal_closed` (или по факту полного replay журнала умершего сопровождения), а не по статусу на канале управления. Причина: каналы не упорядочены между собой, и ранняя пометка дала бы лишний переход `incomplete` → `final`.
 
 **Предложение** по объединению дельт: хаб объединяет дельты одного блока в окне до 25 мс при публикации браузерам; объединённое событие несёт `base_rev` первой и `rev` последней исходной дельты и диапазон исходных ключей событий. Причина: так сохраняется проверяемость и учёт P-04 по самой старой дельте пакета (AT-E-13). Терминальные события, ошибки и запросы не объединяются и не отбрасываются (§8.5).
 

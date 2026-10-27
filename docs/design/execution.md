@@ -4,7 +4,7 @@
 
 ## 1. Жизненный цикл исполнения (§5, §6.1, §9)
 
-Исполнение: одна попытка продолжить разговор в конкретном процессе агента. Источник истины для процессных фактов: воркер; хаб хранит последнее наблюдение и его давность. Все факты жизненного цикла от живого сопровождения, включая `execution_state`, `phase_changed`, `run_finished` и `journal_closed`, записываются в его `SJ` с fsync. Управляющая служба пишет такие факты в `CJ` только когда сопровождение не может их записать: `command_rejected` при отказе старта, `execution_state{stopped, start_cancelled}` до запуска сопровождения и `execution_state{owner_lost}`. Общего порядка между `CJ` и `SJ` нет (S-3).
+Исполнение: одна попытка продолжить разговор в конкретном процессе агента. Источник истины для процессных фактов: воркер; хаб хранит последнее наблюдение и его давность. Все факты жизненного цикла от живого сопровождения, включая `execution_state`, `phase_changed`, `run_finished` и `journal_closed`, записываются в его `SJ` с fsync. Управляющая служба пишет такие факты в `CJ` только когда сопровождение не может их записать: `command_rejected` при отказе старта, `execution_state{stopped, start_cancelled}` до запуска сопровождения и `execution_state{owner_lost}`. Общего порядка между `CJ` и `SJ` нет (S-3). Поле записи протокола называется `execution_state`; сохранённое событие хаба — `execution_state_changed`. `created → owner_lost` допустим: запись принадлежности могла появиться до того, как хаб получил `starting` из `SJ`.
 
 | Состояние | Описание (§6.1) | Смысл |
 | --- | --- | --- |
@@ -15,6 +15,8 @@
 | `stopped` | остановлено | группа ресурсов подтверждённо пуста, итог без ошибки исполнения |
 | `failed` | завершено с ошибкой | старт не удался или процесс завершился с ошибкой; группа подтверждённо пуста либо выход разрешён административно |
 | `owner_lost` | владелец потерян / исполнение не определено | сопровождение умерло или не подтверждено; завершение группы не доказано |
+
+При `stopped` или `failed` хаб сбрасывает `phase` и `phase_at` в `null`; поздний `phase_changed` игнорируется и увеличивает диагностический счётчик проигнорированных записей. Незавершённая команда `start_execution` закрывается также при неудачном старте, отмене старта и `owner_lost`; результат содержит `started = false` и `outcome` (для потери владельца — `owner_lost`).
 
 Итог (`outcome`) терминальных состояний:
 
@@ -28,6 +30,7 @@ stateDiagram-v2
     [*] --> created: start_committed
     created --> created: workdir_wait
     created --> starting: supervisor_spawned
+    created --> owner_lost: supervisor_lost
     created --> stopped: start_cancelled
     created --> failed: start_rejected
     starting --> running: adapter_ready
@@ -36,7 +39,7 @@ stateDiagram-v2
     running --> stopping: stop_requested
     running --> stopping: process_exited
     running --> stopping: adapter_incompatible
-    running --> stopping: storage_failed
+    running --> stopping: storage_failure
     running --> owner_lost: supervisor_lost
     stopping --> stopped: group_empty_confirmed
     stopping --> failed: group_empty_confirmed_with_error
@@ -63,9 +66,9 @@ stateDiagram-v2
 | `running` | `stop_requested` | команда `stop_execution` (штатно) или `force_stop` (принудительно) текущему поколению | `SJ`: намерение; штатно адаптер закрывает CLI, принудительно завершается подтверждённая группа | `stopping` |
 | `running` | `process_exited` | CLI вышел сам: ошибка, лимит, нормальный выход | `SJ`: код выхода; сопровождение закрывает остаток группы (§10.2 «Завершение») | `stopping` |
 | `running` | `adapter_incompatible` | обязательное событие неизвестного формата (§10.3); неизвестное необязательное событие только диагностируется | `SJ`: ошибка совместимости; управляемая остановка CLI; итог `failed(protocol_incompatible)` | `stopping` |
-| `running` | `storage_failed` | запись в журнал невозможна (§6) | управляемая остановка; итог `failed(storage_failure)` | `stopping` |
+| `running` | `storage_failure` | запись в журнал невозможна (§6) | управляемая остановка; итог `failed(storage_failure)` | `stopping` |
 | `stopping` | `group_empty_confirmed` | группа пуста по проверке группы, не по PID | `SJ`: итоговый `execution_state` и запись `journal_closed`; `PG-tx`: итог; владение каталогом освобождено; открытые запросы закрыты; передачи без результата → `acceptance_unconfirmed`; пауза очереди по [delivery.md](delivery.md) §3 | `stopped` или `failed` |
-| `starting`, `running`, `stopping` | `supervisor_lost` | управляющая служба установила смерть сопровождения или не может его подтвердить (§5) | `CJ`, `PG-tx`: `owner_lost`, пауза `owner_lost`; владение каталогом `orphaned`; открытые запросы закрыты | `owner_lost` |
+| `created`, `starting`, `running`, `stopping` | `supervisor_lost` | управляющая служба установила смерть сопровождения или не может его подтвердить (§5) | `CJ`, `PG-tx`: `owner_lost`, пауза `owner_lost`; владение каталогом `orphaned`; открытые запросы закрыты | `owner_lost` |
 | `owner_lost` | `group_empty_confirmed` | сверка: группа пуста | `CJ`, `PG-tx`: `failed(supervisor_died)`; владение освобождено | `failed` |
 | `owner_lost` | `admin_resolved` | явное административное решение после предупреждения | `CJ`, `PG-tx`: `failed(admin_resolved)` с флагом `termination_unconfirmed`; владение освобождено решением владельца | `failed` |
 | любое с записью принадлежности | `boot_changed` | `boot_id` записи ≠ текущему: все процессы прошлой загрузки завершены | `CJ`, `PG-tx`: `stopped(machine_rebooted)`; владение освобождено; передачи без результата → `acceptance_unconfirmed`, если `reconcile` не доказал иное | `stopped` |
@@ -368,6 +371,8 @@ stateDiagram-v2
 Место освобождает компактация подтверждённых диапазонов ([streams.md](streams.md) §3); при недоступном хабе подтверждений нет, поэтому журнал только растёт.
 
 **Инварианты**: беззвучного удаления неподтверждённых данных нет; компактация не трогает неподтверждённые записи, незавершённые команды и минимальные квитанции; причина деградации видна владельцу (AT-C-13). Нулевые потери гарантируются только для подтверждённых команд и зафиксированных событий; байты, которые агент выдал, но которые ещё не записаны надёжно, не обещаются (§9.3).
+
+Имя ошибки и итога исполнения — `storage_failure`; `storage_failed` обозначает только состояние хранилища.
 
 **Терминальных состояний нет**; `storage_failed` покидается, когда место освобождено, но исполнения, остановленные из-за него, не возобновляются сами (E-7).
 

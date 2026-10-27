@@ -35,7 +35,7 @@
 | Хаб | Воркер | Решение |
 | --- | --- | --- |
 | нетерминальное | то же поколение живо, принадлежность подтверждена | принять, обновить фазу и давность |
-| нетерминальное | терминальное с фактами | применить как поздний факт |
+| нетерминальное | терминальное с фактами | до закрытия `SJ` этого исполнения на хабе ждать replay без терминального перехода и без `execution_fact_rejected`; после закрытия применять как поздний факт по допустимым переходам |
 | нетерминальное | `owner_lost` | применить, пауза `owner_lost` |
 | `created` | старт не получен | обычный повтор `start_execution` |
 | `starting` и далее | исполнение неизвестно при прежнем `cj_journal_id` | `state_divergence`: исполнение `owner_lost` с этой причиной, пауза, административная диагностика |
@@ -167,7 +167,8 @@ stateDiagram-v2
     restore_prepared --> restore_prepared: procedure_restarted
     data_restored --> restore_prepared: procedure_restarted
     restore_mode --> restore_prepared: procedure_restarted
-    operational --> blocked: manifest_missing_or_mismatch
+    operational --> blocked: manifest_missing
+    operational --> blocked: manifest_mismatch
     blocked --> operational: admin_reconciled
 ```
 

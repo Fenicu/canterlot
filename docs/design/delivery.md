@@ -80,7 +80,7 @@ stateDiagram-v2
 | `transmitting` | `explicit_rejection` | адаптер: `rejected(reason)` | `SJ`, `PG-tx`: `rejected`, `run_slot` свободен | `rejected` |
 | `transmitting` | `acceptance_undetermined` | адаптер: `undetermined` (в т.ч. истёк его deadline); сопровождение умерло; исполнение завершилось без результата; область команды в `SJ` повреждена | `SJ`/`CJ`: `unconfirmed`; `PG-tx`: `acceptance_unconfirmed`, пауза `unconfirmed_delivery(input_id)`, `run_slot` свободен | `acceptance_unconfirmed` |
 | `acceptance_unconfirmed` | `acceptance_proven` | поздний факт или `reconcile` нашли доказательство | `PG-tx`: `accepted`; пауза `unconfirmed_delivery` этого ввода снимается | `accepted` |
-| `acceptance_unconfirmed` | `non_acceptance_proven` | `reconcile`, источник истории гарантирует полноту; на закреплённых версиях недостижим: история ни Claude Code, ни Codex полноту не гарантирует | `PG-tx`: `rejected(not_accepted_proven)`; пауза остаётся до решения владельца | `rejected` |
+| `acceptance_unconfirmed` | `non_acceptance_proven` | `reconcile`, источник истории гарантирует полноту; на закреплённых версиях недостижим: история ни Claude Code, ни Codex полноту не гарантирует | `PG-tx`: `rejected(non_acceptance_proven)`; пауза остаётся до решения владельца | `rejected` |
 | `acceptance_unconfirmed` | `retry_as_new` | явное действие владельца после предупреждения | новая операция `submit` с новым ключом и `retry_of`; **Предложение**: в конец FIFO, потому что порядок задаёт серверная нумерация | исходный без изменений |
 
 Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
@@ -105,7 +105,7 @@ stateDiagram-v2
 - D-4: `accepted` только по доказательству адаптера; запись в stdin не доказательство (§6.2).
 - D-5: возврат в `queued` только из состояний без `transmission_started`.
 - D-6: из `transmitting` и `acceptance_unconfirmed` нет автоматического пути к повторной передаче; таймер тишины ввод не повторяет (§6.1).
-- D-7: положительное доказательство сильнее вывода из отсутствия: если после `rejected(not_accepted_proven)` пришло доказательство приёма, ввод становится `accepted`, фиксируется диагностика `delivery_fact_conflict`.
+- D-7: положительное доказательство сильнее вывода из отсутствия: если после `rejected(non_acceptance_proven)` пришло доказательство приёма, ввод становится `accepted`, фиксируется диагностика `delivery_fact_conflict`.
 - D-8: машине выдаётся только голова FIFO одного разговора; остальные вводы не покидают хаб.
 - D-9: квитанция отмены или отзыва записывается раньше, чем её результат уходит хабу. Отмена действует против целевой попытки выдачи и всех последующих попыток той же команды; отзыв действует только против своей `target_dispatch_attempt`.
 
@@ -217,7 +217,7 @@ stateDiagram-v2
 | 3 | любой режим | `execution_failed`, `process_exited`, `limit_reached` | не отрицательный результат инструмента | `PG-tx`: пауза с причиной; вводы сохраняются; слот освобождается по статусу ввода; новый CLI не запускается | `paused` |
 | 4 | любой | `user_request_opened`, `context_maintenance_started` | | `PG-tx`: удержание | без изменения |
 | 4 | любой | `user_request_closed`, `context_maintenance_finished` | | снять удержание; выдача ждёт свежей готовности (затвор сопровождения, п. 2) | без изменения |
-| 5 | любой | `machine_session_lost`, `state_divergence_detected` | | удержание `machine_not_reconciled`; если слот `dispatching` без передачи, отзыв выполнится после reconnect | без изменения |
+| 5 | любой | `machine_session_lost`, `state_divergence` | | удержание `machine_not_reconciled`; если слот `dispatching` без передачи, отзыв выполнится после reconnect | без изменения |
 | 5 | любой | `machine_reconciled` | сверка завершена | снять удержание; для каждого найденного `acceptance_unconfirmed` пауза `unconfirmed_delivery` | без изменения или `paused` |
 | 6 | любой | `owner_lost`, `restore_started` | | `PG-tx`: пауза `owner_lost` или `restore_pending`; отзыв невыполненной выдачи | `paused` |
 | 7 | `paused` | `continue_queue` | явное действие владельца с ключом | `PG-tx`: снять причины, у которых выполнено условие снятия; оставшиеся (`owner_lost`, `restore_pending` без сверки) называются в ответе; вводы в `acceptance_unconfirmed` не трогаются; если причин не осталось, проверить затвор | `active` или `paused` |
