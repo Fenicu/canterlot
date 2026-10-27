@@ -25,10 +25,11 @@ tokio = { version = "1.54.1", features = ["process", "sync", "time"] }
 async-stream = "0.3.6"
 base64 = "0.23.1"
 canterlot-proto = { version = "0.1.0", path = "../canterlot-proto" }
-chrono = "0.4.45"
+chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
 getrandom = "0.4.3"
 humantime-serde = "1.1.1"
+ipnet = { version = "2.12.2", features = ["serde"] }
 prost = "0.14.4"
 rcgen = { version = "0.14.10", default-features = false, features = ["ring", "pem", "crypto"], optional = true }
 serde = { version = "1.0.229", features = ["derive"] }

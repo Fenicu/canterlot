@@ -460,9 +460,7 @@ mod utc_time {
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<DateTime<Utc>, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
+        DateTime::<Utc>::deserialize(deserializer)
     }
 }
 
@@ -481,8 +479,6 @@ mod optional_utc_time {
     pub fn deserialize<'de, D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> Result<Option<DateTime<Utc>>, D::Error> {
-        Option::<String>::deserialize(deserializer)?
-            .map(|value| value.parse().map_err(serde::de::Error::custom))
-            .transpose()
+        Option::<DateTime<Utc>>::deserialize(deserializer)
     }
 }

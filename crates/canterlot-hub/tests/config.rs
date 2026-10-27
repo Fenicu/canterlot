@@ -282,3 +282,44 @@ fn relative_blob_dir_resolves_against_the_config_dir() {
         std::path::Path::new("/tmp/canterlot-blobs")
     );
 }
+
+#[test]
+fn trusted_proxy_cidrs_parse_v4_v6_and_reject_garbage() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, format!("{PILOT_BASE}{HTTP_BASE}")).unwrap();
+    let proxies = HubConfig::load(&path)
+        .unwrap()
+        .http
+        .unwrap()
+        .trusted_proxies;
+    let cases = [
+        ("127.255.255.255", [true, false]),
+        ("128.0.0.0", [false, false]),
+        ("::1", [false, true]),
+        ("::2", [false, false]),
+        ("::ffff:127.0.0.1", [false, false]),
+    ];
+    for (address, expected) in cases {
+        let address: std::net::IpAddr = address.parse().unwrap();
+        assert_eq!(
+            [proxies[0].contains(&address), proxies[1].contains(&address)],
+            expected
+        );
+    }
+    for cidr in [
+        "garbage",
+        "127.0.0.1",
+        "127.0.0.1/33",
+        "::1/129",
+        "127.0.0.1/nope",
+        "::1/-1",
+        "300.0.0.1/8",
+        "gggg::/64",
+        "127.0.0.1/8/8",
+    ] {
+        let http = HTTP_BASE.replace("['127.0.0.0/8', '::1/128']", &format!("['{cidr}']"));
+        fs::write(&path, format!("{PILOT_BASE}{http}")).unwrap();
+        assert!(HubConfig::load(&path).is_err(), "accepted {cidr}");
+    }
+}

@@ -1,11 +1,12 @@
 use std::{
     collections::BTreeMap,
     fmt, fs,
-    net::{IpAddr, SocketAddr},
+    net::SocketAddr,
     path::{Path, PathBuf},
     time::Duration,
 };
 
+use ipnet::IpNet;
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -132,57 +133,6 @@ impl HubConfig {
             })?;
         }
         Ok(config)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct IpNet {
-    address: IpAddr,
-    prefix_len: u8,
-}
-
-impl std::str::FromStr for IpNet {
-    type Err = &'static str;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        let (address, prefix) = value.split_once('/').ok_or("invalid IP network")?;
-        let address: IpAddr = address.parse().map_err(|_| "invalid IP network")?;
-        let prefix_len: u8 = prefix.parse().map_err(|_| "invalid IP network")?;
-        if prefix_len > if address.is_ipv4() { 32 } else { 128 } {
-            return Err("invalid IP network");
-        }
-        Ok(Self {
-            address,
-            prefix_len,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for IpNet {
-    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        String::deserialize(deserializer)?
-            .parse()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-impl IpNet {
-    pub fn contains(&self, address: &IpAddr) -> bool {
-        match (self.address, address) {
-            (IpAddr::V4(network), IpAddr::V4(address)) => {
-                let mask = u32::MAX
-                    .checked_shl(32 - u32::from(self.prefix_len))
-                    .unwrap_or(0);
-                u32::from(network) & mask == u32::from(*address) & mask
-            }
-            (IpAddr::V6(network), IpAddr::V6(address)) => {
-                let mask = u128::MAX
-                    .checked_shl(128 - u32::from(self.prefix_len))
-                    .unwrap_or(0);
-                u128::from(network) & mask == u128::from(*address) & mask
-            }
-            _ => false,
-        }
     }
 }
 
