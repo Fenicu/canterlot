@@ -1,6 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::SystemTime;
 
 use canterlot_journal::{Journal, JournalError, JournalId, JournalOptions, Record};
 use tempfile::TempDir;
@@ -978,4 +982,290 @@ fn exclusive_lock_blocks_other_processes_and_releases_on_drop() {
     let (journal, report) = Journal::open(dir.path(), JournalOptions::default()).unwrap();
     assert!(report.corrupted_tail.is_none());
     assert_eq!(journal.last_seq(), 2);
+}
+
+type DirState = BTreeMap<String, (Vec<u8>, SystemTime)>;
+
+fn dir_state(dir: &Path) -> (DirState, SystemTime) {
+    let files = fs::read_dir(dir)
+        .unwrap()
+        .map(|entry| {
+            let entry = entry.unwrap();
+            let name = entry.file_name().into_string().unwrap();
+            let modified = entry.metadata().unwrap().modified().unwrap();
+            let bytes = if entry.file_type().unwrap().is_file() {
+                fs::read(entry.path()).unwrap()
+            } else {
+                Vec::new()
+            };
+            (name, (bytes, modified))
+        })
+        .collect();
+    (files, fs::metadata(dir).unwrap().modified().unwrap())
+}
+
+fn small_segments() -> JournalOptions {
+    JournalOptions {
+        segment_max_bytes: 60,
+        ..JournalOptions::default()
+    }
+}
+
+#[test]
+fn read_only_open_does_not_take_the_lock_or_mutate() {
+    let dir = TempDir::new().unwrap();
+    let mut writer =
+        Journal::create(dir.path(), JournalId(Uuid::now_v7()), small_segments()).unwrap();
+    for _ in 0..6 {
+        writer.append(b"data").unwrap();
+    }
+    writer.ack(2).unwrap();
+    let before = dir_state(dir.path());
+
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    let second = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!(view.id(), writer.id());
+    assert_eq!(
+        (view.first_seq(), view.last_seq(), view.acked_seq()),
+        (1, 6, 2)
+    );
+    assert_eq!(view.read_from(3, usize::MAX).unwrap().len(), 4);
+    assert_eq!(second.last_seq(), 6);
+    assert_eq!(dir_state(dir.path()), before);
+
+    assert_eq!(writer.append(b"after").unwrap(), 7);
+    writer.ack(5).unwrap();
+    writer.compact().unwrap();
+    assert!(matches!(
+        Journal::open(dir.path(), small_segments()),
+        Err(JournalError::Locked)
+    ));
+    assert_eq!(view.last_seq(), 6);
+    let fresh = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!((fresh.last_seq(), fresh.acked_seq()), (7, 5));
+    drop((view, second, fresh));
+
+    let copy = TempDir::new().unwrap();
+    copy_journal(dir.path(), copy.path());
+    fs::remove_file(copy.path().join("lock")).unwrap();
+    let before = dir_state(copy.path());
+    let view = Journal::open_read_only(copy.path()).unwrap();
+    assert_eq!(view.last_seq(), 7);
+    assert!(!copy.path().join("lock").exists());
+    assert_eq!(dir_state(copy.path()), before);
+}
+
+#[test]
+fn read_only_sees_complete_records_and_ignores_a_torn_tail() {
+    let dir = TempDir::new().unwrap();
+    let mut writer = create(dir.path());
+    writer.append(b"one").unwrap();
+    writer.append(b"two-two").unwrap();
+    let segment = segments(dir.path()).remove(0);
+    let end_two = fs::metadata(&segment).unwrap().len();
+    writer.append(b"third payload").unwrap();
+    let full = fs::read(&segment).unwrap();
+
+    for length in end_two..full.len() as u64 {
+        OpenOptions::new()
+            .write(true)
+            .open(&segment)
+            .unwrap()
+            .set_len(length)
+            .unwrap();
+        let before = dir_state(dir.path());
+        let view = Journal::open_read_only(dir.path()).unwrap();
+        assert_eq!(view.last_seq(), 2, "length {length}");
+        assert_records(
+            &view.read_from(1, usize::MAX).unwrap(),
+            &[(1, b"one"), (2, b"two-two")],
+        );
+        assert!(view.read_from(3, usize::MAX).unwrap().is_empty());
+        assert_eq!(dir_state(dir.path()), before);
+        assert!(!dir.path().join("quarantine").exists());
+        assert!(!dir.path().join("sealed").exists());
+    }
+
+    let mut flipped = full.clone();
+    *flipped.last_mut().unwrap() ^= 1;
+    fs::write(&segment, &flipped).unwrap();
+    assert_eq!(Journal::open_read_only(dir.path()).unwrap().last_seq(), 2);
+
+    fs::write(&segment, &full).unwrap();
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!(view.last_seq(), 3);
+    assert_records(
+        &view.read_from(2, usize::MAX).unwrap(),
+        &[(2, b"two-two"), (3, b"third payload")],
+    );
+}
+
+#[test]
+fn read_only_ignores_a_torn_tail_in_the_last_of_several_segments() {
+    let dir = TempDir::new().unwrap();
+    let mut writer =
+        Journal::create(dir.path(), JournalId(Uuid::now_v7()), small_segments()).unwrap();
+    for _ in 0..5 {
+        writer.append(b"data").unwrap();
+    }
+    let paths = segments(dir.path());
+    assert_eq!(paths.len(), 2);
+    let full = fs::read(&paths[1]).unwrap();
+    for (length, expected_last) in [(0, 3), (7, 3), (20, 4), (27, 4)] {
+        fs::write(&paths[1], &full[..length]).unwrap();
+        let view = Journal::open_read_only(dir.path()).unwrap();
+        assert_eq!(view.last_seq(), expected_last, "length {length}");
+        assert_eq!(
+            view.read_from(1, usize::MAX).unwrap().len() as u64,
+            expected_last
+        );
+    }
+}
+
+#[test]
+fn read_only_respects_ack_and_compaction() {
+    let dir = TempDir::new().unwrap();
+    let mut writer =
+        Journal::create(dir.path(), JournalId(Uuid::now_v7()), small_segments()).unwrap();
+    for _ in 0..10 {
+        writer.append(b"data").unwrap();
+    }
+    writer.ack(5).unwrap();
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!(
+        (view.first_seq(), view.last_seq(), view.acked_seq()),
+        (1, 10, 5)
+    );
+    let unacked = view.read_from(view.acked_seq() + 1, usize::MAX).unwrap();
+    assert_eq!(
+        unacked.iter().map(|r| r.seq).collect::<Vec<_>>(),
+        (6..=10).collect::<Vec<_>>()
+    );
+    drop(view);
+
+    assert!(writer.compact().unwrap() > 0);
+    let first = writer.first_seq();
+    assert!(first > 1);
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!(view.first_seq(), first);
+    assert_eq!(view.acked_seq(), 5);
+    assert!(view.first_seq() <= view.acked_seq() + 1);
+    assert!(matches!(
+        view.read_from(first - 1, usize::MAX),
+        Err(JournalError::SeqCompacted { requested, first: reported })
+            if requested == first - 1 && reported == first
+    ));
+    let head = view.read_from(view.acked_seq() + 1, 0).unwrap();
+    assert_eq!(head.len(), 1);
+    assert_eq!((head[0].seq, head[0].payload.as_slice()), (6, &b"data"[..]));
+    drop(view);
+
+    writer.ack(10).unwrap();
+    writer.compact().unwrap();
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    assert_eq!(
+        (view.first_seq(), view.last_seq(), view.acked_seq()),
+        (11, 10, 10)
+    );
+    assert!(view.read_from(11, usize::MAX).unwrap().is_empty());
+    assert_eq!(writer.append(b"next").unwrap(), 11);
+    let view = Journal::open_read_only(dir.path()).unwrap();
+    assert_records(&view.read_from(11, usize::MAX).unwrap(), &[(11, b"next")]);
+}
+
+#[test]
+fn read_only_reports_corruption_before_the_tail() {
+    let dir = TempDir::new().unwrap();
+    let mut writer =
+        Journal::create(dir.path(), JournalId(Uuid::now_v7()), small_segments()).unwrap();
+    for _ in 0..7 {
+        writer.append(b"data").unwrap();
+    }
+    drop(writer);
+    let paths = segments(dir.path());
+    assert_eq!(paths.len(), 3);
+
+    let mut first = fs::read(&paths[0]).unwrap();
+    first[20 + RECORD_HEADER_BYTES] ^= 1;
+    let original = fs::read(&paths[0]).unwrap();
+    fs::write(&paths[0], &first).unwrap();
+    assert!(matches!(
+        Journal::open_read_only(dir.path()),
+        Err(JournalError::Corrupted { from_seq: 2 })
+    ));
+    fs::write(&paths[0], &original).unwrap();
+
+    let middle = fs::read(&paths[1]).unwrap();
+    fs::remove_file(&paths[1]).unwrap();
+    assert!(matches!(
+        Journal::open_read_only(dir.path()),
+        Err(JournalError::Corrupted { from_seq: 4 })
+    ));
+    fs::write(&paths[1], &middle).unwrap();
+    assert_eq!(Journal::open_read_only(dir.path()).unwrap().last_seq(), 7);
+}
+
+#[test]
+fn read_only_rejects_non_journals() {
+    let dir = TempDir::new().unwrap();
+    assert!(matches!(
+        Journal::open_read_only(dir.path()),
+        Err(JournalError::NotAJournal)
+    ));
+    assert!(matches!(
+        Journal::open_read_only(&dir.path().join("missing")),
+        Err(JournalError::NotAJournal)
+    ));
+}
+
+#[test]
+fn read_only_tolerates_a_concurrent_appender() {
+    const TOTAL: u64 = 400;
+    let dir = TempDir::new().unwrap();
+    let options = JournalOptions {
+        segment_max_bytes: 512,
+        ..JournalOptions::default()
+    };
+    let mut writer = Journal::create(dir.path(), JournalId(Uuid::now_v7()), options).unwrap();
+    let done = Arc::new(AtomicBool::new(false));
+    let handle = std::thread::spawn({
+        let done = Arc::clone(&done);
+        move || {
+            for seq in 1..=TOTAL {
+                assert_eq!(
+                    writer.append(format!("record-{seq}").as_bytes()).unwrap(),
+                    seq
+                );
+                if seq % 25 == 0 {
+                    writer.ack(seq - 10).unwrap();
+                    writer.compact().unwrap();
+                }
+            }
+            done.store(true, Ordering::Release);
+        }
+    });
+    let mut seen = 0;
+    loop {
+        let finished = done.load(Ordering::Acquire);
+        let view = Journal::open_read_only(dir.path()).unwrap();
+        assert!(view.last_seq() >= seen);
+        seen = view.last_seq();
+        match view.read_from(view.first_seq(), usize::MAX) {
+            Ok(records) => {
+                let expected = view.first_seq()..=view.last_seq();
+                assert_eq!(records.len() as u64, expected.end() + 1 - expected.start());
+                for (record, seq) in records.iter().zip(expected) {
+                    assert_eq!(record.seq, seq);
+                    assert_eq!(record.payload, format!("record-{seq}").as_bytes());
+                }
+            }
+            Err(JournalError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("unexpected read error: {error}"),
+        }
+        if finished {
+            break;
+        }
+    }
+    handle.join().unwrap();
+    assert_eq!(seen, TOTAL);
 }

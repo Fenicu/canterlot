@@ -5,7 +5,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 
 use crate::format::{self, RECORD_HEADER_BYTES};
-use crate::{CorruptedTail, JournalError};
+use crate::{CorruptedTail, JournalError, Record};
 
 #[derive(Debug)]
 pub(crate) struct RecordPosition {
@@ -107,6 +107,63 @@ pub(crate) fn list(dir: &Path) -> Result<Vec<(u64, PathBuf)>, JournalError> {
         return Err(JournalError::NotAJournal);
     }
     Ok(segments)
+}
+
+pub(crate) fn read_metadata(dir: &Path, name: &str) -> Result<Vec<u8>, JournalError> {
+    match fs::read(dir.join(name)) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Err(JournalError::NotAJournal),
+        result => result.map_err(JournalError::Io),
+    }
+}
+
+pub(crate) fn read_records(
+    segments: &[Segment],
+    from_seq: u64,
+    max_bytes: usize,
+    max_record_bytes: u32,
+) -> Result<Vec<Record>, JournalError> {
+    let first = segments[0].first_seq;
+    if from_seq < first {
+        return Err(JournalError::SeqCompacted {
+            requested: from_seq,
+            first,
+        });
+    }
+    let mut records = Vec::new();
+    let mut bytes = 0usize;
+    for segment in segments {
+        if segment.last_seq() < from_seq {
+            continue;
+        }
+        let mut file = File::open(&segment.path)?;
+        for position in segment
+            .records
+            .iter()
+            .filter(|record| record.seq >= from_seq)
+        {
+            if !records.is_empty()
+                && (bytes > max_bytes || position.len as usize > max_bytes - bytes)
+            {
+                return Ok(records);
+            }
+            file.seek(SeekFrom::Start(position.offset))?;
+            let record = format::read_record(
+                &mut file,
+                RECORD_HEADER_BYTES + u64::from(position.len),
+                max_record_bytes,
+            )?
+            .filter(|record| record.seq == position.seq)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "journal record changed after open",
+                )
+            })?;
+            bytes = bytes.saturating_add(record.payload.len());
+            records.push(record);
+        }
+    }
+    Ok(records)
 }
 
 pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {

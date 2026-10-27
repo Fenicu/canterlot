@@ -943,66 +943,16 @@ pub(crate) fn requires_pilot(record: &RecordBody) -> bool {
     )
 }
 
-// SJ уже открыт супервизором; здесь только чтение без восстановления и захвата lock.
+// SJ уже открыт супервизором; читаем снимок без lock и без восстановления.
 fn peek_sj_head(path: &Path, id: Uuid) -> Result<Option<RecordBody>, StoreError> {
-    use std::io::{Read, Seek, SeekFrom};
-    let invalid = || std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid journal peek");
-    let header = fs::read(path.join("header"))?;
-    if header.len() != 28
-        || &header[..4] != b"CNTJ"
-        || header[4..8] != 1u32.to_le_bytes()
-        || &header[8..24] != id.as_bytes()
-    {
-        return Err(invalid().into());
+    let journal = Journal::open_read_only(path)?;
+    if journal.id().0 != id {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "journal id mismatch").into());
     }
-    let ack = fs::read(path.join("ack"))?;
-    if ack.len() != 12
-        || crc32c::crc32c(&ack[..8]) != u32::from_le_bytes(ack[8..12].try_into().unwrap())
-    {
-        return Err(invalid().into());
-    }
-    let next = u64::from_le_bytes(ack[..8].try_into().unwrap()).saturating_add(1);
-    let mut segments = fs::read_dir(path)?
-        .filter_map(Result::ok)
-        .filter_map(|e| {
-            let name = e.file_name();
-            let name = name.to_str()?;
-            let first = name
-                .strip_prefix("seg-")?
-                .strip_suffix(".log")?
-                .parse::<u64>()
-                .ok()?;
-            Some((first, e.path()))
-        })
-        .collect::<Vec<_>>();
-    segments.sort_by_key(|s| s.0);
-    let Some((_, segment)) = segments.into_iter().rev().find(|(first, _)| *first <= next) else {
-        return Ok(None);
-    };
-    let mut file = std::fs::File::open(segment)?;
-    let mut remaining = file.metadata()?.len();
-    while remaining >= 16 {
-        let mut bytes = [0; 16];
-        file.read_exact(&mut bytes)?;
-        let len = u32::from_le_bytes(bytes[..4].try_into().unwrap());
-        let crc = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
-        let seq = u64::from_le_bytes(bytes[8..16].try_into().unwrap());
-        if len as usize > MAX_MESSAGE_BYTES || u64::from(len) > remaining - 16 {
-            return Ok(None);
-        }
-        if seq < next {
-            file.seek(SeekFrom::Current(i64::from(len)))?;
-        } else if seq == next {
-            let mut payload = vec![0; len as usize];
-            file.read_exact(&mut payload)?;
-            if crc32c::crc32c_append(crc32c::crc32c(&seq.to_le_bytes()), &payload) != crc {
-                return Err(invalid().into());
-            }
-            return Ok(Some(RecordBody::decode(payload.as_slice())?));
-        } else {
-            return Err(invalid().into());
-        }
-        remaining -= 16 + u64::from(len);
-    }
-    Ok(None)
+    journal
+        .read_from(journal.acked_seq().saturating_add(1), 0)?
+        .into_iter()
+        .next()
+        .map(|record| Ok(RecordBody::decode(record.payload.as_slice())?))
+        .transpose()
 }

@@ -2,15 +2,17 @@
 
 mod error;
 mod format;
+mod read_only;
 mod segment;
 
 use std::fs::{self, File, OpenOptions, TryLockError};
-use std::io::{self, Seek, SeekFrom, Write};
+use std::io::{self, Write};
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
 pub use error::JournalError;
 use format::RECORD_HEADER_BYTES;
+pub use read_only::ReadOnlyJournal;
 use segment::{RecordPosition, Segment};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -145,14 +147,11 @@ impl Journal {
         dir: &Path,
         mut opts: JournalOptions,
     ) -> Result<(Journal, OpenReport), JournalError> {
-        let metadata = |name| match fs::read(dir.join(name)) {
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Err(JournalError::NotAJournal),
-            result => result.map_err(JournalError::Io),
-        };
-        let (id, max_record_bytes) = format::decode_header(&metadata("header")?)?;
+        let (id, max_record_bytes) =
+            format::decode_header(&segment::read_metadata(dir, "header")?)?;
         let lock = lock_directory(dir)?;
         opts.max_record_bytes = max_record_bytes;
-        let acked_seq = format::decode_ack(&metadata("ack")?)?;
+        let acked_seq = format::decode_ack(&segment::read_metadata(dir, "ack")?)?;
         let mut sealed_from = match fs::read(dir.join("sealed")) {
             Ok(bytes) => {
                 let from_seq = format::decode_ack(&bytes)?;
@@ -214,6 +213,11 @@ impl Journal {
             write_hook: tests::WriteHook::default(),
         };
         Ok((journal, report))
+    }
+
+    /// Снимок журнала без lock и записи: см. [`ReadOnlyJournal`].
+    pub fn open_read_only(dir: &Path) -> Result<ReadOnlyJournal, JournalError> {
+        read_only::open(dir)
     }
 
     pub fn id(&self) -> JournalId {
@@ -311,48 +315,12 @@ impl Journal {
     }
 
     pub fn read_from(&self, from_seq: u64, max_bytes: usize) -> Result<Vec<Record>, JournalError> {
-        let first = self.first_seq();
-        if from_seq < first {
-            return Err(JournalError::SeqCompacted {
-                requested: from_seq,
-                first,
-            });
-        }
-        let mut records = Vec::new();
-        let mut bytes = 0usize;
-        for segment in &self.segments {
-            if segment.last_seq() < from_seq {
-                continue;
-            }
-            let mut file = File::open(&segment.path)?;
-            for position in segment
-                .records
-                .iter()
-                .filter(|record| record.seq >= from_seq)
-            {
-                if !records.is_empty()
-                    && (bytes > max_bytes || position.len as usize > max_bytes - bytes)
-                {
-                    return Ok(records);
-                }
-                file.seek(SeekFrom::Start(position.offset))?;
-                let record = format::read_record(
-                    &mut file,
-                    RECORD_HEADER_BYTES + u64::from(position.len),
-                    self.options.max_record_bytes,
-                )?
-                .filter(|record| record.seq == position.seq)
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "journal record changed after open",
-                    )
-                })?;
-                bytes = bytes.saturating_add(record.payload.len());
-                records.push(record);
-            }
-        }
-        Ok(records)
+        segment::read_records(
+            &self.segments,
+            from_seq,
+            max_bytes,
+            self.options.max_record_bytes,
+        )
     }
 
     pub fn ack(&mut self, up_to: u64) -> Result<(), JournalError> {

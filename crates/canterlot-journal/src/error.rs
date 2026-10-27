@@ -10,6 +10,7 @@ pub enum JournalError {
     SeqCompacted { requested: u64, first: u64 },
     AckBeyondEnd { ack: u64, last: u64 },
     Sealed { from_seq: u64 },
+    Corrupted { from_seq: u64 },
 }
 
 impl fmt::Display for JournalError {
@@ -35,6 +36,12 @@ impl fmt::Display for JournalError {
             }
             Self::Sealed { from_seq } => {
                 write!(f, "journal is sealed from sequence {from_seq}")
+            }
+            Self::Corrupted { from_seq } => {
+                write!(
+                    f,
+                    "journal is corrupted before its tail from sequence {from_seq}"
+                )
             }
         }
     }
