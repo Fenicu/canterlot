@@ -33,6 +33,8 @@ use tokio::{
 };
 use uuid::Uuid;
 
+#[path = "support/e2e_gate.rs"]
+mod e2e_gate;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -456,6 +458,7 @@ fn transmissions(bodies: &[Body], id: Uuid) -> usize {
 
 #[tokio::test]
 async fn attach_requires_the_secret_and_same_uid() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     let bad: Vec<ControlToSupervisor> = vec![
         harness.attach_message(&[7; 32], 1, 1, harness.execution_id),
@@ -494,6 +497,7 @@ async fn attach_requires_the_secret_and_same_uid() {
 #[tokio::test]
 async fn ipc_server_rejects_other_uid_and_open_directories() {
     use canterlot_worker::supervisor::ipc::IpcServer;
+    let _gate = e2e_gate::acquire().await;
     let root = TempDir::new().unwrap();
     let open = root.path().join("open");
     fs::create_dir(&open).unwrap();
@@ -530,6 +534,7 @@ async fn ipc_server_rejects_other_uid_and_open_directories() {
 
 #[tokio::test]
 async fn start_sequence_is_journal_opened_starting_running_ready() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     let up::Msg::CliStarted(started) = harness.start_cli("synthetic").await else {
@@ -563,6 +568,7 @@ async fn start_sequence_is_journal_opened_starting_running_ready() {
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 async fn intent_is_durable_before_first_byte_and_never_repeated() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -623,6 +629,7 @@ async fn intent_is_durable_before_first_byte_and_never_repeated() {
 
 #[tokio::test]
 async fn second_input_waits_for_awaiting_input_after_first_turn() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -669,6 +676,7 @@ async fn second_input_waits_for_awaiting_input_after_first_turn() {
 #[tokio::test]
 async fn cancel_before_transmission_wins_and_after_loses() {
     use canterlot_proto::worker::v1::CancelInput;
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -720,6 +728,7 @@ async fn cancel_before_transmission_wins_and_after_loses() {
 #[tokio::test]
 async fn withdraw_after_transmission_is_refused_too_late() {
     use canterlot_proto::worker::v1::WithdrawInput;
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -767,6 +776,7 @@ fn interrupt_states(bodies: &[Body], id: Uuid) -> Vec<i32> {
 #[tokio::test]
 async fn interrupt_not_applicable_without_a_turn() {
     use canterlot_proto::worker::ipc::InterruptRequest;
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -796,6 +806,7 @@ async fn interrupt_not_applicable_without_a_turn() {
 #[tokio::test]
 async fn interrupt_keeps_or_exits_process_by_profile() {
     use canterlot_proto::worker::ipc::InterruptRequest;
+    let _gate = e2e_gate::acquire().await;
     let long = script(r#"{"delta":"partial"},{"delay_ms":60000}"#);
     let mut keeps = Harness::start(&[]).await;
     keeps.attach_and_ship(0).await;
@@ -871,6 +882,7 @@ async fn interrupt_keeps_or_exits_process_by_profile() {
 
 #[tokio::test]
 async fn stop_waits_for_group_empty_including_escaped_children() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -924,6 +936,7 @@ async fn stop_waits_for_group_empty_including_escaped_children() {
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 async fn survivors_keep_execution_stopping_not_terminal() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[("CANTERLOT_FAULT_TERMINATE_SURVIVORS", "2")]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -960,6 +973,7 @@ async fn survivors_keep_execution_stopping_not_terminal() {
 
 #[tokio::test]
 async fn process_exit_by_itself_closes_open_blocks_and_group() {
+    let _gate = e2e_gate::acquire().await;
     for (code, state_name, outcome) in [(0, "stopped", "normal_exit"), (3, "failed", "crashed")] {
         let mut harness = Harness::start(&[]).await;
         harness.attach_and_ship(0).await;
@@ -996,6 +1010,7 @@ async fn process_exit_by_itself_closes_open_blocks_and_group() {
 
 #[tokio::test]
 async fn unknown_required_event_fails_with_protocol_incompatible() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -1033,6 +1048,7 @@ async fn unknown_required_event_fails_with_protocol_incompatible() {
 
 #[tokio::test]
 async fn unknown_profile_fails_start() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness
@@ -1055,6 +1071,7 @@ async fn unknown_profile_fails_start() {
 
 #[tokio::test]
 async fn oversized_answer_final_is_checksum_only() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -1112,6 +1129,7 @@ async fn oversized_answer_final_is_checksum_only() {
 
 #[tokio::test]
 async fn sj_ships_from_committed_and_compacts_only_on_ack() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.auto_ack = false;
     harness.attach_and_ship(0).await;
@@ -1192,6 +1210,7 @@ async fn sj_ships_from_committed_and_compacts_only_on_ack() {
 
 #[tokio::test]
 async fn control_detach_does_not_stop_the_execution() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.auto_ack = false;
     harness.attach_and_ship(0).await;
@@ -1248,6 +1267,7 @@ async fn control_detach_does_not_stop_the_execution() {
 
 #[tokio::test]
 async fn no_second_cli_is_ever_started() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     let up::Msg::CliStarted(first) = harness.start_cli("synthetic").await else {
@@ -1276,6 +1296,7 @@ async fn no_second_cli_is_ever_started() {
 
 #[tokio::test]
 async fn wave2_n1_draining_answers_without_extending_closed_journal() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -1368,6 +1389,7 @@ async fn wave2_n1_draining_answers_without_extending_closed_journal() {
 
 #[tokio::test]
 async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -1433,6 +1455,7 @@ async fn wave_w_closed_is_last_record_and_detached_drain_waits_for_ack() {
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 async fn wave_w_containment_errors_report_survivors_before_retry() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[("CANTERLOT_FAULT_TERMINATE_ERRORS", "2")]).await;
     harness.attach_and_ship(0).await;
     harness.start_cli("synthetic").await;
@@ -1467,6 +1490,7 @@ async fn wave_w_containment_errors_report_survivors_before_retry() {
 #[cfg(feature = "fault-injection")]
 #[tokio::test]
 async fn wave_w_group_commit_keeps_stopped_crash_boundary_durable() {
+    let _gate = e2e_gate::acquire().await;
     let mut harness =
         Harness::start(&[("CANTERLOT_FAULT_ABORT_AT", "after_stopped_before_closed")]).await;
     harness.attach_and_ship(0).await;
@@ -1653,6 +1677,7 @@ macro_rules! pilot_supervisor_tests {
     ($($name:ident),* $(,)?) => {$(
         #[tokio::test]
         async fn $name() {
+            let _gate = e2e_gate::acquire().await;
             pilot_supervisor_case(stringify!($name)).await;
         }
     )*};

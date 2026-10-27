@@ -43,6 +43,8 @@ use tokio::{
 use tonic::Code;
 use uuid::Uuid;
 
+#[path = "support/e2e_gate.rs"]
+mod e2e_gate;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -315,8 +317,10 @@ impl Fixture {
             state,
             join: tokio::spawn(worker.run(shutdown)),
         });
+        // Live выставляется при отправке сверки, раньше её применения хабом.
         until("worker live", async || {
             *self.worker.as_ref().unwrap().state.borrow() == SessionState::Live
+                && self.hub().registry.is_reconciled(self.config.machine_id)
         })
         .await;
     }
@@ -769,6 +773,7 @@ fn transmissions(bodies: &[Body], command: Uuid) -> Vec<u32> {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn conversation_turn_end_to_end(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let before = fixture.faults().pause_next(Point::BeforeSjCommit);
@@ -803,6 +808,7 @@ async fn conversation_turn_end_to_end(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stream_break_mid_answer_yields_exact_block_text(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(50, 100);
@@ -828,6 +834,7 @@ async fn stream_break_mid_answer_yields_exact_block_text(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn control_service_restart_keeps_execution_and_answer(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(50, 80);
@@ -845,6 +852,7 @@ async fn control_service_restart_keeps_execution_and_answer(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     sqlx::raw_sql(
         "create function check_interrupt_pause() returns trigger language plpgsql as $$
         begin
@@ -945,6 +953,7 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     for force in [false, true] {
         let fixture = Fixture::new(
             &pool,
@@ -1026,6 +1035,7 @@ async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1118,6 +1128,7 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn lost_sj_acks_do_not_duplicate_blocks(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let ack_start = fixture.faults().acks().len();
@@ -1159,6 +1170,7 @@ async fn lost_sj_acks_do_not_duplicate_blocks(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(
         &pool,
         "synthetic",
@@ -1218,6 +1230,7 @@ async fn withdrawn_input_is_redispatched_with_new_attempt_and_transmitted_once(p
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn transport_errors_never_stop_an_execution(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let (script, expected) = answer(80, 80);
@@ -1256,6 +1269,7 @@ async fn transport_errors_never_stop_an_execution(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let input = fixture
@@ -1288,6 +1302,7 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1305,6 +1320,7 @@ async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1322,6 +1338,7 @@ async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
@@ -1366,6 +1383,7 @@ async fn wave_w_d3_exit_during_outage_reattaches_draining_supervisor(pool: PgPoo
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new(
         &pool,
         "synthetic",
@@ -1399,6 +1417,7 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     fixture
@@ -1443,6 +1462,7 @@ async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
 
 #[test]
 fn wave2_n3_runtime_wipe_and_replacement() {
+    let _gate = e2e_gate::acquire_blocking();
     for case in ["canterlot", "runtime", "replacement"] {
         let runtime = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
@@ -1589,6 +1609,7 @@ async fn wave2_n3_runtime_child(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave2_n1_draining_delivery_releases_slot(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
     let stop = fixture.stop_execution(true).await;
@@ -1638,6 +1659,7 @@ async fn wave2_n1_draining_delivery_releases_slot(pool: PgPool) {
 
 #[test]
 fn wave_w_d2_runtime_socket_paths() {
+    let _gate = e2e_gate::acquire_blocking();
     for case in ["short", "long"] {
         let runtime = tempfile::tempdir().unwrap();
         let path = if case == "long" {
@@ -1734,6 +1756,7 @@ async fn wave_w_runtime_child(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let paused = fixture.faults().pause_next(Point::BeforeSjCommit);
     let (script, expected) = answer(1200, 0);
@@ -1763,6 +1786,7 @@ async fn wave_w_data_reattach_discards_stale_sj_batches(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new_with(
         &pool,
         "synthetic",
@@ -1810,6 +1834,7 @@ async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPoo
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wave_w_spawning_ownership_reports_owner_lost_from_created(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut fixture = Fixture::new_with(&pool, "synthetic", &[], false, false).await;
     fixture.stop_worker().await;
     let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())

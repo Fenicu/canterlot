@@ -33,6 +33,8 @@ use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(20);
 
+#[path = "support/e2e_gate.rs"]
+mod e2e_gate;
 #[allow(dead_code)]
 mod support;
 use support::data_proxy::DataProxy;
@@ -161,6 +163,12 @@ impl Fixture {
             testkit::seed_conversation(&self.pool, self.owner, self.config.machine_id).await;
         let execution = Uuid::now_v7();
         let mut tx = self.pool.begin().await.unwrap();
+        // Порядок блокировок как у хаба: сначала queue_state, иначе взаимоблокировка с его транзакцией.
+        sqlx::query("select 1 from queue_state where conversation_id = $1 for update")
+            .bind(conversation)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
         sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'created')")
             .bind(execution).bind(conversation).execute(&mut *tx).await.unwrap();
         // Подготовка исполнения атомарна: start_execution не попадает в живой outbox.
@@ -475,6 +483,7 @@ async fn restart(pool: &PgPool, hub: TestHub, faults: Faults) -> TestHub {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stream_break_before_ack_replays_same_range(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let first = hub.faults.pause_next(Point::BeforeCjCommit);
@@ -526,6 +535,7 @@ async fn stream_break_before_ack_replays_same_range(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn hub_restart_redelivers_without_duplicates(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let before_send = hub.faults.pause_next(Point::BeforeCommandSend);
@@ -588,6 +598,7 @@ async fn hub_restart_redelivers_without_duplicates(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let mut hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let fixture = Fixture::new(&pool, &hub).await;
     let pause = hub.faults.pause_next(Point::BeforeCjCommit);
@@ -645,6 +656,7 @@ async fn transport_errors_do_not_repeat_commands(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn lost_acks_do_not_duplicate_facts(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     hub.faults.drop_next_acks(usize::MAX);
@@ -685,6 +697,7 @@ async fn lost_acks_do_not_duplicate_facts(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn revoked_machine_cannot_reconnect(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     let mut worker = fixture.start();
@@ -752,6 +765,7 @@ async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
         worker::v1::{Command, ControlDown, control_down},
     };
     use prost::Message;
+    let _gate = e2e_gate::acquire().await;
 
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
@@ -806,6 +820,7 @@ async fn invalid_command_id_does_not_wedge_real_hub_cj_cursor(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn rotated_token_reconnects_same_data_dir_without_cursor_divergence(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
     let mut fixture = Fixture::new(&pool, &hub).await;
     let mut worker = fixture.start();
