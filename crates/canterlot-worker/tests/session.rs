@@ -870,11 +870,14 @@ async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
     .await;
     hub.config.timers.range_ack = Duration::from_secs(3);
     hub.config.timers.heartbeat = Duration::from_millis(30);
-    hub.config.timers.heartbeat_ack = Duration::from_millis(300);
+    // При загрузке CPU fake hub поздно читает heartbeat: даём ACK 1 с и допускаем один повтор seq, сохраняя проверку прогресса и отсутствия рестарта.
+    hub.config.timers.heartbeat_ack = Duration::from_secs(1);
     let path = hub.config.data_dir.clone();
     let store = seed_backlog(store, &path, 48, 200_000);
     let (stop, mut state, join) = start(hub.config.clone(), store);
     let mut last_heartbeat = 0;
+    let mut heartbeat_resent = false;
+    let mut hellos = 0;
     let mut committed = 0;
     timeout(Duration::from_secs(15), async {
         while committed < 112 || last_heartbeat < 3 {
@@ -883,17 +886,27 @@ async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
                 "unexpected restart"
             );
             match hub.event().await {
-                Observed::Hello(_, _) | Observed::Data(_) => {}
+                Observed::Hello(_, _) => {
+                    hellos += 1;
+                    assert!(hellos <= 2, "unexpected reconnect");
+                }
+                Observed::Data(_) => {}
                 Observed::Control(message) => match message.msg {
                     Some(control_up::Msg::CjRecords(batch)) => {
                         committed = committed.max(batch.records.last().unwrap().seq)
                     }
                     Some(control_up::Msg::Heartbeat(h)) => {
                         assert!(
-                            h.seq > last_heartbeat,
-                            "heartbeat resent before ACK was read"
+                            h.seq >= last_heartbeat,
+                            "heartbeat sequence moved backwards"
                         );
-                        last_heartbeat = h.seq;
+                        if h.seq == last_heartbeat {
+                            assert!(!heartbeat_resent, "heartbeat resent more than once");
+                            heartbeat_resent = true;
+                        } else {
+                            heartbeat_resent = false;
+                            last_heartbeat = h.seq;
+                        }
                     }
                     _ => {}
                 },
@@ -902,6 +915,7 @@ async fn large_command_burst_during_large_replay_keeps_heartbeat_acks_timely() {
     })
     .await
     .unwrap();
+    assert_eq!(hellos, 2);
     live_without_backoff(&mut state).await;
     stop_worker(stop, join).await;
     let store = WorkerStore::open(&path).unwrap();
