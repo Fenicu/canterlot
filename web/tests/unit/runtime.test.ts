@@ -10,36 +10,35 @@ function setup() {
   vi.stubGlobal('requestAnimationFrame', (fn: FrameRequestCallback) => { fn(0); return 0; });
 }
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers(); media.clear(); document.documentElement.removeAttribute('style'); document.documentElement.removeAttribute('data-motion'); localStorage.clear(); });
-test('announce_collapses_identical_messages_within_two_seconds', () => {
-  vi.useFakeTimers();
-  const node = document.createElement('div'); const action = mountAnnouncements(node);
-  announce('Подключено'); vi.runOnlyPendingTimers(); expect(node.textContent).toBe('Подключено');
-  node.textContent = 'Без изменений'; announce('Подключено'); vi.runOnlyPendingTimers(); expect(node.textContent).toBe('Без изменений');
-  vi.advanceTimersByTime(2000); announce('Подключено', 'assertive'); vi.runOnlyPendingTimers(); expect(node.textContent).toBe('Подключено'); expect(node.getAttribute('aria-live')).toBe('assertive');
-  action.destroy();
-});
-test('announce_delivers_distinct_messages_in_order_and_collapses_repeats_within_window', () => {
+test('announce_appends_child_elements_in_order_collapses_repeats_prunes_after_5s_and_clears_on_destroy', () => {
   vi.useFakeTimers();
   const node = document.createElement('div');
   const action = mountAnnouncements(node);
 
   announce('Первое');
   announce('Второе');
-  vi.runOnlyPendingTimers();
-  expect(node.textContent).toBe('Первое');
-  vi.runOnlyPendingTimers();
-  expect(node.textContent).toBe('Второе');
+  announce('Третье');
 
+  vi.runOnlyPendingTimers();
+
+  expect(node.children.length).toBe(3);
+  expect(Array.from(node.children).map(c => c.textContent)).toEqual(['Первое', 'Второе', 'Третье']);
+
+  // Identical repeat within 2s adds nothing
   announce('Первое');
-  vi.runOnlyPendingTimers();
-  expect(node.textContent).toBe('Второе');
+  expect(node.children.length).toBe(3);
 
-  vi.advanceTimersByTime(2000);
-  announce('Первое');
-  vi.runOnlyPendingTimers();
-  expect(node.textContent).toBe('Первое');
+  // After 5s the children are gone
+  vi.advanceTimersByTime(5000);
+  expect(node.children.length).toBe(0);
 
+  // Destroy leaves no timers and clears children
+  announce('Четвёртое');
   action.destroy();
+  expect(node.children.length).toBe(0);
+  expect(vi.getTimerCount()).toBe(0);
+
+  vi.useRealTimers();
 });
 test('duration_ms_reads_the_computed_token', () => {
   setup();

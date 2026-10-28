@@ -6,7 +6,8 @@ interface QueuedAnnouncement {
 let host: HTMLElement | undefined;
 const recent = new Map<string, number>();
 const queue: QueuedAnnouncement[] = [];
-let timer: ReturnType<typeof setTimeout> | undefined;
+const removalTimers = new Set<ReturnType<typeof setTimeout>>();
+let queueTimer: ReturnType<typeof setTimeout> | undefined;
 
 function pruneRecent(now: number): void {
   for (const [text, at] of recent) {
@@ -15,27 +16,51 @@ function pruneRecent(now: number): void {
 }
 
 function processQueue(): void {
-  timer = undefined;
-  if (!host || queue.length === 0) return;
-  const item = queue.shift()!;
-  recent.set(item.message, Date.now());
-  host.setAttribute('aria-live', item.politeness);
-  host.textContent = '';
-  host.textContent = item.message;
-  if (queue.length > 0) {
-    timer = setTimeout(processQueue, 50);
+  queueTimer = undefined;
+  if (!host) {
+    queue.length = 0;
+    return;
+  }
+  const now = Date.now();
+  while (queue.length > 0) {
+    const item = queue.shift()!;
+    recent.set(item.message, now);
+    const child = document.createElement('div');
+    child.textContent = item.message;
+    if (item.politeness === 'assertive') {
+      child.setAttribute('aria-live', 'assertive');
+    }
+    host.appendChild(child);
+
+    const removeTimer = setTimeout(() => {
+      child.remove();
+      removalTimers.delete(removeTimer);
+    }, 5000);
+    removalTimers.add(removeTimer);
   }
 }
 
 export function mountAnnouncements(node: HTMLElement): { destroy: () => void } {
   host = node;
+  host.setAttribute('aria-live', 'polite');
   return {
     destroy: () => {
-      host = undefined;
+      if (queueTimer !== undefined) {
+        clearTimeout(queueTimer);
+        queueTimer = undefined;
+      }
+      for (const t of removalTimers) {
+        clearTimeout(t);
+      }
+      removalTimers.clear();
+      if (host) {
+        while (host.firstChild) {
+          host.removeChild(host.firstChild);
+        }
+        host = undefined;
+      }
       recent.clear();
       queue.length = 0;
-      clearTimeout(timer);
-      timer = undefined;
     }
   };
 }
@@ -47,7 +72,7 @@ export function announce(message: string, politeness: 'polite' | 'assertive' = '
   if (recent.has(message)) return;
   if (queue.some(q => q.message === message)) return;
   queue.push({ message, politeness });
-  if (!timer) {
-    timer = setTimeout(processQueue, 0);
+  if (!queueTimer) {
+    queueTimer = setTimeout(processQueue, 0);
   }
 }
