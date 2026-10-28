@@ -95,7 +95,7 @@ async fn gc_expires_stale_uploads_after_the_grace(pool: PgPool) {
     );
     // Тело, которое пишется в этом процессе, сборщик не трогает при любой отсрочке.
     f.age(active, 25).await;
-    let guard = attachments::UploadLocks::global().try_lock(active).unwrap();
+    let guard = f.blobs().try_lock(active).unwrap().unwrap();
     assert_eq!(
         gc::run_once(&f.pool, f.blobs(), Utc::now(), DAY)
             .await
@@ -399,15 +399,23 @@ async fn gc_skips_locked_rows_and_is_safe_to_run_twice(pool: PgPool) {
 }
 
 /// Обёртка, которая видит состояние строки в момент удаления blob и может сорвать удаление.
+#[derive(Clone)]
 struct Observing {
-    inner: Arc<attachments::LocalBlobStore>,
+    inner: Arc<dyn BlobStore>,
     pool: PgPool,
-    seen: Mutex<Vec<String>>,
-    fail_next: AtomicBool,
+    seen: Arc<Mutex<Vec<String>>>,
+    fail_next: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
 impl BlobStore for Observing {
+    fn try_lock(&self, id: Uuid) -> io::Result<Option<Box<dyn BlobStore>>> {
+        Ok(self.inner.try_lock(id)?.map(|inner| {
+            let mut store = self.clone();
+            store.inner = Arc::from(inner);
+            Box::new(store) as Box<dyn BlobStore>
+        }))
+    }
     async fn staging_len(&self, id: Uuid) -> io::Result<Option<u64>> {
         self.inner.staging_len(id).await
     }
@@ -452,8 +460,8 @@ async fn gc_commits_released_before_deleting_the_blob(pool: PgPool) {
     let store = Observing {
         inner: f.store.clone(),
         pool: f.pool.clone(),
-        seen: Mutex::new(Vec::new()),
-        fail_next: AtomicBool::new(false),
+        seen: Arc::new(Mutex::new(Vec::new())),
+        fail_next: Arc::new(AtomicBool::new(false)),
     };
     let first = f
         .ready("first.bin", "application/octet-stream", b"first")

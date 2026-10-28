@@ -7,7 +7,7 @@ use futures_util::stream::BoxStream;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use super::{AttachmentError, BlobError, BlobStore, UploadLocks, state_event};
+use super::{AttachmentError, BlobError, BlobStore, state_event};
 
 /// Принятые байты: длина staging, а после публикации без commit полный размер.
 pub(crate) async fn received(
@@ -46,11 +46,16 @@ pub async fn upload_offset(
     let (state, size) = row(pool, owner_id, id).await?;
     match state.as_str() {
         "created" | "uploading" => {
-            let Some(_guard) = UploadLocks::global().try_lock(id) else {
+            let Some(locked) = store.try_lock(id)? else {
                 let current = received(store, id, size).await?;
                 return Err(AttachmentError::UploadInProgress { current });
             };
-            Ok((received(store, id, size).await?, size))
+            let (state, size) = row(pool, owner_id, id).await?;
+            match state.as_str() {
+                "created" | "uploading" => Ok((received(&*locked, id, size).await?, size)),
+                "ready" => Ok((size, size)),
+                _ => Err(AttachmentError::NotUploadable),
+            }
         }
         "ready" => Ok((size, size)),
         _ => Err(AttachmentError::NotUploadable),
@@ -109,10 +114,15 @@ pub async fn upload_chunk(
     if !matches!(state.as_str(), "created" | "uploading") {
         return Err(AttachmentError::NotUploadable);
     }
-    let Some(_guard) = UploadLocks::global().try_lock(id) else {
+    let Some(locked) = store.try_lock(id)? else {
         let current = received(store, id, size).await?;
         return Err(AttachmentError::UploadInProgress { current });
     };
+    let store = &*locked;
+    let (state, size) = row(pool, owner_id, id).await?;
+    if !matches!(state.as_str(), "created" | "uploading") {
+        return Err(AttachmentError::NotUploadable);
+    }
     let current = store.staging_len(id).await?.unwrap_or(0);
     if current != offset {
         return Err(AttachmentError::OffsetMismatch { current });

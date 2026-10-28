@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use tokio::sync::watch;
 use uuid::Uuid;
 
-use super::{BlobStore, FileKind, UploadLocks, linked, state_event};
+use super::{BlobStore, FileKind, linked, state_event};
 use crate::{config::AttachmentsConfig, singleton::Singleton};
 
 const BATCH: i64 = 1000;
@@ -34,10 +34,11 @@ async fn expire(
     id: Uuid,
     cutoff: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    // Тело, которое пишется в этом процессе, не трогаем вовсе.
-    let Some(_guard) = UploadLocks::global().try_lock(id) else {
+    // Активное тело в любом процессе не трогаем.
+    let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
         return Ok(false);
     };
+    let store = &*locked;
     let mut tx = pool.begin().await?;
     let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
         "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
@@ -80,6 +81,10 @@ async fn release(
     id: Uuid,
     cutoff: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
+    let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
+        return Ok(false);
+    };
+    let store = &*locked;
     let mut tx = pool.begin().await?;
     let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
         "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
@@ -123,10 +128,11 @@ async fn drop_unreferenced_media(
     id: Uuid,
     cutoff: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
-    // Приём того же ID в этом процессе не трогаем.
-    let Some(_guard) = UploadLocks::global().try_lock(id) else {
+    // Приём того же ID в любом процессе не трогаем.
+    let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
         return Ok(false);
     };
+    let store = &*locked;
     let mut tx = pool.begin().await?;
     let locked: Option<Uuid> = sqlx::query_scalar(
         "select id from block_media where id=$1 and attached_at is null and created_at < $2
@@ -205,7 +211,10 @@ pub async fn run_once(
         }
     };
     for file in files.into_iter().filter(|f| f.mtime < cutoff) {
-        // Конечные состояния и отсутствие строки необратимы, поэтому блокировка не нужна.
+        let Some(locked) = store.try_lock(file.id).map_err(sqlx::Error::Io)? else {
+            continue;
+        };
+        let store = &*locked;
         let state: Option<String> = sqlx::query_scalar("select state from attachments where id=$1")
             .bind(file.id)
             .fetch_optional(pool)
@@ -219,7 +228,7 @@ pub async fn run_once(
                     .fetch_one(pool)
                     .await?
             }
-            FileKind::Staging => UploadLocks::global().is_locked(file.id),
+            FileKind::Staging => false,
         };
         let keep = media
             || match file.kind {

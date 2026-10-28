@@ -55,8 +55,12 @@
 6. `queue_state`, по возрастанию `conversation_id`.
 7. Строки `conversations`, по возрастанию ID.
 8. `attachments`, по возрастанию ID.
-9. `conversation_derived`.
-10. `scope_counters` через `events::append`: сначала `conversation:{id}` по возрастанию ID, затем `owner:{id}:conversations`, затем `owner:{id}:machines`.
+9. `blocks`, по возрастанию ID.
+10. `block_media`, по возрастанию ID.
+11. `conversation_derived`.
+12. `scope_counters` через `events::append`: сначала `conversation:{id}` по возрастанию ID, затем `owner:{id}:conversations`, затем `owner:{id}:machines`.
+
+Файловые операции вложений и media сначала берут неблокирующий эксклюзивный `flock` на `blob_dir/locks/<attachment_id>` и только затем начинают транзакции из этого порядка. Lock-файлы не удаляются: замена inode разделила бы захваты разных процессов. Драйвер удерживает дескриптор до завершения фактического I/O, включая фоновые операции после отмены запроса; PATCH после захвата перечитывает состояние строки и длину staging. Публикация, отмена, GC и orphan-обход используют тот же захват, активные вложения GC пропускает.
 
 Под блокировкой `queue_state` нельзя ждать строку `scheduled_jobs`: отмена и обновление заданий используют `FOR UPDATE SKIP LOCKED`. Заблокированное задание уже обрабатывается; обработчик перечитывает «кранч» и удержания под блокировкой очереди и возвращает `Cancelled`, если удержание снято. Задание сброса недели без удержания проверяет `crunch_enabled` и `resume_pending`.
 

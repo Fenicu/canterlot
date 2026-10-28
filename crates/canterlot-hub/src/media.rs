@@ -18,7 +18,7 @@ use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::{
-    attachments::{BlobError, BlobStore, UploadLocks},
+    attachments::{BlobError, BlobStore},
     blocks::ExecutionRef,
     events::{self, NewEvent, Scope},
 };
@@ -200,9 +200,10 @@ pub async fn put(
     if let Some(result) = replay(stored(pool, header.id).await?, header) {
         return result;
     }
-    let Some(_guard) = UploadLocks::global().try_lock(header.id) else {
+    let Some(locked) = store.try_lock(header.id)? else {
         return Err(MediaError::Busy);
     };
+    let store = &*locked;
     if let Some(result) = replay(stored(pool, header.id).await?, header) {
         return result;
     }

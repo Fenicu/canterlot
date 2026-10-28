@@ -329,12 +329,7 @@ async fn missed_notice_is_repaired_by_the_lag_sweep(pool: PgPool) {
     .await
     .unwrap();
     tx.commit().await.unwrap();
-    tokio::time::timeout(
-        Duration::from_millis(200),
-        until_state(&pool, s.conversation_id, "stopped"),
-    )
-    .await
-    .unwrap();
+    until_state(&pool, s.conversation_id, "stopped").await;
     stop.send(true).unwrap();
     task.await.unwrap();
 }

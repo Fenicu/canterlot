@@ -124,6 +124,7 @@ pub(super) fn prepare(
         .recursive(true)
         .mode(0o700)
         .create(&root)?;
+    fs::File::open(data_dir)?.sync_all()?;
     let dir = root.join(execution_id.to_string());
     // Каталог без записи принадлежности остался от прерванной подготовки: процесса там нет.
     match fs::remove_dir_all(&dir) {
@@ -132,6 +133,7 @@ pub(super) fn prepare(
         Err(error) => return Err(error.into()),
     }
     fs::DirBuilder::new().mode(0o700).create(&dir)?;
+    fs::File::open(&root)?.sync_all()?;
     let secret: [u8; 32] = rand::random();
     private_file(&dir.join("secret"), &secret)?;
     let spec = format!(
@@ -145,6 +147,7 @@ pub(super) fn prepare(
     let socket_spec = toml::Value::String(socket.to_string_lossy().into_owned()).to_string();
     let spec = format!("ipc_socket = {socket_spec}\n{spec}");
     private_file(&dir.join("spec.toml"), spec.as_bytes())?;
+    fs::File::open(&dir)?.sync_all()?;
     Ok(Prepared {
         dir,
         secret,

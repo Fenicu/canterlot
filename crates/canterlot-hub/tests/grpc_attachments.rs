@@ -669,3 +669,121 @@ async fn hub_shutdown_ends_open_fetch_streams_with_unavailable(pool: PgPool) {
     drop(resume);
     assert_eq!(f.input_state().await, ("on_machine".into(), None));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn new_execution_attempt_resets_attachment_readiness_atomically(pool: PgPool) {
+    use canterlot_hub::{
+        delivery::{
+            dispatch::{DispatchOutcome, GateInputs, dispatch_next},
+            receipts::{InputReceipt, apply_input_receipt},
+        },
+        executions,
+        model::ExecutionState,
+    };
+    let f = Fixture::new(pool.clone()).await;
+    f.ingest(vec![f.ready()]).await;
+    assert_eq!(f.link().await.0, "ready");
+    apply_input_receipt(&pool, f.command, 1, InputReceipt::Withdrawn, Uuid::now_v7())
+        .await
+        .unwrap();
+    let exec = executions::start(&pool, f.files.owner, f.files.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, exec.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let correlation = Uuid::now_v7();
+    let result = dispatch_next(
+        &pool,
+        f.files.conversation,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        },
+        correlation,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        DispatchOutcome::Dispatched { attempt: 2, .. }
+    ));
+    assert_eq!(f.link().await, ("pending".into(), None, None));
+    let mut conn = pool.acquire().await.unwrap();
+    assert!(
+        !canterlot_hub::conversations::attachments_pending(&mut conn, f.files.conversation)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let event: Value = sqlx::query_scalar(
+        "select payload from events where kind='attachment_state_changed' and correlation_id=$1",
+    )
+    .bind(correlation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event["machine_state"], "pending");
+    assert_eq!(event["input_id"], f.input.to_string());
+    f.ingest(vec![f.ready()]).await;
+    assert_eq!(f.link().await.0, "pending");
+    let ready = record_body::Body::AttachmentReady(AttachmentReady {
+        command_id: f.command.to_string(),
+        dispatch_attempt: 2,
+        attachment_id: f.attachment.to_string(),
+    });
+    f.ingest(vec![ready.clone()]).await;
+    let before = f.machine_events().await.len();
+    f.ingest(vec![ready]).await;
+    assert_eq!(f.link().await, ("ready".into(), None, None));
+    assert_eq!(f.machine_events().await.len(), before);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn new_attempt_clears_attachment_failure_reason_and_retryability(pool: PgPool) {
+    use canterlot_hub::{
+        delivery::{
+            dispatch::{DispatchOutcome, GateInputs, dispatch_next},
+            receipts::{InputReceipt, apply_input_receipt},
+        },
+        executions,
+        model::ExecutionState,
+    };
+    let f = Fixture::new(pool.clone()).await;
+    f.ingest(vec![f.failed(true)]).await;
+    assert_eq!(
+        f.link().await,
+        ("pending".into(), Some("hub_unreachable".into()), Some(true))
+    );
+    apply_input_receipt(&pool, f.command, 1, InputReceipt::Withdrawn, Uuid::now_v7())
+        .await
+        .unwrap();
+    let exec = executions::start(&pool, f.files.owner, f.files.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, exec.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let result = dispatch_next(
+        &pool,
+        f.files.conversation,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        result,
+        DispatchOutcome::Dispatched { attempt: 2, .. }
+    ));
+    assert_eq!(f.link().await, ("pending".into(), None, None));
+}

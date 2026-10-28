@@ -501,3 +501,73 @@ async fn worker_restart_mid_fetch_preserves_temp_and_resumes(pool: PgPool) {
     assert_eq!(fs::read(f.published(id)).unwrap(), bytes);
     assert_eq!(f.sj_transmissions(input.command_id).len(), 1);
 }
+
+#[test]
+fn execution_directory_parents_are_synced_before_ownership_and_readiness() {
+    let _permit = e2e_gate::acquire_blocking();
+    let root = tempfile::tempdir().unwrap();
+    let trace = root.path().join("syscalls");
+    let status = std::process::Command::new("strace")
+        .args([
+            "-f",
+            "-qq",
+            "-yy",
+            "-e",
+            "trace=fsync,fdatasync,mkdir,rename",
+            "-o",
+        ])
+        .arg(&trace)
+        .arg(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "input_is_not_transmitted_until_all_attachments_published",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let calls = fs::read_to_string(trace).unwrap();
+    let calls: Vec<_> = calls.lines().collect();
+    let execution_mkdir = calls
+        .iter()
+        .position(|line| line.contains("mkdir(") && line.contains("/store/executions/"))
+        .unwrap();
+    let line = calls[execution_mkdir];
+    let path = line.split('"').nth(1).unwrap();
+    let execution = std::path::Path::new(path);
+    let executions = execution.parent().unwrap();
+    let data = executions.parent().unwrap();
+    let synced = |path: &std::path::Path, after: usize| {
+        calls
+            .iter()
+            .enumerate()
+            .skip(after)
+            .find(|(_, line)| {
+                line.contains("fsync(") && line.contains(&format!("<{}>", path.display()))
+            })
+            .map(|(i, _)| i)
+            .expect("execution ancestor must be synced")
+    };
+    let executions_mkdir = calls
+        .iter()
+        .position(|line| {
+            line.contains("mkdir(") && line.contains(&format!("\"{}\"", executions.display()))
+        })
+        .unwrap();
+    let data_sync = synced(data, executions_mkdir);
+    let parent_sync = synced(executions, execution_mkdir);
+    let ownership = calls
+        .iter()
+        .enumerate()
+        .skip(execution_mkdir)
+        .find(|(_, line)| {
+            (line.contains("fsync(") || line.contains("fdatasync("))
+                && line.contains("/store/ownership/")
+        })
+        .map(|(i, _)| i)
+        .unwrap();
+    let attachment_sync = synced(&execution.join("attachments"), execution_mkdir);
+    assert!(executions_mkdir < data_sync && data_sync < execution_mkdir);
+    assert!(
+        execution_mkdir < parent_sync && parent_sync < ownership && ownership < attachment_sync
+    );
+}

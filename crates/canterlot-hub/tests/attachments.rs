@@ -2018,3 +2018,300 @@ async fn cancelling_or_failing_a_scheduled_job_deletes_its_attachment_links(pool
         0
     );
 }
+
+async fn signal_at(path: &std::path::Path) {
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while !path.exists() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("process barrier");
+}
+
+#[tokio::test]
+async fn cross_process_upload_child() {
+    let Ok(database) = std::env::var("ATTACHMENT_TEST_DB") else {
+        return;
+    };
+    let pool = PgPool::connect(&database).await.unwrap();
+    let config = canterlot_hub::config::AttachmentsConfig {
+        blob_dir: std::env::var("ATTACHMENT_TEST_BLOBS").unwrap().into(),
+        ..Default::default()
+    };
+    let store = attachments::LocalBlobStore::open(&config, Arc::new(attachments::NoTrace)).unwrap();
+    let owner = std::env::var("ATTACHMENT_TEST_OWNER")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let id = std::env::var("ATTACHMENT_TEST_ID")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let signal = std::path::PathBuf::from(std::env::var("ATTACHMENT_TEST_SIGNAL").unwrap());
+    let barrier = signal.clone();
+    let body = stream::once(async move {
+        std::fs::write(barrier.join("started"), []).unwrap();
+        signal_at(&barrier.join("release")).await;
+        Ok(Bytes::from_static(b"GOOD"))
+    })
+    .boxed();
+    assert_eq!(
+        attachments::upload::upload_chunk(
+            &pool,
+            &store,
+            owner,
+            id,
+            0,
+            body,
+            attachments::UPLOAD_CHUNK_BYTES,
+            Uuid::now_v7()
+        )
+        .await
+        .unwrap(),
+        4
+    );
+    std::fs::write(signal.join("uploaded"), []).unwrap();
+    signal_at(&signal.join("published")).await;
+    let result = attachments::upload::upload_chunk(
+        &pool,
+        &store,
+        owner,
+        id,
+        0,
+        stream::iter([Ok(Bytes::from_static(b"EVIL"))]).boxed(),
+        attachments::UPLOAD_CHUNK_BYTES,
+        Uuid::now_v7(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(attachments::AttachmentError::NotUploadable)
+    ));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn two_hub_processes_cannot_mutate_a_ready_linked_blob(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = f
+        .create("fixture.bin", "application/octet-stream", b"GOOD")
+        .await;
+    let signal = tempfile::tempdir().unwrap();
+    use sqlx::ConnectOptions;
+    let database = pool.connect_options().to_url_lossy().to_string();
+    let mut child = tokio::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "cross_process_upload_child"])
+        .env("ATTACHMENT_TEST_DB", database)
+        .env("ATTACHMENT_TEST_BLOBS", &f.config.blob_dir)
+        .env("ATTACHMENT_TEST_OWNER", f.owner.to_string())
+        .env("ATTACHMENT_TEST_ID", id.to_string())
+        .env("ATTACHMENT_TEST_SIGNAL", signal.path())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    signal_at(&signal.path().join("started")).await;
+    let result = attachments::upload::upload_chunk(
+        &pool,
+        f.blobs(),
+        f.owner,
+        id,
+        0,
+        stream::iter([Ok(Bytes::from_static(b"GOOD"))]).boxed(),
+        attachments::UPLOAD_CHUNK_BYTES,
+        Uuid::now_v7(),
+    )
+    .await;
+    assert!(matches!(
+        result,
+        Err(attachments::AttachmentError::UploadInProgress { .. })
+    ));
+    assert_error(
+        &f.complete(id, &key(), None).await,
+        409,
+        "upload_in_progress",
+        "after_condition",
+    );
+    assert_error(
+        &f.cancel(id, &key()).await,
+        409,
+        "upload_in_progress",
+        "after_condition",
+    );
+    f.age(id, 25).await;
+    let report =
+        attachments::gc::run_once(&pool, f.blobs(), Utc::now(), Duration::from_secs(86400))
+            .await
+            .unwrap();
+    assert_eq!(report.expired_uploads, 0);
+    assert_eq!(f.state_of(id).await, "uploading");
+    std::fs::write(signal.path().join("release"), []).unwrap();
+    signal_at(&signal.path().join("uploaded")).await;
+    assert_eq!(upload_offset(&f.head(id).await), Some(4));
+    assert_eq!(f.complete(id, &key(), None).await.status, 200);
+    assert_eq!(f.submit(&key(), "read", &[id]).await.status, 201);
+    std::fs::write(signal.path().join("published"), []).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(30), child.wait())
+            .await
+            .unwrap()
+            .unwrap()
+            .success()
+    );
+    let bytes = std::fs::read(f.blob_path(id)).unwrap();
+    assert!(bytes == b"GOOD");
+    assert_eq!(sha(&bytes), sha(b"GOOD"));
+    assert_eq!(f.state_of(id).await, "ready");
+}
+
+#[tokio::test]
+async fn directory_durability_child() {
+    use attachments::BlobStore;
+    let Ok(root) = std::env::var("ATTACHMENT_TRACE_ROOT") else {
+        return;
+    };
+    let config = canterlot_hub::config::AttachmentsConfig {
+        blob_dir: std::path::Path::new(&root).join("fresh/nested/blob-root"),
+        ..Default::default()
+    };
+    let trace = Arc::new(Recorder::default());
+    let store = attachments::LocalBlobStore::open(&config, trace.clone()).unwrap();
+    let id = Uuid::now_v7();
+    let shard = store.blob_path(id).parent().unwrap().to_owned();
+    trace.hook(Some(Arc::new(move |step| {
+        if step == PublishStep::FileSynced {
+            std::fs::create_dir(&shard).unwrap();
+        }
+    })));
+    store
+        .append_staging(
+            id,
+            0,
+            stream::iter([Ok(Bytes::from_static(b"GOOD"))]).boxed(),
+            4,
+        )
+        .await
+        .unwrap();
+    store.publish(id, 4, &sha(b"GOOD")).await.unwrap();
+}
+
+fn directory_trace() -> (tempfile::TempDir, Vec<String>) {
+    let root = tempfile::tempdir().unwrap();
+    let trace = root.path().join("syscalls");
+    let status = std::process::Command::new("strace")
+        .args(["-f", "-qq", "-yy", "-e", "trace=fsync,mkdir,rename", "-o"])
+        .arg(&trace)
+        .arg(std::env::current_exe().unwrap())
+        .args(["--exact", "directory_durability_child"])
+        .env("ATTACHMENT_TRACE_ROOT", root.path())
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let calls = std::fs::read_to_string(trace)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    (root, calls)
+}
+
+#[test]
+fn startup_syncs_blob_directory_ancestors() {
+    let (root, calls) = directory_trace();
+    let sync = |path: &std::path::Path| {
+        calls
+            .iter()
+            .position(|line| {
+                line.contains("fsync(") && line.contains(&format!("<{}>", path.display()))
+            })
+            .expect("directory parent must be synced")
+    };
+    let base = root.path();
+    let first = sync(base);
+    let next = sync(&base.join("fresh"));
+    let nested = sync(&base.join("fresh/nested"));
+    let blob = sync(&base.join("fresh/nested/blob-root"));
+    assert!(first < next && next < nested && nested < blob);
+}
+
+#[test]
+fn publication_syncs_an_already_created_shard() {
+    let (root, calls) = directory_trace();
+    let base = root.path();
+    let sync = |path: &std::path::Path| {
+        calls
+            .iter()
+            .position(|line| {
+                line.contains("fsync(") && line.contains(&format!("<{}>", path.display()))
+            })
+            .expect("shard parent must be synced")
+    };
+    let shard_mkdir = calls
+        .iter()
+        .position(|line| line.contains("mkdir(") && line.contains("/blobs/01\""))
+        .unwrap();
+    let parent = sync(&base.join("fresh/nested/blob-root/blobs"));
+    let rename = calls
+        .iter()
+        .position(|line| line.contains("rename("))
+        .unwrap();
+    assert!(shard_mkdir < parent && parent < rename);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn aborted_publication_holds_the_volume_lock_until_io_finishes(pool: PgPool) {
+    use attachments::BlobStore;
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool.clone()).await;
+    let id = f
+        .create("fixture.bin", "application/octet-stream", b"GOOD")
+        .await;
+    f.upload(id, b"GOOD").await;
+    let barrier = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let wait = barrier.clone();
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    f.trace.hook(Some(Arc::new(move |step| {
+        if step == PublishStep::FileSynced {
+            entered.lock().unwrap().take().unwrap().send(()).unwrap();
+            let (mutex, condvar) = &*wait;
+            drop(
+                condvar
+                    .wait_while(mutex.lock().unwrap(), |released| !*released)
+                    .unwrap(),
+            );
+        }
+    })));
+    let store = f.store.clone();
+    let owner = f.owner;
+    let publish = tokio::spawn(async move {
+        attachments::complete(&pool, &*store, owner, id, None, "aborted", Uuid::now_v7()).await
+    });
+    tokio::time::timeout(Duration::from_secs(10), started)
+        .await
+        .unwrap()
+        .unwrap();
+    publish.abort();
+    assert!(publish.await.unwrap_err().is_cancelled());
+    let locked = f.store.try_lock(id).unwrap().is_none();
+    let (mutex, condvar) = &*barrier;
+    *mutex.lock().unwrap() = true;
+    condvar.notify_one();
+    assert!(
+        locked,
+        "cancelled request must not release ongoing publication I/O"
+    );
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if f.store.try_lock(id).unwrap().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    f.trace.hook(None);
+    assert_eq!(f.complete(id, "recovered", None).await.status, 200);
+    assert!(std::fs::read(f.blob_path(id)).unwrap() == b"GOOD");
+}

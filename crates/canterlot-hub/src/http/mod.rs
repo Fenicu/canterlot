@@ -83,6 +83,8 @@ pub struct AppState {
     pub manifest: Arc<PathBuf>,
     pub user_header: HeaderName,
     pub ws_tasks: tokio_util::task::TaskTracker,
+    #[cfg(feature = "fault-injection")]
+    pub ws_faults: crate::fault_injection::Faults,
     pub shutdown: CancellationToken,
 }
 
@@ -109,6 +111,8 @@ impl AppState {
             manifest: Arc::new(deps.manifest),
             user_header,
             ws_tasks: tokio_util::task::TaskTracker::new(),
+            #[cfg(feature = "fault-injection")]
+            ws_faults: Default::default(),
             shutdown: deps.shutdown,
         }
     }

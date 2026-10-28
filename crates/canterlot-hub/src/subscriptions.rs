@@ -219,6 +219,8 @@ struct WriterQueue {
     last_progress: Mutex<Instant>,
     stall_timeout: Duration,
     byte_limit: usize,
+    #[cfg(feature = "fault-injection")]
+    write_pause: Mutex<Option<oneshot::Sender<oneshot::Sender<()>>>>,
 }
 #[derive(Debug)]
 enum PumpError {
@@ -581,6 +583,19 @@ async fn writer(
             .as_ref()
             .is_none_or(|(delivery, _)| delivery.active.load(Ordering::SeqCst))
         {
+            #[cfg(feature = "fault-injection")]
+            if item.delivery.is_some() {
+                let pause = queue
+                    .write_pause
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .take();
+                if let Some(pause) = pause {
+                    let (resume, resumed) = oneshot::channel();
+                    let _ = pause.send(resume);
+                    let _ = resumed.await;
+                }
+            }
             if sink.send(item.frame.clone()).await.is_err() {
                 return;
             }
@@ -645,7 +660,15 @@ pub async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
         last_progress: Mutex::new(Instant::now()),
         stall_timeout: config.stall_timeout,
         byte_limit,
+        #[cfg(feature = "fault-injection")]
+        write_pause: Mutex::new(
+            state
+                .ws_faults
+                .take_pause(crate::fault_injection::Point::WsBeforeDataSend),
+        ),
     });
+    #[cfg(feature = "fault-injection")]
+    let faults = state.ws_faults.clone();
     let age = config.max_connection_age;
     let shutdown = state.shutdown.clone();
     let mut pump = Pump {
@@ -669,6 +692,10 @@ pub async fn handle_socket(state: AppState, owner: Owner, socket: WebSocket) {
             _=>End::Disconnected,
         },
     };
+    #[cfg(feature = "fault-injection")]
+    if matches!(&result, End::Lagged(_)) {
+        faults.pause(crate::fault_injection::Point::WsStalled).await;
+    }
     let _ = end_tx.send(result);
     let _ = tokio::time::timeout(CLOSE_GRACE, &mut writer).await;
 }
@@ -692,6 +719,8 @@ mod tests {
                 last_progress: Mutex::new(Instant::now()),
                 stall_timeout: timeout,
                 byte_limit: bytes,
+                #[cfg(feature = "fault-injection")]
+                write_pause: Mutex::new(None),
             }),
             rx,
         )

@@ -1,7 +1,7 @@
 use std::{
     fs,
-    io::{self, Read},
-    os::unix::fs::{DirBuilderExt, MetadataExt},
+    io::{self, Read, Write},
+    os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -10,7 +10,7 @@ use bytes::Bytes;
 use chrono::{DateTime, Utc};
 use futures_util::{StreamExt, stream::BoxStream};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::io::AsyncSeekExt;
 use uuid::Uuid;
 
 use crate::config::AttachmentsConfig;
@@ -76,6 +76,8 @@ pub struct StoredFile {
 
 #[async_trait::async_trait]
 pub trait BlobStore: Send + Sync {
+    /// Захват тома до конца I/O; возвращённый драйвер удерживает его и в фоновых операциях.
+    fn try_lock(&self, id: Uuid) -> io::Result<Option<Box<dyn BlobStore>>>;
     async fn staging_len(&self, id: Uuid) -> io::Result<Option<u64>>;
     async fn append_staging(
         &self,
@@ -104,13 +106,26 @@ pub struct LocalBlobStore {
     staging: PathBuf,
     blobs: PathBuf,
     trace: Arc<dyn PublishTrace>,
+    locks: PathBuf,
+    held: Option<(Uuid, Arc<fs::File>)>,
 }
 
 fn create_private_dir(path: &Path) -> io::Result<()> {
-    fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
+    let path = std::path::absolute(path)?;
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        current.push(component);
+        match fs::DirBuilder::new().mode(0o700).create(&current) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && current.is_dir() => {}
+            Err(error) => return Err(error),
+        }
+        // Существующий компонент мог создать ещё не синхронизировавший родителя процесс.
+        if let Some(parent) = current.parent() {
+            sync_dir(parent)?;
+        }
+    }
+    Ok(())
 }
 
 fn sync_dir(path: &Path) -> io::Result<()> {
@@ -150,10 +165,13 @@ impl LocalBlobStore {
         config: &AttachmentsConfig,
         trace: Arc<dyn PublishTrace>,
     ) -> Result<Self, BlobError> {
+        create_private_dir(&config.blob_dir)?;
         let staging = config.blob_dir.join("staging");
         let blobs = config.blob_dir.join("blobs");
         create_private_dir(&staging)?;
         create_private_dir(&blobs)?;
+        let locks = config.blob_dir.join("locks");
+        create_private_dir(&locks)?;
         // rename между staging и blobs атомарен только внутри одной файловой системы.
         if fs::metadata(&staging)?.dev() != fs::metadata(&blobs)?.dev() {
             return Err(BlobError::CrossDevice);
@@ -163,6 +181,8 @@ impl LocalBlobStore {
             staging,
             blobs,
             trace,
+            locks,
+            held: None,
         })
     }
 
@@ -230,16 +250,30 @@ impl LocalBlobStore {
         file.sync_all()?;
         drop(file);
         self.step(PublishStep::FileSynced)?;
-        let fresh_shard = !shard.exists();
-        create_private_dir(&shard)?;
-        if fresh_shard {
-            sync_dir(&self.blobs)?;
+        match fs::DirBuilder::new().mode(0o700).create(&shard) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists && shard.is_dir() => {}
+            Err(error) => return Err(error.into()),
         }
+        sync_dir(&self.blobs)?;
         fs::rename(&staging, &blob)?;
         self.step(PublishStep::Renamed)?;
         sync_dir(&shard)?;
         sync_dir(&self.staging)?;
         self.step(PublishStep::DirSynced)
+    }
+
+    async fn remove_file(&self, path: PathBuf) -> io::Result<()> {
+        let store = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _store = store;
+            match fs::remove_file(path) {
+                Err(error) if !not_found(&error) => Err(error),
+                _ => Ok(()),
+            }
+        })
+        .await
+        .map_err(|_| io::Error::other("blob delete failed"))?
     }
 
     fn scan_blocking(&self) -> io::Result<Vec<StoredFile>> {
@@ -304,15 +338,29 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| BlobError::Io(io::Error::other("blob task failed")))?
 }
 
-async fn remove(path: PathBuf) -> io::Result<()> {
-    match tokio::fs::remove_file(path).await {
-        Err(error) if !not_found(&error) => Err(error),
-        _ => Ok(()),
-    }
-}
-
 #[async_trait::async_trait]
 impl BlobStore for LocalBlobStore {
+    fn try_lock(&self, id: Uuid) -> io::Result<Option<Box<dyn BlobStore>>> {
+        if self.held.is_some() {
+            return Err(io::Error::other("blob store already locked"));
+        }
+        let file = fs::File::options()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(self.locks.join(id.to_string()))?;
+        match file.try_lock() {
+            Ok(()) => {
+                let mut store = self.clone();
+                store.held = Some((id, Arc::new(file)));
+                Ok(Some(Box::new(store)))
+            }
+            Err(fs::TryLockError::WouldBlock) => Ok(None),
+            Err(fs::TryLockError::Error(error)) => Err(error),
+        }
+    }
     async fn staging_len(&self, id: Uuid) -> io::Result<Option<u64>> {
         match tokio::fs::metadata(self.staging_path(id)).await {
             Ok(meta) => Ok(Some(meta.len())),
@@ -328,43 +376,40 @@ impl BlobStore for LocalBlobStore {
         mut body: BoxStream<'static, Result<Bytes, io::Error>>,
         max_total: u64,
     ) -> Result<u64, BlobError> {
-        let mut file = tokio::fs::OpenOptions::new()
+        let mut file = fs::OpenOptions::new()
             .create(true)
             .append(true)
             .mode(0o600)
-            .open(self.staging_path(id))
-            .await?;
-        let mut written = file.metadata().await?.len();
+            .open(self.staging_path(id))?;
+        let mut written = file.metadata()?.len();
         if written != offset {
             return Err(BlobError::OffsetMismatch { current: written });
         }
-        // Смещение приёма равно длине файла: всё записанное до обрыва остаётся.
-        let outcome = loop {
-            let Some(frame) = body.next().await else {
-                break Ok(written);
-            };
-            let Ok(frame) = frame else {
-                break Err(BlobError::BodyInterrupted { current: written });
-            };
-            let mut over = false;
-            for piece in frame.chunks(IO_CHUNK_BYTES) {
-                let room = max_total.saturating_sub(written);
-                let take = (piece.len() as u64).min(room) as usize;
-                if take > 0 {
-                    file.write_all(&piece[..take]).await?;
+        while let Some(frame) = body.next().await {
+            let frame = frame.map_err(|_| BlobError::BodyInterrupted { current: written })?;
+            let store = self.clone();
+            let (next_file, next_written, over) = blocking(move || {
+                let _store = store;
+                let mut over = false;
+                for piece in frame.chunks(IO_CHUNK_BYTES) {
+                    let take = (piece.len() as u64).min(max_total.saturating_sub(written)) as usize;
+                    file.write_all(&piece[..take])?;
                     written += take as u64;
+                    if take < piece.len() {
+                        over = true;
+                        break;
+                    }
                 }
-                if take < piece.len() {
-                    over = true;
-                    break;
-                }
-            }
+                Ok((file, written, over))
+            })
+            .await?;
+            file = next_file;
+            written = next_written;
             if over {
-                break Err(BlobError::TooLarge { current: written });
+                return Err(BlobError::TooLarge { current: written });
             }
-        };
-        file.flush().await?;
-        outcome
+        }
+        Ok(written)
     }
 
     async fn publish(
@@ -393,11 +438,11 @@ impl BlobStore for LocalBlobStore {
     }
 
     async fn delete_staging(&self, id: Uuid) -> io::Result<()> {
-        remove(self.staging_path(id)).await
+        self.remove_file(self.staging_path(id)).await
     }
 
     async fn delete_blob(&self, id: Uuid) -> io::Result<()> {
-        remove(self.blob_path(id)).await
+        self.remove_file(self.blob_path(id)).await
     }
 
     async fn scan(&self) -> io::Result<Vec<StoredFile>> {

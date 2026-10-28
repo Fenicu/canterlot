@@ -171,6 +171,32 @@ pub async fn dispatch_next(
     .bind(generation)
     .fetch_one(&mut *tx)
     .await?;
+    let reset: Vec<Uuid> = sqlx::query_scalar(
+        "update input_attachments set machine_state='pending', machine_reason=null,
+                retryable=null, updated_at=clock_timestamp()
+         where input_id=$1 and (machine_state,machine_reason,retryable)
+             is distinct from ('pending',null,null) returning attachment_id",
+    )
+    .bind(input_id)
+    .fetch_all(&mut *tx)
+    .await?;
+    for attachment_id in reset {
+        events::append(
+            &mut tx,
+            NewEvent {
+                scope: Scope::Conversation {
+                    id: conversation_id,
+                },
+                kind: "attachment_state_changed",
+                conversation_id: Some(conversation_id),
+                execution_id: Some(execution_id),
+                payload: json!({"input_id":input_id,"attachment_id":attachment_id,
+                    "machine_state":"pending","machine_reason":null}),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
     queue
         .save(
             &mut tx,

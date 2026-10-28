@@ -3,7 +3,6 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
-    sync::{Mutex, OnceLock},
 };
 
 use canterlot_proto::{
@@ -38,52 +37,6 @@ const DEFAULT_MIME: &str = "application/octet-stream";
 /// Признак нативного изображения для ссылки агенту.
 pub fn native_image(mime: &str) -> bool {
     IMAGE_MIMES.contains(&mime)
-}
-
-/// Захват по вложению внутри процесса: одно тело загрузки и одна публикация за раз.
-pub struct UploadLocks {
-    held: Mutex<HashSet<Uuid>>,
-}
-
-pub struct UploadGuard {
-    id: Uuid,
-}
-
-impl UploadLocks {
-    /// Идентификаторы вложений глобально уникальны, поэтому карта общая для процесса.
-    pub fn global() -> &'static UploadLocks {
-        static LOCKS: OnceLock<UploadLocks> = OnceLock::new();
-        LOCKS.get_or_init(|| UploadLocks {
-            held: Mutex::new(HashSet::new()),
-        })
-    }
-
-    pub fn try_lock(&'static self, id: Uuid) -> Option<UploadGuard> {
-        let inserted = self
-            .held
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .insert(id);
-        // Захват создаётся только при успехе: его Drop снимает чужую запись.
-        inserted.then(|| UploadGuard { id })
-    }
-
-    pub fn is_locked(&self, id: Uuid) -> bool {
-        self.held
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .contains(&id)
-    }
-}
-
-impl Drop for UploadGuard {
-    fn drop(&mut self) {
-        UploadLocks::global()
-            .held
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .remove(&self.id);
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
@@ -495,6 +448,18 @@ pub async fn complete(
             Begin::New => {}
         }
     }
+    let size: i64 =
+        sqlx::query_scalar("select size_bytes from attachments where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(AttachmentError::NotFound)?;
+    let Some(locked) = store.try_lock(id)? else {
+        let current = upload::received(store, id, size as u64).await?;
+        return Err(AttachmentError::UploadInProgress { current });
+    };
+    let store = &*locked;
     let active: Option<(Uuid, i64, String)> = sqlx::query_as(
         "update attachments set updated_at=clock_timestamp()
          where id=$1 and owner_id=$2 and state in ('created','uploading')
@@ -504,18 +469,11 @@ pub async fn complete(
     .bind(owner_id)
     .fetch_optional(pool)
     .await?;
-    // Захват держится до commit: новое тело не начнётся между публикацией и метаданными.
-    let mut _guard = None;
     let conversation_id = match active {
         Some((conversation_id, size, declared)) => {
             if sha256.as_ref().is_some_and(|sha| *sha != declared) {
                 return Err(AttachmentError::Conflict);
             }
-            let Some(guard) = UploadLocks::global().try_lock(id) else {
-                let current = upload::received(store, id, size as u64).await?;
-                return Err(AttachmentError::UploadInProgress { current });
-            };
-            _guard = Some(guard);
             match store.publish(id, size as u64, &declared).await {
                 Ok(()) => {}
                 Err(BlobError::LengthMismatch { actual }) => {
@@ -614,6 +572,28 @@ pub async fn cancel(
 ) -> Result<(), AttachmentError> {
     valid_key(key)?;
     let body = json!({"attachment_id": id});
+    let hash = idempotency::request_hash("cancel_attachment", &body);
+    {
+        let mut conn = pool.acquire().await?;
+        if matches!(
+            idempotency::lookup(&mut conn, owner_id, key, "cancel_attachment", &hash).await?,
+            Begin::Conflict
+        ) {
+            return Err(AttachmentError::IdempotencyConflict);
+        }
+    }
+    let size: i64 =
+        sqlx::query_scalar("select size_bytes from attachments where id=$1 and owner_id=$2")
+            .bind(id)
+            .bind(owner_id)
+            .fetch_optional(pool)
+            .await?
+            .ok_or(AttachmentError::NotFound)?;
+    let Some(locked) = store.try_lock(id)? else {
+        let current = upload::received(store, id, size as u64).await?;
+        return Err(AttachmentError::UploadInProgress { current });
+    };
+    let store = &*locked;
     let outcome = idempotency::run_in_tx(
         pool,
         owner_id,

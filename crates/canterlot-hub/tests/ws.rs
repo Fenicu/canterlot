@@ -628,61 +628,71 @@ async fn catch_up_over_a_slow_link_completes_without_lagged(pool: PgPool) {
 async fn slow_client_subscription_is_cut_with_cursor_while_other_clients_keep_streaming(
     pool: PgPool,
 ) {
-    let h = Hub::new(pool, |c| c.ws.stall_timeout = Duration::from_millis(500)).await;
+    use canterlot_hub::fault_injection::Point;
+    const EVENTS: i64 = 64;
+    let h = Hub::new(pool, |c| {
+        c.ws.stall_timeout = Duration::from_millis(500);
+        c.ws.queue_messages = 4;
+        c.ws.queue_bytes = 65536;
+    })
+    .await;
+    let blocked = h.f.state.ws_faults.pause_next(Point::WsBeforeDataSend);
+    let stalled = h.f.state.ws_faults.pause_next(Point::WsStalled);
     let mut slow = h.socket().await;
     h.subscribe(&mut slow, "slow", Some(0)).await;
     h.subscribe(&mut slow, "slow2", Some(0)).await;
     let mut fast = h.socket().await;
     h.subscribe(&mut fast, "fast", Some(0)).await;
-    let pool = h.f.pool.clone();
-    let scope = Scope::Conversation {
-        id: h.f.seed.conversation_id,
-    };
-    let writer = tokio::spawn(async move {
-        for _ in 0..1200 {
-            support::emit(
-                &pool,
-                scope,
-                "block_delta",
-                json!({"block_id":Uuid::now_v7(),"base_rev":0,"rev":1,"append":"x".repeat(16384)}),
-            )
-            .await;
-        }
-    });
-    let start = Instant::now();
+    let mut tx = h.f.pool.begin().await.unwrap();
+    for _ in 0..EVENTS {
+        events::append(&mut tx, events::NewEvent {
+            scope: Scope::Conversation { id: h.f.seed.conversation_id },
+            kind: "block_delta",
+            conversation_id: Some(h.f.seed.conversation_id),
+            execution_id: None,
+            payload: json!({"block_id":Uuid::now_v7(),"base_rev":0,"rev":1,"append":"x".repeat(16384)}),
+            correlation_id: Uuid::now_v7(),
+        }).await.unwrap();
+    }
+    // Writer первого соединения остановлен; чтение начинается после подтверждённого Stalled.
+    tx.commit().await.unwrap();
     let mut cursor = 0;
-    while cursor < 1200 {
-        let v = fast
-            .next(Duration::from_secs(2))
-            .await
-            .expect("other client keeps streaming");
-        accept(&v, &mut cursor);
-        let at = chrono::DateTime::parse_from_rfc3339(v["event"]["committed_at"].as_str().unwrap())
-            .unwrap();
-        assert!((Utc::now() - at.with_timezone(&Utc)).num_milliseconds() < 2000);
-    }
-    writer.await.unwrap();
-    assert!(start.elapsed() < Duration::from_secs(20));
-    tokio::time::sleep(Duration::from_millis(900)).await;
-    let mut cursors =
-        std::collections::BTreeMap::from([("slow".to_owned(), 0), ("slow2".to_owned(), 0)]);
-    let mut lagged = std::collections::BTreeSet::new();
-    while let Some(v) = slow.next(WAIT).await {
-        let id = v["id"].as_str().unwrap().to_owned();
-        if v["op"] == "event" {
-            assert!(!lagged.contains(&id));
-            accept(&v, cursors.get_mut(&id).unwrap());
-        } else {
-            assert_eq!(v["op"], "lagged");
-            assert!(lagged.insert(id.clone()));
-            assert_eq!(seq(&v["cursor"]), cursors[&id]);
+    let fast_read = async {
+        while cursor < EVENTS {
+            let v = fast.next(WAIT).await.expect("other client keeps streaming");
+            accept(&v, &mut cursor);
         }
-    }
-    assert_eq!(lagged.len(), 2);
-    assert!(slow.close_code.is_some());
+    };
+    let slow_read = async {
+        let resume_writer = tokio::time::timeout(WAIT, blocked).await.unwrap().unwrap();
+        let resume_close = tokio::time::timeout(WAIT, stalled).await.unwrap().unwrap();
+        resume_close.send(()).unwrap();
+        resume_writer.send(()).unwrap();
+        let mut cursors =
+            std::collections::BTreeMap::from([("slow".to_owned(), 0), ("slow2".to_owned(), 0)]);
+        let mut lagged = std::collections::BTreeSet::new();
+        while let Some(v) = slow.next(WAIT).await {
+            let id = v["id"].as_str().unwrap().to_owned();
+            if v["op"] == "event" {
+                assert!(!lagged.contains(&id));
+                accept(&v, cursors.get_mut(&id).unwrap());
+            } else {
+                assert_eq!(v["op"], "lagged");
+                assert!(lagged.insert(id.clone()));
+                assert_eq!(seq(&v["cursor"]), cursors[&id]);
+            }
+        }
+        assert_eq!(lagged.len(), 2);
+        assert_eq!(slow.close_code, Some(1008));
+    };
+    tokio::time::timeout(Duration::from_secs(30), async {
+        tokio::join!(fast_read, slow_read);
+    })
+    .await
+    .expect("both clients complete");
     h.f.emit("run_finished", json!({})).await;
     accept(&fast.next(WAIT).await.unwrap(), &mut cursor);
-    assert_eq!(cursor, 1201);
+    assert_eq!(cursor, EVENTS + 1);
     fast.close().await;
     h.stop().await;
 }

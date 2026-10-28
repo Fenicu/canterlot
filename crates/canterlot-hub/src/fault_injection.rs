@@ -24,6 +24,8 @@ pub enum Point {
     WakeBeforeSubmit,
     ResumeAfterStart,
     DropBusNotice,
+    WsBeforeDataSend,
+    WsStalled,
 }
 
 #[derive(Clone, Debug)]
@@ -242,14 +244,17 @@ impl Faults {
         rx
     }
 
-    pub(crate) async fn pause(&self, point: Point) {
-        let waiter = self
-            .trace
+    pub(crate) fn take_pause(&self, point: Point) -> Option<oneshot::Sender<oneshot::Sender<()>>> {
+        self.trace
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .pauses
             .get_mut(&point)
-            .and_then(VecDeque::pop_front);
+            .and_then(VecDeque::pop_front)
+    }
+
+    pub(crate) async fn pause(&self, point: Point) {
+        let waiter = self.take_pause(point);
         if let Some(waiter) = waiter {
             let (resume, resumed) = oneshot::channel();
             if waiter.send(resume).is_ok() {

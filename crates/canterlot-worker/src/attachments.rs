@@ -107,6 +107,7 @@ fn private_directory(path: &Path) -> io::Result<()> {
 }
 
 impl AttachmentStore {
+    /// `exec_dir` уже надёжно закреплён в `executions/` подготовкой исполнения.
     pub fn new(exec_dir: &Path, parallelism: usize) -> io::Result<Self> {
         Self::with_slots(exec_dir, Arc::new(Semaphore::new(parallelism.clamp(1, 2))))
     }
