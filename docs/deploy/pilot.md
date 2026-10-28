@@ -83,7 +83,7 @@
 |  |                                                                             |  |
 |  |  - KillMode=process (сохранение сопровождающих процессов при рестарте)      |  |
 |  |  - data_dir: ~/.local/state/canterlot-worker (права 0700)                   |  |
-|  |  - Локальный журнал управления (CJ) и кэш токена машины (0600)              |  |
+|  |  - Локальный журнал управления (CJ) и hub.toml с restore_generation (0600)  |  |
 |  +-----------------------------------------------------------------------------+  |
 |           |                                       |                               |
 |           v Управление процессом                  v Управление процессом          |
@@ -101,7 +101,7 @@
 
 ## 2. Хаб в Proxmox LXC
 
-Хаб и база данных PostgreSQL изолированы в выделенном непривилегированном контейнере Proxmox LXC на базе **Debian 13 (trixie)** ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение) §2).
+Хаб и база данных PostgreSQL изолированы в выделенном контейнере Proxmox LXC ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение) §2). Подложка **Debian 13 (trixie)** и PostgreSQL 18 — выбор этого руководства, повторяющий тестовый контур проекта ([scripts/test-db.sh:21](../../scripts/test-db.sh#L21) использует образ `postgres:18.6-trixie`); контейнер рекомендуется создавать непривилегированным.
 
 ### 2.1. Пакеты ОС и установка PostgreSQL 18
 
@@ -214,7 +214,7 @@ dispatch_sweep = "5s"                               # crates/canterlot-hub/src/c
 listen = "10.0.0.10:8080"                           # crates/canterlot-hub/src/config.rs:142 (привязка к IP хаба в LXC; default в коде: 127.0.0.1:8080, config.rs:162)
 trusted_proxies = ["10.0.0.2/32"]                   # crates/canterlot-hub/src/config.rs:143 (IP отдельного хоста Caddy /32)
 owner_login = "owner"                               # crates/canterlot-hub/src/config.rs:144 (логин в Authelia)
-user_header = "Remote-User"                         # crates/canterlot-hub/src/config.rs:145 (default Remote-User)
+user_header = "Remote-User"                         # crates/canterlot-hub/src/config.rs:145 (default Remote-User, config.rs:165)
 allowed_origins = ["https://chat.example.com"]      # crates/canterlot-hub/src/config.rs:146
 # max_json_body_bytes опущен — действует значение по умолчанию 524288 (512 KiB), crates/canterlot-hub/src/config.rs:167
 header_read_timeout = "10s"                         # crates/canterlot-hub/src/config.rs:149
@@ -234,7 +234,7 @@ poll_interval = "2s"                                # crates/canterlot-hub/src/c
 stall_timeout = "15s"                               # crates/canterlot-hub/src/config.rs:300
 
 [limits]                                            # crates/canterlot-hub/src/config.rs:319
-weekly_reserve_pct = 95                             # crates/canterlot-hub/src/config.rs:320 (порог включения «кранча», 0..=100)
+weekly_reserve_pct = 95                             # crates/canterlot-hub/src/config.rs:320 (порог включения «кранча»; диапазон кодом не проверяется — значения выше 100 не имеют смысла)
 snapshot_min_interval = "10m"                       # crates/canterlot-hub/src/config.rs:322
 history_days = 90                                   # crates/canterlot-hub/src/config.rs:323
 default_resume_text = "Лимиты восстановлены, продолжай с того места, где остановился." # crates/canterlot-hub/src/config.rs:324
@@ -247,8 +247,8 @@ warn_pcts = [80, 90, 95]                            # crates/canterlot-hub/src/c
 stale_after = "35m"                                 # crates/canterlot-hub/src/config.rs:338
 
 [limits.poll_floor]                                 # crates/canterlot-hub/src/config.rs:334
-claude = "30m"                                      # crates/canterlot-hub/src/config.rs:377
-codex = "5m"                                        # crates/canterlot-hub/src/config.rs:378
+claude = "30m"                                      # crates/canterlot-hub/src/config.rs:384
+codex = "5m"                                        # crates/canterlot-hub/src/config.rs:385
 
 [activity]                                          # crates/canterlot-hub/src/config.rs:396
 stalled_generating = "5m"                           # crates/canterlot-hub/src/config.rs:398
@@ -305,7 +305,7 @@ sudo -u canterlot canterlot-hub init --config /etc/canterlot/hub.toml
 
 Команда:
 1. Применяет миграции базы данных sqlx.
-2. Создаёт учётную запись владельца `owner_login`.
+2. Вставляет строку владельца в `owners` со свежим UUID (`installation.rs:62-65`); логин `owner_login` задаётся только в HTTP-конфиге и сопоставляется позже с заголовком идентичности при входе ([crates/canterlot-hub/src/http/auth.rs:132](../../crates/canterlot-hub/src/http/auth.rs#L132)).
 3. Генерирует начальные UUID для `installation_id` и `restore_generation`.
 4. Записывает внешний манифест `/etc/canterlot/manifest/installation.toml`.
 5. Повторный запуск завершается ошибкой, если манифест или таблица инсталляции уже существуют.
@@ -427,7 +427,7 @@ export CANTERLOT_CSP="$(node scripts/print-csp.mjs https://chat.example.com)"
 
 ### 4.2. Конфигурация Caddyfile
 
-Конфигурация сайта строго воспроизводит канонический блок из [README.md:447-480](../../README.md#L447-L480):
+Конфигурация сайта строго воспроизводит канонический блок из [README.md:453-486](../../README.md#L453-L486):
 
 > [!IMPORTANT]
 > Блок `route { ... }` критически необходим. В стандартном порядке директив Caddy удаление заголовков (`request_header -...`) выполнилось бы **после** `forward_auth`, удалив только что проставленный заголовок аутентификации. Внутри `route` порядок выполнения строго соответствует порядку строк в конфиге!
@@ -661,7 +661,7 @@ WantedBy=default.target
 3. При перезапуске воркера (`systemctl --user restart canterlot-worker`):
    - Главный процесс воркера корректно завершается.
    - Процессы сопровождения и CLI продолжают выполняться без сбоев.
-   - Весь вывод CLI и промежуточные события буферизуются процессом сопровождения в локальный сессионный журнал на диске: `data_dir/executions/<execution_id>/journal.db` (`SJ`).
+   - Весь вывод CLI и промежуточные события буферизуются процессом сопровождения в локальный сессионный журнал на диске: `data_dir/executions/<execution_id>/sj/` (`SJ`, [crates/canterlot-worker/src/supervisor/sj.rs:33-38](../../crates/canterlot-worker/src/supervisor/sj.rs#L33-L38)).
 4. При старте нового экземпляра воркер сканирует каталог `data_dir/executions/`, находит живые процессы сопровождения, подключается к их IPC Unix-сокетам (`attach`), сверяет состояние и передаёт накопленные факты в хаб. Агентское исполнение не прерывается.
 
 ### 6.5. Включение linger для пользователя
@@ -745,7 +745,7 @@ cd web && npm ci && npm run build && cd ..
 
 **Поведение пилота**:
 1. При последующем подключении воркера к хабу расхождение курсоров фиксируется как неустранимая ошибка рассинхронизации: воркер возвращает ошибку `WorkerError::StateDivergence` ([crates/canterlot-worker/src/session.rs:836-840](../../crates/canterlot-worker/src/session.rs#L836-L840)).
-2. Процесс воркера немедленно завершает работу с кодом выхода 1 ([crates/canterlot-worker/src/main.rs:98-100](../../crates/canterlot-worker/src/main.rs#L98-L100)).
+2. Процесс воркера немедленно завершает работу с кодом выхода 1 ([crates/canterlot-worker/src/main.rs:44-46](../../crates/canterlot-worker/src/main.rs#L44-L46)).
 
 **Штатные пути восстановления в пилоте**:
 - **Синхронный откат**: одновременное восстановление LXC хаба и VM воркера из парных снапшотов Proxmox VE, снятых в один и тот же момент времени при остановленных сервисах.
