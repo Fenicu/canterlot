@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, atomic::Ordering},
@@ -10,14 +10,15 @@ use canterlot_proto::{
     limits::IPC_PROTOCOL_VERSION,
     worker::{
         ipc::{
-            CliStarted, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest, Ownership,
-            OwnershipPhase, ShipFrom, SjAck, SjBatch, StartCli, StopRequest, SupervisorToControl,
-            control_to_supervisor as down, supervisor_to_control as up,
+            CliStarted, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest, LocalFile,
+            Ownership, OwnershipPhase, ShipFrom, SjAck, SjBatch, StartCli, StopRequest,
+            SupervisorToControl, control_to_supervisor as down, supervisor_to_control as up,
         },
         v1::{
-            CancelInput, Command, CommandRejected, ExecutionState, InputCancelLost, InputCancelWon,
+            AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
+            CommandRejected, ExecutionState, InputCancelLost, InputCancelWon,
             InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, StartExecution,
-            WithdrawInput, command::Kind, record_body::Body,
+            WithdrawInput, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -27,11 +28,13 @@ use tokio::{
     sync::{mpsc, watch},
     time::{Instant, sleep_until},
 };
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::{ExecError, Shared, SjRelay, open, procfs, spawn};
 use crate::{
     adapter,
+    attachments::{AttachmentStore, FetchError, RetryPolicy},
     supervisor::ipc::{read_message, write_message},
 };
 
@@ -43,6 +46,29 @@ pub(crate) enum Msg {
     Command(Command),
     SjAck(u64),
     Replay(u64),
+    AttachmentProgress {
+        key: (Uuid, u32),
+        attachment_id: String,
+        result: Result<(), FetchError>,
+        retryable: bool,
+    },
+    FetchFinished {
+        key: (Uuid, u32),
+        files: Result<Vec<LocalFile>, FetchError>,
+    },
+}
+
+struct FetchTask {
+    command: Command,
+    references: Vec<AttachmentRef>,
+    cancel: CancellationToken,
+    shutdown: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+impl Drop for FetchTask {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub(super) struct SpawnRequest {
@@ -495,6 +521,8 @@ pub(super) struct Actor {
     cli_started: bool,
     handed: HashSet<(Uuid, u32)>,
     cancelled_local: HashSet<(Uuid, u32)>,
+    fetching: HashMap<(Uuid, u32), FetchTask>,
+    attachments: Option<Arc<AttachmentStore>>,
     outbox: VecDeque<SjRelay>,
     last_seq: u64,
     acked_seq: u64,
@@ -534,6 +562,8 @@ impl Actor {
             cli_started: false,
             handed: HashSet::new(),
             cancelled_local: HashSet::new(),
+            fetching: HashMap::new(),
+            attachments: None,
             outbox: VecDeque::new(),
             last_seq: 0,
             acked_seq: 0,
@@ -549,6 +579,10 @@ impl Actor {
 
     pub(super) async fn run(mut self, start: Start) {
         let result = self.run_inner(start).await;
+        for (_, mut fetch) in self.fetching.drain() {
+            fetch.shutdown.cancel();
+            let _ = (&mut fetch.task).await;
+        }
         if let Err(error) = &result {
             tracing::warn!(execution_id = %self.id, error_kind = ?std::mem::discriminant(error), "execution actor stopped");
         }
@@ -613,7 +647,13 @@ impl Actor {
         self.acked_seq = attached.acked_sj_seq;
         for input in &attached.received {
             if let Ok(id) = Uuid::parse_str(&input.command_id) {
-                self.handed.insert((id, input.dispatch_attempt));
+                let key = (id, input.dispatch_attempt);
+                if matches!(input.state.as_str(), "cancelled" | "withdrawn") {
+                    self.handed.remove(&key);
+                    self.cancelled_local.insert(key);
+                } else {
+                    self.handed.insert(key);
+                }
             }
         }
         self.link = Some(Link {
@@ -1051,6 +1091,8 @@ impl Actor {
     }
 
     async fn release(&mut self) -> Result<(), ExecError> {
+        // Каталог исполнения удаляется ниже: незавершённые загрузки возвращают ввод хабу.
+        self.cancel_fetches().await?;
         let outcome = self
             .shared
             .infos
@@ -1103,6 +1145,48 @@ impl Actor {
                 .await;
                 Ok(())
             }
+            Msg::AttachmentProgress {
+                key,
+                attachment_id,
+                result,
+                retryable,
+            } => {
+                if self.discard_closed_fetch(key).await? {
+                    return Ok(());
+                }
+                if let Some(fetch) = self.fetching.get(&key) {
+                    let command_id = fetch.command.command_id.clone();
+                    let dispatch_attempt = fetch.command.dispatch_attempt;
+                    let fact = match result {
+                        Ok(()) => Body::AttachmentReady(AttachmentReady {
+                            command_id,
+                            dispatch_attempt,
+                            attachment_id,
+                        }),
+                        Err(error) => Body::AttachmentFailed(AttachmentFailed {
+                            command_id,
+                            dispatch_attempt,
+                            attachment_id,
+                            reason: error.reason().into(),
+                            retryable,
+                        }),
+                    };
+                    self.shared.cj(vec![fact], vec![]).await?;
+                }
+                Ok(())
+            }
+            Msg::FetchFinished { key, files } => {
+                if self.discard_closed_fetch(key).await? {
+                    return Ok(());
+                }
+                let Some(fetch) = self.fetching.remove(&key) else {
+                    return Ok(());
+                };
+                match files {
+                    Ok(files) => self.deliver(fetch.command.clone(), files).await,
+                    Err(_) => reject(&self.shared, &fetch.command, "attachment_unavailable").await,
+                }
+            }
         }
     }
 
@@ -1113,6 +1197,7 @@ impl Actor {
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
             up::Msg::SjBatch(batch) => self.on_batch(batch).await?,
             up::Msg::Exited(exited) => {
+                self.cancel_fetches().await?;
                 self.finished = true;
                 self.reconnect_at = None;
                 let outcome = exited.reason;
@@ -1215,9 +1300,15 @@ impl Actor {
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt))
                 }
                 Body::CancelWon(fact) => {
+                    if let Ok(id) = fact.command_id.parse() {
+                        self.handed.remove(&(id, fact.dispatch_attempt));
+                    }
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
                 }
                 Body::InputWithdrawn(fact) => {
+                    if let Ok(id) = fact.command_id.parse() {
+                        self.handed.remove(&(id, fact.dispatch_attempt));
+                    }
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
                 }
                 Body::DispatchDeferred(fact) => {
@@ -1262,7 +1353,13 @@ impl Actor {
     }
 
     async fn on_command(&mut self, command: Command) -> Result<(), ExecError> {
-        if self.link.is_none() && !self.finished {
+        if self.link.is_none()
+            && !self.finished
+            && !matches!(
+                command.kind,
+                Some(Kind::CancelInput(_) | Kind::WithdrawInput(_) | Kind::StopExecution(_))
+            )
+        {
             self.waiting.push_back(command);
             return Ok(());
         }
@@ -1284,7 +1381,7 @@ impl Actor {
                 }
                 Ok(())
             }
-            Some(Kind::DeliverInput(_)) => {
+            Some(Kind::DeliverInput(input)) => {
                 let Ok(cid) = Uuid::parse_str(&cid_text) else {
                     return Ok(());
                 };
@@ -1297,16 +1394,56 @@ impl Actor {
                     }
                     return answer_without_execution(&self.shared, &command).await;
                 }
-                self.handed.insert((cid, attempt));
-                if !self
-                    .send(down::Msg::Deliver(Deliver {
-                        command: Some(command.clone()),
-                        ..Default::default()
-                    }))
-                    .await
-                {
-                    self.waiting.push_back(command);
+                if self.fetching.contains_key(&(cid, attempt)) {
+                    return Ok(());
                 }
+                let references: Vec<_> = input
+                    .content
+                    .into_iter()
+                    .filter_map(|b| match b.block {
+                        Some(content_block::Block::Attachment(r)) => Some(r),
+                        _ => None,
+                    })
+                    .collect();
+                if references.is_empty() {
+                    return self.deliver(command, vec![]).await;
+                }
+                if self.discard_closed_fetch((cid, attempt)).await? {
+                    return Ok(());
+                }
+                let obsolete: Vec<_> = self
+                    .fetching
+                    .keys()
+                    .copied()
+                    .filter(|(id, old_attempt)| *id == cid && *old_attempt != attempt)
+                    .collect();
+                for key in obsolete {
+                    self.cancel_fetch(key).await;
+                }
+                let command_id = cid_text;
+                let pilot = self
+                    .shared
+                    .store
+                    .call(move |slot| {
+                        Ok(open(slot)?
+                            .command_state(&command_id)?
+                            .is_some_and(|s| s.pilot_v1))
+                    })
+                    .await?;
+                if !pilot {
+                    return reject(&self.shared, &command, "attachment_unavailable").await;
+                }
+                if self.attachments.is_none() {
+                    let dir = self
+                        .exec_dir
+                        .as_ref()
+                        .ok_or(ExecError::Verify("exec_dir"))?;
+                    self.attachments = Some(Arc::new(AttachmentStore::with_slots(
+                        dir,
+                        self.shared.fetch_slots.clone(),
+                    )?));
+                }
+                self.start_fetch(command, references);
                 Ok(())
             }
             Some(Kind::CancelInput(CancelInput {
@@ -1357,6 +1494,11 @@ impl Actor {
                 }
             }
             Some(Kind::StopExecution(stop)) => {
+                self.cancel_fetches().await?;
+                if !live && !self.finished {
+                    self.waiting.push_back(command);
+                    return Ok(());
+                }
                 if live
                     && !self
                         .send(down::Msg::Stop(StopRequest {
@@ -1406,6 +1548,9 @@ impl Actor {
         if self.cancelled_local.contains(&(target_id, target_attempt)) {
             return self.shared.cj(vec![], terminal_self(command)).await;
         }
+        if self.fetching.contains_key(&(target_id, target_attempt)) {
+            self.cancel_fetch((target_id, target_attempt)).await;
+        }
         let handed = self.handed.iter().any(|(id, _)| *id == target_id);
         if handed {
             if live {
@@ -1449,6 +1594,179 @@ impl Actor {
             )
             .await
     }
+
+    async fn deliver(&mut self, command: Command, files: Vec<LocalFile>) -> Result<(), ExecError> {
+        let id = Uuid::parse_str(&command.command_id).map_err(|_| ExecError::InvalidCommand)?;
+        self.handed.insert((id, command.dispatch_attempt));
+        if !self
+            .send(down::Msg::Deliver(Deliver {
+                command: Some(command.clone()),
+                files,
+            }))
+            .await
+        {
+            self.waiting.push_back(command);
+        }
+        Ok(())
+    }
+
+    fn start_fetch(&mut self, command: Command, references: Vec<AttachmentRef>) {
+        let key = (
+            Uuid::parse_str(&command.command_id).expect("validated command"),
+            command.dispatch_attempt,
+        );
+        let store = self.attachments.as_ref().expect("attachment store").clone();
+        let source = self.shared.attachment_source.subscribe();
+        let config = &self.shared.attachment_config;
+        let policy = RetryPolicy {
+            content_attempts: config.fetch_attempts,
+            retry: config.fetch_retry,
+            backoff_cap: config.fetch_backoff_cap,
+        };
+        let sender = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .get(&self.id)
+            .expect("actor sender")
+            .clone();
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        let shutdown = CancellationToken::new();
+        let shutdown_rx = shutdown.clone();
+        let refs = references.clone();
+        let task = tokio::spawn(async move {
+            let mut tasks = tokio::task::JoinSet::new();
+            for (position, reference) in refs.into_iter().enumerate() {
+                let (store, source, policy, cancel, sender) = (
+                    store.clone(),
+                    source.clone(),
+                    policy.clone(),
+                    token.clone(),
+                    sender.clone(),
+                );
+                tasks.spawn(async move {
+                    let attachment_id = reference.attachment_id.clone();
+                    let report = |error, retryable| {
+                        let _ = sender.send(Msg::AttachmentProgress {
+                            key,
+                            attachment_id: attachment_id.clone(),
+                            result: Err(error),
+                            retryable,
+                        });
+                    };
+                    let result = store
+                        .ensure_reporting(source, &reference, &policy, cancel.clone(), report)
+                        .await;
+                    if cancel.is_cancelled() {
+                        return Err(FetchError::Transport);
+                    }
+                    let message = Msg::AttachmentProgress {
+                        key,
+                        attachment_id,
+                        result: result.as_ref().map(|_| ()).map_err(|e| *e),
+                        retryable: false,
+                    };
+                    let _ = sender.send(message);
+                    result.map(|p| {
+                        (
+                            position,
+                            LocalFile {
+                                path: p.path.to_string_lossy().into_owned(),
+                                name: p.name,
+                                mime: p.mime,
+                                size: p.size,
+                                image: p.image,
+                            },
+                        )
+                    })
+                });
+            }
+            let mut files = Vec::new();
+            let mut failure = None;
+            loop {
+                let result = tokio::select! {
+                    biased;
+                    _=shutdown_rx.cancelled()=>{tasks.shutdown().await;return;}
+                    result=tasks.join_next()=>result,
+                };
+                let Some(result) = result else {
+                    break;
+                };
+                match result.unwrap_or(Err(FetchError::Io)) {
+                    Ok(file) => files.push(file),
+                    Err(error) => {
+                        if failure.is_none() {
+                            failure = Some(error);
+                        }
+                        token.cancel();
+                    }
+                }
+            }
+            files.sort_by_key(|(position, _)| *position);
+            let result = failure.map_or_else(
+                || Ok(files.into_iter().map(|(_, file)| file).collect()),
+                Err,
+            );
+            let _ = sender.send(Msg::FetchFinished { key, files: result });
+        });
+        self.fetching.insert(
+            key,
+            FetchTask {
+                command,
+                references,
+                cancel,
+                shutdown,
+                task,
+            },
+        );
+    }
+
+    async fn cancel_fetch(&mut self, key: (Uuid, u32)) {
+        if let Some(mut fetch) = self.fetching.remove(&key) {
+            fetch.cancel.cancel();
+            let _ = (&mut fetch.task).await;
+            if let Some(store) = &self.attachments {
+                for r in &fetch.references {
+                    if let Ok(id) = r.attachment_id.parse() {
+                        store.remove_temp(id);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn discard_closed_fetch(&mut self, key: (Uuid, u32)) -> Result<bool, ExecError> {
+        let closed = self
+            .shared
+            .store
+            .call(move |slot| {
+                let store = open(slot)?;
+                let id = key.0.to_string();
+                let closed = store.delivery_is_closed(&id, key.1)?;
+                if closed {
+                    store.mark_terminal(&id, key.1)?;
+                }
+                Ok(closed)
+            })
+            .await?;
+        if closed {
+            self.cancel_fetch(key).await;
+        }
+        Ok(closed)
+    }
+    async fn cancel_fetches(&mut self) -> Result<(), ExecError> {
+        let keys: Vec<_> = self.fetching.keys().copied().collect();
+        for key in keys {
+            let command = self.fetching.get(&key).map(|fetch| fetch.command.clone());
+            self.cancel_fetch(key).await;
+            if let Some(command) = command {
+                defer_unhanded(&self.shared, &command).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 async fn recv_up(link: &mut Option<Link>) -> Option<Up> {
@@ -1473,6 +1791,298 @@ mod tests {
         store::WorkerStore,
     };
     use canterlot_proto::worker::v1::{DeliverInput, InputCancelLost, JournalRecord, RecordBody};
+
+    #[tokio::test]
+    async fn cancel_and_withdraw_of_a_redispatched_fetch_are_local() {
+        for cancel_input in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+            let id = Uuid::now_v7();
+            let cid = Uuid::now_v7();
+            let input = Command {
+                command_id: cid.to_string(),
+                dispatch_attempt: 2,
+                execution_id: id.to_string(),
+                execution_generation: 1,
+                kind: Some(Kind::DeliverInput(DeliverInput::default())),
+            };
+            let kind = if cancel_input {
+                Kind::CancelInput(CancelInput {
+                    target_command_id: cid.to_string(),
+                    target_dispatch_attempt: 2,
+                })
+            } else {
+                Kind::WithdrawInput(WithdrawInput {
+                    target_command_id: cid.to_string(),
+                    target_dispatch_attempt: 2,
+                })
+            };
+            let command = Command {
+                command_id: Uuid::now_v7().to_string(),
+                dispatch_attempt: 1,
+                execution_id: id.to_string(),
+                execution_generation: 1,
+                kind: Some(kind),
+            };
+            store.accept_command(&input).unwrap();
+            store.accept_command(&command).unwrap();
+            let thread = StoreThread::new(store);
+            let (relay, _rx) = mpsc::channel(1);
+            let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+            let (_tx, rx) = mpsc::unbounded_channel();
+            let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+            actor.handed.insert((cid, 1));
+            let journal = Uuid::now_v7();
+            actor.journal_id = Some(journal);
+            actor
+                .on_batch(SjBatch {
+                    journal_id: journal.to_string(),
+                    records: vec![JournalRecord {
+                        seq: 1,
+                        body: Some(RecordBody {
+                            body: Some(Body::InputWithdrawn(InputWithdrawn {
+                                command_id: cid.to_string(),
+                                dispatch_attempt: 1,
+                            })),
+                        }),
+                    }],
+                })
+                .await
+                .unwrap();
+            let cancel = CancellationToken::new();
+            let token = cancel.clone();
+            actor.fetching.insert(
+                (cid, 2),
+                FetchTask {
+                    command: input,
+                    references: vec![],
+                    cancel,
+                    shutdown: CancellationToken::new(),
+                    task: tokio::spawn(async move {
+                        token.cancelled().await;
+                    }),
+                },
+            );
+            actor.on_command(command).await.unwrap();
+            assert!(actor.fetching.is_empty());
+            assert!(actor.waiting.is_empty());
+            thread
+                .client()
+                .call(move |slot| {
+                    let store = open(slot)?;
+                    assert!(store.command_state(&cid.to_string())?.unwrap().terminal);
+                    assert!(store.cj_records_from(1, usize::MAX)?.iter().any(|r| {
+                        match r.body.as_ref().and_then(|b| b.body.as_ref()) {
+                            Some(Body::CancelWon(f)) => cancel_input && f.dispatch_attempt == 2,
+                            Some(Body::InputWithdrawn(f)) => {
+                                !cancel_input && f.dispatch_attempt == 2
+                            }
+                            _ => false,
+                        }
+                    }));
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            drop(actor);
+            manager.shutdown().await;
+            thread.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn stop_during_ipc_reconnect_cancels_fetch_but_waits_for_delivery() {
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("store");
+        let mut store = WorkerStore::open(&data).unwrap();
+        let id = Uuid::now_v7();
+        let cid = Uuid::now_v7();
+        let input = Command {
+            command_id: cid.to_string(),
+            dispatch_attempt: 1,
+            execution_id: id.to_string(),
+            execution_generation: 1,
+            kind: Some(Kind::DeliverInput(DeliverInput::default())),
+        };
+        let stop = Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: id.to_string(),
+            execution_generation: 1,
+            kind: Some(Kind::StopExecution(Default::default())),
+        };
+        store.accept_command(&input).unwrap();
+        store.accept_command(&stop).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let attachment = Uuid::now_v7();
+        let files = Arc::new(AttachmentStore::new(root.path(), 2).unwrap());
+        let temporary = root
+            .path()
+            .join("attachments/.tmp")
+            .join(format!("{attachment}.part"));
+        fs::write(&temporary, b"partial").unwrap();
+        actor.attachments = Some(files);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        actor.fetching.insert(
+            (cid, 1),
+            FetchTask {
+                command: input,
+                references: vec![AttachmentRef {
+                    attachment_id: attachment.to_string(),
+                    ..Default::default()
+                }],
+                cancel,
+                shutdown: CancellationToken::new(),
+                task: tokio::spawn(async move {
+                    token.cancelled().await;
+                }),
+            },
+        );
+        actor.on_command(stop.clone()).await.unwrap();
+        assert!(actor.fetching.is_empty());
+        assert!(!temporary.exists());
+        assert_eq!(actor.waiting.len(), 1);
+        let stop_id = stop.command_id;
+        thread
+            .client()
+            .call(move |slot| {
+                assert!(!open(slot)?.command_state(&stop_id)?.unwrap().terminal);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn not_found_after_durable_cancel_receipt_is_silent() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let cid = Uuid::now_v7();
+        let command = Command {
+            command_id: cid.to_string(),
+            dispatch_attempt: 1,
+            execution_id: id.to_string(),
+            execution_generation: 1,
+            kind: Some(Kind::DeliverInput(DeliverInput::default())),
+        };
+        store.accept_command_with_pilot(&command, true).unwrap();
+        store
+            .append_cj_fact(Body::CancelWon(InputCancelWon {
+                command_id: cid.to_string(),
+                dispatch_attempt: 1,
+            }))
+            .unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        actor.fetching.insert(
+            (cid, 1),
+            FetchTask {
+                command,
+                references: vec![],
+                cancel: CancellationToken::new(),
+                shutdown: CancellationToken::new(),
+                task: tokio::spawn(async {}),
+            },
+        );
+        actor
+            .on_msg(Msg::FetchFinished {
+                key: (cid, 1),
+                files: Err(FetchError::NotFound),
+            })
+            .await
+            .unwrap();
+        thread
+            .client()
+            .call(move |slot| {
+                let store = open(slot)?;
+                assert!(store.command_state(&cid.to_string())?.unwrap().terminal);
+                assert!(
+                    !store
+                        .cj_records_from(1, usize::MAX)?
+                        .iter()
+                        .any(|r| matches!(
+                            r.body.as_ref().and_then(|b| b.body.as_ref()),
+                            Some(Body::CommandRejected(_))
+                        ))
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn release_defers_inputs_still_fetching() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let cid = Uuid::now_v7();
+        let input = Command {
+            command_id: cid.to_string(),
+            dispatch_attempt: 1,
+            execution_id: id.to_string(),
+            execution_generation: 1,
+            kind: Some(Kind::DeliverInput(DeliverInput::default())),
+        };
+        store.accept_command_with_pilot(&input, true).unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        actor.fetching.insert(
+            (cid, 1),
+            FetchTask {
+                command: input,
+                references: vec![],
+                cancel,
+                shutdown: CancellationToken::new(),
+                task: tokio::spawn(async move {
+                    token.cancelled().await;
+                }),
+            },
+        );
+        actor.release().await.unwrap();
+        assert!(actor.fetching.is_empty());
+        thread
+            .client()
+            .call(move |slot| {
+                let store = open(slot)?;
+                assert!(store.command_state(&cid.to_string())?.unwrap().terminal);
+                assert!(
+                    store
+                        .cj_records_from(1, usize::MAX)?
+                        .iter()
+                        .any(|r| matches!(
+                            r.body.as_ref().and_then(|b| b.body.as_ref()),
+                            Some(Body::DispatchDeferred(f)) if f.command_id == cid.to_string()
+                        ))
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn cancel_lost_releases_pending_delivery() {

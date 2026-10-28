@@ -19,7 +19,8 @@ use tokio::{
 use uuid::Uuid;
 
 use crate::{
-    config::ExecutionConfig,
+    attachments::AttachmentSource,
+    config::{ExecutionConfig, WorkerAttachmentsConfig},
     session::WorkerError,
     session_store::StoreClient,
     store::{Accept, StoreError, WorkerStore},
@@ -71,6 +72,9 @@ pub(crate) struct ExecInfo {
 pub(crate) struct Shared {
     pub route_lock: tokio::sync::Mutex<()>,
     pub config: ExecutionConfig,
+    pub attachment_config: WorkerAttachmentsConfig,
+    pub attachment_source: watch::Sender<Option<Arc<dyn AttachmentSource>>>,
+    pub fetch_slots: Arc<tokio::sync::Semaphore>,
     pub store: StoreClient,
     pub relay: mpsc::Sender<SjRelay>,
     pub enabled: AtomicBool,
@@ -230,11 +234,25 @@ impl ExecutionManager {
         store: StoreClient,
         relay: mpsc::Sender<SjRelay>,
     ) -> ExecutionManager {
+        Self::new_with_attachments(config, store, relay, WorkerAttachmentsConfig::default())
+    }
+
+    pub fn new_with_attachments(
+        config: ExecutionConfig,
+        store: StoreClient,
+        relay: mpsc::Sender<SjRelay>,
+        attachment_config: WorkerAttachmentsConfig,
+    ) -> Self {
         let (shutdown, shutdown_rx) = watch::channel(false);
         ExecutionManager {
             shared: Arc::new(Shared {
                 route_lock: tokio::sync::Mutex::new(()),
                 config,
+                fetch_slots: Arc::new(tokio::sync::Semaphore::new(
+                    attachment_config.fetch_parallelism.clamp(1, 2),
+                )),
+                attachment_config,
+                attachment_source: watch::channel(None).0,
                 store,
                 relay,
                 enabled: AtomicBool::new(true),
@@ -265,6 +283,10 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_ipc_send(&self) {
         *self.shared.fail_sends.lock().expect("send fault lock") += 1;
+    }
+
+    pub fn set_attachment_source(&self, source: Option<Arc<dyn AttachmentSource>>) {
+        self.shared.attachment_source.send_replace(source);
     }
 
     pub fn set_enabled(&self, enabled: bool) {

@@ -49,6 +49,8 @@ pub struct Behavior {
     pub pause_after_first_batch: Duration,
     pub ack_override: Option<u64>,
     pub status: Option<(tonic::Code, &'static str)>,
+    pub fetch_failures: Arc<Mutex<std::collections::VecDeque<tonic::Code>>>,
+    pub attachment: Vec<u8>,
 }
 
 impl Default for Behavior {
@@ -67,6 +69,8 @@ impl Default for Behavior {
             pause_after_first_batch: Duration::ZERO,
             ack_override: None,
             status: None,
+            fetch_failures: Arc::default(),
+            attachment: Vec::new(),
         }
     }
 }
@@ -276,9 +280,38 @@ impl WorkerData for Service {
 
     async fn fetch_attachment(
         &self,
-        _request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
+        request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
     ) -> Result<Response<Self::FetchAttachmentStream>, Status> {
-        Err(Status::unimplemented("attachment fetch is not implemented"))
+        self.check(&request);
+        if let Some(code) = self.behavior.fetch_failures.lock().unwrap().pop_front() {
+            return Err(Status::new(code, "fetch_unavailable"));
+        }
+        let offset = request.into_inner().offset as usize;
+        let (tx, rx) = mpsc::channel(1);
+        let bytes = self.behavior.attachment.clone();
+        tokio::spawn(async move {
+            let mut offset = offset;
+            loop {
+                let end = (offset + 131_072).min(bytes.len());
+                if offset > end {
+                    break;
+                }
+                if tx
+                    .send(Ok(AttachmentChunk {
+                        offset: offset as u64,
+                        data: bytes[offset..end].to_vec(),
+                        last: end == bytes.len(),
+                    }))
+                    .await
+                    .is_err()
+                    || end == bytes.len()
+                {
+                    break;
+                }
+                offset = end;
+            }
+        });
+        Ok(Response::new(ReceiverStream::new(rx)))
     }
 
     type DataStream = ReceiverStream<Result<DataDown, Status>>;

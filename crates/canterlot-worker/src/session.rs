@@ -22,6 +22,7 @@ use tonic::{
 use uuid::Uuid;
 
 use crate::{
+    attachments::{AttachmentSource, ChunkStream, FetchError},
     config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
     exec::{ExecutionManager, SjRelay},
     session_store::StoreThread,
@@ -210,6 +211,51 @@ impl WorkerError {
 #[derive(Clone)]
 struct Bearer(MetadataValue<Ascii>);
 
+pub struct GrpcAttachmentSource {
+    client: WorkerDataClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, Bearer>,
+    >,
+}
+
+impl GrpcAttachmentSource {
+    pub fn from_data_channel(
+        channel: tonic::transport::Channel,
+        credential: MetadataValue<Ascii>,
+    ) -> Self {
+        Self {
+            client: WorkerDataClient::with_interceptor(channel, Bearer(credential))
+                .max_encoding_message_size(MAX_MESSAGE_BYTES)
+                .max_decoding_message_size(MAX_MESSAGE_BYTES),
+        }
+    }
+}
+
+fn fetch_error(status: Status) -> FetchError {
+    match status.code() {
+        tonic::Code::NotFound | tonic::Code::PermissionDenied => FetchError::NotFound,
+        tonic::Code::OutOfRange | tonic::Code::InvalidArgument => FetchError::SizeMismatch,
+        _ => FetchError::Transport,
+    }
+}
+
+#[async_trait::async_trait]
+impl AttachmentSource for GrpcAttachmentSource {
+    async fn open(&self, attachment_id: Uuid, offset: u64) -> Result<ChunkStream, FetchError> {
+        use tokio_stream::StreamExt;
+        let stream = self
+            .client
+            .clone()
+            .fetch_attachment(FetchAttachmentRequest {
+                attachment_id: attachment_id.to_string(),
+                offset,
+            })
+            .await
+            .map_err(fetch_error)?
+            .into_inner();
+        Ok(Box::pin(stream.map(|chunk| chunk.map_err(fetch_error))))
+    }
+}
+
 impl Interceptor for Bearer {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
         request
@@ -327,6 +373,7 @@ impl Worker {
             let _ = task.await;
         }
         if let Some(manager) = self.manager.take() {
+            manager.set_attachment_source(None);
             manager.shutdown().await;
         }
         let closed = self.store.close().await;
@@ -339,8 +386,12 @@ impl Worker {
             .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
             .await?;
         let (sender, relay) = mpsc::channel(8);
-        let manager =
-            ExecutionManager::new(self.config.execution.clone(), self.store.client(), sender);
+        let manager = ExecutionManager::new_with_attachments(
+            self.config.execution.clone(),
+            self.store.client(),
+            sender,
+            self.config.attachments.clone(),
+        );
         manager
             .startup_verify()
             .await
@@ -371,6 +422,7 @@ impl Worker {
         ]
         .contains(&Duration::ZERO)
             || timers.backoff_min > timers.backoff_max
+            || !self.config.attachments.valid()
         {
             return Err(WorkerError::InvalidConfig);
         }
@@ -401,6 +453,7 @@ impl Worker {
             if let Some(task) = self.metrics_task.take() {
                 let _ = task.await;
             }
+            self.manager.as_ref().unwrap().set_attachment_source(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
             if let WorkerError::Hub { code, .. } = &error {
@@ -681,6 +734,14 @@ impl Worker {
             }
         }
         let exec_enabled = accepted.capabilities.iter().any(|cap| cap == "exec_v1");
+        self.manager
+            .as_ref()
+            .unwrap()
+            .set_attachment_source(pilot.then(|| {
+                std::sync::Arc::new(GrpcAttachmentSource {
+                    client: data.clone(),
+                }) as std::sync::Arc<dyn AttachmentSource>
+            }));
         self.manager.as_ref().unwrap().set_enabled(exec_enabled);
         self.transition(SessionState::Reconciling);
         check_generation(generation, &accepted)?;
@@ -859,7 +920,10 @@ impl Worker {
                     && let Some(command) = commands.pop_front()
                 {
                     operation = Some(Box::pin(self.store.call(move |store| {
-                        let accept = store.as_mut().unwrap().accept_command(&command)?;
+                        let accept = store
+                            .as_mut()
+                            .unwrap()
+                            .accept_command_with_pilot(&command, pilot)?;
                         Ok(StoreReply::Command(Box::new(command), accept))
                     })));
                 }

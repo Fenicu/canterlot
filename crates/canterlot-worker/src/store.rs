@@ -65,6 +65,8 @@ struct ReceiptEntry {
     terminal: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     transmitted: bool,
+    #[serde(default)]
+    pilot_v1: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,6 +75,7 @@ pub struct CommandState {
     pub class: ReceiptClass,
     pub inbox_seq: Option<u64>,
     pub terminal: bool,
+    pub pilot_v1: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -315,6 +318,7 @@ impl WorkerStore {
                         .get(&command_id)
                         .is_some_and(|entry| entry.transmitted);
                 let terminal = class == ReceiptClass::Rejected;
+                let pilot_v1 = self.pilot_marker(&command_id, attempt).exists();
                 self.append_receipt(ReceiptEntry {
                     command_id,
                     attempt,
@@ -322,6 +326,7 @@ impl WorkerStore {
                     inbox_seq,
                     terminal,
                     transmitted: was_transmitted,
+                    pilot_v1,
                 })?;
             }
         }
@@ -333,8 +338,12 @@ impl WorkerStore {
                 .is_none_or(|entry| entry.attempt < cmd.dispatch_attempt)
             {
                 self.append_stored_fact(&cmd)?;
+                let pilot_v1 = self
+                    .pilot_marker(&command_id, cmd.dispatch_attempt)
+                    .exists();
                 self.append_receipt(ReceiptEntry {
                     transmitted: transmitted.contains(&command_id),
+                    pilot_v1,
                     command_id,
                     attempt: cmd.dispatch_attempt,
                     class: ReceiptClass::Stored,
@@ -365,6 +374,16 @@ impl WorkerStore {
             self.record_transmission(&command_id)?;
         }
         self.release_inbox()?;
+        for entry in fs::read_dir(&self.data_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            if name
+                .to_str()
+                .is_some_and(|name| name.starts_with(".pilot-") && name.ends_with(".mark"))
+            {
+                fs::remove_file(entry.path())?;
+            }
+        }
         Ok(())
     }
 
@@ -389,6 +408,14 @@ impl WorkerStore {
     }
 
     pub fn accept_command(&mut self, cmd: &Command) -> Result<Accept, StoreError> {
+        self.accept_command_with_pilot(cmd, false)
+    }
+
+    pub fn accept_command_with_pilot(
+        &mut self,
+        cmd: &Command,
+        pilot_v1: bool,
+    ) -> Result<Accept, StoreError> {
         self.ensure_open()?;
         let Ok(id) = Uuid::parse_str(&cmd.command_id) else {
             tracing::warn!(error_kind = "invalid_command_id", "command dropped");
@@ -425,7 +452,7 @@ impl WorkerStore {
         let result = if let Some(reason) = reason {
             self.reject_command(cmd, command_id, reason)
         } else {
-            self.append_command(cmd, command_id, redelivered)
+            self.append_command(cmd, command_id, redelivered, pilot_v1)
         };
         if result.is_err() {
             self.poisoned = true;
@@ -469,6 +496,7 @@ impl WorkerStore {
             inbox_seq,
             terminal: true,
             transmitted,
+            pilot_v1: false,
         })?;
         Ok(Accept::Rejected { cj_seq, reason })
     }
@@ -493,7 +521,12 @@ impl WorkerStore {
         cmd: &Command,
         command_id: String,
         redelivered: bool,
+        pilot_v1: bool,
     ) -> Result<Accept, StoreError> {
+        let marker = self.pilot_marker(&command_id, cmd.dispatch_attempt);
+        if pilot_v1 {
+            write_private_atomic(&marker, b"")?;
+        }
         let inbox_seq = self.inbox.append(&cmd.encode_to_vec())?;
         self.append_boundary(AppendBoundary::Inbox)?;
         let cj_seq = self.append_stored_fact(cmd)?;
@@ -504,12 +537,21 @@ impl WorkerStore {
             inbox_seq: Some(inbox_seq),
             terminal: false,
             transmitted: false,
+            pilot_v1,
         })?;
+        if pilot_v1 {
+            fs::remove_file(marker)?;
+        }
         Ok(if redelivered {
             Accept::Redelivered { cj_seq }
         } else {
             Accept::Stored { cj_seq }
         })
+    }
+
+    fn pilot_marker(&self, command_id: &str, attempt: u32) -> PathBuf {
+        self.data_dir
+            .join(format!(".pilot-{command_id}-{attempt}.mark"))
     }
 
     pub fn command_state(&self, command_id: &str) -> Result<Option<CommandState>, StoreError> {
@@ -522,7 +564,40 @@ impl WorkerStore {
                 class: entry.class.clone(),
                 inbox_seq: entry.inbox_seq,
                 terminal: entry.terminal,
+                pilot_v1: entry.pilot_v1,
             }))
+    }
+
+    pub(crate) fn delivery_is_closed(
+        &self,
+        command_id: &str,
+        attempt: u32,
+    ) -> Result<bool, StoreError> {
+        if self
+            .command_state(command_id)?
+            .is_some_and(|s| s.attempt > attempt || (s.attempt == attempt && s.terminal))
+        {
+            return Ok(true);
+        }
+        let mut from = self.cj.first_seq();
+        while from <= self.cj.last_seq() {
+            for record in self.cj_records_from(from, MAX_MESSAGE_BYTES)? {
+                from = record.seq + 1;
+                let cancelled = match record.body.and_then(|b| b.body) {
+                    Some(record_body::Body::CancelWon(f)) => {
+                        f.command_id == command_id && f.dispatch_attempt == attempt
+                    }
+                    Some(record_body::Body::InputWithdrawn(f)) => {
+                        f.command_id == command_id && f.dispatch_attempt == attempt
+                    }
+                    _ => false,
+                };
+                if cancelled {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
     }
 
     pub fn inbox_command(
@@ -637,6 +712,7 @@ impl WorkerStore {
                     inbox_seq: None,
                     terminal: true,
                     transmitted: false,
+                    pilot_v1: false,
                 })?;
             }
             self.release_inbox()

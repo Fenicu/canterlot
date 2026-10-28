@@ -134,6 +134,7 @@ pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> T
         listener,
         tls::test_pki(),
         None,
+        None,
         #[cfg(feature = "fault-injection")]
         Default::default(),
     )
@@ -155,6 +156,7 @@ pub async fn spawn_test_hub_http(
         listener,
         tls::test_pki(),
         Some(http),
+        None,
         #[cfg(feature = "fault-injection")]
         Default::default(),
     )
@@ -173,7 +175,26 @@ pub async fn spawn_test_hub_with_faults(
         tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
             .await
             .expect("test listener");
-    spawn_on(pool, timers, listener, pki, None, faults).await
+    spawn_on(pool, timers, listener, pki, None, None, faults).await
+}
+
+#[cfg(feature = "fault-injection")]
+pub async fn spawn_test_hub_with_attachment_store(
+    pool: PgPool,
+    timers: crate::config::HubTimers,
+    addr: Option<std::net::SocketAddr>,
+    pki: tls::TestPki,
+    faults: crate::fault_injection::Faults,
+    attachments: (
+        crate::config::AttachmentsConfig,
+        std::sync::Arc<dyn crate::attachments::BlobStore>,
+    ),
+) -> TestHub {
+    let listener =
+        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test listener");
+    spawn_on(pool, timers, listener, pki, None, Some(attachments), faults).await
 }
 
 async fn spawn_on(
@@ -182,6 +203,10 @@ async fn spawn_on(
     listener: tokio::net::TcpListener,
     pki: tls::TestPki,
     http: Option<crate::config::HttpConfig>,
+    attachment_store: Option<(
+        crate::config::AttachmentsConfig,
+        std::sync::Arc<dyn crate::attachments::BlobStore>,
+    )>,
     #[cfg(feature = "fault-injection")] faults: crate::fault_injection::Faults,
 ) -> TestHub {
     use crate::{
@@ -190,7 +215,8 @@ async fn spawn_on(
         session::Registry,
     };
     let (installation, manifest, directory) = test_installation(&pool).await;
-    let (attachments, blobs) = test_blob_store(directory.path());
+    let (attachments, blobs) =
+        attachment_store.unwrap_or_else(|| test_blob_store(directory.path()));
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =

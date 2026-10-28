@@ -24,6 +24,7 @@ sha2 = "0.11.1"
 thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "sync", "time", "signal", "process", "net", "io-std", "io-util", "fs"] }
 tokio-stream = "0.1.19"
+tokio-util = { version = "0.7.20", features = ["rt"] }
 toml = "1.1.8"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tracing = "0.1.44"

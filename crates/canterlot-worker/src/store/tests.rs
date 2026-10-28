@@ -492,3 +492,31 @@ fn ownership_append_error_poisons_parent_store() {
     assert!(store.ownership().live().is_empty());
     assert_eq!(store.cj_cursor().unwrap().last_seq, 0);
 }
+
+#[test]
+fn pilot_receipt_survives_crash_before_receipt_append() {
+    let dir = private_dir();
+    let mut store = WorkerStore::open(dir.path()).unwrap();
+    let cmd = Command {
+        command_id: Uuid::now_v7().to_string(),
+        dispatch_attempt: 1,
+        kind: Some(command::Kind::CancelInput(CancelInput::default())),
+        ..Default::default()
+    };
+    store.crash_after = Some(AppendPoint::Inbox);
+    assert!(
+        catch_unwind(AssertUnwindSafe(
+            || store.accept_command_with_pilot(&cmd, true)
+        ))
+        .is_err()
+    );
+    drop(store);
+    let store = WorkerStore::open(dir.path()).unwrap();
+    assert!(
+        store
+            .command_state(&cmd.command_id)
+            .unwrap()
+            .unwrap()
+            .pilot_v1
+    );
+}

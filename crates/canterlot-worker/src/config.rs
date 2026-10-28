@@ -312,3 +312,12 @@ impl Default for WorkerAttachmentsConfig {
         }
     }
 }
+
+impl WorkerAttachmentsConfig {
+    pub(crate) fn valid(&self) -> bool {
+        (1..=2).contains(&self.fetch_parallelism)
+            && self.fetch_attempts > 0
+            && !self.fetch_retry.is_zero()
+            && !self.fetch_backoff_cap.is_zero()
+    }
+}
