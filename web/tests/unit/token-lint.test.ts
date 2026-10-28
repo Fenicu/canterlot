@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { lintFile, lintTree } from '../../scripts/token-lint.mjs';
+import { icons } from '../../src/lib/ui/icons';
 const directory = 'tests/unit/fixtures/token-lint';
 describe('tokens', () => {
   test('repo_has_no_raw_styling_values', () => expect(lintTree('src', JSON.parse(readFileSync('token-lint.allow.json', 'utf8')))).toEqual([]));
@@ -22,5 +23,11 @@ describe('tokens', () => {
     expect(lintFile('bad.ts', String.raw`export const label = '\u2713';`).map(v => v.rule)).toContain('ui_strings_have_no_emoji_or_checkmark_glyphs');
     expect(lintFile('bad.svelte', '<p>&#10003;</p>').map(v => v.rule)).toContain('ui_strings_have_no_emoji_or_checkmark_glyphs');
     expect(lintFile('ok.svelte', '<p>Доставлено · 0,2 с</p>')).toEqual([]);
+    for (const bad of ['check', 'check-circle', 'checkmark', 'circle_check', 'CHECK']) {
+      expect(lintFile('src/lib/ui/icons.ts', `export const icons = { ${bad}: 'm0 0' };`).map(v => v.rule)).toContain('ui_strings_have_no_emoji_or_checkmark_glyphs');
+    }
+    for (const name of Object.keys(icons)) {
+      expect(name.toLowerCase(), `icon name ${name} contains check`).not.toContain('check');
+    }
   });
 });

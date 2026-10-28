@@ -78,6 +78,14 @@ export function lintFile(path, text) {
       const durationCall = expression => ts.isCallExpression(expression) && ts.isIdentifier(expression.expression) && ['durationMs', 'scaledDurationMs'].includes(expression.expression.text);
       function visit(node) {
         if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && emoji.test(node.text)) add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + node.getStart(source), node.text);
+        const inIconRegistry = path.replaceAll('\\', '/').endsWith('icons.ts') || path.replaceAll('\\', '/').endsWith('icons.js') ||
+          (node.parent && ts.isObjectLiteralExpression(node.parent) && ts.isVariableDeclaration(node.parent.parent) && node.parent.parent.name?.getText(source) === 'icons');
+        if (inIconRegistry && (ts.isPropertyAssignment(node) || ts.isShorthandPropertyAssignment(node) || ts.isPropertySignature(node)) && /check/i.test(node.name.getText(source).replace(/^['"]|['"]$/g, ''))) {
+          add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + node.getStart(source), node.name.getText(source));
+        }
+        if (inIconRegistry && ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal) && /check/i.test(node.literal.text)) {
+          add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + node.getStart(source), node.literal.text);
+        }
         if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'durationMs' && (!node.arguments[0] || !ts.isStringLiteral(node.arguments[0]) || !allowed.has(node.arguments[0].text))) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
         if (ts.isPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.getText(source)) && !durationCall(node.initializer)) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.initializer.getText(source));
         if (ts.isShorthandPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.text)) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.name.text);

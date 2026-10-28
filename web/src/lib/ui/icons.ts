@@ -6,7 +6,7 @@ export const icons = {
   send: 'M12 20V4m-7 7 7-7 7 7', stop: 'M6 6h12v12H6Z', info: 'M12 11v6m0-10v1M12 2a10 10 0 1 0 0 20 10 10 0 0 0 0-20',
   search: 'M10 3a7 7 0 1 0 0 14 7 7 0 0 0 0-14m5 12 6 6', more: 'M5 12h.01M12 12h.01M19 12h.01', plus: 'M12 5v14M5 12h14',
   chevron: 'm8 5 7 7-7 7', copy: 'M9 9h12v12H9ZM3 15V3h12', branch: 'M6 3v18m0-9h8a4 4 0 0 0 4-4V3',
-  check: 'm5 12 4 4L19 6', share: 'M12 16V3m-5 5 5-5 5 5M5 13v8h14v-8',
+  share: 'M12 16V3m-5 5 5-5 5 5M5 13v8h14v-8',
   trash: 'M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7', pin: 'm8 3 8 0-1 7 4 4H5l4-4ZM12 14v8',
   warning: 'M12 3 2 21h20ZM12 9v5m0 3v1'
 } as const;
