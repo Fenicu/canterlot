@@ -5,7 +5,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
     os::unix::fs::PermissionsExt,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -84,9 +84,86 @@ fn answer(count: usize, delay_ms: u64) -> (String, String) {
     (json!({"synthetic":steps}).to_string(), expected)
 }
 
-fn is_supervisor(pid: u32) -> bool {
-    fs::read(format!("/proc/{pid}/cmdline"))
-        .is_ok_and(|args| args.split(|b| *b == 0).any(|arg| arg == b"supervise"))
+fn process_role_at(proc: &Path, expected_ticks: u64) -> Option<bool> {
+    const PF_FORKNOEXEC: u64 = 0x40;
+    let live_execution = || {
+        let stat = fs::read_to_string(proc.join("stat")).ok()?;
+        let fields: Vec<_> = stat[stat.rfind(')')? + 1..].split_whitespace().collect();
+        Some(
+            !matches!(fields.first(), Some(&"Z") | Some(&"X"))
+                && fields.get(19)?.parse::<u64>().ok()? == expected_ticks
+                && fields.get(6)?.parse::<u64>().ok()? & PF_FORKNOEXEC == 0,
+        )
+    };
+    // До exec ребёнок показывает exe и argv родителя. Проверяем флаг до cmdline,
+    // чтобы exec между чтениями не выдал унаследованный argv за новую роль.
+    if !live_execution()? {
+        return None;
+    }
+    let args = fs::read(proc.join("cmdline")).ok()?;
+    let supervisor = args.split(|b| *b == 0).any(|arg| arg == b"supervise");
+    if !supervisor && !args.split(|b| *b == 0).any(|arg| arg == b"synthetic-cli") {
+        return None;
+    }
+    live_execution()?.then_some(supervisor)
+}
+
+fn process_observation(identity: Identity) -> Option<(Identity, bool)> {
+    process_role_at(&PathBuf::from(format!("/proc/{}", identity.0)), identity.1)
+        .map(|supervisor| (identity, supervisor))
+}
+
+#[test]
+fn process_observation_waits_for_exec_without_hiding_second_supervisor() {
+    let proc = tempfile::tempdir().unwrap();
+    let child = (27, 208356280);
+    let supervisor = ((20, 208356235), true);
+    let mut history = BTreeSet::from([supervisor]);
+    // Снимок CLI перед execve из воспроизведения под strace: argv ещё от родителя.
+    let forked_stat =
+        "27 (canterlot-worke) R 20 27 20 0 -1 4194368 1 0 0 0 0 0 0 0 20 0 1 0 208356280\n";
+    fs::write(proc.path().join("stat"), forked_stat).unwrap();
+    fs::write(proc.path().join("cmdline"), b"worker\0supervise\0").unwrap();
+    history.extend(process_role_at(proc.path(), child.1).map(|role| (child, role)));
+    assert_eq!(history, BTreeSet::from([supervisor]));
+
+    fs::write(
+        proc.path().join("stat"),
+        forked_stat.replace("4194368", "4194304"),
+    )
+    .unwrap();
+    fs::write(proc.path().join("cmdline"), b"worker\0synthetic-cli\0").unwrap();
+    history.extend(process_role_at(proc.path(), child.1).map(|role| (child, role)));
+    assert_eq!(history, BTreeSet::from([supervisor, (child, false)]));
+
+    // Если ребёнок действительно исполнил supervise, второй владелец учитывается.
+    fs::write(proc.path().join("cmdline"), b"worker\0supervise\0").unwrap();
+    history.extend(process_role_at(proc.path(), child.1).map(|role| (child, role)));
+    assert_eq!(
+        history.iter().filter(|(_, supervisor)| *supervisor).count(),
+        2
+    );
+}
+
+#[test]
+fn process_observation_rejects_stale_or_exited_process() {
+    let proc = tempfile::tempdir().unwrap();
+    let stat = "27 (canterlot-worke) R 20 27 20 0 -1 4194304 1 0 0 0 0 0 0 0 20 0 1 0 208356280\n";
+    fs::write(proc.path().join("stat"), stat).unwrap();
+    fs::write(proc.path().join("cmdline"), b"worker\0supervise\0").unwrap();
+    assert_eq!(process_role_at(proc.path(), 208356280), Some(true));
+    assert_eq!(process_role_at(proc.path(), 208356279), None);
+    for state in ["Z", "X"] {
+        fs::write(
+            proc.path().join("stat"),
+            stat.replace(") R ", &format!(") {state} ")),
+        )
+        .unwrap();
+        assert_eq!(process_role_at(proc.path(), 208356280), None);
+    }
+    fs::write(proc.path().join("stat"), stat).unwrap();
+    fs::write(proc.path().join("cmdline"), b"").unwrap();
+    assert_eq!(process_role_at(proc.path(), 208356280), None);
 }
 
 fn same_process((pid, ticks): Identity) -> bool {
@@ -173,11 +250,12 @@ impl Fixture {
         let observed = history.clone();
         let watcher = tokio::spawn(async move {
             loop {
-                for member in process_guard.members() {
-                    observed
-                        .lock()
-                        .unwrap()
-                        .insert((member, is_supervisor(member.0)));
+                for (member, supervisor) in process_guard
+                    .members()
+                    .into_iter()
+                    .filter_map(process_observation)
+                {
+                    observed.lock().unwrap().insert((member, supervisor));
                 }
                 sleep(Duration::from_millis(10)).await;
             }
@@ -360,25 +438,21 @@ impl Fixture {
     }
 
     fn identities(&self) -> (Identity, Identity) {
-        let members = self.guard.members();
-        let supervisors: Vec<_> = members
-            .iter()
-            .copied()
-            .filter(|(pid, _)| is_supervisor(*pid))
-            .collect();
-        let cli: Vec<_> = members
-            .iter()
-            .copied()
-            .filter(|(pid, _)| !is_supervisor(*pid))
-            .collect();
+        let (supervisors, cli): (Vec<_>, Vec<_>) = self
+            .guard
+            .members()
+            .into_iter()
+            .filter_map(process_observation)
+            .partition(|(_, supervisor)| *supervisor);
         assert_eq!(supervisors.len(), 1);
         assert_eq!(cli.len(), 1);
-        assert!(same_process(supervisors[0]) && same_process(cli[0]));
+        let (supervisor, cli) = (supervisors[0].0, cli[0].0);
+        assert!(same_process(supervisor) && same_process(cli));
         self.history
             .lock()
             .unwrap()
-            .extend([(supervisors[0], true), (cli[0], false)]);
-        (supervisors[0], cli[0])
+            .extend([(supervisor, true), (cli, false)]);
+        (supervisor, cli)
     }
 
     fn assert_same_processes(&self, identities: (Identity, Identity)) {
@@ -386,11 +460,13 @@ impl Fixture {
         let history = self.history.lock().unwrap();
         assert_eq!(
             history.iter().filter(|(_, supervisor)| *supervisor).count(),
-            1
+            1,
+            "process history: {history:?}"
         );
         assert_eq!(
             history.iter().filter(|(_, supervisor)| !supervisor).count(),
-            1
+            1,
+            "process history: {history:?}"
         );
     }
 
@@ -1288,11 +1364,9 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
     assert!(!same_process(identities.0));
     for _ in 0..15 {
         assert!(
-            !fixture
-                .guard
-                .members()
-                .iter()
-                .any(|(pid, _)| is_supervisor(*pid))
+            !fixture.guard.members().iter().any(
+                |member| process_observation(*member).is_some_and(|(_, supervisor)| supervisor)
+            )
         );
         assert!(fixture.guard.members().iter().all(|p| *p == identities.1));
         sleep(Duration::from_millis(100)).await;
@@ -1811,7 +1885,7 @@ async fn wave_w_pre_attach_timeout_kills_own_child_and_rejects_start(pool: PgPoo
     .await;
     let members = fixture.guard.members();
     assert_eq!(members.len(), 1);
-    assert!(is_supervisor(members[0].0));
+    assert_eq!(process_observation(members[0]), Some((members[0], true)));
     fixture.wait_state("failed").await;
     let result: Value = sqlx::query_scalar("select result from commands where id = $1")
         .bind(started.command_id)
