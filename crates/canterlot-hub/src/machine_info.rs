@@ -272,8 +272,17 @@ pub async fn run_status_projection(
     registry: Registry,
     shutdown: watch::Receiver<bool>,
 ) {
+    let first_acquire = std::sync::atomic::AtomicBool::new(true);
     crate::singleton::supervise(&pool, "machine_status", shutdown, || async {
-        if project(&pool, None, Uuid::now_v7()).await.is_err() {
+        let first = first_acquire.swap(false, std::sync::atomic::Ordering::Relaxed);
+        if project(
+            &pool,
+            if first { None } else { Some(&registry) },
+            Uuid::now_v7(),
+        )
+        .await
+        .is_err()
+        {
             tracing::warn!(
                 kind = "machine_status_database",
                 "initial projection failed"

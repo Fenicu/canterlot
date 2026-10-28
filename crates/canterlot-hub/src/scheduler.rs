@@ -201,6 +201,7 @@ struct JobRow {
     payload: Value,
     state: String,
     attempts: i32,
+    failures: i32,
     result: Option<Value>,
 }
 impl JobRow {
@@ -582,18 +583,24 @@ impl Scheduler {
         report: &mut TickReport,
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let current: Option<JobRow> = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update")
-            .bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *tx).await?;
+        let current: Option<JobRow> = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 and failures=$4 for update")
+            .bind(job.id).bind(job.attempts).bind(job.run_at).bind(job.failures).fetch_optional(&mut *tx).await?;
         if let Some(mut current) = current {
-            current.attempts = current.attempts.saturating_add(1);
-            if permanent || current.attempts as u32 >= self.service.config.max_attempts {
+            current.failures = current.failures.saturating_add(1);
+            if current.kind == "message" {
+                current.attempts = current.attempts.saturating_add(1);
+            }
+            let release_job = matches!(current.kind.as_str(), "wake" | "limit_check");
+            if permanent
+                || (!release_job && current.failures as u32 >= self.service.config.max_attempts)
+            {
                 if current.kind == "message" {
                     self.finish(&mut tx, current, "failed", json!({"error":reason}))
                         .await?;
                 } else {
-                    sqlx::query("update scheduled_jobs set attempts=$2 where id=$1")
+                    sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
                         .bind(current.id)
-                        .bind(current.attempts)
+                        .bind(current.failures)
                         .execute(&mut *tx)
                         .await?;
                     finish_limit(&mut tx, current.id, "failed", json!({"error":reason})).await?;
@@ -603,20 +610,23 @@ impl Scheduler {
                 let multiplier = if reason == "queue_full" {
                     1
                 } else {
-                    1u32 << (current.attempts - 1).min(10)
+                    1u32 << (current.failures - 1).min(10)
                 };
-                let delay = self
+                let mut delay = self
                     .service
                     .config
                     .retry_queue_full
                     .saturating_mul(multiplier)
                     .max(Duration::from_secs(1));
+                if release_job {
+                    delay = delay.min(Duration::from_secs(60));
+                }
                 let at = now
                     + TimeDelta::from_std(delay).map_err(|_| {
                         sqlx::Error::InvalidArgument("retry duration out of range".into())
                     })?;
-                let updated: JobRow = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).fetch_one(&mut *tx).await?;
+                let updated: JobRow = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,updated_at=clock_timestamp() where id=$1 returning *")
+                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).fetch_one(&mut *tx).await?;
                 if updated.kind == "message" {
                     changed(&mut tx, &updated.message()?, Uuid::now_v7()).await?;
                 }
@@ -636,8 +646,8 @@ impl Scheduler {
         if job.kind == "message" && job.message().is_err() {
             sqlx::query("update scheduled_jobs set payload='{\"content\":[],\"attachment_ids\":[]}' where id=$1").bind(job.id).execute(&mut *conn).await?;
         }
-        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
-            .bind(job.id).bind(state).bind(job.attempts).bind(result).fetch_one(&mut *conn).await?;
+        let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,failures=$5,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
+            .bind(job.id).bind(state).bind(job.attempts).bind(result).bind(job.failures).fetch_one(&mut *conn).await?;
         // После отправки ссылку держит ввод; после отказа файлы отдаются сборщику.
         crate::attachments::unlink_scheduled_in_tx(conn, &[job.id]).await?;
         if updated.conversation_id.is_some() {
@@ -752,8 +762,9 @@ impl Scheduler {
             }
             JobOutcome::Cancelled(reason) => {
                 if reason == "invalid_payload" {
-                    sqlx::query("update scheduled_jobs set attempts=attempts+1 where id=$1")
+                    sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
                         .bind(job.id)
+                        .bind(job.failures.saturating_add(1))
                         .execute(&mut *tx)
                         .await?;
                     finish_limit(&mut tx, job.id, "failed", json!({"error":reason})).await?;
@@ -768,7 +779,7 @@ impl Scheduler {
                 // Повтор не раньше следующей секунды: цикл тика не крутит одно задание.
                 let at = at.max(now + TimeDelta::seconds(1));
                 sqlx::query("update scheduled_jobs set run_at=$2,attempts=$3,updated_at=clock_timestamp() where id=$1")
-                    .bind(job.id).bind(at).bind(job.attempts + i32::from(poll)).execute(&mut *tx).await?;
+                    .bind(job.id).bind(at).bind(job.attempts.saturating_add(i32::from(poll))).execute(&mut *tx).await?;
                 tx.commit().await?;
                 report.retried += 1;
                 if poll && let Some(registry) = &self.registry {

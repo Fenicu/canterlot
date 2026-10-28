@@ -547,7 +547,7 @@ async fn in_tx_queue_lock_replay_can_commit_without_duplicate_rows(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn in_tx_record_race_requires_caller_rollback(pool: PgPool) {
+async fn in_tx_input_key_race_requires_caller_rollback(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         let loser_conversation =
@@ -574,9 +574,9 @@ async fn in_tx_record_race_requires_caller_rollback(pool: PgPool) {
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-            assert_eq!(staged_counts, (2, 2, 2, 1));
+            assert_eq!(staged_counts, (1, 2, 1, 1));
             let staged_sequences: (i64, i64) = sqlx::query_as(
-                "select next_input_seq, (select last_seq from scope_counters where scope = $2)
+                "select next_input_seq, coalesce((select last_seq from scope_counters where scope = $2),0)
                  from queue_state where conversation_id = $1",
             )
             .bind(loser_conversation)
@@ -584,10 +584,10 @@ async fn in_tx_record_race_requires_caller_rollback(pool: PgPool) {
             .fetch_one(&mut *tx)
             .await
             .unwrap();
-            assert_eq!(staged_sequences, (2, 1));
+            assert_eq!(staged_sequences, (2, 0));
             tx.rollback().await.unwrap();
         });
-        wait_for_submit_lock(&pool, "%insert into idempotency_keys%").await;
+        wait_for_submit_lock(&pool, "%insert into inputs%").await;
         winner_tx.commit().await.unwrap();
         loser.await.unwrap();
         assert_counts(&pool, (1, 1, 1, 1)).await;
@@ -599,7 +599,7 @@ async fn in_tx_record_race_requires_caller_rollback(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn record_race_rolls_back_and_returns_winner_or_conflict(pool: PgPool) {
+async fn durable_input_replay_does_not_wait_for_generic_key_recreation(pool: PgPool) {
     timeout(Duration::from_secs(30), async {
         let seed = testkit::seed(&pool).await;
         for (key, loser_text) in [
@@ -637,9 +637,11 @@ async fn record_race_rolls_back_and_returns_winner_or_conflict(pool: PgPool) {
             let req = request(&seed, key, loser_text);
             let loser_pool = pool.clone();
             let loser = tokio::spawn(async move { submit_input(&loser_pool, req).await });
-            wait_for_submit_lock(&pool, "%insert into idempotency_keys%").await;
+            let result = timeout(Duration::from_secs(5), loser)
+                .await
+                .unwrap()
+                .unwrap();
             winner_tx.commit().await.unwrap();
-            let result = loser.await.unwrap();
             if loser_text == "original" {
                 assert_eq!(result.unwrap(), winner);
             } else {

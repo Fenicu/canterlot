@@ -116,32 +116,36 @@ pub(crate) async fn supervise<F, Fut>(
         match acquired {
             Ok(Ok(Some(mut singleton))) => {
                 health.0.store(true, Ordering::Release);
-                backoff = Duration::from_millis(250);
-                let stopped = {
+                let acquired_at = tokio::time::Instant::now();
+                let ended = {
                     let work = work();
                     tokio::pin!(work);
                     let mut check = tokio::time::interval(Duration::from_secs(1));
                     check.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
                     loop {
                         tokio::select! {biased;
-                            _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break true,
+                            _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break "shutdown",
                             _=check.tick()=>{
                                 let held=tokio::select! {biased;
-                                    _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break true,
+                                    _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break "shutdown",
                                     held=singleton.still_held()=>held,
                                 };
-                                if !held {break false;}
+                                if !held {break "singleton_lost";}
                             },
-                            _=&mut work=>break false,
+                            _=&mut work=>break "singleton_work_ended",
                         }
                     }
                 };
+                let healthy = acquired_at.elapsed() >= Duration::from_secs(60);
                 health.0.store(false, Ordering::Release);
                 let _ = tokio::time::timeout(Duration::from_secs(1), singleton.release()).await;
-                if stopped {
+                if ended == "shutdown" {
                     return;
                 }
-                tracing::warn!(kind = "singleton_lost", service, "singleton work suspended");
+                if healthy {
+                    backoff = Duration::from_millis(250);
+                }
+                tracing::warn!(kind = ended, service, "singleton work suspended");
             }
             Ok(Ok(None)) => health.0.store(true, Ordering::Release),
             Ok(Err(error)) => {

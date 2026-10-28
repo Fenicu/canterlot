@@ -339,6 +339,52 @@ fn replay(response: serde_json::Value) -> Result<SubmittedInput, SubmitError> {
     serde_json::from_value(response).map_err(|error| sqlx::Error::Decode(Box::new(error)).into())
 }
 
+async fn lookup_submission(
+    conn: &mut PgConnection,
+    req: &SubmitInput,
+    hash: &[u8],
+) -> Result<Option<SubmittedInput>, SubmitError> {
+    #[derive(sqlx::FromRow)]
+    struct Stored {
+        id: Uuid,
+        conversation_id: Uuid,
+        input_seq: i64,
+        command_id: Uuid,
+        submission_hash: Option<Vec<u8>>,
+        content: sqlx::types::Json<Vec<ContentBlock>>,
+        attachment_ids: sqlx::types::Json<Vec<Uuid>>,
+        retry_of: Option<Uuid>,
+    }
+    let stored: Option<Stored> = sqlx::query_as("select i.id,i.conversation_id,i.input_seq,i.command_id,i.submission_hash,i.content,i.retry_of,coalesce(c.payload->'attachment_ids',(select jsonb_agg(attachment_id order by position) from input_attachments where input_id=i.id),'[]'::jsonb) attachment_ids from inputs i join commands c on c.id=i.command_id where i.owner_id=$1 and i.client_idempotency_key=$2")
+        .bind(req.owner_id).bind(&req.idempotency_key).fetch_optional(conn).await?;
+    let Some(stored) = stored else {
+        return Ok(None);
+    };
+    let stored_hash = stored.submission_hash.unwrap_or_else(|| {
+        // Старые ключи могли быть удалены до миграции; исходный запрос восстанавливается из ввода.
+        let original = SubmitInput {
+            conversation_id: stored.conversation_id,
+            content: stored
+                .content
+                .0
+                .into_iter()
+                .filter(|b| matches!(b, ContentBlock::Text { .. }))
+                .collect(),
+            ..req.clone()
+        };
+        request_hash(&original, &stored.attachment_ids, stored.retry_of)
+    });
+    if stored.conversation_id != req.conversation_id || stored_hash != hash {
+        return Err(SubmitError::IdempotencyConflict);
+    }
+    Ok(Some(SubmittedInput {
+        input_id: stored.id,
+        input_seq: stored.input_seq,
+        command_id: stored.command_id,
+        state: InputState::Queued,
+    }))
+}
+
 async fn resolve_race(
     conn: &mut PgConnection,
     req: &SubmitInput,
@@ -404,6 +450,9 @@ pub(crate) async fn submit_message_input_in_tx(
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
         Begin::New => {}
     }
+    if let Some(submitted) = lookup_submission(tx, req, &hash).await? {
+        return Ok(submitted);
+    }
     attachments::check_ids(attachments)?;
     validate_content(req, !attachments.is_empty())?;
     match submit_attempt(tx, req, &hash, retry_of, attachments, true).await? {
@@ -425,6 +474,9 @@ async fn submit_attempt(
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
         Begin::New => {}
     }
+    if let Some(submitted) = lookup_submission(conn, req, hash).await? {
+        return Ok(Attempt::Submitted(submitted));
+    }
     let (input_seq, closed, machine_id): (i64, bool, Uuid) = sqlx::query_as(
         "select q.next_input_seq, q.closed, c.machine_id from queue_state q join conversations c on c.id = q.conversation_id where q.conversation_id = $1 and c.owner_id = $2 for update of q")
         .bind(req.conversation_id).bind(req.owner_id).fetch_optional(&mut *conn).await?.ok_or(SubmitError::ConversationNotFound)?;
@@ -432,6 +484,9 @@ async fn submit_attempt(
         Begin::Replay(response) => return replay(response).map(Attempt::Submitted),
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
         Begin::New => {}
+    }
+    if let Some(submitted) = lookup_submission(conn, req, hash).await? {
+        return Ok(Attempt::Submitted(submitted));
     }
     if closed {
         return Err(SubmitError::ConversationClosed);
@@ -489,10 +544,11 @@ async fn submit_attempt(
     .bind(json!({"input_id": submitted.input_id, "conversation_id": req.conversation_id, "content": content}))
     .execute(&mut *conn)
     .await?;
-    sqlx::query(
+    let inserted = sqlx::query(
         "insert into inputs (id, conversation_id, owner_id, input_seq, idempotency_key,
-                             content, state, command_id, received_at, retry_of)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                             content, state, command_id, received_at, retry_of,client_idempotency_key,submission_hash)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $5, $11)
+         on conflict (owner_id,client_idempotency_key) do nothing",
     )
     .bind(submitted.input_id)
     .bind(req.conversation_id)
@@ -504,8 +560,12 @@ async fn submit_attempt(
     .bind(submitted.command_id)
     .bind(req.received_at)
     .bind(retry_of)
+    .bind(hash)
     .execute(&mut *conn)
-    .await?;
+    .await?.rows_affected();
+    if inserted == 0 {
+        return Ok(Attempt::LostRace);
+    }
 
     let title_changed = if auto_title && input_seq == 1 {
         crate::conversations::auto_title_in_tx(

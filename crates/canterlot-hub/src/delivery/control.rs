@@ -170,6 +170,7 @@ pub async fn request_stop(
         tx.commit().await?;
         return Ok(outcome);
     }
+    mark_owner_stop(&mut tx, conversation_id, false).await?;
     crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
         queue.pause_reasons.0.push(PauseReason::UserStop);
@@ -261,6 +262,7 @@ pub async fn request_stop_execution(
         tx.commit().await?;
         return Ok(outcome);
     }
+    mark_owner_stop(&mut tx, conversation_id, true).await?;
     crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
         queue.pause_reasons.0.push(PauseReason::UserStop);
@@ -479,6 +481,16 @@ async fn record<T: Serialize>(
     } else {
         Err(ControlError::IdempotencyConflict)
     }
+}
+
+async fn mark_owner_stop(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_stop: bool,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("update executions e set owner_stop_requested=owner_stop_requested or $2,owner_stop_input_seq=greatest(owner_stop_input_seq,coalesce((select max(i.input_seq) from inputs i join commands c on c.id=i.command_id where c.execution_id=e.id),0)) where e.conversation_id=$1 and e.state not in ('stopped','failed','owner_lost')")
+        .bind(conversation_id).bind(execution_stop).execute(conn).await?;
+    Ok(())
 }
 
 async fn target_command(

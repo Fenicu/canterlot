@@ -455,6 +455,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         }),
     ])
     .await;
+    let mut run = worker::Run::new(&pool).await;
     sqlx::query("update conversations set crunch_enabled=true where id=$1")
         .bind(run.seed.conversation_id)
         .execute(&pool)

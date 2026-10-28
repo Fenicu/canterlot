@@ -184,7 +184,7 @@ async fn schedule_wake(
         .bind(conversation_id).bind(hold_key).fetch_optional(&mut *conn).await?;
     if let Some(id) = pending {
         if reschedule {
-            sqlx::query("update scheduled_jobs set run_at=$2,attempts=0,payload=$3,updated_at=clock_timestamp() where id=$1")
+            sqlx::query("update scheduled_jobs set run_at=$2,attempts=0,failures=0,payload=$3,updated_at=clock_timestamp() where id=$1")
                 .bind(id).bind(run_at).bind(payload).execute(&mut *conn).await?;
         }
         return Ok(id);
@@ -252,10 +252,26 @@ pub async fn hold_quota_in_tx(
         .filter(|at| *at > now)
         .unwrap_or(now + TimeDelta::days(7))
         + TimeDelta::days(7);
-    sqlx::query("update conversations set resume_pending=true,resume_pending_until=case when resume_pending then coalesce(resume_pending_until,$2) else $2 end where id=$1")
-        .bind(run.conversation_id).bind(expires)
-        .execute(&mut *conn)
-        .await?;
+    let input_command = if fact.input_command_id.is_empty() {
+        None
+    } else {
+        Some(
+            Uuid::parse_str(&fact.input_command_id)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+        )
+    };
+    let owner_stopped: bool = sqlx::query_scalar("select owner_stop_requested or (owner_stop_input_seq is not null and ($2::uuid is null or coalesce((select input_seq from inputs where command_id=$2 and conversation_id=$3),0)<=owner_stop_input_seq)) from executions where id=$1")
+        .bind(run.execution_id).bind(input_command).bind(run.conversation_id).fetch_one(&mut *conn).await?;
+    let pending = !owner_stopped && !queue.pause_reasons.0.contains(&PauseReason::UserStop);
+    let resume_pending: bool = if pending {
+        sqlx::query_scalar("update conversations set resume_pending=true,resume_pending_until=case when $3 or not resume_pending then $2 else coalesce(resume_pending_until,$2) end where id=$1 returning resume_pending")
+            .bind(run.conversation_id).bind(expires).bind(moved).fetch_one(&mut *conn).await?
+    } else {
+        sqlx::query_scalar("select resume_pending from conversations where id=$1")
+            .bind(run.conversation_id)
+            .fetch_one(&mut *conn)
+            .await?
+    };
     let hold_key = quota_key(provider, window.as_str());
     let payload = json!({"provider":provider,"window":window,"hold_key":hold_key,"resets_at":resets_at.map(wire)});
     let wake_job = schedule_wake(
@@ -278,7 +294,7 @@ pub async fn hold_quota_in_tx(
         run.conversation_id,
         "crunch_held",
         Some(run.execution_id),
-        json!({"provider":provider,"window":window,"reason":"quota_exhausted","wake_at":wire(wake_at),"resume_pending":true}),
+        json!({"provider":provider,"window":window,"reason":"quota_exhausted","wake_at":wire(wake_at),"resume_pending":resume_pending}),
         correlation_id,
     )
     .await?;
@@ -312,7 +328,7 @@ async fn schedule_limit_check(
     match pending {
         // Окно резерва сдвинулось: проверка раньше нового сброса бессмысленна.
         Some((id, at)) if at < run_at => {
-            sqlx::query("update scheduled_jobs set run_at=$2,attempts=0,updated_at=clock_timestamp() where id=$1")
+            sqlx::query("update scheduled_jobs set run_at=$2,attempts=0,failures=0,updated_at=clock_timestamp() where id=$1")
                 .bind(id).bind(run_at).execute(&mut *conn).await?;
         }
         Some(_) => {}

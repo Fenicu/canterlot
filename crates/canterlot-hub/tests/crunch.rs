@@ -678,7 +678,10 @@ async fn poll_is_requested_after_the_wake_transaction_commits(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(env.scheduler.tick(reset + secs(20)).await.is_err());
+    assert_eq!(
+        env.scheduler.tick(reset + secs(20)).await.unwrap().retried,
+        1
+    );
     assert!(rx.try_recv().is_err(), "no poll for a rolled back attempt");
     assert_eq!(pending(&pool, "wake").await[0].attempts, 0);
     let polls: i64 = sqlx::query_scalar("select count(*) from limit_polls")
@@ -707,7 +710,8 @@ async fn poll_is_requested_after_the_wake_transaction_commits(pool: PgPool) {
             }
         })
     };
-    env.scheduler.tick(reset + secs(21)).await.unwrap();
+    let retry_at = pending(&pool, "wake").await[0].run_at;
+    env.scheduler.tick(retry_at).await.unwrap();
     let (provider, attempts) = tokio::time::timeout(Duration::from_secs(5), observer)
         .await
         .unwrap()
@@ -923,6 +927,321 @@ async fn verified_reset(env: &Env, reset: DateTime<Utc>) {
         reset + secs(30),
     )
     .await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rereview_nineteen_polls_and_backend_loss_still_wake_after_reset(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    for expected in 1..=19 {
+        let job = pending(&pool, "wake").await.remove(0);
+        env.tick(job.run_at).await;
+        assert_eq!(pending(&pool, "wake").await[0].attempts, expected);
+    }
+    let job = pending(&pool, "wake").await.remove(0);
+    sqlx::raw_sql("create function delay_provider() returns trigger language plpgsql as $$ begin perform pg_sleep(10); return new; end $$; create trigger delay_provider before insert on provider_limits for each row execute function delay_provider();")
+        .execute(&pool).await.unwrap();
+    let kill = async {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let pid: Option<i32> = sqlx::query_scalar("select pid from pg_stat_activity where datname=current_database() and wait_event='PgSleep' and query like '%insert into provider_limits%' and pid<>pg_backend_pid()")
+                    .fetch_optional(&pool).await.unwrap();
+                if let Some(pid) = pid {
+                    sqlx::query("select pg_terminate_backend($1)").bind(pid).execute(&pool).await.unwrap();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }).await.unwrap();
+    };
+    let (tick, ()) = tokio::join!(env.scheduler.tick(job.run_at), kill);
+    assert!(tick.is_ok());
+    sqlx::query("drop trigger delay_provider on provider_limits")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let after = jobs(&pool, "wake").await.remove(0);
+    assert_eq!(after.state, "pending");
+    assert_eq!(
+        after.attempts, 19,
+        "polls and errors must be counted separately"
+    );
+    assert!(after.run_at <= job.run_at + secs(60));
+    let failures: i32 = sqlx::query_scalar("select failures from scheduled_jobs where id=$1")
+        .bind(job.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(failures, 1);
+    verified_reset(&env, job.run_at).await;
+    env.tick(after.run_at.max(job.run_at + secs(31))).await;
+    assert!(!has_quota(&holds(&pool, id).await));
+    assert_eq!(wake_texts(&pool, id).await.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rereview_limit_check_transient_errors_retry_beyond_max_attempts(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let now = start();
+    env.observe("claude", Window::Weekly, 960, Some(now + secs(3600)), now)
+        .await;
+    env.tick(now).await;
+    sqlx::query("update scheduled_jobs set attempts=19 where kind='limit_check'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::raw_sql("create function fail_provider() returns trigger language plpgsql as $$ begin raise exception using errcode='57014',message='temporary timeout'; end $$; create trigger fail_provider before insert on provider_limits for each row execute function fail_provider();")
+        .execute(&pool).await.unwrap();
+    for _ in 0..22 {
+        let job = pending(&pool, "limit_check").await.remove(0);
+        env.tick(job.run_at).await;
+        let after = jobs(&pool, "limit_check").await.remove(0);
+        assert_eq!(after.state, "pending");
+        assert_eq!(after.attempts, 19);
+        assert!(after.run_at > job.run_at && after.run_at <= job.run_at + secs(60));
+    }
+    sqlx::query("drop trigger fail_provider on provider_limits")
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update provider_limits set weekly_reserve_active=false")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let job = pending(&pool, "limit_check").await.remove(0);
+    env.tick(job.run_at).await;
+    assert_eq!(jobs(&pool, "limit_check").await[0].state, "fired");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rereview_late_limit_fact_cannot_rearm_owner_stopped_turn(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let now = start();
+    let reset = now + secs(3600);
+    for (index, execution_stop, continue_first) in
+        [(0, false, false), (1, false, true), (2, true, true)]
+    {
+        let id = env.conversation(true, true).await;
+        if execution_stop {
+            control::request_stop_execution(
+                &pool,
+                env.owner,
+                id,
+                false,
+                &format!("stop-{index}"),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+        } else {
+            control::request_stop(
+                &pool,
+                env.owner,
+                id,
+                &format!("stop-{index}"),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+        }
+        if continue_first {
+            control::continue_queue(
+                &pool,
+                env.owner,
+                id,
+                &format!("continue-{index}"),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(!resume_pending(&pool, id).await);
+        env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+            .await;
+        assert!(
+            !resume_pending(&pool, id).await,
+            "late fact rearmed owner stop {index}"
+        );
+        if !continue_first {
+            control::continue_queue(
+                &pool,
+                env.owner,
+                id,
+                &format!("continue-{index}"),
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+        }
+        verified_reset(&env, reset).await;
+        env.tick(reset + secs(60)).await;
+        assert!(wake_texts(&pool, id).await.is_empty());
+        assert!(!has_quota(&holds(&pool, id).await));
+    }
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rereview_new_hold_gets_fresh_expiry_after_no_live_skip(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + secs(3600);
+    env.observe(
+        "claude",
+        Window::Weekly,
+        10,
+        Some(now + TimeDelta::days(1)),
+        now,
+    )
+    .await;
+    let owner_input = env.submit(id, "queued-before-limit").await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    sqlx::query(
+        "update executions set state='stopped',outcome='normal_exit' where conversation_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    assert!(resume_pending(&pool, id).await);
+    let old_expiry: DateTime<Utc> =
+        sqlx::query_scalar("select resume_pending_until from conversations where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,2,'running')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let DispatchOutcome::Dispatched { command_id, .. } =
+        dispatch_next(&pool, id, gate(), Uuid::now_v7())
+            .await
+            .unwrap()
+    else {
+        panic!("queued owner input did not dispatch after resume");
+    };
+    receipts::apply_input_receipt(&pool, command_id, 1, InputReceipt::Accepted, Uuid::now_v7())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(owner_input)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "accepted");
+    let later = now + TimeDelta::days(7);
+    let next_reset = later + TimeDelta::days(2);
+    env.limit_reached(id, "claude", Window::FiveHour, Some(next_reset), later)
+        .await;
+    let expiry: DateTime<Utc> =
+        sqlx::query_scalar("select resume_pending_until from conversations where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(expiry > next_reset && expiry > old_expiry);
+    env.limit_reached(
+        id,
+        "claude",
+        Window::FiveHour,
+        Some(next_reset),
+        later + secs(1),
+    )
+    .await;
+    let duplicate_expiry: DateTime<Utc> =
+        sqlx::query_scalar("select resume_pending_until from conversations where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(expiry, duplicate_expiry);
+    verified_reset(&env, next_reset).await;
+    env.tick(next_reset + secs(60)).await;
+    assert_eq!(wake_texts(&pool, id).await.len(), 1);
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn rereview_sj_stop_marker_blocks_old_turn_but_allows_new_turn(pool: PgPool) {
+    let mut run = worker::Run::new(&pool).await;
+    let mut env = Env::attach(
+        &pool,
+        run.seed.owner_id,
+        run.seed.machine_id,
+        Default::default(),
+    )
+    .await;
+    run.ingest = Ingest::new(pool.clone()).with_registry(env.registry.clone());
+    let id = run.seed.conversation_id;
+    sqlx::query("update conversations set crunch_enabled=true where id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let now = start();
+    let reset = now + secs(3600);
+    let first = run.input(&pool).await;
+    run.send(vec![worker::accepted(
+        first.command_id,
+        now.timestamp_millis(),
+    )])
+    .await;
+    control::request_stop(&pool, env.owner, id, "interrupt", Uuid::now_v7())
+        .await
+        .unwrap();
+    control::continue_queue(&pool, env.owner, id, "continue", Uuid::now_v7())
+        .await
+        .unwrap();
+    let fact = |command: Uuid, reset: DateTime<Utc>| {
+        Body::LimitReached(LimitReached {
+            execution_id: run.execution.execution_id.to_string(),
+            provider: "claude".into(),
+            window: LimitWindow::FiveHour as i32,
+            resets_at_ms: reset.timestamp_millis() as u64,
+            input_command_id: command.to_string(),
+        })
+    };
+    let late = fact(first.command_id, reset);
+    run.send(vec![late]).await;
+    assert!(!resume_pending(&pool, id).await);
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    assert!(wake_texts(&pool, id).await.is_empty());
+    run.send(vec![worker::finished(
+        &run,
+        first.command_id,
+        now.timestamp_millis(),
+    )])
+    .await;
+    let second = run.input(&pool).await;
+    run.send(vec![worker::accepted(
+        second.command_id,
+        now.timestamp_millis(),
+    )])
+    .await;
+    run.send(vec![Body::LimitReached(LimitReached {
+        execution_id: run.execution.execution_id.to_string(),
+        provider: "claude".into(),
+        window: LimitWindow::FiveHour as i32,
+        resets_at_ms: (reset + secs(7200)).timestamp_millis() as u64,
+        input_command_id: second.command_id.to_string(),
+    })])
+    .await;
+    assert!(
+        resume_pending(&pool, id).await,
+        "a later owner turn may resume after its own limit"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
