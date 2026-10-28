@@ -11,7 +11,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 | Путь | Назначение |
 | --- | --- |
-| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, unit и браузерные проверки |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, синхронизация WSS в `src/lib/sync`, тестовый двойник хаба FakeHub в `testing/fake-hub`, unit и браузерные проверки |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
 | `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
@@ -405,7 +405,9 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 ## PWA
 
-Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. Клиент Task 1 пока показывает место будущего списка сессий. API, manifest, service worker и установка появятся в следующих задачах плана 1.3b; сборка и инструменты уже работают без обращения к внешним сервисам во время выполнения.
+Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. Клиент Task 1 пока показывает место будущего списка сессий. Task 3 добавляет рабочий слой синхронизации; API-клиент, manifest, service worker и установка появятся в следующих задачах плана 1.3b; сборка и инструменты уже работают без обращения к внешним сервисам во время выполнения.
+
+Синхронизация (`web/src/lib/sync`): один `ConnectionManager` держит единственное WSS-соединение с подпротоколом `canterlot.v1` и следит за областями подписок (до 16). После обрыва каждая область сохраняет свой последний применённый курсор и возобновляется с него на новом сокете; пробелы в курсоре заполняются HTTP-запросами диапазона порциями до 256 событий, которые применяются по порядку, а буфер свыше 5 000 событий или 8 МиБ переводит область к пересинхронизации: unsubscribe, снимок с границей, подписка с неё. Вторая пересинхронизация за 60 секунд ждёт backoff (250 мс × 2ⁿ с джиттером, предел 15 секунд), третья ставит область в `degraded` с повтором раз в 30 секунд. На видимой странице соединение пингуется каждые 25 секунд; отсутствие pong за 5 секунд или любых кадров 45 секунд пересоздаёт сокет, а после пробуждения страницы пробный ping с дедлайном 2 секунды заменяет зависший сокет. Событие `hidden` двигает курсор без изменения состояния, крупное событие `oversized` догружается отдельным запросом диапазона из одного события до сдвига курсора. Подробности поведения: [Синхронизация в docs/design/pwa.md](docs/design/pwa.md#синхронизация).
 
 ```bash
 cd web
@@ -430,9 +432,13 @@ bash scripts/check-web.sh
 bash scripts/check.sh
 ```
 
-`check-web.sh` последовательно выполняет `npm ci`, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest, production build и Playwright UI (Chromium телефон, Firefox рабочий стол, workers 2). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `/tmp/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
+`check-web.sh` последовательно выполняет `npm ci`, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest, production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально не больше двух worker'ов, у Firefox один). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `/tmp/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
 
-Клиентские правила: [docs/design/pwa.md](docs/design/pwa.md). Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
+Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` ограничивает расход ресурсов: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 2, а у Firefox один Playwright worker: два экземпляра в этой среде упирались в лимит потоков (EAGAIN) и роняли content-процессы.
+
+Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
+
+Клиентские правила: [docs/design/pwa.md](docs/design/pwa.md).
 
 ### Статическая публикация
 
