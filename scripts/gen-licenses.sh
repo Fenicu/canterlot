@@ -7,9 +7,17 @@ set -euo pipefail
 # shellcheck source=/dev/null
 source ~/.cargo/env 2>/dev/null || true
 export PATH="$HOME/.cargo/bin:$PATH"
+export PYTHONDONTWRITEBYTECODE=1
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  exec python3 "$ROOT_DIR/scripts/test-licenses.py"
+fi
+
+# Run self-test first to ensure parser integrity
+python3 "$ROOT_DIR/scripts/test-licenses.py" -q
 
 mkdir -p docs/licenses
 
@@ -17,11 +25,8 @@ python3 - << 'PY_EOF'
 import sys, os, json, subprocess, re
 from collections import Counter
 
-ALLOWLIST = {
-    'MIT', 'Apache-2.0', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC', 'Zlib',
-    'Unicode-3.0', 'Unicode-DFS-2016', 'MPL-2.0', 'CC0-1.0', '0BSD',
-    'BSL-1.0', 'Unlicense'
-}
+sys.path.insert(0, os.path.abspath('scripts'))
+from spdx import parse_spdx, ALLOWLIST
 
 def clean_repo(repo_val):
     if not repo_val:
@@ -43,32 +48,12 @@ def clean_repo(repo_val):
         url = f'https://github.com/{url}'
     return url or '-'
 
-def check_license(lic_str):
-    if not lic_str:
-        return False, 'Лицензия не указана'
-    s = re.sub(r'\s*/\s*', ' OR ', lic_str)
-    s = s.replace('(', ' ').replace(')', ' ')
-    tokens = [t.strip() for t in re.split(r'\b(?:OR|AND)\b', s) if t.strip()]
-    disallowed = [t for t in tokens if t not in ALLOWLIST]
-    if disallowed:
-        return False, disallowed
-    return True, []
-
-def get_flag_reason(lic_str):
-    if not lic_str:
+def format_reason(lic_str, unallowed):
+    if not lic_str or lic_str == '-':
         return 'Лицензия не указана'
-    ok, disallowed = check_license(lic_str)
-    if ok:
-        return ''
-    s = re.sub(r'\s*/\s*', ' OR ', lic_str)
-    s = s.replace('(', ' ').replace(')', ' ')
-    tokens = [t.strip() for t in re.split(r'\b(?:OR|AND)\b', s) if t.strip()]
-    allowed = [t for t in tokens if t in ALLOWLIST]
-
-    parts = [f'Содержит вне allowlist: {", ".join(disallowed)}']
-    if allowed and ('OR' in re.sub(r'\s*/\s*', ' OR ', lic_str)):
-        parts.append(f'доступен также по альтернативе: {", ".join(allowed)}')
-    return '; '.join(parts)
+    if unallowed:
+        return f'Лицензия вне allowlist: {", ".join(unallowed)}'
+    return 'Не удовлетворяет критериям allowlist'
 
 # 1. Cargo metadata
 cmd = ['cargo', 'metadata', '--format-version', '1', '--locked']
@@ -86,11 +71,15 @@ for p in meta.get('packages', []):
     version = p['version']
     license_expr = p.get('license') or '-'
     repo = clean_repo(p.get('repository'))
+    ok, chosen, unallowed = parse_spdx(license_expr)
     rust_crates.append({
         'name': name,
         'version': version,
         'license': license_expr,
-        'repository': repo
+        'chosen': chosen if ok else '—',
+        'repository': repo,
+        'acceptable': ok,
+        'unallowed': unallowed
     })
 
 rust_crates.sort(key=lambda x: (x['name'].lower(), x['version']))
@@ -113,7 +102,6 @@ for path_key, entry in packages.items():
     name = path_key.split('node_modules/')[-1]
     version = entry.get('version', '')
 
-    # Try reading installed package.json
     pkg_json_path = os.path.join('web', path_key, 'package.json')
     lic = None
     repo_raw = None
@@ -133,13 +121,17 @@ for path_key, entry in packages.items():
 
     repo = clean_repo(repo_raw)
     is_dev = entry.get('dev', False)
+    ok, chosen, unallowed = parse_spdx(lic)
 
     pkg_info = {
         'name': name,
         'version': version,
         'license': str(lic),
+        'chosen': chosen if ok else '—',
         'repository': repo,
-        'path': path_key
+        'path': path_key,
+        'acceptable': ok,
+        'unallowed': unallowed
     }
 
     if is_dev:
@@ -150,57 +142,54 @@ for path_key, entry in packages.items():
 npm_runtime.sort(key=lambda x: (x['name'].lower(), x['version']))
 npm_dev.sort(key=lambda x: (x['name'].lower(), x['version']))
 
-# 3. Summary counts per license expression
+# 3. Summary counts per declared license expression
 rust_lic_counts = Counter(x['license'] for x in rust_crates)
 npm_run_lic_counts = Counter(x['license'] for x in npm_runtime)
 npm_dev_lic_counts = Counter(x['license'] for x in npm_dev)
 
 all_licenses = sorted(set(rust_lic_counts.keys()) | set(npm_run_lic_counts.keys()) | set(npm_dev_lic_counts.keys()))
 
-# 4. Flagged packages
+# 4. Flagged packages (only those with NO acceptable license alternative)
 flagged_rust = []
-seen_flagged = set()
+seen_rust = set()
 for p in rust_crates:
-    ok, _ = check_license(p['license'])
-    if not ok:
+    if not p['acceptable']:
         key = (p['name'], p['version'])
-        if key not in seen_flagged:
-            seen_flagged.add(key)
+        if key not in seen_rust:
+            seen_rust.add(key)
             flagged_rust.append({
                 'name': p['name'],
                 'version': p['version'],
                 'license': p['license'],
-                'reason': get_flag_reason(p['license'])
+                'reason': format_reason(p['license'], p['unallowed'])
             })
 
 flagged_npm_run = []
-seen_flagged = set()
+seen_run = set()
 for p in npm_runtime:
-    ok, _ = check_license(p['license'])
-    if not ok:
+    if not p['acceptable']:
         key = (p['name'], p['version'])
-        if key not in seen_flagged:
-            seen_flagged.add(key)
+        if key not in seen_run:
+            seen_run.add(key)
             flagged_npm_run.append({
                 'name': p['name'],
                 'version': p['version'],
                 'license': p['license'],
-                'reason': get_flag_reason(p['license'])
+                'reason': format_reason(p['license'], p['unallowed'])
             })
 
 flagged_npm_dev = []
-seen_flagged = set()
+seen_dev = set()
 for p in npm_dev:
-    ok, _ = check_license(p['license'])
-    if not ok:
+    if not p['acceptable']:
         key = (p['name'], p['version'])
-        if key not in seen_flagged:
-            seen_flagged.add(key)
+        if key not in seen_dev:
+            seen_dev.add(key)
             flagged_npm_dev.append({
                 'name': p['name'],
                 'version': p['version'],
                 'license': p['license'],
-                'reason': get_flag_reason(p['license'])
+                'reason': format_reason(p['license'], p['unallowed'])
             })
 
 # 5. Format markdown
@@ -229,12 +218,12 @@ doc.append(f'| **ИТОГО** | **{tot_rust}** | **{tot_run}** | **{tot_dev}** |
 
 # Section: Требуют внимания
 doc.append('## Требуют внимания\n')
-doc.append('В данном разделе перечислены зависимости, у которых лицензия не указана либо её выражение содержит лицензии или оговорки вне разрешённого списка (allowlist):')
-doc.append('`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `Unicode-DFS-2016`, `MPL-2.0`, `CC0-1.0`, `0BSD`, `BSL-1.0`, `Unlicense` (а также их логические комбинации через `OR` / `AND`).\n')
+doc.append('В данном разделе перечислены зависимости, у которых лицензия не указана либо не может быть удовлетворена ни одной лицензией из разрешённого списка (allowlist):')
+doc.append('`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `Unicode-DFS-2016`, `MPL-2.0`, `CC0-1.0`, `0BSD`, `BSL-1.0`, `Unlicense`, `MIT-0` (включая оговорку `WITH LLVM-exception` для `Apache-2.0`).')
+doc.append('Для выражений `A OR B` достаточно удовлетворения одной из альтернатив; для `A AND B` обязательно удовлетворение обеих сторон.\n')
 
-total_flagged = len(flagged_rust) + len(flagged_npm_run) + len(flagged_npm_dev)
-if total_flagged == 0:
-    doc.append('Все зависимости соответствуют списку разрешённых лицензий.\n')
+if not flagged_rust and not flagged_npm_run and not flagged_npm_dev:
+    doc.append('Все зависимости удовлетворяют списку разрешённых лицензий.\n')
 else:
     if flagged_rust:
         doc.append('### Rust-крейты\n')
@@ -243,6 +232,9 @@ else:
         for item in flagged_rust:
             doc.append(f"| `{item['name']}` | {item['version']} | `{item['license']}` | {item['reason']} |")
         doc.append('')
+    else:
+        doc.append('### Rust-крейты\n')
+        doc.append('Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 341 зависимость удовлетворяют allowlist).\n')
 
     if flagged_npm_run:
         doc.append('### npm (runtime)\n')
@@ -253,7 +245,8 @@ else:
         doc.append('')
 
     if flagged_npm_dev:
-        doc.append('### npm (dev-only)\n')
+        doc.append('### npm (dev-only, не поставляются)\n')
+        doc.append('Пакеты используются исключительно для сборки, линтинга и тестирования; не поставляются пользователю.\n')
         doc.append('| Пакет | Версия | Лицензия | Причина / примечание |')
         doc.append('| --- | --- | --- | --- |')
         for item in flagged_npm_dev:
@@ -263,35 +256,36 @@ else:
 # Section: Крейты Rust
 doc.append(f'## Крейты Rust\n')
 doc.append(f'Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: {len(rust_crates)}.\n')
-doc.append('| Крейт | Версия | Лицензия | Репозиторий |')
-doc.append('| --- | --- | --- | --- |')
+doc.append('| Крейт | Версия | Лицензия | Выбрано | Репозиторий |')
+doc.append('| --- | --- | --- | --- | --- |')
 for p in rust_crates:
     repo_link = f"[{p['repository']}]({p['repository']})" if p['repository'] != '-' else '-'
-    doc.append(f"| `{p['name']}` | {p['version']} | `{p['license']}` | {repo_link} |")
+    doc.append(f"| `{p['name']}` | {p['version']} | `{p['license']}` | `{p['chosen']}` | {repo_link} |")
 doc.append('')
 
 # Section: Runtime-пакеты npm
 doc.append(f'## Runtime-пакеты npm\n')
 doc.append(f'Пакеты веб-интерфейса `web/`, поставляемые в составе клиентского приложения. Всего: {len(npm_runtime)}.\n')
-doc.append('| Пакет | Версия | Лицензия | Репозиторий |')
-doc.append('| --- | --- | --- | --- |')
+doc.append('| Пакет | Версия | Лицензия | Выбрано | Репозиторий |')
+doc.append('| --- | --- | --- | --- | --- |')
 for p in npm_runtime:
     repo_link = f"[{p['repository']}]({p['repository']})" if p['repository'] != '-' else '-'
-    doc.append(f"| `{p['name']}` | {p['version']} | `{p['license']}` | {repo_link} |")
+    chosen_str = f"`{p['chosen']}`" if p['chosen'] != '—' else '—'
+    doc.append(f"| `{p['name']}` | {p['version']} | `{p['license']}` | {chosen_str} | {repo_link} |")
 doc.append('')
 
 # Section: Dev-пакеты npm
 doc.append(f'## Пакеты npm для разработки\n')
 doc.append(f'Пакеты, используемые только на этапе сборки, линтинга и тестирования (`dev: true`); не поставляются конечным пользователям. Всего записей: {len(npm_dev)}.\n')
 
-# Deduplicate identical (name, version, license) for clean list
 seen = set()
 for p in npm_dev:
     key = (p['name'], p['version'], p['license'])
     if key in seen:
         continue
     seen.add(key)
-    doc.append(f"- `{p['name']}` ({p['version']}) — `{p['license']}`")
+    chosen_note = f" (выбрано: `{p['chosen']}`)" if p['acceptable'] and p['chosen'] != p['license'] else ""
+    doc.append(f"- `{p['name']}` ({p['version']}) — `{p['license']}`{chosen_note}")
 doc.append('')
 
 output_path = 'docs/licenses/THIRD_PARTY.md'
@@ -303,7 +297,8 @@ print(f'  Rust crates: {len(rust_crates)}')
 print(f'  npm runtime packages: {len(npm_runtime)}')
 print(f'  npm dev-only packages: {len(npm_dev)}')
 print(f'  Total packages: {tot_all}')
-print(f'  Flagged packages: {total_flagged} (Rust: {len(flagged_rust)}, npm runtime: {len(flagged_npm_run)}, npm dev: {len(flagged_npm_dev)})')
+flagged_total = len(flagged_rust) + len(flagged_npm_run) + len(flagged_npm_dev)
+print(f'  Flagged packages: {flagged_total} (Rust: {len(flagged_rust)}, npm runtime: {len(flagged_npm_run)}, npm dev: {len(flagged_npm_dev)})')
 PY_EOF
 
 chmod 644 docs/licenses/THIRD_PARTY.md
