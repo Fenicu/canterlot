@@ -1038,25 +1038,32 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
     let _gate = e2e_gate::acquire_exclusive().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
+    // Пауза 80 мс на пакет до 256 записей плюс ~4,5 мс на запись держат приём хаба около
+    // 220 записей в секунду: 4000 дельт локально опережают курсор хаба больше чем на 1024.
+    const DELTAS: usize = 4000;
     fixture
         .faults()
         .set_sj_batch_pause(Duration::from_millis(80));
-    let steps: Vec<_> = (0..18000)
+    let steps: Vec<_> = (0..DELTAS)
         .map(|_| json!({"delta":"x"}))
         .chain([json!({"hang":true})])
         .collect();
     let input = fixture.submit(json!({"synthetic":steps}).to_string()).await;
-    until("18000 deltas durable locally", async || {
+    until("deltas durable locally", async || {
         fixture
             .sj()
             .2
             .iter()
             .filter(|b| matches!(b, Body::BlockDelta(_)))
             .count()
-            == 18000
+            == DELTAS
     })
     .await;
     let (journal, length, _) = fixture.sj();
+    let started = Instant::now();
+    let (interrupt, _) = fixture.interrupt().await;
+    // Курсор хаба только растёт: прочитанный после отправки прерывания он ограничивает
+    // отставание в момент отправки снизу.
     let committed: i64 =
         sqlx::query_scalar("select committed_seq from journal_cursors where journal_id = $1")
             .bind(journal)
@@ -1065,10 +1072,8 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
             .unwrap();
     assert!(
         length > committed as u64 + 1024,
-        "must exercise an SJ backlog"
+        "the interrupt must be sent behind an SJ backlog of more than 1024 records: local {length}, hub {committed}"
     );
-    let started = Instant::now();
-    let (interrupt, _) = fixture.interrupt().await;
     until("interrupt stored locally", async || {
         fixture.store_probe.snapshots().iter().any(|s| {
             s.cj.iter().any(|r| {
@@ -1105,7 +1110,7 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
     assert_eq!(fixture.faults().hellos().len(), 1);
     fixture.faults().set_sj_batch_pause(Duration::ZERO);
     fixture.assert_cursor(false).await;
-    assert_eq!(fixture.event_count("block_delta").await, 18000);
+    assert_eq!(fixture.event_count("block_delta").await, DELTAS as i64);
     assert_eq!(fixture.slot().await, "free");
     assert_eq!(fixture.input_state(input.input_id).await, "accepted");
     let block: (String, String) =
@@ -1116,7 +1121,7 @@ async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
             .unwrap();
     assert_eq!(block.0, "incomplete");
     assert!(
-        block.1 == "x".repeat(18000),
+        block.1 == "x".repeat(DELTAS),
         "backlog block content mismatch"
     );
     assert_eq!(transmissions(&fixture.sj().2, input.command_id), [1]);
