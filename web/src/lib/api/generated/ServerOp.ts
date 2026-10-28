@@ -1,0 +1,945 @@
+export type ServerOp =
+  | {
+      op: "subscribed";
+      id: string;
+      scope: Scope;
+      head: Seq;
+    }
+  | {
+      op: "event";
+      id: string;
+      event:
+        | InputQueued
+        | InputStateChanged
+        | QueueStateChanged
+        | QueuePaused
+        | ExecutionStateChanged
+        | RunFinished
+        | InterruptStateChanged
+        | BlockStarted
+        | BlockDelta
+        | BlockFinal
+        | BlockIncomplete
+        | AdapterDiagnostic
+        | StateDivergence
+        | BlockRevisionGap
+        | BlockChecksumMismatch
+        | BlockConflictingFinal
+        | BlockMediaAttached
+        | ConversationCreated
+        | ConversationUpdated
+        | ConversationSettingsChanged
+        | CrunchChanged
+        | CrunchHeld
+        | CrunchWoken
+        | DerivedChanged
+        | GroupChanged
+        | ScheduledChanged
+        | LimitsChanged
+        | LimitReached
+        | AttachmentStateChanged
+        | RequestOpened
+        | RequestClosed
+        | RequestDecided
+        | MachineAvailabilityChanged
+        | MachineReportUpdated
+        | MachineMetrics
+        | Hidden
+        | PhaseChanged
+        | Oversized
+        | QueueResumed;
+    }
+  | {
+      op: "resync_required";
+      id: string;
+      reason: "cursor_too_old" | "cursor_ahead";
+      oldest_available_seq: Seq;
+    }
+  | {
+      op: "lagged";
+      id: string;
+      cursor: Seq;
+    }
+  | {
+      op: "unsubscribed";
+      id: string;
+    }
+  | {
+      op: "pong";
+      t: number;
+    }
+  | {
+      op: "error";
+      id: string;
+      code: "bad_scope" | "forbidden" | "too_many_subscriptions" | "bad_message";
+    }
+  | {
+      op: "close";
+      reason: "reauth";
+    };
+export type Scope = string;
+export type Seq = string;
+export type Uuid = string;
+export type Time = string;
+export type ContentBlock =
+  | {
+      type: "text";
+      text: string;
+    }
+  | {
+      type: "attachment";
+      attachment_id: Uuid;
+      name: string;
+      mime: string;
+      size: number;
+      sha256: string;
+      image: boolean;
+    };
+
+export interface InputQueued {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "input_queued";
+  payload: {
+    input_id: Uuid;
+    input_seq: Seq;
+    idempotency_key: string;
+    state: "queued";
+    content: ContentBlock[];
+  };
+}
+export interface InputStateChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "input_state_changed";
+  payload: {
+    input_id: Uuid;
+    state:
+      | "queued"
+      | "dispatched"
+      | "on_machine"
+      | "transmitting"
+      | "accepted"
+      | "acceptance_unconfirmed"
+      | "cancelled"
+      | "rejected";
+    attempt?: number;
+    cause?: string;
+    command_id?: Uuid;
+    reason?: string;
+    retry_of?: Uuid | null;
+  };
+}
+export interface QueueStateChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "queue_state_changed";
+  payload: {
+    pause_reasons: {}[];
+    hold_reasons: {}[];
+    run_slot:
+      | "free"
+      | {
+          dispatching: {
+            input_id: Uuid;
+            attempt: number;
+          };
+        }
+      | {
+          running: {
+            input_id: Uuid;
+          };
+        };
+  };
+}
+export interface QueuePaused {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "queue_paused";
+  payload: {
+    pause_reasons: {}[];
+  };
+}
+export interface ExecutionStateChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "execution_state_changed";
+  payload: {
+    state: "created" | "starting" | "running" | "stopping" | "stopped" | "failed" | "owner_lost";
+    generation: number;
+    outcome: string | null;
+  };
+}
+export interface RunFinished {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "run_finished";
+  payload: {
+    input_id: Uuid;
+    input_command_id: Uuid;
+  };
+}
+export interface InterruptStateChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "interrupt_state_changed";
+  payload: {
+    command_id: Uuid;
+    status: "sent_to_agent" | "acknowledged" | "completed" | "not_applicable" | "superseded" | "rejected_stale";
+  };
+}
+export interface BlockStarted {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_started";
+  payload: {
+    block_id: Uuid;
+    rev: number;
+    kind: "text" | "reasoning" | "tool_call" | "tool_result" | "warning" | "error";
+    input_command_id: Uuid | null;
+    parent_block_id: Uuid | null;
+    agent: string;
+    model: string;
+    tool_name: string | null;
+    summary: string | null;
+  };
+}
+export interface BlockDelta {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_delta";
+  payload: {
+    block_id: Uuid;
+    base_rev: number;
+    rev: number;
+    append: string;
+  };
+}
+export interface BlockFinal {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_final";
+  payload: {
+    block_id: Uuid;
+    rev: number;
+    text: string;
+    checksum: string;
+    text_omitted: boolean;
+    summary: string | null;
+  };
+}
+export interface BlockIncomplete {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_incomplete";
+  payload: {
+    block_id: Uuid;
+    rev: number;
+    reason: string;
+  };
+}
+export interface AdapterDiagnostic {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "adapter_diagnostic";
+  payload: {
+    kind: string;
+    event_type: string;
+  };
+}
+export interface StateDivergence {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "state_divergence";
+  payload: {
+    machine_id?: Uuid;
+    execution_id?: Uuid;
+    reason?: string;
+    expected?: string;
+    observed?: string;
+  };
+}
+export interface BlockRevisionGap {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_revision_gap";
+  payload: {
+    block_id: Uuid;
+    current_rev: number;
+    base_rev: number;
+    rev: number;
+  };
+}
+export interface BlockChecksumMismatch {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_checksum_mismatch";
+  payload: {
+    block_id: Uuid;
+    rev: number;
+  };
+}
+export interface BlockConflictingFinal {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_conflicting_final";
+  payload: {
+    block_id: Uuid;
+    rev: number;
+  };
+}
+export interface BlockMediaAttached {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_media_attached";
+  payload: {
+    block_id: Uuid;
+    media_id: Uuid;
+    mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+    size: number;
+    width: number | null;
+    height: number | null;
+  };
+}
+export interface ConversationCreated {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "conversation_created";
+  payload: {
+    id: Uuid;
+    title: string;
+    title_source: "auto" | "user";
+    color: string | null;
+    pinned: boolean;
+    archived: boolean;
+    groups: Uuid[];
+    machine: {
+      id: Uuid;
+      name: string;
+    };
+    harness: {
+      id: string;
+      title: string;
+      provider: string;
+    };
+    workdir: string;
+    created_at: Time;
+    model: string;
+    effort: string;
+    permission_mode: string;
+    activity: Activity;
+    unread_count: number;
+    queue: Queue;
+    crunch: {
+      enabled: boolean;
+    };
+    last_activity_at: Time | null;
+    counts: Counts;
+  };
+}
+export interface Activity {
+  state: "idle" | "working" | "waiting_for_user" | "stalled" | "quota_paused" | "failed" | "stopped";
+  evidence: {};
+  since: Time;
+}
+export interface Queue {
+  queued: number;
+  pause_reasons: {}[];
+  hold_reasons: {}[];
+}
+export interface Counts {
+  all: number;
+  pinned: number;
+  archived: number;
+  groups: {
+    id: Uuid;
+    count: number;
+  }[];
+}
+export interface ConversationUpdated {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "conversation_updated";
+  payload: {
+    id: Uuid;
+    title: string;
+    title_source: "auto" | "user";
+    color: string | null;
+    pinned: boolean;
+    archived: boolean;
+    groups: Uuid[];
+    machine: {
+      id: Uuid;
+      name: string;
+    };
+    harness: {
+      id: string;
+      title: string;
+      provider: string;
+    };
+    workdir: string;
+    created_at: Time;
+    counts: Counts;
+  };
+}
+export interface ConversationSettingsChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "conversation_settings_changed";
+  payload: {
+    effective: {};
+    pending: {};
+    rev: number;
+    rejected?: {
+      keys: string[];
+      reason: string;
+    };
+  };
+}
+export interface CrunchChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "crunch_changed";
+  payload: {
+    enabled: boolean;
+    resume_text?: string | null;
+    reserve_override_until: Time | null;
+    resume_pending: boolean;
+  };
+}
+export interface CrunchHeld {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "crunch_held";
+  payload: {
+    provider: string;
+    window: "five_hour" | "weekly";
+    reason: "quota_exhausted" | "weekly_reserve";
+    wake_at: Time | null;
+    resume_pending: boolean;
+  };
+}
+export interface CrunchWoken {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "crunch_woken";
+  payload: {
+    provider: string;
+    window: "five_hour" | "weekly";
+    hold_key?: string;
+    input_id: Uuid | null;
+    skipped:
+      | (
+          | "closed"
+          | "crunch_disabled"
+          | "no_live_execution"
+          | "resume_already_queued"
+          | "queue_not_empty"
+          | "not_pending"
+          | "paused"
+          | "weekly_reserve"
+        )
+      | null;
+    resume_pending: boolean;
+  };
+}
+export interface DerivedChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "derived_changed";
+  payload: {
+    conversation_id: Uuid;
+    activity: Activity;
+    unread_count: number;
+    queue: Queue;
+    last_activity_at: Time | null;
+    settings: Settings;
+    crunch: {
+      enabled: boolean;
+    };
+  };
+}
+export interface Settings {
+  model: string;
+  effort: string;
+  permission_mode: string;
+}
+export interface GroupChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "group_changed";
+  payload: {
+    group: Group | null;
+    groups: Group[];
+    counts: Counts;
+  };
+}
+export interface Group {
+  id: Uuid;
+  name: string;
+  position: number;
+  created_at: Time;
+}
+export interface ScheduledChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "scheduled_changed";
+  payload: {
+    id: Uuid;
+    conversation_id: Uuid;
+    run_at: Time;
+    content: ContentBlock[];
+    attachment_ids: Uuid[];
+    state: "pending" | "fired" | "cancelled" | "failed";
+    input_id: Uuid | null;
+    attempts: number;
+  };
+}
+export interface LimitsChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "limits_changed";
+  payload: {
+    provider: string;
+    window: "five_hour" | "weekly";
+    used_permille: number;
+    resets_at: Time | null;
+    observed_at: Time;
+    weekly_reserve_active: boolean;
+    weekly_reserve_resets_at: Time | null;
+  };
+}
+export interface LimitReached {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "limit_reached";
+  payload: {
+    provider: string;
+    window: "five_hour" | "weekly";
+    resets_at: Time | null;
+  };
+}
+export interface AttachmentStateChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "attachment_state_changed";
+  payload: {
+    attachment_id: Uuid;
+    state?: "created" | "uploading" | "ready" | "failed" | "cancelled" | "released";
+    reason?: string | null;
+    input_id?: Uuid;
+    machine_state?: "pending" | "ready" | "failed";
+    machine_reason?: string | null;
+  };
+}
+export interface RequestOpened {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "request_opened";
+  payload: {};
+}
+export interface RequestClosed {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "request_closed";
+  payload: {};
+}
+export interface RequestDecided {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "request_decided";
+  payload: {};
+}
+export interface MachineAvailabilityChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_availability_changed";
+  payload: {
+    machine_id: Uuid;
+    availability: "available" | "degraded" | "unavailable";
+  };
+}
+export interface MachineReportUpdated {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_report_updated";
+  payload: {
+    machine_id: Uuid;
+    worker_version: string;
+    capabilities: string[];
+    limits_ok: boolean;
+  };
+}
+export interface MachineMetrics {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_metrics";
+  payload: {
+    machine_id: Uuid;
+    machine_time_ms: number;
+    cpu_cores: number;
+    cpu_permille: number;
+    mem_total_bytes: number;
+    mem_available_bytes: number;
+    load1_centi: number;
+    load5_centi: number;
+    load15_centi: number;
+    disks: {}[];
+    executions: {}[];
+  };
+}
+export interface Hidden {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: null;
+  execution_id: null;
+  correlation_id: Uuid;
+  kind: "hidden";
+  payload: {};
+}
+export interface PhaseChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "phase_changed";
+  payload: {
+    phase:
+      | "awaiting_input"
+      | "generating"
+      | "running_tool"
+      | "awaiting_permission"
+      | "awaiting_answer"
+      | "context_maintenance"
+      | "unknown";
+    tool_name: string | null;
+    summary: string | null;
+  };
+}
+/**
+ * WSS-заполнитель одиночного события, превышающего бюджет данных соединения; полный факт доступен по payload.href.
+ */
+export interface Oversized {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "oversized";
+  payload: {
+    kind: string;
+    href: string;
+  };
+}
+export interface QueueResumed {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "queue_resumed";
+  payload: {
+    pause_reasons: {}[];
+  };
+}

@@ -11,6 +11,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 | Путь | Назначение |
 | --- | --- |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, unit и браузерные проверки |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
 | `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
@@ -396,3 +397,82 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 Порядок обновления: хаб первым, затем воркер. Возможность `pilot_v1` согласуется через `Hello.optional_capabilities` и `Accepted.capabilities`; до её подтверждения записи и команды пилота не используются. Откат хаба ниже возможности, которую воркер уже использовал, не поддерживается. Обновление управляющей службы воркера сохраняет живые процессы сопровождения и их исполнения.
 
 Фоновые службы (`singleton.rs`) восстанавливают отдельное соединение и advisory lock после сбоя с задержкой 250 мс → 30 с, которая сбрасывается после 60 с непрерывной работы; второй хаб остаётся пассивным. `readyz` сообщает имена недоступных служб (`reason: service`, `services`). Планировщик считает ошибки отдельно от опросов и обрабатывает задания независимо. Временные ошибки пробуждений и проверок лимита повторяются неограниченно с задержкой не более 60 с; для остальных заданий действует `max_attempts`. Ежечасное обслуживание удаляет завершённые и ошибочные задания через 30 дней, общие ключи идемпотентности и события через 7 дней. Ключ отправки ввода и хеш запроса сохраняются в самом вводе: поздний повтор после очистки возвращает исходный ответ. Новый лимит получает собственный срок автопродолжения; поздний факт прерванного владельцем хода его не включает. Подробности восстановления, срок автоматического продолжения и форматы событий: [контракт API](docs/design/api.md#восстановление-фоновых-служб-и-обслуживание).
+
+
+## PWA
+
+Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. Клиент Task 1 пока показывает место будущего списка сессий. API, manifest, service worker и установка появятся в следующих задачах плана 1.3b; сборка и инструменты уже работают без обращения к внешним сервисам во время выполнения.
+
+```bash
+cd web
+npm ci
+npm run dev
+npm run check
+npm run lint
+npm run lint:tokens
+npm run test:unit
+npm run gen:api
+npm run build
+npm run preview
+```
+
+`gen:api` читает только `docs/api/openapi.json` и `docs/api/events.schema.json`; типы HTTP, событий, ClientOp и ServerOp не пишутся вручную. Dev proxy `/api` направляет запросы на `HUB_URL` (по умолчанию `http://127.0.0.1:8080`), добавляет `Remote-User` из `HUB_OWNER` (по умолчанию `owner`) и заменяет Origin на `HUB_ALLOWED_ORIGIN` (по умолчанию `http://localhost:5173`). Это локальный режим разработки; наружу Vite не публикуют. В статической production-сборке такого прокси нет.
+
+```bash
+cd web
+PLAYWRIGHT_BROWSERS_PATH=/tmp/canterlot-playwright npx --no-install playwright install chromium firefox
+cd ..
+bash scripts/check-web.sh
+bash scripts/check.sh
+```
+
+`check-web.sh` последовательно выполняет `npm ci`, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest, production build и Playwright UI (Chromium телефон, Firefox рабочий стол, workers 2). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `/tmp/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
+
+Клиентские правила: [docs/design/pwa.md](docs/design/pwa.md). Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
+
+### Статическая публикация
+
+После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, будущий service worker, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
+
+```bash
+node web/scripts/print-csp.mjs https://chat.example
+```
+
+Вывод задают в переменной окружения Caddy `CANTERLOT_CSP` при каждом обновлении сборки. Это обязательная часть публикации: `script-src` не содержит `unsafe-inline`; hashes CSP должны соответствовать `200.html`. `kit.csp` сохраняет `connect-src 'self'`, заголовок Caddy добавляет конкретный WSS origin. Пример ниже заменяет API-only пример из раздела HTTP для установки с PWA:
+
+```caddyfile
+chat.example {
+    route {
+        request_header -Remote-*
+        request_header -X-Forwarded-*
+        request_header -X-Canterlot-Proxy
+        forward_auth authelia:9091 {
+            uri /api/authz/forward-auth
+            copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
+        }
+        header Content-Security-Policy "{$CANTERLOT_CSP}"
+        @api path /api/* /healthz
+        handle @api {
+            reverse_proxy hub:8080 {
+                header_up X-Canterlot-Proxy {file./run/secrets/canterlot-proxy}
+            }
+        }
+        @share {
+            method POST
+            path /_share
+        }
+        handle @share {
+            redir /share?error=sw_inactive 303
+        }
+        handle {
+            @fresh path /service-worker.js /manifest.webmanifest
+            header @fresh Cache-Control "no-cache"
+            root * /srv/canterlot/web/build
+            try_files {path} /200.html
+            file_server
+        }
+    }
+}
+```
+
+WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive` (обработчик и экран добавляются Tasks 9a/9b); тестовый edge уже повторяет это поведение. Для manifest используется `crossorigin="use-credentials"`. Заголовки и `no-cache` для manifest/service worker остаются обязательными после их появления. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Этот task не выполняет реальный деплой.

@@ -1,0 +1,1 @@
+@media (min-width: 44rem) { p { color: var(--text); padding: calc(var(--s4) * 2); margin: 0; width: 50%; stroke: currentColor; padding-bottom: env(safe-area-inset-bottom); transition: color var(--duration-fast) var(--ease); } }

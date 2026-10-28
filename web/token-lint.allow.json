@@ -1,0 +1,26 @@
+[
+  {
+    "path": "lib/ui/StageTrack.svelte",
+    "rule": "raw-shadow",
+    "value": "inset 0 0 0 var(--stage-dot-ring) var(--st-pending)",
+    "reason": "Контур состояния точки из утверждённого макета 23; это кольцо индикатора, а не декоративная тень."
+  },
+  {
+    "path": "lib/ui/StageTrack.svelte",
+    "rule": "raw-shadow",
+    "value": "inset 0 0 0 var(--stage-dot-ring) var(--st-on)",
+    "reason": "Контур состояния точки из утверждённого макета 23; это кольцо индикатора, а не декоративная тень."
+  },
+  {
+    "path": "lib/ui/StageTrack.svelte",
+    "rule": "raw-shadow",
+    "value": "inset 0 0 0 var(--stage-dot-ring) var(--st-error)",
+    "reason": "Контур состояния точки из утверждённого макета 23; это кольцо индикатора, а не декоративная тень."
+  },
+  {
+    "path": "lib/ui/StageTrack.svelte",
+    "rule": "raw-shadow",
+    "value": "inset 0 0 0 var(--stage-dot-ring) var(--st-on), 0 0 0 var(--stage-dot-ring) var(--st-surface), 0 0 0 var(--s2) var(--st-on)",
+    "reason": "Контур состояния точки из утверждённого макета 23; это кольцо индикатора, а не декоративная тень."
+  }
+]
