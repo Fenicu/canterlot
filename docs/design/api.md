@@ -19,7 +19,7 @@
 | `owner:{id}:machines` | `machines` |
 | `conversation:{id}` | `conversation:<uuid>` |
 
-В кадрах WSS, снимках и `GET /events` используются только внешние имена. Области списков разрешаются хабом по аутентифицированному владельцу.
+В кадрах WSS, снимках и `GET /api/v1/events` используются только внешние имена. Области списков разрешаются хабом по аутентифицированному владельцу.
 
 ## Виды событий
 
@@ -69,7 +69,7 @@
 
 Внутренние виды (`journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset`, `limit_observation_unmapped` и будущие) хаб не выпускает: клиент видит на их месте `hidden`.
 
-Событие вне `CLIENT_KINDS` передаётся в WSS и `GET /events` как `hidden` с настоящим `scope_seq`, без внутреннего payload. Поэтому курсор каждой области остаётся непрерывным. Соседние дельты одного блока могут объединяться в течение 25 мс: `scope_seq_from` и `committed_at_from` обозначают начало диапазона, `scope_seq` и `committed_at` его конец. ID и correlation ID берутся из первого события. Объединение не перескакивает через чужие события. Соседние `hidden` объединяются по тому же правилу диапазона.
+Событие вне `CLIENT_KINDS` передаётся в WSS и `GET /api/v1/events` как `hidden` с настоящим `scope_seq`, без внутреннего payload. Поэтому курсор каждой области остаётся непрерывным. Соседние дельты одного блока могут объединяться в течение 25 мс: `scope_seq_from` и `committed_at_from` обозначают начало диапазона, `scope_seq` и `committed_at` его конец. ID и correlation ID берутся из первого события. Объединение не перескакивает через чужие события. Соседние `hidden` объединяются по тому же правилу диапазона.
 
 ## Удержания очереди
 
@@ -307,18 +307,18 @@ Worker при подготовке исполнения синхронизиру
 | --- | --- |
 | `GET /api/v1/snapshot/conversations` | `{scope:"conversations",cursor,data:{items,truncated,counts,groups,limits}}` |
 | `GET /api/v1/snapshot/machines` | `{scope:"machines",cursor,data:{items}}` с доступностью, каталогами, ОС, метриками и предупреждениями |
-| `GET /api/v1/conversations/{id}/snapshot?history_limit=100` | `{scope:"conversation:<uuid>",cursor,data:{detail,queue,history,scheduled}}` |
-| `GET /api/v1/conversations/{id}/history?before=&after=&limit=100` | `{items,next_before,next_after}`; `before` и `after` взаимоисключающие |
-| `GET /api/v1/conversations/{id}/blocks/{block_id}?offset=0&limit=262144` | `{content,offset,next_offset,total_bytes,state,rev,checksum}` |
+| `GET /api/v1/conversations/{id}/snapshot` | `{scope:"conversation:<uuid>",cursor,data:{detail,queue,history,scheduled}}`; параметр `history_limit` (по умолчанию 100) |
+| `GET /api/v1/conversations/{id}/history` | `{items,next_before,next_after}`; параметры `before` и `after` (взаимоисключающие), `limit` (по умолчанию 100) |
+| `GET /api/v1/conversations/{id}/blocks/{block_id}` | `{content,offset,next_offset,total_bytes,state,rev,checksum}`; параметры `offset` (по умолчанию 0), `limit` (до 262144) |
 | `GET /api/v1/conversations/{id}/runs/{run_id}` | Контекст, длительность, токены по моделям и агентам, оценка лимита, части ответа |
 | `GET /api/v1/conversations/{id}/delegation` | Вызовы субагентов: родитель, имя и модель первого дочернего блока, задача, состояние и время |
-| `GET /api/v1/events?scope=&after=&limit=256` | `{events,head}` либо `{resync_required:{reason,oldest_available_seq}}`, оба с HTTP 200 |
+| `GET /api/v1/events` | `{events,head}` либо `{resync_required:{reason,oldest_available_seq}}`, оба с HTTP 200; параметры `scope`, `after`, `limit` (по умолчанию 256) |
 
 Все чтения ограничены владельцем. Отсутствующий и чужой разговор, блок или ход возвращают одинаковый `404 not_found`. Параметры проверяются без повторения текста запроса в ошибке. Курсор событий `after` обязателен, неотрицателен и задаётся десятичной строкой. Область разрешается по владельцу из `conversations`, `machines` или `conversation:<uuid>`; внутренние ключи не принимаются.
 
 Каждый снимок открывает одну транзакцию `REPEATABLE READ READ ONLY`. Первое чтение получает границу `B` из `scope_counters`, следующие читают состояние. `events::append` держит блокировку строки счётчика до фиксации: видимый `B` означает, что все получившие номера до `B` транзакции уже видимы. Более поздние изменения читаются из журнала строго после `B`. Откат возвращает номер. Глобальная последовательность PostgreSQL этого свойства не имеет: писатель с номером 1 может зафиксироваться после писателя с номером 2. Отрицательный контроль в `snapshot_boundary` воспроизводит потерю 1 и проверяет блокировку второго писателя при том же чередовании с `events::append`.
 
-Снимок списка включает архивные разговоры и не более 500 элементов; при превышении `truncated=true`, полные счётчики сохраняются. `machine` элемента списка содержит только `{id,name}`. Волатильные поля читаются из `conversation_derived` через `LEFT JOIN` и изменяются только по `derived_changed`; строки без проекции остаются доступны. Список не содержит доступность машин. Лимиты с `used_pct` находятся только в снимке списка, а не в снимке разговора. Снимок машин использует тот же загрузчик, что `GET /machines`, и пороги предупреждений из конфигурации; `heartbeat_age_ms=null` в снимке, поскольку живой возраст не является состоянием PostgreSQL.
+Снимок списка включает архивные разговоры и не более 500 элементов; при превышении `truncated=true`, полные счётчики сохраняются. `machine` элемента списка содержит только `{id,name}`. Волатильные поля читаются из `conversation_derived` через `LEFT JOIN` и изменяются только по `derived_changed`; строки без проекции остаются доступны. Список не содержит доступность машин. Лимиты с `used_pct` находятся только в снимке списка, а не в снимке разговора. Снимок машин использует тот же загрузчик, что `GET /api/v1/machines`, и пороги предупреждений из конфигурации; `heartbeat_age_ms=null` в снимке, поскольку живой возраст не является состоянием PostgreSQL.
 
 `queue.queued` содержит вводы без `feed_seq` в состояниях `queued`, `dispatched`, `on_machine`, по порядку очереди. `pause_reasons`, хранимые удержания и `run_slot` читаются из `queue_state`; представление добавляет вычисляемые `machine_not_reconciled` и `capability_missing`. HTTP-вариант использует реестр текущих сеансов. При чтении без реестра живой сеанс не считается сверенным. Вычисляемое `attachments_pending {input_id, machine_reason?}` показывается для ввода в состояниях `dispatched` и `on_machine`, пока не все его вложения готовы на машине; причина берётся из `input_attachments.machine_reason`.
 
