@@ -18,6 +18,29 @@ test('announce_collapses_identical_messages_within_two_seconds', () => {
   vi.advanceTimersByTime(2000); announce('Подключено', 'assertive'); vi.runOnlyPendingTimers(); expect(node.textContent).toBe('Подключено'); expect(node.getAttribute('aria-live')).toBe('assertive');
   action.destroy();
 });
+test('announce_delivers_distinct_messages_in_order_and_collapses_repeats_within_window', () => {
+  vi.useFakeTimers();
+  const node = document.createElement('div');
+  const action = mountAnnouncements(node);
+
+  announce('Первое');
+  announce('Второе');
+  vi.runOnlyPendingTimers();
+  expect(node.textContent).toBe('Первое');
+  vi.runOnlyPendingTimers();
+  expect(node.textContent).toBe('Второе');
+
+  announce('Первое');
+  vi.runOnlyPendingTimers();
+  expect(node.textContent).toBe('Второе');
+
+  vi.advanceTimersByTime(2000);
+  announce('Первое');
+  vi.runOnlyPendingTimers();
+  expect(node.textContent).toBe('Первое');
+
+  action.destroy();
+});
 test('duration_ms_reads_the_computed_token', () => {
   setup();
   vi.stubGlobal('getComputedStyle', (node: Element) => ({ transitionDuration: (node as HTMLElement).style.transitionDuration === 'var(--duration-fast)' ? '.16s' : '240ms', getPropertyValue: () => '1' }));

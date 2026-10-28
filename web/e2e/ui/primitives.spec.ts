@@ -10,6 +10,10 @@ test('primitives_have_visible_focus_and_44px_targets', async ({ page }) => {
     const style = await button.evaluate(node => { const css = getComputedStyle(node); return { width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, outline: css.outlineWidth, token: css.getPropertyValue('--focus-width'), target: parseFloat(css.getPropertyValue('--target')) }; });
     expect(style.width).toBeGreaterThanOrEqual(style.target); expect(style.height).toBeGreaterThanOrEqual(style.target); expect(parseFloat(style.outline)).toBe(parseFloat(style.token));
   }
+  const input = page.getByLabel('Название', { exact: true });
+  const inputStyle = await input.evaluate(node => { const css = getComputedStyle(node); return { width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, target: parseFloat(css.getPropertyValue('--target')) }; });
+  expect(inputStyle.height).toBeGreaterThanOrEqual(inputStyle.target);
+  expect(inputStyle.width).toBeGreaterThanOrEqual(inputStyle.target);
   await expect(page.getByRole('button', { name: 'Отправить', exact: true })).toHaveAccessibleDescription('Сначала подключите машину');
 });
 test('sheet_traps_focus_closes_on_escape_and_restores_focus', async ({ page }) => {
@@ -22,9 +26,22 @@ test('sheet_traps_focus_closes_on_escape_and_restores_focus', async ({ page }) =
   await expect(page.locator('#app-shell')).toHaveJSProperty('inert', false);
 });
 test('back_closes_sheet_and_keeps_scroll_position', async ({ page }) => {
-  const opener = page.getByRole('button', { name: 'Открыть панель', exact: true }); await opener.scrollIntoViewIfNeeded();
-  const before = await page.evaluate(() => scrollY); await opener.click(); await expect(page.getByRole('dialog')).toBeVisible();
-  await page.goBack(); await expect(page.getByRole('dialog')).not.toBeVisible(); expect(await page.evaluate(() => scrollY)).toBe(before);
+  const opener = page.getByRole('button', { name: 'Открыть панель', exact: true });
+  await page.evaluate(() => window.scrollTo(0, 180));
+  const before = await page.evaluate(() => scrollY);
+  expect(before).toBeGreaterThan(0);
+  await opener.dispatchEvent('click');
+  await expect(page.getByRole('dialog', { name: 'Параметры' })).toBeVisible();
+  await page.goBack();
+  await expect(page.getByRole('dialog', { name: 'Параметры' })).not.toBeVisible();
+  expect(await page.evaluate(() => scrollY)).toBe(before);
+});
+test('back_closes_confirm_dialog_via_history', async ({ page }) => {
+  await page.getByRole('button', { name: 'Запросить подтверждение' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Подтвердить действие' });
+  await expect(dialog).toBeVisible();
+  await page.goBack();
+  await expect(dialog).not.toBeVisible();
 });
 test('segmented_is_a_keyboard_operable_radio_group', async ({ page }) => {
   const group = page.getByRole('radiogroup', { name: 'Режим' }); const first = group.getByRole('radio', { name: 'Первый', exact: true });
@@ -62,15 +79,53 @@ test('stage_track_is_static_under_reduced_motion', async ({ page }) => {
   await page.getByRole('button', { name: 'Следующий этап' }).click(); await expect(page.getByRole('group', { name: 'Доставка сообщения', exact: true }).locator('.st-status')).toHaveText('на машине');
   await page.emulateMedia({ reducedMotion: 'no-preference' }); await page.getByRole('button', { name: 'Без анимации' }).click();
   await expect.poll(() => page.locator('.st').evaluateAll(nodes => nodes.flatMap(node => node.getAnimations({ subtree: true })).length)).toBe(0);
+  await page.getByRole('button', { name: 'Обычная' }).click();
 });
 test('stage_track_shows_error_reason', async ({ page }) => {
   await page.getByRole('button', { name: 'Ошибка этапа' }).click(); const track = page.getByRole('group', { name: 'Доставка сообщения', exact: true });
   await expect(track.locator('.st-status')).toHaveText('Обрыв передачи'); await expect(track.locator('[data-state=error]')).toHaveCount(1);
 });
 test('motion_scale_changes_all_computed_durations_live', async ({ page }) => {
-  const get = () => page.locator('.st--compact .st-fill').first().evaluate(el => parseFloat(getComputedStyle(el).transitionDuration));
-  expect(await get()).toBeCloseTo(.32); await page.getByRole('button', { name: 'Быстрее', exact: true }).click(); expect(await get()).toBeCloseTo(.16);
-  await page.getByRole('button', { name: 'Медленнее', exact: true }).click(); expect(await get()).toBeCloseTo(.48);
+  const getDurations = () => page.evaluate(() => {
+    const probe = document.createElement('span');
+    document.body.append(probe);
+    const read = (token: string) => {
+      probe.style.transitionDuration = `var(${token})`;
+      return parseFloat(getComputedStyle(probe).transitionDuration);
+    };
+    const fillEl = document.querySelector('.st--compact .st-fill');
+    const result = {
+      fast: read('--duration-fast'),
+      expand: read('--duration-expand'),
+      arrive: read('--duration-stage-arrive'),
+      progress: read('--duration-stage-progress'),
+      fill: fillEl ? parseFloat(getComputedStyle(fillEl).transitionDuration) : 0
+    };
+    probe.remove();
+    return result;
+  });
+  await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.16);
+  const normal = await getDurations();
+  expect(normal.fast).toBeCloseTo(0.16);
+  expect(normal.fill).toBeCloseTo(0.32);
+
+  await page.getByRole('button', { name: 'Быстрее', exact: true }).click();
+  await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.08);
+  const faster = await getDurations();
+  expect(faster.fast).toBeCloseTo(0.08);
+  expect(faster.expand).toBeCloseTo(0.12);
+  expect(faster.arrive).toBeCloseTo(0.14);
+  expect(faster.progress).toBeCloseTo(0.12);
+  expect(faster.fill).toBeCloseTo(0.16);
+
+  await page.getByRole('button', { name: 'Медленнее', exact: true }).click();
+  await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.24);
+  const slower = await getDurations();
+  expect(slower.fast).toBeCloseTo(0.24);
+  expect(slower.expand).toBeCloseTo(0.36);
+  expect(slower.arrive).toBeCloseTo(0.42);
+  expect(slower.progress).toBeCloseTo(0.36);
+  expect(slower.fill).toBeCloseTo(0.48);
 });
 test('primitives_reflow_in_both_themes', async ({ page }) => {
   for (const theme of ['dark', 'light']) for (const width of [360, 320]) {

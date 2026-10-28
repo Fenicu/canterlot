@@ -11,4 +11,10 @@
   label { display: block; color: var(--secondary); font-size: var(--fs-meta); margin: var(--s0) var(--s6) var(--s4); }
   p { margin: var(--s4) var(--s6) var(--s0); color: var(--muted); font-size: var(--fs-sm); }
   .error { color: var(--danger); }
+  :global(.field input), :global(.field select), :global(.field textarea) {
+    display: block; width: 100%; min-height: var(--target); padding: var(--s5) var(--s6); border: 0; border-radius: var(--radius-pill); background: var(--raised); font-size: var(--fs-input); color: inherit;
+  }
+  :global(.field textarea) {
+    border-radius: var(--radius);
+  }
 </style>

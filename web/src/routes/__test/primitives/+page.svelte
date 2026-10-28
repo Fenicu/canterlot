@@ -48,5 +48,4 @@
   section { margin-bottom: var(--s10); }
   h2 { margin-bottom: var(--s6); }
   .row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s4); margin-block: var(--s4); }
-  input { display: block; width: 100%; min-height: var(--target); padding: var(--s5) var(--s6); border: 0; background: var(--raised); border-radius: var(--radius-pill); }
 </style>

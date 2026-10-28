@@ -2,7 +2,7 @@
   import { styleProperty } from './style-property';
   import { onMount } from 'svelte';
   import { announce } from '../a11y/announce';
-  import { scaledDurationMs, prefersReducedMotion } from '../motion';
+  import { prefersReducedMotion } from '../motion';
   import { swapLabel, type Stage, type StageState } from './stage-track';
   let { stages, index, state: trackState = 'active', form = 'compact', label, status, reason, progress, countdown }: {
     stages: Stage[]; index: number; state?: StageState; form?: 'compact' | 'named'; label: string;
@@ -11,6 +11,8 @@
   let host: HTMLDivElement;
   let instant = $state(true);
   let mounted = $state(false);
+  let landed = $state(false);
+  let initial = true;
   let box = $state(0);
   let ringInset = $state(0);
   const current = $derived(Math.min(stages.length - 1, Math.max(-1, index)));
@@ -22,7 +24,27 @@
   $effect(() => {
     if (!mounted) return;
     const next = `${current}:${phase}`;
-    if (next !== previous) { previous = next; announce(`${label}: ${summary}`); }
+    if (previous === '') {
+      previous = next;
+      return;
+    }
+    if (next !== previous) {
+      previous = next;
+      announce(`${label}: ${summary}`);
+    }
+  });
+  $effect(() => {
+    if (!mounted) return;
+    const isDone = phase === 'done';
+    if (initial) {
+      initial = false;
+      return;
+    }
+    if (isDone && !landed) {
+      landed = true;
+    } else if (!isDone && landed) {
+      landed = false;
+    }
   });
   $effect(() => {
     if (!mounted) return;
@@ -35,7 +57,7 @@
     if (!mounted || !countdown || prefersReducedMotion()) return;
     const arc = host.querySelector<SVGCircleElement>('[aria-current="step"] .st-ring-arc');
     if (!arc) return;
-    const animation = arc.animate([{ strokeDasharray: `${countdown.from * 100} 100` }, { strokeDasharray: '100 100' }], { duration: scaledDurationMs(countdown.durationMs), easing: getComputedStyle(host).getPropertyValue('--ease-stage-progress').trim(), fill: 'forwards' });
+    const animation = arc.animate([{ strokeDasharray: `${countdown.from * 100} 100` }, { strokeDasharray: '100 100' }], { duration: countdown.durationMs, easing: 'linear', fill: 'forwards' });
     const media = matchMedia('(prefers-reduced-motion: reduce)');
     const stop = () => { if (prefersReducedMotion()) animation.cancel(); };
     media.addEventListener('change', stop);
@@ -54,11 +76,11 @@
   <div class="st-track"><span class="st-line" aria-hidden="true"><span class="st-fill" use:styleProperty={{ name: 'transform', value: `scaleX(${fill})` }}></span></span>
     <ol class="st-points">
       {#each stages as stage, k (stage.id)}
-        <li class="st-point" data-state={k < current ? 'done' : k === current ? phase : 'pending'} data-kind={stage.kind ?? 'pulse'} data-landed={!instant && k === current && phase === 'done' ? '' : undefined} aria-current={k === current ? 'step' : undefined}>
+        <li class="st-point" data-state={k < current ? 'done' : k === current ? phase : 'pending'} data-kind={stage.kind ?? 'pulse'} data-landed={landed && k === current ? '' : undefined} aria-current={k === current ? 'step' : undefined}>
           <span class="st-mark" aria-hidden="true"><span class="st-halo"></span>
             <svg class="st-ring" viewBox={`0 0 ${box} ${box}`}>
               <circle class="st-ring-track" cx={box / 2} cy={box / 2} r={box / 2 - ringInset} pathLength="100" transform={`rotate(-90 ${box / 2} ${box / 2})`} />
-              <circle class="st-ring-arc" cx={box / 2} cy={box / 2} r={box / 2 - ringInset} pathLength="100" transform={`rotate(-90 ${box / 2} ${box / 2})`} use:styleProperty={{ name: 'stroke-dasharray', value: stage.kind === 'ring' && k === current ? `${fraction * 100} 100` : undefined }} />
+              <circle class="st-ring-arc" cx={box / 2} cy={box / 2} r={box / 2 - ringInset} pathLength="100" transform={`rotate(-90 ${box / 2} ${box / 2})`} use:styleProperty={{ name: 'transition', value: countdown ? 'none' : undefined }} use:styleProperty={{ name: 'stroke-dasharray', value: stage.kind === 'ring' && k === current ? `${fraction * 100} 100` : undefined }} />
             </svg><span class="st-dot"></span>
           </span><span class="st-label" use:swapLabel={stage.label}></span>
         </li>

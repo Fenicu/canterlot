@@ -46,7 +46,7 @@ export function lintFile(path, text) {
   function declaration(prop, value, offset, inline = false) {
     const clean = stripVars(value);
     const rawColor = colors.test(clean) || ((/color|background|^fill$|^stroke$|^border|^outline/.test(prop) || prop.startsWith('--')) && names.test(clean));
-    const rawLength = length.test(clean) && /font|padding|margin|gap|inset|top|right|bottom|left|width|height|radius|outline|border|size|spacing|translate/.test(prop);
+    const rawLength = length.test(clean) && /font|padding|margin|gap|inset|top|right|bottom|left|width|height|radius|outline|border|size|spacing|translate|transform|flex|background-position/.test(prop);
     const rawFont = /^(font|font-family|font-weight|line-height)$/.test(prop) && clean.replace(/[\s/]/g, '') !== '' && !/^(0|inherit|initial|unset|normal)$/.test(clean.trim());
     const rawShadow = /shadow/.test(prop) || /drop-shadow\(/.test(value);
     const badShadow = rawShadow && !/^(none|var\(--shadow\))$/.test(value.trim());
@@ -61,21 +61,31 @@ export function lintFile(path, text) {
     }
     if (!rawMotion && /^(?:transition|animation)(?:-duration|-delay)?$/.test(prop) && !/^(none|0|initial|inherit|unset)$/.test(value.trim()) && !scaled(value)) add('all_durations_go_through_the_motion_scale', offset, value);
   }
-  for (const block of cssBlocks) postcss.parse(block.text).walkDecls(d => declaration(d.prop, d.value, block.offset + d.source.start.offset));
+  for (const block of cssBlocks) {
+    postcss.parse(block.text).walkDecls(d => declaration(d.prop, d.value, block.offset + d.source.start.offset));
+    for (const m of block.text.matchAll(/\\([0-9a-fA-F]{1,6})[ \t]?/g)) {
+      try {
+        const codePoint = parseInt(m[1], 16);
+        if (!isNaN(codePoint) && codePoint > 0 && codePoint <= 0x10ffff) {
+          const glyph = String.fromCodePoint(codePoint);
+          if (emoji.test(glyph)) add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + m.index, m[0]);
+        }
+      } catch {}
+    }
+  }
   const markup = text.replace(/<(script|style)[^>]*>[\s\S]*?<\/\1>/g, m => m.replace(/[^\n]/g, ' '));
   if (!path.endsWith('.css')) {
     for (const m of markup.matchAll(/\bstyle=(['"])([\s\S]*?)\1/g)) {
       try { postcss.parse(`a{${m[2]}}`).walkDecls(d => declaration(d.prop, d.value, m.index, true)); }
       catch { add('inline-style', m.index, m[2]); }
     }
-    for (const m of markup.matchAll(/\bstyle:([\w-]+)=\{([^}]+)\}/g)) declaration(m[1], m[2].replace(/^['"]|['"]$/g, ''), m.index, true);
+    for (const m of markup.matchAll(/\bstyle:([\w-]+)(?:\|[\w-]+)?=(?:\{([^}]+)\}|(['"])(.*?)\3)/g)) declaration(m[1], (m[2] ?? m[4]).replace(/^['"]|['"]$/g, '').trim(), m.index, true);
     for (const m of markup.matchAll(/\b(fill|stroke|stop-color)=(['"])(.*?)\2/g)) if (!/^(currentColor|none|var\(--[\w-]+\))$/.test(m[3])) add('svg-paint', m.index, m[3]);
     for (const m of markup.matchAll(/\b(fill|stroke|stop-color)=\{(['"])(.*?)\2\}/g)) if (!/^(currentColor|none|var\(--[\w-]+\))$/.test(m[3])) add('svg-paint', m.index, m[3]);
     const scripts = path.endsWith('.ts') || path.endsWith('.js') ? [{ text, offset: 0 }] : [...text.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map(m => ({ text: m[1], offset: m.index }));
     for (const block of scripts) {
       for (const m of block.text.matchAll(/(['"`])([^'"`\n]*)\1/g)) if (colors.test(m[2])) add('string-color', block.offset + m.index, m[2]);
       const source = ts.createSourceFile(path, block.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-      const durationCall = expression => ts.isCallExpression(expression) && ts.isIdentifier(expression.expression) && ['durationMs', 'scaledDurationMs'].includes(expression.expression.text);
       function visit(node) {
         if ((ts.isStringLiteralLike(node) || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) && emoji.test(node.text)) add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + node.getStart(source), node.text);
         const inIconRegistry = path.replaceAll('\\', '/').endsWith('icons.ts') || path.replaceAll('\\', '/').endsWith('icons.js') ||
@@ -86,8 +96,37 @@ export function lintFile(path, text) {
         if (inIconRegistry && ts.isLiteralTypeNode(node) && ts.isStringLiteral(node.literal) && /check/i.test(node.literal.text)) {
           add('ui_strings_have_no_emoji_or_checkmark_glyphs', block.offset + node.getStart(source), node.literal.text);
         }
-        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === 'durationMs' && (!node.arguments[0] || !ts.isStringLiteral(node.arguments[0]) || !allowed.has(node.arguments[0].text))) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
-        if (ts.isPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.getText(source)) && !durationCall(node.initializer)) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.initializer.getText(source));
+        const inMotion = path.replaceAll('\\', '/').endsWith('motion.ts') || path.replaceAll('\\', '/').endsWith('motion.js');
+        if (!inMotion && ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.EqualsToken) {
+          const prop = ts.isPropertyAccessExpression(node.left)
+            ? node.left.name.text
+            : (ts.isElementAccessExpression(node.left) && ts.isStringLiteral(node.left.argumentExpression) ? node.left.argumentExpression.text : null);
+          if (prop && ['animationDuration', 'transitionDuration', 'animationDelay', 'transitionDelay'].includes(prop)) {
+            add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
+          }
+        }
+        if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
+          if (node.expression.text === 'durationMs' && (!node.arguments[0] || !ts.isStringLiteral(node.arguments[0]) || !allowed.has(node.arguments[0].text))) {
+            add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
+          }
+          if (node.expression.text === 'scaledDurationMs' && (!node.arguments[0] || ts.isNumericLiteral(node.arguments[0]) || (ts.isStringLiteral(node.arguments[0]) && !allowed.has(node.arguments[0].text)))) {
+            add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.getText(source));
+          }
+        }
+        if (ts.isPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.getText(source))) {
+          const text = node.initializer.getText(source);
+          const isCountdownDeadline = /countdown(?:\?\.|\.)durationMs\b/.test(text);
+          const isDurationMsCall = ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
+            node.initializer.expression.text === 'durationMs' && node.initializer.arguments[0] &&
+            ts.isStringLiteral(node.initializer.arguments[0]) && allowed.has(node.initializer.arguments[0].text);
+          const isScaledDurationToken = ts.isCallExpression(node.initializer) && ts.isIdentifier(node.initializer.expression) &&
+            node.initializer.expression.text === 'scaledDurationMs' && node.initializer.arguments[0] &&
+            ((ts.isStringLiteral(node.initializer.arguments[0]) && allowed.has(node.initializer.arguments[0].text)) ||
+             /countdown(?:\?\.|\.)durationMs\b/.test(node.initializer.arguments[0].getText(source)));
+          if (!isCountdownDeadline && !isDurationMsCall && !isScaledDurationToken) {
+            add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), text);
+          }
+        }
         if (ts.isShorthandPropertyAssignment(node) && ['duration', 'delay'].includes(node.name.text)) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.name.text);
         if (ts.isCallExpression(node) && ts.isPropertyAccessExpression(node.expression) && node.expression.name.text === 'animate' && node.arguments[1] && !ts.isObjectLiteralExpression(node.arguments[1])) add('all_durations_go_through_the_motion_scale', block.offset + node.getStart(source), node.arguments[1].getText(source));
         ts.forEachChild(node, visit);
@@ -101,7 +140,7 @@ export function lintFile(path, text) {
   return found.sort((a, b) => a.line - b.line || a.rule.localeCompare(b.rule));
 }
 export function lintTree(root, allow) {
-  for (const entry of allow) if (!entry.reason?.trim()) throw new Error('Allow entry needs a reason');
+  for (const entry of allow) if (!entry.reason?.trim() || !entry.value?.trim()) throw new Error('Allow entry needs a reason and a value');
   const result = [];
   function walk(directory) {
     for (const item of readdirSync(directory, { withFileTypes: true })) {
@@ -109,7 +148,7 @@ export function lintTree(root, allow) {
       if (item.isDirectory()) walk(file);
       else if (/\.(css|svelte|ts|js|html)$/.test(item.name)) {
         const path = relative(resolve(root), file).replaceAll('\\', '/');
-        for (const violation of lintFile(file, readFileSync(file, 'utf8'))) if (!allow.some(entry => entry.path === path && entry.rule === violation.rule && (entry.value === undefined || entry.value === violation.value))) result.push({ path, ...violation });
+        for (const violation of lintFile(file, readFileSync(file, 'utf8'))) if (!allow.some(entry => entry.path === path && entry.rule === violation.rule && entry.value === violation.value)) result.push({ path, ...violation });
       }
     }
   }

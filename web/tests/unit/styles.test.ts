@@ -34,3 +34,8 @@ test('disabled_button_requires_a_reason', () => {
   const walk = (path: string): string[] => readdirSync(path, { withFileTypes: true }).flatMap(e => e.isDirectory() ? walk(`${path}/${e.name}`) : [`${path}/${e.name}`]);
   for (const path of walk('src').filter(p => p.endsWith('.svelte') && !p.endsWith('/Button.svelte'))) expect(readFileSync(path, 'utf8'), path).not.toMatch(/<button\b[^>]*\bdisabled\b/);
 });
+test('pwa_design_doc_records_removal_of_check_icon_and_unscaled_countdown', () => {
+  const doc = readFileSync('../docs/design/pwa.md', 'utf8');
+  expect(doc).not.toMatch(/Регистрация `check` остаётся/);
+  expect(doc).toMatch(/нет иконки `check`/i);
+});

@@ -1,10 +1,14 @@
 <script lang="ts">
   import Sheet from './Sheet.svelte';
   import Button from './Button.svelte';
-  let { title, body, confirmLabel, danger = false, onconfirm, onclose, open = true }: { title: string; body: string; confirmLabel: string; danger?: boolean; onconfirm: () => void; onclose?: () => void; open?: boolean } = $props();
+  let { title, body, confirmLabel, danger = false, onconfirm, onclose, open = true, routeKey }: {
+    title: string; body: string; confirmLabel: string; danger?: boolean;
+    onconfirm: () => void; onclose?: () => void; open?: boolean; routeKey?: string;
+  } = $props();
+  const autoKey = $props.id();
   let dismissed = $state(false);
 </script>
-<Sheet open={open && !dismissed} {title} onclose={() => { dismissed = true; onclose?.(); }}>
+<Sheet open={open && !dismissed} {title} routeKey={routeKey ?? autoKey} onclose={() => { dismissed = true; onclose?.(); }}>
   <p>{body}</p><div class:danger><Button variant="primary" onclick={() => { onconfirm(); dismissed = true; }}>{confirmLabel}</Button><Button variant="text" onclick={() => { dismissed = true; onclose?.(); }}>Отмена</Button></div>
 </Sheet>
 <style>
