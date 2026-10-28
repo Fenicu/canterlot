@@ -34,7 +34,6 @@ pub struct Header {
     pub sha256: String,
 }
 
-#[derive(Debug)]
 pub enum MediaError {
     Invalid,
     NotFound,
@@ -44,6 +43,18 @@ pub enum MediaError {
     Interrupted,
     Db(sqlx::Error),
     Blob(BlobError),
+}
+
+impl fmt::Debug for MediaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Db(error) => f
+                .debug_tuple("Db")
+                .field(&crate::dberr::describe(error))
+                .finish(),
+            other => f.write_str(other.kind()),
+        }
+    }
 }
 
 impl MediaError {

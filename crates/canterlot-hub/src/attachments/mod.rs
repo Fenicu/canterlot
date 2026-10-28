@@ -784,12 +784,12 @@ pub async fn link_scheduled_in_tx(
     conversation_id: Uuid,
     job_id: Uuid,
     attachment_ids: &[Uuid],
-) -> Result<(), AttachmentError> {
+) -> Result<Vec<AttachmentRef>, AttachmentError> {
     if attachment_ids.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
     let (catalog, machine) = gate_for(conn, conversation_id).await?;
-    lock_ready_in_tx(
+    let refs = lock_ready_in_tx(
         conn,
         owner_id,
         conversation_id,
@@ -799,13 +799,13 @@ pub async fn link_scheduled_in_tx(
     )
     .await?;
     sqlx::query(
-        "insert into scheduled_job_attachments (job_id, attachment_id) select $1, unnest($2::uuid[])",
+        "insert into scheduled_job_attachments (job_id, attachment_id) select $1, unnest($2::uuid[]) on conflict do nothing",
     )
     .bind(job_id)
     .bind(attachment_ids)
     .execute(conn)
     .await?;
-    Ok(())
+    Ok(refs)
 }
 
 /// Снимает ссылки заданий, которые отменены, отправлены или завершились ошибкой.

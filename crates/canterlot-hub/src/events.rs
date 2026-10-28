@@ -224,6 +224,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "input_state_changed",
     "queue_state_changed",
     "queue_paused",
+    "queue_resumed",
     "execution_state_changed",
     "phase_changed",
     "run_finished",

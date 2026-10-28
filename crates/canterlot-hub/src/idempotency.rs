@@ -5,11 +5,21 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgConnection, PgPool};
 use uuid::Uuid;
 
-#[derive(Debug, PartialEq)]
+#[derive(PartialEq)]
 pub enum Begin {
     New,
     Replay(Value),
     Conflict,
+}
+
+impl std::fmt::Debug for Begin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::New => "New",
+            Self::Replay(_) => "Replay(<redacted>)",
+            Self::Conflict => "Conflict",
+        })
+    }
 }
 
 pub async fn lookup(

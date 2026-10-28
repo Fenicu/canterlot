@@ -100,7 +100,7 @@ pub trait BlobStore: Send + Sync {
     async fn scan(&self) -> io::Result<Vec<StoredFile>>;
 }
 
-/// Локальный том: `staging/<id>.part` и `blobs/<id[0..2]>/<id>` в одном `blob_dir` на одной ФС.
+/// Локальный том: `staging/<id>.part` и `blobs/<последние 2 hex>/<id>` в одном `blob_dir` на одной ФС.
 #[derive(Clone)]
 pub struct LocalBlobStore {
     staging: PathBuf,
@@ -192,11 +192,18 @@ impl LocalBlobStore {
 
     fn shard(&self, id: Uuid) -> PathBuf {
         let name = id.to_string();
-        self.blobs.join(&name[..2])
+        self.blobs.join(&name[name.len() - 2..])
     }
 
     pub fn blob_path(&self, id: Uuid) -> PathBuf {
-        self.shard(id).join(id.to_string())
+        let current = self.shard(id).join(id.to_string());
+        let name = id.to_string();
+        let legacy = self.blobs.join(&name[..2]).join(&name);
+        if !current.exists() && legacy.exists() {
+            legacy
+        } else {
+            current
+        }
     }
 
     fn step(&self, step: PublishStep) -> Result<(), BlobError> {
@@ -210,7 +217,7 @@ impl LocalBlobStore {
         expected_sha256: &str,
     ) -> Result<(), BlobError> {
         let blob = self.blob_path(id);
-        let shard = self.shard(id);
+        let shard = blob.parent().expect("blob shard").to_owned();
         match fs::File::open(&blob) {
             Ok(mut file) => {
                 // Повтор после сбоя между публикацией и commit: содержимое уже на месте.

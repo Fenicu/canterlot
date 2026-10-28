@@ -244,7 +244,7 @@ pub(crate) async fn emit_changed(
             Window::FiveHour => p.five_hour,
         };
         if let Some(s) = state {
-            events::append(conn,NewEvent{scope:Scope::Conversations{owner_id},kind:"limits_changed",conversation_id:None,execution_id:None,payload:json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)),"observed_at":s.observed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"weekly_reserve_active":p.weekly_reserve_active}),correlation_id}).await?;
+            events::append(conn,NewEvent{scope:Scope::Conversations{owner_id},kind:"limits_changed",conversation_id:None,execution_id:None,payload:json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)),"observed_at":s.observed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":p.weekly_reserve_resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true))}),correlation_id}).await?;
         }
     }
     Ok(())

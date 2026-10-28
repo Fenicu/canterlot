@@ -9,7 +9,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use super::{BlobStore, FileKind, linked, state_event};
-use crate::{config::AttachmentsConfig, singleton::Singleton};
+use crate::config::AttachmentsConfig;
 
 const BATCH: i64 = 1000;
 
@@ -210,42 +210,49 @@ pub async fn run_once(
             return Ok(report);
         }
     };
-    for file in files.into_iter().filter(|f| f.mtime < cutoff) {
-        let Some(locked) = store.try_lock(file.id).map_err(sqlx::Error::Io)? else {
-            continue;
-        };
-        let store = &*locked;
-        let state: Option<String> = sqlx::query_scalar("select state from attachments where id=$1")
-            .bind(file.id)
-            .fetch_optional(pool)
-            .await?;
-        let state = state.as_deref();
-        // Blob картинки агента живёт, пока есть её строка; staging приёма короткоживущий.
-        let media: bool = match file.kind {
-            FileKind::Blob => {
-                sqlx::query_scalar("select exists(select 1 from block_media where id=$1)")
-                    .bind(file.id)
-                    .fetch_one(pool)
-                    .await?
+    let files: Vec<_> = files.into_iter().filter(|f| f.mtime < cutoff).collect();
+    for batch in files.chunks(128) {
+        let mut locked = std::collections::HashMap::new();
+        for file in batch {
+            if let std::collections::hash_map::Entry::Vacant(entry) = locked.entry(file.id)
+                && let Some(store) = store.try_lock(file.id).map_err(sqlx::Error::Io)?
+            {
+                entry.insert(store);
             }
-            FileKind::Staging => false,
-        };
-        let keep = media
-            || match file.kind {
-                FileKind::Staging => matches!(state, Some("created" | "uploading")),
-                FileKind::Blob => matches!(state, Some("created" | "uploading" | "ready")),
-            };
-        if keep {
+        }
+        if locked.is_empty() {
             continue;
         }
-        let deleted = match file.kind {
-            FileKind::Staging => store.delete_staging(file.id).await,
-            FileKind::Blob => store.delete_blob(file.id).await,
-        };
-        match (deleted, file.kind) {
-            (Ok(()), FileKind::Staging) => report.orphan_staging += 1,
-            (Ok(()), FileKind::Blob) => report.orphan_blobs += 1,
-            (Err(error), _) => log_file_error(file.id, &error),
+        let ids: Vec<_> = locked.keys().copied().collect();
+        let rows: Vec<(Uuid,Option<String>,bool)> = sqlx::query_as("select ids.id,a.state,m.id is not null from unnest($1::uuid[]) ids(id) left join attachments a on a.id=ids.id left join block_media m on m.id=ids.id")
+            .bind(&ids).fetch_all(pool).await?;
+        let known: std::collections::HashMap<_, _> = rows
+            .into_iter()
+            .map(|(id, state, media)| (id, (state, media)))
+            .collect();
+        for file in batch {
+            let Some(store) = locked.get(&file.id) else {
+                continue;
+            };
+            let (state, media) = known.get(&file.id).expect("catalog row");
+            let keep = match file.kind {
+                FileKind::Staging => matches!(state.as_deref(), Some("created" | "uploading")),
+                FileKind::Blob => {
+                    *media || matches!(state.as_deref(), Some("created" | "uploading" | "ready"))
+                }
+            };
+            if keep {
+                continue;
+            }
+            let deleted = match file.kind {
+                FileKind::Staging => store.delete_staging(file.id).await,
+                FileKind::Blob => store.delete_blob(file.id).await,
+            };
+            match (deleted, file.kind) {
+                (Ok(()), FileKind::Staging) => report.orphan_staging += 1,
+                (Ok(()), FileKind::Blob) => report.orphan_blobs += 1,
+                (Err(error), _) => log_file_error(file.id, &error),
+            }
         }
     }
     Ok(report)
@@ -256,24 +263,11 @@ pub async fn run(
     pool: PgPool,
     store: Arc<dyn BlobStore>,
     config: AttachmentsConfig,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
-    let options = pool.connect_options();
     let interval = config.gc_interval.max(Duration::from_millis(10));
-    let mut singleton = loop {
-        let acquired = tokio::select! {biased; _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return, result=Singleton::acquire(&options,"attachment-gc")=>result};
-        match acquired {
-            Ok(Some(lock)) => break lock,
-            Err(error) => log_db_error(&error),
-            _ => {}
-        }
-        tokio::select! {biased; _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return, _=tokio::time::sleep(interval)=>{}}
-    };
-    let work = async {
+    crate::singleton::supervise(&pool, "attachment-gc", shutdown, || async {
         loop {
-            if !singleton.still_held().await {
-                break;
-            }
             match run_once(&pool, &*store, Utc::now(), config.gc_grace).await {
                 Ok(report) if report != GcReport::default() => tracing::info!(
                     kind = "attachment_gc",
@@ -289,9 +283,8 @@ pub async fn run(
             }
             tokio::time::sleep(interval).await;
         }
-    };
-    tokio::select! {biased; _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>{}, _=work=>{}}
-    singleton.release().await;
+    })
+    .await;
 }
 
 fn log_db_error(error: &sqlx::Error) {

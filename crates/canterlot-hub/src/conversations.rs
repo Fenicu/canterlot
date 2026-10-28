@@ -569,7 +569,7 @@ pub(crate) async fn lock_conversation(
     id: Uuid,
 ) -> Result<(), UpdateError> {
     sqlx::query("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.owner_id=$1 and c.id=$2 for update of q").bind(owner).bind(id).fetch_optional(&mut *conn).await?.ok_or(UpdateError::NotFound)?;
-    sqlx::query("select id from conversations where id=$1 and owner_id=$2 for update")
+    sqlx::query("select id from conversations where id=$1 and owner_id=$2 for no key update")
         .bind(id)
         .bind(owner)
         .fetch_optional(conn)
@@ -697,7 +697,7 @@ pub(crate) async fn emit_attributes(
     id: Uuid,
     correlation: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let p = attribute_payload(conn, owner, id).await?;
+    let mut p = attribute_payload(conn, owner, id).await?;
     append(
         conn,
         Scope::Conversation { id },
@@ -707,6 +707,16 @@ pub(crate) async fn emit_attributes(
         correlation,
     )
     .await?;
+    let scope = Scope::Conversations { owner_id: owner }.key();
+    sqlx::query("insert into scope_counters(scope,last_seq) values($1,0) on conflict do nothing")
+        .bind(&scope)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("select scope from scope_counters where scope=$1 for update")
+        .bind(scope)
+        .execute(&mut *conn)
+        .await?;
+    p["counts"] = serde_json::to_value(counts(conn, owner).await?).expect("counts");
     append(
         conn,
         Scope::Conversations { owner_id: owner },
@@ -817,6 +827,8 @@ pub async fn mark_read(
     owner_id: Uuid,
     id: Uuid,
     seq: i64,
+    thresholds: &activity::Thresholds,
+    metrics_stale_after: std::time::Duration,
 ) -> Result<(), UpdateError> {
     if seq < 0 {
         return Err(UpdateError::Invalid("seq"));
@@ -829,11 +841,12 @@ pub async fn mark_read(
         .execute(&mut *tx)
         .await?;
     tx.commit().await?;
-    activity::refresh(
+    activity::refresh_with_metrics(
         pool,
         id,
         Utc::now(),
-        &activity::Thresholds::from(&Default::default()),
+        thresholds,
+        metrics_stale_after,
         Uuid::now_v7(),
     )
     .await?;
@@ -1165,7 +1178,7 @@ pub async fn change_settings(
     let request = json!({"id": id, "settings": patch});
     Ok(idempotency::run_in_tx(pool, owner_id, key, "change_settings", &request, Some(id), move |conn| Box::pin(async move {
         sqlx::query("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
-                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
+                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for no key update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
                 if !row.try_get::<Vec<String>, _>("capabilities")?.iter().any(|v| v == "pilot_v1") { return Err(SettingsError::CapabilityMissing); }
         let mut pending: Value = row.try_get("pending_settings")?;
         for (k, v) in [("model", patch.model), ("effort", patch.effort), ("permission_mode", patch.permission_mode)] { if let Some(v) = v { pending[k] = json!(v); } }
@@ -1211,7 +1224,7 @@ async fn apply_sent_settings(
         .bind(id)
         .fetch_one(&mut *conn)
         .await?;
-    let row = sqlx::query("select owner_id,model,effort,permission_mode,pending_settings from conversations where id=$1 for update").bind(id).fetch_one(&mut *conn).await?;
+    let row = sqlx::query("select owner_id,model,effort,permission_mode,pending_settings from conversations where id=$1 for no key update").bind(id).fetch_one(&mut *conn).await?;
     let owner: Uuid = row.try_get("owner_id")?;
     let mut pending: Value = row.try_get("pending_settings")?;
     let mut model: String = row.try_get("model")?;
@@ -1261,7 +1274,7 @@ pub(crate) async fn revalidate_pending_in_tx(
     id: Uuid,
     correlation: Uuid,
 ) -> Result<(Value, i64), sqlx::Error> {
-    let row = sqlx::query("select c.owner_id,c.model,c.effort,c.permission_mode,c.pending_settings,c.settings_rev,h.models,h.permission_modes from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 for update of c").bind(id).fetch_one(&mut *conn).await?;
+    let row = sqlx::query("select c.owner_id,c.model,c.effort,c.permission_mode,c.pending_settings,c.settings_rev,h.models,h.permission_modes from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 for no key update of c").bind(id).fetch_one(&mut *conn).await?;
     let mut pending: Value = row.try_get("pending_settings")?;
     let rev = row.try_get("settings_rev")?;
     if pending.as_object().is_none_or(|p| p.is_empty()) {

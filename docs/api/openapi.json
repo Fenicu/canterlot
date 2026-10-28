@@ -2642,7 +2642,7 @@
             }
           },
           "503": {
-            "description": "База недоступна или установка не совпадает",
+            "description": "База или фоновая служба недоступна, либо установка не совпадает",
             "content": {
               "application/json": {
                 "schema": {
@@ -5251,7 +5251,8 @@
       "ProbeReason": {
         "type": "string",
         "enum": [
-          "database"
+          "database",
+          "service"
         ]
       },
       "ProbeStatus": {
@@ -5269,6 +5270,12 @@
         "properties": {
           "reason": {
             "$ref": "#/components/schemas/ProbeReason"
+          },
+          "services": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
           },
           "status": {
             "$ref": "#/components/schemas/ProbeStatus"

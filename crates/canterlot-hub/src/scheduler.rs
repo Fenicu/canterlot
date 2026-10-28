@@ -21,7 +21,6 @@ use crate::{
     events::{self, NewEvent, Scope},
     idempotency,
     session::Registry,
-    singleton::Singleton,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -180,7 +179,19 @@ fn validate_content(content: &[ContentBlock], has_attachments: bool) -> Result<(
         .map_err(|_| ScheduleError::InvalidContent("invalid_content"))
 }
 
-#[derive(sqlx::FromRow)]
+fn validate_refs(
+    content: &[ContentBlock],
+    refs: &[canterlot_proto::worker::v1::AttachmentRef],
+) -> Result<(), ScheduleError> {
+    let mut blocks = content.to_vec();
+    for reference in refs {
+        blocks.push(ContentBlock::from_ref(reference)?);
+    }
+    crate::delivery::submit::check_bounds(&blocks)
+        .map_err(|_| ScheduleError::InvalidContent("invalid_content"))
+}
+
+#[derive(Clone, sqlx::FromRow)]
 struct JobRow {
     id: Uuid,
     kind: String,
@@ -285,7 +296,8 @@ pub async fn schedule_message(
         if pending>=config.max_pending_per_conversation as i64{return Err(ScheduleError::TooManyPending);}
         let job:JobRow=sqlx::query_as("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) values($1,'message',$2,$3,$4,$5) returning *")
             .bind(Uuid::now_v7()).bind(owner_id).bind(conversation_id).bind(req.run_at).bind(json!({"content":req.content,"attachment_ids":req.attachment_ids})).fetch_one(&mut *conn).await?;
-        crate::attachments::link_scheduled_in_tx(conn,owner_id,conversation_id,job.id,&req.attachment_ids).await?;
+        let refs=crate::attachments::link_scheduled_in_tx(conn,owner_id,conversation_id,job.id,&req.attachment_ids).await?;
+        validate_refs(&req.content,&refs)?;
         let message=job.message()?; changed(conn,&message,correlation_id).await?; Ok(message)
     })).await?.value;
     settings.notify.notify_one();
@@ -341,6 +353,9 @@ async fn mutate(
                 let has_attachments=job.payload["attachment_ids"].as_array().is_some_and(|ids|!ids.is_empty());
                 validate_content(&content,has_attachments)?;job.payload["content"]=json!(content);
             }
+            let message=job.message()?;
+            let refs=crate::attachments::link_scheduled_in_tx(conn,owner_id,message.conversation_id,job.id,&message.attachment_ids).await?;
+            validate_refs(&message.content,&refs)?;
             sqlx::query("update scheduled_jobs set run_at=$2,payload=$3,updated_at=clock_timestamp() where id=$1").bind(id).bind(job.run_at).bind(&job.payload).execute(&mut *conn).await?;
         } else {
             job.state="cancelled".into();
@@ -358,7 +373,7 @@ pub async fn list_messages(
     owner_id: Uuid,
     conversation_id: Uuid,
 ) -> Result<Vec<ScheduledMessage>, sqlx::Error> {
-    let jobs:Vec<JobRow>=sqlx::query_as("select j.* from scheduled_jobs j join conversations c on c.id=j.conversation_id where c.owner_id=$1 and j.owner_id=$1 and j.conversation_id=$2 and j.kind='message' order by (j.state='pending') desc,j.run_at,j.id limit 200").bind(owner_id).bind(conversation_id).fetch_all(conn).await?;
+    let jobs:Vec<JobRow>=sqlx::query_as("select j.* from scheduled_jobs j join conversations c on c.id=j.conversation_id where c.owner_id=$1 and j.owner_id=$1 and j.conversation_id=$2 and j.kind='message' order by (j.state='pending') desc,case when j.state='pending' then j.run_at end,case when j.state<>'pending' then j.updated_at end desc,j.id desc limit 200").bind(owner_id).bind(conversation_id).fetch_all(conn).await?;
     jobs.iter().map(JobRow::message).collect()
 }
 
@@ -440,6 +455,7 @@ impl Scheduler {
     }
 
     pub async fn tick(&self, now: DateTime<Utc>) -> Result<TickReport, sqlx::Error> {
+        crunch::expire_pending(&self.pool, now).await?;
         let mut report = TickReport::default();
         loop {
             let mut tx = self.pool.begin().await?;
@@ -448,10 +464,23 @@ impl Scheduler {
                 tx.commit().await?;
                 break;
             };
-            if job.kind == "message" {
-                self.fire_message(tx, job, now, &mut report).await?;
+            let claimed = job.clone();
+            let outcome = if job.kind == "message" {
+                self.fire_message(tx, job, now, &mut report).await
             } else {
-                self.fire_limit_job(tx, job, now, &mut report).await?;
+                self.fire_limit_job(tx, job, now, &mut report).await
+            };
+            if let Err(error) = outcome {
+                log_error(&error);
+                let (reason, permanent) = match error {
+                    sqlx::Error::Decode(_)
+                    | sqlx::Error::ColumnDecode { .. }
+                    | sqlx::Error::RowNotFound => ("invalid_payload", true),
+                    sqlx::Error::InvalidArgument(_) => ("invalid_job", true),
+                    _ => ("job_error", false),
+                };
+                self.record_failure(&claimed, now, reason, permanent, &mut report)
+                    .await?;
             }
         }
         report.next_due =
@@ -508,90 +537,93 @@ impl Scheduler {
                 self.dispatcher.trigger(message.conversation_id);
                 report.fired += 1;
             }
-            Err(SubmitError::QueueFull { .. }) => {
-                tx.rollback().await?;
-                // После отката блокировка задания берётся заново, до любых блокировок очереди.
-                let mut retry = self.pool.begin().await?;
-                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update skip locked").bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *retry).await?;
-                if let Some(mut current) = current {
-                    current.attempts += 1;
-                    if current.attempts as u32 >= self.service.config.max_attempts {
-                        self.finish(&mut retry, current, "failed", json!({"error":"queue_full"}))
-                            .await?;
-                        report.failed += 1;
-                    } else {
-                        current.run_at =
-                            now + TimeDelta::from_std(self.service.config.retry_queue_full)
-                                .map_err(|_| {
-                                    sqlx::Error::InvalidArgument(
-                                        "retry duration out of range".into(),
-                                    )
-                                })?;
-                        let updated:JobRow=sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,updated_at=clock_timestamp() where id=$1 returning *").bind(current.id).bind(current.attempts).bind(current.run_at).fetch_one(&mut *retry).await?;
-                        changed(&mut retry, &updated.message()?, Uuid::now_v7()).await?;
-                        report.retried += 1;
-                    }
-                }
-                retry.commit().await?;
-            }
-            Err(error @ (SubmitError::ConversationClosed | SubmitError::ConversationNotFound)) => {
-                let reason = if matches!(error, SubmitError::ConversationNotFound) {
-                    "conversation_not_found"
-                } else {
-                    "conversation_closed"
+            Err(error) => {
+                let (reason, permanent) = match &error {
+                    SubmitError::QueueFull { .. } => ("queue_full", false),
+                    SubmitError::ConversationClosed => ("conversation_closed", true),
+                    SubmitError::ConversationNotFound => ("conversation_not_found", true),
+                    SubmitError::ResourceLimit { .. } => ("resource_limit", true),
+                    SubmitError::InvalidContent { .. } => ("invalid_content", true),
+                    SubmitError::InvalidRequest { .. } => ("invalid_request", true),
+                    SubmitError::IdempotencyConflict => ("idempotency_conflict", true),
+                    SubmitError::KeyRaceLost => ("key_race_lost", false),
+                    SubmitError::Db(_) => ("database_error", false),
+                    SubmitError::Attachment(error) => match error {
+                        crate::attachments::AttachmentError::Db(_) => ("database_error", false),
+                        crate::attachments::AttachmentError::CapabilityMissing => {
+                            ("capability_missing", true)
+                        }
+                        crate::attachments::AttachmentError::LimitsMismatch => {
+                            ("limits_mismatch", true)
+                        }
+                        crate::attachments::AttachmentError::Unsupported => {
+                            ("attachment_unsupported", true)
+                        }
+                        _ => ("attachment_unavailable", true),
+                    },
                 };
-                self.finish(&mut tx, job, "failed", json!({"error":reason}))
-                    .await?;
-                tx.commit().await?;
-                report.failed += 1;
-            }
-            Err(SubmitError::KeyRaceLost) => {
-                tx.rollback().await?;
-                let mut retry = self.pool.begin().await?;
-                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' for update skip locked").bind(job.id).fetch_optional(&mut *retry).await?;
-                if let Some(current) = current {
-                    let input_id: Uuid = sqlx::query_scalar(
-                        "select id from inputs where owner_id=$1 and idempotency_key=$2",
-                    )
-                    .bind(current.owner_id)
-                    .bind(&key)
-                    .fetch_one(&mut *retry)
-                    .await?;
-                    self.finish(&mut retry, current, "fired", json!({"input_id":input_id}))
-                        .await?;
-                    report.fired += 1;
+                if let SubmitError::Db(error) = &error {
+                    log_error(error);
                 }
-                retry.commit().await?;
-                self.dispatcher.trigger(message.conversation_id);
-            }
-            Err(SubmitError::Attachment(error)) => {
-                // Привязка могла уже изменить строки в этой транзакции: отказ фиксируется заново.
                 tx.rollback().await?;
-                let reason = match error {
-                    crate::attachments::AttachmentError::CapabilityMissing => "capability_missing",
-                    crate::attachments::AttachmentError::LimitsMismatch => "limits_mismatch",
-                    crate::attachments::AttachmentError::Unsupported => "attachment_unsupported",
-                    _ => "attachment_unavailable",
-                };
-                let mut retry = self.pool.begin().await?;
-                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update skip locked").bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *retry).await?;
-                if let Some(current) = current {
-                    self.finish(&mut retry, current, "failed", json!({"error":reason}))
-                        .await?;
-                    report.failed += 1;
-                }
-                retry.commit().await?;
-            }
-            Err(SubmitError::Db(e)) => {
-                tx.rollback().await?;
-                return Err(e);
-            }
-            Err(_) => {
-                tx.rollback().await?;
-                return Err(sqlx::Error::Protocol("scheduled submit rejected".into()));
+                self.record_failure(&job, now, reason, permanent, report)
+                    .await?;
             }
         }
         Ok(())
+    }
+
+    async fn record_failure(
+        &self,
+        job: &JobRow,
+        now: DateTime<Utc>,
+        reason: &'static str,
+        permanent: bool,
+        report: &mut TickReport,
+    ) -> Result<(), sqlx::Error> {
+        let mut tx = self.pool.begin().await?;
+        let current: Option<JobRow> = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update")
+            .bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *tx).await?;
+        if let Some(mut current) = current {
+            current.attempts = current.attempts.saturating_add(1);
+            if permanent || current.attempts as u32 >= self.service.config.max_attempts {
+                if current.kind == "message" {
+                    self.finish(&mut tx, current, "failed", json!({"error":reason}))
+                        .await?;
+                } else {
+                    sqlx::query("update scheduled_jobs set attempts=$2 where id=$1")
+                        .bind(current.id)
+                        .bind(current.attempts)
+                        .execute(&mut *tx)
+                        .await?;
+                    finish_limit(&mut tx, current.id, "failed", json!({"error":reason})).await?;
+                }
+                report.failed += 1;
+            } else {
+                let multiplier = if reason == "queue_full" {
+                    1
+                } else {
+                    1u32 << (current.attempts - 1).min(10)
+                };
+                let delay = self
+                    .service
+                    .config
+                    .retry_queue_full
+                    .saturating_mul(multiplier)
+                    .max(Duration::from_secs(1));
+                let at = now
+                    + TimeDelta::from_std(delay).map_err(|_| {
+                        sqlx::Error::InvalidArgument("retry duration out of range".into())
+                    })?;
+                let updated: JobRow = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,updated_at=clock_timestamp() where id=$1 returning *")
+                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).fetch_one(&mut *tx).await?;
+                if updated.kind == "message" {
+                    changed(&mut tx, &updated.message()?, Uuid::now_v7()).await?;
+                }
+                report.retried += 1;
+            }
+        }
+        tx.commit().await
     }
 
     async fn finish(
@@ -601,11 +633,17 @@ impl Scheduler {
         state: &str,
         result: Value,
     ) -> Result<(), sqlx::Error> {
+        if job.kind == "message" && job.message().is_err() {
+            sqlx::query("update scheduled_jobs set payload='{\"content\":[],\"attachment_ids\":[]}' where id=$1").bind(job.id).execute(&mut *conn).await?;
+        }
         let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
             .bind(job.id).bind(state).bind(job.attempts).bind(result).fetch_one(&mut *conn).await?;
         // После отправки ссылку держит ввод; после отказа файлы отдаются сборщику.
         crate::attachments::unlink_scheduled_in_tx(conn, &[job.id]).await?;
-        changed(conn, &updated.message()?, Uuid::now_v7()).await
+        if updated.conversation_id.is_some() {
+            changed(conn, &updated.message()?, Uuid::now_v7()).await?;
+        }
+        Ok(())
     }
 
     /// Задания лимитов: обработчик и завершение в одной транзакции, опрос и снимок после commit.
@@ -713,9 +751,18 @@ impl Scheduler {
                 }
             }
             JobOutcome::Cancelled(reason) => {
-                finish_limit(&mut tx, job.id, "cancelled", json!({"reason":reason})).await?;
+                if reason == "invalid_payload" {
+                    sqlx::query("update scheduled_jobs set attempts=attempts+1 where id=$1")
+                        .bind(job.id)
+                        .execute(&mut *tx)
+                        .await?;
+                    finish_limit(&mut tx, job.id, "failed", json!({"error":reason})).await?;
+                    report.failed += 1;
+                } else {
+                    finish_limit(&mut tx, job.id, "cancelled", json!({"reason":reason})).await?;
+                    report.cancelled += 1;
+                }
                 tx.commit().await?;
-                report.cancelled += 1;
             }
             JobOutcome::Retry { at, poll } => {
                 // Повтор не раньше следующей секунды: цикл тика не крутит одно задание.
@@ -738,10 +785,22 @@ impl Scheduler {
     }
 
     pub async fn maintenance(&self) -> Result<(), sqlx::Error> {
-        events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await?;
-        sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await?;
-        sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await?;
-        Ok(())
+        let results = [
+            events::purge_older_than(&self.pool, Duration::from_secs(7 * 86400)).await.map(|_| ()),
+            sqlx::query("delete from limit_snapshots where observed_at < clock_timestamp() - $1 * interval '1 day'").bind(self.history_days as f64).execute(&self.pool).await.map(|_| ()),
+            sqlx::query("delete from scheduled_jobs where state in ('fired','cancelled','failed') and updated_at < clock_timestamp() - interval '30 days'").execute(&self.pool).await.map(|_| ()),
+            sqlx::query("delete from idempotency_keys where created_at < clock_timestamp() - interval '7 days'").execute(&self.pool).await.map(|_| ()),
+        ];
+        let mut first = None;
+        for result in results {
+            if let Err(error) = result {
+                log_error(&error);
+                if first.is_none() {
+                    first = Some(error);
+                }
+            }
+        }
+        first.map_or(Ok(()), Err)
     }
 
     pub async fn wait_for_due(&self, next_due: Option<DateTime<Utc>>, now: DateTime<Utc>) {
@@ -753,24 +812,11 @@ impl Scheduler {
         tokio::select! {_=self.service.notify.notified()=>{},_=tokio::time::sleep(until)=>{}}
     }
 
-    pub async fn run(self, mut shutdown: watch::Receiver<bool>) {
-        let options = self.pool.connect_options();
-        let mut singleton = loop {
-            let acquired = tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,result=Singleton::acquire(&options,"scheduler")=>result};
-            match acquired {
-                Ok(Some(lock)) => break lock,
-                Err(e) => log_error(&e),
-                _ => {}
-            }
-            tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,_=tokio::time::sleep(self.service.config.idle_poll.max(Duration::from_millis(1)))=>{}}
-        };
-        let work = async {
+    pub async fn run(self, shutdown: watch::Receiver<bool>) {
+        crate::singleton::supervise(&self.pool, "scheduler", shutdown, || async {
             let mut maintenance = tokio::time::interval(Duration::from_secs(3600));
             maintenance.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
-                if !singleton.still_held().await {
-                    break;
-                }
                 let next = match self.tick(Utc::now()).await {
                     Ok(r) => r.next_due,
                     Err(e) => {
@@ -783,9 +829,8 @@ impl Scheduler {
                     _=maintenance.tick()=>if let Err(e)=self.maintenance().await{log_error(&e);},
                 }
             }
-        };
-        tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>{},_=work=>{}}
-        singleton.release().await;
+        })
+        .await;
     }
 }
 fn log_error(e: &sqlx::Error) {

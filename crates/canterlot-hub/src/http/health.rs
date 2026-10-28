@@ -44,6 +44,7 @@ pub enum ProbeStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ProbeReason {
     Database,
+    Service,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -52,6 +53,8 @@ pub struct ProbeView {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub reason: Option<ProbeReason>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<&'static str>,
 }
 
 /// Живость процесса: без личности и без обращения к базе.
@@ -62,13 +65,14 @@ async fn healthz() -> Json<ProbeView> {
     Json(ProbeView {
         status: ProbeStatus::Ok,
         reason: None,
+        services: Vec::new(),
     })
 }
 
 /// Готовность: база отвечает, а запись установки совпадает с состоянием процесса и манифестом.
 #[utoipa::path(get, path = "/readyz", tag = "health", responses(
     (status = 200, description = "Хаб готов", body = ProbeView),
-    (status = 503, description = "База недоступна или установка не совпадает", body = ProbeView),
+    (status = 503, description = "База или фоновая служба недоступна, либо установка не совпадает", body = ProbeView),
 ))]
 async fn readyz(State(state): State<AppState>) -> Response {
     let check = async {
@@ -89,11 +93,27 @@ async fn readyz(State(state): State<AppState>) -> Response {
         }
     };
     match tokio::time::timeout(READY_TIMEOUT, check).await {
-        Ok(Ok(())) => Json(ProbeView {
-            status: ProbeStatus::Ok,
-            reason: None,
-        })
-        .into_response(),
+        Ok(Ok(())) => {
+            let services = crate::singleton::down_services(&state.pool);
+            if services.is_empty() {
+                Json(ProbeView {
+                    status: ProbeStatus::Ok,
+                    reason: None,
+                    services,
+                })
+                .into_response()
+            } else {
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(ProbeView {
+                        status: ProbeStatus::NotReady,
+                        reason: Some(ProbeReason::Service),
+                        services,
+                    }),
+                )
+                    .into_response()
+            }
+        }
         outcome => {
             let reason = match outcome {
                 Ok(Err(reason)) => reason,
@@ -105,6 +125,7 @@ async fn readyz(State(state): State<AppState>) -> Response {
                 Json(ProbeView {
                     status: ProbeStatus::NotReady,
                     reason: Some(ProbeReason::Database),
+                    services: Vec::new(),
                 }),
             )
                 .into_response()

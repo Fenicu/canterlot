@@ -170,6 +170,7 @@ pub async fn request_stop(
         tx.commit().await?;
         return Ok(outcome);
     }
+    crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
         queue.pause_reasons.0.push(PauseReason::UserStop);
     }
@@ -260,6 +261,7 @@ pub async fn request_stop_execution(
         tx.commit().await?;
         return Ok(outcome);
     }
+    crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
         queue.pause_reasons.0.push(PauseReason::UserStop);
     }

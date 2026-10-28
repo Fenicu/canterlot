@@ -244,7 +244,7 @@ async fn delete_group_in_tx(
     get(conn, owner_id, id).await?;
     let ids:Vec<Uuid>=sqlx::query_scalar("select c.id from conversations c join conversation_group_members gm on gm.conversation_id=c.id where gm.group_id=$1 and c.owner_id=$2 order by c.id").bind(id).bind(owner_id).fetch_all(&mut *conn).await?;
     sqlx::query("select conversation_id from queue_state where conversation_id=any($1) order by conversation_id for update").bind(&ids).fetch_all(&mut *conn).await?;
-    sqlx::query("select id from conversations where id=any($1) order by id for update")
+    sqlx::query("select id from conversations where id=any($1) order by id for no key update")
         .bind(&ids)
         .fetch_all(&mut *conn)
         .await?;
@@ -278,13 +278,7 @@ async fn delete_group_in_tx(
         )
         .await?;
     }
-    emit(
-        conn,
-        owner_id,
-        json!({"id":id,"deleted":true}),
-        correlation_id,
-    )
-    .await?;
+    emit(conn, owner_id, Value::Null, correlation_id).await?;
     Ok::<(), GroupError>(())
 }
 

@@ -439,6 +439,14 @@ async fn read(
         .seq
         .parse()
         .map_err(|_| ApiError::new(ErrorCode::InvalidRequest))?;
-    conversations::mark_read(&s.pool, o.owner_id, id, seq).await?;
+    conversations::mark_read(
+        &s.pool,
+        o.owner_id,
+        id,
+        seq,
+        &crate::activity::Thresholds::from(&*s.activity),
+        s.machines.metrics_stale_after,
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }

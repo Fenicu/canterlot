@@ -19,7 +19,6 @@ use crate::{
     config::{ActivityConfig, MachinesConfig},
     events::{self, NewEvent, Scope},
     model::{ExecutionState, HoldReason, HoldView, PauseReason, RunSlot},
-    singleton::Singleton,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -440,7 +439,7 @@ pub async fn refresh(
     .await
 }
 
-async fn refresh_with_metrics(
+pub async fn refresh_with_metrics(
     pool: &PgPool,
     conversation_id: Uuid,
     now: DateTime<Utc>,
@@ -454,7 +453,7 @@ async fn refresh_with_metrics(
         .fetch_one(&mut *tx)
         .await?;
     let (owner_id, read_seq, model, effort, permission, crunch): (Uuid, i64, String, String, String, bool) =
-        sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled from conversations where id=$1 for update")
+        sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled from conversations where id=$1 for no key update")
             .bind(conversation_id)
             .fetch_one(&mut *tx)
             .await?;
@@ -500,6 +499,8 @@ async fn refresh_with_metrics(
             && old.try_get::<String, _>("effective_permission_mode")? == permission
             && old.try_get::<bool, _>("crunch_enabled")? == crunch
         {
+            sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
+                .bind(conversation_id).execute(&mut *tx).await?;
             tx.commit().await?;
             return Ok(Refresh::Unchanged);
         }
@@ -544,29 +545,16 @@ pub async fn run(
     bus: EventBus,
     config: ActivityConfig,
     machines: MachinesConfig,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
-    let mut notices = bus.subscribe();
-    let options = pool.connect_options();
-    let mut singleton = loop {
-        let acquired = tokio::select! {biased; _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,result=Singleton::acquire(&options,"activity")=>result};
-        match acquired {
-            Ok(Some(lock)) => break lock,
-            Err(error) => log_error(&error),
-            _ => {}
-        }
-        tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,_=tokio::time::sleep(config.tick.max(Duration::from_millis(1)))=>{}}
-    };
-    let work = async {
+    crate::singleton::supervise(&pool, "activity", shutdown, || async {
+        let mut notices = bus.subscribe();
         let mut tick = tokio::time::interval(config.tick.max(Duration::from_millis(1)));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut pending: HashMap<Uuid, (Instant, Option<Notice>)> = HashMap::new();
         let mut sweep_at = None;
         let thresholds = Thresholds::from(&config);
         loop {
-            if !singleton.still_held().await {
-                break;
-            }
             let next = pending
                 .values()
                 .map(|(at, _)| *at)
@@ -656,9 +644,7 @@ pub async fn run(
                 }
             }
         }
-    };
-    tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>{},_=work=>{}}
-    singleton.release().await;
+    }).await;
 }
 
 fn log_error(error: &sqlx::Error) {

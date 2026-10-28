@@ -300,7 +300,10 @@ async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPoo
         .execute(&pool)
         .await
         .unwrap();
-    assert!(sch.tick(now + TimeDelta::seconds(3)).await.is_err());
+    assert_eq!(
+        sch.tick(now + TimeDelta::seconds(3)).await.unwrap().retried,
+        1
+    );
     assert_eq!(count(&pool, "select count(*) from inputs").await, 0);
     assert_eq!(count(&pool, "select count(*) from commands").await, 0);
     assert_eq!(
@@ -314,7 +317,7 @@ async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPoo
     assert_eq!(
         count(
             &pool,
-            "select count(*) from scheduled_jobs where state='pending' and attempts=0"
+            "select count(*) from scheduled_jobs where state='pending' and attempts=1"
         )
         .await,
         1
@@ -324,7 +327,7 @@ async fn fire_failure_in_the_same_transaction_leaves_the_job_pending(pool: PgPoo
         .await
         .unwrap();
     assert_eq!(
-        sch.tick(now + TimeDelta::seconds(3)).await.unwrap().fired,
+        sch.tick(now + TimeDelta::seconds(63)).await.unwrap().fired,
         1
     );
 }

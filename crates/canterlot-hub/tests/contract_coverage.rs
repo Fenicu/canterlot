@@ -107,6 +107,25 @@ fn coverage_table_matches_openapi_and_event_schema() {
     assert_eq!(schema_kinds, defined, "every event $def is in oneOf");
     let client: BTreeSet<String> = CLIENT_KINDS.iter().map(|k| (*k).to_owned()).collect();
     assert_eq!(schema_kinds, client, "events.schema.json and CLIENT_KINDS");
+    let ws_kinds: BTreeSet<String> = schema["$defs"]["ServerOp"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|op| op["properties"]["op"]["const"] == "event")
+        .unwrap()["properties"]["event"]["oneOf"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            r["$ref"]
+                .as_str()
+                .unwrap()
+                .strip_prefix("#/$defs/")
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    assert_eq!(ws_kinds, client, "ServerOp.event and CLIENT_KINDS");
     let server_ops: BTreeSet<String> = schema["$defs"]["ServerOp"]["oneOf"]
         .as_array()
         .unwrap()

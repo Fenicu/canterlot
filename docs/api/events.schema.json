@@ -116,6 +116,9 @@
     },
     {
       "$ref": "#/$defs/oversized"
+    },
+    {
+      "$ref": "#/$defs/queue_resumed"
     }
   ],
   "$defs": {
@@ -3391,6 +3394,16 @@
             },
             "weekly_reserve_active": {
               "type": "boolean"
+            },
+            "weekly_reserve_resets_at": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Time"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -3399,7 +3412,8 @@
             "used_permille",
             "resets_at",
             "observed_at",
-            "weekly_reserve_active"
+            "weekly_reserve_active",
+            "weekly_reserve_resets_at"
           ],
           "additionalProperties": false
         }
@@ -4432,6 +4446,9 @@
                 },
                 {
                   "$ref": "#/$defs/oversized"
+                },
+                {
+                  "$ref": "#/$defs/queue_resumed"
                 }
               ]
             }
@@ -4758,6 +4775,88 @@
       ],
       "additionalProperties": false,
       "description": "WSS-заполнитель одиночного события, превышающего бюджет данных соединения; полный факт доступен по payload.href."
+    },
+    "queue_resumed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "queue_resumed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "pause_reasons": {
+              "type": "array",
+              "items": {
+                "type": "object"
+              }
+            }
+          },
+          "required": [
+            "pause_reasons"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
     }
   }
 }

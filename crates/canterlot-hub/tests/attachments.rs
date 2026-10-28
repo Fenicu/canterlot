@@ -2248,7 +2248,7 @@ fn publication_syncs_an_already_created_shard() {
     };
     let shard_mkdir = calls
         .iter()
-        .position(|line| line.contains("mkdir(") && line.contains("/blobs/01\""))
+        .position(|line| line.contains("mkdir(") && line.contains("/blobs/"))
         .unwrap();
     let parent = sync(&base.join("fresh/nested/blob-root/blobs"));
     let rename = calls

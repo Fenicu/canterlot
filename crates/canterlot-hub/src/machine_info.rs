@@ -1,7 +1,6 @@
 use crate::{
     events::{self, NewEvent, Scope},
     session::{Availability, Registry},
-    singleton::Singleton,
 };
 use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT, MAX_METRICS_EXECUTIONS},
@@ -267,52 +266,31 @@ async fn project(
     tx.commit().await?;
     Ok(changes.len())
 }
-const PASSIVE_RETRY: std::time::Duration = std::time::Duration::from_secs(2);
 
 pub async fn run_status_projection(
     pool: PgPool,
     registry: Registry,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) {
-    let options = pool.connect_options();
-    // Второй процесс остаётся пассивным и забирает блокировку, когда её отпустит первый.
-    let mut lock = loop {
-        if *shutdown.borrow() {
+    crate::singleton::supervise(&pool, "machine_status", shutdown, || async {
+        if project(&pool, None, Uuid::now_v7()).await.is_err() {
+            tracing::warn!(
+                kind = "machine_status_database",
+                "initial projection failed"
+            );
             return;
         }
-        let acquired = tokio::select! {biased;
-            _ = crate::dispatcher::wait_for_shutdown(&mut shutdown) => return,
-            result = Singleton::acquire(&options, "machine_status") => result,
-        };
-        match acquired {
-            Ok(Some(lock)) => break lock,
-            Ok(None) => {}
-            Err(_) => tracing::warn!(kind = "machine_status_database", "singleton unavailable"),
+        let mut changes = registry.subscribe_changes();
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            tokio::select! {_=tick.tick()=>{},_=changes.recv()=>{}}
+            if project_availability(&pool, &registry, Uuid::now_v7())
+                .await
+                .is_err()
+            {
+                tracing::warn!(kind = "machine_status_database", "projection failed");
+            }
         }
-        tokio::select! {biased;
-            _ = crate::dispatcher::wait_for_shutdown(&mut shutdown) => return,
-            _ = tokio::time::sleep(PASSIVE_RETRY) => {}
-        }
-    };
-    if !lock.still_held().await {
-        return;
-    }
-    let reset = tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>{lock.release().await;return;},result=project(&pool,None,Uuid::now_v7())=>result};
-    if reset.is_err() {
-        lock.release().await;
-        return;
-    }
-    let mut changes = registry.subscribe_changes();
-    let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
-    loop {
-        tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break,_=tick.tick()=>{},_=changes.recv()=>{}}
-        if !lock.still_held().await {
-            break;
-        }
-        let result = tokio::select! {biased;_=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>break,result=project_availability(&pool,&registry,Uuid::now_v7())=>result};
-        if result.is_err() {
-            tracing::warn!(kind = "machine_status_database", "projection failed");
-        }
-    }
-    lock.release().await;
+    })
+    .await;
 }

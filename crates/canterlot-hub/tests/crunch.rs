@@ -942,7 +942,7 @@ async fn wake_respects_user_pause_and_only_releases_the_hold(pool: PgPool) {
     assert!(!has_quota(&holds(&pool, id).await));
     assert_eq!(pauses(&pool, id).await, vec![PauseReason::UserStop]);
     assert!(wake_texts(&pool, id).await.is_empty());
-    assert!(resume_pending(&pool, id).await);
+    assert!(!resume_pending(&pool, id).await);
     assert_eq!(
         jobs(&pool, "wake").await[0].result.as_ref().unwrap()["skipped"],
         "paused"
@@ -1897,7 +1897,7 @@ async fn hub_restart_between_hold_and_wake_still_wakes_once(pool: PgPool) {
         .execute(&pool)
         .await
         .unwrap();
-    assert!(restarted.tick(reset + secs(60)).await.is_err());
+    assert_eq!(restarted.tick(reset + secs(60)).await.unwrap().retried, 1);
     assert_eq!(inputs(&pool, id).await, 0);
     assert!(has_quota(&holds(&pool, id).await));
     assert!(resume_pending(&pool, id).await);
@@ -2338,4 +2338,161 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(p
         );
     }
     assert_eq!(deadlocks(&pool).await, before);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_wave_owner_stop_prevents_resume_at_later_weekly_reset(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    control::request_stop(&pool, env.owner, id, "stop", Uuid::now_v7())
+        .await
+        .unwrap();
+    verified_reset(&env, reset).await;
+    env.tick(reset + secs(60)).await;
+    control::continue_queue(&pool, env.owner, id, "continue", Uuid::now_v7())
+        .await
+        .unwrap();
+    let week = now + TimeDelta::days(3);
+    env.observe(
+        "claude",
+        Window::Weekly,
+        960,
+        Some(week),
+        now + TimeDelta::days(1),
+    )
+    .await;
+    env.tick(now + TimeDelta::days(1)).await;
+    env.observe(
+        "claude",
+        Window::Weekly,
+        10,
+        Some(week + TimeDelta::days(7)),
+        week + secs(1),
+    )
+    .await;
+    env.tick(week + secs(1)).await;
+    assert!(!resume_pending(&pool, id).await);
+    assert!(wake_texts(&pool, id).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_wave_owner_execution_stop_clears_resume_pending(pool: PgPool) {
+    let env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    env.limit_reached(id, "claude", Window::FiveHour, Some(now + secs(3600)), now)
+        .await;
+    control::request_stop_execution(
+        &pool,
+        env.owner,
+        id,
+        false,
+        "stop-execution",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(!resume_pending(&pool, id).await);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_wave_pending_resume_expires_at_end_of_next_weekly_window(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let week = now + TimeDelta::days(1);
+    env.observe("claude", Window::Weekly, 960, Some(week), now)
+        .await;
+    env.tick(now).await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(now + secs(3600)), now)
+        .await;
+    sqlx::query(
+        "update executions set state='stopped',outcome='normal_exit' where conversation_id=$1",
+    )
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    verified_reset(&env, now + secs(3600)).await;
+    env.tick(now + secs(3660)).await;
+    assert!(resume_pending(&pool, id).await);
+    env.observe(
+        "claude",
+        Window::Weekly,
+        960,
+        Some(week + TimeDelta::days(7)),
+        week + secs(1),
+    )
+    .await;
+    env.tick(week + secs(1)).await;
+    assert!(resume_pending(&pool, id).await);
+    let expiry = week + TimeDelta::days(7);
+    env.observe(
+        "claude",
+        Window::Weekly,
+        10,
+        Some(expiry + TimeDelta::days(7)),
+        expiry + secs(1),
+    )
+    .await;
+    env.tick(expiry + secs(1)).await;
+    assert!(!resume_pending(&pool, id).await);
+    assert!(wake_texts(&pool, id).await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_wave_limits_events_carry_reserve_window_on_entry_and_rollover(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let now = start();
+    let week = now + TimeDelta::days(1);
+    for (at, reset) in [(now, week), (week + secs(1), week + TimeDelta::days(7))] {
+        env.observe("claude", Window::Weekly, 960, Some(reset), at)
+            .await;
+        env.tick(at).await;
+        let payload:Value=sqlx::query_scalar("select payload from events where kind='limits_changed' order by scope_seq desc limit 1").fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            payload["weekly_reserve_resets_at"],
+            reset.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+        );
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn final_wave_failed_poll_send_does_not_consume_provider_slot(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let sender = env.registry.command_sender(env.claude).unwrap();
+    while sender.try_send(ControlDown::default()).is_ok() {}
+    let now = start();
+    assert!(
+        !crunch::request_poll(
+            &pool,
+            &env.registry,
+            "claude",
+            Duration::from_secs(1800),
+            now
+        )
+        .await
+        .unwrap()
+    );
+    env.receivers
+        .get_mut(&env.claude)
+        .unwrap()
+        .recv()
+        .await
+        .unwrap();
+    assert!(
+        crunch::request_poll(
+            &pool,
+            &env.registry,
+            "claude",
+            Duration::from_secs(1800),
+            now + secs(1)
+        )
+        .await
+        .unwrap()
+    );
 }

@@ -243,8 +243,17 @@ pub async fn hold_quota_in_tx(
             (candidate, true)
         }
     };
-    sqlx::query("update conversations set resume_pending=true where id=$1")
-        .bind(run.conversation_id)
+    let weekly_reset: Option<DateTime<Utc>> =
+        sqlx::query_scalar("select weekly_resets_at from provider_limits where provider=$1")
+            .bind(provider)
+            .fetch_one(&mut *conn)
+            .await?;
+    let expires = weekly_reset
+        .filter(|at| *at > now)
+        .unwrap_or(now + TimeDelta::days(7))
+        + TimeDelta::days(7);
+    sqlx::query("update conversations set resume_pending=true,resume_pending_until=case when resume_pending then coalesce(resume_pending_until,$2) else $2 end where id=$1")
+        .bind(run.conversation_id).bind(expires)
         .execute(&mut *conn)
         .await?;
     let hold_key = quota_key(provider, window.as_str());
@@ -430,6 +439,9 @@ pub async fn apply_weekly_rule_in_tx(
         None => now + delta(verify_delay(config, 0))?,
     };
     schedule_limit_check(conn, owner_id, provider, check_at).await?;
+    if new_window {
+        limits::emit_changed(conn, owner_id, provider, Window::Weekly, correlation_id).await?;
+    }
     Ok(effect)
 }
 
@@ -592,8 +604,9 @@ pub async fn handle_wake_in_tx(
             Some(queue) => queue,
             None => return Ok(JobOutcome::Cancelled("conversation_not_found")),
         };
+    clear_resume_in_tx(conn, id, Some(now), correlation_id).await?;
     let (crunch, mut resume_pending, resume_text): (bool, bool, Option<String>) = sqlx::query_as(
-        "select crunch_enabled,resume_pending,crunch_resume_text from conversations where id=$1 for update",
+        "select crunch_enabled,resume_pending,crunch_resume_text from conversations where id=$1 for no key update",
     )
     .bind(id)
     .fetch_one(&mut *conn)
@@ -644,16 +657,19 @@ pub async fn handle_wake_in_tx(
         // Продолжением становится уже стоящий ввод владельца.
         resume_pending = false;
         Some("queue_not_empty")
-    } else if !resume_pending {
-        Some("not_pending")
     } else if !queue.pause_reasons.0.is_empty() {
         Some("paused")
+    } else if !resume_pending {
+        Some("not_pending")
     } else if reserve {
         // Автоматика в резерв не заходит, даже для переопределённой сессии.
         Some("weekly_reserve")
     } else {
         None
     };
+    if matches!(skipped, Some("closed" | "crunch_disabled" | "paused")) {
+        resume_pending = false;
+    }
     let slot = queue.slot()?;
     queue.save(conn, &slot, None, correlation_id).await?;
     let mut input_id = None;
@@ -849,7 +865,7 @@ async fn spend_in_tx(
     }
     let mut queue: LockedQueue = sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q")
         .bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(CrunchError::NotFound)?;
-    let (crunch, resume_pending, until): (bool, bool, Option<DateTime<Utc>>) = sqlx::query_as("select crunch_enabled,resume_pending,reserve_override_until from conversations where id=$1 for update")
+    let (crunch, resume_pending, until): (bool, bool, Option<DateTime<Utc>>) = sqlx::query_as("select crunch_enabled,resume_pending,reserve_override_until from conversations where id=$1 for no key update")
         .bind(id).fetch_one(&mut *conn).await?;
     let Some(provider) = provider else {
         return Ok(SpendOutcome::NotHeld);
@@ -919,16 +935,45 @@ pub async fn request_poll(
     else {
         return Ok(false);
     };
+    let Ok(permit) = sender.try_reserve() else {
+        return Ok(false);
+    };
     let claimed: Option<String> = sqlx::query_scalar("insert into limit_polls(provider,last_requested_at) values($1,$2) on conflict(provider) do update set last_requested_at=excluded.last_requested_at where limit_polls.last_requested_at <= $3 returning provider")
         .bind(provider).bind(now).bind(now - delta(min_interval)?).fetch_optional(pool).await?;
     if claimed.is_none() {
         return Ok(false);
     }
-    Ok(sender
-        .try_send(ControlDown {
-            msg: Some(control_down::Msg::PollLimits(PollLimits {
-                provider: provider.into(),
-            })),
-        })
-        .is_ok())
+    permit.send(ControlDown {
+        msg: Some(control_down::Msg::PollLimits(PollLimits {
+            provider: provider.into(),
+        })),
+    });
+    Ok(true)
+}
+
+pub(crate) async fn clear_resume_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    expired_at: Option<DateTime<Utc>>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let changed: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as("update conversations set resume_pending=false,resume_pending_until=null where id=$1 and resume_pending and ($2::timestamptz is null or resume_pending_until <= $2) returning crunch_enabled,reserve_override_until")
+        .bind(id).bind(expired_at).fetch_optional(&mut *conn).await?;
+    if let Some((enabled, until)) = changed {
+        append(conn,id,"crunch_changed",None,json!({"enabled":enabled,"resume_pending":false,"reserve_override_until":until.map(wire)}),correlation_id).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn expire_pending(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
+    let ids: Vec<Uuid> = sqlx::query_scalar("select id from conversations where resume_pending and resume_pending_until <= $1 order by id").bind(now).fetch_all(pool).await?;
+    for id in ids {
+        let mut tx = pool.begin().await?;
+        let locked: Option<Uuid> = sqlx::query_scalar("select conversation_id from queue_state where conversation_id=$1 for update skip locked").bind(id).fetch_optional(&mut *tx).await?;
+        if locked.is_some() {
+            clear_resume_in_tx(&mut tx, id, Some(now), Uuid::now_v7()).await?;
+        }
+        tx.commit().await?;
+    }
+    Ok(())
 }

@@ -152,7 +152,7 @@ fn hub_blob(f: &Fixture, id: Uuid) -> PathBuf {
     f.blob_config
         .blob_dir
         .join("blobs")
-        .join(&name[..2])
+        .join(&name[name.len() - 2..])
         .join(name)
 }
 

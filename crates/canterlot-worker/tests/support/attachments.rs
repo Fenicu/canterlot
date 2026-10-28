@@ -294,20 +294,30 @@ impl Fixture {
         assert_eq!(self.transmissions(input.command_id), 1);
     }
     pub async fn cj(&self) -> Vec<Body> {
-        // После остановки служба освобождает журнал; копия не меняет оригинал.
+        // Снимок живого журнала: повтор при компакции.
         let directory = self.config.data_dir.join("cj");
-        let copy = tempfile::tempdir().unwrap();
-        for entry in fs::read_dir(directory).unwrap().flatten() {
-            if entry.file_type().unwrap().is_file() {
-                fs::copy(entry.path(), copy.path().join(entry.file_name())).unwrap();
+        let records = timeout(WAIT, async {
+            loop {
+                let read = canterlot_journal::Journal::open_read_only(&directory)
+                    .and_then(|journal| journal.read_from(journal.first_seq(), usize::MAX));
+                match read {
+                    Ok(records) => break records,
+                    Err(canterlot_journal::JournalError::Io(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::UnexpectedEof
+                        ) =>
+                    {
+                        tokio::task::yield_now().await;
+                    }
+                    Err(_) => panic!("CJ snapshot failed"),
+                }
             }
-        }
-        let (journal, _) =
-            canterlot_journal::Journal::open(copy.path(), Default::default()).unwrap();
+        })
+        .await
+        .unwrap();
         use prost::Message;
-        journal
-            .read_from(journal.first_seq(), usize::MAX)
-            .unwrap()
+        records
             .into_iter()
             .filter_map(|r| {
                 canterlot_proto::worker::v1::RecordBody::decode(r.payload.as_slice())

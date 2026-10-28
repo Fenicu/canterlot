@@ -400,7 +400,7 @@ async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestRes
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn singleton_lock_is_held_on_a_dedicated_connection_and_loss_stops_the_service(
+async fn singleton_lock_is_dedicated_and_status_projection_recovers_after_loss(
     pool: PgPool,
 ) -> TestResult {
     let options = pool.connect_options();
@@ -428,8 +428,14 @@ async fn singleton_lock_is_held_on_a_dedicated_connection_and_loss_stops_the_ser
         .bind(pid)
         .execute(&pool)
         .await?;
+    tokio::time::timeout(WAIT, async {loop {
+        let recovered:bool=sqlx::query_scalar("select exists(select 1 from pg_locks where locktype='advisory' and database=(select oid from pg_database where datname=current_database()) and pid<>$1)").bind(pid).fetch_one(&pool).await.unwrap();
+        if recovered {break;}
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }}).await?;
+    assert!(!task.is_finished());
+    stop.send(true)?;
     tokio::time::timeout(WAIT, task).await??;
-    drop(stop);
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
