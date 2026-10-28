@@ -6,7 +6,21 @@
 
 ---
 
-## 1. Схема архитектуры развёртывания
+## 1. Схема архитектуры и используемые адреса
+
+### 1.1. Таблица сетевых параметров и заполнителей
+
+В руководстве используются следующие типовые значения (заменяются на фактические параметры инфраструктуры):
+
+| Параметр | Значение в примере | Назначение |
+|---|---|---|
+| Адрес хаба (LXC) | `10.0.0.10` | Внутренний IP-адрес контейнера Proxmox LXC с хабом и PostgreSQL |
+| Адрес хоста Caddy | `10.0.0.2` | Внутренний IP-адрес отдельного сервера Web/Edge с Caddy и Authelia |
+| Адрес машины воркера | `10.0.0.20` | Внутренний IP-адрес рабочей VM владельца с воркером и агентами |
+| Публичное имя сайта | `chat.example.com` | Внешний HTTPS-домен для доступа к PWA и API |
+| Внутреннее DNS-имя хаба | `hub.example.internal` | Доменное имя хаба для gRPC TLS (указано в сертификате SAN) |
+
+### 1.2. Архитектурная схема
 
 Размещение компонентов строго следует решениям [pilot.md](../design/pilot.md#2-размещение) (§2) и [ADR-0004](../adr/0004-browser-auth-forward-auth.md):
 
@@ -17,16 +31,16 @@
                                     | HTTPS / WSS
                                     v
 +-----------------------------------------------------------------------------------+
-| Сервер Web / Edge (Внешняя сеть / DMZ)                                            |
+| Сервер Web / Edge (Внешняя сеть / DMZ, IP: 10.0.0.2)                              |
 |                                                                                   |
 |  +-----------------------------------------------------------------------------+  |
 |  | Caddy (Обратный прокси и раздача статики PWA)                                |  |
 |  |                                                                             |  |
 |  |  1. file_server: отдача SPA сборки web/build/ (try_files {path} /200.html)   |  |
-|  |  2. Content-Security-Policy (хэши инлайн-скриптов из print-csp.mjs)         |  |
-|  |  3. route: зачистка заголовков Remote-* и X-Canterlot-Proxy клиента        |  |
+|  |  2. Content-Security-Policy (хэши инлайн-скриптов из CANTERLOT_CSP)          |  |
+|  |  3. route: зачистка семейств заголовков Remote-*, X-Forwarded-*, Proxy     |  |
 |  |  4. forward_auth: запрос к Authelia (проверка SSO сессии по cookie)        |  |
-|  |  5. reverse_proxy: проксирование /api/ и /api/v1/ws на порт хаба           |  |
+|  |  5. reverse_proxy: проксирование @api (/api/* и /healthz) на порт хаба    |  |
 |  |     + инъекция заголовка секрета X-Canterlot-Proxy                          |  |
 |  +-----------------------------------------------------------------------------+  |
 |                         |                          |                              |
@@ -42,25 +56,27 @@
 | Proxmox LXC: Среда хаба Canterlot (IP: 10.0.0.10)                                 |
 |                                                                                   |
 |  +-----------------------------------------------------------------------------+  |
+|  | nftables: порт 8080 только с 10.0.0.2, порт 7443 только с 10.0.0.20         |  |
+|  +-----------------------------------------------------------------------------+  |
 |  | canterlot-hub (systemd system service: canterlot-hub.service)               |  |
 |  |                                                                             |  |
-|  |  - HTTP API: порт 8080 (только для Caddy, проверка доверенного IP и секрета) |  |
-|  |  - gRPC TLS: порт 7443 (серверный TLS с SAN, проверка токенов машин)       |  |
+|  |  - HTTP API: 10.0.0.10:8080 (только для Caddy, проверка IP и секрета)       |  |
+|  |  - gRPC TLS: 10.0.0.10:7443 (серверный TLS с SAN, bearer-токены машин)      |  |
 |  |  - Вложения: локальный каталог data/attachments (staging / blobs)            |  |
 |  +-----------------------------------------------------------------------------+  |
 |           |                                       |                               |
 |           v Unix сокет / TCP loopback             v Независимый том               |
 |  +-----------------------------+     +-----------------------------------------+  |
-|  | PostgreSQL 16               |     | Внешний манифест инсталляции:           |  |
+|  | PostgreSQL 18 (Debian 13)   |     | Внешний манифест инсталляции:           |  |
 |  | (БД canterlot, миграции SQL)|     | /etc/canterlot/manifest/installation.toml|  |
 |  +-----------------------------+     | (ВНЕ набора снапшотов базы данных)      |  |
 |                                      +-----------------------------------------+  |
 +-----------------------------------------------------------------------------------+
                                                      ^
-                         gRPC over TLS (Внутренний CA| без входящих портов у воркера)
+                         gRPC over TLS (Серверный TLS| без входящих портов у воркера)
                                                      |
 +-----------------------------------------------------------------------------------+
-| Proxmox VM: Рабочая станция владельца                                             |
+| Proxmox VM: Рабочая станция владельца (IP: 10.0.0.20)                             |
 |                                                                                   |
 |  +-----------------------------------------------------------------------------+  |
 |  | canterlot-worker (systemd user service: canterlot-worker.service)           |  |
@@ -73,7 +89,7 @@
 |           v Управление процессом                  v Управление процессом          |
 |  +-----------------------------------+   +------------------------------------+   |
 |  | canterlot-worker supervise        |   | canterlot-worker supervise         |   |
-|  | (Отдельная process group, PID 1)  |   | (Отдельная process group, PID 2)   |   |
+|  | (Отдельная сессия ОС via setsid)  |   | (Отдельная сессия ОС via setsid)   |   |
 |  |  - Локальный журнал сессии (SJ)   |   |  - Локальный журнал сессии (SJ)    |   |
 |  |  - Дочерний процесс: claude CLI   |   |  - Дочерний процесс: codex CLI     |   |
 |  |  - Буферизация вывода при рестарте|   |  - Буферизация вывода при рестарте |   |
@@ -85,40 +101,98 @@
 
 ## 2. Хаб в Proxmox LXC
 
-Хаб и база данных PostgreSQL изолированы в выделенном непривилегированном контейнере Proxmox LXC (Debian 12 / Ubuntu 24.04).
+Хаб и база данных PostgreSQL изолированы в выделенном непривилегированном контейнере Proxmox LXC на базе **Debian 13 (trixie)** ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение) §2).
 
-### 2.1. Пакеты ОС и окружение
+### 2.1. Пакеты ОС и установка PostgreSQL 18
 
-Внутри LXC-контейнера устанавливаются зависимости:
+Тестовый контур проекта ориентирован на PostgreSQL 18 ([scripts/test-db.sh:21](../../scripts/test-db.sh#L21) использует образ `postgres:18.6-trixie`). Внутри LXC настраивается официальный репозиторий PGDG (PostgreSQL Global Development Group):
+
 ```bash
+apt-get update && apt-get install -y curl ca-certificates gnupg
+
+# 1. Подключение ключа и репозитория PGDG
+install -d /etc/apt/keyrings
+curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /etc/apt/keyrings/postgresql.gpg
+echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt trixie-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+
+# 2. Установка пакетов хаба, PostgreSQL 18 и межсетевого экрана
 apt-get update && apt-get install -y \
-    postgresql-16 \
+    postgresql-18 \
     openssl \
     ca-certificates \
     curl \
-    jq
+    jq \
+    nftables
 ```
 
 Бинарный файл `canterlot-hub` размещается в `/usr/local/bin/canterlot-hub` с правами `0755`.  
 > **TODO**: В настоящее время централизованный deb-пакет отсутствует; бинарный файл собирается из исходников через `cargo build --release -p canterlot-hub` и копируется вручную.
 
-### 2.2. Настройка PostgreSQL
+### 2.2. Системный пользователь ОС и настройка PostgreSQL
 
-Создаётся системный пользователь и база данных:
+Служба хаба выполняется от выделенной непривилегированной учётной записи ОС. Создаём системного пользователя:
+```bash
+useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin canterlot
+```
+
+Затем создаём роль и базу данных в PostgreSQL:
 ```bash
 sudo -u postgres psql -c "CREATE USER canterlot WITH PASSWORD 'СВЕРХСТОЙКИЙ_ПАРОЛЬ_БД';"
 sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot;"
 ```
 
-Строка подключения сохраняется в файл, защищённый маской `0600`:
+Строка подключения сохраняется в файл, защищённый маской `0600`. Чтобы пароль не оставался в журнале командного интерпретатора (`~/.bash_history`), ввод пароля выполняется через `read -rs`:
 ```bash
 mkdir -p /etc/canterlot
-echo "postgres://canterlot:СВЕРХСТОЙКИЙ_ПАРОЛЬ_БД@127.0.0.1:5432/canterlot" > /etc/canterlot/db.url
-chmod 0600 /etc/canterlot/db.url
-chown -R canterlot:canterlot /etc/canterlot
+( umask 077
+  read -rsp "Введите пароль пользователя БД canterlot: " DB_PASS
+  echo
+  printf 'postgres://canterlot:%s@127.0.0.1:5432/canterlot\n' "$DB_PASS" > /etc/canterlot/db.url
+  chown canterlot:canterlot /etc/canterlot/db.url
+)
 ```
 
-### 2.3. Конфигурация `hub.toml`
+### 2.3. Межсетевой экран nftables на LXC хаба
+
+Порт HTTP API (:8080) предназначен исключительно для обратного прокси Caddy, а порт gRPC (:7443) — только для рабочей машины воркера ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение) §2). На уровне ядра LXC сетевой трафик ограничивается через `nftables`.
+
+Создаём конфигурацию `/etc/nftables.conf`:
+```bash
+cat <<'EOF' > /etc/nftables.conf
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy accept;
+
+        # Разрешаем локальный loopback и уже установленные сессии
+        iif "lo" accept
+        ct state established,related accept
+
+        # HTTP API (порт 8080) принимается ТОЛЬКО с адреса хоста Caddy (10.0.0.2)
+        ip saddr 10.0.0.2 tcp dport 8080 accept
+        tcp dport 8080 drop
+
+        # gRPC TLS (порт 7443) принимается ТОЛЬКО с адреса машины воркера (10.0.0.20)
+        ip saddr 10.0.0.20 tcp dport 7443 accept
+        tcp dport 7443 drop
+    }
+}
+EOF
+
+systemctl enable --now nftables
+```
+
+**Проверка изоляции портов**: выполните с машины воркера (`10.0.0.20`) или любого другого узла, отличного от Caddy:
+```bash
+# Порт 8080 обязан сбрасываться правилом drop
+curl --connect-timeout 2 http://10.0.0.10:8080/readyz
+# Ожидается: Operation timed out (пакеты отброшены)
+```
+
+### 2.4. Конфигурация `hub.toml`
 
 Конфигурационный файл хаба располагается по пути `/etc/canterlot/hub.toml` (права `0600`, владелец `canterlot`). Все относительные пути внутри файла вычисляются относительно каталога, в котором лежит `hub.toml`.
 
@@ -127,27 +201,26 @@ chown -R canterlot:canterlot /etc/canterlot
 ```toml
 # Корневые параметры хаба
 database_url_file = "/etc/canterlot/db.url"         # crates/canterlot-hub/src/config.rs:15
-grpc_listen = "0.0.0.0:7443"                        # crates/canterlot-hub/src/config.rs:16 (default 127.0.0.1:7443)
+grpc_listen = "10.0.0.10:7443"                      # crates/canterlot-hub/src/config.rs:16 (обязательное поле, без значения по умолчанию)
 tls_cert = "/etc/canterlot/tls/hub.crt"             # crates/canterlot-hub/src/config.rs:17
 tls_key = "/etc/canterlot/tls/hub.key"              # crates/canterlot-hub/src/config.rs:18
 manifest = "/etc/canterlot/manifest/installation.toml" # crates/canterlot-hub/src/config.rs:19
 
 [timers]                                            # crates/canterlot-hub/src/config.rs:38
 handshake = "10s"                                   # crates/canterlot-hub/src/config.rs:40
-degraded_after = "30s"                              # crates/canterlot-hub/src/config.rs:42
-unavailable_after = "90s"                           # crates/canterlot-hub/src/config.rs:44
+# degraded_after (15s, config.rs:59), unavailable_after (30s, config.rs:60)
+# и command_stored_receipt (5s, config.rs:63) опущены — действуют значения по умолчанию из кода
 http2_keepalive_interval = "30s"                    # crates/canterlot-hub/src/config.rs:46
 http2_keepalive_timeout = "10s"                     # crates/canterlot-hub/src/config.rs:48
-command_stored_receipt = "2s"                       # crates/canterlot-hub/src/config.rs:50
 dispatch_sweep = "5s"                               # crates/canterlot-hub/src/config.rs:52
 
 [http]                                              # crates/canterlot-hub/src/config.rs:141
-listen = "0.0.0.0:8080"                             # crates/canterlot-hub/src/config.rs:142 (default 127.0.0.1:8080)
-trusted_proxies = ["10.0.0.1/32"]                   # crates/canterlot-hub/src/config.rs:143 (IP Caddy-прокси)
+listen = "10.0.0.10:8080"                           # crates/canterlot-hub/src/config.rs:142 (привязка к IP хаба в LXC; default в коде: 127.0.0.1:8080, config.rs:162)
+trusted_proxies = ["10.0.0.2/32"]                   # crates/canterlot-hub/src/config.rs:143 (IP отдельного хоста Caddy /32)
 owner_login = "owner"                               # crates/canterlot-hub/src/config.rs:144 (логин в Authelia)
 user_header = "Remote-User"                         # crates/canterlot-hub/src/config.rs:145 (default Remote-User)
 allowed_origins = ["https://chat.example.com"]      # crates/canterlot-hub/src/config.rs:146
-max_json_body_bytes = 1048576                       # crates/canterlot-hub/src/config.rs:147 (1 MiB)
+# max_json_body_bytes опущен — действует значение по умолчанию 524288 (512 KiB), crates/canterlot-hub/src/config.rs:167
 header_read_timeout = "10s"                         # crates/canterlot-hub/src/config.rs:149
 body_read_timeout = "30s"                           # crates/canterlot-hub/src/config.rs:151
 max_connections = 256                               # crates/canterlot-hub/src/config.rs:152
@@ -204,14 +277,25 @@ disk_warn_pct = 85                                  # crates/canterlot-hub/src/c
 metrics_stale_after = "90s"                         # crates/canterlot-hub/src/config.rs:467
 ```
 
+### 2.5. Секрет прокси и перенос на сервер Caddy
+
 Секрет прокси создаётся отдельной командой (ровно 32 байта шестнадцатеричной строки без переводов строк):
 ```bash
-umask 077
-openssl rand -hex 32 | tr -d '\n' > /etc/canterlot/proxy.secret
-chmod 0600 /etc/canterlot/proxy.secret
+( umask 077
+  openssl rand -hex 32 | tr -d '\n' > /etc/canterlot/proxy.secret
+  chmod 0600 /etc/canterlot/proxy.secret
+  chown canterlot:canterlot /etc/canterlot/proxy.secret
+)
 ```
 
-### 2.4. Инициализация хаба (`canterlot-hub init`)
+**Перенос секрета на сервер Caddy (10.0.0.2)**:  
+Секрет обязан быть перенесён на сервер Caddy без отображения его содержимого в терминале или сохранении в истории командной строки:
+```bash
+ssh root@10.0.0.2 "( umask 077; mkdir -p /etc/caddy/secrets; cat > /etc/caddy/secrets/canterlot-proxy && chown caddy:caddy /etc/caddy/secrets/canterlot-proxy && chmod 0600 /etc/caddy/secrets/canterlot-proxy )" < /etc/canterlot/proxy.secret
+```
+Файл `/etc/caddy/secrets/canterlot-proxy` на сервере Caddy содержит байт-в-байт тот же секрет, защищён правами `0600` и доступен исключительно пользователю `caddy`.
+
+### 2.6. Инициализация хаба (`canterlot-hub init`)
 
 Команда инициализации ([crates/canterlot-hub/src/main.rs:30](../../crates/canterlot-hub/src/main.rs#L30)) выполняется **ровно один раз**:
 ```bash
@@ -228,7 +312,7 @@ sudo -u canterlot canterlot-hub init --config /etc/canterlot/hub.toml
 4. Записывает внешний манифест `/etc/canterlot/manifest/installation.toml`.
 5. Повторный запуск завершается ошибкой, если манифест или таблица инсталляции уже существуют.
 
-### 2.5. Служба systemd для хаба
+### 2.7. Служба systemd для хаба
 
 Создаётся системный юнит `/etc/systemd/system/canterlot-hub.service`:
 ```ini
@@ -269,7 +353,7 @@ systemctl enable --now canterlot-hub
 
 ## 3. Внутренний УЦ и TLS для gRPC
 
-Канал связи между воркером и хабом защищён mutual TLS / TLS от внутреннего центра сертификации (УЦ) ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение)). Воркер проверяет валидность сертификата хаба и совпадение Subject Alternative Name (SAN).
+Канал связи между воркером и хабом защищён **серверным TLS** от внутреннего центра сертификации (УЦ) ([docs/design/pilot.md#2-размещение](../design/pilot.md#2-размещение) §2). Воркер проверяет сертификат хаба по доверенному корневому сертификату `ca.crt` и сверяет Subject Alternative Name (SAN). Для аутентификации воркер использует долгоживущий bearer-токен машины в gRPC-метаданных ([crates/canterlot-worker/src/session.rs:638-645](../../crates/canterlot-worker/src/session.rs#L638-L645)). Клиентские сертификаты в схеме пилота не применяются (это серверный TLS, а не mutual TLS).
 
 > **TODO**: Автоматическая ротация сертификатов внутренним демоном (например, cert-manager / step-ca) не входит в состав пилота. Сертификаты генерируются через OpenSSL вручную на длительный срок.
 
@@ -328,7 +412,7 @@ openssl x509 -req -in hub.csr -CA ca.crt -CAkey ca.key -CAcreateserial \
 
 Caddy выполняет функции внешнего TLS-терминатора, сервера статических файлов PWA, шлюза SSO через Authelia и обратного прокси к хабу ([docs/adr/0004-browser-auth-forward-auth.md](../adr/0004-browser-auth-forward-auth.md), [README.md](../../README.md#http-вход-csrf-и-caddy)).
 
-### 4.1. Сборка фронтенда PWA и получение CSP
+### 4.1. Сборка фронтенда PWA и генерация CSP
 
 Перед запуском PWA собирается в статические файлы:
 ```bash
@@ -337,55 +421,63 @@ npm ci
 npm run build
 ```
 
-Скрипт `web/scripts/print-csp.mjs` вычисляет SHA-256 хеши инлайн-скриптов из `web/build/200.html` и генерирует заголовок Content-Security-Policy:
+Скрипт `web/scripts/print-csp.mjs` вычисляет SHA-256 хеши инлайн-скриптов из `web/build/200.html` и генерирует заголовок Content-Security-Policy ([README.md:445](../../README.md#L445)):
 ```bash
-node scripts/print-csp.mjs https://chat.example.com
+export CANTERLOT_CSP="$(node scripts/print-csp.mjs https://chat.example.com)"
 ```
-Вывод команды подставляется в директиву `header Content-Security-Policy` в Caddyfile.
-
-> **TODO**: Автоматическая синхронизация вывода `print-csp.mjs` с Caddyfile в CI/CD пайплайне пока не автоматизирована; при пересборке фронтенда заголовок CSP обновляется вручную.
+Переменная `CANTERLOT_CSP` передаётся в окружение службы Caddy и подставляется директивой `header Content-Security-Policy "{$CANTERLOT_CSP}"`.
 
 ### 4.2. Конфигурация Caddyfile
 
+Конфигурация сайта строго воспроизводит канонический блок из [README.md:447-480](../../README.md#L447-L480):
+
 > [!IMPORTANT]
 > Блок `route { ... }` критически необходим. В стандартном порядке директив Caddy удаление заголовков (`request_header -...`) выполнилось бы **после** `forward_auth`, удалив только что проставленный заголовок аутентификации. Внутри `route` порядок выполнения строго соответствует порядку строк в конфиге!
-> Клиентские заголовки `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy` обязаны удаляться до вызова `forward_auth`.
+>
+> Директивы `request_header -Remote-*`, `request_header -X-Forwarded-*` и `request_header -X-Canterlot-Proxy` зачищают **семейства префиксов**, блокируя любые попытки клиента подделать заголовки пользователя (`Remote-User`, `Remote-Groups`, `Remote-Name`, `Remote-Email`), параметры прокси (`X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Uri`) или секрет прокси (`X-Canterlot-Proxy`).
 
 ```caddyfile
 chat.example.com {
-    # Корневой каталог сборки SvelteKit PWA
-    root * /var/www/canterlot/build
-
-    # Заголовок CSP (значение получено из scripts/print-csp.mjs)
-    header Content-Security-Policy "default-src 'self'; script-src 'self' 'sha256-...'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' wss://chat.example.com; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
-
     route {
-        # 1. СТРОГАЯ ЗАЧИСТКА заголовков, присланных клиентом:
-        request_header -Remote-User
-        request_header -Remote-Groups
-        request_header -Remote-Name
-        request_header -Remote-Email
+        # 1. Зачистка семейств заголовков клиента ДО передачи в Authelia
+        request_header -Remote-*
+        request_header -X-Forwarded-*
         request_header -X-Canterlot-Proxy
-        request_header -X-Forwarded-For
-        request_header -X-Forwarded-Proto
-        request_header -X-Forwarded-Host
 
-        # 2. Проверка сессии в Authelia
+        # 2. Проверка сессии владельца через Authelia forward-auth
         forward_auth authelia:9091 {
             uri /api/authz/forward-auth
             copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
         }
 
-        # 3. Обратный прокси API и WebSocket на хаб в LXC
-        @api_or_ws path /api/*
-        reverse_proxy @api_or_ws 10.0.0.10:8080 {
-            # Передача общего секрета хабу (файл защищён правами 0600)
-            header_up X-Canterlot-Proxy {file./etc/caddy/secrets/canterlot-proxy}
+        # 3. Политика безопасности контента (значение из переменной CANTERLOT_CSP)
+        header Content-Security-Policy "{$CANTERLOT_CSP}"
+
+        # 4. Проксирование API, WebSocket и публичного healthcheck на хаб
+        @api path /api/* /healthz
+        handle @api {
+            reverse_proxy 10.0.0.10:8080 {
+                header_up X-Canterlot-Proxy {file./etc/caddy/secrets/canterlot-proxy}
+            }
         }
 
-        # 4. Раздача статики PWA (SPA fallback на 200.html)
-        try_files {path} /200.html
-        file_server
+        # 5. Обработка Web Share Target при неактивном Service Worker
+        @share {
+            method POST
+            path /_share
+        }
+        handle @share {
+            redir /share?error=sw_inactive 303
+        }
+
+        # 6. Раздача статики PWA (service-worker и manifest без кэширования)
+        handle {
+            @fresh path /service-worker.js /manifest.webmanifest
+            header @fresh Cache-Control "no-cache"
+            root * /var/www/canterlot/build
+            try_files {path} /200.html
+            file_server
+        }
     }
 }
 ```
@@ -460,7 +552,19 @@ token=dGhpcy1pcy1hLXRlc3QtdG9rZW4...
 
 Воркер исполняется непосредственно на рабочей машине/виртуальной машине владельца от имени обычной пользовательской учётной записи (не root!).
 
-### 6.1. Конфигурация `worker.toml`
+### 6.1. Разрешение сетевого имени хаба
+
+Чтобы воркер успешно подключался к хабу по защищённому имени из сертификата SAN ([crates/canterlot-worker/src/session.rs:643-645](../../crates/canterlot-worker/src/session.rs#L643-L645)), на рабочей машине настраивается разрешение DNS или добавляется статическая запись в `/etc/hosts`:
+```bash
+echo "10.0.0.10 hub.example.internal" | sudo tee -a /etc/hosts
+```
+Проверка разрешения имени:
+```bash
+getent hosts hub.example.internal
+# Ожидается вывод: 10.0.0.10 hub.example.internal
+```
+
+### 6.2. Конфигурация `worker.toml`
 
 Конфигурационный файл располагается по пути `~/.config/canterlot/worker.toml`.
 
@@ -516,13 +620,13 @@ description = "Профиль без персоны (нейтральный аг
 harnesses = ["claude_code", "codex"]                # crates/canterlot-worker/src/config.rs:291
 ```
 
-### 6.2. Права доступа к файлам и каталогам
+### 6.3. Права доступа к файлам и каталогам
 
 - `token_file`: обязательно права `0600` (`chmod 600 ~/.config/canterlot/token`).
 - `data_dir`: создаётся воркером автоматически с правами `0700`.
 - Все каталоги исполнений `data_dir/executions/<id>` имеют права `0700`, а сокеты IPC и `spec.toml` — `0600`.
 
-### 6.3. Пользовательский юнит systemd и `KillMode=process`
+### 6.4. Пользовательский юнит systemd и выживание процессов
 
 Воркер настраивается как пользовательская служба systemd (`systemd --user`).  
 Файл: `~/.config/systemd/user/canterlot-worker.service`:
@@ -554,15 +658,15 @@ WantedBy=default.target
 По умолчанию systemd при остановке или перезапуске службы уничтожает всю группу cgroup (`KillMode=control-group`), посылая SIGKILL всем потомкам процесса.  
 Директива `KillMode=process` предписывает systemd посылать сигнал SIGTERM **исключительно** основному процессу воркера (`Worker`).
 
-1. При запуске каждого агентского исполнения воркер стартует изолированный процесс сопровождения `canterlot-worker supervise` ([crates/canterlot-worker/src/main.rs:31](../../crates/canterlot-worker/src/main.rs#L31)), который сразу создаёт **новую группу процессов** (`setpgid`).
-2. Внутри этой группы процесс сопровождения запускает дочерний CLI харнесса (`claude` или `codex`).
+1. При запуске каждого агентского исполнения воркер стартует изолированный процесс сопровождения `canterlot-worker supervise` ([crates/canterlot-worker/src/supervisor/run.rs:218-223](../../crates/canterlot-worker/src/supervisor/run.rs#L218-L223)), который сразу создаёт новую сессию операционной системы через `setsid`.
+2. Внутри новой сессии процесс сопровождения запускает дочерний CLI харнесса (`claude` или `codex`).
 3. При перезапуске воркера (`systemctl --user restart canterlot-worker`):
    - Главный процесс воркера корректно завершается.
    - Процессы сопровождения и CLI продолжают выполняться без сбоев.
    - Весь вывод CLI и промежуточные события буферизуются процессом сопровождения в локальный сессионный журнал на диске: `data_dir/executions/<execution_id>/journal.db` (`SJ`).
 4. При старте нового экземпляра воркер сканирует каталог `data_dir/executions/`, находит живые процессы сопровождения, подключается к их IPC Unix-сокетам (`attach`), сверяет состояние и передаёт накопленные факты в хаб. Агентское исполнение не прерывается.
 
-### 6.4. Включение linger для пользователя
+### 6.5. Включение linger для пользователя
 
 Чтобы пользовательская служба systemd не завершалась при выходе владельца из SSH-сессии, на машине воркера включается linger:
 ```bash
@@ -603,9 +707,8 @@ cd web && npm ci && npm run build && cd ..
 2. **Caddy (Web Server)**:
    При изменениях в PWA:
    - Обновите файлы сборки: `/var/www/canterlot/build/`.
-   - Запустите скрипт `node web/scripts/print-csp.mjs https://chat.example.com`.
-   - Обновите директиву `header Content-Security-Policy` в Caddyfile.
-   - Выполните мягкую перезагрузку Caddy: `caddy reload`.
+   - Запустите скрипт генерации CSP: `export CANTERLOT_CSP="$(node web/scripts/print-csp.mjs https://chat.example.com)"`.
+   - Перезагрузите сервис Caddy с обновлённой переменной окружения: `systemctl restart caddy` (или `caddy reload`).
 3. **Воркер (Рабочая VM)**:
    ```bash
    cp target/release/canterlot-worker /usr/local/bin/canterlot-worker
@@ -615,7 +718,7 @@ cd web && npm ci && npm run build && cd ..
 
 ### 7.3. Что выживает при обновлении
 
-- **Процессы сопровождения и агентские CLI**: благодаря `KillMode=process` и сохранению сессионных журналов `SJ` работа агентов продолжается без пауз.
+- **Процессы сопровождения и агентские CLI**: благодаря `KillMode=process`, вызову `setsid` и сохранению сессионных журналов `SJ` работа агентов продолжается без пауз.
 - **Очереди сообщений и отложенные вводы**: хранятся в PostgreSQL хаба, планировщик подхватывает их сразу после старта хаба.
 - **Вложения**: незавершённые загрузки файлов возобновляются с сохранённого байтового смещения (`Upload-Offset`).
 - **Согласование протокола (`pilot_v1`)**: при реконнекте воркер и хаб заново согласуют возможности в handshake. Если хаб старше воркера, воркер придерживает новые факты; откат хаба на версию ниже уже задействованных возможностей не поддерживается ([README.md](../../README.md#обновление-контракта-пилота)).
@@ -625,7 +728,7 @@ cd web && npm ci && npm run build && cd ..
 ## 8. Резервное копирование и восстановление
 
 В соответствии с решением владельца ([pilot.md](../design/pilot.md#11-отступления-от-тз-решения-владельца) §1.1, §2) приложение самостоятельно не создаёт резервные копии:
-- Бэкапы выполняются **исключительно средствами гипервизора Proxmox VE** (регулярные снапшоты и дампы LXC контейнера хаба).
+- Бэкапы выполняются **исключительно средствами гипервизора Proxmox VE** (регулярные согласованные снапшоты и дампы LXC контейнера хаба и VM воркера).
 
 ### 8.1. Правило изоляции внешнего манифеста
 
@@ -638,21 +741,27 @@ cd web && npm ci && npm run build && cd ..
 - `restore_generation`: текущий маркер поколения восстановления.
 - Флаг незавершённой процедуры восстановления `restore_in_progress`.
 
-### 8.2. Рассинхронизация курсора (Cursor Divergence) и протокол R7
+### 8.2. Рассинхронизация состояния (State Divergence) в пилоте
 
-При откате базы данных хаба из снапшота Proxmox возникает ситуация:
-- База данных хаба откатывается назад во времени.
-- Журналы воркера (`CJ` и `SJ`) содержат факты и команды, которые хаб «забыл».
+При откате базы данных хаба из снапшота Proxmox без одновременного отката воркера возникает ситуация рассинхронизации: база данных хаба откатывается назад во времени, а локальные журналы воркера (`CJ` и `SJ`) содержат факты и события, которых хаб больше не помнит.
 
-При последующем gRPC-подключении воркер и хаб обнаружат расхождение курсоров (`state_divergence`).  
-Полноценный протокол восстановления **R7** ([docs/design/recovery.md#r7-restore-с-новым-поколением-181-84](../design/recovery.md#r7-restore-с-новым-поколением-181-84)):
-1. Хаб останавливается, в `installation.toml` генерируется новое поколение `restore_generation` и ставится флаг восстановления.
-2. База данных восстанавливается из снапшота; хаб стартует в режиме восстановления: все очереди блокируются (`restore_pending`), новые исполнения запрещены.
-3. Воркер подключается, видит новое поколение восстановления и передаёт хабу отчёт: список живых исполнений, квитанции известных команд и диапазоны журналов.
-4. Хаб классифицирует команды: доказанно выполненные команды **не выдаются повторно**, чтобы не дублировать действия агентов на реальных файлах репозиториев владельца.
-5. Владелец в интерфейсе подтверждает продолжение работы.
+**Поведение пилота**:
+1. При последующем подключении воркера к хабу расхождение курсоров фиксируется как неустранимая ошибка рассинхронизации: воркер возвращает ошибку `WorkerError::StateDivergence` ([crates/canterlot-worker/src/session.rs:836-840](../../crates/canterlot-worker/src/session.rs#L836-L840)).
+2. Процесс воркера немедленно завершает работу с кодом выхода 1 ([crates/canterlot-worker/src/main.rs:98-100](../../crates/canterlot-worker/src/main.rs#L98-L100)).
 
-> **Статус для пилота**: Автоматическая сверка и восстановление по протоколу R7 относятся к этапу 4. В текущей версии пилота при откате базы из снапшота воркер обнаруживает расхождение курсоров и аварийно останавливается с явным кодом ошибки (`state_divergence`), требуя ручного вмешательства администратора ([pilot.md](../design/pilot.md#2-размещение) §2).
+**Штатные пути восстановления в пилоте**:
+- **Синхронный откат**: одновременное восстановление LXC хаба и VM воркера из парных снапшотов Proxmox VE, снятых в один и тот же момент времени при остановленных сервисах.
+- **Сброс локального состояния воркера**: администратор хаба выполняет ротацию токена со сбросом локального состояния через CLI ([crates/canterlot-hub/src/main.rs:48-56](../../crates/canterlot-hub/src/main.rs#L48-L56)):
+  ```bash
+  sudo -u canterlot canterlot-hub machine rotate-token \
+      --config /etc/canterlot/hub.toml \
+      --machine-id 019a1b10-0000-7000-8000-000000000001 \
+      --reset-local-state
+  ```
+  После этого на машине воркера очищается каталог `~/.local/state/canterlot-worker`, записывается новый токен и служба запускается с чистого состояния.
+
+> [!NOTE]
+> Автоматическая процедура управляемого восстановления с формированием нового `restore_generation`, передачей воркером отчёта о живых исполнениях и интерактивным подтверждением владельцем в UI (протокол R7, [docs/design/recovery.md](../../docs/design/recovery.md)) относится к **Этапу 4** и в пилотном контуре не поддерживается.
 
 ---
 
@@ -660,24 +769,34 @@ cd web && npm ci && npm run build && cd ..
 
 Перед открытием PWA в браузере выполните проверку каждого пункта:
 
-- [ ] **1. База данных PostgreSQL**: служба активна, база `canterlot` создана, файл `/etc/canterlot/db.url` имеет права `0600` и доступен пользователю `canterlot`.
+- [ ] **1. Системный пользователь и PostgreSQL 18**: системный пользователь `canterlot` создан, служба `postgresql` активна, база `canterlot` создана, файл `/etc/canterlot/db.url` имеет права `0600` и доступен пользователю `canterlot`.
 - [ ] **2. Манифест инсталляции**: каталог `/etc/canterlot/manifest` размещён на независимом томе вне снапшотов БД.
 - [ ] **3. Первичная инициализация**: выполнена команда `canterlot-hub init --config /etc/canterlot/hub.toml`, создан файл `installation.toml`.
-- [ ] **4. TLS-сертификаты**: сертификаты `ca.crt`, `hub.crt`, `hub.key` выпущены, SAN содержит точное доменное имя хаба, `hub.key` защищён правами `0600`.
-- [ ] **5. Секрет прокси**: файл `/etc/canterlot/proxy.secret` содержит не менее 32 ASCII-символов, права `0600`; идентичный секрет прописан в директиве Caddy.
-- [ ] **6. Caddy и Authelia**: блок `chat.example.com` зачищает клиентские заголовки `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`, выполняет `forward_auth` и проксирует `/api/*` на порт `8080` хаба.
-- [ ] **7. Сопряжение машины**: выполнена команда `canterlot-hub machine add`, полученный токен сохранён в `~/.config/canterlot/token` с правами `0600`, UUID вписаны в `worker.toml`.
-- [ ] **8. Рабочие каталоги воркера**: пути в `allowed_workdir_roots` существуют на рабочей VM и принадлежат пользователю воркера.
-- [ ] **9. Права хранилища воркера**: каталог `~/.local/state/canterlot-worker` создан с правами `0700`.
-- [ ] **10. Службы systemd**:
+- [ ] **4. Межсетевой экран LXC**: `nftables` активен, порт 8080 доступен только с `10.0.0.2`, порт 7443 — только с `10.0.0.20`.
+- [ ] **5. TLS-сертификаты**: сертификаты `ca.crt`, `hub.crt`, `hub.key` выпущены, SAN содержит имя `hub.example.internal` и IP `10.0.0.10`, файл `hub.key` защищён правами `0600`.
+- [ ] **6. Секрет прокси**: файл `/etc/canterlot/proxy.secret` на хабе и `/etc/caddy/secrets/canterlot-proxy` на сервере Caddy содержат идентичный 32-байтный секрет и защищены правами `0600`.
+- [ ] **7. Caddy и Authelia**: блок `chat.example.com` зачищает семейства заголовков `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`, выполняет `forward_auth`, выставляет `Content-Security-Policy` и проксирует `@api` (`/api/*` и `/healthz`) на `10.0.0.10:8080`.
+- [ ] **8. Разрешение имени на воркере**: в `/etc/hosts` воркера прописана строка `10.0.0.10 hub.example.internal`, команда `getent hosts hub.example.internal` возвращает IP хаба.
+- [ ] **9. Сопряжение машины**: выполнена команда `canterlot-hub machine add`, полученный токен сохранён в `~/.config/canterlot/token` с правами `0600`, UUID вписаны в `worker.toml`.
+- [ ] **10. Права хранилища воркера**: каталог `~/.local/state/canterlot-worker` создан с правами `0700`.
+- [ ] **11. Службы systemd**:
   - Хаб: `systemctl status canterlot-hub` активен (active/running).
   - Воркер: `systemctl --user status canterlot-worker` активен (active/running), директива `KillMode=process` установлена.
   - Linger: выполнен `loginctl enable-linger $USER`.
-- [ ] **11. Тестирование прокси**: запуск `bash scripts/check-proxy.sh https://chat.example.com cookies.txt` завершается успешно (код возврата 0).
-- [ ] **12. Сквозная доступность**:
-  - `curl -k https://chat.example.com/healthz` возвращает HTTP 200.
-  - `curl -k https://chat.example.com/readyz` возвращает HTTP 200 (`{"status":"ready"}`).
-  - В браузере открывается `https://chat.example.com`, после входа через Authelia загружается PWA, а в журнале хаба отображается успешное подключение воркера: `Accepted machine workstation`.
+- [ ] **12. Тестирование прокси**: запуск `bash scripts/check-proxy.sh https://chat.example.com cookies.txt` завершается успешно (код возврата 0).
+- [ ] **13. Сквозная доступность и приёмка**:
+  - Публичная проверка сертификата и шлюза:
+    ```bash
+    curl -fsS https://chat.example.com/healthz
+    # Ожидается: {"status":"ok"}
+    ```
+  - Локальная проверка готовности внутри LXC хаба:
+    ```bash
+    curl -fsS http://10.0.0.10:8080/readyz
+    # Ожидается: {"status":"ok"}
+    ```
+  - В браузере открывается `https://chat.example.com`, после входа через Authelia загружается PWA.
+  - В журнале хаба (`journalctl -u canterlot-hub`) фиксируется подключение воркера с сообщением: `session accepted` (атрибуты `kind = "session_accepted"`, `machine_id = ...`).
 
 ---
 
@@ -687,6 +806,6 @@ cd web && npm ci && npm run build && cd ..
 
 1. **TODO: Пакетный установщик**: сборка deb/rpm пакетов отсутствует. Компоненты компилируются через Cargo и устанавливаются вручную.
 2. **TODO: Автоматическая ротация TLS gRPC**: ротация сертификатов внутреннего центра сертификации и хаба выполняется вручную через OpenSSL.
-3. **TODO: Автоматическое обновление CSP**: заголовок CSP в Caddyfile генерируется утилитой `print-csp.mjs` и вставляется вручную после пересборки `web/build`.
-4. **TODO: Автоматическое восстановление R7**: при рассинхронизации базы данных со снапшотом воркер останавливается; автоматическая сверка фактов запланирована на этап 4.
+3. **TODO: Автоматическое обновление CSP**: заголовок CSP генерируется утилитой `print-csp.mjs` и передаётся в переменную `CANTERLOT_CSP` при обновлении фронтенда.
+4. **TODO: Автоматическое восстановление R7**: при рассинхронизации состояния воркер аварийно останавливается; автоматическая сверка фактов запланирована на этап 4.
 5. **TODO: Собственный экран входа Canterlot**: в пилоте аутентификация полностью делегирована связке Caddy + Authelia; встроенный логин Canterlot разрабатывается для последующих этапов.
