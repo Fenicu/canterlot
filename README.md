@@ -58,6 +58,8 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 Полная проверка — `scripts/check.sh`; e2e-тесты запускаются только с `--all-features`. Сквозные сценарии пилота: `cargo test -p canterlot-worker --all-features --test pilot_e2e`; тяжёлые e2e одного бинарника выполняются не больше трёх одновременно (`CANTERLOT_E2E_PARALLEL`), процессы сопровождения и синтетического CLI тест убивает при завершении. Стенд с настройками как у `serve` (лимиты, активность, планировщик, хранилище вложений) собирает `testkit::spawn_test_hub_with`.
 
+Перегенерация перечня лицензий зависимостей — `scripts/gen-licenses.sh` (обновляет `docs/licenses/THIRD_PARTY.md`).
+
 Для тестов хаба нужны Docker и `strace` (регрессии порядка fsync); `strace` также используется сквозной проверкой долговечности каталогов worker. Из корня репозитория запустите PostgreSQL 18.6 и тесты:
 
 ```bash
