@@ -43,6 +43,8 @@ struct BodyDeadline {
 struct ReadBody {
     inner: Pin<Box<Body>>,
     deadline: watch::Sender<Option<Instant>>,
+    /// Тело загрузки вложения: предел задаёт простой между кадрами, а не всё тело.
+    idle: Option<Duration>,
 }
 
 impl HttpBody for ReadBody {
@@ -56,6 +58,8 @@ impl HttpBody for ReadBody {
         let result = self.inner.as_mut().poll_frame(cx);
         if matches!(result, Poll::Ready(None | Some(Err(_)))) || self.inner.is_end_stream() {
             self.deadline.send_replace(None);
+        } else if let (Poll::Ready(Some(Ok(_))), Some(idle)) = (&result, self.idle) {
+            self.deadline.send_replace(Some(Instant::now() + idle));
         }
         result
     }
@@ -78,9 +82,17 @@ async fn body_deadline(
     state
         .deadline
         .send_replace((!body.is_end_stream()).then(|| Instant::now() + state.timeout));
+    let upload = parts.method == axum::http::Method::PATCH
+        && parts
+            .uri
+            .path()
+            .strip_prefix("/api/v1/attachments/")
+            .and_then(|rest| rest.strip_suffix("/content"))
+            .is_some_and(|id| !id.contains('/'));
     let body = Body::new(ReadBody {
         inner: Box::pin(body),
         deadline: state.deadline.clone(),
+        idle: upload.then_some(state.timeout),
     });
     let response = next.run(Request::from_parts(parts, body)).await;
     if response.status() == StatusCode::SWITCHING_PROTOCOLS {

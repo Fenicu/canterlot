@@ -3,9 +3,8 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ContentBlock, ControlDown, DeliverInput, Interrupt, SettingsOverride,
-        StartExecution, StopExecution, TextBlock, WithdrawInput, command, content_block,
-        control_down,
+        CancelInput, Command, ControlDown, DeliverInput, Interrupt, SettingsOverride,
+        StartExecution, StopExecution, WithdrawInput, command, control_down,
     },
 };
 use prost::Message;
@@ -59,6 +58,10 @@ struct InputPayload {
     input_id: Uuid,
     conversation_id: Uuid,
     content: Vec<submit::ContentBlock>,
+    /// Те же вложения, что и блоки `attachment` в `content`; поле служит для проверок в SQL.
+    #[serde(default)]
+    #[allow(dead_code)]
+    attachment_ids: Vec<Uuid>,
     settings: Option<SettingsPayload>,
     settings_rev: Option<i64>,
 }
@@ -140,12 +143,8 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 conversation_id: payload.conversation_id.to_string(),
                 content: payload
                     .content
-                    .into_iter()
-                    .map(|block| match block {
-                        submit::ContentBlock::Text { text } => ContentBlock {
-                            block: Some(content_block::Block::Text(TextBlock { text })),
-                        },
-                    })
+                    .iter()
+                    .map(submit::ContentBlock::to_proto)
                     .collect(),
                 settings: payload.settings.map(|s| SettingsOverride {
                     model: s.model.unwrap_or_default(),

@@ -148,7 +148,7 @@ async fn cancel_replays_the_domain_outcome(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn attachment_ids_are_not_implemented_before_task_9(pool: PgPool) {
+async fn attachment_ids_are_checked_and_part_of_the_request_hash(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -161,9 +161,18 @@ async fn attachment_ids_are_not_implemented_before_task_9(pool: PgPool) {
         .unwrap();
     let conversation = testkit::seed_conversation(&pool, owner, machine).await;
     let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    // Машина без `pilot_v1` в сохранённом отчёте вложений не принимает, ввод не создаётся.
     let result = client.send(Method::POST, &format!("/api/v1/conversations/{conversation}/inputs"), Some("input"), Some(serde_json::json!({"content":[{"type":"text","text":"test"}],"attachment_ids":[Uuid::now_v7()]}))).await;
-    assert_eq!(result.status, 501);
-    assert_eq!(result.json::<Value>()["error"]["code"], "not_implemented");
+    assert_eq!(result.status, 409);
+    assert_eq!(
+        result.json::<Value>()["error"]["code"],
+        "capability_missing"
+    );
+    let inputs: i64 = sqlx::query_scalar("select count(*) from inputs")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(inputs, 0);
     let path = format!("/api/v1/conversations/{conversation}/inputs");
     let first = client
         .send(
@@ -466,6 +475,31 @@ async fn exercise_mutation_replay(pool: PgPool) -> Vec<Observed> {
         .as_str()
         .unwrap()
         .to_string();
+    let attachment_body = |name: &str| serde_json::json!({"conversation_id":id,"name":name,"size":3,"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"});
+    let mut attachments = Vec::new();
+    for (key, name) in [("setup_upload", "abc.txt"), ("setup_cancel", "cancel.txt")] {
+        let created = client
+            .send(
+                Method::POST,
+                "/api/v1/attachments",
+                Some(key),
+                Some(attachment_body(name)),
+            )
+            .await;
+        assert_eq!(created.status, 201);
+        let attachment = created.json::<Value>()["id"].as_str().unwrap().to_owned();
+        let uploaded = client
+            .send_body(
+                Method::PATCH,
+                &format!("/api/v1/attachments/{attachment}/content"),
+                &[("upload-offset", "0".into())],
+                axum::body::Body::from("abc"),
+            )
+            .await;
+        assert_eq!(uploaded.status, 204);
+        attachments.push(attachment);
+    }
+    let (uploaded, to_cancel) = (attachments[0].clone(), attachments[1].clone());
     let cases = [
         (
             Method::POST,
@@ -566,6 +600,26 @@ async fn exercise_mutation_replay(pool: PgPool) -> Vec<Observed> {
             format!("/api/v1/conversations/{resume_id}/resume"),
             Some(serde_json::json!({"continue_queue":false})),
             Some(serde_json::json!({"continue_queue":true})),
+        ),
+        (
+            Method::POST,
+            "/api/v1/attachments".into(),
+            Some(attachment_body("one.txt")),
+            Some(attachment_body("two.txt")),
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/attachments/{uploaded}/complete"),
+            None,
+            Some(
+                serde_json::json!({"sha256":"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}),
+            ),
+        ),
+        (
+            Method::DELETE,
+            format!("/api/v1/attachments/{to_cancel}"),
+            None,
+            None,
         ),
     ];
     let keys = |key: String| {

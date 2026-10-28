@@ -458,6 +458,24 @@ pub async fn capability_hold_input(
     .fetch_optional(conn)
     .await
 }
+/// Вычисляемое удержание: ввод выдан машине, но не все его файлы опубликованы у агента.
+/// Причина берётся из `input_attachments.machine_reason` и нигде не хранится как удержание.
+pub async fn attachments_pending(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Vec<(Uuid, Option<String>)>, sqlx::Error> {
+    sqlx::query_as(
+        "select ia.input_id, (array_agg(ia.machine_reason order by ia.position)
+                filter (where ia.machine_reason is not null))[1]
+         from input_attachments ia join inputs i on i.id = ia.input_id
+         where i.conversation_id = $1 and i.state in ('dispatched','on_machine')
+           and ia.machine_state <> 'ready'
+         group by ia.input_id order by min(i.input_seq)",
+    )
+    .bind(id)
+    .fetch_all(conn)
+    .await
+}
 pub async fn detail(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -484,6 +502,14 @@ pub async fn detail(
         if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
             reasons.push(json!({"reason":"capability_missing","input_id":input_id}));
         }
+    }
+    for (input_id, reason) in attachments_pending(conn, id).await? {
+        let hold = HoldView::AttachmentsPending { input_id, reason };
+        if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
+            reasons
+                .push(serde_json::to_value(&hold).map_err(|e| sqlx::Error::Encode(Box::new(e)))?);
+        }
+        holds.push(hold);
     }
     let execution=sqlx::query("select id,generation,state,outcome,native_conversation_id,created_at from executions where conversation_id=$1 and state not in ('stopped','failed')").bind(id).fetch_optional(&mut *conn).await?.map(|r|->Result<Value,sqlx::Error>{Ok(json!({"execution_id":r.try_get::<Uuid,_>("id")?,"generation":r.try_get::<i64,_>("generation")?,"state":r.try_get::<String,_>("state")?,"outcome":r.try_get::<Option<String>,_>("outcome")?,"native_conversation_id":r.try_get::<Option<String>,_>("native_conversation_id")?,"created_at":time(r.try_get("created_at")?)}))}).transpose()?;
     let resume_pending: bool = row.try_get("resume_pending")?;
@@ -1022,6 +1048,7 @@ async fn update_attributes_in_tx(
                 return Err(UpdateError::ArchiveActive(vec!["scheduled"]));
             }
             sqlx::query("update scheduled_jobs set state='cancelled',updated_at=clock_timestamp() where id=any($1)").bind(&locked).execute(&mut *conn).await?;
+            crate::attachments::unlink_scheduled_in_tx(conn, &locked).await?;
             crate::scheduler::publish_archive_cancellations(conn, &locked, correlation_id).await?;
             sqlx::query("update conversations set crunch_enabled=false where id=$1")
                 .bind(id)
@@ -1444,6 +1471,7 @@ pub(crate) async fn auto_title_in_tx(
         .iter()
         .flat_map(|b| match b {
             crate::delivery::ContentBlock::Text { text } => text.split_whitespace(),
+            crate::delivery::ContentBlock::Attachment { .. } => "".split_whitespace(),
         })
         .collect::<Vec<_>>()
         .join(" ");

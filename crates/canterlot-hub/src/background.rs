@@ -13,6 +13,11 @@ pub struct BackgroundDeps {
     pub activity: crate::config::ActivityConfig,
     pub machines: crate::config::MachinesConfig,
     pub multi_process: bool,
+    /// Сборщик вложений; `None` у служебных стендов без хранилища.
+    pub attachments: Option<(
+        std::sync::Arc<dyn crate::attachments::BlobStore>,
+        crate::config::AttachmentsConfig,
+    )>,
 }
 
 /// Фоновая служба, завершившаяся паникой.
@@ -37,9 +42,10 @@ impl Background {
             activity,
             machines,
             multi_process,
+            attachments,
         } = deps;
         let bus = crate::bus::EventBus::spawn(pool.clone(), multi_process, stopped.clone());
-        let tasks = vec![
+        let mut tasks = vec![
             (
                 "activity_task_error",
                 tokio::spawn(crate::activity::run(
@@ -74,14 +80,20 @@ impl Background {
             (
                 "dispatcher_task_error",
                 tokio::spawn(dispatcher::run(
-                    pool,
+                    pool.clone(),
                     registry,
                     dispatch_rx,
                     timers,
-                    stopped,
+                    stopped.clone(),
                 )),
             ),
         ];
+        if let Some((store, config)) = attachments {
+            tasks.push((
+                "attachment_gc_task_error",
+                tokio::spawn(crate::attachments::gc::run(pool, store, config, stopped)),
+            ));
+        }
         Self { signal, tasks, bus }
     }
 

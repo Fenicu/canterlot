@@ -340,8 +340,10 @@ name = "canterlot-hub"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "async-trait",
  "axum",
  "base64 0.23.1",
+ "bytes",
  "canterlot-hub",
  "canterlot-proto",
  "chrono",

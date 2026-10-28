@@ -6,6 +6,352 @@
     "version": "1.0.0"
   },
   "paths": {
+    "/api/v1/attachments": {
+      "post": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "create",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewAttachment"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Вложение создано, загрузка с нулевого смещения",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedAttachment"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attachments/{id}": {
+      "get": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "get_one",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Вложение",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "cancel",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Загрузка отменена или неиспользованное вложение удалено"
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attachments/{id}/complete": {
+      "post": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "complete",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Необязательное тело",
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CompleteBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Содержимое проверено, надёжно опубликовано, вложение готово",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AttachmentView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/attachments/{id}/content": {
+      "get": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "download",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Содержимое готового вложения, всегда как скачиваемый файл",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "head": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "upload_offset",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Принятое смещение загрузки",
+            "headers": {
+              "Upload-Length": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Объявленный размер"
+              },
+              "Upload-Offset": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Принятые байты"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "attachments"
+        ],
+        "operationId": "upload_chunk",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Upload-Offset",
+            "in": "header",
+            "description": "Смещение, с которого продолжается загрузка",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "description": "Не больше upload_chunk_bytes",
+          "content": {
+            "application/octet-stream": {
+              "schema": {
+                "$ref": "#/components/schemas/BinaryContent"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Часть принята",
+            "headers": {
+              "Upload-Offset": {
+                "schema": {
+                  "type": "integer",
+                  "format": "int64",
+                  "minimum": 0
+                },
+                "description": "Принятые байты"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/config": {
       "get": {
         "tags": [
@@ -2431,6 +2777,11 @@
           }
         }
       },
+      "BinaryContent": {
+        "type": "string",
+        "format": "binary",
+        "description": "Двоичное содержимое файла."
+      },
       "BlockPage": {
         "type": "object",
         "required": [
@@ -2628,6 +2979,19 @@
           }
         ]
       },
+      "CompleteBody": {
+        "type": "object",
+        "properties": {
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Контрольная сумма, с которой клиент завершает загрузку; другая сумма даёт конфликт."
+          }
+        },
+        "additionalProperties": false
+      },
       "ConfigView": {
         "type": "object",
         "required": [
@@ -2688,8 +3052,50 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "attachment_id",
+              "name",
+              "mime",
+              "size",
+              "sha256",
+              "image",
+              "type"
+            ],
+            "properties": {
+              "attachment_id": {
+                "type": "string",
+                "format": "uuid"
+              },
+              "image": {
+                "type": "boolean"
+              },
+              "mime": {
+                "type": "string"
+              },
+              "name": {
+                "type": "string"
+              },
+              "sha256": {
+                "type": "string"
+              },
+              "size": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "attachment"
+                ]
+              }
+            }
           }
-        ]
+        ],
+        "description": "Блок содержимого ввода. Владелец присылает только `text`; блоки `attachment` хаб добавляет\nсам после текста при привязке готовых вложений."
       },
       "ContextInfo": {
         "type": "object",
@@ -2944,6 +3350,24 @@
           }
         }
       },
+      "CreatedAttachment": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/AttachmentView"
+          },
+          {
+            "type": "object",
+            "required": [
+              "upload"
+            ],
+            "properties": {
+              "upload": {
+                "$ref": "#/components/schemas/UploadOffer"
+              }
+            }
+          }
+        ]
+      },
       "CrunchDetail": {
         "type": "object",
         "required": [
@@ -3181,7 +3605,15 @@
           "workdir_not_allowed",
           "group_not_found",
           "group_name_taken",
-          "archive_active"
+          "archive_active",
+          "attachment_not_ready",
+          "attachment_not_uploadable",
+          "attachment_unsupported",
+          "attachment_unavailable",
+          "offset_mismatch",
+          "upload_in_progress",
+          "checksum_mismatch",
+          "attachment_conflict"
         ]
       },
       "ErrorDetails": {
@@ -4481,6 +4913,39 @@
           }
         }
       },
+      "NewAttachment": {
+        "type": "object",
+        "required": [
+          "conversation_id",
+          "name",
+          "size",
+          "sha256"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mime": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "PartView": {
         "type": "object",
         "required": [
@@ -5593,6 +6058,25 @@
             ]
           }
         ]
+      },
+      "UploadOffer": {
+        "type": "object",
+        "required": [
+          "offset",
+          "upload_chunk_bytes"
+        ],
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "upload_chunk_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "UsageDay": {
         "type": "object",

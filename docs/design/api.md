@@ -53,7 +53,7 @@
 
 ## Удержания очереди
 
-`HoldReason` хранит причины в PG. `HoldView` содержит все эти варианты и вычисляемые `machine_not_reconciled`, `capability_missing { input_id }`. Вычисляемые варианты не десериализуются как `HoldReason`. У `attachments_pending` необязательное поле Rust `reason` передаётся как `machine_reason` из `input_attachments.machine_reason`, поскольку JSON-поле `reason` служит тегом варианта.
+`HoldReason` хранит причины в PG. `HoldView` содержит все эти варианты и вычисляемые `machine_not_reconciled`, `capability_missing { input_id }`, `attachments_pending { input_id, machine_reason? }`. Вычисляемые варианты не десериализуются как `HoldReason`; `attachments_pending` строится из `input_attachments` и в очереди не хранится. Необязательное поле Rust `reason` передаётся как `machine_reason` из `input_attachments.machine_reason`, поскольку JSON-поле `reason` служит тегом варианта.
 
 ## Вход и служебные правила
 
@@ -107,12 +107,22 @@
 | `group_not_found` | 404 | `browser` | `never` | Группа не найдена |
 | `group_name_taken` | 409 | `browser` | `never` | Группа с таким именем уже существует |
 | `archive_active` | 409 | `browser` | `never` | В сессии есть активная работа |
+| `attachment_not_ready` | 409 | `browser` | `after_condition` | Вложение ещё не готово |
+| `attachment_not_uploadable` | 409 | `browser` | `never` | Загрузка вложения уже завершена или прекращена |
+| `attachment_unsupported` | 422 | `browser` | `never` | Харнесс не принимает такое вложение |
+| `attachment_unavailable` | 409 | `browser` | `never` | Вложение больше недоступно |
+| `offset_mismatch` | 409 | `browser` | `after_condition` | Смещение загрузки не совпадает с принятым |
+| `upload_in_progress` | 409 | `browser` | `after_condition` | Вложение уже загружается |
+| `checksum_mismatch` | 422 | `browser` | `never` | Содержимое не совпало с контрольной суммой |
+| `attachment_conflict` | 409 | `browser` | `never` | Вложение уже завершено с другой контрольной суммой |
 
 Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
 
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
+
+Ответы `offset_mismatch`, `upload_in_progress` и `resource_limit` загрузки вложения несут заголовок `Upload-Offset` с принятым смещением; оборванное тело загрузки даёт `400 invalid_request` с тем же заголовком.
 
 ## Маршруты и покрытие
 
@@ -130,7 +140,7 @@
 | `PATCH /api/v1/scheduled/{id}` | Изменить время или содержимое до отправки |
 | `DELETE /api/v1/scheduled/{id}` | Отменить до отправки |
 
-Отложенные сообщения принимают `run_at` от секунды до 366 дней вперёд, `content` как обычный ввод и пока пустой `attachment_ids`. Создание возвращает 201, изменение и отмена 200; повтор ключа возвращает сохранённый ответ. Список содержит до 200 сообщений, сначала ожидающие, внутри каждой группы по `run_at` и `id`. `scheduled_changed` несёт полное представление сообщения в области разговора. Планировщик ставит ввод с ключом `sched:<id>` в той же транзакции, в которой помечает задание отправленным; паузы и удержания очереди действуют как обычно.
+Отложенные сообщения принимают `run_at` от секунды до 366 дней вперёд, `content` как обычный ввод и `attachment_ids` готовых вложений (раздел «Вложения»). Создание возвращает 201, изменение и отмена 200; повтор ключа возвращает сохранённый ответ. Список содержит до 200 сообщений, сначала ожидающие, внутри каждой группы по `run_at` и `id`. `scheduled_changed` несёт полное представление сообщения в области разговора. Планировщик ставит ввод с ключом `sched:<id>` в той же транзакции, в которой помечает задание отправленным; паузы и удержания очереди действуют как обычно.
 
 `derived_changed` публикуется в области разговора, затем в списке владельца и содержит `conversation_id`, `activity:{state,evidence,since}`, `unread_count`, `queue:{queued,pause_reasons,hold_reasons}`, `last_activity_at`, `settings:{model,effort,permission_mode}`, `crunch:{enabled}`. Настройки и кранч материализуются из эффективных значений разговора; изменение публикует только проектор. `last_activity_at` берётся по времени фиксации последнего ввода или создания блока и округляется вниз до минуты. Дельты блока не меняют это время. Прочитанность считается по `created_seq` текстовых блоков, предупреждений и ошибок в состояниях `streaming` и `final` относительно `last_read_seq` разговора.
 
@@ -188,7 +198,7 @@
 
 | Метод и путь | Тело | Результат |
 | --- | --- | --- |
-| `POST /api/v1/conversations/{id}/inputs` | `content[]` (`{"type":"text","text"}`), `attachment_ids?`, `retry_of?` | 201, `SubmittedInput`; непустой `attachment_ids` до задачи 9 даёт `501 not_implemented` |
+| `POST /api/v1/conversations/{id}/inputs` | `content[]` (`{"type":"text","text"}`), `attachment_ids?` (до 10 готовых вложений), `retry_of?` | 201, `SubmittedInput`; блоки `attachment` хаб добавляет после текста сам |
 | `POST /api/v1/inputs/{id}/cancel` | - | `CancelOutcome` |
 | `POST /api/v1/conversations/{id}/interrupt` | - | `StopOutcome`: пауза очереди, прерывание, отзыв |
 | `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome` |
@@ -203,6 +213,36 @@
 Настройки проверяются как итоговая комбинация по сохранённому каталогу машины: модель, усилие этой модели, режим разрешений харнесса. Допустимое изменение попадает в `pending_settings`, увеличивает `settings_rev` и публикует `conversation_settings_changed {effective, pending, rev}` в области разговора. Диспетчер повторно проверяет комбинацию под блокировкой очереди, кладёт действующие значения в команду (`settings`, `settings_rev`) и снимает недопустимые ключи с событием, где добавлено `rejected:{keys, reason:"settings_unavailable"}`. `input_accepted` делает отправленные значения эффективными и убирает из ожидающих только ключи с тем же значением. Отказ до передачи с причиной `settings_unavailable` убирает ключи отклонённой команды и не ставит паузу. Ввод с настройками не уходит в сеанс без `pilot_v1`: он остаётся в очереди, а `detail` показывает вычисляемое удержание `capability_missing`.
 
 `retry_of` обязан указывать на ввод той же сессии в состоянии `acceptance_unconfirmed`, иначе `422 invalid_request`; значение входит в хеш запроса. Первый ввод сессии с автоматическим названием задаёт название: первые 60 символов по границе слова, пробелы сжимаются, запасное значение `Новая сессия`.
+
+## Вложения
+
+| Метод и путь | Тело | Результат |
+| --- | --- | --- |
+| `POST /api/v1/attachments` | `conversation_id`, `name`, `mime?`, `size`, `sha256` | 201, `AttachmentView` и `upload {offset: 0, upload_chunk_bytes}` |
+| `HEAD /api/v1/attachments/{id}/content` | - | 200, `Upload-Offset`, `Upload-Length` |
+| `PATCH /api/v1/attachments/{id}/content` | заголовок `Upload-Offset`, тело до `upload_chunk_bytes` | 204, `Upload-Offset` |
+| `POST /api/v1/attachments/{id}/complete` | `sha256?` | 200, `AttachmentView` в состоянии `ready` |
+| `DELETE /api/v1/attachments/{id}` | - | 204 |
+| `GET /api/v1/attachments/{id}` | - | `AttachmentView`; `uploaded_bytes` у незавершённой загрузки |
+| `GET /api/v1/attachments/{id}/content` | - | содержимое готового вложения |
+
+Размер от 1 до 104857600 байт, больше `413 resource_limit`; объявленный размер служит и потолком загрузки. Имя сводится к последнему компоненту пути, не длиннее 255 байт, без NUL и управляющих символов. `mime` хранится без параметров в нижнем регистре, по умолчанию `application/octet-stream`; `sha256` состоит из 64 шестнадцатеричных символов.
+
+`PATCH` не требует `Idempotency-Key`: повтор определяется смещением. Маршрут имеет собственный предел тела 8 МиБ, общий предел JSON к нему не относится, а предел времени чтения тела отсчитывается от последнего принятого кадра. Тело пишется в `staging/<id>.part` кусками до 128 КиБ; принятое смещение равно длине файла, байты оборванного тела сохраняются. На одно вложение пишется одно тело: второй `PATCH` или `HEAD` во время записи получает `409 upload_in_progress` с текущим `Upload-Offset`, неверное смещение `409 offset_mismatch`. Одновременно принимается не больше `[attachments].max_concurrent_uploads` тел, сверх этого `429 too_many_requests`. Часть для `failed`, `cancelled` или `ready` даёт `409 attachment_not_uploadable`.
+
+`complete` (§13.1) сначала проверяет ключ и отмечает активность, затем вне транзакций проверяет длину (`409 offset_mismatch` при неполной загрузке) и SHA-256 (`422 checksum_mismatch`, запись `failed`, staging удаляется), делает `fsync` файла, `rename` в `blobs/<id[0..2]>/<id>` и `fsync` каталогов. Только после этого короткая транзакция переводит запись из `created`/`uploading` в `ready` и добавляет `attachment_state_changed`. Сбой между публикацией и commit оставляет запись `uploading` и blob; повтор с тем же ID и checksum не копирует содержимое и фиксирует метаданные. Тело `{sha256}` необязательно; другая контрольная сумма для того же вложения даёт `409 attachment_conflict`.
+
+`DELETE` переводит загрузку из `created`/`uploading` в `cancelled`, готовое вложение без ссылок в `released`; вложение со ссылкой из ввода или отложенного сообщения даёт `409 invalid_state`, конечные состояния повторно дают 204. Файлы удаляются после commit.
+
+Ввод и отложенное сообщение принимают до 10 `attachment_ids`, больше `413 resource_limit`, повтор id `400 invalid_request`. Транзакция ввода блокирует записи `for share` по возрастанию id и требует владельца, разговор и `ready`, иначе `409 attachment_not_ready`, и ввод не создаётся. Сохранённый отчёт машины должен содержать `pilot_v1` (`409 capability_missing`) и совпадающие лимиты (`409 limits_mismatch`); живой сеанс не проверяется, поэтому ставить в очередь можно и при выключенной машине. Файл `image/*` для харнесса без изображений даёт `422 attachment_unsupported`. Ссылка агенту несёт `image = true` только для `image/png`, `image/jpeg`, `image/gif`, `image/webp`. Команда получает блоки `attachment` после текста и `attachment_ids`; диспетчер не отдаёт её сеансу без `pilot_v1` (вычисляемое удержание `capability_missing`). Хеш запроса покрывает `attachment_ids` по порядку.
+
+Отложенное сообщение хранит ссылки в `scheduled_job_attachments`, и сборщик их учитывает. Отправка перепроверяет готовность: снятое вложение переводит задание в `failed` с `attachment_unavailable`. Отмена, отказ и отправка задания снимают его ссылки в той же транзакции.
+
+Выдача доступна только владельцу. `Content-Type` берётся из списка `image/png`, `image/jpeg`, `image/gif`, `image/webp` при совпадающей сигнатуре файла, иначе `application/octet-stream`; ответ несёт `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment; filename*=UTF-8''<имя в процентной кодировке>`, `Content-Security-Policy: sandbox`, `Cache-Control: private, no-store`. Незавершённое вложение даёт `409 attachment_not_ready`, снятое `409 attachment_unavailable`.
+
+Сборщик (`canterlot:attachment-gc`, раз в `gc_interval`, отсрочка `gc_grace` = 24 ч) переводит загрузки без активности в `failed(upload_expired)` и удаляет staging после commit, переводит готовые вложения без ссылок в `released` и удаляет blob после commit, удаляет файлы staging без записи `created`/`uploading` и blob без записи `created`/`uploading`/`ready`, если они старше отсрочки. Каждое решение берёт строку `for update skip locked` и перепроверяет состояние, время и ссылки после блокировки. Тело загрузки, которое пишется в этом процессе, сборщик не трогает.
+
+`attachment_state_changed {attachment_id, state, reason}` публикуется в области разговора на каждый переход: `created`, `uploading`, `ready`, `failed` (с причиной), `cancelled`, `released`. Имени и содержимого файла в событии нет.
 
 ## Снимки, история и восстановление диапазона
 
@@ -223,7 +263,7 @@
 
 Снимок списка включает архивные разговоры и не более 500 элементов; при превышении `truncated=true`, полные счётчики сохраняются. `machine` элемента списка содержит только `{id,name}`. Волатильные поля читаются из `conversation_derived` через `LEFT JOIN` и изменяются только по `derived_changed`; строки без проекции остаются доступны. Список не содержит доступность машин. Лимиты с `used_pct` находятся только в снимке списка, а не в снимке разговора. Снимок машин использует тот же загрузчик, что `GET /machines`, и пороги предупреждений из конфигурации; `heartbeat_age_ms=null` в снимке, поскольку живой возраст не является состоянием PostgreSQL.
 
-`queue.queued` содержит вводы без `feed_seq` в состояниях `queued`, `dispatched`, `on_machine`, по порядку очереди. `pause_reasons`, хранимые удержания и `run_slot` читаются из `queue_state`; представление добавляет вычисляемые `machine_not_reconciled` и `capability_missing`. HTTP-вариант использует реестр текущих сеансов. При чтении без реестра живой сеанс не считается сверенным. `attachments_pending.machine_reason` зарезервирован типом `HoldView` для хранения причины загрузки в задаче 9. До появления хранилища вложений обычные вводы содержат только блоки текста и пустой список `attachments`.
+`queue.queued` содержит вводы без `feed_seq` в состояниях `queued`, `dispatched`, `on_machine`, по порядку очереди. `pause_reasons`, хранимые удержания и `run_slot` читаются из `queue_state`; представление добавляет вычисляемые `machine_not_reconciled` и `capability_missing`. HTTP-вариант использует реестр текущих сеансов. При чтении без реестра живой сеанс не считается сверенным. Вычисляемое `attachments_pending {input_id, machine_reason?}` показывается для ввода в состояниях `dispatched` и `on_machine`, пока не все его вложения готовы на машине; причина берётся из `input_attachments.machine_reason`.
 
 Лента всегда расположена по возрастанию номера области: ввод по `feed_seq`, блок по `created_seq`. Ввод без `feed_seq` находится в очереди и не разрывает текущий ответ. По умолчанию возвращаются последние 100 элементов, максимум 200. `before` выбирает предыдущее окно, `after` следующее, строго исключая сам ключ; указатель продолжения соответствующего направления выдаётся при наличии следующей страницы. Старые записи, перенесённые миграцией без исходного события, могут иметь отрицательный ключ истории. Миграция 0012 назначает таким вводам и блокам общие уникальные ключи внутри разговора: отдельные порядки миграции 0008 могли совпадать и терять элемент на границе страницы. Положительные номера событий сохраняются. Первичная выборка ключей использует `blocks_timeline` и `inputs_feed`, текст загружается только для выбранных элементов.
 

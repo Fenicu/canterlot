@@ -6,7 +6,8 @@ use canterlot_proto::{
         check_deliver_input,
     },
     worker::v1::{
-        Command, ContentBlock as ProtoContentBlock, DeliverInput, TextBlock, command, content_block,
+        AttachmentRef, Command, ContentBlock as ProtoContentBlock, DeliverInput, TextBlock,
+        command, content_block,
     },
 };
 use chrono::{DateTime, Utc};
@@ -16,6 +17,7 @@ use sqlx::{Connection, PgConnection, PgPool};
 use uuid::Uuid;
 
 use crate::{
+    attachments::{self, AttachmentError},
     events::{self, NewEvent, Scope},
     idempotency::{self, Begin},
     model::{CommandKind, DeliveryState, InputState},
@@ -24,10 +26,59 @@ use crate::{
 const OPERATION: &str = "submit_input";
 pub const QUEUE_LIMIT: i64 = 100;
 
+/// Блок содержимого ввода. Владелец присылает только `text`; блоки `attachment` хаб добавляет
+/// сам после текста при привязке готовых вложений.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
-    Text { text: String },
+    Text {
+        text: String,
+    },
+    Attachment {
+        attachment_id: Uuid,
+        name: String,
+        mime: String,
+        size: u64,
+        sha256: String,
+        image: bool,
+    },
+}
+
+impl ContentBlock {
+    pub fn from_ref(reference: &AttachmentRef) -> Result<Self, sqlx::Error> {
+        Ok(Self::Attachment {
+            attachment_id: Uuid::parse_str(&reference.attachment_id)
+                .map_err(|e| sqlx::Error::Decode(Box::new(e)))?,
+            name: reference.name.clone(),
+            mime: reference.mime.clone(),
+            size: reference.size,
+            sha256: reference.sha256.clone(),
+            image: reference.image,
+        })
+    }
+
+    pub fn to_proto(&self) -> ProtoContentBlock {
+        ProtoContentBlock {
+            block: Some(match self {
+                Self::Text { text } => content_block::Block::Text(TextBlock { text: text.clone() }),
+                Self::Attachment {
+                    attachment_id,
+                    name,
+                    mime,
+                    size,
+                    sha256,
+                    image,
+                } => content_block::Block::Attachment(AttachmentRef {
+                    attachment_id: attachment_id.to_string(),
+                    name: name.clone(),
+                    mime: mime.clone(),
+                    size: *size,
+                    sha256: sha256.clone(),
+                    image: *image,
+                }),
+            }),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -74,6 +125,7 @@ pub enum SubmitError {
     },
     ConversationNotFound,
     ConversationClosed,
+    Attachment(AttachmentError),
     Db(sqlx::Error),
 }
 
@@ -135,6 +187,7 @@ impl fmt::Debug for SubmitError {
                 .finish(),
             Self::ConversationNotFound => f.write_str("ConversationNotFound"),
             Self::ConversationClosed => f.write_str("ConversationClosed"),
+            Self::Attachment(error) => f.debug_tuple("Attachment").field(error).finish(),
             Self::Db(error) => {
                 f.write_str("Db(")?;
                 fmt_db_error(error, f)?;
@@ -162,6 +215,7 @@ impl fmt::Display for SubmitError {
             ),
             Self::ConversationNotFound => f.write_str("conversation not found"),
             Self::ConversationClosed => f.write_str("conversation closed"),
+            Self::Attachment(error) => write!(f, "attachment: {error}"),
             Self::Db(error) => {
                 f.write_str("database error: ")?;
                 fmt_db_error(error, f)
@@ -185,26 +239,50 @@ impl From<sqlx::Error> for SubmitError {
     }
 }
 
-fn validate_content(req: &SubmitInput) -> Result<(), SubmitError> {
-    idempotency::validate_key(&req.idempotency_key)
-        .map_err(|reason| SubmitError::InvalidRequest { reason })?;
-    validate_scheduled_content(&req.content)
+impl From<AttachmentError> for SubmitError {
+    fn from(error: AttachmentError) -> Self {
+        match error {
+            AttachmentError::Db(error) => Self::Db(error),
+            other => Self::Attachment(other),
+        }
+    }
 }
 
-pub(crate) fn validate_scheduled_content(content: &[ContentBlock]) -> Result<(), SubmitError> {
-    if content.iter().all(|block| match block {
-        ContentBlock::Text { text } => text.is_empty(),
-    }) {
+fn validate_content(req: &SubmitInput, has_attachments: bool) -> Result<(), SubmitError> {
+    idempotency::validate_key(&req.idempotency_key)
+        .map_err(|reason| SubmitError::InvalidRequest { reason })?;
+    validate_message_content(&req.content, has_attachments)
+}
+
+/// Содержимое владельца: только текст; без вложений хотя бы один непустой блок.
+pub(crate) fn validate_message_content(
+    content: &[ContentBlock],
+    has_attachments: bool,
+) -> Result<(), SubmitError> {
+    let mut texts = Vec::with_capacity(content.len());
+    for block in content {
+        match block {
+            ContentBlock::Text { text } => texts.push(text),
+            ContentBlock::Attachment { .. } => {
+                return Err(SubmitError::InvalidContent {
+                    reason: "attachment_block",
+                });
+            }
+        }
+    }
+    if !has_attachments && texts.iter().all(|text| text.is_empty()) {
         return Err(SubmitError::InvalidContent { reason: "empty" });
     }
-    if content.iter().any(|block| match block {
-        ContentBlock::Text { text } => text.contains('\0'),
-    }) {
+    if texts.iter().any(|text| text.contains('\0')) {
         return Err(SubmitError::InvalidContent {
             reason: "nul_character",
         });
     }
-    // Резервируем заголовок будущей выдачи до привязки исполнения.
+    check_bounds(content)
+}
+
+/// Резервируем заголовок будущей выдачи до привязки исполнения.
+pub(crate) fn check_bounds(content: &[ContentBlock]) -> Result<(), SubmitError> {
     let command = Command {
         command_id: Uuid::nil().to_string(),
         dispatch_attempt: i32::MAX as u32,
@@ -213,14 +291,7 @@ pub(crate) fn validate_scheduled_content(content: &[ContentBlock]) -> Result<(),
         kind: Some(command::Kind::DeliverInput(DeliverInput {
             input_id: Uuid::nil().to_string(),
             conversation_id: Uuid::nil().to_string(),
-            content: content
-                .iter()
-                .map(|block| match block {
-                    ContentBlock::Text { text } => ProtoContentBlock {
-                        block: Some(content_block::Block::Text(TextBlock { text: text.clone() })),
-                    },
-                })
-                .collect(),
+            content: content.iter().map(ContentBlock::to_proto).collect(),
             ..Default::default()
         })),
     };
@@ -280,10 +351,10 @@ async fn resolve_race(
 }
 
 pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedInput, SubmitError> {
-    validate_content(&req)?;
+    validate_content(&req, false)?;
     let hash = request_hash(&req, &[], None);
     let mut tx = pool.begin().await?;
-    match submit_attempt(&mut tx, &req, &hash, None, false).await {
+    match submit_attempt(&mut tx, &req, &hash, None, &[], false).await {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;
             Ok(submitted)
@@ -305,12 +376,12 @@ pub async fn submit_input_in_tx(
     tx: &mut PgConnection,
     req: &SubmitInput,
 ) -> Result<SubmittedInput, SubmitError> {
-    validate_content(req)?;
+    validate_content(req, false)?;
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
     let hash = request_hash(req, &[], None);
-    match submit_attempt(tx, req, &hash, None, false).await? {
+    match submit_attempt(tx, req, &hash, None, &[], false).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -333,13 +404,9 @@ pub(crate) async fn submit_message_input_in_tx(
         Begin::Conflict => return Err(SubmitError::IdempotencyConflict),
         Begin::New => {}
     }
-    if !attachments.is_empty() {
-        return Err(SubmitError::InvalidRequest {
-            reason: "attachments_unavailable",
-        });
-    }
-    validate_content(req)?;
-    match submit_attempt(tx, req, &hash, retry_of, true).await? {
+    attachments::check_ids(attachments)?;
+    validate_content(req, !attachments.is_empty())?;
+    match submit_attempt(tx, req, &hash, retry_of, attachments, true).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -350,6 +417,7 @@ async fn submit_attempt(
     req: &SubmitInput,
     hash: &[u8],
     retry_of: Option<Uuid>,
+    attachment_ids: &[Uuid],
     auto_title: bool,
 ) -> Result<Attempt, SubmitError> {
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
@@ -451,6 +519,42 @@ async fn submit_attempt(
         false
     };
 
+    // Порядок блокировок: строка разговора выше, затем записи вложений `for share`.
+    let content = if attachment_ids.is_empty() {
+        content
+    } else {
+        let (catalog, machine) = attachments::gate_for(conn, req.conversation_id).await?;
+        let refs = attachments::link_in_tx(
+            conn,
+            req.owner_id,
+            req.conversation_id,
+            submitted.input_id,
+            attachment_ids,
+            &catalog,
+            &machine,
+        )
+        .await?;
+        let mut blocks = req.content.clone();
+        for reference in &refs {
+            blocks.push(ContentBlock::from_ref(reference)?);
+        }
+        check_bounds(&blocks)?;
+        let content =
+            serde_json::to_value(&blocks).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
+        sqlx::query("update commands set payload = payload || jsonb_build_object('content', $2::jsonb, 'attachment_ids', $3::jsonb) where id = $1")
+            .bind(submitted.command_id)
+            .bind(&content)
+            .bind(json!(attachment_ids))
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("update inputs set content = $2 where id = $1")
+            .bind(submitted.input_id)
+            .bind(&content)
+            .execute(&mut *conn)
+            .await?;
+        content
+    };
+
     let event = events::append(
         conn,
         NewEvent {
@@ -536,6 +640,15 @@ impl fmt::Debug for ContentBlock {
                 .debug_struct("Text")
                 .field("text_bytes", &text.len())
                 .finish(),
+            Self::Attachment {
+                attachment_id,
+                size,
+                ..
+            } => f
+                .debug_struct("Attachment")
+                .field("attachment_id", attachment_id)
+                .field("size", size)
+                .finish_non_exhaustive(),
         }
     }
 }

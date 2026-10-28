@@ -74,7 +74,7 @@ pub enum ScheduleError {
     TimeOutOfRange,
     TooManyPending,
     InvalidContent(&'static str),
-    AttachmentsUnavailable,
+    Attachment(crate::attachments::AttachmentError),
     IdempotencyConflict,
     Db(sqlx::Error),
 }
@@ -85,15 +85,15 @@ impl fmt::Debug for ScheduleError {
                 .debug_tuple("Db")
                 .field(&crate::dberr::describe(e))
                 .finish(),
+            Self::Attachment(e) => f.debug_tuple("Attachment").field(e).finish(),
             other => f.write_str(match other {
                 Self::NotFound => "NotFound",
                 Self::NotPending => "NotPending",
                 Self::TimeOutOfRange => "TimeOutOfRange",
                 Self::TooManyPending => "TooManyPending",
                 Self::InvalidContent(_) => "InvalidContent",
-                Self::AttachmentsUnavailable => "AttachmentsUnavailable",
                 Self::IdempotencyConflict => "IdempotencyConflict",
-                Self::Db(_) => unreachable!(),
+                Self::Db(_) | Self::Attachment(_) => unreachable!(),
             }),
         }
     }
@@ -107,6 +107,14 @@ impl std::error::Error for ScheduleError {}
 impl From<sqlx::Error> for ScheduleError {
     fn from(e: sqlx::Error) -> Self {
         Self::Db(e)
+    }
+}
+impl From<crate::attachments::AttachmentError> for ScheduleError {
+    fn from(e: crate::attachments::AttachmentError) -> Self {
+        match e {
+            crate::attachments::AttachmentError::Db(e) => Self::Db(e),
+            other => Self::Attachment(other),
+        }
     }
 }
 impl From<idempotency::IdempotencyConflict> for ScheduleError {
@@ -167,8 +175,8 @@ fn validate_time(run_at: DateTime<Utc>, now: DateTime<Utc>) -> Result<(), Schedu
     }
     Ok(())
 }
-fn validate_content(content: &[ContentBlock]) -> Result<(), ScheduleError> {
-    crate::delivery::submit::validate_scheduled_content(content)
+fn validate_content(content: &[ContentBlock], has_attachments: bool) -> Result<(), ScheduleError> {
+    crate::delivery::submit::validate_message_content(content, has_attachments)
         .map_err(|_| ScheduleError::InvalidContent("invalid_content"))
 }
 
@@ -271,12 +279,13 @@ pub async fn schedule_message(
         let found:Option<Uuid>=sqlx::query_scalar("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(conversation_id).bind(owner_id).fetch_optional(&mut *conn).await?;
         if found.is_none(){return Err(ScheduleError::NotFound);}
         if let Some(replay)=replay_locked(conn,owner_id,&locked_key,"schedule_message",&hash).await?{return Ok(replay);}
-        validate_time(req.run_at,now)?; validate_content(&req.content)?;
-        if !req.attachment_ids.is_empty(){return Err(ScheduleError::AttachmentsUnavailable);}
+        validate_time(req.run_at,now)?; validate_content(&req.content,!req.attachment_ids.is_empty())?;
+        crate::attachments::check_ids(&req.attachment_ids)?;
         let pending:i64=sqlx::query_scalar("select count(*) from scheduled_jobs where conversation_id=$1 and kind='message' and state='pending'").bind(conversation_id).fetch_one(&mut *conn).await?;
         if pending>=config.max_pending_per_conversation as i64{return Err(ScheduleError::TooManyPending);}
         let job:JobRow=sqlx::query_as("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) values($1,'message',$2,$3,$4,$5) returning *")
             .bind(Uuid::now_v7()).bind(owner_id).bind(conversation_id).bind(req.run_at).bind(json!({"content":req.content,"attachment_ids":req.attachment_ids})).fetch_one(&mut *conn).await?;
+        crate::attachments::link_scheduled_in_tx(conn,owner_id,conversation_id,job.id,&req.attachment_ids).await?;
         let message=job.message()?; changed(conn,&message,correlation_id).await?; Ok(message)
     })).await?.value;
     settings.notify.notify_one();
@@ -328,11 +337,15 @@ async fn mutate(
         if job.state!="pending" {return Err(ScheduleError::NotPending);}
         if let Some(patch)=patch {
             if let Some(at)=patch.run_at {validate_time(at,now)?;job.run_at=at;}
-            if let Some(content)=patch.content {validate_content(&content)?;job.payload["content"]=json!(content);}
+            if let Some(content)=patch.content {
+                let has_attachments=job.payload["attachment_ids"].as_array().is_some_and(|ids|!ids.is_empty());
+                validate_content(&content,has_attachments)?;job.payload["content"]=json!(content);
+            }
             sqlx::query("update scheduled_jobs set run_at=$2,payload=$3,updated_at=clock_timestamp() where id=$1").bind(id).bind(job.run_at).bind(&job.payload).execute(&mut *conn).await?;
         } else {
             job.state="cancelled".into();
             sqlx::query("update scheduled_jobs set state='cancelled',updated_at=clock_timestamp() where id=$1").bind(id).execute(&mut *conn).await?;
+            crate::attachments::unlink_scheduled_in_tx(conn,&[id]).await?;
         }
         let message=job.message()?;changed(conn,&message,correlation_id).await?; Ok(message)
     })).await?.value;
@@ -478,7 +491,7 @@ impl Scheduler {
                     conversation_id: message.conversation_id,
                     key: key.clone(),
                     content: message.content.clone(),
-                    attachment_ids: vec![],
+                    attachment_ids: message.attachment_ids.clone(),
                     retry_of: None,
                     received_at: job.run_at,
                 },
@@ -551,6 +564,24 @@ impl Scheduler {
                 retry.commit().await?;
                 self.dispatcher.trigger(message.conversation_id);
             }
+            Err(SubmitError::Attachment(error)) => {
+                // Привязка могла уже изменить строки в этой транзакции: отказ фиксируется заново.
+                tx.rollback().await?;
+                let reason = match error {
+                    crate::attachments::AttachmentError::CapabilityMissing => "capability_missing",
+                    crate::attachments::AttachmentError::LimitsMismatch => "limits_mismatch",
+                    crate::attachments::AttachmentError::Unsupported => "attachment_unsupported",
+                    _ => "attachment_unavailable",
+                };
+                let mut retry = self.pool.begin().await?;
+                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update skip locked").bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *retry).await?;
+                if let Some(current) = current {
+                    self.finish(&mut retry, current, "failed", json!({"error":reason}))
+                        .await?;
+                    report.failed += 1;
+                }
+                retry.commit().await?;
+            }
             Err(SubmitError::Db(e)) => {
                 tx.rollback().await?;
                 return Err(e);
@@ -572,6 +603,8 @@ impl Scheduler {
     ) -> Result<(), sqlx::Error> {
         let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
             .bind(job.id).bind(state).bind(job.attempts).bind(result).fetch_one(&mut *conn).await?;
+        // После отправки ссылку держит ввод; после отказа файлы отдаются сборщику.
+        crate::attachments::unlink_scheduled_in_tx(conn, &[job.id]).await?;
         changed(conn, &updated.message()?, Uuid::now_v7()).await
     }
 

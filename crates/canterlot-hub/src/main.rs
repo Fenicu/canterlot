@@ -207,8 +207,16 @@ async fn serve(
         activity,
         scheduler: scheduler_config,
         machines,
+        attachments,
         ..
     } = config;
+    let blobs: std::sync::Arc<dyn canterlot_hub::attachments::BlobStore> = std::sync::Arc::new(
+        canterlot_hub::attachments::LocalBlobStore::open(
+            &attachments,
+            std::sync::Arc::new(canterlot_hub::attachments::NoTrace),
+        )
+        .map_err(|error| format!("blob_dir_error: {error}"))?,
+    );
     let http_parts = match http_config {
         Some(http_config) => {
             let secret = http_config
@@ -254,6 +262,7 @@ async fn serve(
         multi_process: http_parts
             .as_ref()
             .is_some_and(|(config, _, _)| config.multi_process),
+        attachments: Some((blobs.clone(), attachments.clone())),
     });
     let root = tokio_util::sync::CancellationToken::new();
     let trigger = root.clone();
@@ -294,6 +303,8 @@ async fn serve(
             limits,
             activity,
             machines,
+            attachments,
+            blobs,
             manifest,
             shutdown: http_root.clone(),
         });

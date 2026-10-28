@@ -25,8 +25,10 @@ tokio = { version = "1.54.1", features = ["process", "sync", "test-util", "time"
 
 [dependencies]
 async-stream = "0.3.6"
+async-trait = "0.1.92"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "matched-path", "query", "tokio", "ws"] }
 base64 = "0.23.1"
+bytes = "1.12.1"
 canterlot-proto = { version = "0.1.0", path = "../canterlot-proto" }
 chrono = { version = "0.4.45", features = ["serde"] }
 clap = { version = "4.6.7", features = ["derive"] }
@@ -46,10 +48,10 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 subtle = "2.6.1"
 tempfile = "3.27.0"
 thiserror = "2.0.21"
-tokio = { version = "1.54.1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { version = "1.54.1", features = ["fs", "io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.19", features = ["net"] }
 tokio-tungstenite = { version = "0.30.0", default-features = false, features = ["handshake"], optional = true }
-tokio-util = { version = "0.7.20", features = ["rt"] }
+tokio-util = { version = "0.7.20", features = ["io", "rt"] }
 toml = "1.1.8"
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tower = { version = "0.5.3", features = ["util"], optional = true }

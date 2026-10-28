@@ -120,6 +120,71 @@ fn ws_ops_have_client_and_server_op_defs() {
     ));
     assert!(!client.is_valid(&json!({"op":"subscribe","id":"s","scope":"machines","after":0})));
 }
+/// Вложение проходит все состояния хаба и попадает во ввод блоком `attachment`.
+async fn attach_and_submit(f: &Fixture) {
+    use axum::http::Method;
+    sqlx::query("update machines set capabilities='{pilot_v1}' where id=$1")
+        .bind(f.seed.machine_id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let sha = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
+    let mut ids = Vec::new();
+    for (key, name) in [("attach", "a.txt"), ("attach_cancel", "b.txt")] {
+        let created = f
+            .client
+            .send(
+                Method::POST,
+                "/api/v1/attachments",
+                Some(key),
+                Some(json!({"conversation_id": f.seed.conversation_id, "name": name, "size": 3, "sha256": sha})),
+            )
+            .await;
+        assert_eq!(created.status.as_u16(), 201);
+        ids.push(created.json::<Value>()["id"].as_str().unwrap().to_owned());
+    }
+    let uploaded = f
+        .client
+        .send_body(
+            Method::PATCH,
+            &format!("/api/v1/attachments/{}/content", ids[0]),
+            &[("upload-offset", "0".into())],
+            axum::body::Body::from("abc"),
+        )
+        .await;
+    assert_eq!(uploaded.status.as_u16(), 204);
+    let done = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/attachments/{}/complete", ids[0]),
+            Some("attach_done"),
+            None,
+        )
+        .await;
+    assert_eq!(done.status.as_u16(), 200);
+    let cancelled = f
+        .client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/attachments/{}", ids[1]),
+            Some("attach_drop"),
+            None,
+        )
+        .await;
+    assert_eq!(cancelled.status.as_u16(), 204);
+    let input = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{}/inputs", f.seed.conversation_id),
+            Some("attach_input"),
+            Some(json!({"content":[{"type":"text","text":"файл"}],"attachment_ids":[ids[0]]})),
+        )
+        .await;
+    assert_eq!(input.status.as_u16(), 201);
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
@@ -223,6 +288,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
     )
     .await
     .unwrap();
+    attach_and_submit(&f).await;
     machine_info::apply_report(
         &pool,
         f.seed.owner_id,
@@ -490,6 +556,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         "queue_state_changed",
         "interrupt_state_changed",
         "state_divergence",
+        "attachment_state_changed",
         "hidden",
     ] {
         assert!(seen.contains(k), "scenario did not emit {k}");

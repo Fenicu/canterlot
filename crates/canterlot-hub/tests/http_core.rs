@@ -504,6 +504,8 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
     let timers = HubTimers::default();
     let registry = canterlot_hub::session::Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = canterlot_hub::dispatcher::Dispatcher::channel();
+    let blob_dir = tempfile::tempdir().unwrap();
+    let (attachments, blobs) = canterlot_hub::testkit::test_blob_store(blob_dir.path());
     let background = Background::start(BackgroundDeps {
         pool: pool.clone(),
         registry,
@@ -517,6 +519,7 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         activity: Default::default(),
         machines: Default::default(),
         multi_process: false,
+        attachments: Some((blobs, attachments)),
     });
     tokio::time::sleep(Duration::from_millis(300)).await;
     tokio::time::timeout(Duration::from_secs(10), background.stop())
@@ -1184,7 +1187,12 @@ async fn every_route_requires_identity_unless_listed_public(pool: PgPool) {
             let response = outsider
                 .send(method.clone(), &concrete, Some("k"), Some(json!({})))
                 .await;
-            assert_error(&response, 401, "unauthenticated", "auth", "after_condition");
+            if method == Method::HEAD {
+                // Ответ на HEAD не несёт тела: проверяется только статус.
+                assert_eq!(response.status, 401, "HEAD {path}");
+            } else {
+                assert_error(&response, 401, "unauthenticated", "auth", "after_condition");
+            }
             checked += 1;
         }
     }

@@ -380,6 +380,19 @@ pub async fn load_inputs(
             .fetch_one(&mut *conn)
             .await?;
     let availability: &str = q.try_get("availability")?;
+    // Выданный ввод ждёт публикации файлов на машине, пока его вложения не готовы.
+    let awaiting_attachments = match &slot {
+        RunSlot::Free => false,
+        RunSlot::Dispatching { input_id, .. } | RunSlot::Running { input_id } => {
+            sqlx::query_scalar(
+                "select exists(select 1 from input_attachments ia join inputs i on i.id = ia.input_id
+                 where ia.input_id = $1 and i.state in ('dispatched','on_machine') and ia.machine_state <> 'ready')",
+            )
+            .bind(input_id)
+            .fetch_one(&mut *conn)
+            .await?
+        }
+    };
     Ok(ActivityInputs {
         now,
         execution,
@@ -398,7 +411,7 @@ pub async fn load_inputs(
             "degraded" => LinkState::Degraded,
             _ => LinkState::Unavailable,
         },
-        awaiting_attachments: false,
+        awaiting_attachments,
         background_work: None,
     })
 }

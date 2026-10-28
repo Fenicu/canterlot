@@ -16,12 +16,14 @@ use tokio_util::sync::CancellationToken;
 use utoipa_axum::router::OpenApiRouter;
 
 use crate::{
-    config::{ActivityConfig, HttpConfig, LimitsConfig, MachinesConfig},
+    attachments::BlobStore,
+    config::{ActivityConfig, AttachmentsConfig, HttpConfig, LimitsConfig, MachinesConfig},
     dispatcher::Dispatcher,
     installation::Installation,
     session::Registry,
 };
 
+pub mod attachments;
 pub mod auth;
 mod connection;
 pub mod conversations;
@@ -39,8 +41,7 @@ pub mod scheduled;
 pub mod snapshot;
 pub mod ws;
 
-/// Размер одного тела `PATCH` загрузки вложения; объявляется в `GET /api/v1/config`.
-pub const UPLOAD_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+pub use crate::attachments::UPLOAD_CHUNK_BYTES;
 
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 const MIN_PROXY_SECRET_BYTES: usize = 32;
@@ -56,6 +57,8 @@ pub struct AppDeps {
     pub limits: LimitsConfig,
     pub activity: ActivityConfig,
     pub machines: MachinesConfig,
+    pub attachments: AttachmentsConfig,
+    pub blobs: Arc<dyn BlobStore>,
     pub manifest: PathBuf,
     pub shutdown: CancellationToken,
 }
@@ -72,6 +75,10 @@ pub struct AppState {
     pub limits: Arc<LimitsConfig>,
     pub activity: Arc<ActivityConfig>,
     pub machines: Arc<MachinesConfig>,
+    pub attachments: Arc<AttachmentsConfig>,
+    pub blobs: Arc<dyn BlobStore>,
+    /// Тела загрузок вложений одновременно в обработке: не больше `max_concurrent_uploads`.
+    pub upload_slots: Arc<tokio::sync::Semaphore>,
     pub manifest: Arc<PathBuf>,
     pub user_header: HeaderName,
     pub ws_tasks: tokio_util::task::TaskTracker,
@@ -93,6 +100,11 @@ impl AppState {
             limits: Arc::new(deps.limits),
             activity: Arc::new(deps.activity),
             machines: Arc::new(deps.machines),
+            upload_slots: Arc::new(tokio::sync::Semaphore::new(
+                deps.attachments.max_concurrent_uploads.max(1),
+            )),
+            attachments: Arc::new(deps.attachments),
+            blobs: deps.blobs,
             manifest: Arc::new(deps.manifest),
             user_header,
             ws_tasks: tokio_util::task::TaskTracker::new(),
@@ -125,6 +137,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(snapshot::routes())
         .merge(history::routes())
         .merge(ws::routes())
+        .merge(attachments::routes())
 }
 
 pub fn router(state: AppState) -> Router {

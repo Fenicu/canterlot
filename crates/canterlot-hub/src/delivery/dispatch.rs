@@ -142,7 +142,14 @@ pub async fn dispatch_next(
     let (pending, rev) =
         crate::conversations::revalidate_pending_in_tx(&mut tx, conversation_id, correlation_id)
             .await?;
-    if pending.as_object().is_some_and(|v| !v.is_empty())
+    // Ссылки на вложения и настройки понимает только сеанс с `pilot_v1`.
+    let carries_refs: bool = sqlx::query_scalar(
+        "select jsonb_array_length(coalesce(payload->'attachment_ids','[]'::jsonb)) > 0 from commands where id = $1",
+    )
+    .bind(command_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    if (carries_refs || pending.as_object().is_some_and(|v| !v.is_empty()))
         && !gate.session_capabilities.iter().any(|v| v == "pilot_v1")
     {
         tx.commit().await?;

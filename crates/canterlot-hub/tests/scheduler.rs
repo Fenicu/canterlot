@@ -106,7 +106,7 @@ async fn schedule_validates_time_window_content_and_pending_limit(pool: PgPool) 
             Uuid::now_v7()
         )
         .await,
-        Err(ScheduleError::AttachmentsUnavailable)
+        Err(ScheduleError::Attachment(_))
     ));
     scheduled(&pool, &s, "ok", now).await;
     assert!(matches!(

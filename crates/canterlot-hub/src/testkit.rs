@@ -81,6 +81,7 @@ pub async fn test_app_deps(
     proxy_secret: Option<Vec<u8>>,
 ) -> (crate::http::AppDeps, tempfile::TempDir) {
     let (installation, manifest, directory) = test_installation(&pool).await;
+    let (attachments, blobs) = test_blob_store(directory.path());
     let timers = crate::config::HubTimers::default();
     let (dispatcher, _rx) = crate::dispatcher::Dispatcher::channel();
     let scheduler =
@@ -96,10 +97,31 @@ pub async fn test_app_deps(
         limits: Default::default(),
         activity: Default::default(),
         machines: Default::default(),
+        attachments,
+        blobs,
         manifest,
         shutdown: tokio_util::sync::CancellationToken::new(),
     };
     (deps, directory)
+}
+
+/// Хранилище вложений во временном каталоге теста.
+pub fn test_blob_store(
+    directory: &std::path::Path,
+) -> (
+    crate::config::AttachmentsConfig,
+    std::sync::Arc<dyn crate::attachments::BlobStore>,
+) {
+    let config = crate::config::AttachmentsConfig {
+        blob_dir: directory.join("attachments"),
+        ..Default::default()
+    };
+    let store = crate::attachments::LocalBlobStore::open(
+        &config,
+        std::sync::Arc::new(crate::attachments::NoTrace),
+    )
+    .expect("test blob store");
+    (config, std::sync::Arc::new(store))
 }
 
 pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> TestHub {
@@ -168,6 +190,7 @@ async fn spawn_on(
         session::Registry,
     };
     let (installation, manifest, directory) = test_installation(&pool).await;
+    let (attachments, blobs) = test_blob_store(directory.path());
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =
@@ -207,6 +230,7 @@ async fn spawn_on(
         activity: Default::default(),
         machines: Default::default(),
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
+        attachments: Some((blobs.clone(), attachments.clone())),
     });
     let (http_addr, app, http_listener) = match http {
         Some(config) => {
@@ -228,6 +252,8 @@ async fn spawn_on(
                 limits: Default::default(),
                 activity: Default::default(),
                 machines: Default::default(),
+                attachments,
+                blobs,
                 manifest,
                 shutdown: root.clone(),
             });
@@ -609,7 +635,33 @@ impl TestClient {
             }
             None => Body::empty(),
         };
-        let mut request = builder.body(payload).expect("test request");
+        self.dispatch(builder.body(payload).expect("test request"), path)
+            .await
+    }
+
+    /// Произвольное тело (например, поток для загрузки вложения) и дополнительные заголовки.
+    pub async fn send_body(
+        &self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, String)],
+        body: Body,
+    ) -> TestResponse {
+        let mut builder = Request::builder().method(method).uri(path);
+        for (name, value) in &self.headers {
+            builder = builder.header(name, value);
+        }
+        for (name, value) in headers {
+            builder = builder.header(
+                HeaderName::from_bytes(name.as_bytes()).expect("test header name"),
+                HeaderValue::from_str(value).expect("test header value"),
+            );
+        }
+        self.dispatch(builder.body(body).expect("test request"), path)
+            .await
+    }
+
+    async fn dispatch(&self, mut request: Request<Body>, path: &str) -> TestResponse {
         match &self.target {
             Target::InProcess { router, peer } => {
                 use tower::ServiceExt;

@@ -115,6 +115,14 @@ error_codes! {
     GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
     GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
     ArchiveActive => "archive_active", 409, Browser, Never, "В сессии есть активная работа";
+    AttachmentNotReady => "attachment_not_ready", 409, Browser, AfterCondition, "Вложение ещё не готово";
+    AttachmentNotUploadable => "attachment_not_uploadable", 409, Browser, Never, "Загрузка вложения уже завершена или прекращена";
+    AttachmentUnsupported => "attachment_unsupported", 422, Browser, Never, "Харнесс не принимает такое вложение";
+    AttachmentUnavailable => "attachment_unavailable", 409, Browser, Never, "Вложение больше недоступно";
+    OffsetMismatch => "offset_mismatch", 409, Browser, AfterCondition, "Смещение загрузки не совпадает с принятым";
+    UploadInProgress => "upload_in_progress", 409, Browser, AfterCondition, "Вложение уже загружается";
+    ChecksumMismatch => "checksum_mismatch", 422, Browser, Never, "Содержимое не совпало с контрольной суммой";
+    AttachmentConflict => "attachment_conflict", 409, Browser, Never, "Вложение уже завершено с другой контрольной суммой";
 }
 
 impl From<crate::conversations::SettingsError> for ApiError {
@@ -153,7 +161,7 @@ impl From<crate::scheduler::ScheduleError> for ApiError {
             E::TimeOutOfRange => Self::new(ErrorCode::ScheduleTimeOutOfRange),
             E::TooManyPending => Self::new(ErrorCode::TooManyScheduled),
             E::InvalidContent(_) => Self::new(ErrorCode::InvalidRequest),
-            E::AttachmentsUnavailable => Self::new(ErrorCode::NotImplemented),
+            E::Attachment(error) => error.into(),
             E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
             E::Db(error) => error.into(),
         }
@@ -193,6 +201,8 @@ pub struct ApiError {
     pub message: &'static str,
     pub details: Option<ErrorDetails>,
     pub correlation_id: Uuid,
+    /// Текущее смещение загрузки вложения для заголовка `Upload-Offset`.
+    pub upload_offset: Option<u64>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -235,6 +245,7 @@ impl ApiError {
             message: code.message(),
             details: None,
             correlation_id: current_correlation().unwrap_or(Uuid::nil()),
+            upload_offset: None,
         }
     }
 
@@ -269,7 +280,13 @@ impl IntoResponse for ApiError {
                 details: self.details,
             },
         };
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if let Some(offset) = self.upload_offset {
+            response
+                .headers_mut()
+                .insert("upload-offset", axum::http::HeaderValue::from(offset));
+        }
+        response
     }
 }
 
@@ -304,9 +321,7 @@ impl From<SubmitError> for ApiError {
         match error {
             SubmitError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             SubmitError::KeyRaceLost => ApiError::new(ErrorCode::Internal),
-            SubmitError::InvalidRequest {
-                reason: "attachments_unavailable",
-            } => ApiError::new(ErrorCode::NotImplemented),
+            SubmitError::Attachment(error) => error.into(),
             SubmitError::InvalidRequest {
                 reason: "invalid_retry",
             } => {
@@ -407,5 +422,44 @@ impl From<crate::groups::GroupError> for ApiError {
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             E::Db(e) => return e.into(),
         })
+    }
+}
+
+impl From<crate::attachments::AttachmentError> for ApiError {
+    fn from(error: crate::attachments::AttachmentError) -> Self {
+        use crate::attachments::AttachmentError as E;
+        let offset = error.upload_offset();
+        let code = match error {
+            E::NotFound => ErrorCode::NotFound,
+            E::TooLarge | E::ExcessBytes { .. } | E::TooMany => ErrorCode::ResourceLimit,
+            E::InvalidName | E::Invalid | E::BodyInterrupted { .. } => ErrorCode::InvalidRequest,
+            E::ChecksumMismatch => ErrorCode::ChecksumMismatch,
+            E::OffsetMismatch { .. } => ErrorCode::OffsetMismatch,
+            E::UploadInProgress { .. } => ErrorCode::UploadInProgress,
+            E::NotUploadable => ErrorCode::AttachmentNotUploadable,
+            E::NotReady => ErrorCode::AttachmentNotReady,
+            E::Unavailable => ErrorCode::AttachmentUnavailable,
+            E::Unsupported => ErrorCode::AttachmentUnsupported,
+            E::Conflict => ErrorCode::AttachmentConflict,
+            E::InvalidState => ErrorCode::InvalidState,
+            E::TooManyUploads => ErrorCode::TooManyRequests,
+            E::CapabilityMissing => ErrorCode::CapabilityMissing,
+            E::LimitsMismatch => ErrorCode::LimitsMismatch,
+            E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
+            E::Db(error) => return error.into(),
+            E::Blob(error) => {
+                let api = ApiError::new(ErrorCode::Internal);
+                tracing::error!(
+                    kind = "attachment_blob_error",
+                    error = %error,
+                    correlation_id = %api.correlation_id,
+                    "blob store failed"
+                );
+                return api;
+            }
+        };
+        let mut api = ApiError::new(code);
+        api.upload_offset = offset;
+        api
     }
 }

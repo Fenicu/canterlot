@@ -4,6 +4,7 @@
 compile_error!("fault-injection must not be built in release");
 
 pub mod activity;
+pub mod attachments;
 pub mod background;
 pub mod blocks;
 pub mod bus;
