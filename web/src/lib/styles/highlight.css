@@ -1,0 +1,70 @@
+/* Стили подсветки синтаксиса highlight.js, привязанные исключительно к дизайн-токенам */
+pre code.hljs {
+  display: block;
+  overflow-x: auto;
+  padding: var(--s3);
+  background: var(--code);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  line-height: var(--lh-code);
+  border-radius: var(--radius-sm);
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-built_in,
+.hljs-name,
+.hljs-tag {
+  color: var(--accent);
+  font-weight: var(--weight-medium);
+}
+
+.hljs-string,
+.hljs-title,
+.hljs-section,
+.hljs-attribute,
+.hljs-literal,
+.hljs-template-tag,
+.hljs-template-variable,
+.hljs-type,
+.hljs-addition {
+  color: var(--success);
+}
+
+.hljs-comment,
+.hljs-quote,
+.hljs-deletion,
+.hljs-meta {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.hljs-number,
+.hljs-regexp,
+.hljs-link {
+  color: var(--warning);
+}
+
+.hljs-variable,
+.hljs-params {
+  color: var(--text);
+}
+
+.hljs-symbol,
+.hljs-bullet {
+  color: var(--accent-link);
+}
+
+.hljs-function,
+.hljs-title.class_ {
+  color: var(--blue);
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: var(--weight-bold);
+}

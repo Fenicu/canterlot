@@ -22,5 +22,11 @@
     "rule": "raw-shadow",
     "value": "inset 0 0 0 var(--stage-dot-ring) var(--st-on), 0 0 0 var(--stage-dot-ring) var(--st-surface), 0 0 0 var(--s2) var(--st-on)",
     "reason": "Контур состояния точки из утверждённого макета 23; это кольцо индикатора, а не декоративная тень."
+  },
+  {
+    "path": "lib/render/Html.svelte",
+    "rule": "html-sink",
+    "value": "{@html}",
+    "reason": "sanitised renderer output"
   }
 ]
