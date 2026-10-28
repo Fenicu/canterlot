@@ -35,6 +35,7 @@ uuid = { version = "1.29.0", features = ["v7", "serde"] }
 [dev-dependencies]
 canterlot-hub = { path = "../canterlot-hub", features = ["testkit"] }
 chrono = "0.4.45"
+jsonschema = { version = "0.60.2", default-features = false }
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "uuid", "migrate", "macros"] }
 tempfile = "3.27.0"
 tokio = { version = "1.54.1", features = ["net", "process"] }

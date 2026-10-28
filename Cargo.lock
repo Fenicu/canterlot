@@ -410,6 +410,7 @@ dependencies = [
  "chrono",
  "clap",
  "humantime-serde",
+ "jsonschema",
  "prost",
  "rand 0.10.3",
  "rustix",

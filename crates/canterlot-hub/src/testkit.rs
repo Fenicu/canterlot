@@ -124,19 +124,32 @@ pub fn test_blob_store(
     (config, std::sync::Arc::new(store))
 }
 
+/// Параметры тестового хаба: всё, что настраивает настоящий `serve`.
+#[derive(Default)]
+pub struct TestHubOptions {
+    pub timers: crate::config::HubTimers,
+    pub http: Option<crate::config::HttpConfig>,
+    pub limits: crate::config::LimitsConfig,
+    pub activity: crate::config::ActivityConfig,
+    pub scheduler: crate::config::SchedulerConfig,
+    pub machines: crate::config::MachinesConfig,
+    pub attachments: Option<(
+        crate::config::AttachmentsConfig,
+        std::sync::Arc<dyn crate::attachments::BlobStore>,
+    )>,
+    pub addr: Option<std::net::SocketAddr>,
+    pub pki: Option<tls::TestPki>,
+    #[cfg(feature = "fault-injection")]
+    pub faults: crate::fault_injection::Faults,
+}
+
 pub async fn spawn_test_hub(pool: PgPool, timers: crate::config::HubTimers) -> TestHub {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener");
-    spawn_on(
+    spawn_test_hub_with(
         pool,
-        timers,
-        listener,
-        tls::test_pki(),
-        None,
-        None,
-        #[cfg(feature = "fault-injection")]
-        Default::default(),
+        TestHubOptions {
+            timers,
+            ..Default::default()
+        },
     )
     .await
 }
@@ -147,18 +160,13 @@ pub async fn spawn_test_hub_http(
     timers: crate::config::HubTimers,
     http: crate::config::HttpConfig,
 ) -> TestHub {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("test listener");
-    spawn_on(
+    spawn_test_hub_with(
         pool,
-        timers,
-        listener,
-        tls::test_pki(),
-        Some(http),
-        None,
-        #[cfg(feature = "fault-injection")]
-        Default::default(),
+        TestHubOptions {
+            timers,
+            http: Some(http),
+            ..Default::default()
+        },
     )
     .await
 }
@@ -171,11 +179,17 @@ pub async fn spawn_test_hub_with_faults(
     pki: tls::TestPki,
     faults: crate::fault_injection::Faults,
 ) -> TestHub {
-    let listener =
-        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
-            .await
-            .expect("test listener");
-    spawn_on(pool, timers, listener, pki, None, None, faults).await
+    spawn_test_hub_with(
+        pool,
+        TestHubOptions {
+            timers,
+            addr,
+            pki: Some(pki),
+            faults,
+            ..Default::default()
+        },
+    )
+    .await
 }
 
 #[cfg(feature = "fault-injection")]
@@ -190,30 +204,45 @@ pub async fn spawn_test_hub_with_attachment_store(
         std::sync::Arc<dyn crate::attachments::BlobStore>,
     ),
 ) -> TestHub {
-    let listener =
-        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
-            .await
-            .expect("test listener");
-    spawn_on(pool, timers, listener, pki, None, Some(attachments), faults).await
+    spawn_test_hub_with(
+        pool,
+        TestHubOptions {
+            timers,
+            addr,
+            pki: Some(pki),
+            faults,
+            attachments: Some(attachments),
+            ..Default::default()
+        },
+    )
+    .await
 }
 
-async fn spawn_on(
-    pool: PgPool,
-    timers: crate::config::HubTimers,
-    listener: tokio::net::TcpListener,
-    pki: tls::TestPki,
-    http: Option<crate::config::HttpConfig>,
-    attachment_store: Option<(
-        crate::config::AttachmentsConfig,
-        std::sync::Arc<dyn crate::attachments::BlobStore>,
-    )>,
-    #[cfg(feature = "fault-injection")] faults: crate::fault_injection::Faults,
-) -> TestHub {
+/// Хаб, собранный как `serve`: одни и те же лимиты, проектор и планировщик у ingest, фоновых служб и HTTP.
+pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestHub {
     use crate::{
         background::{Background, BackgroundDeps},
         dispatcher, grpc, ingest,
         session::Registry,
     };
+    let TestHubOptions {
+        timers,
+        http,
+        limits,
+        activity,
+        scheduler: scheduler_config,
+        machines,
+        attachments: attachment_store,
+        addr,
+        pki,
+        #[cfg(feature = "fault-injection")]
+        faults,
+    } = options;
+    let listener =
+        tokio::net::TcpListener::bind(addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap()))
+            .await
+            .expect("test listener");
+    let pki = pki.unwrap_or_else(tls::test_pki);
     let (installation, manifest, directory) = test_installation(&pool).await;
     let (attachments, blobs) =
         attachment_store.unwrap_or_else(|| test_blob_store(directory.path()));
@@ -225,7 +254,7 @@ async fn spawn_on(
     let ingest = ingest::Ingest::new(pool.clone())
         .with_dispatcher(dispatcher.clone())
         .with_registry(registry.clone())
-        .with_limits(Default::default());
+        .with_limits(limits.clone());
     #[cfg(feature = "fault-injection")]
     let ingest = {
         state.faults = faults.clone();
@@ -240,8 +269,8 @@ async fn spawn_on(
     let (shutdown, stop) = tokio::sync::oneshot::channel();
     let root = tokio_util::sync::CancellationToken::new();
     let scheduler =
-        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default())
-            .with_limits(registry.clone(), Default::default());
+        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), scheduler_config)
+            .with_limits(registry.clone(), limits.clone());
     #[cfg(feature = "fault-injection")]
     let scheduler = {
         let mut scheduler = scheduler;
@@ -254,8 +283,8 @@ async fn spawn_on(
         timers,
         dispatch_rx,
         scheduler: scheduler.clone(),
-        activity: Default::default(),
-        machines: Default::default(),
+        activity: activity.clone(),
+        machines: machines.clone(),
         multi_process: http.as_ref().is_some_and(|config| config.multi_process),
         attachments: Some((blobs.clone(), attachments.clone())),
     });
@@ -276,9 +305,9 @@ async fn spawn_on(
                 scheduler,
                 http: config,
                 proxy_secret: secret,
-                limits: Default::default(),
-                activity: Default::default(),
-                machines: Default::default(),
+                limits,
+                activity,
+                machines,
                 attachments,
                 blobs,
                 manifest,
@@ -521,8 +550,9 @@ use axum::{
     Router,
     body::{Body, Bytes},
     extract::ConnectInfo,
-    http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode},
+    http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode},
 };
+pub use axum::{body::Body as RequestBody, http::Method};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 

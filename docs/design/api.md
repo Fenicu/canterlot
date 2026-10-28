@@ -1,6 +1,6 @@
 # Контракт API пилота
 
-Документ фиксирует словарь этапа 1.3a. HTTP-маршруты, схемы OpenAPI, полезная нагрузка событий и таблица покрытия дополняются в задачах, которые реализуют соответствующее поведение. Требования пилота: [pilot.md](pilot.md); транспорт: [streams.md](streams.md).
+Документ фиксирует контракт этапа 1.3a, на который опирается PWA (план 1.3b): представление данных, ошибки, маршруты, виды событий и покрытие экранов пилота. Машиночитаемый контракт: [openapi.json](../api/openapi.json) и [events.schema.json](../api/events.schema.json). Требования пилота: [pilot.md](pilot.md); транспорт: [streams.md](streams.md).
 
 ## Представление данных
 
@@ -23,32 +23,49 @@
 
 ## Виды событий
 
-Таблица перечисляет новые имена этого плана. Существующие имена событий сохраняются. Полный список клиентских видов фиксируется в `events::CLIENT_KINDS` в задаче 7a.
+Таблица перечисляет все клиентские виды (`events::CLIENT_KINDS`, `$defs` и `oneOf` файла [events.schema.json](../api/events.schema.json)); тест `coverage_table_matches_openapi_and_event_schema` сверяет её со схемой. «Разговор» означает область `conversation:{id}`, «список» - `owner:{id}:conversations`, «машины» - `owner:{id}:machines`.
 
 | Область | `kind` | Назначение |
 | --- | --- | --- |
-| `conversation:{id}` | `derived_changed` | Вычисленное состояние разговора |
-| `conversation:{id}` | `conversation_updated` | Атрибуты разговора |
-| `conversation:{id}` | `conversation_settings_changed` | Настройки следующего хода и их применение |
-| `conversation:{id}` | `crunch_changed` | Настройки «кранча» |
-| `conversation:{id}` | `crunch_held` | Удержание по лимиту |
-| `conversation:{id}` | `crunch_woken` | Подтверждённое пробуждение |
-| `conversation:{id}` | `limit_reached` | Факт исчерпания окна |
-| `conversation:{id}` | `scheduled_changed` | Отложенные сообщения |
-| `conversation:{id}` | `attachment_state_changed` | Состояние вложения |
-| `conversation:{id}` | `request_opened` | Зарезервировано для плана 1.3c |
-| `conversation:{id}` | `request_closed` | Зарезервировано для плана 1.3c |
-| `conversation:{id}` | `request_decided` | Зарезервировано для плана 1.3c |
-| `owner:{id}:conversations` | `conversation_created` | Создание разговора |
-| `owner:{id}:conversations` | `conversation_updated` | Атрибуты элемента списка |
-| `owner:{id}:conversations` | `derived_changed` | Вычисленные поля элемента списка |
-| `owner:{id}:conversations` | `group_changed` | Группы владельца |
-| `owner:{id}:conversations` | `limits_changed` | Лимиты провайдера |
-| `owner:{id}:machines` | `machine_availability_changed` | Доступность машины |
-| `owner:{id}:machines` | `machine_report_updated` | Каталог и сведения машины |
-| `owner:{id}:machines` | `machine_metrics` | Последний снимок метрик |
+| Разговор | `input_queued` | Ввод сохранён хабом и стоит в очереди |
+| Разговор | `input_state_changed` | Ввод выдан, на машине, принят, отклонён или отменён |
+| Разговор | `queue_state_changed` | Паузы, удержания и слот хода очереди |
+| Разговор | `queue_paused` | Очередь поставлена на паузу (прерывание, остановка, ошибка) |
+| Разговор | `execution_state_changed` | Состояние исполнения |
+| Разговор | `phase_changed` | Фаза хода, имя инструмента и краткий аргумент |
+| Разговор | `run_finished` | Ход завершён |
+| Разговор | `interrupt_state_changed` | Ход прерывания |
+| Разговор | `block_started` | Начало блока: вид, агент, модель, родитель, инструмент, summary |
+| Разговор | `block_delta` | Дельта текста блока; соседние дельты в WSS объединяются |
+| Разговор | `block_final` | Окончательный текст блока |
+| Разговор | `block_incomplete` | Блок оборван с причиной |
+| Разговор | `adapter_diagnostic` | Диагностика адаптера |
+| Разговор, список | `state_divergence` | Расхождение состояния хаба и машины |
+| Разговор | `block_revision_gap` | Пропуск ревизии блока |
+| Разговор | `block_checksum_mismatch` | Контрольная сумма блока не совпала |
+| Разговор | `block_conflicting_final` | Повторный финал блока с другим содержимым |
+| Разговор, список | `conversation_updated` | Атрибуты разговора; в списке также `counts` |
+| Разговор | `conversation_settings_changed` | Настройки следующего хода и их применение |
+| Разговор | `crunch_changed` | Настройки «кранча» и переопределение резерва |
+| Разговор | `crunch_held` | Удержание по лимиту |
+| Разговор | `crunch_woken` | Подтверждённое пробуждение |
+| Разговор | `limit_reached` | Факт исчерпания окна |
+| Разговор | `scheduled_changed` | Отложенное сообщение |
+| Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
+| Разговор | `request_opened` | Зарезервировано для плана 1.3c |
+| Разговор | `request_closed` | Зарезервировано для плана 1.3c |
+| Разговор | `request_decided` | Зарезервировано для плана 1.3c |
+| Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
+| Список | `conversation_created` | Создание разговора (полный элемент списка) |
+| Список | `group_changed` | Группы владельца и счётчики |
+| Список | `limits_changed` | Лимиты провайдера |
+| Машины | `machine_availability_changed` | Доступность машины |
+| Машины | `machine_report_updated` | Каталог и сведения машины |
+| Машины | `machine_metrics` | Последний снимок метрик |
 | Любая | `hidden` | Заполнитель без полезной нагрузки для внутреннего события |
 | Любая (WSS) | `oversized` | Исходный вид события и HTTP-ссылка вместо невместимого payload |
+
+Внутренние виды (`journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset`, `limit_observation_unmapped` и будущие) хаб не выпускает: клиент видит на их месте `hidden`.
 
 Событие вне `CLIENT_KINDS` передаётся в WSS и `GET /events` как `hidden` с настоящим `scope_seq`, без внутреннего payload. Поэтому курсор каждой области остаётся непрерывным. Соседние дельты одного блока могут объединяться в течение 25 мс: `scope_seq_from` и `committed_at_from` обозначают начало диапазона, `scope_seq` и `committed_at` его конец. ID и correlation ID берутся из первого события. Объединение не перескакивает через чужие события. Соседние `hidden` объединяются по тому же правилу диапазона.
 
@@ -93,7 +110,6 @@
 | `not_pending` | 409 | `browser` | `never` | Отложенное сообщение уже обработано |
 | `schedule_time_out_of_range` | 422 | `browser` | `never` | Время отправки вне допустимого диапазона |
 | `too_many_scheduled` | 409 | `browser` | `never` | Слишком много отложенных сообщений |
-
 | `machine_not_found` | 404 | `browser` | `never` | Машина не найдена |
 | `machine_unavailable` | 409 | `delivery` | `after_condition` | Машина недоступна |
 | `capability_missing` | 409 | `delivery` | `after_condition` | Требуется обновление воркера |
@@ -145,7 +161,7 @@
 
 `derived_changed` публикуется в области разговора, затем в списке владельца и содержит `conversation_id`, `activity:{state,evidence,since}`, `unread_count`, `queue:{queued,pause_reasons,hold_reasons}`, `last_activity_at`, `settings:{model,effort,permission_mode}`, `crunch:{enabled}`. Настройки и кранч материализуются из эффективных значений разговора; изменение публикует только проектор. `last_activity_at` берётся по времени фиксации последнего ввода или создания блока и округляется вниз до минуты. Дельты блока не меняют это время. Прочитанность считается по `created_seq` текстовых блоков, предупреждений и ошибок в состояниях `streaming` и `final` относительно `last_read_seq` разговора.
 
-Маршруты, схемы payload и соответствие экранам пилота фиксируются последующими задачами 4–10c. Наличие имени события в этой таблице само по себе не означает, что его производитель уже реализован.
+Соответствие экранам пилота и полный список маршрутов и видов событий: раздел [«Покрытие экранов пилота»](#покрытие-экранов-пилота).
 
 
 ## Сессии, группы и чтение данных машин
@@ -336,3 +352,43 @@ Pump читает журнал только при доступной ёмкос
 `lagged` возникает только при заполненной очереди без успешной записи в течение `stall_timeout`. Неотправленный хвост удаляется, незавершённая запись заканчивается, затем writer отправляет по одному `{"op":"lagged","id":"s1","cursor":"1500"}` для каждой действующей подписки и закрывает соединение кодом 1008. Курсор учитывает только успешно записанные кадры. Заключительные кадры отправляются последовательно через резерв управления; на их отправку даётся до 10 с, затем сокет освобождается. Медленное чтение с продолжающейся записью не считается зависанием.
 
 По истечении `max_connection_age` сервер отправляет `{"op":"close","reason":"reauth"}`, затем close 4401. Клиент переподключается через прокси для повторной проверки личности. Shutdown хаба закрывает сокеты кодом 1001 и дожидается завершения pump/writer; они не создают отделённых задач.
+
+## Покрытие экранов пилота
+
+Таблица связывает экраны и поведение [pilot.md](pilot.md) §3–§11 с маршрутами и событиями. PWA (план 1.3b) отображает только то, что перечислено здесь; строки с пометкой «резерв» задают контракт без реализации в 1.3a. Одно соединение WSS несёт все области; каждая область может нести `hidden`. Пути записаны полностью, параметры запроса указаны в скобках.
+
+| № | Экран или поведение | Маршруты | События | Задачи |
+| --- | --- | --- | --- | --- |
+| 1 | Список сессий: цвет, название, агент и модель, машина, активность с доказательством, непрочитанное (§3) | `GET /api/v1/snapshot/conversations`, `GET /api/v1/conversations` (`filter`, `q`, `cursor`, `limit`), `GET /api/v1/conversations/{id}`, `POST /api/v1/conversations/{id}/read` | `conversation_created`, `conversation_updated`, `derived_changed` | 5, 6a, 7a |
+| 2 | Вкладки «Все», «Закреплённые» и группы со счётчиками; управление группами; сессия в нескольких группах (§3) | `GET /api/v1/groups`, `POST /api/v1/groups`, `PATCH /api/v1/groups/{id}`, `DELETE /api/v1/groups/{id}`, `PUT /api/v1/conversations/{id}/groups`; счётчики в снимке списка | `group_changed`, `conversation_updated` | 6a, 7a |
+| 3 | Закрепление, цвет, название, архив, синхронно между устройствами (§3) | `PATCH /api/v1/conversations/{id}` | `conversation_updated` | 6a |
+| 4 | Поиск по названиям (§3, ТЗ §12.1) | `GET /api/v1/conversations` (`q`) | – | 6a |
+| 5 | Строка лимитов и история расхода по дням, сессиям, моделям и агентам (§3, §7) | `GET /api/v1/limits`, `GET /api/v1/limits/history` (`provider`, `from`, `to`, `tz`); лимиты в снимке списка | `limits_changed` | 3, 6a, 7a, 8 |
+| 6 | Создание сессии: машина, каталог под разрешёнными корнями и недавние папки, агент, модель, усилие, профиль инструкций, режим разрешений, «кранч» и текст продолжения (§4) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}/workdirs/recent`, `POST /api/v1/conversations`, `POST /api/v1/conversations/{id}/executions` | `conversation_created`, `execution_state_changed` | 2, 3, 6a, 6b |
+| 7 | Лента: пузыри с отметками «сохранено» и «принято», карточки ответа, блоки инструментов, потоковый текст, полный вывод по запросу (§5.1) | `GET /api/v1/conversations/{id}/snapshot`, `GET /api/v1/conversations/{id}/history` (`before`, `after`, `limit`), `GET /api/v1/conversations/{id}/blocks/{block_id}` (`offset`, `limit`), `GET /api/v1/events` (диапазон разрыва) | `input_queued`, `input_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `run_finished`, `phase_changed`, `hidden` | 3, 7a, 7b |
+| 8 | Строки и ленты субагентов, дерево делегирования на десктопе (§6) | поля блока `agent`, `model`, `parent_block_id`; `GET /api/v1/conversations/{id}/delegation` | `block_started` | 2, 3, 7a |
+| 9 | Поле ввода: отправка, вложение, прерывание, «отправить позже» (§5.2) | `POST /api/v1/conversations/{id}/inputs`, `POST /api/v1/conversations/{id}/interrupt`, вложения (строка 16), `POST /api/v1/conversations/{id}/scheduled` | `input_queued`, `queue_state_changed`, `queue_paused`, `interrupt_state_changed` | 5, 6b, 9 |
+| 10 | Очередь и отложенные сообщения под лентой; отмена ввода в очереди (§5.1, §5.3) | очередь и отложенные в снимке разговора; `GET /api/v1/conversations/{id}/scheduled`, `PATCH /api/v1/scheduled/{id}`, `DELETE /api/v1/scheduled/{id}`, `POST /api/v1/inputs/{id}/cancel` | `scheduled_changed`, `input_state_changed` | 5, 6b, 7a |
+| 11 | Смена модели, режима разрешений и усилия посреди сессии; ожидающее значение в шапке (§5.4) | `PATCH /api/v1/conversations/{id}/settings`; `settings{effective,pending}` в карточке | `conversation_settings_changed` | 2, 6b |
+| 12 | Карточки вопросов и разрешений (§5.5), резерв | `POST /api/v1/conversations/{id}/requests/{request_id}/decision` отвечает `501 not_implemented` | `request_opened`, `request_closed`, `request_decided` | только контракт (план 1.3c) |
+| 13 | «Инфо» об ответе и экспорт в markdown или картинку (§5.6) | `GET /api/v1/conversations/{id}/runs/{run_id}` (расход по моделям и агентам, контекст, длительность, оценка лимита), содержимое блоков | – | 3, 7a |
+| 14 | «Кранч»: переключатель, текст продолжения, удержания `quota_exhausted` и `weekly_reserve`, «Продолжить, тратя резерв» (§8) | `PUT /api/v1/conversations/{id}/crunch`, `POST /api/v1/conversations/{id}/spend-reserve`; удержания в карточке, элементе списка и снимке | `crunch_changed`, `crunch_held`, `crunch_woken`, `limit_reached`, `queue_state_changed` | 6a, 8 |
+| 15 | Состояние активности с доказательствами в списке и шапке (§9) | в элементе списка, карточке и снимках | `derived_changed` | 5 |
+| 16 | Вложения: загрузка с возобновлением частями по 8 МиБ, прогресс, отметки готовности, скачивание; «Поделиться» из Android через тот же API (§10) | `POST /api/v1/attachments`, `HEAD /api/v1/attachments/{id}/content`, `PATCH /api/v1/attachments/{id}/content`, `POST /api/v1/attachments/{id}/complete`, `DELETE /api/v1/attachments/{id}`, `GET /api/v1/attachments/{id}`, `GET /api/v1/attachments/{id}/content` | `attachment_state_changed` | 9, 10a, 10b |
+| 17 | Экран машины: связь, возраст heartbeat, ОС, CPU, память, диск с предупреждением 85 %, нагрузка, сессии (§11) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}`, `GET /api/v1/snapshot/machines` | `machine_availability_changed`, `machine_report_updated`, `machine_metrics` | 2, 3, 6a, 7a |
+| 18 | Остановка, принудительная остановка, продолжение разговора, продолжение очереди (§1 п. 4) | `POST /api/v1/conversations/{id}/stop`, `POST /api/v1/conversations/{id}/resume`, `POST /api/v1/conversations/{id}/queue/continue`, `POST /api/v1/conversations/{id}/executions` | `queue_state_changed`, `queue_paused`, `execution_state_changed` | 6b |
+| 19 | Диагностика активного разговора (ТЗ §12.1) | снимок и полный поток событий разговора, включая диагностические виды | `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final` | 7a, 7b |
+| 20 | Синхронизация и служебная инфраструктура | `GET /api/v1/me`, `GET /api/v1/config`, `GET /api/v1/openapi.json`, `GET /api/v1/events`, `GET /api/v1/ws`, `GET /healthz`, `GET /readyz` | `hidden`, `oversized`, `resync_required`, `lagged`, `close` | 4, 7a, 7b |
+| 21 | Основания межсессионных инструментов (§12): вычисляемое состояние с доказательствами и контракт подписок | активность (строка 15) и области WSS (строка 20) | `derived_changed` | 5, 7b |
+| 22 | Лимиты, видимые модели (§7): только путь данных; инструмент MCP и пометка 80/90/95 % в планах 2a/2b | – (`ControlDown.limits_snapshot` для сеансов `pilot_v1`) | `limits_changed` | 1, 2, 3 |
+
+`resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. Вид `queue_resumed` из черновика плана не существует: снятие паузы публикуется как `queue_state_changed`.
+
+### Заморозка контракта
+
+Контракт для плана 1.3b заморожен тестами хаба `contract_coverage`:
+
+- `coverage_table_matches_openapi_and_event_schema`: каждый маршрут этой таблицы есть в `openapi.json` и наоборот; каждый вид события таблицы покрытия и таблицы видов есть в `events.schema.json` (и в `CLIENT_KINDS`) и наоборот; каждый `ErrorCode` перечисления и `components.schemas.ErrorCode` есть в таблице ошибок; закоммиченный `openapi.json` совпадает с генерацией.
+- `every_mutating_endpoint_records_its_key_once_across_the_whole_api`: каждая изменяющая операция `openapi.json`, кроме `PATCH /api/v1/attachments/{id}/content` и `POST /api/v1/conversations/{id}/read`, после первого вызова и повтора оставляет одну запись ключа, повтор возвращает тот же ответ, другой запрос с тем же ключом даёт `409 idempotency_conflict`. Маршрут без фикстуры проваливает тест. Зарезервированный `…/decision` отвечает `501 not_implemented` и ключ не записывает.
+
+Сквозные сценарии пилота через HTTP, WSS, настоящий хаб, управляющую службу воркера, процессы сопровождения и синтетический CLI: `crates/canterlot-worker/tests/pilot_e2e.rs`. Каждый сценарий сверяет поток WSS с журналом: только клиентские виды и `hidden` без payload, непрерывные номера каждой области (в том числе после переподключения с курсора), каждое событие базы покрыто ровно одним кадром.
