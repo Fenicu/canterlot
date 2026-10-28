@@ -4,9 +4,11 @@
 use std::{
     collections::BTreeMap,
     fs,
+    future::{Future, poll_fn},
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
+    task::Poll,
     time::Duration,
 };
 
@@ -26,6 +28,7 @@ use prost::Message;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
     net::{UnixStream, unix::OwnedWriteHalf},
     process::Child,
     sync::mpsc,
@@ -138,6 +141,16 @@ struct Harness {
 struct Conn {
     write: OwnedWriteHalf,
     rx: mpsc::UnboundedReceiver<SupervisorToControl>,
+}
+
+impl Conn {
+    async fn detach(mut self) {
+        self.write.shutdown().await.unwrap();
+        // The supervisor queues Closed after the frames and closes its writer on Closed.
+        timeout(WAIT, async { while self.rx.recv().await.is_some() {} })
+            .await
+            .expect("supervisor did not drain the control connection");
+    }
 }
 
 async fn connect(exec_dir: &Path) -> Conn {
@@ -1128,6 +1141,54 @@ async fn oversized_answer_final_is_checksum_only() {
 }
 
 #[tokio::test]
+async fn detach_waits_for_supervisor_to_drain_sj_acks() {
+    let root = TempDir::new().unwrap();
+    let listener = tokio::net::UnixListener::bind(root.path().join("ipc.sock")).unwrap();
+    let mut conn = connect(root.path()).await;
+    let (mut peer, _) = listener.accept().await.unwrap();
+    for seq in [5, 1_000_000] {
+        write_message(
+            &mut conn.write,
+            &ControlToSupervisor {
+                msg: Some(down::Msg::SjAck(SjAck { up_to_seq: seq })),
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    let detached = conn.detach();
+    tokio::pin!(detached);
+    assert!(
+        poll_fn(|cx| Poll::Ready(detached.as_mut().poll(cx).is_pending())).await,
+        "detach returned before the supervisor read the queued acks"
+    );
+    for seq in [5, 1_000_000] {
+        let message = read_message::<ControlToSupervisor, _>(&mut peer)
+            .await
+            .unwrap();
+        assert_eq!(
+            message.msg,
+            Some(down::Msg::SjAck(SjAck { up_to_seq: seq }))
+        );
+    }
+    assert_eq!(
+        timeout(WAIT, peer.read(&mut [0]))
+            .await
+            .expect("client write EOF")
+            .unwrap(),
+        0,
+        "write side is closed"
+    );
+    assert!(
+        poll_fn(|cx| Poll::Ready(detached.as_mut().poll(cx).is_pending())).await,
+        "detach must also wait for the supervisor to finish handling the acks"
+    );
+    drop(peer);
+    timeout(WAIT, detached).await.expect("supervisor EOF");
+}
+
+#[tokio::test]
 async fn sj_ships_from_committed_and_compacts_only_on_ack() {
     let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;
@@ -1168,7 +1229,7 @@ async fn sj_ships_from_committed_and_compacts_only_on_ack() {
             up_to_seq: 1_000_000,
         }))
         .await;
-    drop(harness.conn.take());
+    harness.conn.take().unwrap().detach().await;
     let attached = harness.attach().await;
     assert_eq!(
         attached.acked_sj_seq, 5,
