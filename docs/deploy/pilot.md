@@ -135,18 +135,14 @@ apt-get update && apt-get install -y \
 useradd --system --home-dir /var/lib/canterlot --shell /usr/sbin/nologin canterlot
 ```
 
-Затем создаём роль и базу данных в PostgreSQL:
-```bash
-sudo -u postgres psql -c "CREATE USER canterlot WITH PASSWORD 'СВЕРХСТОЙКИЙ_ПАРОЛЬ_БД';"
-sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot;"
-```
-
-Строка подключения сохраняется в файл, защищённый маской `0600`. Чтобы пароль не оставался в журнале командного интерпретатора (`~/.bash_history`), ввод пароля выполняется через `read -rs`:
+Затем создаём роль и базу данных в PostgreSQL, а строку подключения сохраняем в файл с правами `0600`. Пароль генерируется случайным (шестнадцатеричные символы не требуют экранирования в URL), передаётся в `psql` через стандартный ввод и не появляется ни в аргументах команд (`ps`), ни в журнале командного интерпретатора (`~/.bash_history`):
 ```bash
 mkdir -p /etc/canterlot
 ( umask 077
-  read -rsp "Введите пароль пользователя БД canterlot: " DB_PASS
-  echo
+  DB_PASS=$(openssl rand -hex 24)
+  sudo -u postgres psql -c "CREATE ROLE canterlot LOGIN;"
+  printf "ALTER ROLE canterlot PASSWORD '%s';\n" "$DB_PASS" | sudo -u postgres psql -q
+  sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot;"
   printf 'postgres://canterlot:%s@127.0.0.1:5432/canterlot\n' "$DB_PASS" > /etc/canterlot/db.url
   chown canterlot:canterlot /etc/canterlot/db.url
 )
@@ -279,7 +275,7 @@ metrics_stale_after = "90s"                         # crates/canterlot-hub/src/c
 
 ### 2.5. Секрет прокси и перенос на сервер Caddy
 
-Секрет прокси создаётся отдельной командой (ровно 32 байта шестнадцатеричной строки без переводов строк):
+Секрет прокси создаётся отдельной командой (32 случайных байта в виде 64 шестнадцатеричных символов, без перевода строки):
 ```bash
 ( umask 077
   openssl rand -hex 32 | tr -d '\n' > /etc/canterlot/proxy.secret
@@ -294,6 +290,8 @@ metrics_stale_after = "90s"                         # crates/canterlot-hub/src/c
 ssh root@10.0.0.2 "( umask 077; mkdir -p /etc/caddy/secrets; cat > /etc/caddy/secrets/canterlot-proxy && chown caddy:caddy /etc/caddy/secrets/canterlot-proxy && chmod 0600 /etc/caddy/secrets/canterlot-proxy )" < /etc/canterlot/proxy.secret
 ```
 Файл `/etc/caddy/secrets/canterlot-proxy` на сервере Caddy содержит байт-в-байт тот же секрет, защищён правами `0600` и доступен исключительно пользователю `caddy`.
+
+Если Caddy запущен в контейнере Docker, файл остаётся на хосте с правами `0600`, владельцем назначается UID, от которого работает процесс Caddy в контейнере, а в контейнер файл монтируется только для чтения по пути, указанному в директиве `{file.…}` Caddyfile (README использует `/run/secrets/canterlot-proxy`). Путь в Caddyfile и путь монтирования должны совпадать.
 
 ### 2.6. Инициализация хаба (`canterlot-hub init`)
 
