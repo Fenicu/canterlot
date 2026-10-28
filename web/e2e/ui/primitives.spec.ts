@@ -59,10 +59,10 @@ test('theme_toggle_persists_and_theme_script_runs_before_first_paint', async ({ 
   await page.getByRole('button', { name: 'Сменить тему' }).click(); await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
 });
 test('built_shell_has_no_inline_event_handlers', () => expect(readFileSync('build/200.html', 'utf8')).not.toMatch(/\son\w+\s*=/i));
-test('edge_server_sends_the_production_csp_header_from_the_single_source', async ({ request }) => {
+test('edge_server_sends_the_production_csp_header_from_the_single_source', async ({ request, baseURL }) => {
   const shell = readFileSync('build/200.html', 'utf8');
   const hashes = [...shell.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => `sha256-${createHash('sha256').update(m[1]!).digest('base64')}`);
-  for (const route of ['/', '/__test/primitives', '/missing.js']) expect((await request.get(route)).headers()['content-security-policy']).toBe(productionCsp({ websocketOrigin: 'ws://127.0.0.1:4173', scriptHashes: hashes }));
+  for (const route of ['/', '/__test/primitives', '/missing.js']) expect((await request.get(route)).headers()['content-security-policy']).toBe(productionCsp({ websocketOrigin: `ws://${new URL(baseURL!).host}`, scriptHashes: hashes }));
   const response = await request.post('/_share', { maxRedirects: 0 }); expect(response.status()).toBe(303); expect(response.headers()['location']).toBe('/share?error=sw_inactive');
 });
 test('stage_track_reflects_events_without_fake_progress', async ({ page }) => {

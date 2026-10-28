@@ -14,6 +14,8 @@ export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-2}"
 export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
 export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-2}"
 export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
+# Каждый прогон берёт свой свободный порт: параллельные проверки из соседних рабочих копий не делят 4173.
+export PORT="${PORT:-$(node -e "const s=require('net').createServer();s.listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")}"
 npm ci
 npm run check
 npm run lint
