@@ -194,7 +194,8 @@ async fn spawn_on(
     let registry = Registry::new(timers.clone());
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =
-        grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
+        grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
+            .with_blob_store(blobs.clone());
     let ingest = ingest::Ingest::new(pool.clone())
         .with_dispatcher(dispatcher.clone())
         .with_registry(registry.clone())

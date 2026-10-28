@@ -30,6 +30,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `docs/api/events.schema.json` | JSON Schema 2020-12 событий браузера и кадров canterlot.v1 |
 | `crates/canterlot-hub/src/http/scheduled.rs` | Создание, список, изменение и отмена отложенных сообщений |
 | `crates/canterlot-hub/src/{attachments/,http/attachments.rs}` | Вложения хаба: загрузка частями в staging, проверенная надёжная публикация, метаданные, привязка к вводу, сборщик и безопасная выдача |
+| `crates/canterlot-hub/src/grpc/attachments.rs` | Выдача вложений машине через `FetchAttachment`, возобновление по смещению и ограничение потоков |
 | `docs/api/openapi.json` | Машиночитаемый контракт API, генерируется `scripts/gen-openapi.sh` |
 | `scripts/{gen-openapi,check-proxy}.sh` | Перегенерация OpenAPI; приёмка заголовков Caddy и Authelia |
 | `docs/adr/0004-browser-auth-forward-auth.md` | Вход браузера через прокси с forward-auth |
@@ -182,6 +183,8 @@ metrics_stale_after = "90s"
 ```
 
 Origin задаётся как `scheme://host[:port]`, без пути, query и fragment; `logout_url` является абсолютным HTTPS URL. `blob_dir` и `proxy_secret_file` разрешаются от каталога конфигурации, staging и blobs размещаются на одной файловой системе вне рабочих репозиториев. `multi_process = true` включает `NOTIFY` и слушатель PostgreSQL с восстановлением соединения; при `false` шина остаётся внутри процесса.
+
+`WorkerData.FetchAttachment` читает опубликованные blobs из того же `[attachments].blob_dir` чанками до 128 КиБ, начиная с запрошенного смещения. На машину допускается четыре потока; пятый получает `RESOURCE_EXHAUSTED`. Потоки не удерживают соединения PostgreSQL и завершаются с `UNAVAILABLE` при остановке хаба. Готовность файлов и причины ожидания поступают в `CJ` как `attachment_ready` / `attachment_failed`; обрыв передачи сам по себе не отклоняет ввод. Новых настроек воркера для серверной части нет; его загрузчик реализуется задачей 10b.
 
 `[activity]` задаёт пороги подозрения на зависание и частоту проекции. Генерация без событий дольше пяти минут или инструмент без событий дольше получаса получают `stalled` только при доступной машине. Это состояние не прерывает исполнение. Проектор считает непрочитанные блоки и сводку очереди, публикует `derived_changed` при изменении и восстанавливает пропущенные уведомления периодическим обходом.
 

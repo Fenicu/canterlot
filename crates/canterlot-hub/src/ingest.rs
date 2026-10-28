@@ -1653,6 +1653,94 @@ async fn apply_journal_body(
     body: &Body,
     correlation_id: Uuid,
 ) -> Result<Option<bool>, IngestError> {
+    let attachment = match body {
+        Body::AttachmentReady(fact) => Some((
+            fact.command_id.as_str(),
+            fact.dispatch_attempt,
+            fact.attachment_id.as_str(),
+            "ready",
+            None,
+            None,
+        )),
+        Body::AttachmentFailed(fact) => Some((
+            fact.command_id.as_str(),
+            fact.dispatch_attempt,
+            fact.attachment_id.as_str(),
+            if fact.retryable { "pending" } else { "failed" },
+            Some(sanitize_reason(&fact.reason)),
+            Some(fact.retryable),
+        )),
+        _ => None,
+    };
+    if let Some((command, dispatch_attempt, attachment, state, reason, retryable)) = attachment {
+        if kind != JournalKind::Cj {
+            return Err(IngestError::InvalidRecord);
+        }
+        let command = parse_id(command)?;
+        let attachment = parse_id(attachment)?;
+        let dispatch_attempt = attempt(dispatch_attempt)?;
+        let conversation: Option<Uuid> = sqlx::query_scalar(
+            "select q.conversation_id from queue_state q
+             join conversations conv on conv.id=q.conversation_id
+             join commands c on c.conversation_id=q.conversation_id
+             where c.id=$1 and c.machine_id=$2 and conv.machine_id=$2
+               and c.kind='deliver_input' for update of q",
+        )
+        .bind(command)
+        .bind(machine_id)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some(conversation_id) = conversation else {
+            return Ok(Some(true));
+        };
+        let target: Option<(Uuid, Option<Uuid>)> = sqlx::query_as(
+            "select i.id,c.execution_id from inputs i
+             join commands c on c.id=i.command_id
+             join input_attachments ia on ia.input_id=i.id
+             where c.id=$1 and c.dispatch_attempt=$2 and ia.attachment_id=$3
+               and i.state not in ('cancelled','rejected')",
+        )
+        .bind(command)
+        .bind(dispatch_attempt)
+        .bind(attachment)
+        .fetch_optional(&mut *conn)
+        .await?;
+        let Some((input_id, execution_id)) = target else {
+            return Ok(Some(true));
+        };
+        let changed = sqlx::query(
+            "update input_attachments set machine_state=$3,machine_reason=$4,retryable=$5,
+                updated_at=clock_timestamp()
+             where input_id=$1 and attachment_id=$2
+               and (machine_state,machine_reason,retryable) is distinct from ($3,$4,$5)",
+        )
+        .bind(input_id)
+        .bind(attachment)
+        .bind(state)
+        .bind(&reason)
+        .bind(retryable)
+        .execute(&mut *conn)
+        .await?
+        .rows_affected();
+        if changed > 0 {
+            events::append(
+                conn,
+                NewEvent {
+                    scope: Scope::Conversation {
+                        id: conversation_id,
+                    },
+                    kind: "attachment_state_changed",
+                    conversation_id: Some(conversation_id),
+                    execution_id,
+                    payload: json!({"input_id":input_id,"attachment_id":attachment,
+                    "machine_state":state,"machine_reason":reason}),
+                    correlation_id,
+                },
+            )
+            .await?;
+        }
+        return Ok(Some(false));
+    }
     if let Body::JournalOpened(fact) = body {
         if kind != JournalKind::Sj || seq != 1 {
             return Err(IngestError::InvalidRecord);

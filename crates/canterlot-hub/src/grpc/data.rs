@@ -13,9 +13,9 @@ impl WorkerData for HubGrpc {
 
     async fn fetch_attachment(
         &self,
-        _request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
+        request: Request<canterlot_proto::worker::v1::FetchAttachmentRequest>,
     ) -> Result<Response<Self::FetchAttachmentStream>, Status> {
-        Err(Status::unimplemented("attachment fetch is not implemented"))
+        super::attachments::fetch(self, request).await
     }
 
     type DataStream = ReplyStream<DataDown>;

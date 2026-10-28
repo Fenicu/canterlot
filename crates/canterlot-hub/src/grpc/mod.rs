@@ -23,6 +23,7 @@ use crate::{
     session::{CAPABILITY_EXEC_V1, CAPABILITY_PILOT_V1, Registry},
 };
 
+mod attachments;
 mod auth;
 mod control;
 mod data;
@@ -74,6 +75,8 @@ pub struct HubGrpc {
     pub installation: Installation,
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
+    blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
+    fetch_slots: attachments::FetchSlots,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
     shutdown: CancellationToken,
@@ -269,10 +272,17 @@ impl HubGrpc {
             installation,
             timers,
             ingest,
+            blobs: None,
+            fetch_slots: Default::default(),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub fn with_blob_store(mut self, blobs: Arc<dyn crate::attachments::BlobStore>) -> Self {
+        self.blobs = Some(blobs);
+        self
     }
 
     async fn admit_control(

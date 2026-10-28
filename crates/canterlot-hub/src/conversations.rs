@@ -503,6 +503,9 @@ pub async fn detail(
             reasons.push(json!({"reason":"capability_missing","input_id":input_id}));
         }
     }
+    if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
+        reasons.retain(|hold| hold["reason"] != "attachments_pending");
+    }
     for (input_id, reason) in attachments_pending(conn, id).await? {
         let hold = HoldView::AttachmentsPending { input_id, reason };
         if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {

@@ -30,14 +30,15 @@ async fn migration_and_startup_project_old_terminal_conversations_without_events
     let execution = Uuid::now_v7();
     sqlx::query("insert into executions(id,conversation_id,generation,state,outcome) values($1,$2,1,'stopped','user_stop')").bind(execution).bind(s.conversation_id).execute(&pool).await.unwrap();
     sqlx::query("insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,created_seq) values($1,$2,$3,'text','final',1,10)").bind(Uuid::now_v7()).bind(execution).bind(s.conversation_id).execute(&pool).await.unwrap();
-    sqlx::raw_sql(include_str!("../migrations/0010_derived_and_scheduler.sql"))
-        .execute(&pool)
-        .await
-        .unwrap();
-    sqlx::raw_sql(include_str!("../migrations/0011_conversations_ui.sql"))
-        .execute(&pool)
-        .await
-        .unwrap();
+    for migration in canterlot_hub::db::MIGRATOR
+        .iter()
+        .filter(|m| m.version >= 10)
+    {
+        sqlx::raw_sql(migration.sql.as_ref())
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
     let (stop, task, _) = projector(
         &pool,
         ActivityConfig {

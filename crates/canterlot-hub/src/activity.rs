@@ -18,7 +18,7 @@ use crate::{
     bus::{self, EventBus, Notice},
     config::{ActivityConfig, MachinesConfig},
     events::{self, NewEvent, Scope},
-    model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+    model::{ExecutionState, HoldReason, HoldView, PauseReason, RunSlot},
     singleton::Singleton,
 };
 
@@ -469,7 +469,19 @@ async fn refresh_with_metrics(
         .fetch_optional(&mut *tx)
         .await?;
     let pauses = json!(inputs.queue.pause_reasons);
-    let holds = json!(inputs.queue.hold_reasons);
+    let mut holds: Vec<HoldView> = inputs
+        .queue
+        .hold_reasons
+        .iter()
+        .cloned()
+        .map(HoldView::from)
+        .collect();
+    for (input_id, reason) in
+        crate::conversations::attachments_pending(&mut tx, conversation_id).await?
+    {
+        holds.push(HoldView::AttachmentsPending { input_id, reason });
+    }
+    let holds = json!(holds);
     let mut since = now;
     if let Some(old) = old {
         let old_state: String = old.try_get("activity_state")?;
