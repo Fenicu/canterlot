@@ -10,6 +10,10 @@ if [[ "${1:-}" != "" && "${1:-}" != "--stack" ]]; then
   exit 2
 fi
 export PLAYWRIGHT_BROWSERS_PATH="${PLAYWRIGHT_BROWSERS_PATH:-/tmp/canterlot-playwright}"
+export TOKIO_WORKER_THREADS="${TOKIO_WORKER_THREADS:-2}"
+export RAYON_NUM_THREADS="${RAYON_NUM_THREADS:-2}"
+export MOZ_TASKCONTROLLER_THREADCOUNT="${MOZ_TASKCONTROLLER_THREADCOUNT:-2}"
+export GSETTINGS_BACKEND="${GSETTINGS_BACKEND:-memory}"
 npm ci
 npm run check
 npm run lint

@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<title>Проверка транспорта</title>
+<p>Проверка транспорта</p>
+<script>
+  const frames = [];
+  const closes = [];
+  let socket;
+  window.smoke = {
+    frames, closes,
+    connect() {
+      return new Promise((resolve, reject) => {
+        socket = new WebSocket(`${location.origin.replace('http', 'ws')}/api/v1/ws`, 'canterlot.v1');
+        socket.onopen = () => resolve(socket.protocol);
+        socket.onerror = () => reject(new Error('socket_failed'));
+        socket.onmessage = event => frames.push(JSON.parse(event.data));
+        socket.onclose = event => closes.push(event.code);
+      });
+    },
+    send(op) { socket.send(JSON.stringify(op)); },
+    close() { socket.close(); }
+  };
+</script>
+</html>

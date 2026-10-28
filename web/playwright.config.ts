@@ -5,6 +5,6 @@ export default defineConfig({
   webServer: { command: 'node e2e/edge/serve.mjs', url: 'http://127.0.0.1:4173', reuseExistingServer: false },
   projects: [
     { name: 'phone', use: { ...devices['Pixel 7'], browserName: 'chromium' } },
-    { name: 'desktop', use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } }
+    { name: 'desktop', workers: 1, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } }
   ]
 });
