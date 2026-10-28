@@ -24,6 +24,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
 }
 #[derive(Deserialize, IntoParams)]
 #[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
 pub struct HistoryParams {
     pub before: Option<String>,
     pub after: Option<String>,

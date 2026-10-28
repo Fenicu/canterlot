@@ -11,7 +11,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "create",
+        "operationId": "post__api_v1_attachments",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -35,6 +35,15 @@
         "responses": {
           "201": {
             "description": "Вложение создано, загрузка с нулевого смещения",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -45,6 +54,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -61,7 +79,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "get_one",
+        "operationId": "get__api_v1_attachments__id_",
         "parameters": [
           {
             "name": "id",
@@ -76,6 +94,15 @@
         "responses": {
           "200": {
             "description": "Вложение",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -86,6 +113,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -100,7 +136,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "cancel",
+        "operationId": "delete__api_v1_attachments__id_",
         "parameters": [
           {
             "name": "id",
@@ -122,10 +158,28 @@
         ],
         "responses": {
           "204": {
-            "description": "Загрузка отменена или неиспользованное вложение удалено"
+            "description": "Загрузка отменена или неиспользованное вложение удалено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -142,7 +196,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "complete",
+        "operationId": "post__api_v1_attachments__id__complete",
         "parameters": [
           {
             "name": "id",
@@ -176,6 +230,15 @@
         "responses": {
           "200": {
             "description": "Содержимое проверено, надёжно опубликовано, вложение готово",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -186,6 +249,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -202,7 +274,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "download",
+        "operationId": "get__api_v1_attachments__id__content",
         "parameters": [
           {
             "name": "id",
@@ -217,6 +289,15 @@
         "responses": {
           "200": {
             "description": "Содержимое готового вложения, всегда как скачиваемый файл",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/octet-stream": {
                 "schema": {
@@ -227,6 +308,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -241,7 +331,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "upload_offset",
+        "operationId": "head__api_v1_attachments__id__content",
         "parameters": [
           {
             "name": "id",
@@ -272,11 +362,27 @@
                   "minimum": 0
                 },
                 "description": "Принятые байты"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
               }
             }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -291,7 +397,7 @@
         "tags": [
           "attachments"
         ],
-        "operationId": "upload_chunk",
+        "operationId": "patch__api_v1_attachments__id__content",
         "parameters": [
           {
             "name": "id",
@@ -336,11 +442,27 @@
                   "minimum": 0
                 },
                 "description": "Принятые байты"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
               }
             }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -358,10 +480,19 @@
           "session"
         ],
         "summary": "Лимиты и пороги, которыми клиент проверяет ввод до отправки.",
-        "operationId": "config",
+        "operationId": "get__api_v1_config",
         "responses": {
           "200": {
             "description": "Настройки для клиента",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -372,6 +503,15 @@
           },
           "401": {
             "description": "Нет личности",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -382,6 +522,15 @@
           },
           "403": {
             "description": "Чужой пользователь",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -392,6 +541,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -408,7 +566,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "list",
+        "operationId": "get__api_v1_conversations",
         "parameters": [
           {
             "name": "filter",
@@ -459,6 +617,15 @@
         "responses": {
           "200": {
             "description": "Список сессий",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -469,6 +636,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -483,7 +659,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "create",
+        "operationId": "post__api_v1_conversations",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -507,6 +683,15 @@
         "responses": {
           "201": {
             "description": "Сессия создана",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -517,6 +702,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -533,7 +727,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "get",
+        "operationId": "get__api_v1_conversations__id_",
         "parameters": [
           {
             "name": "id",
@@ -548,6 +742,15 @@
         "responses": {
           "200": {
             "description": "Сессия",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -558,6 +761,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -572,7 +784,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "update",
+        "operationId": "patch__api_v1_conversations__id_",
         "parameters": [
           {
             "name": "id",
@@ -605,6 +817,15 @@
         "responses": {
           "200": {
             "description": "Атрибуты изменены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -615,6 +836,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -631,7 +861,7 @@
         "tags": [
           "history"
         ],
-        "operationId": "block",
+        "operationId": "get__api_v1_conversations__id__blocks__block_id_",
         "parameters": [
           {
             "name": "id",
@@ -679,6 +909,15 @@
         "responses": {
           "200": {
             "description": "Текст блока; смещения в байтах UTF-8",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -689,6 +928,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -705,7 +953,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "set_crunch",
+        "operationId": "put__api_v1_conversations__id__crunch",
         "parameters": [
           {
             "name": "id",
@@ -738,6 +986,15 @@
         "responses": {
           "200": {
             "description": "Кранч изменён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -748,6 +1005,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -764,7 +1030,7 @@
         "tags": [
           "history"
         ],
-        "operationId": "delegation",
+        "operationId": "get__api_v1_conversations__id__delegation",
         "parameters": [
           {
             "name": "id",
@@ -779,6 +1045,15 @@
         "responses": {
           "200": {
             "description": "Вызовы субагентов",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -792,6 +1067,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -808,7 +1092,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "start_execution",
+        "operationId": "post__api_v1_conversations__id__executions",
         "parameters": [
           {
             "name": "id",
@@ -831,6 +1115,15 @@
         "responses": {
           "201": {
             "description": "Исполнение создано",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -841,6 +1134,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -857,7 +1159,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "set_groups",
+        "operationId": "put__api_v1_conversations__id__groups",
         "parameters": [
           {
             "name": "id",
@@ -890,6 +1192,15 @@
         "responses": {
           "200": {
             "description": "Группы изменены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -900,6 +1211,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -916,7 +1236,7 @@
         "tags": [
           "history"
         ],
-        "operationId": "page",
+        "operationId": "get__api_v1_conversations__id__history",
         "parameters": [
           {
             "name": "id",
@@ -929,35 +1249,26 @@
           },
           {
             "name": "before",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "after",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "string",
-                "null"
-              ]
+              "type": "string"
             }
           },
           {
             "name": "limit",
-            "in": "path",
-            "required": true,
+            "in": "query",
+            "required": false,
             "schema": {
-              "type": [
-                "integer",
-                "null"
-              ],
+              "type": "integer",
               "format": "int64"
             }
           }
@@ -965,6 +1276,15 @@
         "responses": {
           "200": {
             "description": "Окно истории в порядке scope_seq",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -975,6 +1295,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -991,7 +1320,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "submit",
+        "operationId": "post__api_v1_conversations__id__inputs",
         "parameters": [
           {
             "name": "id",
@@ -1024,6 +1353,15 @@
         "responses": {
           "201": {
             "description": "Сообщение в очереди",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1034,6 +1372,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1050,7 +1397,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "interrupt",
+        "operationId": "post__api_v1_conversations__id__interrupt",
         "parameters": [
           {
             "name": "id",
@@ -1073,6 +1420,15 @@
         "responses": {
           "200": {
             "description": "Остановка запрошена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1083,6 +1439,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1099,7 +1464,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "continue_queue",
+        "operationId": "post__api_v1_conversations__id__queue_continue",
         "parameters": [
           {
             "name": "id",
@@ -1122,6 +1487,15 @@
         "responses": {
           "200": {
             "description": "Очередь продолжена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1132,6 +1506,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1148,7 +1531,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "read",
+        "operationId": "post__api_v1_conversations__id__read",
         "parameters": [
           {
             "name": "id",
@@ -1172,10 +1555,28 @@
         },
         "responses": {
           "204": {
-            "description": "Прочитанность сохранена"
+            "description": "Прочитанность сохранена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1192,7 +1593,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "decision",
+        "operationId": "post__api_v1_conversations__id__requests__request_id__decision",
         "parameters": [
           {
             "name": "id",
@@ -1223,10 +1624,28 @@
         ],
         "responses": {
           "501": {
-            "description": "Решение пока не поддерживается"
+            "description": "Решение пока не поддерживается",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1243,7 +1662,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "resume",
+        "operationId": "post__api_v1_conversations__id__resume",
         "parameters": [
           {
             "name": "id",
@@ -1276,6 +1695,15 @@
         "responses": {
           "201": {
             "description": "Исполнение возобновлено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1286,6 +1714,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1302,7 +1739,7 @@
         "tags": [
           "history"
         ],
-        "operationId": "run",
+        "operationId": "get__api_v1_conversations__id__runs__run_id_",
         "parameters": [
           {
             "name": "id",
@@ -1326,6 +1763,15 @@
         "responses": {
           "200": {
             "description": "Сведения о ходе",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1336,6 +1782,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1352,7 +1807,7 @@
         "tags": [
           "scheduled"
         ],
-        "operationId": "list",
+        "operationId": "get__api_v1_conversations__id__scheduled",
         "parameters": [
           {
             "name": "id",
@@ -1368,6 +1823,15 @@
         "responses": {
           "200": {
             "description": "Отложенные сообщения",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1381,6 +1845,15 @@
           },
           "404": {
             "description": "Разговор не найден",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1391,6 +1864,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1405,7 +1887,7 @@
         "tags": [
           "scheduled"
         ],
-        "operationId": "create",
+        "operationId": "post__api_v1_conversations__id__scheduled",
         "parameters": [
           {
             "name": "id",
@@ -1440,6 +1922,15 @@
         "responses": {
           "201": {
             "description": "Сообщение запланировано",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1450,6 +1941,15 @@
           },
           "409": {
             "description": "Конфликт или слишком много сообщений",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1460,6 +1960,15 @@
           },
           "422": {
             "description": "Время вне допустимого диапазона",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1470,6 +1979,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1486,7 +2004,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "settings",
+        "operationId": "patch__api_v1_conversations__id__settings",
         "parameters": [
           {
             "name": "id",
@@ -1519,6 +2037,15 @@
         "responses": {
           "200": {
             "description": "Настройки изменены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1529,6 +2056,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1545,7 +2081,7 @@
         "tags": [
           "snapshots"
         ],
-        "operationId": "conversation",
+        "operationId": "get__api_v1_conversations__id__snapshot",
         "parameters": [
           {
             "name": "id",
@@ -1572,6 +2108,15 @@
         "responses": {
           "200": {
             "description": "Снимок разговора и граница журнала",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1582,6 +2127,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1599,7 +2153,7 @@
           "conversations"
         ],
         "summary": "Ручное продолжение одной сессии за счёт недельного резерва до сброса недели.",
-        "operationId": "spend_reserve",
+        "operationId": "post__api_v1_conversations__id__spend_reserve",
         "parameters": [
           {
             "name": "id",
@@ -1622,6 +2176,15 @@
         "responses": {
           "200": {
             "description": "Решение о продолжении за счёт резерва",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1632,6 +2195,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1648,7 +2220,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "stop",
+        "operationId": "post__api_v1_conversations__id__stop",
         "parameters": [
           {
             "name": "id",
@@ -1681,6 +2253,15 @@
         "responses": {
           "200": {
             "description": "Остановка исполнения запрошена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1691,6 +2272,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1707,7 +2297,7 @@
         "tags": [
           "events"
         ],
-        "operationId": "range",
+        "operationId": "get__api_v1_events",
         "parameters": [
           {
             "name": "scope",
@@ -1741,6 +2331,15 @@
         "responses": {
           "200": {
             "description": "Диапазон событий либо требование нового снимка",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1751,6 +2350,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1767,10 +2375,19 @@
         "tags": [
           "groups"
         ],
-        "operationId": "list",
+        "operationId": "get__api_v1_groups",
         "responses": {
           "200": {
             "description": "Группы",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1784,6 +2401,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1798,7 +2424,7 @@
         "tags": [
           "groups"
         ],
-        "operationId": "create",
+        "operationId": "post__api_v1_groups",
         "parameters": [
           {
             "name": "Idempotency-Key",
@@ -1822,6 +2448,15 @@
         "responses": {
           "201": {
             "description": "Группа создана",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1832,6 +2467,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1848,7 +2492,7 @@
         "tags": [
           "groups"
         ],
-        "operationId": "delete",
+        "operationId": "delete__api_v1_groups__id_",
         "parameters": [
           {
             "name": "id",
@@ -1870,10 +2514,28 @@
         ],
         "responses": {
           "204": {
-            "description": "Группа удалена"
+            "description": "Группа удалена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1888,7 +2550,7 @@
         "tags": [
           "groups"
         ],
-        "operationId": "update",
+        "operationId": "patch__api_v1_groups__id_",
         "parameters": [
           {
             "name": "id",
@@ -1921,6 +2583,15 @@
         "responses": {
           "200": {
             "description": "Группа изменена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1931,6 +2602,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1947,7 +2627,7 @@
         "tags": [
           "conversations"
         ],
-        "operationId": "cancel_input",
+        "operationId": "post__api_v1_inputs__id__cancel",
         "parameters": [
           {
             "name": "id",
@@ -1970,6 +2650,15 @@
         "responses": {
           "200": {
             "description": "Отмена запрошена",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1980,6 +2669,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -1996,10 +2694,19 @@
         "tags": [
           "limits"
         ],
-        "operationId": "current",
+        "operationId": "get__api_v1_limits",
         "responses": {
           "200": {
             "description": "Текущие лимиты",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2013,6 +2720,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2029,7 +2745,7 @@
         "tags": [
           "limits"
         ],
-        "operationId": "history",
+        "operationId": "get__api_v1_limits_history",
         "parameters": [
           {
             "name": "provider",
@@ -2081,6 +2797,15 @@
         "responses": {
           "200": {
             "description": "Расход и история лимитов",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2091,6 +2816,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2107,10 +2841,19 @@
         "tags": [
           "machines"
         ],
-        "operationId": "list",
+        "operationId": "get__api_v1_machines",
         "responses": {
           "200": {
             "description": "Машины владельца",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2124,6 +2867,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2140,7 +2892,7 @@
         "tags": [
           "machines"
         ],
-        "operationId": "get",
+        "operationId": "get__api_v1_machines__id_",
         "parameters": [
           {
             "name": "id",
@@ -2155,6 +2907,15 @@
         "responses": {
           "200": {
             "description": "Машина",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2165,6 +2926,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2181,7 +2951,7 @@
         "tags": [
           "machines"
         ],
-        "operationId": "recent",
+        "operationId": "get__api_v1_machines__id__workdirs_recent",
         "parameters": [
           {
             "name": "id",
@@ -2196,6 +2966,15 @@
         "responses": {
           "200": {
             "description": "Недавние каталоги",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2206,6 +2985,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2223,10 +3011,19 @@
           "session"
         ],
         "summary": "Личность владельца; PWA привязывает к `owner_id` локальные данные.",
-        "operationId": "me",
+        "operationId": "get__api_v1_me",
         "responses": {
           "200": {
             "description": "Владелец",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2237,6 +3034,15 @@
           },
           "401": {
             "description": "Нет личности",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2247,6 +3053,15 @@
           },
           "403": {
             "description": "Чужой пользователь",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2257,6 +3072,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2273,7 +3097,7 @@
         "tags": [
           "media"
         ],
-        "operationId": "get_media",
+        "operationId": "get__api_v1_media__id_",
         "parameters": [
           {
             "name": "id",
@@ -2294,6 +3118,13 @@
                   "type": "string"
                 },
                 "description": "SHA-256 содержимого в кавычках"
+              },
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
               }
             },
             "content": {
@@ -2321,6 +3152,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2338,16 +3178,34 @@
           "session"
         ],
         "summary": "Машиночитаемый контракт API (`docs/api/openapi.json`).",
-        "operationId": "openapi_json",
+        "operationId": "get__api_v1_openapi_json",
         "responses": {
           "200": {
             "description": "Документ OpenAPI",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {}
             }
           },
           "401": {
             "description": "Нет личности",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2358,6 +3216,15 @@
           },
           "403": {
             "description": "Чужой пользователь",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2368,6 +3235,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2384,7 +3260,7 @@
         "tags": [
           "scheduled"
         ],
-        "operationId": "cancel",
+        "operationId": "delete__api_v1_scheduled__id_",
         "parameters": [
           {
             "name": "id",
@@ -2409,6 +3285,15 @@
         "responses": {
           "200": {
             "description": "Сообщение отменено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2419,6 +3304,15 @@
           },
           "409": {
             "description": "Сообщение уже обработано",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2429,6 +3323,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2443,7 +3346,7 @@
         "tags": [
           "scheduled"
         ],
-        "operationId": "update",
+        "operationId": "patch__api_v1_scheduled__id_",
         "parameters": [
           {
             "name": "id",
@@ -2478,6 +3381,15 @@
         "responses": {
           "200": {
             "description": "Сообщение изменено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2488,6 +3400,15 @@
           },
           "409": {
             "description": "Сообщение уже обработано",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2498,6 +3419,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2514,10 +3444,19 @@
         "tags": [
           "snapshots"
         ],
-        "operationId": "conversations",
+        "operationId": "get__api_v1_snapshot_conversations",
         "responses": {
           "200": {
             "description": "Снимок списка и граница журнала",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2528,6 +3467,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2544,10 +3492,19 @@
         "tags": [
           "snapshots"
         ],
-        "operationId": "machines",
+        "operationId": "get__api_v1_snapshot_machines",
         "responses": {
           "200": {
             "description": "Снимок машин и граница журнала",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2558,6 +3515,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2574,13 +3540,31 @@
         "tags": [
           "events"
         ],
-        "operationId": "upgrade",
+        "operationId": "get__api_v1_ws",
         "responses": {
           "101": {
-            "description": "WSS canterlot.v1; кадры ClientOp / ServerOp в events.schema.json"
+            "description": "WSS canterlot.v1; кадры ClientOp / ServerOp в events.schema.json",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2598,10 +3582,19 @@
           "health"
         ],
         "summary": "Живость процесса: без личности и без обращения к базе.",
-        "operationId": "healthz",
+        "operationId": "get__healthz",
         "responses": {
           "200": {
             "description": "Процесс жив",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2612,6 +3605,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2629,10 +3631,19 @@
           "health"
         ],
         "summary": "Готовность: база отвечает, а запись установки совпадает с состоянием процесса и манифестом.",
-        "operationId": "readyz",
+        "operationId": "get__readyz",
         "responses": {
           "200": {
             "description": "Хаб готов",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2643,6 +3654,15 @@
           },
           "503": {
             "description": "База или фоновая служба недоступна, либо установка не совпадает",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {
@@ -2653,6 +3673,15 @@
           },
           "default": {
             "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
             "content": {
               "application/json": {
                 "schema": {

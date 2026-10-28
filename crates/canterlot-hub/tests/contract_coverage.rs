@@ -617,3 +617,46 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     }
     assert_eq!(checked.len(), mutating.len());
 }
+
+#[test]
+fn openapi_documents_global_server_time() {
+    let document = serde_json::to_value(openapi::document()).unwrap();
+    for (path, item) in document["paths"].as_object().unwrap() {
+        for (method, operation) in item.as_object().unwrap() {
+            if let Some(responses) = operation["responses"].as_object() {
+                for (status, response) in responses {
+                    assert_eq!(
+                        response["headers"]["X-Server-Time-Ms"]["schema"]["type"], "integer",
+                        "{method} {path} {status}: server time header"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn openapi_documents_optional_history_query() {
+    let document = serde_json::to_value(openapi::document()).unwrap();
+    let parameters = document["paths"]["/api/v1/conversations/{id}/history"]["get"]["parameters"]
+        .as_array()
+        .unwrap();
+    for name in ["before", "after"] {
+        let parameter = parameters.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(parameter["in"], "query", "{name}");
+        assert_ne!(parameter["required"], true, "{name}");
+    }
+}
+
+#[test]
+fn openapi_operation_ids_are_unique_for_type_generation() {
+    let document = serde_json::to_value(openapi::document()).unwrap();
+    let mut seen = BTreeSet::new();
+    for item in document["paths"].as_object().unwrap().values() {
+        for operation in item.as_object().unwrap().values() {
+            if let Some(id) = operation["operationId"].as_str() {
+                assert!(seen.insert(id), "duplicate operationId: {id}");
+            }
+        }
+    }
+}

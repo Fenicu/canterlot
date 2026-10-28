@@ -5,7 +5,9 @@ use utoipa::{
     openapi::{
         Ref, RefOr,
         content::ContentBuilder,
+        header::HeaderBuilder,
         response::{Response, ResponseBuilder},
+        schema::{ObjectBuilder, SchemaType, Type},
     },
 };
 use utoipa_axum::router::OpenApiRouter;
@@ -42,12 +44,12 @@ pub fn document() -> utoipa::openapi::OpenApi {
     let mut document = OpenApiRouter::with_openapi(base)
         .merge(api_routes())
         .into_openapi();
-    add_default_error(&mut document);
+    complete_operations(&mut document);
     document
 }
 
-/// Любая операция может завершиться ошибкой из реестра кодов, поэтому каждая получает ответ `default`.
-fn add_default_error(document: &mut utoipa::openapi::OpenApi) {
+/// Общие ответы и уникальные имена операций для генерации клиентских типов.
+fn complete_operations(document: &mut utoipa::openapi::OpenApi) {
     let response: Response = ResponseBuilder::new()
         .description("Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry")
         .content(
@@ -57,25 +59,46 @@ fn add_default_error(document: &mut utoipa::openapi::OpenApi) {
                 .build(),
         )
         .build();
-    for item in document.paths.paths.values_mut() {
-        for operation in [
-            &mut item.get,
-            &mut item.put,
-            &mut item.post,
-            &mut item.delete,
-            &mut item.options,
-            &mut item.head,
-            &mut item.patch,
-            &mut item.trace,
+    for (path, item) in &mut document.paths.paths {
+        for (method, operation) in [
+            ("get", &mut item.get),
+            ("put", &mut item.put),
+            ("post", &mut item.post),
+            ("delete", &mut item.delete),
+            ("options", &mut item.options),
+            ("head", &mut item.head),
+            ("patch", &mut item.patch),
+            ("trace", &mut item.trace),
         ]
         .into_iter()
-        .flatten()
+        .filter_map(|(method, operation)| operation.as_mut().map(|op| (method, op)))
         {
+            operation.operation_id = Some(format!(
+                "{method}_{}",
+                path.replace(|c: char| !c.is_ascii_alphanumeric(), "_")
+            ));
             operation
                 .responses
                 .responses
                 .entry("default".to_owned())
                 .or_insert_with(|| RefOr::T(response.clone()));
+            for response in operation.responses.responses.values_mut() {
+                if let RefOr::T(response) = response {
+                    response.headers.insert(
+                        "X-Server-Time-Ms".to_owned(),
+                        RefOr::T(
+                            HeaderBuilder::new()
+                                .description(Some("Часы хаба: целые миллисекунды Unix"))
+                                .schema(Some(
+                                    ObjectBuilder::new()
+                                        .schema_type(SchemaType::Type(Type::Integer))
+                                        .minimum(Some(0)),
+                                ))
+                                .build(),
+                        ),
+                    );
+                }
+            }
         }
     }
 }
