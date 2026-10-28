@@ -697,16 +697,36 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
-        /** @enum {string} */
-        ActivityState: "idle" | "working" | "waiting_for_user" | "stalled" | "quota_paused" | "failed" | "stopped";
-        ActivityView: {
+        ActivityConfigView: {
             /** Format: int64 */
             stalled_generating_secs: number;
             /** Format: int64 */
             stalled_tool_secs: number;
         };
         /** @enum {string} */
+        ActivityState: "idle" | "working" | "waiting_for_user" | "stalled" | "quota_paused" | "failed" | "stopped";
+        ActivityView: {
+            evidence: components["schemas"]["Evidence"];
+            since: string;
+            state: components["schemas"]["ActivityState"];
+        };
+        /** @enum {string} */
         ArchiveReason: "crunch" | "scheduled" | "live_execution";
+        AttachmentRecord: {
+            /** Format: uuid */
+            conversation_id: string;
+            fail_reason?: string | null;
+            /** Format: uuid */
+            id: string;
+            mime: string;
+            name: string;
+            sha256: string;
+            /** Format: int64 */
+            size: number;
+            state: string;
+            /** Format: int64 */
+            uploaded_bytes?: number | null;
+        };
         AttachmentView: {
             /** Format: uuid */
             attachment_id: string;
@@ -804,7 +824,7 @@ export interface components {
             sha256?: string | null;
         };
         ConfigView: {
-            activity: components["schemas"]["ActivityView"];
+            activity: components["schemas"]["ActivityConfigView"];
             auth: components["schemas"]["AuthView"];
             defaults: components["schemas"]["DefaultsView"];
             limit_thresholds: components["schemas"]["LimitThresholdsView"];
@@ -861,7 +881,7 @@ export interface components {
         ConversationSnapshot: {
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
-            queue: components["schemas"]["QueueView"];
+            queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
         };
         Counts: {
@@ -893,7 +913,7 @@ export interface components {
             conversation_id: string;
             execution?: components["schemas"]["StartedExecution"] | null;
         };
-        CreatedAttachment: components["schemas"]["AttachmentView"] & {
+        CreatedAttachment: components["schemas"]["AttachmentRecord"] & {
             upload: components["schemas"]["UploadOffer"];
         };
         CrunchDetail: {
@@ -1470,12 +1490,18 @@ export interface components {
             /** Format: int64 */
             rev: number;
         };
+        SnapshotQueueView: {
+            hold_reasons: components["schemas"]["HoldView"][];
+            pause_reasons: components["schemas"]["PauseReason"][];
+            queued: components["schemas"]["InputView"][];
+            run_slot: components["schemas"]["RunSlot"];
+        };
         Snapshot_ConversationSnapshot: {
             cursor: string;
             data: {
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
-                queue: components["schemas"]["QueueView"];
+                queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
             };
             scope: string;
@@ -1689,7 +1715,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AttachmentView"];
+                    "application/json": components["schemas"]["AttachmentRecord"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
@@ -1766,7 +1792,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["AttachmentView"];
+                    "application/json": components["schemas"]["AttachmentRecord"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

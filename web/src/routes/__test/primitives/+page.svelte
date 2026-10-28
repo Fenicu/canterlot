@@ -16,9 +16,16 @@
   import Sheet from '$lib/ui/Sheet.svelte';
   import ConfirmDialog from '$lib/ui/ConfirmDialog.svelte';
   import StageTrack from '$lib/ui/StageTrack.svelte';
+  import { onMount } from 'svelte';
   import { theme } from '$lib/theme';
   import { setMotionScale } from '$lib/motion';
   import type { StageState } from '$lib/ui/stage-track';
+  onMount(() => {
+    if (import.meta.env.VITE_UI_TESTS !== '1') return;
+    void Promise.all([import('$lib/uploads/patch'), import('$lib/uploads/hasher')]).then(([patch, hasher]) => {
+      Object.assign(window, { __canterlotPatchChunk: patch.patchChunk, __canterlotHash: hasher.hashInWorker });
+    });
+  });
   let open = $state(false); let confirm = $state(false); let confirmed = $state(false);
   let checked = $state(false); let value = $state('one'); let input = $state(''); let select = $state('one');
   let index = $state(0); let phase = $state<StageState>('active'); let progress = $state(.25);
