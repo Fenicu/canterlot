@@ -2577,7 +2577,9 @@
             }
           },
           "required": [
-            "enabled"
+            "enabled",
+            "resume_pending",
+            "reserve_override_until"
           ]
         }
       },
@@ -2653,8 +2655,17 @@
             "provider": {
               "type": "string"
             },
+            "window": {
+              "enum": [
+                "five_hour",
+                "weekly"
+              ]
+            },
             "reason": {
-              "type": "string"
+              "enum": [
+                "quota_exhausted",
+                "weekly_reserve"
+              ]
             },
             "wake_at": {
               "anyOf": [
@@ -2665,9 +2676,18 @@
                   "type": "null"
                 }
               ]
+            },
+            "resume_pending": {
+              "type": "boolean"
             }
           },
-          "required": []
+          "required": [
+            "provider",
+            "window",
+            "reason",
+            "wake_at",
+            "resume_pending"
+          ]
         }
       },
       "required": [
@@ -2742,6 +2762,15 @@
             "provider": {
               "type": "string"
             },
+            "window": {
+              "enum": [
+                "five_hour",
+                "weekly"
+              ]
+            },
+            "hold_key": {
+              "type": "string"
+            },
             "input_id": {
               "anyOf": [
                 {
@@ -2751,9 +2780,37 @@
                   "type": "null"
                 }
               ]
+            },
+            "skipped": {
+              "anyOf": [
+                {
+                  "enum": [
+                    "closed",
+                    "crunch_disabled",
+                    "no_live_execution",
+                    "resume_already_queued",
+                    "queue_not_empty",
+                    "not_pending",
+                    "paused",
+                    "weekly_reserve"
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "resume_pending": {
+              "type": "boolean"
             }
           },
-          "required": []
+          "required": [
+            "provider",
+            "window",
+            "input_id",
+            "skipped",
+            "resume_pending"
+          ]
         }
       },
       "required": [

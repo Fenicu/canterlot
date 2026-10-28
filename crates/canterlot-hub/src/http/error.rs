@@ -133,6 +133,17 @@ impl From<crate::conversations::SettingsError> for ApiError {
     }
 }
 
+impl From<crate::crunch::CrunchError> for ApiError {
+    fn from(error: crate::crunch::CrunchError) -> Self {
+        use crate::crunch::CrunchError as E;
+        match error {
+            E::NotFound => Self::new(ErrorCode::NotFound),
+            E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
+            E::Db(error) => error.into(),
+        }
+    }
+}
+
 impl From<crate::scheduler::ScheduleError> for ApiError {
     fn from(error: crate::scheduler::ScheduleError) -> Self {
         use crate::scheduler::ScheduleError as E;

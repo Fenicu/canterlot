@@ -461,7 +461,8 @@ async fn legacy_input_and_block_keys_do_not_collide_after_migration(pool: PgPool
     let old = sqlx::migrate::Migrator {
         migrations: canterlot_hub::db::MIGRATOR
             .iter()
-            .filter(|m| m.version <= 11)
+            // Всё, кроме проверяемой 0012: текущий код пишет старые строки до её применения.
+            .filter(|m| m.version != 12)
             .cloned()
             .collect::<Vec<_>>()
             .into(),

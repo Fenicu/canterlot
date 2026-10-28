@@ -480,6 +480,12 @@ impl Ingest {
         let mut failure = None;
         let mut gap = None;
         let mut changed_limits = BTreeSet::new();
+        let limit_records = batch.records.iter().any(|record| {
+            matches!(
+                record.body.as_ref().and_then(|b| b.body.as_ref()),
+                Some(Body::LimitObserved(_) | Body::LimitReached(_))
+            )
+        });
         let mut touched = BTreeSet::new();
         let mut diagnostics: Vec<(&'static str, serde_json::Value)> = Vec::new();
         let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
@@ -638,6 +644,10 @@ impl Ingest {
             .await?;
         }
         tx.commit().await?;
+        if limit_records {
+            // Факт лимита мог поставить пробуждение или правило резерва.
+            crate::scheduler::notify_pool(&self.pool);
+        }
         if let Some(registry) = &self.registry {
             let providers: BTreeSet<_> = changed_limits.iter().map(|(p, _)| p).collect();
             for provider in providers {
@@ -1477,6 +1487,7 @@ impl crate::grpc::Ingest for Ingest {
                 .await?;
             }
             tx.commit().await?;
+            crate::scheduler::notify_pool(&self.pool);
             self.ignored.fetch_add(unmapped, Ordering::Relaxed);
             if let Some(registry) = &self.registry {
                 let providers: BTreeSet<_> = changed.iter().map(|(p, _)| p).collect();

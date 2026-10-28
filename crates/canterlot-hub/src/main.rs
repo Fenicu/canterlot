@@ -234,7 +234,7 @@ async fn serve(
         dispatcher.clone(),
         scheduler_config,
     )
-    .with_history_days(limits.history_days);
+    .with_limits(registry.clone(), limits.clone());
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone());
     state.ingest = std::sync::Arc::new(

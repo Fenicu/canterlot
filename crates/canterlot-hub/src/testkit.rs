@@ -190,7 +190,8 @@ async fn spawn_on(
     let (shutdown, stop) = tokio::sync::oneshot::channel();
     let root = tokio_util::sync::CancellationToken::new();
     let scheduler =
-        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default());
+        crate::scheduler::Scheduler::new(pool.clone(), dispatcher.clone(), Default::default())
+            .with_limits(registry.clone(), Default::default());
     #[cfg(feature = "fault-injection")]
     let scheduler = {
         let mut scheduler = scheduler;
@@ -310,6 +311,47 @@ pub mod tls {
             server_cert_pem: cert.pem(),
             server_key_pem: key.serialize_pem(),
         }
+    }
+}
+
+/// Сеанс машины только в Registry, без gRPC: команды вниз читаются из `commands`.
+pub struct FakeSession {
+    pub commands: tokio::sync::mpsc::Receiver<canterlot_proto::worker::v1::ControlDown>,
+    pub lease: FakeLease,
+}
+
+/// Пока жива, машина остаётся в Registry.
+pub struct FakeLease {
+    _control: crate::session::ControlLease,
+    _data: Option<crate::session::DataLease>,
+}
+
+/// `data = false` оставляет машину `degraded`; часы машины совпадают с часами хаба.
+pub fn fake_session(
+    registry: &crate::session::Registry,
+    machine_id: Uuid,
+    capabilities: &[&str],
+    data: bool,
+) -> FakeSession {
+    let connection = Uuid::now_v7();
+    let (control, commands) = registry
+        .register(machine_id, connection, Vec::new())
+        .expect("free test machine slot");
+    let capabilities: Vec<String> = capabilities.iter().map(|c| (*c).to_owned()).collect();
+    registry.mark_accepted(machine_id, connection, &capabilities);
+    let data = data.then(|| {
+        registry
+            .attach_data(machine_id, connection, &[])
+            .expect("test data lease")
+    });
+    let now = chrono::Utc::now();
+    registry.observe_clock(machine_id, now.timestamp_millis() as u64, now);
+    FakeSession {
+        commands,
+        lease: FakeLease {
+            _control: control,
+            _data: data,
+        },
     }
 }
 

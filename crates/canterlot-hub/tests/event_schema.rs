@@ -370,6 +370,31 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         }),
     ])
     .await;
+    sqlx::query("update conversations set crunch_enabled=true where id=$1")
+        .bind(run.seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    run.send(vec![Body::LimitReached(LimitReached {
+        execution_id: run.execution.execution_id.to_string(),
+        provider: "claude".into(),
+        window: LimitWindow::Weekly as i32,
+        resets_at_ms: (now.timestamp_millis() + 3_600_000) as u64,
+        ..Default::default()
+    })])
+    .await;
+    sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) values($1,'wake',$2,$3,$4,$5)")
+        .bind(Uuid::now_v7()).bind(run.seed.owner_id).bind(run.seed.conversation_id).bind(now)
+        .bind(json!({"provider":"claude","window":"weekly","hold_key":"weekly:claude","verified":true}))
+        .execute(&pool).await.unwrap();
+    canterlot_hub::scheduler::Scheduler::new(
+        pool.clone(),
+        canterlot_hub::dispatcher::Dispatcher::channel().0,
+        Default::default(),
+    )
+    .tick(now + chrono::TimeDelta::seconds(1))
+    .await
+    .unwrap();
     run.ingest
         .reconcile(
             run.seed.machine_id,
@@ -440,6 +465,8 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         "conversation_updated",
         "conversation_settings_changed",
         "crunch_changed",
+        "crunch_held",
+        "crunch_woken",
         "group_changed",
         "queue_paused",
         "derived_changed",

@@ -135,6 +135,19 @@ pub async fn start_in_tx(
     options: &StartOptions,
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
+    let harness: Option<String> =
+        sqlx::query_scalar("select harness from conversations where id=$1 and owner_id=$2")
+            .bind(conversation_id)
+            .bind(owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    // Строка провайдера раньше очереди: возобновление и вход в резерв сериализуются.
+    let provider = harness
+        .as_deref()
+        .and_then(canterlot_proto::harness::provider_of);
+    if let Some(provider) = provider {
+        crate::limits::share_provider(conn, provider).await?;
+    }
     let mut queue: LockedQueue = sqlx::query_as(
         "select * from queue_state
          where conversation_id = $1 for update",
@@ -208,6 +221,18 @@ pub async fn start_in_tx(
         .0
         .retain(|r| *r != HoldReason::NoLiveExecution);
     add_once(&mut queue.hold_reasons.0, HoldReason::ExecutionStarting);
+    let overridden = row
+        .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("reserve_override_until")?
+        .is_some_and(|until| until > chrono::Utc::now());
+    if let Some(provider) = provider.filter(|_| !overridden) {
+        for hold in crate::crunch::initial_holds_in_tx(conn, provider).await? {
+            if !queue.hold_reasons.0.iter().any(|h| {
+                matches!((h, &hold), (HoldReason::WeeklyReserve { provider: a, .. }, HoldReason::WeeklyReserve { provider: b, .. }) if a == b)
+            }) {
+                queue.hold_reasons.0.push(hold);
+            }
+        }
+    }
     queue
         .save(
             conn,

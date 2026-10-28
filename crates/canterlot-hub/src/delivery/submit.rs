@@ -393,6 +393,14 @@ async fn submit_attempt(
         return Err(SubmitError::QueueFull { limit: QUEUE_LIMIT });
     }
 
+    // Ввод владельца сам становится продолжением после лимита.
+    let resumed: Option<(bool, Option<DateTime<Utc>>)> = sqlx::query_as(
+        "update conversations set resume_pending = false where id = $1 and resume_pending
+         returning crunch_enabled, reserve_override_until",
+    )
+    .bind(req.conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
     sqlx::query(
         "update queue_state set next_input_seq = next_input_seq + 1 where conversation_id = $1",
     )
@@ -463,6 +471,28 @@ async fn submit_attempt(
         },
     )
     .await?;
+
+    if let Some((enabled, until)) = resumed {
+        events::append(
+            conn,
+            NewEvent {
+                scope: Scope::Conversation {
+                    id: req.conversation_id,
+                },
+                kind: "crunch_changed",
+                conversation_id: Some(req.conversation_id),
+                execution_id: None,
+                payload: json!({
+                    "enabled": enabled,
+                    "resume_pending": false,
+                    "reserve_override_until": until
+                        .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)),
+                }),
+                correlation_id: req.correlation_id,
+            },
+        )
+        .await?;
+    }
 
     if title_changed {
         crate::conversations::emit_attributes(

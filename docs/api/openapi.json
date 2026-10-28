@@ -1247,6 +1247,56 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/spend-reserve": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "summary": "Ручное продолжение одной сессии за счёт недельного резерва до сброса недели.",
+        "operationId": "spend_reserve",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Решение о продолжении за счёт резерва",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpendOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/stop": {
       "post": {
         "tags": [
@@ -4763,6 +4813,13 @@
           },
           "weekly_reserve_active": {
             "type": "boolean"
+          },
+          "weekly_reserve_resets_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Сброс недели, в окне которой включился резерв."
           }
         }
       },
@@ -5296,6 +5353,14 @@
             "type": "string"
           }
         }
+      },
+      "SpendOutcome": {
+        "type": "string",
+        "enum": [
+          "continued",
+          "already_continued",
+          "not_held"
+        ]
       },
       "StartedExecution": {
         "type": "object",

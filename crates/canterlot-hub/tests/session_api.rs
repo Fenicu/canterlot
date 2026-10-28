@@ -557,6 +557,12 @@ async fn exercise_mutation_replay(pool: PgPool) -> Vec<Observed> {
         ),
         (
             Method::POST,
+            format!("/api/v1/conversations/{id}/spend-reserve"),
+            None,
+            None,
+        ),
+        (
+            Method::POST,
             format!("/api/v1/conversations/{resume_id}/resume"),
             Some(serde_json::json!({"continue_queue":false})),
             Some(serde_json::json!({"continue_queue":true})),

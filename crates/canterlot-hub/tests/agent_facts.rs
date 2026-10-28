@@ -1314,7 +1314,11 @@ async fn an_unknown_provider_is_invalid_and_leaves_no_provider_row(pool: PgPool)
         .await;
     assert!(matches!(result, Err(IngestError::InvalidRecord)));
     assert_eq!(
-        count(&pool, "select count(*) from provider_limits").await,
+        count(
+            &pool,
+            "select count(*) from provider_limits where provider='bogus'"
+        )
+        .await,
         0
     );
     Ok(())

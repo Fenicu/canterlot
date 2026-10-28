@@ -1,3 +1,4 @@
+pub use crate::crunch::LimitReachedEffect;
 use crate::{
     blocks::ExecutionRef,
     config::LimitsConfig,
@@ -72,6 +73,7 @@ pub struct ProviderLimits {
     pub weekly: Option<WindowState>,
     pub five_hour: Option<WindowState>,
     pub weekly_reserve_active: bool,
+    pub weekly_reserve_resets_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Serialize)]
 pub struct WindowState {
@@ -89,6 +91,21 @@ pub(crate) async fn lock_provider(
         .execute(&mut *conn)
         .await?;
     sqlx::query("select provider from provider_limits where provider=$1 for update")
+        .bind(provider)
+        .fetch_one(conn)
+        .await?;
+    Ok(())
+}
+/// Разделяемая блокировка строки провайдера: создание и возобновление сессии против правила резерва.
+pub(crate) async fn share_provider(
+    conn: &mut PgConnection,
+    provider: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("insert into provider_limits(provider) values($1) on conflict do nothing")
+        .bind(provider)
+        .execute(&mut *conn)
+        .await?;
+    sqlx::query("select provider from provider_limits where provider=$1 for share")
         .bind(provider)
         .fetch_one(conn)
         .await?;
@@ -152,12 +169,66 @@ pub(crate) async fn record_in_tx(
             Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,updated_at=$5 where provider=$1",
         }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(now).execute(&mut *conn).await?;
     }
+    if newer && o.window == Window::Weekly {
+        weekly_stage(conn, o, observed_at, now, config).await?;
+    }
     Ok(Recorded {
         snapshot_stored: store,
         provider_changed: newer
             && (used != Some(i32::from(o.used_permille)) || reset != o.resets_at),
         stale: !newer,
     })
+}
+/// Стадия наблюдения недельного резерва; сами удержания ставит задание `limit_rule`.
+async fn weekly_stage(
+    conn: &mut PgConnection,
+    o: &Observation,
+    observed_at: DateTime<Utc>,
+    now: DateTime<Utc>,
+    config: &LimitsConfig,
+) -> Result<(), sqlx::Error> {
+    let (active, mut reserve_resets, mut low_count, mut low_at): (
+        bool,
+        Option<DateTime<Utc>>,
+        i16,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as("select weekly_reserve_active,weekly_reserve_resets_at,weekly_low_count,weekly_low_at from provider_limits where provider=$1")
+        .bind(&o.provider)
+        .fetch_one(&mut *conn)
+        .await?;
+    let threshold = i32::from(config.weekly_reserve_pct) * 10;
+    let exit = threshold - i32::from(config.reserve_exit_hysteresis_permille);
+    let used = i32::from(o.used_permille);
+    let interval = chrono::Duration::from_std(config.snapshot_min_interval)
+        .map_err(|_| sqlx::Error::InvalidArgument("snapshot interval overflow".into()))?;
+    let entered = !active && used >= threshold;
+    if entered {
+        reserve_resets = o.resets_at;
+        (low_count, low_at) = (0, None);
+    } else if active {
+        reserve_resets = reserve_resets.or(o.resets_at);
+        if used > exit {
+            (low_count, low_at) = (0, None);
+        } else if low_count == 0 {
+            (low_count, low_at) = (1, Some(observed_at));
+        } else if low_at.is_none_or(|at| observed_at - at >= interval) {
+            (low_count, low_at) = (low_count.saturating_add(1), Some(observed_at));
+        }
+    } else {
+        (low_count, low_at) = (0, None);
+    }
+    let active = active || entered;
+    sqlx::query("update provider_limits set weekly_reserve_active=$2,weekly_reserve_resets_at=$3,weekly_low_count=$4,weekly_low_at=$5 where provider=$1 and (weekly_reserve_active,weekly_reserve_resets_at,weekly_low_count,weekly_low_at) is distinct from ($2,$3,$4,$5)")
+        .bind(&o.provider).bind(active).bind(if active { reserve_resets } else { None }).bind(low_count).bind(low_at)
+        .execute(&mut *conn).await?;
+    if !active {
+        return Ok(());
+    }
+    // Вставляет только держатель строки провайдера, поэтому проверка без ожидания чужих транзакций.
+    sqlx::query("insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload) select $1,'limit_rule',m.owner_id,null,$3,jsonb_build_object('provider',$4::text) from machines m where m.id=$2 and not exists(select 1 from scheduled_jobs where kind='limit_rule' and state='pending' and payload->>'provider'=$4) on conflict do nothing")
+        .bind(Uuid::now_v7()).bind(o.machine_id).bind(now).bind(&o.provider)
+        .execute(&mut *conn).await?;
+    Ok(())
 }
 pub(crate) async fn emit_changed(
     conn: &mut PgConnection,
@@ -180,21 +251,44 @@ pub(crate) async fn emit_changed(
 }
 pub async fn on_limit_reached_in_tx(
     conn: &mut PgConnection,
-    _owner_id: Uuid,
+    owner_id: Uuid,
     run: &ExecutionRef,
     fact: &LimitReached,
-    _config: &LimitsConfig,
-    _now: DateTime<Utc>,
+    config: &LimitsConfig,
+    now: DateTime<Utc>,
     correlation_id: Uuid,
-) -> Result<(), sqlx::Error> {
+) -> Result<LimitReachedEffect, sqlx::Error> {
     let window = Window::from_proto(fact.window)?;
+    if !known_provider(&fact.provider) {
+        return Err(sqlx::Error::InvalidArgument(
+            "unknown limit provider".into(),
+        ));
+    }
+    // Строка провайдера раньше очереди: общий порядок блокировок хаба.
+    lock_provider(conn, &fact.provider).await?;
     let mut queue:LockedQueue=sqlx::query_as("select q.* from queue_state q join conversations c on c.id=q.conversation_id join executions e on e.conversation_id=c.id where e.id=$1 and c.id=$2 and c.machine_id=$3 for update of q").bind(run.execution_id).bind(run.conversation_id).bind(run.machine_id).fetch_one(&mut *conn).await?;
+    let crunch: bool = sqlx::query_scalar("select crunch_enabled from conversations where id=$1")
+        .bind(run.conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if crunch {
+        return crate::crunch::hold_quota_in_tx(
+            conn,
+            owner_id,
+            run,
+            fact,
+            config,
+            now,
+            correlation_id,
+        )
+        .await;
+    }
     // Пока пауза по этому окну стоит, повторный факт ничего не добавляет.
     if queue.pause_reasons.0.iter().any(|reason| {
         matches!(reason, PauseReason::LimitReached { provider, window: stored, .. }
             if provider.as_deref() == Some(fact.provider.as_str()) && stored.as_deref() == Some(window.as_str()))
     }) {
-        return Ok(());
+        return Ok(LimitReachedEffect::Paused);
     }
     let resets_at = timestamp(fact.resets_at_ms)?;
     queue.pause_reasons.0.push(PauseReason::LimitReached {
@@ -206,7 +300,18 @@ pub async fn on_limit_reached_in_tx(
     queue
         .save(conn, &slot, Some(run.execution_id), correlation_id)
         .await?;
-    events::append(conn,NewEvent{scope:Scope::Conversation{id:run.conversation_id},kind:"limit_reached",conversation_id:Some(run.conversation_id),execution_id:Some(run.execution_id),payload:json!({"provider":fact.provider,"window":window,"resets_at":resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true))}),correlation_id}).await?;
+    limit_reached_event(conn, run, &fact.provider, window, resets_at, correlation_id).await?;
+    Ok(LimitReachedEffect::Paused)
+}
+pub(crate) async fn limit_reached_event(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    provider: &str,
+    window: Window,
+    resets_at: Option<DateTime<Utc>>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    events::append(conn,NewEvent{scope:Scope::Conversation{id:run.conversation_id},kind:"limit_reached",conversation_id:Some(run.conversation_id),execution_id:Some(run.execution_id),payload:json!({"provider":provider,"window":window,"resets_at":resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true))}),correlation_id}).await?;
     Ok(())
 }
 pub(crate) fn timestamp(ms: u64) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
@@ -244,6 +349,7 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                 weekly: state("weekly")?,
                 five_hour: state("five_hour")?,
                 weekly_reserve_active: r.try_get("weekly_reserve_active")?,
+                weekly_reserve_resets_at: r.try_get("weekly_reserve_resets_at")?,
             })
         })
         .collect()

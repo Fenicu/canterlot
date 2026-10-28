@@ -326,7 +326,7 @@ pub async fn request_stop_execution(
     Ok(outcome)
 }
 
-async fn withdraw_dispatch(
+pub(crate) async fn withdraw_dispatch(
     conn: &mut PgConnection,
     slot: &RunSlot,
 ) -> Result<Option<Uuid>, sqlx::Error> {

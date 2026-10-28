@@ -37,6 +37,8 @@ pub struct ProviderView {
     pub weekly: Option<WindowView>,
     pub five_hour: Option<WindowView>,
     pub weekly_reserve_active: bool,
+    /// Сброс недели, в окне которой включился резерв.
+    pub weekly_reserve_resets_at: Option<String>,
 }
 impl From<limits::ProviderLimits> for ProviderView {
     fn from(p: limits::ProviderLimits) -> Self {
@@ -45,6 +47,7 @@ impl From<limits::ProviderLimits> for ProviderView {
             weekly: p.weekly.map(window),
             five_hour: p.five_hour.map(window),
             weekly_reserve_active: p.weekly_reserve_active,
+            weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
         }
     }
 }
@@ -81,12 +84,7 @@ async fn current(
         limits::current(&mut *s.pool.acquire().await?)
             .await?
             .into_iter()
-            .map(|p| ProviderView {
-                provider: p.provider,
-                weekly: p.weekly.map(window),
-                five_hour: p.five_hour.map(window),
-                weekly_reserve_active: p.weekly_reserve_active,
-            })
+            .map(ProviderView::from)
             .collect(),
     ))
 }

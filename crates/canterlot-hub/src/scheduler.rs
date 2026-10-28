@@ -13,12 +13,14 @@ use tokio::sync::{Notify, watch};
 use uuid::Uuid;
 
 use crate::{
-    config::SchedulerConfig,
+    config::{LimitsConfig, SchedulerConfig},
     conversations::{SubmitMessage, submit_message_in_tx},
+    crunch::{self, JobOutcome},
     delivery::{ContentBlock, SubmitError},
     dispatcher::Dispatcher,
     events::{self, NewEvent, Scope},
     idempotency,
+    session::Registry,
     singleton::Singleton,
 };
 
@@ -129,6 +131,10 @@ fn pool_key(pool: &PgPool) -> String {
         o.get_port(),
         o.get_database().unwrap_or("postgres")
     )
+}
+/// Будит планировщик этого пула после commit, создавшего задание.
+pub(crate) fn notify_pool(pool: &PgPool) {
+    service(pool).notify.notify_one();
 }
 fn service(pool: &PgPool) -> Arc<Service> {
     services()
@@ -348,6 +354,7 @@ pub struct TickReport {
     pub fired: usize,
     pub retried: usize,
     pub failed: usize,
+    pub cancelled: usize,
     pub next_due: Option<DateTime<Utc>>,
 }
 #[derive(Clone)]
@@ -376,6 +383,8 @@ pub struct Scheduler {
     dispatcher: Dispatcher,
     service: Arc<Service>,
     history_days: u32,
+    registry: Option<Registry>,
+    limits: Arc<LimitsConfig>,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
 }
@@ -395,13 +404,22 @@ impl Scheduler {
             pool,
             dispatcher,
             service,
-            history_days: crate::config::LimitsConfig::default().history_days,
+            history_days: LimitsConfig::default().history_days,
+            registry: None,
+            limits: Arc::new(LimitsConfig::default()),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
         }
     }
     pub fn with_history_days(mut self, days: u32) -> Self {
         self.history_days = days;
+        self
+    }
+    /// Правила лимитов: опрос и снимки идут через сеансы этого Registry после commit.
+    pub fn with_limits(mut self, registry: Registry, limits: LimitsConfig) -> Self {
+        self.history_days = limits.history_days;
+        self.registry = Some(registry);
+        self.limits = Arc::new(limits);
         self
     }
     pub fn notify(&self) {
@@ -412,131 +430,137 @@ impl Scheduler {
         let mut report = TickReport::default();
         loop {
             let mut tx = self.pool.begin().await?;
-            let job:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where kind='message' and state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await?;
+            let job:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await?;
             let Some(job) = job else {
                 tx.commit().await?;
                 break;
             };
-            debug_assert_eq!(job.kind, "message");
-            #[cfg(feature = "fault-injection")]
-            self.faults
-                .pause(crate::fault_injection::Point::SchedulerBeforeSubmit)
-                .await;
-            let message = job.message()?;
-            let key = format!("sched:{}", job.id);
-            let existing: Option<Uuid> = sqlx::query_scalar(
-                "select id from inputs where owner_id=$1 and idempotency_key=$2",
-            )
-            .bind(job.owner_id)
-            .bind(&key)
-            .fetch_optional(&mut *tx)
-            .await?;
-            let result = if let Some(input_id) = existing {
-                Ok(input_id)
+            if job.kind == "message" {
+                self.fire_message(tx, job, now, &mut report).await?;
             } else {
-                submit_message_in_tx(
-                    &mut tx,
-                    &SubmitMessage {
-                        owner_id: job.owner_id,
-                        conversation_id: message.conversation_id,
-                        key: key.clone(),
-                        content: message.content.clone(),
-                        attachment_ids: vec![],
-                        retry_of: None,
-                        received_at: job.run_at,
-                    },
-                    Uuid::now_v7(),
-                )
-                .await
-                .map(|s| s.input_id)
-            };
-            match result {
-                Ok(input_id) => {
-                    self.finish(&mut tx, job, "fired", json!({"input_id":input_id}))
-                        .await?;
-                    tx.commit().await?;
-                    self.dispatcher.trigger(message.conversation_id);
-                    report.fired += 1;
-                }
-                Err(SubmitError::QueueFull { .. }) => {
-                    tx.rollback().await?;
-                    // После отката блокировка задания берётся заново, до любых блокировок очереди.
-                    let mut retry = self.pool.begin().await?;
-                    let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update skip locked").bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *retry).await?;
-                    if let Some(mut current) = current {
-                        current.attempts += 1;
-                        if current.attempts as u32 >= self.service.config.max_attempts {
-                            self.finish(
-                                &mut retry,
-                                current,
-                                "failed",
-                                json!({"error":"queue_full"}),
-                            )
-                            .await?;
-                            report.failed += 1;
-                        } else {
-                            current.run_at = now
-                                + TimeDelta::from_std(self.service.config.retry_queue_full)
-                                    .map_err(|_| {
-                                        sqlx::Error::InvalidArgument(
-                                            "retry duration out of range".into(),
-                                        )
-                                    })?;
-                            let updated:JobRow=sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,updated_at=clock_timestamp() where id=$1 returning *").bind(current.id).bind(current.attempts).bind(current.run_at).fetch_one(&mut *retry).await?;
-                            changed(&mut retry, &updated.message()?, Uuid::now_v7()).await?;
-                            report.retried += 1;
-                        }
-                    }
-                    retry.commit().await?;
-                }
-                Err(
-                    error @ (SubmitError::ConversationClosed | SubmitError::ConversationNotFound),
-                ) => {
-                    let reason = if matches!(error, SubmitError::ConversationNotFound) {
-                        "conversation_not_found"
-                    } else {
-                        "conversation_closed"
-                    };
-                    self.finish(&mut tx, job, "failed", json!({"error":reason}))
-                        .await?;
-                    tx.commit().await?;
-                    report.failed += 1;
-                }
-                Err(SubmitError::KeyRaceLost) => {
-                    tx.rollback().await?;
-                    let mut retry = self.pool.begin().await?;
-                    let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' for update skip locked").bind(job.id).fetch_optional(&mut *retry).await?;
-                    if let Some(current) = current {
-                        let input_id: Uuid = sqlx::query_scalar(
-                            "select id from inputs where owner_id=$1 and idempotency_key=$2",
-                        )
-                        .bind(current.owner_id)
-                        .bind(&key)
-                        .fetch_one(&mut *retry)
-                        .await?;
-                        self.finish(&mut retry, current, "fired", json!({"input_id":input_id}))
-                            .await?;
-                        report.fired += 1;
-                    }
-                    retry.commit().await?;
-                    self.dispatcher.trigger(message.conversation_id);
-                }
-                Err(SubmitError::Db(e)) => {
-                    tx.rollback().await?;
-                    return Err(e);
-                }
-                Err(_) => {
-                    tx.rollback().await?;
-                    return Err(sqlx::Error::Protocol("scheduled submit rejected".into()));
-                }
+                self.fire_limit_job(tx, job, now, &mut report).await?;
             }
         }
-        report.next_due = sqlx::query_scalar(
-            "select min(run_at) from scheduled_jobs where kind='message' and state='pending'",
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        report.next_due =
+            sqlx::query_scalar("select min(run_at) from scheduled_jobs where state='pending'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(report)
+    }
+
+    async fn fire_message(
+        &self,
+        mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        job: JobRow,
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<(), sqlx::Error> {
+        debug_assert_eq!(job.kind, "message");
+        #[cfg(feature = "fault-injection")]
+        self.faults
+            .pause(crate::fault_injection::Point::SchedulerBeforeSubmit)
+            .await;
+        let message = job.message()?;
+        let key = format!("sched:{}", job.id);
+        let existing: Option<Uuid> =
+            sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
+                .bind(job.owner_id)
+                .bind(&key)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let result = if let Some(input_id) = existing {
+            Ok(input_id)
+        } else {
+            submit_message_in_tx(
+                &mut tx,
+                &SubmitMessage {
+                    owner_id: job.owner_id,
+                    conversation_id: message.conversation_id,
+                    key: key.clone(),
+                    content: message.content.clone(),
+                    attachment_ids: vec![],
+                    retry_of: None,
+                    received_at: job.run_at,
+                },
+                Uuid::now_v7(),
+            )
+            .await
+            .map(|s| s.input_id)
+        };
+        match result {
+            Ok(input_id) => {
+                self.finish(&mut tx, job, "fired", json!({"input_id":input_id}))
+                    .await?;
+                tx.commit().await?;
+                self.dispatcher.trigger(message.conversation_id);
+                report.fired += 1;
+            }
+            Err(SubmitError::QueueFull { .. }) => {
+                tx.rollback().await?;
+                // После отката блокировка задания берётся заново, до любых блокировок очереди.
+                let mut retry = self.pool.begin().await?;
+                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 for update skip locked").bind(job.id).bind(job.attempts).bind(job.run_at).fetch_optional(&mut *retry).await?;
+                if let Some(mut current) = current {
+                    current.attempts += 1;
+                    if current.attempts as u32 >= self.service.config.max_attempts {
+                        self.finish(&mut retry, current, "failed", json!({"error":"queue_full"}))
+                            .await?;
+                        report.failed += 1;
+                    } else {
+                        current.run_at =
+                            now + TimeDelta::from_std(self.service.config.retry_queue_full)
+                                .map_err(|_| {
+                                    sqlx::Error::InvalidArgument(
+                                        "retry duration out of range".into(),
+                                    )
+                                })?;
+                        let updated:JobRow=sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,updated_at=clock_timestamp() where id=$1 returning *").bind(current.id).bind(current.attempts).bind(current.run_at).fetch_one(&mut *retry).await?;
+                        changed(&mut retry, &updated.message()?, Uuid::now_v7()).await?;
+                        report.retried += 1;
+                    }
+                }
+                retry.commit().await?;
+            }
+            Err(error @ (SubmitError::ConversationClosed | SubmitError::ConversationNotFound)) => {
+                let reason = if matches!(error, SubmitError::ConversationNotFound) {
+                    "conversation_not_found"
+                } else {
+                    "conversation_closed"
+                };
+                self.finish(&mut tx, job, "failed", json!({"error":reason}))
+                    .await?;
+                tx.commit().await?;
+                report.failed += 1;
+            }
+            Err(SubmitError::KeyRaceLost) => {
+                tx.rollback().await?;
+                let mut retry = self.pool.begin().await?;
+                let current:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' for update skip locked").bind(job.id).fetch_optional(&mut *retry).await?;
+                if let Some(current) = current {
+                    let input_id: Uuid = sqlx::query_scalar(
+                        "select id from inputs where owner_id=$1 and idempotency_key=$2",
+                    )
+                    .bind(current.owner_id)
+                    .bind(&key)
+                    .fetch_one(&mut *retry)
+                    .await?;
+                    self.finish(&mut retry, current, "fired", json!({"input_id":input_id}))
+                        .await?;
+                    report.fired += 1;
+                }
+                retry.commit().await?;
+                self.dispatcher.trigger(message.conversation_id);
+            }
+            Err(SubmitError::Db(e)) => {
+                tx.rollback().await?;
+                return Err(e);
+            }
+            Err(_) => {
+                tx.rollback().await?;
+                return Err(sqlx::Error::Protocol("scheduled submit rejected".into()));
+            }
+        }
+        Ok(())
     }
 
     async fn finish(
@@ -549,6 +573,135 @@ impl Scheduler {
         let updated:JobRow=sqlx::query_as("update scheduled_jobs set state=$2,attempts=$3,result=$4,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1 returning *")
             .bind(job.id).bind(state).bind(job.attempts).bind(result).fetch_one(&mut *conn).await?;
         changed(conn, &updated.message()?, Uuid::now_v7()).await
+    }
+
+    /// Задания лимитов: обработчик и завершение в одной транзакции, опрос и снимок после commit.
+    async fn fire_limit_job(
+        &self,
+        mut tx: sqlx::Transaction<'static, sqlx::Postgres>,
+        job: JobRow,
+        now: DateTime<Utc>,
+        report: &mut TickReport,
+    ) -> Result<(), sqlx::Error> {
+        let kind = match job.kind.as_str() {
+            "wake" => JobKind::Wake,
+            "limit_check" => JobKind::LimitCheck,
+            "limit_rule" => JobKind::LimitRule,
+            _ => {
+                finish_limit(
+                    &mut tx,
+                    job.id,
+                    "cancelled",
+                    json!({"reason":"unknown_kind"}),
+                )
+                .await?;
+                tx.commit().await?;
+                report.cancelled += 1;
+                return Ok(());
+            }
+        };
+        let claimed = ClaimedJob {
+            id: job.id,
+            kind,
+            owner_id: job.owner_id,
+            conversation_id: job.conversation_id,
+            run_at: job.run_at,
+            payload: job.payload.clone(),
+            attempts: job.attempts,
+        };
+        #[cfg(feature = "fault-injection")]
+        if kind == JobKind::Wake {
+            self.faults
+                .pause(crate::fault_injection::Point::WakeBeforeSubmit)
+                .await;
+        }
+        let provider = job.payload["provider"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned();
+        let correlation = Uuid::now_v7();
+        let mut left = Vec::new();
+        let outcome = match kind {
+            JobKind::Wake => {
+                crunch::handle_wake_in_tx(&mut tx, &claimed, &self.limits, now, correlation).await
+            }
+            JobKind::LimitCheck => {
+                crunch::handle_limit_check_in_tx(&mut tx, &claimed, &self.limits, now, correlation)
+                    .await
+            }
+            JobKind::LimitRule => crunch::apply_weekly_rule_in_tx(
+                &mut tx,
+                job.owner_id,
+                &provider,
+                &self.limits,
+                now,
+                correlation,
+            )
+            .await
+            .and_then(|effect| {
+                left = effect.left.clone();
+                serde_json::to_value(&effect)
+                    .map(JobOutcome::Done)
+                    .map_err(|e| sqlx::Error::Encode(Box::new(e)))
+            }),
+            JobKind::Message => unreachable!("message jobs are fired separately"),
+        };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(e) => {
+                let _ = tx.rollback().await;
+                return Err(e);
+            }
+        };
+        match outcome {
+            JobOutcome::Done(result) => {
+                finish_limit(&mut tx, job.id, "fired", result).await?;
+                tx.commit().await?;
+                report.fired += 1;
+                match kind {
+                    JobKind::Wake => {
+                        if let Some(id) = job.conversation_id {
+                            self.dispatcher.trigger(id);
+                        }
+                    }
+                    JobKind::LimitRule => {
+                        for id in left {
+                            self.dispatcher.trigger(id);
+                        }
+                        if let Some(registry) = &self.registry
+                            && let Err(e) =
+                                crate::limits::push_limits_snapshot(&self.pool, registry, &provider)
+                                    .await
+                        {
+                            log_error(&e);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            JobOutcome::Cancelled(reason) => {
+                finish_limit(&mut tx, job.id, "cancelled", json!({"reason":reason})).await?;
+                tx.commit().await?;
+                report.cancelled += 1;
+            }
+            JobOutcome::Retry { at, poll } => {
+                // Повтор не раньше следующей секунды: цикл тика не крутит одно задание.
+                let at = at.max(now + TimeDelta::seconds(1));
+                sqlx::query("update scheduled_jobs set run_at=$2,attempts=$3,updated_at=clock_timestamp() where id=$1")
+                    .bind(job.id).bind(at).bind(job.attempts + i32::from(poll)).execute(&mut *tx).await?;
+                tx.commit().await?;
+                report.retried += 1;
+                if poll && let Some(registry) = &self.registry {
+                    let interval = crunch::poll_interval(&self.limits, &provider, job.attempts);
+                    if let Err(e) =
+                        crunch::request_poll(&self.pool, registry, &provider, interval, now).await
+                    {
+                        log_error(&e);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
     pub async fn maintenance(&self) -> Result<(), sqlx::Error> {
@@ -604,6 +757,18 @@ impl Scheduler {
 }
 fn log_error(e: &sqlx::Error) {
     tracing::error!(kind="scheduler_db_error",error=%crate::dberr::describe(e),"scheduler operation failed");
+}
+
+/// Внутренние задания лимитов не публикуют `scheduled_changed`: это не сообщения владельца.
+async fn finish_limit(
+    conn: &mut PgConnection,
+    id: Uuid,
+    state: &str,
+    result: Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query("update scheduled_jobs set state=$2,result=$3,updated_at=clock_timestamp(),fired_at=case when $2='fired' then clock_timestamp() else null end where id=$1")
+        .bind(id).bind(state).bind(result).execute(conn).await?;
+    Ok(())
 }
 
 pub(crate) async fn publish_archive_cancellations(

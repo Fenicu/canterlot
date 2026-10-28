@@ -9,6 +9,7 @@ pub mod blocks;
 pub mod bus;
 pub mod config;
 pub mod conversations;
+pub mod crunch;
 pub mod db;
 pub mod dberr;
 pub mod delivery;

@@ -486,7 +486,7 @@ pub async fn detail(
         }
     }
     let execution=sqlx::query("select id,generation,state,outcome,native_conversation_id,created_at from executions where conversation_id=$1 and state not in ('stopped','failed')").bind(id).fetch_optional(&mut *conn).await?.map(|r|->Result<Value,sqlx::Error>{Ok(json!({"execution_id":r.try_get::<Uuid,_>("id")?,"generation":r.try_get::<i64,_>("generation")?,"state":r.try_get::<String,_>("state")?,"outcome":r.try_get::<Option<String>,_>("outcome")?,"native_conversation_id":r.try_get::<Option<String>,_>("native_conversation_id")?,"created_at":time(r.try_get("created_at")?)}))}).transpose()?;
-    let resume_pending = false;
+    let resume_pending: bool = row.try_get("resume_pending")?;
     Ok(Some(ConversationDetail {
         attributes: i.attributes,
         model: i.model,
@@ -904,6 +904,12 @@ async fn create_in_tx(
     {
         return Err(CreateError::Invalid("attributes"));
     }
+    // Строка провайдера `for share` раньше очереди: правило резерва видит новый разговор или наоборот.
+    let mut holds = vec![HoldReason::NoLiveExecution];
+    if let Some(provider) = canterlot_proto::harness::provider_of(&req.harness) {
+        crate::limits::share_provider(conn, provider).await?;
+        holds.extend(crate::crunch::initial_holds_in_tx(conn, provider).await?);
+    }
     let id = Uuid::now_v7();
     let title = req.title.as_deref().unwrap_or("");
     let user = !title.trim().is_empty();
@@ -919,7 +925,11 @@ async fn create_in_tx(
     };
     sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
             .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(profile).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
-    sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,'[{\"reason\":\"no_live_execution\"}]')").bind(id).execute(&mut *conn).await?;
+    sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
+        .bind(id)
+        .bind(sqlx::types::Json(&holds))
+        .execute(&mut *conn)
+        .await?;
     replace_groups(conn, id, &req.group_ids).await?;
     let execution = if req.start {
         Some(
@@ -1017,6 +1027,9 @@ async fn update_attributes_in_tx(
                 .bind(id)
                 .execute(&mut *conn)
                 .await?;
+            if crunch {
+                crate::crunch::disable_in_tx(conn, id, correlation_id).await?;
+            }
         }
     }
     sqlx::query("update conversations set title=coalesce($2,title),title_source=case when $2::text is null then title_source when length(btrim($2))=0 then 'auto' else 'user' end,color=case when $3 then $4 else color end,pinned=coalesce($5,pinned),pinned_at=case when $5=true and not pinned then clock_timestamp() when $5=false then null else pinned_at end,archived_at=case when $6=true then coalesce(archived_at,clock_timestamp()) when $6=false then null else archived_at end,updated_at=clock_timestamp() where id=$1")
@@ -1040,12 +1053,21 @@ async fn set_crunch_in_tx(
         return Err(UpdateError::Invalid("resume_text"));
     }
     sqlx::query("update conversations set crunch_enabled=$2,crunch_resume_text=case when $3::text is not null then $3 when $2 then $4 else crunch_resume_text end,updated_at=clock_timestamp() where id=$1").bind(id).bind(setting.enabled).bind(&setting.resume_text).bind(&limits.default_resume_text).execute(&mut *conn).await?;
+    if !setting.enabled {
+        crate::crunch::disable_in_tx(conn, id, correlation_id).await?;
+    }
+    let (resume_pending, until): (bool, Option<DateTime<Utc>>) = sqlx::query_as(
+        "select resume_pending,reserve_override_until from conversations where id=$1",
+    )
+    .bind(id)
+    .fetch_one(&mut *conn)
+    .await?;
     append(
         conn,
         Scope::Conversation { id },
         "crunch_changed",
         Some(id),
-        json!({"enabled":setting.enabled}),
+        json!({"enabled":setting.enabled,"resume_pending":resume_pending,"reserve_override_until":until.map(time)}),
         correlation_id,
     )
     .await?;

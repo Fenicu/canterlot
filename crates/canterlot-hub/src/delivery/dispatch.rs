@@ -42,6 +42,34 @@ pub enum DispatchOutcome {
     Empty,
 }
 
+/// Флаг резерва читается без блокировки: между commit наблюдения и правилом ход не начнётся.
+async fn derived_reserve(
+    conn: &mut sqlx::PgConnection,
+    conversation_id: Uuid,
+) -> Result<Option<HoldReason>, sqlx::Error> {
+    let (harness, overridden): (String, bool) = sqlx::query_as(
+        "select harness, coalesce(reserve_override_until > clock_timestamp(), false) from conversations where id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let Some(provider) = canterlot_proto::harness::provider_of(&harness).filter(|_| !overridden)
+    else {
+        return Ok(None);
+    };
+    let reserve: Option<Option<chrono::DateTime<chrono::Utc>>> = sqlx::query_scalar(
+        "select coalesce(weekly_reserve_resets_at, weekly_resets_at) from provider_limits
+         where provider = $1 and weekly_reserve_active",
+    )
+    .bind(provider)
+    .fetch_optional(conn)
+    .await?;
+    Ok(reserve.map(|resets_at| HoldReason::WeeklyReserve {
+        provider: provider.into(),
+        resets_at,
+    }))
+}
+
 pub async fn dispatch_next(
     pool: &PgPool,
     conversation_id: Uuid,
@@ -63,7 +91,7 @@ pub async fn dispatch_next(
     if !queue.pause_reasons.0.is_empty() {
         reasons.push(BlockReason::Paused(queue.pause_reasons.0.clone()));
     }
-    let holds: Vec<_> = queue
+    let mut holds: Vec<_> = queue
         .hold_reasons
         .0
         .iter()
@@ -77,6 +105,11 @@ pub async fn dispatch_next(
         })
         .cloned()
         .collect();
+    if let Some(reserve) = derived_reserve(&mut tx, conversation_id).await?
+        && !holds.iter().any(|h| matches!((h, &reserve), (HoldReason::WeeklyReserve { provider: a, .. }, HoldReason::WeeklyReserve { provider: b, .. }) if a == b))
+    {
+        holds.push(reserve);
+    }
     if !holds.is_empty() {
         reasons.push(BlockReason::Held(holds));
     }
