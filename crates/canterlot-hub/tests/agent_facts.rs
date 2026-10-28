@@ -23,6 +23,109 @@ use uuid::Uuid;
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool) {
+    let mut r = Run::new(&pool).await;
+    let text = "я🦄".repeat(1024);
+    let expected = |limit: usize| format!("{}…", text.chars().take(limit - 1).collect::<String>());
+    let block = Uuid::now_v7();
+    let incomplete = Uuid::now_v7();
+    let closed = Uuid::now_v7();
+    let start = |id: Uuid| {
+        Body::BlockStarted(BlockStarted {
+            block_id: id.to_string(),
+            kind: "text".into(),
+            agent: text.clone(),
+            model: text.clone(),
+            tool_name: text.clone(),
+            summary: text.clone(),
+            ..Default::default()
+        })
+    };
+    r.send(vec![
+        start(block),
+        Body::PhaseChanged(PhaseChanged {
+            execution_id: r.execution.execution_id.to_string(),
+            phase: "running_tool".into(),
+            tool_name: text.clone(),
+            summary: text.clone(),
+        }),
+    ])
+    .await;
+    let detail: Value = sqlx::query_scalar("select phase_detail from executions where id=$1")
+        .bind(r.execution.execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(detail["summary"], expected(1024));
+    assert_eq!(detail["tool_name"], expected(128));
+    r.send(vec![
+        Body::BlockFinal(BlockFinal {
+            block_id: block.to_string(),
+            rev: 1,
+            checksum: blocks::checksum(""),
+            summary: text.clone(),
+            ..Default::default()
+        }),
+        start(incomplete),
+        Body::BlockIncomplete(BlockIncomplete {
+            block_id: incomplete.to_string(),
+            rev: 1,
+            reason: text.clone(),
+        }),
+        start(closed),
+        Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: r.execution.execution_id.to_string(),
+            kind: text.clone(),
+            event_type: text.clone(),
+        }),
+        Body::JournalClosed(JournalClosed {
+            execution_id: r.execution.execution_id.to_string(),
+            generation: r.execution.generation as u64,
+            reason: text.clone(),
+        }),
+    ])
+    .await;
+    let rows: Vec<(String, Value)> =
+        sqlx::query_as("select kind,payload from events where scope=$1 order by scope_seq")
+            .bind(
+                Scope::Conversation {
+                    id: r.seed.conversation_id,
+                }
+                .key(),
+            )
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    for (kind, payload) in rows {
+        for (field, limit) in [
+            ("summary", 1024),
+            ("tool_name", 128),
+            ("agent", 128),
+            ("model", 128),
+            ("reason", 1024),
+        ] {
+            if let Some(value) = payload[field].as_str() {
+                assert_eq!(value, expected(limit), "{kind}.{field}");
+            }
+        }
+        if kind == "adapter_diagnostic" {
+            assert_eq!(payload["kind"], expected(128));
+            assert_eq!(payload["event_type"], expected(128));
+        }
+    }
+    let stored: (String, String, String, String) =
+        sqlx::query_as("select agent,model,tool_name,summary from blocks where block_id=$1")
+            .bind(block)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored,
+        (expected(128), expected(128), expected(128), expected(1024))
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn block_started_stores_agent_model_tool_and_summary(pool: PgPool) -> TestResult {
     let mut r = Run::new(&pool).await;
     let id = Uuid::now_v7();

@@ -256,6 +256,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "machine_report_updated",
     "machine_metrics",
     "hidden",
+    "oversized",
 ];
 
 pub fn is_client_visible(kind: &str) -> bool {
@@ -270,7 +271,7 @@ pub fn wire_scope(scope: &Scope) -> String {
     }
 }
 
-#[derive(serde::Serialize, utoipa::ToSchema)]
+#[derive(Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct WireEvent {
     pub v: u8,
     pub id: Uuid,

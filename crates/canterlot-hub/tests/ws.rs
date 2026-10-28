@@ -108,7 +108,7 @@ fn accept(frame: &Value, cursor: &mut i64) {
 fn adjacent_deltas_of_one_block_are_merged_with_range() {
     let t = Instant::now();
     let b = Uuid::now_v7();
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     let first = delta(8, b, 3, "аб");
     let id = first.id;
     let correlation = first.correlation_id;
@@ -128,7 +128,7 @@ fn adjacent_deltas_of_one_block_are_merged_with_range() {
     assert_eq!(v["correlation_id"], correlation.to_string());
     assert!(m.flush().is_empty());
     assert!(m.next_deadline().is_none());
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     m.push(delta(1, b, 0, "a"), t);
     assert_eq!(m.push(delta(2, b, 8, "b"), t).len(), 1);
     assert_eq!(m.push(delta(4, b, 9, "c"), t).len(), 1);
@@ -137,7 +137,7 @@ fn adjacent_deltas_of_one_block_are_merged_with_range() {
 fn merged_delta_carries_committed_at_from_of_the_oldest_source() {
     let t = Instant::now();
     let b = Uuid::now_v7();
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     let a = delta(1, b, 0, "a");
     let first = a.committed_at.clone();
     let z = delta(2, b, 1, "z");
@@ -154,7 +154,7 @@ fn interleaved_blocks_are_not_reordered() {
     let t = Instant::now();
     let a = Uuid::now_v7();
     let b = Uuid::now_v7();
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     let mut out = vec![];
     for e in [
         delta(1, a, 0, "a"),
@@ -178,7 +178,7 @@ fn interleaved_blocks_are_not_reordered() {
 #[test]
 fn placeholder_flushes_a_pending_delta_merge_and_adjacent_placeholders_merge() {
     let t = Instant::now();
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     m.push(delta(1, Uuid::now_v7(), 0, "a"), t);
     let mut out = m.push(wire(2, "journal_closed", json!({"secret":"private"})), t);
     assert_eq!(out.len(), 1);
@@ -198,7 +198,7 @@ fn placeholder_flushes_a_pending_delta_merge_and_adjacent_placeholders_merge() {
 #[test]
 fn terminal_events_are_never_merged_or_dropped() {
     let t = Instant::now();
-    let mut m = Merger::new(Duration::from_millis(25));
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     let mut out = vec![];
     let kinds = [
         "block_delta",
@@ -219,30 +219,30 @@ fn terminal_events_are_never_merged_or_dropped() {
     }
 }
 #[test]
-fn merge_window_is_bounded_to_25ms_and_64kib() {
+fn merge_window_is_bounded_to_25ms_and_64kib_serialized() {
     let t = Instant::now();
     let b = Uuid::now_v7();
-    let mut m = Merger::new(Duration::from_secs(1));
+    let mut m = Merger::new(Duration::from_secs(1), "s", 1047552);
     m.push(delta(1, b, 0, "a"), t);
     assert_eq!(m.next_deadline(), Some(t + Duration::from_millis(25)));
     assert!(m.flush_due(t + Duration::from_micros(24999)).is_empty());
     assert_eq!(m.flush_due(t + Duration::from_millis(25)).len(), 1);
-    let mut m = Merger::new(Duration::from_millis(25));
-    for n in 1..=4 {
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
+    for n in 1..=3 {
         assert!(
             m.push(delta(n, b, n as u64 - 1, &"я".repeat(8192)), t)
                 .is_empty()
         );
     }
-    let full = m.push(delta(5, b, 4, "x"), t);
+    let full = m.push(delta(4, b, 3, &"я".repeat(8192)), t);
     assert_eq!(full.len(), 1);
     assert_eq!(
         full[0].event.payload["append"].as_str().unwrap().len(),
-        65536
+        49152
     );
-    assert_eq!(full[0].event.scope_seq, "4");
-    assert_eq!(m.flush()[0].event.scope_seq, "5");
-    let mut m = Merger::new(Duration::from_millis(25));
+    assert_eq!(full[0].event.scope_seq, "3");
+    assert_eq!(m.flush()[0].event.scope_seq, "4");
+    let mut m = Merger::new(Duration::from_millis(25), "s", 1047552);
     m.push(delta(1, b, 0, "a"), t);
     assert_eq!(
         m.push(delta(2, b, 1, "b"), t + Duration::from_millis(25))
@@ -375,6 +375,9 @@ async fn internal_kinds_advance_the_cursor_without_payload(pool: PgPool) {
 }
 
 async fn backlog(h: &Hub, count: i64) {
+    backlog_text(h, count, &"x".repeat(16384)).await;
+}
+async fn backlog_text(h: &Hub, count: i64, text: &str) {
     let b = Uuid::now_v7();
     let mut tx = h.f.pool.begin().await.unwrap();
     for n in 0..count {
@@ -387,7 +390,7 @@ async fn backlog(h: &Hub, count: i64) {
                 kind: "block_delta",
                 conversation_id: Some(h.f.seed.conversation_id),
                 execution_id: None,
-                payload: json!({"block_id":b,"base_rev":n,"rev":n+1,"append":"x".repeat(16384)}),
+                payload: json!({"block_id":b,"base_rev":n,"rev":n+1,"append":text}),
                 correlation_id: Uuid::now_v7(),
             },
         )
@@ -395,6 +398,211 @@ async fn backlog(h: &Hub, count: i64) {
         .unwrap();
     }
     tx.commit().await.unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn review_fix_small_queue_catches_up_across_reconnects(pool: PgPool) {
+    for text in ["x".repeat(16384), "\"\\я🦄".repeat(2048)] {
+        let h = Hub::new(pool.clone(), |c| c.ws.queue_bytes = 32768).await;
+        assert!(h.f.state.http.validate().is_ok());
+        assert_eq!(text.len(), 16384);
+        backlog_text(&h, 40, &text).await;
+        let mut cursor = 0;
+        let mut received = String::new();
+        let id = "\u{1}".repeat(128);
+        for target in [13, 26, 40] {
+            let before = cursor;
+            let mut w = h.socket().await;
+            assert_eq!(
+                h.subscribe(&mut w, &id, Some(cursor)).await["op"],
+                "subscribed"
+            );
+            while cursor < target {
+                let Some(frame) = w.next(WAIT).await else {
+                    break;
+                };
+                assert!(frame.to_string().len() <= 32768 - 1024);
+                let from = cursor + 1;
+                accept(&frame, &mut cursor);
+                assert_eq!(frame["event"]["kind"], "block_delta");
+                assert_eq!(frame["event"]["payload"]["base_rev"], from - 1);
+                assert_eq!(frame["event"]["payload"]["rev"], cursor);
+                let append = frame["event"]["payload"]["append"].as_str().unwrap();
+                assert_eq!(append, text.repeat((cursor - from + 1) as usize));
+                received.push_str(append);
+            }
+            let close = w.close_code;
+            w.close().await;
+            assert!(
+                cursor > before,
+                "reconnect must advance: cursor={cursor}, close={close:?}"
+            );
+            assert!(cursor >= target, "fast reader must catch up");
+        }
+        assert_eq!(cursor, 40);
+        assert_eq!(received, text.repeat(40));
+        h.stop().await;
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn review_fix_oversized_summary_commits_and_reaches_ws(pool: PgPool) {
+    use canterlot_hub::{
+        executions,
+        ingest::{Ingest, IngestOutcome, JournalKind},
+        model::ExecutionState,
+    };
+    use canterlot_proto::worker::v1::{
+        BlockStarted, JournalOpened, JournalRecord, JournalRecords, RecordBody, record_body::Body,
+    };
+    let h = Hub::new(pool, |_| {}).await;
+    let seed = &h.f.seed;
+    sqlx::query("insert into machine_credentials(machine_id,token_sha256) values($1,$2)")
+        .bind(seed.machine_id)
+        .bind(seed.credential_digest())
+        .execute(&h.f.pool)
+        .await
+        .unwrap();
+    let run = executions::start(
+        &h.f.pool,
+        seed.owner_id,
+        seed.conversation_id,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&h.f.pool, run.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let ingest = Ingest::new(h.f.pool.clone());
+    let journal = Uuid::now_v7().to_string();
+    let batch = |seq, body| JournalRecords {
+        journal_id: journal.clone(),
+        records: vec![JournalRecord {
+            seq,
+            body: Some(RecordBody { body: Some(body) }),
+        }],
+    };
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                1,
+                Body::JournalOpened(JournalOpened {
+                    execution_id: run.execution_id.to_string(),
+                    generation: run.generation as u64,
+                    supervisor_protocol_version: 1,
+                }),
+            ),
+        )
+        .await
+        .unwrap();
+    let scope = Scope::Conversation {
+        id: seed.conversation_id,
+    };
+    let mut cursor = events::boundary(&mut h.f.pool.acquire().await.unwrap(), &scope)
+        .await
+        .unwrap();
+    let id = Uuid::now_v7();
+    let batch = batch(
+        2,
+        Body::BlockStarted(BlockStarted {
+            block_id: id.to_string(),
+            kind: "text".into(),
+            agent: "main".into(),
+            summary: "\u{1}".repeat(180000),
+            ..Default::default()
+        }),
+    );
+    canterlot_proto::limits::check_record_batch(&batch).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            ingest
+                .apply_batch(
+                    seed.machine_id,
+                    &seed.credential_digest(),
+                    JournalKind::Sj,
+                    &batch
+                )
+                .await
+                .unwrap(),
+            IngestOutcome::Committed { up_to_seq: 2 }
+        );
+    }
+    let mut w = h.socket().await;
+    assert_eq!(
+        h.subscribe(&mut w, "s", Some(cursor)).await["op"],
+        "subscribed"
+    );
+    let frame = w
+        .next(WAIT)
+        .await
+        .expect("committed fact must reach the client");
+    accept(&frame, &mut cursor);
+    assert_eq!(frame["event"]["kind"], "block_started");
+    let expected = format!("{}…", "\u{1}".repeat(1023));
+    assert_eq!(frame["event"]["payload"]["summary"], expected);
+    let stored: String = sqlx::query_scalar("select summary from blocks where block_id=$1")
+        .bind(id)
+        .fetch_one(&h.f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, expected);
+    w.close().await;
+    h.stop().await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn review_fix_oversized_event_has_http_reference_and_resume_advances(pool: PgPool) {
+    for budget in [1048576, 4096] {
+        let h = Hub::new(pool.clone(), |c| c.ws.queue_bytes = budget).await;
+        assert!(h.f.state.http.validate().is_ok());
+        h.f.emit(
+            "block_delta",
+            json!({"block_id":Uuid::now_v7(),"base_rev":0,"rev":1,"append":"я🦄"}),
+        )
+        .await;
+        let payload = json!({"kind":"synthetic","event_type":"\u{1}".repeat(180000)});
+        let source = h.f.emit("adapter_diagnostic", payload.clone()).await;
+        h.f.emit("run_finished", json!({})).await;
+        let mut w = h.socket().await;
+        let id = "\u{1}".repeat(128);
+        assert_eq!(h.subscribe(&mut w, &id, Some(0)).await["op"], "subscribed");
+        let mut cursor = 0;
+        accept(&w.next(WAIT).await.unwrap(), &mut cursor);
+        let frame = w.next(WAIT).await.expect("oversized placeholder");
+        assert!(frame.to_string().len() <= budget - 1024);
+        accept(&frame, &mut cursor);
+        let event = &frame["event"];
+        assert_eq!(event["kind"], "oversized");
+        assert_eq!(event["id"], source.id.to_string());
+        assert_eq!(event["scope_seq"], "2");
+        assert_eq!(event["payload"]["kind"], "adapter_diagnostic");
+        let href = event["payload"]["href"].as_str().unwrap();
+        let fetched = h.f.get(href).await;
+        assert_eq!(fetched["events"][0]["id"], source.id.to_string());
+        assert_eq!(fetched["events"][0]["kind"], "adapter_diagnostic");
+        assert_eq!(fetched["events"][0]["payload"], payload);
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../docs/api/events.schema.json")).unwrap();
+        assert!(jsonschema::validator_for(&schema).unwrap().is_valid(event));
+        w.close().await;
+        let mut w = h.socket().await;
+        assert_eq!(
+            h.subscribe(&mut w, &id, Some(cursor)).await["op"],
+            "subscribed"
+        );
+        let frame = w.next(WAIT).await.unwrap();
+        accept(&frame, &mut cursor);
+        assert_eq!(frame["event"]["kind"], "run_finished");
+        assert_eq!(cursor, 3);
+        w.close().await;
+        h.stop().await;
+    }
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn catch_up_over_a_slow_link_completes_without_lagged(pool: PgPool) {
@@ -829,6 +1037,7 @@ fn websocket_resource_config_is_bounded() {
         ("queue_messages", 1),
         ("queue_messages", 257),
         ("queue_bytes", 1024),
+        ("queue_bytes", 4095),
         ("queue_bytes", 1048577),
         ("max_subscriptions", 0),
         ("max_subscriptions", 17),

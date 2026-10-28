@@ -110,6 +110,9 @@
     },
     {
       "$ref": "#/$defs/phase_changed"
+    },
+    {
+      "$ref": "#/$defs/oversized"
     }
   ],
   "$defs": {
@@ -935,7 +938,8 @@
             "outcome": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 1024
                 },
                 {
                   "type": "null"
@@ -1231,15 +1235,18 @@
               ]
             },
             "agent": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "model": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "tool_name": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 128
                 },
                 {
                   "type": "null"
@@ -1249,7 +1256,8 @@
             "summary": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 1024
                 },
                 {
                   "type": "null"
@@ -1452,7 +1460,8 @@
             "summary": {
               "anyOf": [
                 {
-                  "type": "string"
+                  "type": "string",
+                  "maxLength": 1024
                 },
                 {
                   "type": "null"
@@ -1548,7 +1557,8 @@
               "minimum": 0
             },
             "reason": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 1024
             }
           },
           "required": [
@@ -1629,10 +1639,12 @@
           "type": "object",
           "properties": {
             "kind": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             },
             "event_type": {
-              "type": "string"
+              "type": "string",
+              "maxLength": 128
             }
           },
           "required": [
@@ -4289,6 +4301,9 @@
                 },
                 {
                   "$ref": "#/$defs/phase_changed"
+                },
+                {
+                  "$ref": "#/$defs/oversized"
                 }
               ]
             }
@@ -4494,13 +4509,15 @@
               "type": [
                 "string",
                 "null"
-              ]
+              ],
+              "maxLength": 128
             },
             "summary": {
               "type": [
                 "string",
                 "null"
-              ]
+              ],
+              "maxLength": 1024
             }
           },
           "required": [
@@ -4526,6 +4543,93 @@
         "payload"
       ],
       "additionalProperties": false
+    },
+    "oversized": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "oversized"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "href": {
+              "type": "string",
+              "pattern": "^/api/v1/events\\?scope=(conversations|machines|conversation:[0-9a-f-]{36})&after=[0-9]+&limit=1$"
+            }
+          },
+          "required": [
+            "kind",
+            "href"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false,
+      "description": "WSS-заполнитель одиночного события, превышающего бюджет данных соединения; полный факт доступен по payload.href."
     }
   }
 }

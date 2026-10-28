@@ -192,7 +192,7 @@ impl HttpConfig {
             || self.max_connections > tokio::sync::Semaphore::MAX_PERMITS
             || !(1..=16).contains(&self.ws.max_subscriptions)
             || !(2..=256).contains(&self.ws.queue_messages)
-            || !(1025..=1048576).contains(&self.ws.queue_bytes)
+            || !(4096..=1048576).contains(&self.ws.queue_bytes)
             || self.ws.max_connection_age.is_zero()
             || self.ws.poll_interval.is_zero()
             || self.ws.stall_timeout.is_zero()

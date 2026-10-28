@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::{borrow::Cow, collections::BTreeSet};
 
 use canterlot_proto::{
     limits::{
@@ -220,7 +220,7 @@ impl Ingest {
                         execution_id: id.to_string(),
                         generation: observation.generation,
                         state: observation.state.clone(),
-                        outcome: observation.outcome.clone(),
+                        outcome: bounded_text(&observation.outcome, 1024),
                         ..Default::default()
                     }),
                     Uuid::now_v7(),
@@ -412,6 +412,8 @@ impl Ingest {
                 .as_ref()
                 .and_then(|body| body.body.as_ref())
                 .ok_or(IngestError::UnknownRecord)?;
+            let body = bounded_metadata(body);
+            let body = body.as_ref();
             let correlation_id = Uuid::now_v7();
             let ignored = match apply_journal_body(
                 &mut tx,
@@ -554,6 +556,8 @@ impl Ingest {
                     .as_ref()
                     .and_then(|body| body.body.as_ref())
                     .ok_or(IngestError::UnknownRecord)?;
+                let body = bounded_metadata(body);
+                let body = body.as_ref();
                 let correlation_id = Uuid::now_v7();
                 match apply_journal_body(
                     &mut tx,
@@ -850,6 +854,61 @@ fn pilot_error(error: sqlx::Error) -> IngestError {
         sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
         _ => IngestError::Database,
     }
+}
+
+fn bounded_text(value: &str, limit: usize) -> String {
+    let mut value = value.replace('\0', "�");
+    if let Some((end, ch)) = value.char_indices().nth(limit - 1)
+        && end + ch.len_utf8() < value.len()
+    {
+        value.truncate(end);
+        value.push('…');
+    }
+    value
+}
+
+fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
+    let mut bounded = match body {
+        Body::BlockStarted(_)
+        | Body::BlockFinal(_)
+        | Body::BlockIncomplete(_)
+        | Body::PhaseChanged(_)
+        | Body::JournalClosed(_)
+        | Body::AdapterDiagnostic(_)
+        | Body::ExecutionState(_)
+        | Body::RunFinished(_) => body.clone(),
+        _ => return Cow::Borrowed(body),
+    };
+    match &mut bounded {
+        Body::BlockStarted(f) => {
+            f.agent = bounded_text(&f.agent, 128);
+            f.model = bounded_text(&f.model, 128);
+            f.tool_name = bounded_text(&f.tool_name, 128);
+            f.summary = bounded_text(&f.summary, 1024);
+        }
+        Body::BlockFinal(f) => {
+            f.summary = bounded_text(&f.summary, 1024);
+        }
+        Body::BlockIncomplete(f) => f.reason = bounded_text(&f.reason, 1024),
+        Body::JournalClosed(f) => f.reason = bounded_text(&f.reason, 1024),
+        Body::PhaseChanged(f) => {
+            f.tool_name = bounded_text(&f.tool_name, 128);
+            f.summary = bounded_text(&f.summary, 1024);
+        }
+        Body::AdapterDiagnostic(f) => {
+            f.kind = bounded_text(&f.kind, 128);
+            f.event_type = bounded_text(&f.event_type, 128);
+        }
+        Body::ExecutionState(f) => f.outcome = bounded_text(&f.outcome, 1024),
+        Body::RunFinished(f) => {
+            for usage in &mut f.usage {
+                usage.agent = bounded_text(&usage.agent, 128);
+                usage.model = bounded_text(&usage.model, 128);
+            }
+        }
+        _ => unreachable!(),
+    }
+    Cow::Owned(bounded)
 }
 
 async fn require_active(

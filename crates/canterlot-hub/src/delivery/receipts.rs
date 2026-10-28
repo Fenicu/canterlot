@@ -396,11 +396,12 @@ pub async fn apply_run_finished_in_tx(
 pub(crate) fn sanitize_reason(reason: &str) -> String {
     let mut reason = reason.replace('\0', "");
     if reason.len() > 1024 {
-        let mut end = 1024;
+        let mut end = 1024 - '…'.len_utf8();
         while !reason.is_char_boundary(end) {
             end -= 1;
         }
         reason.truncate(end);
+        reason.push('…');
     }
     reason
 }

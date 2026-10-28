@@ -636,7 +636,8 @@ async fn receipt_reasons_are_sanitized_and_bounded(pool: PgPool) -> TestResult {
         let (_, _, input) = setup(&pool).await;
         receipt(&pool, &input, 1, value).await;
         let (result, reject): (Value, Option<String>) = sqlx::query_as("select c.result, i.reject_reason from commands c join inputs i on i.command_id = c.id where c.id = $1").bind(input.command_id).fetch_one(&pool).await?;
-        let expected = format!("a{}", "é".repeat(511));
+        let expected = format!("a{}…", "é".repeat(510));
+        assert_eq!(expected.len(), 1024);
         assert_eq!(result["reason"], expected);
         if let Some(reject) = reject {
             assert_eq!(reject, expected);

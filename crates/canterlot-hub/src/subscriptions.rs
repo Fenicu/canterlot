@@ -86,12 +86,16 @@ impl Outgoing {
 
 pub struct Merger {
     window: Duration,
+    id: String,
+    frame_budget: usize,
     pending: Option<(Outgoing, Instant)>,
 }
 impl Merger {
-    pub fn new(window: Duration) -> Self {
+    pub fn new(window: Duration, id: &str, data_budget: usize) -> Self {
         Self {
             window: window.min(Duration::from_millis(25)),
+            id: id.to_owned(),
+            frame_budget: data_budget.min(MAX_MERGED_BYTES),
             pending: None,
         }
     }
@@ -121,18 +125,22 @@ impl Merger {
                     .zip(event.payload["append"].as_str())
                     .is_some_and(|(a, b)| a.len() + b.len() <= MAX_MERGED_BYTES);
             if consecutive && (hidden || delta) {
+                let mut merged = last.clone();
                 if delta {
                     let mut text = last.payload["append"]
                         .as_str()
                         .expect("delta text")
                         .to_owned();
                     text.push_str(event.payload["append"].as_str().expect("delta text"));
-                    last.payload["append"] = json!(text);
-                    last.payload["rev"] = event.payload["rev"].clone();
+                    merged.payload["append"] = json!(text);
+                    merged.payload["rev"] = event.payload["rev"].clone();
                 }
-                last.scope_seq = event.scope_seq;
-                last.committed_at = event.committed_at;
-                return out;
+                merged.scope_seq = event.scope_seq.clone();
+                merged.committed_at = event.committed_at.clone();
+                if event_frame(&self.id, &merged).len() <= self.frame_budget {
+                    *last = merged;
+                    return out;
+                }
             }
         }
         out.extend(self.flush());
@@ -140,7 +148,8 @@ impl Merger {
             || event.kind == "block_delta"
                 && event.payload["append"]
                     .as_str()
-                    .is_some_and(|s| s.len() <= MAX_MERGED_BYTES);
+                    .is_some_and(|s| s.len() <= MAX_MERGED_BYTES)
+                && event_frame(&self.id, &event).len() <= self.frame_budget;
         if mergeable {
             self.pending = Some((Outgoing::single(event), now + self.window));
         } else {
@@ -165,6 +174,10 @@ impl Merger {
     pub fn next_deadline(&self) -> Option<Instant> {
         self.pending.as_ref().map(|(_, at)| *at)
     }
+}
+
+fn event_frame(id: &str, event: &WireEvent) -> String {
+    json!({"op":"event","id":id,"event":event}).to_string()
 }
 
 #[derive(Deserialize)]
@@ -221,6 +234,9 @@ impl From<sqlx::Error> for PumpError {
     }
 }
 impl WriterQueue {
+    fn data_budget(&self) -> usize {
+        self.byte_limit.saturating_sub(CONTROL_BYTES)
+    }
     fn batch_capacity(&self) -> usize {
         self.messages
             .available_permits()
@@ -322,15 +338,20 @@ struct Pump {
 impl Pump {
     async fn output(&self, id: &str, outgoing: Vec<Outgoing>) -> Result<(), PumpError> {
         let delivery = &self.subscriptions[id].delivery;
-        for event in outgoing {
+        for mut event in outgoing {
             let cursor = event.event.scope_seq.parse().expect("projected sequence");
+            let mut frame = event_frame(id, &event.event);
+            if frame.len() > self.queue.data_budget() {
+                event.event.payload = json!({
+                    "kind": event.event.kind,
+                    "href": format!("/api/v1/events?scope={}&after={}&limit=1", event.event.scope, cursor - 1),
+                });
+                event.event.kind = "oversized".into();
+                frame = event_frame(id, &event.event);
+            }
             self.queue
                 .enqueue(
-                    Message::Text(
-                        json!({"op":"event","id":id,"event":event.event})
-                            .to_string()
-                            .into(),
-                    ),
+                    Message::Text(frame.into()),
                     Some((delivery.clone(), cursor)),
                 )
                 .await?;
@@ -417,12 +438,17 @@ impl Pump {
                 };
                 self.queue.control(json!({"op":"subscribed","id":id,"scope":events::wire_scope(&scope),"head":head.to_string()})).await?;
                 let now = Instant::now();
+                let merger = Merger::new(
+                    self.state.http.ws.delta_window,
+                    &id,
+                    self.queue.data_budget(),
+                );
                 self.subscriptions.insert(
                     id,
                     Subscription {
                         scope,
                         cursor: after,
-                        merger: Merger::new(self.state.http.ws.delta_window),
+                        merger,
                         delivery: Arc::new(Delivery {
                             active: AtomicBool::new(true),
                             sent: AtomicI64::new(after),
