@@ -1,7 +1,45 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi } from 'vitest';
 import { highlightLazy, HIGHLIGHT_LIMITS } from '../../../src/lib/render/highlight';
 
 describe('highlighting', () => {
+  test('highlight_before_markdown_initialisation_filters_every_class_token', async () => {
+    vi.resetModules();
+    const shared = (await import('dompurify')).default;
+    shared.removeAllHooks();
+    const { highlightLazy: highlightFirst } = await import('../../../src/lib/render/highlight');
+    const html = await highlightFirst('class Foo {} function bar() {}', 'javascript');
+    expect(html).toContain('hljs-title');
+    const doc = new DOMParser().parseFromString(html!, 'text/html');
+    for (const element of doc.querySelectorAll('[class]')) {
+      for (const token of element.classList) {
+        expect(token.startsWith('hljs') || token.startsWith('language-'), token).toBe(true);
+      }
+    }
+    const { createMarkdown } = await import('../../../src/lib/render/markdown');
+    createMarkdown();
+    expect(await highlightFirst('class Foo {} function bar() {}', 'javascript')).toBe(html);
+    // Renderer configuration must not install hooks on the imported singleton.
+    expect(shared.sanitize('<span class="outside">text</span>')).toContain('class="outside"');
+  });
+
+  test('renderers_use_private_sanitiser_without_mutating_shared_hooks', async () => {
+    const shared = (await import('dompurify')).default;
+    shared.addHook('afterSanitizeAttributes', node => {
+      node.setAttribute('data-shared-hook', 'present');
+    });
+    try {
+      const { createMarkdown } = await import('../../../src/lib/render/markdown');
+      const { highlightLazy: highlight } = await import('../../../src/lib/render/highlight');
+      const markdown = createMarkdown().render('[link](https://example.com)');
+      const highlighted = await highlight('class Foo {}', 'javascript');
+      expect(markdown).not.toContain('data-shared-hook');
+      expect(highlighted).not.toContain('data-shared-hook');
+      expect(shared.sanitize('<span class="outside">text</span>')).toContain('data-shared-hook="present"');
+    } finally {
+      shared.removeAllHooks();
+    }
+  });
+
   test('highlight_skips_large_blocks_and_unknown_languages_and_loads_the_language_lazily', async () => {
     // 1. Unknown language -> null
     const unknownRes = await highlightLazy('const x = 1;', 'unknownlang123');
@@ -64,7 +102,9 @@ describe('highlighting', () => {
       expect(el.tagName.toLowerCase()).toBe('span');
       for (const attr of el.attributes) {
         expect(attr.name).toBe('class');
-        expect(attr.value.startsWith('hljs')).toBe(true);
+        for (const token of attr.value.split(/\s+/)) {
+          expect(token.startsWith('hljs') || token.startsWith('language-')).toBe(true);
+        }
       }
     }
   });

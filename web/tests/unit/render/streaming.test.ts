@@ -1,9 +1,102 @@
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, vi } from 'vitest';
 import { splitStable, StreamingMarkdown } from '../../../src/lib/render/streamingMarkdown';
 import { createMarkdown } from '../../../src/lib/render/markdown';
 import { highlightLazy } from '../../../src/lib/render/highlight';
 
 describe('streaming markdown', () => {
+  test('small_appends_scan_linear_work_and_reuse_closed_chunk_objects', () => {
+    const work = (count: number, unfinishedLine = false) => {
+      let scanned = 0;
+      const indexOf = String.prototype.indexOf;
+      const charCodeAt = String.prototype.charCodeAt;
+      const lines = vi.spyOn(String.prototype, 'indexOf').mockImplementation(function (
+        this: string, search: string, start = 0
+      ) {
+        const end = indexOf.call(this, search, start);
+        if (search === '\n') scanned += (end < 0 ? this.length : end + 1) - start;
+        return end;
+      });
+      const characters = vi.spyOn(String.prototype, 'charCodeAt').mockImplementation(function (
+        this: string, index: number
+      ) {
+        scanned++;
+        return charCodeAt.call(this, index);
+      });
+      const sm = new StreamingMarkdown({ render: text => text });
+      let text = '';
+      try {
+        for (let i = 0; i < count; i++) {
+          const appended = unfinishedLine ? 'x'.repeat(16) : `Paragraph ${i}\n\n`;
+          text += appended;
+          sm.update(text, false);
+          splitStable(text, text.length - appended.length);
+        }
+      } finally {
+        lines.mockRestore();
+        characters.mockRestore();
+      }
+      return scanned;
+    };
+    expect(work(1024)).toBeLessThan(work(256) * 6);
+    expect(work(1024, true)).toBeLessThan(work(256, true) * 6);
+
+    const sm = new StreamingMarkdown({ render: text => text });
+    const first = sm.update('First\n\nSecond', false);
+    const closed = first.chunks[0];
+    const second = sm.update('First\n\nSecond\n\nThird', false);
+    expect(second.chunks[0]).toBe(closed);
+    expect(second.chunks).toBe(first.chunks);
+  });
+
+  test('streaming_resets_offsets_fences_and_chunks_when_text_is_replaced', () => {
+    const md = createMarkdown();
+    const sm = new StreamingMarkdown(md);
+    sm.update('Old\n\n```text\nopen', false);
+    for (const text of ['New\n\nTail', '', 'New\n\n~~~\ncode\n~~~\n\nEnd']) {
+      const result = sm.update(text, false);
+      expect(result.chunks.map(chunk => chunk.html).join('') + result.tail.html).toBe(md.render(text));
+    }
+  });
+
+  test.each([
+    ['tilde', '~~~text\nsource\n\n[verify](https://evil.example/login)\n~~~'],
+    ['three_space_indent', '   ```text\nsource\n\n[verify](https://evil.example/login)\n   ```'],
+    ['longer_opening', '````text\n```\n\n[verify](https://evil.example/login)\n````'],
+    ['invalid_closing_info', '```text\n```not-a-close\n\n[verify](https://evil.example/login)\n```'],
+    ['invalid_closing_indent', '~~~\n    ~~~\n\n[verify](https://evil.example/login)\n~~~'],
+    ['different_marker', '~~~\n```\n\n[verify](https://evil.example/login)\n~~~'],
+    ['longer_closing_with_tabs', '~~~text\nsource\n\n[verify](https://evil.example/login)\n~~~~ \t'],
+    ['crlf', '~~~text\r\nsource\r\n\r\n[verify](https://evil.example/login)\r\n~~~'],
+    ['tab_list_continuation', '- item\n\n\t~~~text\n\tsource\n\n\t[verify](https://evil.example/login)\n\t~~~'],
+    ['space_tab_list_continuation', '- item\n\n \t~~~text\n \tsource\n\n \t[verify](https://evil.example/login)\n \t~~~'],
+    ['outdent_from_list_opens_outer_fence', '- item\n\n  ~~~text\n  source\n~~~\n\n[verify](https://evil.example/login)\n~~~'],
+    ['outdent_from_nested_list_opens_outer_fence', '- outer\n  - inner\n\n    ~~~text\n    source\n  ~~~\n\n  [verify](https://evil.example/login)\n  ~~~']
+  ])('streamed_fence_matches_full_render_%s', (_name, payload) => {
+    const md = createMarkdown();
+    const sm = new StreamingMarkdown(md);
+    const text = `Intro\n\n${payload}\n\nAfter`;
+    for (let i = 1; i <= text.length; i++) {
+      const prefix = text.slice(0, i);
+      const result = sm.update(prefix, false);
+      const streamed = result.chunks.map(chunk => chunk.html).join('') + result.tail.html;
+      expect(streamed, `prefix ${i}: ${prefix}`).toBe(md.render(prefix));
+      expect(new DOMParser().parseFromString(streamed, 'text/html').querySelector('a')).toBeNull();
+    }
+  });
+
+  test('splitter_distinguishes_fence_info_strings_and_indented_code', () => {
+    expect(splitStable('```bad`info\ntext').openFence).toBe(false);
+    expect(splitStable('~~~info`allowed\ntext').openFence).toBe(true);
+    expect(splitStable('    ```\ntext').openFence).toBe(false);
+    expect(splitStable('\t```\ntext').openFence).toBe(false);
+    expect(splitStable('~~~\ncode\n~~~not-close').openFence).toBe(true);
+    expect(splitStable('- ~~~\n  code').openFence).toBe(true);
+    expect(splitStable('- ~~~\n  code\n  ~~~').openFence).toBe(false);
+    const text = 'First\n\nSecond\n\nThird';
+    const all = splitStable(text).boundaries;
+    expect(splitStable(text, 8).boundaries).toEqual(all.filter(boundary => boundary >= 8));
+  });
+
   test('split_stable_never_splits_inside_a_fence_or_before_a_list_marker_and_is_append_only', () => {
     // 1. Text with fences, lists, indented continuation, paragraphs
     const sample = [

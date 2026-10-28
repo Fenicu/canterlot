@@ -1,5 +1,4 @@
-import DOMPurify from 'dompurify';
-import type { DOMPurify as DOMPurifyInstance } from 'dompurify';
+import { sanitizeRendered } from './sanitize';
 
 export const HIGHLIGHT_LIMITS = {
   maxBytes: 20480,
@@ -58,20 +57,6 @@ async function getHljs(): Promise<HljsCore> {
   return hljsPromise;
 }
 
-function getPurify(): DOMPurifyInstance {
-  if (typeof window !== 'undefined') {
-    const raw = DOMPurify as unknown as { default?: (w: unknown) => DOMPurifyInstance; sanitize?: unknown };
-    if (typeof (raw as { sanitize?: unknown }).sanitize === 'function') {
-      return raw as unknown as DOMPurifyInstance;
-    }
-    if (typeof raw.default === 'function') {
-      return raw.default(window);
-    }
-    return (DOMPurify as unknown as (w: unknown) => DOMPurifyInstance)(window);
-  }
-  throw new Error('DOMPurify requires a DOM environment');
-}
-
 export async function highlightLazy(code: string, lang: string | null): Promise<string | null> {
   if (!lang || !lang.trim()) return null;
   const normalized = lang.trim().toLowerCase();
@@ -97,11 +82,5 @@ export async function highlightLazy(code: string, lang: string | null): Promise<
   }
 
   const raw = hljs.highlight(code, { language: canonical, ignoreIllegals: true });
-  const purify = getPurify();
-
-  // Очистка HTML подсветки через строгий allow-list DOMPurify
-  return purify.sanitize(raw.value, {
-    ALLOWED_TAGS: ['span'],
-    ALLOWED_ATTR: ['class']
-  });
+  return sanitizeRendered(raw.value, 'highlight');
 }

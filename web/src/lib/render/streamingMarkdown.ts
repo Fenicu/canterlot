@@ -31,81 +31,218 @@ function escapeHtml(s: string): string {
     .replace(/'/g, '&#39;');
 }
 
+interface Fence {
+  marker: number;
+  length: number;
+  containerIndent: number;
+}
+
+// Summarise the unfinished line as characters arrive; never rescan its prefix.
+class LineState {
+  indent = 0;
+  first = 0;
+  prefix = '';
+  markerLength = 0;
+  markerRun = true;
+  backtickInInfo = false;
+  closingSpaceOnly = true;
+  listFence: LineState | null = null;
+
+  constructor(readonly start: number, readonly afterBlank = false) {}
+
+  consume(code: number): void {
+    if (this.first === 0) {
+      if (code === 32 || code === 9) {
+        this.indent += code === 9 ? 4 - this.indent % 4 : 1;
+        return;
+      }
+      this.first = code;
+    }
+    if (this.prefix.length < 32) this.prefix += String.fromCharCode(code);
+    if (this.markerRun && code === this.first && (code === 96 || code === 126)) {
+      this.markerLength++;
+    } else {
+      this.markerRun = false;
+      if (code === 96) this.backtickInInfo = true;
+      if (code !== 32 && code !== 9) this.closingSpaceOnly = false;
+    }
+    if (this.listFence) {
+      this.listFence.consume(code);
+    } else if (this.prefix.length < 32) {
+      const match = /^([-*+]|\d{1,9}[.)])([ \t]+)([`~])$/.exec(this.prefix);
+      if (match) {
+        this.listFence = new LineState(this.start);
+        this.listFence.indent = this.columnAfterMarker(match);
+        this.listFence.consume(code);
+      }
+    }
+  }
+
+  get listMarker(): boolean {
+    return /^(?:[-*+]|\d{1,9}[.)])[ \t]/.test(this.prefix);
+  }
+
+  get listIndent(): number | null {
+    const match = /^([-*+]|\d{1,9}[.)])([ \t]+|$)/.exec(this.prefix);
+    if (!match) return null;
+    const markerEnd = this.indent + match[1]!.length;
+    const padding = this.columnAfterMarker(match) - markerEnd;
+    return markerEnd + (padding >= 1 && padding <= 4 ? padding : 1);
+  }
+
+  private columnAfterMarker(match: RegExpExecArray): number {
+    let column = this.indent + match[1]!.length;
+    for (const space of match[2]!) column += space === '\t' ? 4 - column % 4 : 1;
+    return column;
+  }
+}
+
+class StableSplitter {
+  private previous = '';
+  private processed = 0;
+  private line = new LineState(0);
+  private fence: Fence | null = null;
+  private seenContent = false;
+  private afterBlank = false;
+  private afterCR = false;
+  private listIndents: number[] = [];
+  boundaries: number[] = [];
+
+  update(text: string): boolean {
+    const reset = !text.startsWith(this.previous);
+    if (reset) {
+      this.processed = 0;
+      this.line = new LineState(0);
+      this.fence = null;
+      this.seenContent = false;
+      this.afterBlank = false;
+      this.afterCR = false;
+      this.listIndents = [];
+      this.boundaries = [];
+    }
+    for (; this.processed < text.length; this.processed++) {
+      const code = text.charCodeAt(this.processed);
+      if (this.afterCR && code === 10) {
+        this.afterCR = false;
+        this.line = new LineState(this.processed + 1, this.afterBlank);
+        continue;
+      }
+      this.afterCR = code === 13;
+      if (code === 10 || code === 13) {
+        this.updateLists();
+        this.considerBoundary(true);
+        if (!this.fence) {
+          if (this.line.first === 0) {
+            if (this.seenContent) this.afterBlank = true;
+          } else {
+            this.seenContent = true;
+          }
+        }
+        this.fence = this.fenceAfterLine();
+        this.line = new LineState(this.processed + 1, this.afterBlank);
+      } else {
+        this.line.consume(code);
+        this.considerBoundary(false);
+      }
+    }
+    this.previous = text;
+    return reset;
+  }
+
+  private considerBoundary(complete: boolean): void {
+    if (this.fence || !this.afterBlank || this.line.first === 0) return;
+    // List continuations need at least two columns; a single tab supplies four.
+    if (this.line.indent >= 2 || this.line.listMarker) {
+      this.afterBlank = false;
+      return;
+    }
+    const first = this.line.first;
+    const couldBeList = (first >= 48 && first <= 57) || first === 45 || first === 42 || first === 43;
+    if (complete || (!couldBeList && this.line.indent === 0)) {
+      this.boundaries.push(this.line.start);
+      this.afterBlank = false;
+      this.listIndents = [];
+    }
+  }
+
+  private containerAt(indent: number): number {
+    let lo = 0;
+    let hi = this.listIndents.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (this.listIndents[mid]! <= indent) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo === 0 ? 0 : this.listIndents[lo - 1]!;
+  }
+
+  private updateLists(): void {
+    const line = this.line;
+    if (line.first === 0) return;
+    if (this.fence && line.indent >= this.fence.containerIndent) return;
+    const listIndent = line.listIndent;
+    if (this.fence || line.afterBlank || listIndent !== null || line.markerLength >= 3) {
+      while (this.listIndents.length && this.listIndents[this.listIndents.length - 1]! > line.indent) {
+        this.listIndents.pop();
+      }
+    }
+    if (listIndent !== null && line.indent - this.containerAt(line.indent) < 4) {
+      this.listIndents.push(listIndent);
+    }
+  }
+
+  private fenceAfterLine(): Fence | null {
+    const raw = this.line;
+    let fence = this.fence;
+    // Outdenting ends the list's fence before this line is interpreted anew.
+    if (fence && raw.first !== 0 && raw.indent < fence.containerIndent) fence = null;
+    const line = !fence && raw.listFence ? raw.listFence : raw;
+    const containerIndent = fence?.containerIndent ??
+      (line === raw ? this.containerAt(line.indent) : raw.listIndent!);
+    if (line.indent - containerIndent >= 4 || line.markerLength < 3) return fence;
+    if (fence) {
+      return line.first === fence.marker && line.markerLength >= fence.length && line.closingSpaceOnly
+        ? null : fence;
+    }
+    if (line.first === 96 && line.backtickInInfo) return null;
+    return { marker: line.first, length: line.markerLength, containerIndent };
+  }
+
+  get openFence(): boolean {
+    // EOL may close a fence for this result, but a later append can invalidate
+    // that closing line. Only newline-terminated lines commit the fence state.
+    return this.fenceAfterLine() !== null;
+  }
+}
+
+const standaloneSplitter = new StableSplitter();
+
 export function splitStable(
   text: string,
   fromBoundary?: number
 ): { boundaries: number[]; openFence: boolean } {
-  const openFence = ((text.match(/^```/gm) || []).length % 2) === 1;
-
-  const lines: { start: number; end: number; text: string; hasNewline: boolean }[] = [];
-  let pos = 0;
-  while (pos < text.length) {
-    const nl = text.indexOf('\n', pos);
-    if (nl === -1) {
-      lines.push({ start: pos, end: text.length, text: text.slice(pos), hasNewline: false });
-      break;
-    } else {
-      lines.push({ start: pos, end: nl, text: text.slice(pos, nl), hasNewline: true });
-      pos = nl + 1;
+  standaloneSplitter.update(text);
+  const boundaries = standaloneSplitter.boundaries;
+  let lo = 0;
+  let hi = boundaries.length;
+  if (fromBoundary !== undefined) {
+    while (lo < hi) {
+      const mid = (lo + hi) >>> 1;
+      if (boundaries[mid]! < fromBoundary) lo = mid + 1;
+      else hi = mid;
     }
   }
-
-  const boundaries: number[] = [];
-  let inFence = false;
-  let seenContentBefore = false;
-  let sawBlankLineOutsideFence = false;
-
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const rawContent = line.text.endsWith('\r') ? line.text.slice(0, -1) : line.text;
-    const isFenceLine = rawContent.startsWith('```');
-
-    if (!inFence) {
-      if (rawContent.trim() === '') {
-        if (seenContentBefore) {
-          sawBlankLineOutsideFence = true;
-        }
-      } else {
-        if (sawBlankLineOutsideFence) {
-          const isDefiniteNotListOrContinuation = /^[^\s\d\-*+]/.test(rawContent);
-          const isListMarker = /^\s*[-*+]\s/.test(rawContent) || /^\s*\d+[.)]\s/.test(rawContent);
-          const isIndentedContinuation = /^\s{2,}\S/.test(rawContent);
-
-          if (isDefiniteNotListOrContinuation) {
-            boundaries.push(line.start);
-            sawBlankLineOutsideFence = false;
-          } else if (line.hasNewline) {
-            if (!isListMarker && !isIndentedContinuation) {
-              boundaries.push(line.start);
-            }
-            sawBlankLineOutsideFence = false;
-          } else {
-            if (isListMarker || isIndentedContinuation) {
-              sawBlankLineOutsideFence = false;
-            }
-          }
-        }
-        seenContentBefore = true;
-      }
-    }
-
-    if (isFenceLine) {
-      inFence = !inFence;
-    }
-  }
-
-  const resultBoundaries = fromBoundary !== undefined
-    ? boundaries.filter(b => b >= fromBoundary)
-    : boundaries;
-
-  return { boundaries: resultBoundaries, openFence };
+  return { boundaries: boundaries.slice(lo), openFence: standaloneSplitter.openFence };
 }
 
 export class StreamingMarkdown {
   private renderer: MdRenderer;
   private chunkCache = new Map<string, string>();
   private totalRendered = 0;
+  private splitter = new StableSplitter();
+  private chunks: Chunk[] = [];
+  private chunkEnd = 0;
+  private closedBoundaries = 0;
 
   constructor(r: MdRenderer) {
     this.renderer = r;
@@ -122,17 +259,18 @@ export class StreamingMarkdown {
       };
     }
 
-    const { boundaries } = splitStable(text);
-    const chunks: Chunk[] = [];
-    let cachedCount = 0;
-
-    let prev = 0;
-    for (let i = 0; i < boundaries.length; i++) {
-      const b = boundaries[i];
-      if (b === undefined) continue;
-      const chunkText = text.slice(prev, b);
-      prev = b;
-
+    if (this.splitter.update(text)) {
+      this.chunks = [];
+      this.chunkEnd = 0;
+      this.closedBoundaries = 0;
+      this.chunkCache.clear();
+    }
+    const boundaries = this.splitter.boundaries;
+    let cachedCount = this.chunks.length;
+    while (this.closedBoundaries < boundaries.length) {
+      const boundary = boundaries[this.closedBoundaries++]!;
+      const chunkText = text.slice(this.chunkEnd, boundary);
+      this.chunkEnd = boundary;
       let chunkHtml = this.chunkCache.get(chunkText);
       if (chunkHtml !== undefined) {
         cachedCount++;
@@ -141,10 +279,10 @@ export class StreamingMarkdown {
         this.chunkCache.set(chunkText, chunkHtml);
         this.totalRendered++;
       }
-      chunks.push({ id: `chunk-${i}`, html: chunkHtml });
+      this.chunks.push({ id: `chunk-${this.chunks.length}`, html: chunkHtml });
     }
 
-    const tailText = text.slice(prev);
+    const tailText = text.slice(this.chunkEnd);
     const tailBytes = new TextEncoder().encode(tailText).length;
 
     let tail: Tail;
@@ -158,7 +296,7 @@ export class StreamingMarkdown {
     }
 
     return {
-      chunks,
+      chunks: this.chunks,
       tail,
       stats: {
         rendered: this.totalRendered,
