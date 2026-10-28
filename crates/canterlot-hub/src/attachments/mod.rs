@@ -61,6 +61,7 @@ impl fmt::Debug for NewAttachment {
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[schema(as = AttachmentRecord)]
 pub struct AttachmentView {
     pub id: Uuid,
     pub conversation_id: Uuid,

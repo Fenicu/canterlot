@@ -79,6 +79,34 @@ fn is_name(span: &str) -> bool {
 const METHODS: [&str; 6] = ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"];
 
 #[test]
+fn distinct_rust_views_publish_unique_schema_names() {
+    use utoipa::ToSchema;
+
+    let document = openapi_document();
+    let mut names = BTreeMap::new();
+    macro_rules! register {
+        ($($ty:ty),+ $(,)?) => {$({
+            let name = <$ty>::name();
+            let previous = names.insert(name.clone(), std::any::type_name::<$ty>());
+            assert!(previous.is_none(), "schema {name} is shared by {previous:?} and {}", std::any::type_name::<$ty>());
+            assert_eq!(
+                document["components"]["schemas"][name.as_ref()],
+                serde_json::to_value(<$ty as utoipa::PartialSchema>::schema()).unwrap(),
+                "published schema for {}", std::any::type_name::<$ty>()
+            );
+        })+};
+    }
+    register!(
+        canterlot_hub::attachments::AttachmentView,
+        canterlot_hub::history::AttachmentView,
+        canterlot_hub::conversations::ActivityView,
+        canterlot_hub::http::health::ActivityView,
+        canterlot_hub::conversations::QueueView,
+        canterlot_hub::snapshot::QueueView,
+    );
+}
+
+#[test]
 fn coverage_table_matches_openapi_and_event_schema() {
     let api_md = repo_file("docs/design/api.md");
     let document = openapi_document();

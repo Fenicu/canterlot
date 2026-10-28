@@ -170,6 +170,7 @@ pub struct WsView {
 }
 
 #[derive(Serialize, ToSchema)]
+#[schema(as = ActivityConfigView)]
 pub struct ActivityView {
     pub stalled_generating_secs: u64,
     pub stalled_tool_secs: u64,

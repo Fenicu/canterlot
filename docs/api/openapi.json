@@ -106,7 +106,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AttachmentView"
+                  "$ref": "#/components/schemas/AttachmentRecord"
                 }
               }
             }
@@ -242,7 +242,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/AttachmentView"
+                  "$ref": "#/components/schemas/AttachmentRecord"
                 }
               }
             }
@@ -3696,19 +3696,7 @@
   },
   "components": {
     "schemas": {
-      "ActivityState": {
-        "type": "string",
-        "enum": [
-          "idle",
-          "working",
-          "waiting_for_user",
-          "stalled",
-          "quota_paused",
-          "failed",
-          "stopped"
-        ]
-      },
-      "ActivityView": {
+      "ActivityConfigView": {
         "type": "object",
         "required": [
           "stalled_generating_secs",
@@ -3727,6 +3715,37 @@
           }
         }
       },
+      "ActivityState": {
+        "type": "string",
+        "enum": [
+          "idle",
+          "working",
+          "waiting_for_user",
+          "stalled",
+          "quota_paused",
+          "failed",
+          "stopped"
+        ]
+      },
+      "ActivityView": {
+        "type": "object",
+        "required": [
+          "state",
+          "evidence",
+          "since"
+        ],
+        "properties": {
+          "evidence": {
+            "$ref": "#/components/schemas/Evidence"
+          },
+          "since": {
+            "type": "string"
+          },
+          "state": {
+            "$ref": "#/components/schemas/ActivityState"
+          }
+        }
+      },
       "ArchiveReason": {
         "type": "string",
         "enum": [
@@ -3734,6 +3753,59 @@
           "scheduled",
           "live_execution"
         ]
+      },
+      "AttachmentRecord": {
+        "type": "object",
+        "required": [
+          "id",
+          "conversation_id",
+          "name",
+          "mime",
+          "size",
+          "sha256",
+          "state"
+        ],
+        "properties": {
+          "conversation_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fail_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sha256": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "state": {
+            "type": "string"
+          },
+          "uploaded_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "AttachmentView": {
         "type": "object",
@@ -4107,7 +4179,7 @@
         ],
         "properties": {
           "activity": {
-            "$ref": "#/components/schemas/ActivityView"
+            "$ref": "#/components/schemas/ActivityConfigView"
           },
           "auth": {
             "$ref": "#/components/schemas/AuthView"
@@ -4324,7 +4396,7 @@
             "$ref": "#/components/schemas/HistoryPage"
           },
           "queue": {
-            "$ref": "#/components/schemas/QueueView"
+            "$ref": "#/components/schemas/SnapshotQueueView"
           },
           "scheduled": {
             "type": "array",
@@ -4454,7 +4526,7 @@
       "CreatedAttachment": {
         "allOf": [
           {
-            "$ref": "#/components/schemas/AttachmentView"
+            "$ref": "#/components/schemas/AttachmentRecord"
           },
           {
             "type": "object",
@@ -6839,6 +6911,38 @@
           }
         }
       },
+      "SnapshotQueueView": {
+        "type": "object",
+        "required": [
+          "queued",
+          "pause_reasons",
+          "hold_reasons",
+          "run_slot"
+        ],
+        "properties": {
+          "hold_reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HoldView"
+            }
+          },
+          "pause_reasons": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PauseReason"
+            }
+          },
+          "queued": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InputView"
+            }
+          },
+          "run_slot": {
+            "$ref": "#/components/schemas/RunSlot"
+          }
+        }
+      },
       "Snapshot_ConversationSnapshot": {
         "type": "object",
         "required": [
@@ -6866,7 +6970,7 @@
                 "$ref": "#/components/schemas/HistoryPage"
               },
               "queue": {
-                "$ref": "#/components/schemas/QueueView"
+                "$ref": "#/components/schemas/SnapshotQueueView"
               },
               "scheduled": {
                 "type": "array",

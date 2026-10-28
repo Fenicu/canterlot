@@ -122,6 +122,54 @@ fn key() -> String {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn attachment_http_responses_match_openapi_schemas(pool: PgPool) {
+    let _shared = HEAVY.read().await;
+    let f = Fixture::new(pool).await;
+    let document: Value = serde_json::from_str(&canterlot_hub::http::openapi::render()).unwrap();
+    let created = f
+        .create_in(f.conversation, "contract.txt", "text/plain", b"abc")
+        .await;
+    assert_eq!(created.status, 201);
+    let id = id_of(&created);
+    let fetched = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(fetched.status, 200);
+    f.upload(id, b"abc").await;
+    let completed = f.complete(id, &key(), None).await;
+    assert_eq!(completed.status, 200);
+
+    let mut failures = Vec::new();
+    for (method, path, response) in [
+        ("post", "/api/v1/attachments", created),
+        ("get", "/api/v1/attachments/{id}", fetched),
+        ("post", "/api/v1/attachments/{id}/complete", completed),
+    ] {
+        let status = response.status.as_str();
+        let mut schema = document["paths"][path][method]["responses"][status]["content"]
+            ["application/json"]["schema"]
+            .clone();
+        assert!(
+            schema.is_object(),
+            "{method} {path}: response schema exists"
+        );
+        schema["components"] = document["components"].clone();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let body: Value = response.json();
+        for error in validator.iter_errors(&body) {
+            failures.push(format!("{method} {path} {status}: {error}"));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn create_validates_size_name_and_ceiling(pool: PgPool) {
     let _shared = HEAVY.read().await;
     let f = Fixture::new(pool).await;

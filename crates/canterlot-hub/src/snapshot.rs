@@ -36,6 +36,7 @@ pub struct ConversationSnapshot {
     pub scheduled: Vec<ScheduledMessage>,
 }
 #[derive(Serialize, ToSchema)]
+#[schema(as = SnapshotQueueView)]
 pub struct QueueView {
     pub queued: Vec<InputView>,
     pub pause_reasons: Vec<PauseReason>,
