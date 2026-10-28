@@ -22,7 +22,7 @@ import {
 	type InputUiState,
 	type InputView
 } from './inputs';
-import { TimelineModel, type TimelineEntry } from './timeline';
+import { TimelineModel, cmpSeq, type TimelineEntry } from './timeline';
 
 export interface HistoryBlock {
 	kind: 'block';
@@ -272,7 +272,9 @@ export class ChatStore {
 		}
 		if (this.#hold || this.timeline.tailDetached) {
 			this.#held.push(event);
-			if (this.timeline.tailDetached) this.timeline.newerCount += 1;
+			if (this.timeline.tailDetached && (event.kind === 'block_started' || event.kind === 'input_queued')) {
+				this.timeline.newerCount += 1;
+			}
 			return;
 		}
 		this.#dispatch(event);
@@ -358,7 +360,26 @@ export class ChatStore {
 				}
 				return;
 			case 'attachment_state_changed':
-				if (event.kind === 'attachment_state_changed') this.attachments.set(event.payload.attachment_id, { ...event.payload });
+				if (event.kind === 'attachment_state_changed') {
+					const prev = this.attachments.get(event.payload.attachment_id) ?? {};
+					const next: Record<string, unknown> = { ...prev, ...(event.payload as unknown as Record<string, unknown>) };
+					this.attachments.set(event.payload.attachment_id, next);
+					for (const input of this.inputs.values()) {
+						for (let i = 0; i < input.attachments.length; i++) {
+							if (input.attachments[i]?.attachment_id === event.payload.attachment_id) {
+								const current = input.attachments[i]!;
+								input.attachments[i] = {
+									attachment_id: event.payload.attachment_id,
+									name: typeof next.name === 'string' ? next.name : current.name,
+									mime: typeof next.mime === 'string' ? next.mime : current.mime,
+									size: typeof next.size === 'number' ? next.size : current.size,
+									sha256: typeof next.sha256 === 'string' ? next.sha256 : current.sha256,
+									image: typeof next.image === 'boolean' ? next.image : current.image
+								};
+							}
+						}
+					}
+				}
 				return;
 			case 'derived_changed':
 				if (event.kind === 'derived_changed') {
@@ -402,6 +423,33 @@ export class ChatStore {
 		const existing = this.inputs.get(payload.idempotency_key) ?? freshInput(payload.idempotency_key, '', this.deps.clock.now());
 		existing.id = payload.input_id;
 		existing.text = textOf(payload.content as HistoryInput['content']);
+		const rawContent = (payload.content as Array<{ type: string; attachment_id?: string }> | undefined) ?? [];
+		const attBlocks = rawContent.filter((b) => b.type === 'attachment' && typeof b.attachment_id === 'string');
+		if (attBlocks.length > 0) {
+			existing.attachments = attBlocks.map((b) => {
+				const registered = this.attachments.get(b.attachment_id!);
+				if (registered) {
+					return {
+						attachment_id: String(registered.attachment_id ?? b.attachment_id),
+						name: typeof registered.name === 'string' ? registered.name : '',
+						mime: typeof registered.mime === 'string' ? registered.mime : '',
+						size: typeof registered.size === 'number' ? registered.size : 0,
+						sha256: typeof registered.sha256 === 'string' ? registered.sha256 : '',
+						image: Boolean(registered.image)
+					};
+				}
+				const prior = existing.attachments.find((a) => a.attachment_id === b.attachment_id);
+				if (prior) return prior;
+				return {
+					attachment_id: b.attachment_id!,
+					name: '',
+					mime: '',
+					size: 0,
+					sha256: '',
+					image: false
+				};
+			});
+		}
 		existing.state = 'queued';
 		existing.placement = placeInput('queued');
 		existing.marks = marksFor('queued');
@@ -466,7 +514,7 @@ export class ChatStore {
 		}
 		if (data.scheduled) this.scheduled = data.scheduled;
 		const items = data.history?.items ?? [];
-		const oldest = [...items].sort((a, b) => (seqOf(a) < seqOf(b) ? -1 : 1))[0];
+		const oldest = [...items].sort((a, b) => cmpSeq(seqOf(a), seqOf(b)))[0];
 		const floor = oldest ? seqOf(oldest) : null;
 		const older = floor ? this.timeline.entries.filter((entry) => BigInt(entry.seq) < BigInt(floor)) : [];
 		const keepOlder = older.every((entry) => terminalEntry(entry));
@@ -549,7 +597,10 @@ export class ChatStore {
 			if (op.state !== 'saving' && op.state !== 'unknown') continue;
 			if (this.inputs.has(op.key)) continue;
 			const text = typeof (op.body as { text?: string } | null)?.text === 'string' ? (op.body as { text: string }).text : '';
-			this.inputs.set(op.key, freshInput(op.key, text, op.createdAt));
+			const attachments = Array.isArray((op.body as { attachments?: AttachmentRef[] } | null)?.attachments)
+				? (op.body as { attachments: AttachmentRef[] }).attachments
+				: [];
+			this.inputs.set(op.key, freshInput(op.key, text, op.createdAt, attachments));
 		}
 	}
 }

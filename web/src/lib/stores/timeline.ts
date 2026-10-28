@@ -30,15 +30,28 @@ export class TimelineModel {
 		if (dir === 'tail') {
 			const oldest = incoming[0]?.seq;
 			const kept = oldest ? this.entries.filter((entry) => cmpSeq(entry.seq, oldest) < 0) : [];
-			this.#entries.set(dedupe([...kept, ...incoming]));
+			const combined = dedupe([...kept, ...incoming]);
+			if (combined.length > this.maxLoaded) {
+				combined.splice(0, combined.length - this.maxLoaded);
+				this.hasOlder = true;
+			}
+			this.#entries.set(combined);
 			this.tailDetached = false;
 			this.newerCount = 0;
 			return;
 		}
 		const merged =
 			dir === 'older' ? dedupe([...incoming, ...this.entries]) : dedupe([...this.entries, ...incoming]);
+		if (merged.length > this.maxLoaded) {
+			if (dir === 'newer') {
+				merged.splice(0, merged.length - this.maxLoaded);
+				this.hasOlder = true;
+			} else {
+				merged.splice(this.maxLoaded);
+				this.tailDetached = true;
+			}
+		}
 		this.#entries.set(merged);
-		if (this.entries.length > this.maxLoaded) this.trimNewestEnd();
 	}
 
 	trimNewestEnd(): void {
@@ -55,6 +68,10 @@ export class TimelineModel {
 		const without = this.entries.filter((item) => item.key !== entry.key);
 		without.push(entry);
 		without.sort((a, b) => cmpSeq(a.seq, b.seq));
+		if (without.length > this.maxLoaded) {
+			without.splice(0, without.length - this.maxLoaded);
+			this.hasOlder = true;
+		}
 		this.#entries.set(without);
 	}
 

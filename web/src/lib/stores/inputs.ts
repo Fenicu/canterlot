@@ -61,12 +61,12 @@ export function marksFor(state: InputUiState): { saved: boolean; accepted: boole
 
 export const CANCEL_REQUESTED_LABEL = 'отмена запрошена';
 
-export function freshInput(key: string, text: string, createdAt: number): InputView {
+export function freshInput(key: string, text: string, createdAt: number, attachments: AttachmentRef[] = []): InputView {
 	return {
 		key,
 		id: null,
 		text,
-		attachments: [],
+		attachments: [...attachments],
 		state: 'saving',
 		placement: 'strip',
 		marks: marksFor('saving'),

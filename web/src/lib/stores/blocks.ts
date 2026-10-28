@@ -194,6 +194,7 @@ function applyDelta(blocks: Map<string, BlockModel>, ev: HubEvent): BlockEffect[
 	const block = blocks.get(payload.block_id);
 	if (!block) return [];
 	if (block.state === 'final') return [{ type: 'diag', kind: 'delta_after_final', blockId: block.id }];
+	if (block.state === 'incomplete') return [];
 	const delta: PendingDelta = { base: payload.base_rev, rev: payload.rev, append: payload.append };
 	if (block.state === 'stale') {
 		block.pending.push(delta);
@@ -230,6 +231,7 @@ function applyFinal(blocks: Map<string, BlockModel>, ev: HubEvent): BlockEffect[
 		}
 		return [{ type: 'verify', blockId: block.id }];
 	}
+	++block.ticket;
 	block.pending.length = 0;
 	block.sawGap = false;
 	block.rev = payload.rev;
@@ -241,6 +243,7 @@ function applyFinal(blocks: Map<string, BlockModel>, ev: HubEvent): BlockEffect[
 function applyIncomplete(blocks: Map<string, BlockModel>, ev: HubEvent): BlockEffect[] {
 	if (ev.kind !== 'block_incomplete') return [];
 	const block = ensure(blocks, ev.payload.block_id);
+	++block.ticket;
 	block.rev = ev.payload.rev;
 	block.state = 'incomplete';
 	block.incompleteReason = ev.payload.reason;
@@ -250,6 +253,8 @@ function applyIncomplete(blocks: Map<string, BlockModel>, ev: HubEvent): BlockEf
 }
 
 export function installPage(block: BlockModel, page: BlockPage, fromBytes: number): void {
+	if (block.state === 'final') return;
+	if (block.state === 'incomplete' && page.state !== 'final') return;
 	if (fromBytes === 0) replaceBody(block, page.content);
 	else appendBody(block, page.content);
 	block.rev = page.rev;
@@ -293,7 +298,7 @@ export class BlockSync {
 		if (!block || block.checksum === null) return;
 		const hex = await this.io.sha256Hex(block.body);
 		if (hex === block.checksum) {
-			if (block.state !== 'incomplete') block.state = 'final';
+			block.state = 'final';
 			publish(block);
 			return;
 		}
@@ -307,9 +312,18 @@ export class BlockSync {
 		const block = this.blocks.get(blockId);
 		if (!block) return;
 		const mine = ++block.ticket;
-		const page = await this.io.fetchContent(blockId, fromBytes);
+		let offset = fromBytes;
+		let first = true;
+		for (;;) {
+			const page = await this.io.fetchContent(blockId, offset);
+			if (block.ticket !== mine) return;
+			installPage(block, page, first ? fromBytes : offset);
+			first = false;
+			const next = page.next_offset ?? (offset + utf8Length(page.content));
+			if (next <= offset || next >= page.total_bytes) break;
+			offset = next;
+		}
 		if (block.ticket !== mine) return;
-		installPage(block, page, fromBytes);
 		await this.#replay(block);
 	}
 

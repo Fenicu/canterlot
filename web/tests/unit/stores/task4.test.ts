@@ -17,8 +17,8 @@ import {
 import { ChatStore, type ChatApi, type HistoryBlock, type HistoryItem } from '$lib/stores/chat.svelte';
 import { buildDelegation, laneBlocks, subagentVerb } from '$lib/stores/delegation';
 import { fmt } from '$lib/format/ru';
-import { placeInput, type InputUiState } from '$lib/stores/inputs';
-import { limitView } from '$lib/stores/limits';
+import { placeInput, type AttachmentRef, type InputUiState } from '$lib/stores/inputs';
+import { limitView, windowText, type LimitWindow } from '$lib/stores/limits';
 import { ListStore, type ListRow } from '$lib/stores/list.svelte';
 import { MachinesStore } from '$lib/stores/machines.svelte';
 import { TimelineModel, type TimelineEntry } from '$lib/stores/timeline';
@@ -312,46 +312,144 @@ describe('stores task 4', () => {
 		for (const seed of [1, 2, 3]) {
 			const random = mulberry(seed);
 			const blocks = new Map<string, BlockModel>();
-			const canonical = new Map<string, { text: string; rev: number }>();
+			const canonical = new Map<string, { text: string; rev: number; checksum: string; finalized: boolean }>();
 			const events: HubEvent[] = [];
-			for (let index = 0; index < 200; index++) {
+			const alphabet = ['а', 'б', 'в', '🙂', '🚀', '中', '文', 'x', 'й', '\n'];
+
+			for (let index = 0; index < 60; index++) {
 				const id = `00000000-0000-4000-8000-${(index + 1).toString(16).padStart(12, '0')}`;
-				const alphabet = ['а', 'б', '🙂', '中', 'x', 'й'];
-				const chunks = Array.from({ length: 4 + Math.floor(random() * 4) }, () => alphabet[Math.floor(random() * alphabet.length)]!);
+				const chunkCount = 4 + Math.floor(random() * 5);
+				const chunks = Array.from({ length: chunkCount }, () => alphabet[Math.floor(random() * alphabet.length)]!);
 				const text = chunks.join('');
-				canonical.set(id, { text, rev: chunks.length });
+				const checksum = await sha256Hex(text);
+				let finalized = true;
+
 				events.push(started(0, id, 'text', {}));
+
 				const middle: HubEvent[] = [];
 				for (let rev = 1; rev <= chunks.length; rev++) {
 					middle.push(delta(rev - 1, rev, chunks[rev - 1]!, id, `${index}:${rev}`));
 				}
 				const last = middle[middle.length - 1]!;
-				const kept = middle.slice(0, -1).filter(() => random() > 0.35);
-				if (random() > 0.5 && kept.length > 1) kept.push(kept[Math.floor(random() * kept.length)]!);
+				const kept = middle.slice(0, -1).filter(() => random() > 0.3);
+
+				// Duplicates
+				if (random() > 0.5 && kept.length > 1) {
+					kept.push(kept[Math.floor(random() * kept.length)]!);
+				}
+
+				// Shuffle intermediate deltas
 				for (let pass = kept.length - 1; pass > 0; pass--) {
 					const swap = Math.floor(random() * (pass + 1));
 					const current = kept[pass]!;
 					kept[pass] = kept[swap]!;
 					kept[swap] = current;
 				}
-				if (chunks.length > 3) {
+
+				// Overlapping merged delta
+				if (chunks.length > 3 && random() > 0.4) {
 					const append = chunks.slice(1, 4).join('');
 					kept.push(delta(1, 4, append, id, `${index}:merge`));
 				}
+
 				kept.push(last);
 				events.push(...kept);
+
+				// Terminal events
+				const roll = random();
+				if (roll < 0.2) {
+					// Incomplete without late final
+					events.push(ev('block_incomplete', { block_id: id, rev: chunks.length, reason: 'interrupted' }, `${index}:term`));
+					finalized = false;
+				} else if (roll < 0.4) {
+					// Incomplete followed by late final
+					events.push(ev('block_incomplete', { block_id: id, rev: chunks.length, reason: 'interrupted' }, `${index}:term1`));
+					const textOmitted = random() > 0.5;
+					events.push(
+						ev(
+							'block_final',
+							{
+								block_id: id,
+								rev: chunks.length,
+								checksum,
+								text_omitted: textOmitted,
+								text: textOmitted ? '' : text,
+								summary: null
+							},
+							`${index}:term2`
+						)
+					);
+				} else {
+					// Direct final (with text, text_omitted, or temporary checksum mismatch)
+					const badChecksum = random() < 0.15;
+					const textOmitted = random() > 0.5;
+					events.push(
+						ev(
+							'block_final',
+							{
+								block_id: id,
+								rev: chunks.length,
+								checksum: badChecksum ? '0000000000000000000000000000000000000000000000000000000000000000' : checksum,
+								text_omitted: textOmitted,
+								text: textOmitted ? '' : text,
+								summary: null
+							},
+							`${index}:term`
+						)
+					);
+				}
+
+				canonical.set(id, { text, rev: chunks.length, checksum, finalized });
 			}
+
+			// Shuffle events across blocks to interleave streams
+			for (let pass = events.length - 1; pass > 0; pass--) {
+				const swap = Math.floor(random() * (pass + 1));
+				const current = events[pass]!;
+				events[pass] = events[swap]!;
+				events[swap] = current;
+			}
+			events.sort((a, b) => {
+				const aId = (a.payload as { block_id?: string }).block_id;
+				const bId = (b.payload as { block_id?: string }).block_id;
+				if (a.kind === 'block_started' && b.kind !== 'block_started' && aId === bId) return -1;
+				if (b.kind === 'block_started' && a.kind !== 'block_started' && aId === bId) return 1;
+				return 0;
+			});
+
 			const sync = new BlockSync(blocks, {
 				sha256Hex,
-				fetchContent: (blockId, offset) => {
+				fetchContent: async (blockId, offset) => {
 					const record = canonical.get(blockId)!;
+					// Asynchronous resolution with jittered delay
+					await new Promise((resolve) => setTimeout(resolve, Math.floor(random() * 4)));
 					const content = utf8Slice(record.text, offset);
-					return Promise.resolve({ content, offset, rev: record.rev, state: 'streaming', total_bytes: utf8Length(record.text) });
+					return {
+						content,
+						offset,
+						next_offset: null,
+						rev: record.rev,
+						checksum: record.checksum,
+						state: record.finalized ? 'final' : 'streaming',
+						total_bytes: utf8Length(record.text)
+					};
 				}
 			});
+
 			for (const event of events) sync.handle(applyBlockEvent(blocks, event));
 			await sync.settled;
-			for (const [id, record] of canonical) expect(blocks.get(id)!.text).toBe(record.text);
+
+			for (const [id, record] of canonical) {
+				const block = blocks.get(id)!;
+				if (record.finalized) {
+					expect(block.state).toBe('final');
+					expect(block.text).toBe(record.text);
+					expect(block.bytes).toBe(utf8Length(record.text));
+				} else {
+					expect(block.state).toBe('incomplete');
+					expect(record.text.startsWith(block.text)).toBe(true);
+				}
+			}
 		}
 	});
 
@@ -863,6 +961,315 @@ describe('stores task 4', () => {
 		api.blocks.set(blockId, { text: 'Привет, мир', rev: 2, state: 'streaming' });
 		await clock.advanceAsync(1500);
 		expect(chat.blocks.get(blockId)!.text).toBe('Привет, мир');
+	});
+
+	it('asynchronous_fetch_content_interleaved_with_final_does_not_corrupt_body', async () => {
+		const blocks = new Map<string, BlockModel>();
+		let resolveFetch: ((page: BlockPage) => void) | undefined;
+		const sync = new BlockSync(blocks, {
+			fetchContent: (_id, offset) => {
+				if (offset === 5) {
+					return new Promise((resolve) => {
+						resolveFetch = resolve;
+					});
+				}
+				return Promise.resolve({ content: '0123456789', offset: 0, rev: 10, state: 'final', total_bytes: 10 });
+			},
+			sha256Hex
+		});
+		sync.handle(applyBlockEvent(blocks, started(0, BLOCK)));
+		sync.handle(applyBlockEvent(blocks, delta(0, 5, '01234')));
+		// Overlapping delta triggers refetch from offset 5
+		sync.handle(applyBlockEvent(blocks, delta(3, 7, '3456')));
+
+		// block_final arrives while fetch is in-flight
+		const finalChecksum = await sha256Hex('0123456789');
+		sync.handle(
+			applyBlockEvent(
+				blocks,
+				ev(
+					'block_final',
+					{
+						block_id: BLOCK,
+						rev: 10,
+						text: '0123456789',
+						checksum: finalChecksum,
+						text_omitted: false,
+						summary: null
+					},
+					'4'
+				)
+			)
+		);
+		expect(blocks.get(BLOCK)!.text).toBe('0123456789');
+		expect(blocks.get(BLOCK)!.state).toBe('final');
+
+		// In-flight fetch resolves with older chunk
+		resolveFetch?.({ content: '56789', offset: 5, rev: 10, state: 'streaming', total_bytes: 10 });
+		await sync.settled;
+
+		expect(blocks.get(BLOCK)!.text).toBe('0123456789');
+		expect(blocks.get(BLOCK)!.state).toBe('final');
+		expect(sync.diagnostics.filter((d) => (d as { kind?: string }).kind === 'block_checksum_mismatch')).toHaveLength(0);
+	});
+
+	it('block_over_256_kib_refetched_across_pages', async () => {
+		const blocks = new Map<string, BlockModel>();
+		const totalBytes = 300 * 1024;
+		const fullText = 'x'.repeat(totalBytes);
+		const pageSize = 256 * 1024;
+		const sync = new BlockSync(blocks, {
+			fetchContent: async (_id, offset) => {
+				const slice = fullText.slice(offset, offset + pageSize);
+				const next_offset = offset + slice.length < totalBytes ? offset + slice.length : null;
+				return {
+					content: slice,
+					offset,
+					next_offset,
+					rev: 5,
+					state: 'streaming',
+					total_bytes: totalBytes
+				};
+			},
+			sha256Hex
+		});
+		sync.handle(applyBlockEvent(blocks, started(0, BLOCK)));
+		// Gap triggers refetch from 0
+		sync.handle(applyBlockEvent(blocks, delta(2, 5, '...', BLOCK, '2')));
+		await sync.settled;
+
+		const block = blocks.get(BLOCK)!;
+		expect(block.bytes).toBe(totalBytes);
+		expect(block.body).toBe(fullText);
+	});
+
+	it('late_final_with_text_omitted_after_incomplete_transitions_to_final', async () => {
+		const blocks = new Map<string, BlockModel>();
+		const text = 'Содержимое до сбоя';
+		const checksum = await sha256Hex(text);
+		const sync = new BlockSync(blocks, {
+			fetchContent: async () => ({
+				content: text,
+				offset: 0,
+				rev: 2,
+				state: 'final',
+				total_bytes: utf8Length(text)
+			}),
+			sha256Hex
+		});
+		sync.handle(applyBlockEvent(blocks, started(0, BLOCK)));
+		sync.handle(applyBlockEvent(blocks, delta(0, 2, text)));
+		sync.handle(applyBlockEvent(blocks, ev('block_incomplete', { block_id: BLOCK, rev: 2, reason: 'прервано' }, '3')));
+		expect(blocks.get(BLOCK)!.state).toBe('incomplete');
+
+		// Late final with text_omitted: true and matching checksum
+		sync.handle(
+			applyBlockEvent(
+				blocks,
+				ev('block_final', { block_id: BLOCK, rev: 2, checksum, text_omitted: true, summary: null }, '4')
+			)
+		);
+		await sync.settled;
+
+		expect(blocks.get(BLOCK)!.state).toBe('final');
+		expect(blocks.get(BLOCK)!.text).toBe(text);
+	});
+
+	it('forward_paging_beyond_3000_items_trims_oldest_end', () => {
+		const timeline = new TimelineModel();
+		const initial: TimelineEntry[] = Array.from({ length: 3000 }, (_, i) => entry(String(i + 1)));
+		timeline.applyHistoryPage(initial, 'tail');
+		expect(timeline.entries).toHaveLength(3000);
+
+		// User pages forward with 'newer'
+		const newerItems: TimelineEntry[] = Array.from({ length: 50 }, (_, i) => entry(String(3001 + i)));
+		timeline.applyHistoryPage(newerItems, 'newer');
+
+		expect(timeline.entries).toHaveLength(3000);
+		expect(timeline.newestSeq()).toBe('3050');
+		expect(timeline.oldestSeq()).toBe('51');
+		expect(timeline.hasOlder).toBe(true);
+	});
+
+	it('snapshot_floor_with_sequences_9_10_11_uses_numeric_order', () => {
+		const chat = chatOf();
+		// Older entry '7' is final (terminal).
+		// Timeline entry '9' was streaming (non-terminal) before snapshot arrived.
+		const b7 = entry('7');
+		const b9entry = new BlockModel('b9', 'text');
+		b9entry.createdSeq = '9';
+		b9entry.state = 'streaming';
+		chat.timeline.applyHistoryPage([b7, { kind: 'block', key: 'block:b9', seq: '9', block: b9entry }], 'tail');
+
+		// Snapshot items: '9' (now updated to streaming text), '10' (final), '11' (final)
+		const b9: HistoryBlock = {
+			kind: 'block',
+			id: 'b9',
+			block_kind: 'text',
+			content: 'девять',
+			content_bytes: 12,
+			content_truncated: false,
+			created_seq: '9',
+			created_at: '2026-10-28T12:00:00.000Z',
+			rev: 1,
+			state: 'streaming'
+		};
+		const b10: HistoryBlock = {
+			kind: 'block',
+			id: 'b10',
+			block_kind: 'text',
+			content: 'десять',
+			content_bytes: 12,
+			content_truncated: false,
+			created_seq: '10',
+			created_at: '2026-10-28T12:00:01.000Z',
+			rev: 1,
+			state: 'final'
+		};
+		const b11: HistoryBlock = {
+			kind: 'block',
+			id: 'b11',
+			block_kind: 'text',
+			content: 'одиннадцать',
+			content_bytes: 20,
+			content_truncated: false,
+			created_seq: '11',
+			created_at: '2026-10-28T12:00:02.000Z',
+			rev: 1,
+			state: 'final'
+		};
+
+		chat.applier.applySnapshot({ history: { items: [b9, b10, b11] } }, '12');
+
+		// With numeric floor '9', the only older entry is '7', which is terminal, so it is kept.
+		// With lexicographical bug, floor is '10', so streaming '9' is classified as older, causing '7' to be dropped.
+		const seqs = chat.timeline.entries.map((e) => e.seq);
+		expect(seqs).toEqual(['7', '9', '10', '11']);
+	});
+
+	it('attachments_on_live_queued_and_saving_inputs', () => {
+		const attKey = 'idem-att';
+		const attRef: AttachmentRef = {
+			attachment_id: 'att-1',
+			name: 'doc.pdf',
+			mime: 'application/pdf',
+			size: 1024,
+			sha256: 'abc',
+			image: false
+		};
+		const ops = {
+			ops: new Map([
+				[
+					attKey,
+					{
+						key: attKey,
+						kind: 'input',
+						conversationId: CONV,
+						state: 'saving',
+						body: { text: 'с файлом', attachments: [attRef] },
+						createdAt: 100,
+						attempts: 0
+					}
+				]
+			]),
+			settle() {}
+		};
+		const chat = chatOf(ops as unknown as OpJournal);
+		const saving = chat.strip().find((i) => i.key === attKey);
+		expect(saving).toBeDefined();
+		expect(saving!.attachments).toEqual([attRef]);
+
+		chat.applier.applyEvents([
+			{
+				event: ev('attachment_state_changed', { ...attRef, state: 'ready' }, '2'),
+				overlap: false
+			}
+		]);
+
+		chat.applier.applyEvents([
+			{
+				event: ev(
+					'input_queued',
+					{
+						input_id: 'inp-att',
+						input_seq: '3',
+						idempotency_key: attKey,
+						state: 'queued',
+						content: [
+							{ type: 'text', text: 'с файлом' },
+							{ type: 'attachment', attachment_id: 'att-1' }
+						]
+					},
+					'3'
+				),
+				overlap: false
+			}
+		]);
+
+		const queued = chat.inputs.get(attKey);
+		expect(queued).toBeDefined();
+		expect(queued!.attachments).toHaveLength(1);
+		expect(queued!.attachments[0]!.attachment_id).toBe('att-1');
+		expect(queued!.attachments[0]!.name).toBe('doc.pdf');
+	});
+
+	it('newer_count_per_item_not_per_delta', () => {
+		const chat = chatOf();
+		chat.timeline.tailDetached = true;
+		chat.timeline.newerCount = 0;
+
+		for (let i = 1; i <= 10; i++) {
+			chat.applier.applyEvents([{ event: delta(i - 1, i, `chunk${i}`), overlap: false }]);
+		}
+		expect(chat.timeline.newerCount).toBe(0);
+
+		chat.applier.applyEvents([{ event: started(0, 'b-new'), overlap: false }]);
+		expect(chat.timeline.newerCount).toBe(1);
+	});
+
+	it('upsert_bounded_by_max_loaded', () => {
+		const timeline = new TimelineModel();
+		for (let i = 1; i <= 3000; i++) {
+			timeline.upsert(entry(String(i)));
+		}
+		expect(timeline.entries).toHaveLength(3000);
+		expect(timeline.oldestSeq()).toBe('1');
+		expect(timeline.newestSeq()).toBe('3000');
+
+		timeline.upsert(entry('3001'));
+		expect(timeline.entries).toHaveLength(3000);
+		expect(timeline.oldestSeq()).toBe('2');
+		expect(timeline.newestSeq()).toBe('3001');
+		expect(timeline.hasOlder).toBe(true);
+	});
+
+	it('window_text_flags_stale_and_hot_correctly', () => {
+		const now = Date.parse('2026-10-28T12:00:00.000Z');
+		const freshWindow: LimitWindow = {
+			observed_at: '2026-10-28T11:59:50.000Z',
+			resets_at: '2026-10-28T15:00:00.000Z',
+			used_permille: 150
+		};
+		const view = windowText(freshWindow, now);
+		expect(view.stale).toBe(false);
+		expect(view.hot).toBe(false);
+
+		const hotWindow: LimitWindow = {
+			observed_at: '2026-10-28T11:59:50.000Z',
+			resets_at: '2026-10-28T15:00:00.000Z',
+			used_permille: 850
+		};
+		const hotView = windowText(hotWindow, now);
+		expect(hotView.stale).toBe(false);
+		expect(hotView.hot).toBe(true);
+
+		const staleWindow: LimitWindow = {
+			observed_at: '2026-10-28T11:50:00.000Z',
+			resets_at: '2026-10-28T15:00:00.000Z',
+			used_permille: 150
+		};
+		const staleView = windowText(staleWindow, now);
+		expect(staleView.stale).toBe(true);
 	});
 });
 
