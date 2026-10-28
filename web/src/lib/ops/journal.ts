@@ -66,9 +66,9 @@ export class OpJournal {
     document.removeEventListener('visibilitychange', this.#onVisible);
   }
 
-  async begin<B>(kind: OpKind, body: B, opts: { conversationId?: string; persist: boolean }): Promise<Op<B>> {
+  async begin<B>(kind: OpKind, body: B, opts: { conversationId?: string; persist: boolean; key?: string }): Promise<Op<B>> {
     const op = reactiveOp<B>({
-      key: crypto.randomUUID(),
+      key: opts.key ?? crypto.randomUUID(),
       kind,
       conversationId: opts.conversationId,
       body,
