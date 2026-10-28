@@ -36,6 +36,7 @@ pub mod history;
 pub mod layers;
 pub mod limits;
 pub mod machines;
+pub mod media;
 pub mod openapi;
 pub mod scheduled;
 pub mod snapshot;
@@ -138,6 +139,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(history::routes())
         .merge(ws::routes())
         .merge(attachments::routes())
+        .merge(media::routes())
 }
 
 pub fn router(state: AppState) -> Router {

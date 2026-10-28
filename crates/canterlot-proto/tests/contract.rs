@@ -1290,3 +1290,89 @@ fn hello_and_heartbeat_carry_machine_time_and_old_decoders_skip_it() {
     );
     assert_roundtrip(heartbeat);
 }
+
+#[test]
+fn media_messages_roundtrip_fit_limits_and_redact_bytes() {
+    use canterlot_proto::{
+        limits::{MAX_MEDIA_BYTES, MEDIA_MIMES, check_ipc_message},
+        worker::{ipc, v1::*},
+    };
+    assert_eq!(MAX_MEDIA_BYTES, 20 * 1024 * 1024);
+    assert_eq!(
+        MEDIA_MIMES,
+        ["image/png", "image/jpeg", "image/webp", "image/gif"]
+    );
+    let marker = b"PRIVATE_MEDIA_MARKER_123";
+    let header = MediaChunk {
+        part: Some(media_chunk::Part::Header(MediaHeader {
+            media_id: "019a1b10-0000-7000-8000-000000000001".into(),
+            execution_id: "019a1b10-0000-7000-8000-000000000002".into(),
+            block_id: "019a1b10-0000-7000-8000-000000000003".into(),
+            mime: "image/png".into(),
+            size: MAX_MEDIA_BYTES,
+            sha256: "a".repeat(64),
+        })),
+    };
+    let data = MediaChunk {
+        part: Some(media_chunk::Part::Data(vec![7; MAX_FILE_CHUNK_BYTES])),
+    };
+    assert!(data.encoded_len() <= MAX_MESSAGE_BYTES);
+    assert_roundtrip(header.clone());
+    assert_roundtrip(data);
+    assert_roundtrip(MediaStored {
+        media_id: "m".into(),
+    });
+    let secret = MediaChunk {
+        part: Some(media_chunk::Part::Data(marker.to_vec())),
+    };
+    let debug = format!("{secret:?}");
+    assert!(!debug.contains("PRIVATE_MEDIA_MARKER"), "{debug}");
+    assert!(debug.contains(&marker.len().to_string()));
+    assert!(format!("{header:?}").contains("20971520"));
+    let record = RecordBody {
+        body: Some(record_body::Body::BlockMedia(BlockMedia {
+            block_id: "b".into(),
+            media_id: "m".into(),
+            mime: "image/webp".into(),
+            size: 42,
+            sha256: "b".repeat(64),
+            width: 640,
+            height: 480,
+        })),
+    };
+    assert_roundtrip(record.clone());
+    // Декодер без поля 27 видит пустое тело, а не другое событие.
+    #[derive(Clone, PartialEq, Message)]
+    struct OldRecordBody {
+        #[prost(message, optional, tag = "1")]
+        command_stored: Option<canterlot_proto::worker::v1::CommandStored>,
+    }
+    assert_eq!(
+        OldRecordBody::decode(record.encode_to_vec().as_slice()).unwrap(),
+        OldRecordBody::default()
+    );
+    let upload = ipc::SupervisorToControl {
+        msg: Some(ipc::supervisor_to_control::Msg::MediaUpload(
+            ipc::MediaUpload {
+                media_id: "m".into(),
+                block_id: "b".into(),
+                mime: "image/gif".into(),
+                size: 9,
+                sha256: "c".repeat(64),
+            },
+        )),
+    };
+    let result = ipc::ControlToSupervisor {
+        msg: Some(ipc::control_to_supervisor::Msg::MediaResult(
+            ipc::MediaResult {
+                media_id: "m".into(),
+                stored: false,
+                reason: "conflict".into(),
+            },
+        )),
+    };
+    assert_eq!(check_ipc_message(&upload), Ok(()));
+    assert_eq!(check_ipc_message(&result), Ok(()));
+    assert_roundtrip(upload);
+    assert_roundtrip(result);
+}

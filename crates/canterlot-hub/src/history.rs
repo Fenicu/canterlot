@@ -75,6 +75,8 @@ pub struct BlockView {
     pub rev: i64,
     pub revision_gap: bool,
     pub incomplete_reason: Option<String>,
+    /// Картинки, на которые смотрел агент; появляются после `block_media_attached`.
+    pub media: Vec<crate::media::MediaView>,
 }
 #[derive(Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -150,6 +152,7 @@ async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx
         &content
     };
     let at = time(r.try_get("created_at")?);
+    let media = crate::media::for_block(conn, id).await?;
     Ok(BlockView {
         id,
         kind,
@@ -173,6 +176,7 @@ async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx
         rev: r.try_get("rev")?,
         revision_gap: r.try_get("revision_gap")?,
         incomplete_reason: r.try_get("incomplete_reason")?,
+        media,
     })
 }
 pub async fn page(

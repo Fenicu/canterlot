@@ -2268,6 +2268,70 @@
         }
       }
     },
+    "/api/v1/media/{id}": {
+      "get": {
+        "tags": [
+          "media"
+        ],
+        "operationId": "get_media",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Картинка, на которую смотрел агент: тип из проверенного списка, показ на месте, ETag равен SHA-256",
+            "headers": {
+              "ETag": {
+                "schema": {
+                  "type": "string"
+                },
+                "description": "SHA-256 содержимого в кавычках"
+              }
+            },
+            "content": {
+              "image/png": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/jpeg": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/webp": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              },
+              "image/gif": {
+                "schema": {
+                  "$ref": "#/components/schemas/BinaryContent"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/openapi.json": {
       "get": {
         "tags": [
@@ -2841,7 +2905,8 @@
           "content_truncated",
           "content_bytes",
           "rev",
-          "revision_gap"
+          "revision_gap",
+          "media"
         ],
         "properties": {
           "agent": {
@@ -2892,6 +2957,13 @@
           "line_count": {
             "type": "integer",
             "format": "int64"
+          },
+          "media": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MediaView"
+            },
+            "description": "Картинки, на которые смотрел агент; появляются после `block_media_attached`."
           },
           "model": {
             "type": "string"
@@ -4787,6 +4859,42 @@
           "owner_id": {
             "type": "string",
             "format": "uuid"
+          }
+        }
+      },
+      "MediaView": {
+        "type": "object",
+        "description": "Картинка в моделях чтения блока.",
+        "required": [
+          "media_id",
+          "mime",
+          "size"
+        ],
+        "properties": {
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "media_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
           }
         }
       },

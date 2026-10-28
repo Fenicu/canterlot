@@ -93,6 +93,23 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             text: string("text")?,
             summary: value["summary"].as_str().map(str::to_owned),
         },
+        "media" => {
+            let block_id = *blocks
+                .get(&uuid("block_id")?)
+                .ok_or(AdapterError::Protocol)?;
+            let source = match value.get("data").and_then(Value::as_str) {
+                Some(data) => {
+                    use base64::Engine;
+                    MediaSource::Bytes(
+                        base64::engine::general_purpose::STANDARD
+                            .decode(data)
+                            .map_err(|_| AdapterError::Protocol)?,
+                    )
+                }
+                None => MediaSource::Path(PathBuf::from(string("path")?)),
+            };
+            AdapterEvent::Media { block_id, source }
+        }
         "completed" => {
             let input_command_id = uuid("input_command_id")?;
             blocks.clear();

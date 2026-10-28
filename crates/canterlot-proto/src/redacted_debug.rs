@@ -160,3 +160,27 @@ impl fmt::Debug for crate::worker::v1::PhaseChanged {
             .finish()
     }
 }
+
+impl fmt::Debug for crate::worker::v1::MediaChunk {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MediaChunk")
+            .field("part", &self.part)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::media_chunk::Part {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Header(header) => f
+                .debug_struct("Header")
+                .field("media_id", &header.media_id)
+                .field("size", &header.size)
+                .finish_non_exhaustive(),
+            Self::Data(data) => f
+                .debug_struct("Data")
+                .field("data_bytes", &data.len())
+                .finish(),
+        }
+    }
+}

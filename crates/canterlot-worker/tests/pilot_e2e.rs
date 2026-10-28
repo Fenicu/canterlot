@@ -1788,3 +1788,129 @@ async fn internal_kinds_never_leave_the_hub_over_wss_in_the_full_flow(pool: PgPo
     );
     assert_eq!(ws.connections, 2);
 }
+
+/// PNG с заголовком IHDR: тип и размеры определяются по сигнатуре и заголовку.
+fn png(width: u32, height: u32, tail: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+    bytes.extend(width.to_be_bytes());
+    bytes.extend(height.to_be_bytes());
+    bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    bytes.extend((0..tail).map(|i| (i % 253) as u8));
+    bytes
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn view_image_step_shows_media_on_the_tool_block_end_to_end(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let mut ws = p.ws().await;
+    let id = p.create("synthetic", false).await;
+    let chat = format!("conversation:{id}");
+    ws.subscribe("chat", &chat).await;
+    let bytes = png(3, 2, 70_000);
+    fs::write(p.work.join("screen.png"), &bytes).unwrap();
+    let input = p
+        .submit(
+            id,
+            &script(json!([{"view_image": "screen.png"}, {"delta": "Вижу картинку"}])),
+            &[],
+        )
+        .await;
+    let command = uuid(&input["command_id"]);
+    p.answered(id, command, "Вижу картинку").await;
+    ws.wait_event(
+        "media attached over WSS",
+        &chat,
+        "block_media_attached",
+        |_| true,
+    )
+    .await;
+
+    // WSS: блок `Read` с путём, затем ссылка на опубликованную картинку того же блока.
+    let events = ws.events(&chat);
+    let started = events
+        .iter()
+        .find(|e| {
+            e["kind"] == "block_started"
+                && e["payload"]["kind"] == "tool_call"
+                && e["payload"]["tool_name"] == "Read"
+        })
+        .expect("tool block started")
+        .clone();
+    assert_eq!(started["payload"]["summary"], "screen.png");
+    assert_eq!(started["payload"]["input_command_id"], command.to_string());
+    let block = uuid(&started["payload"]["block_id"]);
+    let attached = events
+        .iter()
+        .find(|e| e["kind"] == "block_media_attached")
+        .unwrap()
+        .clone();
+    assert!(seq(&attached["scope_seq"]) > seq(&started["scope_seq"]));
+    let media = uuid(&attached["payload"]["media_id"]);
+    assert_eq!(
+        attached["payload"],
+        json!({"block_id": block, "media_id": media, "mime": "image/png", "size": bytes.len(), "width": 3, "height": 2})
+    );
+    assert_eq!(
+        ws.payloads(&chat, "block_media_attached").len(),
+        1,
+        "one reference per image"
+    );
+
+    // Модели чтения: история и снимок несут картинку на блоке инструмента.
+    let expected = json!([{"media_id": media, "mime": "image/png", "size": bytes.len(), "width": 3, "height": 2}]);
+    let history = p.history(id).await;
+    let tool = history
+        .iter()
+        .find(|i| i["kind"] == "block" && i["id"] == block.to_string())
+        .expect("tool block in history");
+    assert_eq!(tool["block_kind"], "tool_call");
+    assert_eq!(tool["tool_name"], "Read");
+    assert_eq!(tool["summary"], "screen.png");
+    assert_eq!(tool["media"], expected);
+    let result = history
+        .iter()
+        .find(|i| i["kind"] == "block" && i["parent_block_id"] == block.to_string())
+        .expect("tool result in history");
+    assert_eq!(result["content"], format!("{} bytes", bytes.len()));
+    assert_eq!(result["media"], json!([]));
+    let snapshot = p.get(&format!("/api/v1/conversations/{id}/snapshot")).await;
+    let in_snapshot = snapshot["data"]["history"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["id"] == block.to_string())
+        .unwrap()
+        .clone();
+    assert_eq!(in_snapshot["media"], expected);
+
+    // Выдача браузеру: проверенный тип, показ на месте, ETag равен SHA-256.
+    let response = p
+        .api
+        .send(Method::GET, &format!("/api/v1/media/{media}"), None, None)
+        .await;
+    assert_eq!(response.status, 200);
+    assert_eq!(response.body.as_ref(), bytes.as_slice());
+    assert_eq!(response.headers["content-type"], "image/png");
+    assert_eq!(response.headers["x-content-type-options"], "nosniff");
+    assert_eq!(response.headers["content-disposition"], "inline");
+    assert_eq!(response.headers["etag"], format!("\"{}\"", sha_hex(&bytes)));
+    let execution: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 order by generation desc limit 1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let copies = p
+        .config
+        .data_dir
+        .join("executions")
+        .join(execution.to_string())
+        .join("media");
+    until("worker copy removed after publish", async || {
+        fs::read_dir(&copies).map_or(true, |mut d| d.next().is_none())
+    })
+    .await;
+    check_streams(&pool, p.owner, &ws).await;
+}

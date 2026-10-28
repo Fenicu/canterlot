@@ -10,6 +10,7 @@ service WorkerControl {
 service WorkerData {
   rpc Data(stream DataUp) returns (stream DataDown);
   rpc FetchAttachment(FetchAttachmentRequest) returns (stream AttachmentChunk);
+  rpc PutMedia(stream MediaChunk) returns (MediaStored);
 }
 
 enum StreamKind {
@@ -239,6 +240,7 @@ message RecordBody {
     LimitReached limit_reached = 24;
     AttachmentReady attachment_ready = 25;
     AttachmentFailed attachment_failed = 26;
+    BlockMedia block_media = 27;
   }
 }
 
@@ -543,4 +545,36 @@ message AttachmentFailed {
   string attachment_id = 3;
   string reason = 4;
   bool retryable = 5;
+}
+
+// Картинка, которую видел агент: первый кадр несёт заголовок, следующие - данные до 131072 байт.
+message MediaHeader {
+  string media_id = 1;
+  string execution_id = 2;
+  string block_id = 3;
+  string mime = 4;
+  uint64 size = 5;
+  string sha256 = 6;
+}
+
+message MediaChunk {
+  oneof part {
+    MediaHeader header = 1;
+    bytes data = 2;
+  }
+}
+
+message MediaStored {
+  string media_id = 1;
+}
+
+// Пишется сопровождением только после MediaStored: хаб не видит ссылок на неопубликованное.
+message BlockMedia {
+  string block_id = 1;
+  string media_id = 2;
+  string mime = 3;
+  uint64 size = 4;
+  string sha256 = 5;
+  uint32 width = 6;
+  uint32 height = 7;
 }

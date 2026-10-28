@@ -14,6 +14,8 @@ use tonic::Code;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Point {
     BeforeFetchChunk,
+    BeforeMediaChunk,
+    BeforeMediaPublish,
     BeforeCommandSend,
     BeforeCjCommit,
     BeforeSjCommit,

@@ -314,6 +314,14 @@ impl WorkerData for Service {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
+    async fn put_media(
+        &self,
+        request: Request<Streaming<canterlot_proto::worker::v1::MediaChunk>>,
+    ) -> Result<Response<canterlot_proto::worker::v1::MediaStored>, Status> {
+        self.check(&request);
+        Err(Status::unimplemented("media_not_supported_by_test_hub"))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,

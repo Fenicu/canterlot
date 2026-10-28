@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.PhaseChanged",
             ".canterlot.worker.v1.AttachmentRef",
             ".canterlot.worker.v1.AttachmentChunk",
+            ".canterlot.worker.v1.MediaChunk",
         ])
         .build_server(true)
         .build_client(true)

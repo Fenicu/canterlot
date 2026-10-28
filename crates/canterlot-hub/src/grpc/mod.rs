@@ -27,6 +27,7 @@ mod attachments;
 mod auth;
 mod control;
 mod data;
+mod media;
 mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
@@ -77,6 +78,7 @@ pub struct HubGrpc {
     pub ingest: Arc<dyn Ingest>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
     fetch_slots: attachments::FetchSlots,
+    media_slots: media::UploadSlots,
     #[cfg(feature = "fault-injection")]
     pub faults: crate::fault_injection::Faults,
     shutdown: CancellationToken,
@@ -274,6 +276,7 @@ impl HubGrpc {
             ingest,
             blobs: None,
             fetch_slots: Default::default(),
+            media_slots: Default::default(),
             #[cfg(feature = "fault-injection")]
             faults: Default::default(),
             shutdown: CancellationToken::new(),

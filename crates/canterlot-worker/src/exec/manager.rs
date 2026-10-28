@@ -11,14 +11,15 @@ use canterlot_proto::{
     worker::{
         ipc::{
             CliStarted, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest, LocalFile,
-            Ownership, OwnershipPhase, ShipFrom, SjAck, SjBatch, StartCli, StopRequest,
-            SupervisorToControl, control_to_supervisor as down, supervisor_to_control as up,
+            MediaResult, MediaUpload, Ownership, OwnershipPhase, ShipFrom, SjAck, SjBatch,
+            StartCli, StopRequest, SupervisorToControl, control_to_supervisor as down,
+            supervisor_to_control as up,
         },
         v1::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
             CommandRejected, ExecutionState, InputCancelLost, InputCancelWon,
-            InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, StartExecution,
-            WithdrawInput, command::Kind, content_block, record_body::Body,
+            InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, MediaHeader,
+            StartExecution, WithdrawInput, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -35,6 +36,7 @@ use super::{ExecError, Shared, SjRelay, open, procfs, spawn};
 use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
+    media::{self, PutError},
     supervisor::ipc::{read_message, write_message},
 };
 
@@ -56,6 +58,18 @@ pub(crate) enum Msg {
         key: (Uuid, u32),
         files: Result<Vec<LocalFile>, FetchError>,
     },
+    MediaFinished {
+        media_id: Uuid,
+        result: Result<(), PutError>,
+    },
+}
+
+/// Загрузка картинки агента на хаб; прерывается вместе с актором.
+struct MediaTask(tokio::task::JoinHandle<()>);
+impl Drop for MediaTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct FetchTask {
@@ -523,6 +537,7 @@ pub(super) struct Actor {
     cancelled_local: HashSet<(Uuid, u32)>,
     fetching: HashMap<(Uuid, u32), FetchTask>,
     attachments: Option<Arc<AttachmentStore>>,
+    uploads: HashMap<Uuid, MediaTask>,
     outbox: VecDeque<SjRelay>,
     last_seq: u64,
     acked_seq: u64,
@@ -564,6 +579,7 @@ impl Actor {
             cancelled_local: HashSet::new(),
             fetching: HashMap::new(),
             attachments: None,
+            uploads: HashMap::new(),
             outbox: VecDeque::new(),
             last_seq: 0,
             acked_seq: 0,
@@ -1093,6 +1109,7 @@ impl Actor {
     async fn release(&mut self) -> Result<(), ExecError> {
         // Каталог исполнения удаляется ниже: незавершённые загрузки возвращают ввод хабу.
         self.cancel_fetches().await?;
+        self.uploads.clear();
         let outcome = self
             .shared
             .infos
@@ -1175,6 +1192,24 @@ impl Actor {
                 }
                 Ok(())
             }
+            Msg::MediaFinished { media_id, result } => {
+                self.uploads.remove(&media_id);
+                if let Err(error) = result {
+                    tracing::warn!(kind = "media_upload_failed", execution_id = %self.id, media_id = %media_id, reason = error.reason(), "media upload failed");
+                }
+                // Без связи сопровождение повторит запрос после нового Attach.
+                self.send(down::Msg::MediaResult(MediaResult {
+                    media_id: media_id.to_string(),
+                    stored: result.is_ok(),
+                    reason: result
+                        .err()
+                        .map(PutError::reason)
+                        .unwrap_or_default()
+                        .into(),
+                }))
+                .await;
+                Ok(())
+            }
             Msg::FetchFinished { key, files } => {
                 if self.discard_closed_fetch(key).await? {
                     return Ok(());
@@ -1196,8 +1231,10 @@ impl Actor {
             up::Msg::CliStarted(started) => self.on_cli_started(started).await?,
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
             up::Msg::SjBatch(batch) => self.on_batch(batch).await?,
+            up::Msg::MediaUpload(request) => self.start_upload(request),
             up::Msg::Exited(exited) => {
                 self.cancel_fetches().await?;
+                self.uploads.clear();
                 self.finished = true;
                 self.reconnect_at = None;
                 let outcome = exited.reason;
@@ -1608,6 +1645,42 @@ impl Actor {
             self.waiting.push_back(command);
         }
         Ok(())
+    }
+
+    /// Одна загрузка на картинку; повторный запрос той же картинки ждёт уже идущую.
+    fn start_upload(&mut self, request: MediaUpload) {
+        let (Ok(media_id), Some(exec_dir)) =
+            (Uuid::parse_str(&request.media_id), self.exec_dir.clone())
+        else {
+            return;
+        };
+        if self.uploads.contains_key(&media_id) {
+            return;
+        }
+        let sender = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .get(&self.id)
+            .expect("actor sender")
+            .clone();
+        let sink = self.shared.media_sink.subscribe();
+        let backoff_cap = self.shared.attachment_config.fetch_backoff_cap;
+        let header = MediaHeader {
+            media_id: request.media_id,
+            execution_id: self.id.to_string(),
+            block_id: request.block_id,
+            mime: request.mime,
+            size: request.size,
+            sha256: request.sha256,
+        };
+        let task = tokio::spawn(async move {
+            let path = media::media_path(&exec_dir, media_id);
+            let result = media::upload(sink, &path, header, backoff_cap).await;
+            let _ = sender.send(Msg::MediaFinished { media_id, result });
+        });
+        self.uploads.insert(media_id, MediaTask(task));
     }
 
     fn start_fetch(&mut self, command: Command, references: Vec<AttachmentRef>) {

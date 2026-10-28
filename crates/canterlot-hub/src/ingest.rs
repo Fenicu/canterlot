@@ -1273,6 +1273,7 @@ async fn apply_body(
         | Body::BlockDelta(_)
         | Body::BlockFinal(_)
         | Body::BlockIncomplete(_)
+        | Body::BlockMedia(_)
         | Body::PhaseChanged(_)
         | Body::JournalOpened(_) => return Err(IngestError::InvalidRecord),
     }
@@ -1762,6 +1763,7 @@ async fn apply_journal_body(
             | Body::BlockDelta(_)
             | Body::BlockFinal(_)
             | Body::BlockIncomplete(_)
+            | Body::BlockMedia(_)
             | Body::PhaseChanged(_)
             | Body::JournalClosed(_)
     ) {
@@ -1779,6 +1781,15 @@ async fn apply_journal_body(
     let run = owned_execution(conn, machine_id, execution_id, None)
         .await?
         .ok_or(IngestError::ForeignExecution)?;
+    if let Body::BlockMedia(fact) = body {
+        return crate::media::attach_in_tx(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(|error| match error {
+                sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
+                _ => IngestError::Database,
+            });
+    }
     let outcome = match body {
         Body::BlockStarted(fact) => blocks::start_block(conn, &run, fact, correlation_id).await,
         Body::BlockDelta(fact) => blocks::apply_delta(conn, &run, fact, correlation_id).await,

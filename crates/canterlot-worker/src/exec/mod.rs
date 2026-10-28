@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::{
     attachments::AttachmentSource,
     config::{ExecutionConfig, WorkerAttachmentsConfig},
+    media::MediaSink,
     session::WorkerError,
     session_store::StoreClient,
     store::{Accept, StoreError, WorkerStore},
@@ -74,6 +75,7 @@ pub(crate) struct Shared {
     pub config: ExecutionConfig,
     pub attachment_config: WorkerAttachmentsConfig,
     pub attachment_source: watch::Sender<Option<Arc<dyn AttachmentSource>>>,
+    pub media_sink: watch::Sender<Option<Arc<dyn MediaSink>>>,
     pub fetch_slots: Arc<tokio::sync::Semaphore>,
     pub store: StoreClient,
     pub relay: mpsc::Sender<SjRelay>,
@@ -253,6 +255,7 @@ impl ExecutionManager {
                 )),
                 attachment_config,
                 attachment_source: watch::channel(None).0,
+                media_sink: watch::channel(None).0,
                 store,
                 relay,
                 enabled: AtomicBool::new(true),
@@ -287,6 +290,11 @@ impl ExecutionManager {
 
     pub fn set_attachment_source(&self, source: Option<Arc<dyn AttachmentSource>>) {
         self.shared.attachment_source.send_replace(source);
+    }
+
+    /// Канал загрузки картинок агента; `None` на время разрыва.
+    pub fn set_media_sink(&self, sink: Option<Arc<dyn MediaSink>>) {
+        self.shared.media_sink.send_replace(sink);
     }
 
     pub fn set_enabled(&self, enabled: bool) {

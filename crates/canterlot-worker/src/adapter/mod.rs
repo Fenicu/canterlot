@@ -143,6 +143,23 @@ impl fmt::Debug for LocalFile {
             .finish()
     }
 }
+/// Источник картинки: байты из результата инструмента или путь, который сопровождение читает сразу.
+#[derive(Clone)]
+pub enum MediaSource {
+    Bytes(Vec<u8>),
+    Path(PathBuf),
+}
+impl fmt::Debug for MediaSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bytes(bytes) => f
+                .debug_struct("Bytes")
+                .field("bytes", &bytes.len())
+                .finish(),
+            Self::Path(_) => f.write_str("Path"),
+        }
+    }
+}
 #[derive(Clone)]
 pub enum AdapterEvent {
     Phase {
@@ -168,6 +185,10 @@ pub enum AdapterEvent {
         block_id: Uuid,
         text: String,
         summary: Option<String>,
+    },
+    Media {
+        block_id: Uuid,
+        source: MediaSource,
     },
     RunFinished {
         input_command_id: Uuid,
@@ -215,6 +236,11 @@ impl fmt::Debug for AdapterEvent {
                 .field("block_id", block_id)
                 .field("text_bytes", &text.len())
                 .finish_non_exhaustive(),
+            Self::Media { block_id, source } => f
+                .debug_struct("Media")
+                .field("block_id", block_id)
+                .field("source", source)
+                .finish(),
             Self::RunFinished {
                 input_command_id, ..
             } => f

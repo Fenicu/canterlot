@@ -25,6 +25,7 @@ use crate::{
     attachments::{AttachmentSource, ChunkStream, FetchError},
     config::{ConfigError, ConfigErrorCategory, WorkerConfig, read_token},
     exec::{ExecutionManager, SjRelay},
+    media::{MediaSink, PutError},
     session_store::StoreThread,
     store::{Accept, StoreError, WorkerStore},
 };
@@ -256,6 +257,66 @@ impl AttachmentSource for GrpcAttachmentSource {
     }
 }
 
+/// Загрузка картинок агента по отдельному соединению HTTP/2: поток SJ и управление её не ждут.
+pub struct GrpcMediaSink {
+    client: WorkerDataClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, Bearer>,
+    >,
+}
+
+fn put_error(status: &Status) -> PutError {
+    match status.code() {
+        tonic::Code::AlreadyExists => PutError::Conflict,
+        tonic::Code::DataLoss => PutError::Corrupt,
+        tonic::Code::InvalidArgument
+        | tonic::Code::NotFound
+        | tonic::Code::PermissionDenied
+        | tonic::Code::FailedPrecondition
+        | tonic::Code::OutOfRange
+        | tonic::Code::Unimplemented => PutError::Rejected,
+        _ => PutError::Transport,
+    }
+}
+
+#[async_trait::async_trait]
+impl MediaSink for GrpcMediaSink {
+    async fn put(&self, header: MediaHeader, mut file: tokio::fs::File) -> Result<(), PutError> {
+        use tokio::io::AsyncReadExt;
+        let media_id = header.media_id.clone();
+        let (frames, rx) = mpsc::channel(2);
+        // Файл читается кусками по мере отправки: в памяти не больше пары чанков.
+        let producer = tokio::spawn(async move {
+            let first = MediaChunk {
+                part: Some(media_chunk::Part::Header(header)),
+            };
+            if frames.send(first).await.is_err() {
+                return Ok(());
+            }
+            loop {
+                let mut data = vec![0; canterlot_proto::limits::MAX_FILE_CHUNK_BYTES];
+                let read = file.read(&mut data).await?;
+                if read == 0 {
+                    return Ok::<_, std::io::Error>(());
+                }
+                data.truncate(read);
+                let chunk = MediaChunk {
+                    part: Some(media_chunk::Part::Data(data)),
+                };
+                if frames.send(chunk).await.is_err() {
+                    return Ok(());
+                }
+            }
+        });
+        let response = self.client.clone().put_media(ReceiverStream::new(rx)).await;
+        producer.abort();
+        match response {
+            Ok(stored) if stored.get_ref().media_id == media_id => Ok(()),
+            Ok(_) => Err(PutError::Rejected),
+            Err(status) => Err(put_error(&status)),
+        }
+    }
+}
+
 impl Interceptor for Bearer {
     fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
         request
@@ -374,6 +435,7 @@ impl Worker {
         }
         if let Some(manager) = self.manager.take() {
             manager.set_attachment_source(None);
+            manager.set_media_sink(None);
             manager.shutdown().await;
         }
         let closed = self.store.close().await;
@@ -454,6 +516,7 @@ impl Worker {
                 let _ = task.await;
             }
             self.manager.as_ref().unwrap().set_attachment_source(None);
+            self.manager.as_ref().unwrap().set_media_sink(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
             if let WorkerError::Hub { code, .. } = &error {
@@ -638,6 +701,10 @@ impl Worker {
         let mut control = WorkerControlClient::with_interceptor(control, auth.clone())
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
+        // Третье соединение подключается при первой загрузке картинки.
+        let media = WorkerDataClient::with_interceptor(endpoint.connect_lazy(), auth.clone())
+            .max_decoding_message_size(MAX_MESSAGE_BYTES)
+            .max_encoding_message_size(MAX_MESSAGE_BYTES);
         let mut data = WorkerDataClient::with_interceptor(data, auth)
             .max_decoding_message_size(MAX_MESSAGE_BYTES)
             .max_encoding_message_size(MAX_MESSAGE_BYTES);
@@ -741,6 +808,14 @@ impl Worker {
                 std::sync::Arc::new(GrpcAttachmentSource {
                     client: data.clone(),
                 }) as std::sync::Arc<dyn AttachmentSource>
+            }));
+        self.manager
+            .as_ref()
+            .unwrap()
+            .set_media_sink(pilot.then(|| {
+                std::sync::Arc::new(GrpcMediaSink {
+                    client: media.clone(),
+                }) as std::sync::Arc<dyn MediaSink>
             }));
         self.manager.as_ref().unwrap().set_enabled(exec_enabled);
         self.transition(SessionState::Reconciling);

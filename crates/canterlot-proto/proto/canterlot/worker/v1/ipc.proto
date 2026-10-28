@@ -15,6 +15,7 @@ message ControlToSupervisor {
     StopRequest stop = 7;
     ShipFrom ship_from = 8;
     SjAck sj_ack = 9;
+    MediaResult media_result = 10;
   }
 }
 
@@ -25,6 +26,7 @@ message SupervisorToControl {
     DeliverAck deliver_ack = 3;
     SjBatch sj_batch = 4;
     Exited exited = 5;
+    MediaUpload media_upload = 6;
   }
 }
 
@@ -138,4 +140,19 @@ message LocalFile {
   string mime = 3;
   uint64 size = 4;
   bool image = 5;
+}
+
+// Файл лежит в exec_dir/media/<media_id>; путь по IPC не передаётся.
+message MediaUpload {
+  string media_id = 1;
+  string block_id = 2;
+  string mime = 3;
+  uint64 size = 4;
+  string sha256 = 5;
+}
+
+message MediaResult {
+  string media_id = 1;
+  bool stored = 2;
+  string reason = 3;
 }

@@ -400,6 +400,25 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         }),
     ])
     .await;
+    // Картинка агента: строка опубликована, ссылка приходит записью сопровождения.
+    let viewed = Uuid::now_v7();
+    let media = Uuid::now_v7();
+    sqlx::query("insert into block_media(id,execution_id,conversation_id,block_id,mime,size_bytes,sha256) values($1,$2,$3,$4,'image/png',3,$5)")
+        .bind(media).bind(run.execution.execution_id).bind(run.seed.conversation_id).bind(viewed).bind("a".repeat(64))
+        .execute(&pool).await.unwrap();
+    run.send(vec![
+        worker::started(viewed, "tool_call"),
+        Body::BlockMedia(BlockMedia {
+            block_id: viewed.to_string(),
+            media_id: media.to_string(),
+            mime: "image/png".into(),
+            size: 3,
+            sha256: "a".repeat(64),
+            width: 2,
+            height: 0,
+        }),
+    ])
+    .await;
     run.send(vec![
         worker::finished(&run, i.command_id, now.timestamp_millis()),
         Body::LimitObserved(worker::observation(104, now.timestamp_millis())),
@@ -549,6 +568,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         "block_revision_gap",
         "block_checksum_mismatch",
         "block_conflicting_final",
+        "block_media_attached",
         "adapter_diagnostic",
         "run_finished",
         "limits_changed",

@@ -6,6 +6,9 @@ pub const MAX_ATTACHMENT_BYTES: u64 = 104_857_600;
 pub const MAX_ATTACHMENTS_PER_INPUT: usize = 10;
 pub const MAX_ATTACHMENT_NAME_BYTES: usize = 255;
 pub const MAX_METRICS_EXECUTIONS: usize = 256;
+/// Картинка, на которую смотрел агент: крупнее показывается только путь и размер.
+pub const MAX_MEDIA_BYTES: u64 = 20_971_520;
+pub const MEDIA_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;

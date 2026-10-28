@@ -10,11 +10,12 @@ use canterlot_proto::{
     limits::{BLOCK_FINAL_INLINE_MAX_BYTES, IPC_PROTOCOL_VERSION, MAX_BLOCK_DELTA_BYTES},
     worker::{
         ipc::{
-            Attached, CliStarted, ControlToSupervisor, DeliverAck, Exited, ReceivedInput,
-            SupervisorToControl, control_to_supervisor as down, supervisor_to_control as up,
+            Attached, CliStarted, ControlToSupervisor, DeliverAck, Exited, MediaResult,
+            MediaUpload, ReceivedInput, SupervisorToControl, control_to_supervisor as down,
+            supervisor_to_control as up,
         },
         v1::{
-            AdapterDiagnostic, BlockDelta, BlockFinal, BlockIncomplete, BlockStarted,
+            AdapterDiagnostic, BlockDelta, BlockFinal, BlockIncomplete, BlockMedia, BlockStarted,
             InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost, InputCancelWon,
             InputDispatchDeferred, InputRejected, InputTransmissionStarted, InputWithdrawn,
             InterruptState, InterruptStatus, JournalClosed, JournalOpened, PhaseChanged,
@@ -38,10 +39,30 @@ use super::{
 use crate::{
     adapter::{
         Adapter, AdapterEvent, CloseMode, InterruptOutcome, LimitFact, LimitWindow, LocalFile,
-        Phase, SettingsChange, StartSpec, Transmission, TransmitOutcome, registry_with_deadline,
+        MediaSource, Phase, SettingsChange, StartSpec, Transmission, TransmitOutcome,
+        registry_with_deadline,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
+    media::{self, Prepared, Skip},
 };
+
+/// Картинки в подготовке и ожидании загрузки на одно исполнение; сверх этого событие пропускается.
+const MAX_PENDING_MEDIA: usize = 32;
+
+struct MediaJob {
+    media_id: Uuid,
+    block_id: Uuid,
+    source: MediaSource,
+}
+
+/// Очередь картинок: загружается одна за раз через управляющую службу; ссылка `BlockMedia`
+/// пишется в SJ только после ответа хаба о надёжной публикации.
+#[derive(Default)]
+struct MediaQueue {
+    preparing: usize,
+    ready: VecDeque<Prepared>,
+    inflight: Option<Uuid>,
+}
 
 #[allow(clippy::large_enum_variant)]
 enum Control {
@@ -134,6 +155,9 @@ struct Supervisor {
     attached: Option<u64>,
     next_conn: u64,
     attach_deadline: Option<Instant>,
+    workdir: Option<PathBuf>,
+    media: MediaQueue,
+    media_jobs: mpsc::UnboundedSender<MediaJob>,
 }
 
 fn now_ms() -> u64 {
@@ -207,6 +231,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         IpcServer::bind_socket(&socket, secret.clone(), rustix::process::getuid().as_raw()).await?;
     let pid = std::process::id();
     let start_ticks = crate::containment::start_ticks(pid)?;
+    let (media_jobs, prepared) = media_preparer(exec_dir.clone());
     let mut supervisor = Supervisor {
         attach_deadline: Some(Instant::now() + spec.timers.attach_wait),
         spec,
@@ -240,6 +265,9 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         conns: HashMap::new(),
         attached: None,
         next_conn: 0,
+        workdir: None,
+        media: MediaQueue::default(),
+        media_jobs,
     };
     supervisor.record(Body::JournalOpened(JournalOpened {
         execution_id: supervisor.spec.execution_id.to_string(),
@@ -251,7 +279,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     tracing::info!(execution_id = %supervisor.spec.execution_id, journal_id = %supervisor.sj.journal_id(), "supervisor started");
-    match supervisor.event_loop(server).await {
+    match supervisor.event_loop(server, prepared).await {
         Ok(code) => Ok(code),
         Err(error) => {
             tracing::error!(error_kind = ?std::mem::discriminant(&error), "supervisor failed");
@@ -259,6 +287,31 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
             Err(error)
         }
     }
+}
+
+/// Подготовка картинок по одной в порядке событий: чтение источника сразу, копия, SHA-256.
+fn media_preparer(
+    exec_dir: PathBuf,
+) -> (
+    mpsc::UnboundedSender<MediaJob>,
+    mpsc::UnboundedReceiver<Result<Prepared, Skip>>,
+) {
+    let (jobs, mut queue) = mpsc::unbounded_channel::<MediaJob>();
+    let (done, prepared) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(job) = queue.recv().await {
+            let dir = exec_dir.clone();
+            let result = tokio::task::spawn_blocking(move || {
+                media::prepare(&dir, job.media_id, job.block_id, job.source)
+            })
+            .await
+            .unwrap_or(Err(Skip::Unreadable));
+            if done.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (jobs, prepared)
 }
 
 async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> AdapterEvent {
@@ -312,7 +365,11 @@ impl Supervisor {
         Ok(())
     }
 
-    async fn event_loop(&mut self, mut server: IpcServer) -> Result<ExitCode, SupervisorError> {
+    async fn event_loop(
+        &mut self,
+        mut server: IpcServer,
+        mut prepared: mpsc::UnboundedReceiver<Result<Prepared, Skip>>,
+    ) -> Result<ExitCode, SupervisorError> {
         let (accepted_tx, mut accepted) = mpsc::channel::<IpcConnection>(8);
         let accept_task = tokio::spawn(async move {
             let period = Duration::from_secs(5);
@@ -342,6 +399,7 @@ impl Supervisor {
             tokio::select! {
                 Some(connection) = accepted.recv() => self.on_connection(connection, &control_tx),
                 Some(control) = control_rx.recv() => self.on_control(control).await?,
+                Some(result) = prepared.recv() => self.on_media_prepared(result),
                 event = adapter_event(&mut self.adapter, self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. })) => {
                     self.on_adapter_event(event).await?;
                     for _ in 0..63 {
@@ -449,6 +507,7 @@ impl Supervisor {
         self.conns.remove(&id);
         if self.attached == Some(id) {
             self.attached = None;
+            self.media.inflight = None;
             self.sj.disable_ship();
         }
     }
@@ -511,6 +570,9 @@ impl Supervisor {
                 received,
             }));
             tracing::info!(kind = "attached", "control attached");
+            // Новая управляющая служба получает незавершённую загрузку заново.
+            self.media.inflight = None;
+            self.pump_media();
             return Ok(());
         }
         if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
@@ -556,7 +618,109 @@ impl Supervisor {
             down::Msg::Stop(stop) => self.on_stop(stop.force).await?,
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
+            down::Msg::MediaResult(result) => self.on_media_result(result)?,
         }
+        Ok(())
+    }
+
+    fn on_media(&mut self, block_id: Uuid, source: MediaSource) -> Result<(), SupervisorError> {
+        if !self.pilot_v1 {
+            self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                execution_id: self.spec.execution_id.to_string(),
+                kind: "capability_missing".into(),
+                event_type: "media_dropped".into(),
+            }))?;
+            return Ok(());
+        }
+        if self.media.preparing + self.media.ready.len() >= MAX_PENDING_MEDIA {
+            tracing::warn!(kind = "media_skipped", reason = "backlog", "media skipped");
+            return Ok(());
+        }
+        let source = match source {
+            MediaSource::Path(path) if path.is_relative() => match &self.workdir {
+                Some(workdir) => MediaSource::Path(workdir.join(path)),
+                None => return Ok(()),
+            },
+            other => other,
+        };
+        let job = MediaJob {
+            media_id: Uuid::now_v7(),
+            block_id,
+            source,
+        };
+        if self.media_jobs.send(job).is_ok() {
+            self.media.preparing += 1;
+        }
+        Ok(())
+    }
+
+    fn on_media_prepared(&mut self, result: Result<Prepared, Skip>) {
+        self.media.preparing = self.media.preparing.saturating_sub(1);
+        match result {
+            Ok(prepared) if !matches!(self.lifecycle, Lifecycle::Draining { .. }) => {
+                self.media.ready.push_back(prepared);
+            }
+            Ok(prepared) => {
+                let _ = std::fs::remove_file(media::media_path(&self.exec_dir, prepared.media_id));
+            }
+            Err(skip) => {
+                tracing::info!(
+                    kind = "media_skipped",
+                    reason = skip.reason(),
+                    "media skipped"
+                );
+            }
+        }
+        self.pump_media();
+    }
+
+    fn pump_media(&mut self) {
+        if self.media.inflight.is_some()
+            || self.attached.is_none()
+            || matches!(self.lifecycle, Lifecycle::Draining { .. })
+        {
+            return;
+        }
+        let Some(next) = self.media.ready.front() else {
+            return;
+        };
+        let request = MediaUpload {
+            media_id: next.media_id.to_string(),
+            block_id: next.block_id.to_string(),
+            mime: next.mime.into(),
+            size: next.size,
+            sha256: next.sha256.clone(),
+        };
+        self.media.inflight = Some(next.media_id);
+        self.send(up::Msg::MediaUpload(request));
+    }
+
+    fn on_media_result(&mut self, result: MediaResult) -> Result<(), SupervisorError> {
+        let Ok(id) = Uuid::parse_str(&result.media_id) else {
+            return Ok(());
+        };
+        if self.media.inflight != Some(id)
+            || self.media.ready.front().map(|p| p.media_id) != Some(id)
+        {
+            return Ok(());
+        }
+        self.media.inflight = None;
+        let prepared = self.media.ready.pop_front().expect("front media");
+        let _ = std::fs::remove_file(media::media_path(&self.exec_dir, id));
+        if result.stored {
+            self.record(Body::BlockMedia(BlockMedia {
+                block_id: prepared.block_id.to_string(),
+                media_id: id.to_string(),
+                mime: prepared.mime.into(),
+                size: prepared.size,
+                sha256: prepared.sha256,
+                width: prepared.width,
+                height: prepared.height,
+            }))?;
+        } else {
+            tracing::warn!(kind = "media_unavailable", reason = %safe_event_type(&result.reason), "media upload failed");
+        }
+        self.pump_media();
         Ok(())
     }
 
@@ -608,6 +772,7 @@ impl Supervisor {
             return self.begin_stop(StopCause::StartFailed, false);
         };
         self.pilot_v1 = start.pilot_v1;
+        self.workdir = Some(PathBuf::from(&start.workdir));
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
             .into();
@@ -1149,6 +1314,7 @@ impl Supervisor {
                     self.record(body)?;
                 }
             }
+            AdapterEvent::Media { block_id, source } => self.on_media(block_id, source)?,
             AdapterEvent::ContextExhausted => {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }
@@ -1440,6 +1606,9 @@ impl Supervisor {
             generation: self.spec.generation,
             reason: outcome.into(),
         }))?;
+        // Картинки, не опубликованные к закрытию журнала, отбрасываются вместе с каталогом исполнения.
+        self.media.ready.clear();
+        self.media.inflight = None;
         self.lifecycle = Lifecycle::Draining {
             outcome: outcome.into(),
         };

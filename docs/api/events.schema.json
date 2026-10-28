@@ -52,6 +52,9 @@
       "$ref": "#/$defs/block_conflicting_final"
     },
     {
+      "$ref": "#/$defs/block_media_attached"
+    },
+    {
       "$ref": "#/$defs/conversation_created"
     },
     {
@@ -2000,6 +2003,128 @@
           "required": [
             "block_id",
             "rev"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "block_media_attached": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "block_media_attached"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "block_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "media_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "mime": {
+              "enum": [
+                "image/png",
+                "image/jpeg",
+                "image/webp",
+                "image/gif"
+              ]
+            },
+            "size": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20971520
+            },
+            "width": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "height": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "block_id",
+            "media_id",
+            "mime",
+            "size",
+            "width",
+            "height"
           ],
           "additionalProperties": false
         }
@@ -4241,6 +4366,9 @@
                 },
                 {
                   "$ref": "#/$defs/block_conflicting_final"
+                },
+                {
+                  "$ref": "#/$defs/block_media_attached"
                 },
                 {
                   "$ref": "#/$defs/conversation_created"

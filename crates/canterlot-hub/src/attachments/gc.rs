@@ -19,6 +19,8 @@ pub struct GcReport {
     pub released: usize,
     pub orphan_blobs: usize,
     pub orphan_staging: usize,
+    /// Опубликованные картинки агента, на которые так и не сослался блок.
+    pub unreferenced_media: usize,
 }
 
 fn log_file_error(id: Uuid, error: &std::io::Error) {
@@ -114,6 +116,40 @@ async fn release(
     Ok(true)
 }
 
+/// Картинка без ссылки из блока дольше отсрочки удаляется: строка первой, blob после commit.
+async fn drop_unreferenced_media(
+    pool: &PgPool,
+    store: &dyn BlobStore,
+    id: Uuid,
+    cutoff: DateTime<Utc>,
+) -> Result<bool, sqlx::Error> {
+    // Приём того же ID в этом процессе не трогаем.
+    let Some(_guard) = UploadLocks::global().try_lock(id) else {
+        return Ok(false);
+    };
+    let mut tx = pool.begin().await?;
+    let locked: Option<Uuid> = sqlx::query_scalar(
+        "select id from block_media where id=$1 and attached_at is null and created_at < $2
+         for update skip locked",
+    )
+    .bind(id)
+    .bind(cutoff)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if locked.is_none() {
+        return Ok(false);
+    }
+    sqlx::query("delete from block_media where id=$1")
+        .bind(id)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    if let Err(error) = store.delete_blob(id).await {
+        log_file_error(id, &error);
+    }
+    Ok(true)
+}
+
 pub async fn run_once(
     pool: &PgPool,
     store: &dyn BlobStore,
@@ -149,6 +185,18 @@ pub async fn run_once(
             report.released += 1;
         }
     }
+    let unreferenced: Vec<Uuid> = sqlx::query_scalar(
+        "select id from block_media where attached_at is null and created_at < $1 order by id limit $2",
+    )
+    .bind(cutoff)
+    .bind(BATCH)
+    .fetch_all(pool)
+    .await?;
+    for id in unreferenced {
+        if drop_unreferenced_media(pool, store, id, cutoff).await? {
+            report.unreferenced_media += 1;
+        }
+    }
     let files = match store.scan().await {
         Ok(files) => files,
         Err(error) => {
@@ -163,10 +211,21 @@ pub async fn run_once(
             .fetch_optional(pool)
             .await?;
         let state = state.as_deref();
-        let keep = match file.kind {
-            FileKind::Staging => matches!(state, Some("created" | "uploading")),
-            FileKind::Blob => matches!(state, Some("created" | "uploading" | "ready")),
+        // Blob картинки агента живёт, пока есть её строка; staging приёма короткоживущий.
+        let media: bool = match file.kind {
+            FileKind::Blob => {
+                sqlx::query_scalar("select exists(select 1 from block_media where id=$1)")
+                    .bind(file.id)
+                    .fetch_one(pool)
+                    .await?
+            }
+            FileKind::Staging => UploadLocks::global().is_locked(file.id),
         };
+        let keep = media
+            || match file.kind {
+                FileKind::Staging => matches!(state, Some("created" | "uploading")),
+                FileKind::Blob => matches!(state, Some("created" | "uploading" | "ready")),
+            };
         if keep {
             continue;
         }
@@ -213,6 +272,7 @@ pub async fn run(
                     released = report.released,
                     orphan_blobs = report.orphan_blobs,
                     orphan_staging = report.orphan_staging,
+                    unreferenced_media = report.unreferenced_media,
                     "attachment gc pass"
                 ),
                 Ok(_) => {}

@@ -232,6 +232,7 @@ async fn gc_removes_orphan_blobs_and_staging_without_a_row(pool: PgPool) {
             released: 0,
             orphan_blobs: 2,
             orphan_staging: 3,
+            unreferenced_media: 0,
         }
     );
     for gone in [

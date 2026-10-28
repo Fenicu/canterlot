@@ -18,6 +18,13 @@ impl WorkerData for HubGrpc {
         super::attachments::fetch(self, request).await
     }
 
+    async fn put_media(
+        &self,
+        request: Request<Streaming<MediaChunk>>,
+    ) -> Result<Response<MediaStored>, Status> {
+        super::media::put(self, request).await
+    }
+
     type DataStream = ReplyStream<DataDown>;
 
     async fn data(

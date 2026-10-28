@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use canterlot_hub::{
-    attachments::{BlobStore, LocalBlobStore, NoTrace},
+    attachments::{BlobStore, LocalBlobStore, NoTrace, PublishTrace},
     config::{AttachmentsConfig, HubTimers},
     conversations::{self, SubmitMessage},
     delivery::{ContentBlock, SubmittedInput, control},
@@ -85,6 +85,13 @@ impl Fixture {
         Self::new_with_gate(pool, false).await
     }
     pub async fn new_with_gate(pool: &PgPool, hold_gate: bool) -> Self {
+        Self::build(pool, hold_gate, Arc::new(NoTrace)).await
+    }
+    /// Хранилище хаба с наблюдателем шагов публикации.
+    pub async fn with_trace(pool: &PgPool, trace: Arc<dyn PublishTrace>) -> Self {
+        Self::build(pool, false, trace).await
+    }
+    async fn build(pool: &PgPool, hold_gate: bool, trace: Arc<dyn PublishTrace>) -> Self {
         let root = tempfile::tempdir().unwrap();
         let guard = ProcessGuard::new(root.path());
         let blob_config = AttachmentsConfig {
@@ -92,7 +99,7 @@ impl Fixture {
             ..Default::default()
         };
         let blobs: Arc<dyn BlobStore> =
-            Arc::new(LocalBlobStore::open(&blob_config, Arc::new(NoTrace)).unwrap());
+            Arc::new(LocalBlobStore::open(&blob_config, trace).unwrap());
         let hub = testkit::spawn_test_hub_with_attachment_store(
             pool.clone(),
             timers(),

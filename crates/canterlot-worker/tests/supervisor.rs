@@ -1692,3 +1692,248 @@ pilot_supervisor_tests!(
     limit_facts_are_dropped_and_counted_without_pilot_v1,
     unsupported_setting_is_rejected_before_any_byte_reaches_the_cli_sj
 );
+
+/// PNG с заголовком IHDR: сопровождению важны сигнатура и размеры.
+fn png(width: u32, height: u32, tail: usize) -> Vec<u8> {
+    let mut bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR".to_vec();
+    bytes.extend(width.to_be_bytes());
+    bytes.extend(height.to_be_bytes());
+    bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
+    bytes.extend((0..tail).map(|i| (i % 251) as u8));
+    bytes
+}
+
+impl Harness {
+    async fn start_cli_pilot(&mut self, pilot_v1: bool) {
+        let workdir = self._root.path().to_string_lossy().into_owned();
+        self.send(down::Msg::StartCli(StartCli {
+            profile: "synthetic".into(),
+            workdir,
+            pilot_v1,
+            ..Default::default()
+        }))
+        .await;
+        self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+            .await;
+    }
+
+    async fn media_upload(&mut self) -> canterlot_proto::worker::ipc::MediaUpload {
+        match self
+            .next_message(|message| matches!(message, up::Msg::MediaUpload(_)))
+            .await
+        {
+            up::Msg::MediaUpload(request) => request,
+            _ => unreachable!(),
+        }
+    }
+}
+
+#[tokio::test]
+async fn media_reference_is_written_only_after_media_stored_and_resent_after_reattach() {
+    use canterlot_proto::worker::ipc::MediaResult;
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_pilot(true).await;
+    let image = png(12, 7, 300_000);
+    let path = harness._root.path().join("screen.png");
+    fs::write(&path, &image).unwrap();
+    let id = Uuid::now_v7();
+    let ack = harness
+        .deliver(
+            id,
+            1,
+            &script(r#"{"view_image":"screen.png"},{"delta":"готово"}"#),
+        )
+        .await;
+    assert_eq!(ack.result, "accepted_for_gate");
+    let request = harness.media_upload().await;
+    let bodies = harness
+        .wait_records("tool call block and the answer", |b| run_finished(b, id))
+        .await;
+    let call = bodies
+        .iter()
+        .find_map(|b| match b {
+            Body::BlockStarted(f) if f.kind == "tool_call" => Some(f.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (call.tool_name.as_str(), call.summary.as_str()),
+        ("Read", "screen.png")
+    );
+    assert!(
+        bodies.iter().any(
+            |b| matches!(b, Body::BlockFinal(f) if f.text == format!("{} bytes", image.len()))
+        )
+    );
+    assert_eq!(request.block_id, call.block_id);
+    assert_eq!(request.mime, "image/png");
+    assert_eq!(request.size, image.len() as u64);
+    assert_eq!(request.sha256, sha256_hex(&image));
+    let copy = harness.exec_dir.join("media").join(&request.media_id);
+    assert_eq!(fs::read(&copy).unwrap(), image);
+    assert_eq!(
+        fs::metadata(&copy).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Правка исходного файла после события не меняет загружаемую копию.
+    fs::write(&path, b"changed").unwrap();
+    // Без MediaStored ссылки нет, даже когда ход закончился.
+    while harness.pump(Duration::from_millis(300)).await {}
+    assert!(
+        !harness
+            .records
+            .values()
+            .any(|b| matches!(b, Body::BlockMedia(_)))
+    );
+
+    // Новая управляющая служба получает незавершённый запрос заново.
+    harness.conn = None;
+    harness
+        .attach_and_ship(harness.records.keys().last().copied().unwrap_or(0))
+        .await;
+    let again = harness.media_upload().await;
+    assert_eq!(again, request);
+    harness
+        .send(down::Msg::MediaResult(MediaResult {
+            media_id: request.media_id.clone(),
+            stored: true,
+            reason: String::new(),
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("block media reference", |b| {
+            b.iter().any(|b| matches!(b, Body::BlockMedia(_)))
+        })
+        .await;
+    let reference: Vec<_> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            Body::BlockMedia(f) => Some(f.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reference,
+        [canterlot_proto::worker::v1::BlockMedia {
+            block_id: call.block_id.clone(),
+            media_id: request.media_id.clone(),
+            mime: "image/png".into(),
+            size: image.len() as u64,
+            sha256: sha256_hex(&image),
+            width: 12,
+            height: 7,
+        }]
+    );
+    assert!(!copy.exists());
+    // Повторный ответ для той же картинки второй ссылки не даёт.
+    harness
+        .send(down::Msg::MediaResult(MediaResult {
+            media_id: request.media_id.clone(),
+            stored: true,
+            reason: String::new(),
+        }))
+        .await;
+    while harness.pump(Duration::from_millis(300)).await {}
+    assert_eq!(
+        harness
+            .records
+            .values()
+            .filter(|b| matches!(b, Body::BlockMedia(_)))
+            .count(),
+        1
+    );
+
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn media_is_dropped_without_pilot_v1_and_failed_upload_writes_no_reference() {
+    use canterlot_proto::worker::ipc::MediaResult;
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_pilot(false).await;
+    fs::write(harness._root.path().join("a.png"), png(1, 1, 10)).unwrap();
+    let id = Uuid::now_v7();
+    harness
+        .deliver(id, 1, &script(r#"{"view_image":"a.png"}"#))
+        .await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert!(bodies.iter().any(|b| matches!(b, Body::AdapterDiagnostic(f) if f.kind == "capability_missing" && f.event_type == "media_dropped")));
+    while harness.pump(Duration::from_millis(300)).await {}
+    assert!(
+        !harness
+            .others
+            .iter()
+            .any(|m| matches!(m.msg, Some(up::Msg::MediaUpload(_))))
+    );
+    assert!(!harness.exec_dir.join("media").exists());
+    harness.shutdown().await;
+
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_pilot(true).await;
+    fs::write(harness._root.path().join("b.png"), png(2, 2, 10)).unwrap();
+    fs::write(
+        harness._root.path().join("c.gif"),
+        b"GIF89a\x03\x00\x04\x00\x00\x00\x00",
+    )
+    .unwrap();
+    let id = Uuid::now_v7();
+    harness
+        .deliver(
+            id,
+            1,
+            &script(r#"{"view_image":"b.png"},{"view_image":"c.gif"}"#),
+        )
+        .await;
+    let first = harness.media_upload().await;
+    harness
+        .send(down::Msg::MediaResult(MediaResult {
+            media_id: first.media_id.clone(),
+            stored: false,
+            reason: "conflict".into(),
+        }))
+        .await;
+    // Следующая картинка уходит только после ответа о предыдущей.
+    let second = harness.media_upload().await;
+    assert_ne!(second.media_id, first.media_id);
+    assert_eq!(second.mime, "image/gif");
+    assert!(
+        !harness
+            .exec_dir
+            .join("media")
+            .join(&first.media_id)
+            .exists()
+    );
+    harness
+        .send(down::Msg::MediaResult(MediaResult {
+            media_id: second.media_id.clone(),
+            stored: true,
+            reason: String::new(),
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("gif reference", |b| {
+            b.iter().any(|b| matches!(b, Body::BlockMedia(_)))
+        })
+        .await;
+    let references: Vec<_> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            Body::BlockMedia(f) => Some((f.media_id.clone(), f.width, f.height)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(references, [(second.media_id.clone(), 3, 4)]);
+    harness.shutdown().await;
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}

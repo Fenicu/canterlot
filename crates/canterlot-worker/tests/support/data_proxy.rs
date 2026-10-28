@@ -173,6 +173,13 @@ impl WorkerData for Proxy {
         Err(Status::unimplemented("attachment fetch is not implemented"))
     }
 
+    async fn put_media(
+        &self,
+        _request: Request<Streaming<canterlot_proto::worker::v1::MediaChunk>>,
+    ) -> Result<Response<canterlot_proto::worker::v1::MediaStored>, Status> {
+        Err(Status::unimplemented("media upload is not implemented"))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,

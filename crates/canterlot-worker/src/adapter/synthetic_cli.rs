@@ -13,7 +13,9 @@
 //! "cache_read":10,"cache_write":0}}, {"limit_observed":{"window":"weekly",
 //! "used_permille":960,"resets_in_ms":3600000}}, {"limit_reached":{
 //! "window":"five_hour","resets_in_ms":5000}}, {"context_exhausted":true},
-//! {"read_attachment":0}. Ввод также несёт files и settings.
+//! {"read_attachment":0}, {"view_image":"<путь>"} или {"view_image":{"path":"…",
+//! "inline":true}}: блок `Read` с путём в summary, кадр `media {block_id, path | data}`
+//! (data - base64 байтов файла) и результат «<размер> bytes». Ввод также несёт files и settings.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
 use serde::{Deserialize, Serialize};
@@ -349,6 +351,52 @@ fn run_steps<'a>(
                         .collect::<String>()
                 );
                 text_delta(turn, lane, &hash).await?;
+            } else if let Some(view) = step.get("view_image") {
+                let (raw, inline) = match view {
+                    Value::String(path) => (path.clone(), false),
+                    _ => (
+                        view["path"]
+                            .as_str()
+                            .ok_or_else(|| io::Error::other("invalid view_image step"))?
+                            .to_owned(),
+                        view["inline"].as_bool().unwrap_or(false),
+                    ),
+                };
+                let path = std::path::absolute(&raw)?;
+                emit(
+                    json!({"type":"phase","phase":"running_tool","tool_name":"Read","summary":raw}),
+                )
+                .await?;
+                let call = turn
+                    .block(BlockKind::ToolCall, &raw, lane, Some("Read"), Some(&raw))
+                    .await?;
+                let size = tokio::fs::metadata(&path).await.map(|m| m.len()).ok();
+                if inline {
+                    use base64::Engine;
+                    let bytes = tokio::fs::read(&path).await?;
+                    let data = base64::engine::general_purpose::STANDARD.encode(bytes);
+                    emit(json!({"type":"media","block_id":call,"data":data})).await?;
+                } else {
+                    emit(json!({"type":"media","block_id":call,"path":path})).await?;
+                }
+                let result_lane = Lane {
+                    parent: Some(call),
+                    agent: lane.agent.clone(),
+                    model: lane.model.clone(),
+                    text_id: None,
+                    accumulated: String::new(),
+                };
+                let result =
+                    size.map_or_else(|| "file not found".to_owned(), |n| format!("{n} bytes"));
+                turn.block(
+                    BlockKind::ToolResult,
+                    &result,
+                    &result_lane,
+                    Some("Read"),
+                    Some(&raw),
+                )
+                .await?;
+                phase(Phase::Generating).await?;
             } else if let Some(error) = step["error"].as_str() {
                 turn.block(BlockKind::Error, error, lane, None, None)
                     .await?;
