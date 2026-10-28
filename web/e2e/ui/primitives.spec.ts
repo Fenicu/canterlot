@@ -27,6 +27,7 @@ test('sheet_traps_focus_closes_on_escape_and_restores_focus', async ({ page }) =
 });
 test('back_closes_sheet_and_keeps_scroll_position', async ({ page }) => {
   const opener = page.getByRole('button', { name: 'Открыть панель', exact: true });
+  await expect(opener).toBeVisible();
   await page.evaluate(() => window.scrollTo(0, 180));
   const before = await page.evaluate(() => scrollY);
   expect(before).toBeGreaterThan(0);
@@ -105,12 +106,14 @@ test('motion_scale_changes_all_computed_durations_live', async ({ page }) => {
     return result;
   });
   await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.16);
+  await expect.poll(async () => (await getDurations()).fill).toBeCloseTo(0.32);
   const normal = await getDurations();
   expect(normal.fast).toBeCloseTo(0.16);
   expect(normal.fill).toBeCloseTo(0.32);
 
   await page.getByRole('button', { name: 'Быстрее', exact: true }).click();
   await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.08);
+  await expect.poll(async () => (await getDurations()).fill).toBeCloseTo(0.16);
   const faster = await getDurations();
   expect(faster.fast).toBeCloseTo(0.08);
   expect(faster.expand).toBeCloseTo(0.12);
@@ -120,6 +123,7 @@ test('motion_scale_changes_all_computed_durations_live', async ({ page }) => {
 
   await page.getByRole('button', { name: 'Медленнее', exact: true }).click();
   await expect.poll(async () => (await getDurations()).fast).toBeCloseTo(0.24);
+  await expect.poll(async () => (await getDurations()).fill).toBeCloseTo(0.48);
   const slower = await getDurations();
   expect(slower.fast).toBeCloseTo(0.24);
   expect(slower.expand).toBeCloseTo(0.36);

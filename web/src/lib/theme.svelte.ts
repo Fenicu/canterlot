@@ -5,10 +5,14 @@ let release: (() => void) | undefined;
 function apply(): void {
   effective = pref === 'system' ? (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark') : pref;
   const root = document.documentElement;
-  root.dataset.themeSwitching = '';
+  const previous = root.dataset.theme;
+  const changed = Boolean(previous && previous !== effective);
+  if (changed) root.dataset.themeSwitching = '';
   root.dataset.theme = effective;
   document.querySelector('meta[name="theme-color"]')?.setAttribute('content', getComputedStyle(root).getPropertyValue('--bg').trim());
-  requestAnimationFrame(() => requestAnimationFrame(() => delete root.dataset.themeSwitching));
+  if (changed) {
+    requestAnimationFrame(() => requestAnimationFrame(() => delete root.dataset.themeSwitching));
+  }
 }
 export const theme = {
   get pref() { return pref; },
