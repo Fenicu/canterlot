@@ -3,12 +3,11 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload};
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
+pub mod claude_code;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic_cli;
-
-pub mod claude_code;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Support {
