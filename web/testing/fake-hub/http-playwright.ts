@@ -792,6 +792,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         }, 120);
       }, 120);
     } else if (api.decisionAutoProgress === 'transmitting') {
+      // Пауза держит «сохранено хабом» видимым: за 120 мс нагруженная страница
+      // применяет оба события в одном кадре и промежуточный этап не отрисовывается.
       setTimeout(() => {
         hub.append(`conversation:${convId}`, {
           kind: 'request_transmitting',
@@ -799,7 +801,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
           payload: { request_id: reqId }
         });
         hub.flush();
-      }, 120);
+      }, 1500);
     }
 
     await route.fulfill({
