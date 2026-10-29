@@ -374,6 +374,7 @@ pub enum CommandKind {
     Interrupt,
     StartExecution,
     StopExecution,
+    DeliverDecision,
 }
 
 impl CommandKind {
@@ -385,6 +386,7 @@ impl CommandKind {
             Self::Interrupt => "interrupt",
             Self::StartExecution => "start_execution",
             Self::StopExecution => "stop_execution",
+            Self::DeliverDecision => "deliver_decision",
         }
     }
 }
@@ -400,6 +402,7 @@ impl FromStr for CommandKind {
             "interrupt" => Ok(Self::Interrupt),
             "start_execution" => Ok(Self::StartExecution),
             "stop_execution" => Ok(Self::StopExecution),
+            "deliver_decision" => Ok(Self::DeliverDecision),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

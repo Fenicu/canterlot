@@ -32,6 +32,7 @@ pub mod machines;
 pub mod media;
 pub mod model;
 pub mod outbox;
+pub mod requests;
 pub mod runs;
 pub mod scheduler;
 pub mod session;
