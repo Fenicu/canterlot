@@ -1,16 +1,21 @@
-import { SvelteMap } from 'svelte/reactivity';
-import type { Idb } from '$lib/storage/idb';
-import { ApiError, NetworkError, AuthRequired, session } from '$lib/api/http';
-import { reactiveOp } from '$lib/ops/op.svelte';
+import { SvelteMap } from "svelte/reactivity";
+import type { Idb } from "#lib/storage/idb.js";
+import {
+  ApiError,
+  NetworkError,
+  AuthRequired,
+  session,
+} from "#lib/api/http.js";
+import { reactiveOp } from "#lib/ops/op.svelte.js";
 
-export type OpKind = 'input' | 'scheduled' | 'create_conversation' | 'other';
+export type OpKind = "input" | "scheduled" | "create_conversation" | "other";
 
 export interface Op<B = unknown> {
   key: string;
   kind: OpKind;
   conversationId?: string;
   body: B;
-  state: 'saving' | 'committed' | 'refused' | 'unknown';
+  state: "saving" | "committed" | "refused" | "unknown";
   attempts: number;
   createdAt: number;
   refusal?: { code: string; message: string };
@@ -27,7 +32,7 @@ export interface JournalEnv {
 const openJournals = new Set<OpJournal>();
 
 export function closeOpenJournals(): void {
-  for (const journal of [...openJournals]) journal.close();
+  for (const journal of [...openJournals]) journal.retire();
 }
 
 export class OpJournal {
@@ -43,7 +48,11 @@ export class OpJournal {
   #onOnline = () => this.#resumeWaiting();
   #onPageShow = () => this.#resumeWaiting();
   #onVisible = () => {
-    if (typeof document !== 'undefined' && document.visibilityState === 'visible') this.#resumeWaiting();
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "visible"
+    )
+      this.#resumeWaiting();
   };
 
   constructor(db: Idb, send: (op: Op) => Promise<unknown>, env: JournalEnv) {
@@ -51,33 +60,42 @@ export class OpJournal {
     this.#send = send;
     this.#env = env;
     openJournals.add(this);
-    if (typeof window !== 'undefined') {
-      window.addEventListener('online', this.#onOnline);
-      window.addEventListener('pageshow', this.#onPageShow);
-      document.addEventListener('visibilitychange', this.#onVisible);
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.#onOnline);
+      window.addEventListener("pageshow", this.#onPageShow);
+      document.addEventListener("visibilitychange", this.#onVisible);
     }
   }
 
   close(): void {
     openJournals.delete(this);
-    if (typeof window === 'undefined') return;
-    window.removeEventListener('online', this.#onOnline);
-    window.removeEventListener('pageshow', this.#onPageShow);
-    document.removeEventListener('visibilitychange', this.#onVisible);
+    if (typeof window === "undefined") return;
+    window.removeEventListener("online", this.#onOnline);
+    window.removeEventListener("pageshow", this.#onPageShow);
+    document.removeEventListener("visibilitychange", this.#onVisible);
   }
 
-  async begin<B>(kind: OpKind, body: B, opts: { conversationId?: string; persist: boolean; key?: string }): Promise<Op<B>> {
+  retire(): void {
+    for (const key of this.ops.keys()) this.#stop(key);
+    this.close();
+  }
+
+  async begin<B>(
+    kind: OpKind,
+    body: B,
+    opts: { conversationId?: string; persist: boolean; key?: string },
+  ): Promise<Op<B>> {
     const op = reactiveOp<B>({
       key: opts.key ?? crypto.randomUUID(),
       kind,
       conversationId: opts.conversationId,
       body,
-      state: 'saving',
+      state: "saving",
       attempts: 0,
-      createdAt: this.#env.now()
+      createdAt: this.#env.now(),
     });
     (this.ops as SvelteMap<string, Op>).set(op.key, op);
-    if (kind !== 'other' || opts.persist) {
+    if (kind !== "other" || opts.persist) {
       this.#persisted.add(op.key);
       await this.#persist(op);
     }
@@ -88,9 +106,12 @@ export class OpJournal {
     if (this.#running.has(op.key) || this.#stopped.has(op.key)) return;
     this.#running.add(op.key);
     try {
-      while (!this.#stopped.has(op.key) && (op.state === 'saving' || op.state === 'unknown')) {
+      while (
+        !this.#stopped.has(op.key) &&
+        (op.state === "saving" || op.state === "unknown")
+      ) {
         if (this.#authBlocked()) {
-          op.state = 'unknown';
+          op.state = "unknown";
           await this.#persist(op);
           if (this.#stopped.has(op.key)) return;
           await this.#wait(op.key, () => !this.#authBlocked());
@@ -98,7 +119,7 @@ export class OpJournal {
           continue;
         }
         if (!this.#env.online()) {
-          op.state = 'unknown';
+          op.state = "unknown";
           await this.#persist(op);
           if (this.#stopped.has(op.key)) return;
           await this.#wait(op.key, () => this.#env.online());
@@ -106,35 +127,35 @@ export class OpJournal {
           continue;
         }
         op.attempts += 1;
-        op.state = 'unknown';
+        op.state = "unknown";
         await this.#persist(op);
         if (this.#stopped.has(op.key)) return;
         try {
           const result = await this.#send(op);
           if (this.#stopped.has(op.key)) return;
           op.result = result;
-          op.state = 'committed';
+          op.state = "committed";
           await this.#persist(op);
           if (this.#stopped.has(op.key)) return;
           return;
         } catch (err) {
           if (this.#stopped.has(op.key)) return;
           if (err instanceof AuthRequired) {
-            op.state = 'unknown';
+            op.state = "unknown";
             await this.#persist(op);
             if (this.#stopped.has(op.key)) return;
             await this.#wait(op.key, () => !this.#authBlocked());
             if (this.#stopped.has(op.key)) return;
             continue;
           }
-          if (err instanceof ApiError && err.code === 'idempotency_conflict') {
-            op.state = 'refused';
+          if (err instanceof ApiError && err.code === "idempotency_conflict") {
+            op.state = "refused";
             op.refusal = { code: err.code, message: err.message };
             await this.#persist(op);
             throw err;
           }
           if (this.#retryable(err)) {
-            op.state = 'unknown';
+            op.state = "unknown";
             await this.#persist(op);
             if (this.#stopped.has(op.key)) return;
             await this.#backoff(op);
@@ -142,7 +163,7 @@ export class OpJournal {
             continue;
           }
           if (err instanceof ApiError) {
-            op.state = 'refused';
+            op.state = "refused";
             op.refusal = { code: err.code, message: err.message };
             await this.#drop(op.key);
             throw err;
@@ -157,8 +178,10 @@ export class OpJournal {
   }
 
   async recover(): Promise<Op[]> {
-    const rows = await this.db.list<Op>('ops');
-    const pending = rows.filter((op) => op?.key && (op.state === 'saving' || op.state === 'unknown'));
+    const rows = await this.db.list<Op>("ops");
+    const pending = rows.filter(
+      (op) => op?.key && (op.state === "saving" || op.state === "unknown"),
+    );
     for (const row of pending) {
       const op = reactiveOp(row);
       this.#persisted.add(op.key);
@@ -175,8 +198,8 @@ export class OpJournal {
 
   retryNow(key: string): void {
     const op = this.ops.get(key);
-    if (!op || op.state === 'committed' || op.state === 'refused') return;
-    op.state = 'unknown';
+    if (!op || op.state === "committed" || op.state === "refused") return;
+    op.state = "unknown";
     const wake = this.#wake.get(key);
     if (wake) wake();
     else void this.run(op);
@@ -191,53 +214,63 @@ export class OpJournal {
     this.#wake.get(key)?.();
     (this.ops as SvelteMap<string, Op>).delete(key);
     this.#persisted.delete(key);
-    void this.db.delete('ops', key);
+    void this.db.delete("ops", key);
   }
 
   #resumeWaiting(): void {
     for (const op of this.ops.values()) {
-      if (op.state === 'saving' || op.state === 'unknown') this.retryNow(op.key);
+      if (op.state === "saving" || op.state === "unknown")
+        this.retryNow(op.key);
     }
   }
 
   #authBlocked(): boolean {
-    return session.state === 'expired' || this.#env.authExpired();
+    return session.state === "expired" || this.#env.authExpired();
   }
 
   #retryable(err: unknown): boolean {
     if (err instanceof NetworkError) return true;
-    if (err !== null && typeof err === 'object' && (err as { name?: string }).name === 'AbortError') return true;
-    return err instanceof ApiError && err.retry === 'safe_same_key';
+    if (
+      err !== null &&
+      typeof err === "object" &&
+      (err as { name?: string }).name === "AbortError"
+    )
+      return true;
+    return err instanceof ApiError && err.retry === "safe_same_key";
   }
 
   async #persist(op: Op): Promise<void> {
     if (this.#stopped.has(op.key) || !this.#persisted.has(op.key)) return;
     const refusal = op.refusal;
     // Прокси $state IndexedDB не клонирует, поэтому в базу уходит обычный снимок.
-    const snapshot = JSON.parse(JSON.stringify({
-      key: op.key,
-      kind: op.kind,
-      conversationId: op.conversationId,
-      body: op.body,
-      state: op.state,
-      attempts: op.attempts,
-      createdAt: op.createdAt,
-      refusal: refusal ? { code: refusal.code, message: refusal.message } : undefined,
-      result: op.result
-    })) as Op;
+    const snapshot = JSON.parse(
+      JSON.stringify({
+        key: op.key,
+        kind: op.kind,
+        conversationId: op.conversationId,
+        body: op.body,
+        state: op.state,
+        attempts: op.attempts,
+        createdAt: op.createdAt,
+        refusal: refusal
+          ? { code: refusal.code, message: refusal.message }
+          : undefined,
+        result: op.result,
+      }),
+    ) as Op;
     try {
-      await this.db.put('ops', op.key, snapshot);
+      await this.db.put("ops", op.key, snapshot);
     } catch (err) {
-      if (err instanceof Error && err.message === 'storage_retired') return;
+      if (err instanceof Error && err.message === "storage_retired") return;
       throw err;
     }
-    if (this.#stopped.has(op.key)) await this.db.delete('ops', op.key);
+    if (this.#stopped.has(op.key)) await this.db.delete("ops", op.key);
   }
 
   async #drop(key: string): Promise<void> {
     (this.ops as SvelteMap<string, Op>).delete(key);
     this.#persisted.delete(key);
-    await this.db.delete('ops', key);
+    await this.db.delete("ops", key);
   }
 
   async #backoff(op: Op): Promise<void> {

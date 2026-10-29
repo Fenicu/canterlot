@@ -1,4 +1,4 @@
-import { cell } from '$lib/stores/cell.svelte';
+import { cell } from "#lib/stores/cell.svelte.js";
 
 const PIN_PX = 48;
 
@@ -24,9 +24,9 @@ export class ScrollController {
     this.#env = env;
     this.#last = el.scrollTop;
     this.#onScroll = () => this.#readScroll();
-    el.addEventListener('scroll', this.#onScroll, { passive: true });
-    if (typeof ResizeObserver !== 'undefined') {
-      this.#observer = new ResizeObserver(() => this.onContentChange('resize'));
+    el.addEventListener("scroll", this.#onScroll, { passive: true });
+    if (typeof ResizeObserver !== "undefined") {
+      this.#observer = new ResizeObserver(() => this.onContentChange("resize"));
       this.#observer.observe(el);
     }
   }
@@ -39,10 +39,12 @@ export class ScrollController {
     return this.#showJump.get();
   }
 
-  onContentChange(kind: 'tail-growth' | 'prepend' | 'height-above' | 'resize'): void {
-    if (kind === 'prepend' || kind === 'height-above') return;
+  onContentChange(
+    kind: "tail-growth" | "prepend" | "height-above" | "resize",
+  ): void {
+    if (kind === "prepend" || kind === "height-above") return;
     if (this.pinned) this.#toBottom();
-    else if (kind === 'tail-growth') this.#showJump.set(true);
+    else if (kind === "tail-growth") this.#showJump.set(true);
   }
 
   ownScroll(top: number): void {
@@ -58,7 +60,7 @@ export class ScrollController {
   }
 
   destroy(): void {
-    this.#el.removeEventListener('scroll', this.#onScroll);
+    this.#el.removeEventListener("scroll", this.#onScroll);
     this.#observer?.disconnect();
     if (this.#frame) this.#env.cancelRaf?.(this.#frame);
   }

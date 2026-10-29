@@ -4,8 +4,18 @@ export interface RunInfo {
 	started_at: string;
 	finished_at?: string | null;
 	duration_ms?: number | null;
-	parts: { block_id: string; kind: string; agent: string; model: string }[];
-	usage: unknown[];
+	context?: { tokens: number; window_tokens?: number | null } | null;
+	limit?: { provider: string; weekly_delta_permille: number; exact: boolean } | null;
+	parts: { block_id: string; kind: string; agent: string; model: string; task?: string }[];
+	usage: {
+		agent?: string;
+		model?: string;
+		input_tokens?: number;
+		output_tokens?: number;
+		cache_read_tokens?: number;
+		cache_write_tokens?: number;
+		kind?: string;
+	}[];
 }
 
 export class RunStore {

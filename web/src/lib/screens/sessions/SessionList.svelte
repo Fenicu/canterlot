@@ -14,16 +14,16 @@
 </script>
 
 <script lang="ts">
-  import { listConversations } from '$lib/api/client';
-  import { loadConfig } from '$lib/api/config';
-  import type { Runtime } from '$lib/app/runtime';
-  import { clock } from '$lib/clock';
-  import { browserRuntime } from '$lib/screens/chat/open';
-  import Icon from '$lib/ui/Icon.svelte';
-  import IconButton from '$lib/ui/IconButton.svelte';
-  import { theme } from '$lib/theme';
-  import type { ListRow } from '$lib/stores/list.svelte';
-  import type { LimitThresholds } from '$lib/stores/limits';
+  import { listConversations } from '#lib/api/client.js';
+  import { loadConfig } from '#lib/api/config.js';
+  import type { Runtime } from '#lib/app/runtime.js';
+  import { clock } from '#lib/clock.js';
+  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import Icon from '#lib/ui/Icon.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import { theme } from '#lib/theme.js';
+  import type { ListRow } from '#lib/stores/list.svelte.js';
+  import type { LimitThresholds } from '#lib/stores/limits.js';
   import { beforeNavigate } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
@@ -37,6 +37,7 @@
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
   import SessionSheet from './SessionSheet.svelte';
+  import { installation } from '#lib/pwa/register.js';
 
   let { main = false, create = false }: { main?: boolean; create?: boolean } = $props();
 
@@ -49,6 +50,7 @@
   let sheetId = $state('');
   let groupsOpen = $state(false);
   let menu = $state(false);
+  let canInstall = $state(false);
   let tick = $state(0);
   let scroller = $state<HTMLElement | null>(null);
   let thresholds = $state<LimitThresholds>({ stale_after_secs: 35 * 60, warn_pcts: [80], weekly_reserve_pct: 95 });
@@ -59,6 +61,10 @@
   });
 
   onMount(() => {
+    const install = installation();
+    const changed = () => { canInstall = install.canInstall; };
+    changed();
+    install.addEventListener('change', changed);
     collapsed = readCollapsed();
     let alive = true;
     void browserRuntime().then(async (value) => {
@@ -66,7 +72,7 @@
       runtime = value;
       const config = await loadConfig().catch(() => null);
       if (config?.limit_thresholds) thresholds = config.limit_thresholds;
-    });
+    }).catch(() => undefined);
     let timer = 0;
     const arm = () => {
       timer = window.setInterval(() => tick++, 1000);
@@ -80,6 +86,7 @@
     arm();
     document.addEventListener('visibilitychange', visible);
     return () => {
+      install.removeEventListener('change', changed);
       alive = false;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', visible);
@@ -151,7 +158,8 @@
     if (target instanceof HTMLElement) rememberScroll(target.scrollTop);
   }
 
-  beforeNavigate(() => {
+  beforeNavigate(({ shallow, type }) => {
+    if (shallow && type === 'goto') return;
     if (scroller) rememberScroll(scroller.scrollTop);
   });
 </script>
@@ -159,14 +167,40 @@
 <svelte:element this={main ? 'main' : 'div'} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
   <div class="bar">
     <p class="brand">canterlot</p>
-    {#if create}<a class="create" href={resolve('/new')} aria-label="Новая сессия"><span aria-hidden="true">+</span></a>{/if}
-    <IconButton icon="search" label="Поиск" onclick={() => (searchOpen = !searchOpen)} />
-    <IconButton icon={theme.effective === 'dark' ? 'sun' : 'moon'} label="Сменить тему" onclick={() => theme.toggle()} />
-    <button type="button" aria-label="Ещё" aria-expanded={menu} onclick={() => (menu = !menu)}><Icon name="more" /></button>
+
+    {#if create}
+      <a
+        class="create"
+        href={resolve('new')}
+        aria-label="Новая сессия"
+      ><span aria-hidden="true">+</span></a>
+    {/if}
+
+    <IconButton
+      icon="search"
+      label="Поиск"
+      onclick={() => searchOpen = !searchOpen}
+    />
+
+    <IconButton
+      icon={theme.effective === 'dark' ? 'sun' : 'moon'}
+      label="Сменить тему"
+      onclick={() => theme.toggle()}
+    />
+
+    <button
+      type="button"
+      aria-label="Ещё"
+      aria-expanded={menu}
+      onclick={() => menu = !menu}
+    ><Icon name="more" /></button>
+
     {#if menu}
       <div class="menu" role="menu">
+        <a role="menuitem" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</a>
         <button type="button" role="menuitem" onclick={() => { groupsOpen = true; menu = false; }}>Группы</button>
         <button type="button" role="menuitem" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</button>
+        {#if canInstall}<button type="button" role="menuitem" onclick={() => { menu = false; void installation().prompt(); }}>Установить</button>{/if}
       </div>
     {/if}
   </div>
@@ -174,8 +208,19 @@
     <SearchBar bind:value={query} onreset={resetSearch} />
   {/if}
   {#if runtime}
-    <LimitsStrip providers={runtime.list.limits} {now} {thresholds} prefer={openRow?.harness.provider ?? ''} crunch={openRow?.crunch.enabled ?? false} />
-    <GroupTabs {tabs} current={tab} onselect={(next) => (tab = next)} />
+    <LimitsStrip
+      providers={runtime.list.limits}
+      now={now}
+      thresholds={thresholds}
+      prefer={openRow?.harness.provider ?? ''}
+      crunch={openRow?.crunch.enabled ?? false}
+    />
+
+    <GroupTabs
+      tabs={tabs}
+      current={tab}
+      onselect={(next) => tab = next}
+    />
   {/if}
   <div class="scroll" data-list-scroll bind:this={scroller} onscroll={remember}>
     {#if runtime && runtime.machines.items.size === 0 && ready}
@@ -187,15 +232,24 @@
       <EmptyState kind="sessions" />
     {:else}
       {#each sections as section (section.id)}
-        <Section {...section} {now} ontoggle={toggle} onopen={(id) => (sheetId = id)} />
+        <Section
+          {...section}
+          now={now}
+          ontoggle={toggle}
+          onopen={(id) => sheetId = id}
+        />
       {/each}
     {/if}
   </div>
   {#if sheetItem}
-    <SessionSheet item={sheetItem} {groups} onclose={() => (sheetId = '')} />
+    <SessionSheet
+      item={sheetItem}
+      groups={groups}
+      onclose={() => sheetId = ''}
+    />
   {/if}
   {#if groupsOpen}
-    <GroupManager {groups} onclose={() => (groupsOpen = false)} />
+    <GroupManager groups={groups} onclose={() => groupsOpen = false} />
   {/if}
 </svelte:element>
 

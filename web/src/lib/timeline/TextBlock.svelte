@@ -1,10 +1,10 @@
 <script lang="ts">
-  import Html from '$lib/render/Html.svelte';
-  import { createMarkdown } from '$lib/render/markdown';
-  import { StreamingMarkdown } from '$lib/render/streamingMarkdown';
-  import { prefersReducedMotion } from '$lib/motion';
-  import type { BlockModel } from '$lib/stores/blocks';
-  import { revealedText } from '$lib/timeline/present';
+  import Html from '#lib/render/Html.svelte';
+  import { createMarkdown } from '#lib/render/markdown.js';
+  import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
+  import { prefersReducedMotion } from '#lib/motion.js';
+  import type { BlockModel } from '#lib/stores/blocks.js';
+  import { revealedText } from '#lib/timeline/present.js';
 
   let { block }: { block: BlockModel } = $props();
   const engine = new StreamingMarkdown(createMarkdown());

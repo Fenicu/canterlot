@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { BlockModel, BlockPage } from '$lib/stores/blocks';
-  import { toolStatusText } from '$lib/timeline/present';
-  import ToolOutput from '$lib/timeline/ToolOutput.svelte';
+  import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
+  import { toolStatusText } from '#lib/timeline/present.js';
+  import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
   let {
     block,

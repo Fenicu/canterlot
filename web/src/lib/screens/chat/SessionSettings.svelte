@@ -5,11 +5,11 @@
 </script>
 
 <script lang="ts">
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import type { MachineRecord } from '$lib/stores/machines.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch } from './controls';
-	import { ApiError } from '$lib/api/http';
-	import Toggle from '$lib/ui/Toggle.svelte';
+	import { ApiError } from '#lib/api/http.js';
+	import Toggle from '#lib/ui/Toggle.svelte';
 
 	let {
 		chat,

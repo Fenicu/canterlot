@@ -1,13 +1,13 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import type { Activity } from '$lib/screens/sessions/activityText';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
-	import { colorVar } from '$lib/screens/sessions/colors';
-	import { theme } from '$lib/theme';
+	import { colorVar } from '#lib/screens/sessions/colors.js';
+	import { theme } from '#lib/theme.js';
 	import { stopSession, resumeSession, continueSessionQueue, startSessionExecution } from './controls';
-	import LimitsStrip from '$lib/screens/sessions/LimitsStrip.svelte';
-	import type { LimitThresholds, ProviderLimits } from '$lib/stores/limits';
+	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
+	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 
 	interface DetailLike {
 		title?: string;
@@ -60,20 +60,12 @@
 			: `${harnessTitle} · ${effectiveModel} · ${machineName}`
 	);
 
-	const isLive = $derived(
-		chat.execution
-			? ((chat.execution as { live?: boolean; state?: string }).live ??
-			  ['created', 'starting', 'running', 'stopping'].includes(
-					(chat.execution as { state?: string }).state ?? ''
-			  ))
-			: false
-	);
-	const hasUserStop = $derived(
-		chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop')
-	);
-	const hasNoLiveExecution = $derived(
-		chat.queue.hold_reasons.some((h) => (h as { reason?: string })?.reason === 'no_live_execution')
-	);
+	const isLive = $derived(chat.execution
+		? (chat.execution as { live?: boolean; state?: string }).live ?? ['created', 'starting', 'running', 'stopping'].includes((chat.execution as { state?: string }).state ?? '')
+		: false);
+
+	const hasUserStop = $derived(chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop'));
+	const hasNoLiveExecution = $derived(chat.queue.hold_reasons.some((h) => (h as { reason?: string })?.reason === 'no_live_execution'));
 
 	async function handleStop(force = false) {
 		actionError = null;
@@ -119,9 +111,11 @@
 
 <div class="chat-header" role="region" aria-label="Шапка чата">
 	<div class="topbar">
-		<a class="icon-button back" href={resolve('/sessions')} aria-label="Все сессии">
-			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7" /></svg>
-		</a>
+		<a
+			class="icon-button back"
+			href={resolve('sessions')}
+			aria-label="Все сессии"
+		><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7"></path></svg></a>
 
 		<div class="grow header-info">
 			<div class="row title-row">
@@ -131,7 +125,7 @@
 					activity={chat.activity as Activity | null}
 					phase={chat.phase}
 					executionState={(chat.execution as { state?: string })?.state}
-					{now}
+					now={now}
 				/>
 			</div>
 			<div class="subtitle" title={subtitle}>{subtitle}</div>
@@ -147,9 +141,9 @@
 				onclick={() => { menuOpen = !menuOpen; confirmingForce = false; }}
 			>
 				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<circle cx="5" cy="12" r="1.5" />
-					<circle cx="12" cy="12" r="1.5" />
-					<circle cx="19" cy="12" r="1.5" />
+					<circle cx="5" cy="12" r="1.5"></circle>
+					<circle cx="12" cy="12" r="1.5"></circle>
+					<circle cx="19" cy="12" r="1.5"></circle>
 				</svg>
 			</button>
 
@@ -160,14 +154,20 @@
 				aria-label="Сменить тему"
 				onclick={() => theme.toggle()}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14A9 9 0 0 1 10 3a9 9 0 1 0 10 11Z" /></svg>
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14A9 9 0 0 1 10 3a9 9 0 1 0 10 11Z"></path></svg>
 			</button>
 		</div>
 	</div>
 
 	{#if providers.length > 0}
 		<div class="header-limits">
-			<LimitsStrip {providers} {now} {thresholds} prefer={provider} crunch={chat.crunch.enabled} />
+			<LimitsStrip
+				providers={providers}
+				now={now}
+				thresholds={thresholds}
+				prefer={provider}
+				crunch={chat.crunch.enabled}
+			/>
 		</div>
 	{/if}
 

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { BlockModel } from '$lib/stores/blocks';
+  import type { BlockModel } from '#lib/stores/blocks.js';
   let { block }: { block: BlockModel } = $props();
   const title = $derived(block.kind === 'error' ? 'Ошибка' : 'Предупреждение');
 </script>

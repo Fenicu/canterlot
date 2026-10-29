@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { announce } from '$lib/a11y/announce';
-  import type { ConnectionPhase } from '$lib/sync/connection';
-  import type { ScopeStatus } from '$lib/sync/scope';
+  import { announce } from '#lib/a11y/announce.js';
+  import type { ConnectionPhase } from '#lib/sync/connection.js';
+  import type { ScopeStatus } from '#lib/sync/scope.js';
 
   let {
     phase,

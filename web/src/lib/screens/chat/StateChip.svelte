@@ -1,6 +1,6 @@
 <script lang="ts">
-	import { activityLine, type Activity } from '$lib/screens/sessions/activityText';
-	import { announce } from '$lib/a11y/announce';
+	import { activityLine, type Activity } from '#lib/screens/sessions/activityText.js';
+	import { announce } from '#lib/a11y/announce.js';
 
 	let {
 		activity = null,

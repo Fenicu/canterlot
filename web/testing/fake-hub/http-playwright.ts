@@ -75,6 +75,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({
       headers: headers(),
       json: {
+        schema_version: 1,
+        auth: { logout_url: null },
+        machines: { disk_warn_pct: 85, metrics_stale_after_secs: 90 },
         limits: {
           max_attachment_bytes: 104_857_600,
           max_attachments_per_input: 10,
@@ -149,7 +152,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
   });
 
-  await page.route('**/api/v1/attachments/**', async (route) => {
+  await page.route(/\/api\/v1\/attachments(?:\/|$)/, async (route) => {
     const url = new URL(route.request().url());
     const method = route.request().method();
     const parts = url.pathname.split('/');
@@ -643,6 +646,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { id } });
   });
 
+  await page.route('**/api/v1/conversations/*/runs/*', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const runId = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const info = api.runs.get(runId);
+    if (!info) {
+      await route.fulfill({
+        status: 404,
+        headers: headers(),
+        json: { error: { code: 'not_found', message: 'Run not found' } }
+      });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: info });
+  });
+
+  await page.route('**/api/v1/conversations/*/delegation', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const list = api.delegations.get(id) ?? [];
+    await route.fulfill({ headers: headers(), json: list });
+  });
+
   await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
   });
@@ -801,4 +826,24 @@ function recount(api: FakeHubApi) {
       count: items.filter((item) => !item.archived && item.groups.includes(group.id)).length
     }))
   };
+}
+
+/** Числа макетов 09/10, даты относительно дня запуска. */
+export async function seedSecondaryScreens(page: Page, api: FakeHubApi, ids: { machine: string; pinned: string }, logout: string | null) {
+  const metrics = { machine_time_ms: Date.now(), cpu_cores: 8, cpu_permille: 240, mem_total_bytes: 32 * 1024 ** 3, mem_available_bytes: Math.round(19.2 * 1024 ** 3), load1_centi: 184, load5_centi: 162, load15_centi: 141, disks: [{ label: 'data', total_bytes: 1000, free_bytes: 120 }, { label: 'root_0', total_bytes: 1000, free_bytes: 600 }], executions: [] };
+  const machine = api.machines.get(ids.machine)!;
+  Object.assign(machine, { os: 'Linux · x86_64', availability: 'available', heartbeat_age_ms: 2000, availability_since: new Date(Date.now() - 3_600_000).toISOString(), metrics: { ...metrics, observed_at: new Date().toISOString() }, warnings: ['disk_usage_high'] });
+  const historyRequests: URLSearchParams[] = [];
+  await page.route('**/api/v1/config', r => r.fulfill({ json: { schema_version: 1, auth: { logout_url: logout }, machines: { disk_warn_pct: 85, metrics_stale_after_secs: 90 }, limits: { max_attachment_bytes: 104_857_600, max_attachments_per_input: 10, upload_chunk_bytes: 8_388_608, max_input_text_bytes: 262_144, queue_limit: 100 }, defaults: { crunch_resume_text: 'продолжи с места остановки' }, limit_thresholds: { stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 } } }));
+  await page.route('**/api/v1/limits/history?*', r => {
+    const query = new URL(r.request().url()).searchParams; historyRequests.push(query);
+    const provider = query.get('provider') ?? 'claude';
+    const start = new Date(query.get('from')!);
+    const days = Array.from({ length: 7 }, (_, n) => { const date = new Date(start); date.setDate(date.getDate() + n); return date; });
+    return r.fulfill({ json: {
+      series: [{ provider, five_hour: days.map((date, n) => ({ observed_at: date.toISOString(), used_permille: 180 + n * 30, used_pct: 18 + n * 3 })), weekly: days.map((date, n) => ({ observed_at: date.toISOString(), used_permille: 560 + n * 60, used_pct: 56 + n * 6 })) }],
+      usage: [{ day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'main', model: 'opus', input_tokens: 126000, output_tokens: 8400, cache_read_tokens: 1000, cache_write_tokens: 2000, weekly_delta_permille: 32, runs: 2, overlapped_runs: 0 }, { day: new Intl.DateTimeFormat('en-CA', { timeZone: query.get('tz') ?? 'UTC' }).format(days.at(-1)!), conversation_id: ids.pinned, provider, agent: 'agent-1', model: 'haiku', input_tokens: 18000, output_tokens: 1200, cache_read_tokens: 0, cache_write_tokens: 0, weekly_delta_permille: 2, runs: 1, overlapped_runs: 1 }]
+    } });
+  });
+  return { metrics, historyRequests };
 }

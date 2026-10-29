@@ -1,21 +1,22 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browserRuntime } from './open';
-	import { getRuntime, type Runtime } from '$lib/app/runtime';
-	import { loadConfig } from '$lib/api/config';
-	import Composer from '$lib/composer/Composer.svelte';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import PendingStrip from '$lib/timeline/PendingStrip.svelte';
-	import Timeline from '$lib/timeline/Timeline.svelte';
+	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
+	import { loadConfig } from '#lib/api/config.js';
+	import Composer from '#lib/composer/Composer.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
 	import RequestCard from '$lib/requests/RequestCard.svelte';
 	import type { RequestItem } from '$lib/stores/requests.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
-	import type { ProviderLimits, LimitThresholds } from '$lib/stores/limits';
-	import type { MachineRecord } from '$lib/stores/machines.svelte';
-	import Sheet from '$lib/ui/Sheet.svelte';
+	import InfoSheet from './InfoSheet.svelte';
+	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
+	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
+	import Sheet from '#lib/ui/Sheet.svelte';
 
 	interface MachineRef {
 		id?: string;
@@ -64,6 +65,7 @@
 
 	let showSettings = $state(false);
 	let showDiagnostics = $state(false);
+	let infoRunId = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
@@ -117,7 +119,14 @@
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 	/>
 
-	<Timeline {chat} {onInfo} {now} />
+	<Timeline
+		{chat}
+		onInfo={(runId) => {
+			infoRunId = runId;
+			onInfo?.(runId);
+		}}
+		{now}
+	/>
 
 	{#if chat.requests.items.size > 0}
 		<div class="request-cards-slot">
@@ -161,6 +170,14 @@
 		<Diagnostics
 			{chat}
 			onclose={() => (showDiagnostics = false)}
+		/>
+	{/if}
+
+	{#if infoRunId}
+		<InfoSheet
+			{chat}
+			runId={infoRunId}
+			onclose={() => (infoRunId = null)}
 		/>
 	{/if}
 </section>

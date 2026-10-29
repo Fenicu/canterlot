@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { getRuntime } from '$lib/app/runtime';
-  import { restoreComposerText } from '$lib/composer/restore';
-  import StageTrack from '$lib/ui/StageTrack.svelte';
-  import ConfirmDialog from '$lib/ui/ConfirmDialog.svelte';
-  import type { Stage } from '$lib/ui/stage-track';
-  import type { ChatStore } from '$lib/stores/chat.svelte';
-  import type { InputView } from '$lib/stores/inputs';
-  import { retryAsNew, returnToDraft } from '$lib/timeline/QueueActions';
-  import { deliveryIndex, deliveryLabel } from '$lib/timeline/present';
+  import { getRuntime } from '#lib/app/runtime.js';
+  import { restoreComposerText } from '#lib/composer/restore.js';
+  import StageTrack from '#lib/ui/StageTrack.svelte';
+  import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
+  import type { Stage } from '#lib/ui/stage-track.js';
+  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { InputView } from '#lib/stores/inputs.js';
+  import { retryAsNew, returnToDraft } from '#lib/timeline/QueueActions.js';
+  import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
 
   let { input, chat, agentWorking = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean } = $props();
   let ask = $state<string | null>(null);

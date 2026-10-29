@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ListRow } from '$lib/stores/list.svelte';
+  import type { ListRow } from '#lib/stores/list.svelte.js';
   import SessionRow from './SessionRow.svelte';
 
   let {

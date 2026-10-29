@@ -1,22 +1,23 @@
 <script lang="ts">
   import { onMount, untrack } from 'svelte';
-  import { canSendNow } from '$lib/api/gate';
-  import { loadConfig } from '$lib/api/config';
-  import { clock } from '$lib/clock';
-  import AttachmentTray from '$lib/composer/AttachmentTray.svelte';
-  import InterruptButton from '$lib/composer/InterruptButton.svelte';
-  import SendLater from '$lib/composer/SendLater.svelte';
-  import { bindDraft } from '$lib/composer/draftBinding';
-  import { ComposerModel, type Limits } from '$lib/composer/model.svelte';
-  import { getEnterPref } from '$lib/composer/prefs';
-  import { bindComposerRestore } from '$lib/composer/restore';
-  import { decideEnter, isTouchPrimary } from '$lib/composer/sendRules';
-  import { getRuntime } from '$lib/app/runtime';
-  import { sessionUploads } from '$lib/screens/chat/open';
-  import type { ChatStore } from '$lib/stores/chat.svelte';
-  import Icon from '$lib/ui/Icon.svelte';
-  import IconButton from '$lib/ui/IconButton.svelte';
-  import { probe } from '$lib/perf/probe';
+  import { canSendNow } from '#lib/api/gate.js';
+  import { loadConfig } from '#lib/api/config.js';
+  import { clock } from '#lib/clock.js';
+  import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
+  import InterruptButton from '#lib/composer/InterruptButton.svelte';
+  import SendLater from '#lib/composer/SendLater.svelte';
+  import { bindDraft } from '#lib/composer/draftBinding.js';
+  import { ComposerModel, type Limits } from '#lib/composer/model.svelte.js';
+  import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
+  import { getEnterPref } from '#lib/composer/prefs.js';
+  import { bindComposerRestore } from '#lib/composer/restore.js';
+  import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { getRuntime } from '#lib/app/runtime.js';
+  import { sessionUploads } from '#lib/screens/chat/open.js';
+  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import Icon from '#lib/ui/Icon.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import { probe } from '#lib/perf/probe.js';
 
   let { chat }: { chat: ChatStore } = $props();
   const runtime = getRuntime();
@@ -42,6 +43,8 @@
         serverNow: () => clock.serverNow()
       })
   );
+
+  untrack(() => { model.errorMessage = takeAttachmentNotice(chat.id); });
 
   let node = $state<HTMLTextAreaElement | null>(null);
   let file = $state<HTMLInputElement | null>(null);

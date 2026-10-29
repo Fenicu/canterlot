@@ -1,14 +1,14 @@
 <script lang="ts" module>
-  export { presets, validateScheduleTime } from '$lib/composer/schedule';
+  export { presets, validateScheduleTime } from '#lib/composer/schedule.js';
 </script>
 
 <script lang="ts">
-  import { fmt } from '$lib/format/ru';
-  import { presets } from '$lib/composer/schedule';
-  import { isTouchPrimary } from '$lib/composer/sendRules';
-  import Button from '$lib/ui/Button.svelte';
-  import IconButton from '$lib/ui/IconButton.svelte';
-  import Sheet from '$lib/ui/Sheet.svelte';
+  import { fmt } from '#lib/format/ru.js';
+  import { presets } from '#lib/composer/schedule.js';
+  import { isTouchPrimary } from '#lib/composer/sendRules.js';
+  import Button from '#lib/ui/Button.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import Sheet from '#lib/ui/Sheet.svelte';
 
   let {
     open,

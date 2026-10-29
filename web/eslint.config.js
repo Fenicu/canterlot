@@ -13,7 +13,7 @@ const consoleRestricted = ['log', 'info', 'warn', 'error', 'debug'].map(property
   message: 'No private data in logs.'
 }));
 export default ts.config(
-  { ignores: ['build/**', '.svelte-kit/**', 'node_modules/**', 'test-results/**', 'playwright-report/**', 'tests/unit/fixtures/**', 'src/lib/api/generated/**'] },
+  { ignores: ['build/**', 'build-update/**', '.svelte-kit/**', 'node_modules/**', 'test-results/**', 'playwright-report/**', 'tests/unit/fixtures/**', 'src/lib/api/generated/**'] },
   ...ts.configs.recommended,
   ...svelte.configs['flat/recommended'],
   { files: ['**/*.svelte', '**/*.svelte.ts', '**/*.svelte.js'], languageOptions: { parserOptions: { parser: ts.parser } } },
