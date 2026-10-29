@@ -3,6 +3,8 @@ use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use crate::adapter::spawn_with_retry_io;
+
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (2, 1, 310);
 pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 310), (2, 1, 311)];
 
@@ -45,12 +47,28 @@ pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
 }
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
-    let mut cmd = Command::new(executable);
-    cmd.arg("--version").kill_on_drop(true);
-    let out = match timeout(Duration::from_secs(5), cmd.output()).await {
-        Ok(Ok(o)) => o,
-        Ok(Err(_)) => return Err(VersionError::NotFound),
-        Err(_) => return Err(VersionError::Failed),
+    let out = match spawn_with_retry_io(|| {
+        let mut cmd = Command::new(executable);
+        cmd.arg("--version").kill_on_drop(true);
+        async move {
+            match timeout(Duration::from_secs(5), cmd.output()).await {
+                Ok(v) => v,
+                Err(_) => Err(std::io::Error::other("timeout")),
+            }
+        }
+    })
+    .await
+    {
+        Ok(o) => o,
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                return Err(VersionError::NotFound);
+            }
+            if err.to_string() == "timeout" {
+                return Err(VersionError::Failed);
+            }
+            return Err(VersionError::Failed);
+        }
     };
     if !out.status.success() {
         return Err(VersionError::Failed);

@@ -595,3 +595,31 @@ mod tests {
         assert!(super::registry("synthetic-exit-on-interrupt").is_none());
     }
 }
+
+// Общий вспомогательный код адаптеров.
+
+use std::io;
+
+/// Выполнить `spawn` с повторами при ETXTBSY/`ExecutableFileBusy`.
+pub async fn spawn_with_retry_io<F, Fut, T>(mut spawn: F) -> io::Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = io::Result<T>>,
+{
+    let mut attempts = 0;
+    loop {
+        match spawn().await {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::ExecutableFileBusy {
+                    attempts += 1;
+                    if attempts < 5 {
+                        tokio::time::sleep(Duration::from_millis(25 * attempts as u64)).await;
+                        continue;
+                    }
+                }
+                return Err(err);
+            }
+        }
+    }
+}
