@@ -1,4 +1,10 @@
-import { ApiError, AuthRequired, envelopeOf, NetworkError, session } from '$lib/api/http';
+import {
+  ApiError,
+  AuthRequired,
+  envelopeOf,
+  NetworkError,
+  session,
+} from "#lib/api/http.js";
 
 export interface PatchChunkOptions {
   progressTimeoutMs?: number;
@@ -15,7 +21,7 @@ export interface PatchSender {
     url: string,
     chunk: Blob | Uint8Array,
     offset: number,
-    options?: PatchChunkOptions
+    options?: PatchChunkOptions,
   ): Promise<PatchChunkResult>;
 }
 
@@ -27,7 +33,7 @@ export function patchChunk(
   url: string,
   chunk: Blob | Uint8Array,
   offset: number,
-  options?: PatchChunkOptions
+  options?: PatchChunkOptions,
 ): Promise<PatchChunkResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
@@ -51,7 +57,7 @@ export function patchChunk(
         progressTimer = null;
       }
       if (options?.signal) {
-        options.signal.removeEventListener('abort', onAbortSignal);
+        options.signal.removeEventListener("abort", onAbortSignal);
       }
     }
 
@@ -61,58 +67,67 @@ export function patchChunk(
 
     if (options?.signal) {
       if (options.signal.aborted) {
-        reject(new Error('Запрос отменён'));
+        reject(new Error("Запрос отменён"));
         return;
       }
-      options.signal.addEventListener('abort', onAbortSignal);
+      options.signal.addEventListener("abort", onAbortSignal);
     }
 
-    xhr.upload.addEventListener('progress', (e) => {
+    xhr.upload.addEventListener("progress", (e) => {
       resetTimer();
       if (e.lengthComputable) {
         options?.onProgress?.(e.loaded, e.total);
       }
     });
 
-    xhr.addEventListener('load', () => {
+    xhr.addEventListener("load", () => {
       cleanup();
 
-      const rawHeaders = xhr.getAllResponseHeaders?.() ?? '';
+      const rawHeaders = xhr.getAllResponseHeaders?.() ?? "";
       const headers = new Headers();
-      for (const line of rawHeaders.split('\r\n')) {
-        const idx = line.indexOf(':');
+      for (const line of rawHeaders.split("\r\n")) {
+        const idx = line.indexOf(":");
         if (idx > 0) {
-          headers.set(line.slice(0, idx).trim().toLowerCase(), line.slice(idx + 1).trim());
+          headers.set(
+            line.slice(0, idx).trim().toLowerCase(),
+            line.slice(idx + 1).trim(),
+          );
         }
       }
 
-      const offsetHeader = xhr.getResponseHeader('Upload-Offset');
+      const offsetHeader = xhr.getResponseHeader("Upload-Offset");
       if (offsetHeader) {
-        headers.set('upload-offset', offsetHeader);
+        headers.set("upload-offset", offsetHeader);
       }
 
-      const contentType = xhr.getResponseHeader('Content-Type') ?? '';
+      const contentType = xhr.getResponseHeader("Content-Type") ?? "";
       const landed = xhr.responseURL;
       if (landed) {
-        const base = typeof window !== 'undefined' ? window.location.href : 'https://canterlot.local';
+        const base =
+          typeof window !== "undefined"
+            ? window.location.href
+            : "https://canterlot.local";
         const requested = new URL(url, base);
         const actual = new URL(landed, base);
-        if (actual.origin !== requested.origin || actual.pathname !== requested.pathname) {
-          session.state = 'expired';
-          reject(new AuthRequired('redirect'));
+        if (
+          actual.origin !== requested.origin ||
+          actual.pathname !== requested.pathname
+        ) {
+          session.state = "expired";
+          reject(new AuthRequired("redirect"));
           return;
         }
       }
 
-      if (xhr.status === 0 || contentType.includes('text/html')) {
-        session.state = 'expired';
-        reject(new AuthRequired('redirect'));
+      if (xhr.status === 0 || contentType.includes("text/html")) {
+        session.state = "expired";
+        reject(new AuthRequired("redirect"));
         return;
       }
 
       if (xhr.status === 401) {
-        session.state = 'expired';
-        reject(new AuthRequired('unauthenticated'));
+        session.state = "expired";
+        reject(new AuthRequired("unauthenticated"));
         return;
       }
 
@@ -123,16 +138,20 @@ export function patchChunk(
         } catch {
           code = undefined;
         }
-        if (code === 'forbidden_user' || code === 'origin_rejected') {
-          session.state = 'expired';
-          reject(new AuthRequired(code === 'forbidden_user' ? 'forbidden_user' : 'redirect'));
+        if (code === "forbidden_user" || code === "origin_rejected") {
+          session.state = "expired";
+          reject(
+            new AuthRequired(
+              code === "forbidden_user" ? "forbidden_user" : "redirect",
+            ),
+          );
           return;
         }
       }
 
       if (xhr.status === 200 || xhr.status === 204) {
         if (offsetHeader === null || !/^\d+$/.test(offsetHeader)) {
-          reject(new NetworkError('missing_upload_offset'));
+          reject(new NetworkError("missing_upload_offset"));
           return;
         }
         resolve({ offset: Number(offsetHeader) });
@@ -146,45 +165,50 @@ export function patchChunk(
         errorBody = undefined;
       }
       if (!errorBody) {
-        reject(new NetworkError('response_without_envelope'));
+        reject(new NetworkError("response_without_envelope"));
         return;
       }
 
-      reject(new ApiError(
-        xhr.status,
-        errorBody.code,
-        errorBody.message,
-        errorBody.scope,
-        errorBody.retry,
-        errorBody.correlation_id,
-        errorBody.details,
-        headers
-      ));
+      reject(
+        new ApiError(
+          xhr.status,
+          errorBody.code,
+          errorBody.message,
+          errorBody.scope,
+          errorBody.retry,
+          errorBody.correlation_id,
+          errorBody.details,
+          headers,
+        ),
+      );
     });
 
-    xhr.addEventListener('error', () => {
+    xhr.addEventListener("error", () => {
       cleanup();
-      reject(new NetworkError('Сетевая ошибка при передаче части файла'));
+      reject(new NetworkError("Сетевая ошибка при передаче части файла"));
     });
 
-    xhr.addEventListener('abort', () => {
+    xhr.addEventListener("abort", () => {
       cleanup();
       if (isProgressTimedOut) {
-        reject(new Error('Превышен таймаут прогресса загрузки'));
+        reject(new Error("Превышен таймаут прогресса загрузки"));
       } else {
-        reject(new Error('Загрузка отменена'));
+        reject(new Error("Загрузка отменена"));
       }
     });
 
-    xhr.open('PATCH', url);
-    xhr.setRequestHeader('Upload-Offset', String(offset));
-    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
-    xhr.setRequestHeader('X-Canterlot-Client', '1');
-    xhr.setRequestHeader('X-Correlation-Id', crypto.randomUUID());
+    xhr.open("PATCH", url);
+    xhr.setRequestHeader("Upload-Offset", String(offset));
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader("X-Canterlot-Client", "1");
+    xhr.setRequestHeader("X-Correlation-Id", crypto.randomUUID());
 
     resetTimer();
 
-    const body = chunk instanceof Blob ? chunk : (chunk as unknown as XMLHttpRequestBodyInit);
+    const body =
+      chunk instanceof Blob
+        ? chunk
+        : (chunk as unknown as XMLHttpRequestBodyInit);
     xhr.send(body as XMLHttpRequestBodyInit);
   });
 }

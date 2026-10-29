@@ -2,11 +2,12 @@ import { defineConfig } from 'vitest/config';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 
 export default defineConfig({
-  plugins: [svelte()],
+  plugins: [svelte({ configFile: false })],
   resolve: {
     conditions: ['browser'],
     alias: {
-      $lib: new URL('./src/lib', import.meta.url).pathname
+      $lib: new URL('./src/lib', import.meta.url).pathname,
+      '#lib': new URL('./src/lib', import.meta.url).pathname
     }
   },
   test: {

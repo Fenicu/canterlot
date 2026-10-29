@@ -24,43 +24,47 @@ export const httpHealth = new HttpHealthTracker();
 export interface SendGateEnv {
   onLine(): boolean;
   now(): number;
-  probe(): Promise<'ok' | 'down'>;
+  probe(): Promise<"ok" | "down">;
 }
 
 /**
  * Проверка, можно ли отправлять. Смотрит на navigator.onLine и последний успешный HTTP,
  * не на живость WebSocket.
  */
-export async function canSendNow(env?: SendGateEnv): Promise<'ok' | 'offline'> {
-  const onLine = env?.onLine ?? (() => typeof navigator === 'undefined' || navigator.onLine !== false);
+export async function canSendNow(env?: SendGateEnv): Promise<"ok" | "offline"> {
+  const onLine =
+    env?.onLine ??
+    (() => typeof navigator === "undefined" || navigator.onLine !== false);
   const now = env?.now ?? (() => Date.now());
 
-  if (!onLine()) return 'offline';
+  if (!onLine()) return "offline";
 
   const last = httpHealth.lastOkAt;
-  if (last !== null && now() - last <= 30_000) return 'ok';
+  if (last !== null && now() - last <= 30_000) return "ok";
 
   if (env?.probe) {
     try {
       const result = await Promise.race([
         env.probe(),
-        new Promise<'down'>((resolve) => setTimeout(() => resolve('down'), 2000))
+        new Promise<"down">((resolve) =>
+          setTimeout(() => resolve("down"), 2000),
+        ),
       ]);
-      if (result === 'ok') {
+      if (result === "ok") {
         httpHealth.recordSuccess(now());
-        return 'ok';
+        return "ok";
       }
-      return 'offline';
+      return "offline";
     } catch {
-      return 'offline';
+      return "offline";
     }
   }
 
   try {
-    const { http: request } = await import('$lib/api/http');
-    await request('GET', '/api/v1/me', undefined, { timeoutMs: 2000 });
-    return 'ok';
+    const { http: request } = await import("#lib/api/http.js");
+    await request("GET", "/api/v1/me", undefined, { timeoutMs: 2000 });
+    return "ok";
   } catch {
-    return 'offline';
+    return "offline";
   }
 }

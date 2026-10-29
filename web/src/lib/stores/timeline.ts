@@ -24,6 +24,7 @@ export class TimelineModel {
 	get entries(): TimelineEntry[] {
 		return this.#entries.get();
 	}
+	clear(): void { this.#entries.set([]); this.hasOlder = false; this.tailDetached = false; this.newerCount = 0; }
 
 	applyHistoryPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
 		const incoming = [...items].sort((a, b) => cmpSeq(a.seq, b.seq));

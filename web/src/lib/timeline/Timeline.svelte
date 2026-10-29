@@ -1,24 +1,34 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { announce } from '$lib/a11y/announce';
-  import { clock } from '$lib/clock';
-  import { probe } from '$lib/perf/probe';
-  import type { BlockPage } from '$lib/stores/blocks';
-  import type { ChatStore } from '$lib/stores/chat.svelte';
-  import AnswerCard from '$lib/timeline/AnswerCard.svelte';
-  import UserBubble from '$lib/timeline/UserBubble.svelte';
-  import { buildRows, type Row } from '$lib/timeline/rows';
-  import { ScrollController } from '$lib/timeline/scrollController';
+  import { announce } from '#lib/a11y/announce.js';
+  import { clock } from '#lib/clock.js';
+  import { probe } from '#lib/perf/probe.js';
+  import type { BlockPage } from '#lib/stores/blocks.js';
+  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import UserBubble from '#lib/timeline/UserBubble.svelte';
+  import { buildRows, type Row } from '#lib/timeline/rows.js';
+  import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
     captureAnchor,
     restoreAnchor,
     rowEstimate,
     visibleRange
-  } from '$lib/timeline/virtual';
+  } from '#lib/timeline/virtual.js';
 
-  let { chat, onInfo, now = Date.now() }: { chat: ChatStore; onInfo?: (runId: string) => void; now?: number } = $props();
+  let {
+    chat,
+    onInfo,
+    now = Date.now(),
+    laneRoot
+  }: {
+    chat: ChatStore;
+    onInfo?: (runId: string) => void;
+    now?: number;
+    laneRoot?: string;
+  } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
   let range = $state({ start: 0, end: 0, padTop: 0, padBottom: 0 });
@@ -37,7 +47,7 @@
   let queued: { key: string; height: number; node?: HTMLElement }[] = [];
   const PIN_PX = 48;
 
-  const rows = $derived(buildRows(chat.timeline.entries, { now }));
+  const rows = $derived(buildRows(chat.timeline.entries, { now, laneRoot }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   let seenRows: string | null = null;
   $effect(() => {

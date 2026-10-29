@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount, onDestroy, type Snippet } from 'svelte';
-  import { pushState } from '$app/navigation';
+  import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
   let { open, title, routeKey, onclose, children }: { open: boolean; title: string; routeKey?: string; onclose: () => void; children: Snippet } = $props();
@@ -26,10 +26,21 @@
   function keydown(event: KeyboardEvent) {
     if (event.key === 'Escape') { event.preventDefault(); close(); }
     if (event.key !== 'Tab') return;
-    const items = [...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')].filter(node => node.getClientRects().length > 0);
-    const first = items[0]; const last = items.at(-1);
-    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
-    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+
+    const items = [
+      ...dialog.querySelectorAll<HTMLElement>('button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')
+    ].filter((node) => node.getClientRects().length > 0);
+
+    const first = items[0];
+    const last = items.at(-1);
+
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last?.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first?.focus();
+    }
   }
   onMount(() => { mounted = true; });
   onDestroy(() => { if (dialog?.open) restore(); });
@@ -39,7 +50,14 @@
       opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       shell = document.getElementById('app-shell');
       previousInert = shell?.inert ?? false;
-      if (routeKey && page.state.sheet !== routeKey) { pushState('', { ...page.state, sheet: routeKey }); entry = true; }
+
+      if (routeKey && page.state.sheet !== routeKey) {
+        // eslint-disable-next-line svelte/no-navigation-without-resolve
+        void goto('', { shallow: true, state: { ...page.state, sheet: routeKey } }).then(() => {
+          entry = true;
+        });
+      }
+
       dialog.showModal();
       if (shell) shell.inert = true;
     } else if (!open && dialog.open) close();

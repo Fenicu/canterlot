@@ -6,7 +6,7 @@
 ![этап](https://shields.fenicu.com/badge/%D1%8D%D1%82%D0%B0%D0%BF-1.3b%20PWA-00f4ee)
 ![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex-1f5457)
 ![Rust](https://shields.fenicu.com/badge/rust-1.99-orange?logo=rust)
-![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white)
+![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
 ![PostgreSQL](https://shields.fenicu.com/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
 ![Node](https://shields.fenicu.com/badge/node-24-339933?logo=node.js&logoColor=white)
 
@@ -23,7 +23,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 | Путь | Назначение |
 | --- | --- |
-| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, тестовый двойник хаба FakeHub в `testing/fake-hub`, хранилища ленты и списка, окно ленты чата, поле ввода, оболочка и экраны списка сессий, unit и браузерные проверки |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, FakeHub в `testing/fake-hub`, лента чата, поле ввода, оболочка и список сессий, экраны машин, истории лимитов, настроек и выбора сессии для «Поделиться», платформа `src/lib/pwa` (установка, offline, обновление, share, очистка), manifest и иконки из токенов, unit и браузерные проверки |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
 | `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
@@ -37,6 +37,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
 | `crates/canterlot-hub/src/{presets,http/presets}.rs` | Пресеты инструкций: версии текста, CRUD API, события, снимок и стартовый пресет исполнителя |
 | `crates/canterlot-hub/src/http/{conversations,groups,machines,limits}.rs` | HTTP сессий и групп, чтение машин, лимитов и недавних каталогов |
+| `crates/canterlot-hub/src/requests.rs`, `migrations/0018_requests.sql` | Запросы агента и разрешения: таблица requests, первый ответ побеждает, `POST /api/v1/conversations/{id}/requests/{id}/decision`, события `request_opened`, `request_decided`, `request_transmitting`, `request_closed`, удержание очереди и активность `WaitingForUser` |
 | `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
 | `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
 | `crates/canterlot-hub/src/{subscriptions.rs,http/ws.rs}` | WSS canterlot.v1: подписки по курсору, pull-based pump, слияние дельт и отключение зависшего клиента |
@@ -86,7 +87,7 @@ cargo test -p canterlot-hub
 Каждый тест схемы создаёт отдельную базу через `sqlx::test`, поэтому пользователю PostgreSQL нужно право `CREATEDB`.
 Функции подготовки данных доступны с feature `testkit` и автоматически подключаются при тестировании хаба.
 Параллельные рабочие копии на одной машине поднимают отдельный сервер: `CANTERLOT_TEST_PG_PORT=55441 scripts/test-db.sh up`.
-Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo test -p canterlot-hub`.
+Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo test -p canterlot-hub`. Одной переменной порта для `cargo test` мало: `.cargo/config.toml` указывает на общую базу 55440. `scripts/check.sh` сам выставляет `DATABASE_URL` по `CANTERLOT_TEST_PG_PORT`, если `DATABASE_URL` не задан.
 sqlx называет тестовые базы по пути теста, поэтому две копии на одном сервере удаляли бы базы друг друга.
 `down` и `psql` принимают ту же переменную.
 
@@ -440,7 +441,7 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 `POST /api/v1/conversations/{id}/inputs` ставит текст и готовые `attachment_ids` в очередь; `retry_of` ссылается на неподтверждённый ввод той же сессии. `PATCH /api/v1/conversations/{id}/settings` сохраняет изменения для следующего ввода; они становятся эффективными после подтверждения воркера. `POST /api/v1/conversations/{id}/executions` запускает исполнение, а `POST /api/v1/conversations/{id}/resume` продолжает сессию с последним native ID и при запросе снимает паузу очереди в той же транзакции.
 
-Чтения: `GET /api/v1/snapshot/conversations`, `GET /api/v1/snapshot/machines`, `GET /api/v1/conversations/{id}/snapshot`, `/history`, `/blocks/{block_id}`, `/runs/{run_id}`, `/delegation`. Снимок и его курсор читаются в одной `REPEATABLE READ` транзакции; `GET /api/v1/events?scope=&after=&limit=` восстанавливает хвост с сохранением номеров внутренних событий через `hidden`. При устаревшем или опережающем курсоре нужен новый снимок. Подробные поля и ограничения: `docs/design/api.md`; схема событий: `docs/api/events.schema.json`. Новых таблиц конфигурации в задаче 7a нет: действуют `[http]` и пороги `[machines]`.
+Чтения: `GET /api/v1/snapshot/conversations`, `GET /api/v1/snapshot/machines`, `GET /api/v1/conversations/{id}/snapshot`, `/history`, `/blocks/{block_id}`, `/runs/{run_id}`, `/delegation`. Снимок и его курсор читаются в одной `REPEATABLE READ` транзакции; `GET /api/v1/events?scope=&after=&limit=` восстанавливает хвост с сохранением номеров внутренних событий через `hidden`. При устаревшем или опережающем курсоре нужен новый снимок. Снимок разговора отдаёт в `open_requests` все незавершённые запросы (`open`, `decision_saved`, `decision_transmitting`); при переходе решения к передаче агенту хаб выпускает событие `request_transmitting`. Подробные поля и ограничения: `docs/design/api.md`; схема событий: `docs/api/events.schema.json`. Новых таблиц конфигурации в задаче 7a нет: действуют `[http]` и пороги `[machines]`.
 
 ## Обновление контракта пилота
 
@@ -451,7 +452,7 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 ## PWA
 
-Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. Клиент Task 1 показывает место будущего списка сессий. Ядро Task 2 уже в `web/src/lib`: типизированные вызовы `api/client.ts` по контракту OpenAPI, разбор ошибок, часы по `X-Server-Time-Ms`, журнал операций, черновики с зеркалом `localStorage` и докачка вложений. Manifest, service worker и установка остаются следующими задачами плана 1.3b. Сборка и инструменты работают без обращения к внешним сервисам во время выполнения.
+Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. В `web/src/lib` находятся типизированный API, синхронизация, журнал операций, черновики, докачка вложений, список сессий и чат. Экраны `screens/machines`, `screens/limits`, `screens/settings`, `screens/share` показывают живые метрики, историю двух окон квот за семь местных дней, настройки устройства и выбор сессии для файлов Android. Платформа `pwa/` добавляет установку, безопасное обновление, offline-оболочку и приём Android «Поделиться». Сборка и инструменты работают без обращения к внешним сервисам во время выполнения.
 
 Рендеринг (`web/src/lib/render`): безопасный потоковый Markdown (markdown-it без сырого HTML, замена изображений на ссылки, строгий allow-list DOMPurify, открытие ссылок в новой вкладке с noopener/noreferrer/nofollow), кеширование закрытых блоков, plain-хвост свыше 8 КиБ, ленивая подсветка highlight.js и очистка ANSI.
 
@@ -463,7 +464,11 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 
 Оболочка и список (`web/src/lib/shell`, `web/src/lib/screens/sessions`): телефон показывает один экран с нижней навигацией, планшет список и чат, стол добавляет панель поручений. Список группирует сессии, ищет на сервере и показывает полосу лимитов по порогам из конфигурации. Новая сессия создаётся отдельным запросом с тем же ключом при повторе.
 
-Шапка чата и управление сессией (`web/src/lib/screens/chat`, Task 8a): шапка чата (`ChatHeader`) с заголовком, цветной меткой сессии, строкой статуса (`StateChip`) и индикатором отложенной смены модели; меню управления (остановка с подтверждением принудительного прерывания, возобновление сессии и очереди, запуск); настройки посреди сессии (`SessionSettings`) с валидацией каталога машины и переключателем «кранча»; карточки пауз и удержаний (`PauseCards`, `pauseCards.ts`), включая переопределение недельного лимита (`spend-reserve`); заглушка вопроса агента (`RequestSlot`) и защищённая диагностика сессии (`Diagnostics`).
+Шапка чата и управление сессией (`web/src/lib/screens/chat`, Task 8a): шапка чата (`ChatHeader`) с заголовком, цветной меткой сессии, строкой статуса (`StateChip`) и индикатором отложенной смены модели; меню управления (остановка с подтверждением принудительного прерывания, возобновление сессии и очереди, запуск); настройки посреди сессии (`SessionSettings`) с валидацией каталога машины и переключателем «кранча»; карточки пауз и удержаний (`PauseCards`, `pauseCards.ts`), включая переопределение недельного лимита (`spend-reserve`); карточки запросов агента и защищённая диагностика сессии (`Diagnostics`).
+
+Запросы агента и разрешения (`web/src/lib/requests`, `stores/requests.svelte.ts`, Task 7, Task 8): интерактивные карточки вопросов (`QuestionCard.svelte`) и разрешений (`PermissionCard.svelte`), встроенные над полем ввода через `RequestCard.svelte`. Отправка решения создаёт операцию в `OpJournal`, карточка проходит этапы «отправка → сохранено хабом → передано агенту → применено» на `StageTrack`, при конфликте решений от другого устройства показывает предупреждение и отключает ввод (AT-D-01), а после применения сворачивается в компактную строку с возможностью разворачивания по клику.
+
+Сведения о ходе, экспорт и ленты субагентов (`web/src/lib/screens/chat`, `web/src/lib/export`, Task 8b): лист «Об ответе» (`InfoSheet`, `info.ts`) с моделями по частям, расходом токенов (основной + субагент), длительностью, контекстом, честной оценкой лимита и автоматическим обновлением по `run_finished`; экспорт в Markdown (`export/markdown.ts`, текст основного ответа, вызовы инструментов в виде кратких строк, исключение субагентов) с резервным полем при отказе буфера; экспорт в изображение (`export/image.ts`, `export/deliver.ts`) в теме по токенам с делением на страницы до 8 192 px и отправкой через Web Share или буфер/файлы; отдельная лента субагента (`Lane.svelte`, `lane.ts`, маршрут `/c/[id]/lane/[blockId]`) с карточкой задачи, единой лентой и возвратом в основную сессию; панель делегирования рабочего стола (`DelegationPanel.svelte`) с деревом поручений и живыми статусами.
 
 ### Модули `web/src/lib`
 
@@ -472,14 +477,17 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 - `app/` — корень композиции приложения (`runtime.ts`), связывающий хранилища, менеджер WSS, транспорт, черновики и загрузку вложений.
 - `composer/` — компонент и модель поля ввода (`Composer.svelte`, `model.svelte.ts`), правила Enter на телефоне и десктопе, лоток вложений (`AttachmentTray.svelte`), лист отложенной отправки (`SendLater.svelte`) и кнопка прерывания (`InterruptButton.svelte`).
 - `drafts/` — сохранение черновиков ввода (`store.ts`, `DraftStore`) с транзакционной записью в IndexedDB и синхронным зеркалом в `localStorage`.
+- `export/` — экспорт ответа: markdown (`markdown.ts`), картинка по страницам (`image.ts`) и доставка через «Поделиться», буфер обмена или скачивание (`deliver.ts`).
 - `format/` — русскоязычные форматтеры дат, относительного времени, длительностей и размеров байтов (`ru.ts`).
 - `ops/` — журнал клиентских операций `OpJournal` (`journal.ts`, `op.svelte.ts`) и сборка HTTP-запроса операции с ключом повтора (`request.ts`).
 - `perf/` — опциональный легковесный замер производительности и журнал метрик (`probe.ts`), выключенный по умолчанию.
+- `pwa/` — платформа PWA: регистрация service worker и безопасное обновление (`register.ts`, `update.ts`), установка (`install.ts`), метка офлайн-данных (`offline.ts`), приём «Поделиться» (`share.ts`), очистка при выходе (`signout.ts`).
 - `render/` — безопасный потоковый рендеринг Markdown (`markdown.ts`, `streamingMarkdown.ts`), подсветка синтаксиса highlight.js (`highlight.ts`), очистка ANSI (`ansi.ts`) и санитайзинг DOMPurify (`sanitize.ts`, `Html.svelte`).
+- `requests/` — карточки вопросов и разрешений (`QuestionCard.svelte`, `PermissionCard.svelte`, `RequestCard.svelte`), этапы `StageTrack` и валидация ввода.
 - `screens/` — экраны PWA; экран чата (`screens/chat/ChatScreen.svelte`) собирает шапку, ленту сообщений, поле ввода и боковые панели.
 - `shell/` — оболочка приложения: раскладка телефон / планшет / десктоп (`AppShell.svelte`, `layout.ts`), навигация (`Nav.svelte`), баннеры связи (`ConnectionBanner.svelte`) и диалог истёкшей сессии (`SessionExpired.svelte`).
 - `storage/` — изоляция хранилища IndexedDB по `owner_id` пользователя (`owner.ts`) и типизированная обёртка транзакций `idb.ts`.
-- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
+- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), запросы агента и разрешения (`requests.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
 - `sync/` — постоянное WSS-соединение `ConnectionManager` (`connection.ts`), подписки на скоупы (`scope.ts`), дочитка пропусков по HTTP (`transport.ts`, `batcher.ts`) и экспоненциальный backoff (`backoff.ts`).
 - `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), полоса очереди (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
 - `ui/` — библиотека дизайн-компонентов на CSS-токенах: `Button`, `IconButton`, `Sheet`, `Disclosure`, `Pill`, `Segmented`, `StageTrack`, `TopBar`, `BottomNav`, `icons.ts`.
@@ -528,7 +536,7 @@ bash scripts/check.sh
 
 ### Статическая публикация
 
-После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, будущий service worker, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
+После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, service worker, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
 
 ```bash
 node web/scripts/print-csp.mjs https://chat.example
@@ -547,6 +555,7 @@ chat.example {
             copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
         }
         header Content-Security-Policy "{$CANTERLOT_CSP}"
+        header X-Content-Type-Options "nosniff"
         @api path /api/* /healthz
         handle @api {
             reverse_proxy hub:8080 {
@@ -563,6 +572,8 @@ chat.example {
         handle {
             @fresh path /service-worker.js /manifest.webmanifest
             header @fresh Cache-Control "no-cache"
+            @worker path /service-worker.js
+            header @worker Service-Worker-Allowed "/"
             root * /srv/canterlot/web/build
             try_files {path} /200.html
             file_server
@@ -571,4 +582,14 @@ chat.example {
 }
 ```
 
-WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive` (обработчик и экран добавляются Tasks 9a/9b); тестовый edge уже повторяет это поведение. Для manifest используется `crossorigin="use-credentials"`. Заголовки и `no-cache` для manifest/service worker остаются обязательными после их появления. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Этот task не выполняет реальный деплой.
+WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive`; объяснение и выбор сессии принадлежат Task 9b. Активный worker сохраняет файлы и текст в `share_inbox` текущего владельца на 24 часа и отвечает `303` на `/share?id=…`. Текст и URL остаются полями черновика, вложениями становятся только файлы. Для manifest используется `crossorigin="use-credentials"`. Worker запрашивает ресурсы с credentials, отклоняет auth redirect и приватные ответы. `service-worker.js` обслуживается как JavaScript, manifest как `application/manifest+json`; для обоих обязателен `Cache-Control: no-cache`, для worker `Service-Worker-Allowed: /`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
+
+### Установка и обновление
+
+Manifest генерирует Vite из тёмного `--bg` в `tokens.css`. PNG уже лежат в `web/static/icons`; после изменения токенов или `source.svg` пересоздайте их командой `cd web && PLAYWRIGHT_BROWSERS_PATH=/tmp/canterlot-playwright node scripts/gen-icons.mjs`. Знак повторяет букву c и круглую точку состояния интерфейса; весь рисунок помещается в безопасный круг maskable-иконки. На Chromium пункт «Установить» появляется в меню «Ещё», когда браузер разрешает установку, и исчезает после использования. В Firefox установка остаётся возможностью браузера, собственного неработающего пункта нет.
+
+Новый worker ждёт, пока владелец завершит ввод; баннер «Доступна новая версия» предлагает «Обновить». Перед активацией все черновики записываются в IndexedDB. Пока поле с непустым текстом в фокусе или запись ещё не завершена, перезагрузки нет. Скрытая вкладка может применить готовую версию после записи черновиков. `skipWaiting` вызывается только по сообщению страницы, никогда из `install`. После первого успешного посещения offline открываются `/c/{id}`, `/new`, `/machines` и другие глубокие ссылки через `200.html`; доступны черновики, история не кэшируется. Метка «Нет связи · данные от …» указывает последнюю успешную синхронизацию списка. После выхода локальные данные и настройки владельца очищаются через `purgeLocal` («Настройки» → «Выйти», затем переход по `auth.logout_url` из `/config`).
+
+В меню «Ещё» доступны «Настройки»: логин, связь и последняя синхронизация, тема, Enter, сохраняемая скорость анимаций, установка и обновление. Очистка данных и выход сначала останавливают подписки и загрузки и удаляют локальные данные; при `auth.logout_url = null` экран объясняет завершение сессии на странице Authelia. `/share` сохраняет переданный текст в черновик выбранной или новой сессии и сразу начинает загрузку вложений с обычными ограничениями 100 МиБ / 10 файлов. Сообщение само не отправляется.
+
+`bash scripts/check-web.sh` собирает также вторую версию в игнорируемый `web/build-update`, чтобы проверить настоящую смену worker без перезагрузки во время ввода. Проверка Android «Поделиться» на телефоне остаётся пунктом приёмки Task 10.

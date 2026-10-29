@@ -1,7 +1,7 @@
 <script lang="ts">
-	import type { ChatStore } from '$lib/stores/chat.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { buildDiagnosticsReport, type DiagnosticsData } from './diagnostics';
-	import Sheet from '$lib/ui/Sheet.svelte';
+	import Sheet from '#lib/ui/Sheet.svelte';
 
 	interface DiagnosticEventLike {
 		kind?: string;

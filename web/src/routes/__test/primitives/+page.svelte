@@ -1,28 +1,28 @@
 <script lang="ts">
-  import Button from '$lib/ui/Button.svelte';
-  import IconButton from '$lib/ui/IconButton.svelte';
-  import Icon from '$lib/ui/Icon.svelte';
-  import Pill from '$lib/ui/Pill.svelte';
-  import Mark from '$lib/ui/Mark.svelte';
-  import Toggle from '$lib/ui/Toggle.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
-  import Field from '$lib/ui/Field.svelte';
-  import Select from '$lib/ui/Select.svelte';
-  import Textarea from '$lib/ui/Textarea.svelte';
-  import Gauge from '$lib/ui/Gauge.svelte';
-  import Disclosure from '$lib/ui/Disclosure.svelte';
-  import TopBar from '$lib/ui/TopBar.svelte';
-  import BottomNav from '$lib/ui/BottomNav.svelte';
-  import Sheet from '$lib/ui/Sheet.svelte';
-  import ConfirmDialog from '$lib/ui/ConfirmDialog.svelte';
-  import StageTrack from '$lib/ui/StageTrack.svelte';
+  import Button from '#lib/ui/Button.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import Icon from '#lib/ui/Icon.svelte';
+  import Pill from '#lib/ui/Pill.svelte';
+  import Mark from '#lib/ui/Mark.svelte';
+  import Toggle from '#lib/ui/Toggle.svelte';
+  import Segmented from '#lib/ui/Segmented.svelte';
+  import Field from '#lib/ui/Field.svelte';
+  import Select from '#lib/ui/Select.svelte';
+  import Textarea from '#lib/ui/Textarea.svelte';
+  import Gauge from '#lib/ui/Gauge.svelte';
+  import Disclosure from '#lib/ui/Disclosure.svelte';
+  import TopBar from '#lib/ui/TopBar.svelte';
+  import BottomNav from '#lib/ui/BottomNav.svelte';
+  import Sheet from '#lib/ui/Sheet.svelte';
+  import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
+  import StageTrack from '#lib/ui/StageTrack.svelte';
   import { onMount } from 'svelte';
-  import { theme } from '$lib/theme';
-  import { setMotionScale } from '$lib/motion';
-  import type { StageState } from '$lib/ui/stage-track';
+  import { theme } from '#lib/theme.js';
+  import { setMotionScale } from '#lib/motion.js';
+  import type { StageState } from '#lib/ui/stage-track.js';
   onMount(() => {
     if (import.meta.env.VITE_UI_TESTS !== '1') return;
-    void Promise.all([import('$lib/uploads/patch'), import('$lib/uploads/hasher')]).then(([patch, hasher]) => {
+    void Promise.all([import('#lib/uploads/patch.js'), import('#lib/uploads/hasher.js')]).then(([patch, hasher]) => {
       Object.assign(window, { __canterlotPatchChunk: patch.patchChunk, __canterlotHash: hasher.hashInWorker });
     });
   });

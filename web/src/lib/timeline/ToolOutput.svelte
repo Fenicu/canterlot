@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { stripAnsi } from '$lib/render/ansi';
-  import type { BlockModel, BlockPage } from '$lib/stores/blocks';
-  import { takeToolPage } from '$lib/timeline/present';
+  import { stripAnsi } from '#lib/render/ansi.js';
+  import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
+  import { takeToolPage } from '#lib/timeline/present.js';
 
   let { block, load }: { block: BlockModel; load: (blockId: string, offset: number) => Promise<BlockPage> } = $props();
   let full = $state('');

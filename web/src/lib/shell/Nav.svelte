@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import BottomNav from '$lib/ui/BottomNav.svelte';
-  let { current }: { current: 'sessions' | 'machines' | 'limits' } = $props();
+  import BottomNav from '#lib/ui/BottomNav.svelte';
+  let { current, create = true }: { current: 'sessions' | 'machines' | 'limits'; create?: boolean } = $props();
 </script>
 
 <div class="dock">
@@ -13,7 +13,7 @@
       { href: '/limits', label: 'Лимиты', current: current === 'limits' }
     ]}
   />
-  <a class="fab" href={resolve('/new')} aria-label="Новая сессия"><span aria-hidden="true">+</span></a>
+  {#if create}<a class="fab" href={resolve('/new')} aria-label="Новая сессия"><span aria-hidden="true">+</span></a>{/if}
 </div>
 
 <style>

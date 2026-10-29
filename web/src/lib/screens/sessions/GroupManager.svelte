@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { createGroup, deleteGroup, patchGroup } from '$lib/api/client';
-  import { isTouchPrimary } from '$lib/composer/sendRules';
-  import Sheet from '$lib/ui/Sheet.svelte';
+  import { createGroup, deleteGroup, patchGroup } from '#lib/api/client.js';
+  import { isTouchPrimary } from '#lib/composer/sendRules.js';
+  import Sheet from '#lib/ui/Sheet.svelte';
 
   let {
     groups,

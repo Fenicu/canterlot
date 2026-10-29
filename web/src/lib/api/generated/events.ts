@@ -31,6 +31,7 @@ export type WireEvent =
   | RequestOpened
   | RequestClosed
   | RequestDecided
+  | RequestTransmitting
   | MachineAvailabilityChanged
   | MachineReportUpdated
   | MachineMetrics
@@ -779,6 +780,22 @@ export interface RequestDecided {
     request_id: Uuid;
     winner_decision_id: Uuid;
     decision: {};
+  };
+}
+export interface RequestTransmitting {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "request_transmitting";
+  payload: {
+    request_id: Uuid;
   };
 }
 export interface MachineAvailabilityChanged {

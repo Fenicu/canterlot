@@ -1,0 +1,11 @@
+.secondary-body { overflow: auto; min-height: 0; flex: 1; padding: var(--s8); }
+.secondary-content { max-width: var(--reading-max); margin-inline: auto; width: 100%; min-width: 0; overflow-wrap: anywhere; }
+.secondary-content h2 { font-size: var(--fs-title); margin-block: var(--s8) var(--s4); }
+.secondary-content p { margin-block: var(--s4); }
+.secondary-content a { color: var(--accent-link); }
+.secondary-content button { min-height: var(--target); padding: var(--s4) var(--s8); color: var(--text); background: var(--raised); border: var(--hairline) solid var(--control-line); border-radius: var(--radius-pill); cursor: pointer; }
+.secondary-content button:hover { background: var(--hover); }
+.secondary-content button:active { background: var(--selected); }
+.secondary-content button:disabled { cursor: default; color: var(--muted); }
+.secondary-content .note { color: var(--muted); font-size: var(--fs-meta); }
+.secondary-content .error { color: var(--danger); }

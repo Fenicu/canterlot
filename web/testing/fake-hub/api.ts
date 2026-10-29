@@ -25,10 +25,12 @@ export class FakeHubApi {
 	readonly runs = new Map<string, RunInfo>();
 	readonly machines = new Map<string, MachineRecord>();
 	readonly reads: { id: string; seq: string }[] = [];
+	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, groups: [] };
 	limits: ProviderLimits[] = [];
 	truncated = false;
+	decisionAutoProgress: boolean | 'transmitting' | 'saved' = true;
 	#seq = 0;
 
 	constructor(readonly hub: FakeHub) {
@@ -46,11 +48,65 @@ export class FakeHubApi {
 	}
 
 	conversationData(id: string): SnapshotData {
+		const requestsMap = new Map<string, Record<string, unknown>>();
+
+		const rawDetail = this.details.get(id) as Record<string, unknown> | undefined;
+		if (Array.isArray(rawDetail?.open_requests)) {
+			for (const r of rawDetail.open_requests as Record<string, unknown>[]) {
+				const reqId = String(r.id ?? r.request_id ?? '');
+				if (reqId) requestsMap.set(reqId, { ...r, id: reqId, request_id: reqId });
+			}
+		}
+
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			const p = ev.payload as Record<string, unknown>;
+			const reqId = String(p?.request_id ?? p?.id ?? '');
+			if (!reqId) continue;
+			if (ev.kind === 'request_opened') {
+				const existing = requestsMap.get(reqId);
+				if (!existing) {
+					requestsMap.set(reqId, {
+						id: reqId,
+						request_id: reqId,
+						conversation_id: id,
+						kind: p.kind ?? 'question',
+						state: 'open',
+						request_payload: p.payload ?? p,
+						payload: p.payload ?? p
+					});
+				}
+			} else if (ev.kind === 'request_decided') {
+				const req = requestsMap.get(reqId);
+				if (req) {
+					req.state = 'decision_saved';
+					req.decision_payload = p.decision ?? p.winner_decision;
+					req.winner_decision = p.decision ?? p.winner_decision;
+				}
+			} else if (ev.kind === 'request_transmitting') {
+				const req = requestsMap.get(reqId);
+				if (req && (req.state === 'open' || req.state === 'decision_saved')) {
+					req.state = 'decision_transmitting';
+				}
+			} else if (ev.kind === 'request_closed') {
+				const req = requestsMap.get(reqId);
+				if (req) {
+					const reason = String(p.reason ?? 'closed');
+					req.state = reason === 'applied' ? 'decision_applied' : (reason === 'not_applied' ? 'decision_not_applied' : 'closed_without_decision');
+					req.reason = reason;
+				}
+			}
+		}
+
+		const open_requests = [...requestsMap.values()].filter((r) =>
+			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
+		);
+
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
 			queue: (this.details.get(id)?.queue as SnapshotData['queue']) ?? { pause_reasons: [], hold_reasons: [], queued: 0, run_slot: 'free' },
 			history: this.page(id, {}),
-			scheduled: []
+			scheduled: [],
+			open_requests
 		};
 	}
 

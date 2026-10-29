@@ -1,12 +1,12 @@
 <script lang="ts">
-  import { ApiError } from '$lib/api/http';
-  import { deleteScheduled, interrupt, patchScheduled } from '$lib/api/client';
-  import { getRuntime } from '$lib/app/runtime';
-  import { cancelInput } from '$lib/timeline/QueueActions';
-  import { CANCEL_REQUESTED_LABEL } from '$lib/stores/inputs';
-  import type { ChatStore } from '$lib/stores/chat.svelte';
-  import { deliveryLabel, scheduledLabel } from '$lib/timeline/present';
-  import Sheet from '$lib/ui/Sheet.svelte';
+  import { ApiError } from '#lib/api/http.js';
+  import { deleteScheduled, interrupt, patchScheduled } from '#lib/api/client.js';
+  import { getRuntime } from '#lib/app/runtime.js';
+  import { cancelInput } from '#lib/timeline/QueueActions.js';
+  import { CANCEL_REQUESTED_LABEL } from '#lib/stores/inputs.js';
+  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import { deliveryLabel, scheduledLabel } from '#lib/timeline/present.js';
+  import Sheet from '#lib/ui/Sheet.svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());

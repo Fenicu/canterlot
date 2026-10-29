@@ -3,12 +3,17 @@
   import '../lib/styles/base.css';
   import { onMount, type Snippet } from 'svelte';
   import { afterNavigate } from '$app/navigation';
-  import { initTheme } from '$lib/theme';
-  import { announce, mountAnnouncements } from '$lib/a11y/announce';
-  import AppShell from '$lib/shell/AppShell.svelte';
+  import { initTheme } from '#lib/theme.js';
+  import { announce, mountAnnouncements } from '#lib/a11y/announce.js';
+  import AppShell from '#lib/shell/AppShell.svelte';
   let { children }: { children: Snippet } = $props();
   onMount(initTheme);
-  afterNavigate(() => announce(document.title));
+
+  afterNavigate(({ shallow, type }) => {
+    if (shallow && type === 'goto') return;
+
+    return announce(document.title);
+  });
 </script>
 <a class="skip-link" href="#main">К содержимому</a>
 <div id="app-shell"><AppShell>{@render children()}</AppShell></div>

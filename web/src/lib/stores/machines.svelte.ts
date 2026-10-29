@@ -1,20 +1,20 @@
+import type { components } from '#lib/api/generated/openapi.js';
 import { SvelteMap } from 'svelte/reactivity';
-import type { ConnectionManager } from '$lib/sync/connection';
-import type { RangeResult, ScopeApplier, ScopeStatus } from '$lib/sync/scope';
-import type { HubEvent } from '$lib/sync/wire';
+import type { ConnectionManager } from '#lib/sync/connection.js';
+import type { RangeResult, ScopeApplier, ScopeStatus } from '#lib/sync/scope.js';
+import type { HubEvent } from '#lib/sync/wire.js';
 
-export interface MachineMetrics {
-	observed_at: string;
-	cpu_permille?: number;
-	mem_available_bytes?: number;
-	machine_time_ms?: number;
-}
+export type MachineMetrics = Pick<components['schemas']['MetricsView'], 'observed_at'> & Partial<components['schemas']['MetricsView']>;
 
 export interface MachineRecord {
 	id: string;
 	name: string;
 	availability: string;
 	os: string | null;
+	heartbeat_age_ms?: number | null;
+	heartbeat_received_at?: number;
+	availability_since?: string | null;
+	sessions?: components['schemas']['SessionView'][];
 	warnings: string[];
 	metrics: MachineMetrics | null;
 	harnesses: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] }[];
@@ -55,7 +55,7 @@ export class MachinesStore {
 			applySnapshot: (data) => {
 				const items = (data as { items?: MachineRecord[] }).items ?? [];
 				this.items.clear();
-				for (const item of items) this.items.set(item.id, item);
+				for (const item of items) this.items.set(item.id, { ...item, heartbeat_received_at: this.deps.clock.now() });
 			},
 			applyEvents: (batch) => {
 				for (const item of batch) this.#apply(item.event);
@@ -86,14 +86,14 @@ export class MachinesStore {
 		if (!machine.metrics?.observed_at) return false;
 		const observed = Date.parse(machine.metrics.observed_at);
 		if (Number.isNaN(observed)) return true;
-		return this.deps.clock.now() - observed > (this.deps.staleAfterMs ?? 60_000);
+		return this.deps.clock.now() - observed > (this.deps.staleAfterMs ?? 90_000);
 	}
 
 	#apply(event: HubEvent): void {
 		const kind = event.kind as string;
 		if (kind === 'machine_availability_changed' && event.kind === 'machine_availability_changed') {
 			const machine = this.items.get(event.payload.machine_id);
-			if (machine) machine.availability = event.payload.availability;
+			if (machine) this.items.set(machine.id, { ...machine, availability: event.payload.availability });
 			return;
 		}
 		if (kind === 'machine_report_updated' && event.kind === 'machine_report_updated') {
@@ -102,17 +102,22 @@ export class MachinesStore {
 			machine.worker_version = event.payload.worker_version;
 			machine.capabilities = event.payload.capabilities;
 			machine.limits_ok = event.payload.limits_ok;
+			this.items.set(machine.id, { ...machine });
 			return;
 		}
 		if (kind === 'machine_metrics' && event.kind === 'machine_metrics') {
 			const machine = this.items.get(event.payload.machine_id);
 			if (!machine) return;
 			machine.metrics = {
-				observed_at: event.committed_at,
-				cpu_permille: event.payload.cpu_permille,
-				mem_available_bytes: event.payload.mem_available_bytes,
-				machine_time_ms: event.payload.machine_time_ms
+				...event.payload,
+				disks: event.payload.disks.filter((disk): disk is components['schemas']['DiskView'] => 'label' in disk && typeof disk.label === 'string' && 'total_bytes' in disk && typeof disk.total_bytes === 'number' && 'free_bytes' in disk && typeof disk.free_bytes === 'number'),
+				executions: [],
+				observed_at: event.committed_at
 			};
+			machine.warnings = machine.warnings.filter(warning => warning !== 'metrics_stale');
+			machine.heartbeat_age_ms = 0;
+			machine.heartbeat_received_at = this.deps.clock.now();
+			this.items.set(machine.id, { ...machine });
 			return;
 		}
 		if (kind !== 'hidden') this.unknownKinds += 1;

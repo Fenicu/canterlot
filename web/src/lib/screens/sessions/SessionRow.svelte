@@ -1,8 +1,8 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { fmt } from '$lib/format/ru';
-  import Icon from '$lib/ui/Icon.svelte';
-  import type { ListRow } from '$lib/stores/list.svelte';
+  import { fmt } from '#lib/format/ru.js';
+  import Icon from '#lib/ui/Icon.svelte';
+  import type { ListRow } from '#lib/stores/list.svelte.js';
   import { activityLine, type Activity } from './activityText';
   import { colorVar } from './colors';
 
