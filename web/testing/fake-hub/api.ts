@@ -46,11 +46,18 @@ export class FakeHubApi {
 	}
 
 	conversationData(id: string): SnapshotData {
+		const open_requests: unknown[] = [];
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind === 'request_opened') {
+				open_requests.push(ev.payload);
+			}
+		}
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
 			queue: (this.details.get(id)?.queue as SnapshotData['queue']) ?? { pause_reasons: [], hold_reasons: [], queued: 0, run_slot: 'free' },
 			history: this.page(id, {}),
-			scheduled: []
+			scheduled: [],
+			open_requests
 		};
 	}
 

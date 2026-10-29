@@ -28,7 +28,7 @@ function asRecord(val: unknown): Record<string, unknown> {
   return val && typeof val === 'object' ? (val as Record<string, unknown>) : {};
 }
 
-function createRequestItem(init: RequestItem): RequestItem {
+export function createRequestItem(init: RequestItem): RequestItem {
   const item = $state<RequestItem>({
     id: init.id,
     conversationId: init.conversationId,
@@ -42,16 +42,11 @@ function createRequestItem(init: RequestItem): RequestItem {
   return item;
 }
 
-export class RequestsModel extends Array<HubEvent> {
-  static get [Symbol.species]() {
-    return Array;
-  }
-
+export class RequestsModel {
   readonly items = new SvelteMap<string, RequestItem>();
   readonly conversationId?: string;
 
   constructor(conversationId?: string) {
-    super();
     this.conversationId = conversationId;
   }
 
@@ -109,7 +104,6 @@ export class RequestsModel extends Array<HubEvent> {
   }
 
   applyOpened(event: HubEvent): void {
-    this.push(event);
     const ev = asRecord(event);
     const payload = asRecord(event.payload);
     const id = String(payload.request_id ?? payload.id ?? '');
@@ -138,7 +132,6 @@ export class RequestsModel extends Array<HubEvent> {
   }
 
   applyDecided(event: HubEvent): void {
-    this.push(event);
     const ev = asRecord(event);
     const payload = asRecord(event.payload);
     const id = String(payload.request_id ?? payload.id ?? '');
@@ -161,8 +154,19 @@ export class RequestsModel extends Array<HubEvent> {
     }
   }
 
+  applyTransmitting(event: HubEvent): void {
+    const payload = asRecord(event.payload);
+    const id = String(payload.request_id ?? payload.id ?? '');
+    if (!id) return;
+    const item = this.items.get(id);
+    if (item) {
+      if (item.state === 'saved' || item.state === 'sending' || item.state === 'open') {
+        item.state = 'transmitting';
+      }
+    }
+  }
+
   applyClosed(event: HubEvent): void {
-    this.push(event);
     const payload = asRecord(event.payload);
     const id = String(payload.request_id ?? payload.id ?? '');
     if (!id) return;
@@ -181,7 +185,7 @@ export class RequestsModel extends Array<HubEvent> {
   }
 
   applyInterrupt(event?: HubEvent): void {
-    if (event) this.push(event);
+    void event;
     for (const item of this.items.values()) {
       if (item.state === 'open' || item.state === 'sending') {
         item.state = 'closed';

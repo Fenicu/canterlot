@@ -182,6 +182,10 @@ export class ChatStore {
 		return this.#sub?.status ?? 'idle';
 	}
 
+	get ops(): OpJournal {
+		return this.deps.ops;
+	}
+
 	get applier(): ScopeApplier {
 		return {
 			loadSnapshot: async () => {
@@ -433,6 +437,10 @@ export class ChatStore {
 				this.diagnostics.push(event);
 				return;
 			default:
+				if ((event as { kind?: string }).kind === 'request_transmitting') {
+					this.requests.applyTransmitting(event);
+					return;
+				}
 				this.unknownKinds += 1;
 		}
 	}

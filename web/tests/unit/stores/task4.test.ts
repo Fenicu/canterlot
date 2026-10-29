@@ -614,11 +614,12 @@ describe('stores task 4', () => {
 	it('reserved_request_events_are_stored_and_never_break_reducers', () => {
 		const chat = chatOf();
 		chat.applier.applyEvents([
-			{ event: ev('request_opened', {}, '1'), overlap: false },
-			{ event: ev('request_decided', {}, '2'), overlap: false },
-			{ event: ev('request_closed', {}, '3'), overlap: false }
+			{ event: ev('request_opened', { request_id: 'r1' }, '1'), overlap: false },
+			{ event: ev('request_decided', { request_id: 'r1' }, '2'), overlap: false },
+			{ event: ev('request_closed', { request_id: 'r1', reason: 'applied' }, '3'), overlap: false }
 		]);
-		expect(chat.requests.map((item) => item.kind)).toEqual(['request_opened', 'request_decided', 'request_closed']);
+		expect(chat.requests.items.size).toBe(1);
+		expect(chat.requests.items.get('r1')?.state).toBe('applied');
 		expect(chat.unknownKinds).toBe(0);
 	});
 
@@ -635,7 +636,7 @@ describe('stores task 4', () => {
 		expect(chat.hiddenCount).toBe(1);
 		expect(chat.unknownKinds).toBe(0);
 		expect(chat.blocks.size).toBe(0);
-		expect(chat.requests).toHaveLength(0);
+		expect(chat.requests.items.size).toBe(0);
 	});
 
 	it('list_events_merge_attribute_and_volatile_fields_independently', () => {

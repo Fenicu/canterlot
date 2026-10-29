@@ -316,12 +316,11 @@ test('question_placeholder_renders_evidence_text_without_calling_the_decision_en
 		seeder: (api) => seedMockup06(api)
 	});
 
-	// Check question placeholder card
+	// Check question card
 	await expect(page.getByText('Вопрос от агента')).toBeVisible();
 	await expect(page.getByRole('heading', { name: 'Что делать, если курсор старше журнала событий?' })).toBeVisible();
-	await expect(
-		page.getByText('Ответ из приложения появится в следующем обновлении. Агент ждёт ответа.')
-	).toBeVisible();
+	await expect(page.getByText('Resync')).toBeVisible();
+	await expect(page.getByRole('button', { name: 'Ответить' })).toBeVisible();
 
 	// Verify no decision endpoint was called
 	expect(decisionCalls).toBe(0);

@@ -9,12 +9,12 @@
 	import Timeline from '$lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
-	import RequestSlot, { type RequestView } from './RequestSlot.svelte';
+	import RequestCard from '$lib/requests/RequestCard.svelte';
+	import type { RequestItem } from '$lib/stores/requests.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import type { ProviderLimits, LimitThresholds } from '$lib/stores/limits';
 	import type { MachineRecord } from '$lib/stores/machines.svelte';
-	import type { Activity } from '$lib/screens/sessions/activityText';
 	import Sheet from '$lib/ui/Sheet.svelte';
 
 	interface MachineRef {
@@ -23,11 +23,6 @@
 
 	interface ChatDetailWithMachine {
 		machine?: MachineRef;
-	}
-
-	interface RequestEventLike {
-		kind?: string;
-		payload?: RequestView;
 	}
 
 	let {
@@ -90,12 +85,36 @@
 		}
 	});
 
-	const activeRequest = $derived.by(() => {
-		const reqs = chat.requests ?? [];
-		for (let i = reqs.length - 1; i >= 0; i--) {
-			const r = reqs[i] as RequestEventLike | undefined;
-			if (r?.kind === 'request_closed' || r?.kind === 'request_decided') return null;
-			if (r?.kind === 'request_opened') return r.payload ?? null;
+	const activeRequestItem = $derived.by((): RequestItem | null => {
+		const items = [...chat.requests.items.values()];
+		for (let i = items.length - 1; i >= 0; i--) {
+			const item = items[i];
+			if (
+				item &&
+				(item.state === 'open' ||
+					item.state === 'sending' ||
+					item.state === 'saved' ||
+					item.state === 'transmitting')
+			) {
+				return item;
+			}
+		}
+		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
+		if (chat.activity?.state === 'waiting_for_user' && typeof evidence?.question === 'string') {
+			return {
+				id: 'activity-request',
+				conversationId: chat.id,
+				kind: 'question',
+				state: 'open',
+				payload: {
+					questions: [
+						{
+							id: 'q0',
+							text: evidence.question
+						}
+					]
+				}
+			};
 		}
 		return null;
 	});
@@ -113,7 +132,16 @@
 
 	<Timeline {chat} {onInfo} {now} />
 
-	<RequestSlot request={activeRequest} activity={chat.activity as Activity | null} />
+	{#if activeRequestItem}
+		<div class="request-card-slot">
+			<RequestCard
+				request={activeRequestItem}
+				onDecision={async (decision) => {
+					await chat.requests.submitDecision(activeRequestItem.id, decision, chat.ops);
+				}}
+			/>
+		</div>
+	{/if}
 
 	<PauseCards {chat} {now} />
 
@@ -148,5 +176,11 @@
 		min-width: 0;
 		min-height: 0;
 		position: relative;
+	}
+
+	.request-card-slot {
+		padding: var(--s3) var(--s4);
+		box-sizing: border-box;
+		width: 100%;
 	}
 </style>
