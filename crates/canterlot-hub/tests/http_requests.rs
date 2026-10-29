@@ -533,3 +533,23 @@ async fn post_decision_rejects_changed_payload_after_idempotency_retention(pool:
     assert_eq!(replay.body, first.body);
     assert_eq!(f.counts().await, (1, 1));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn post_decision_for_missing_request_rolls_back_synchronously(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let mut probe = f.pool.acquire().await.unwrap();
+    for _ in 0..10 {
+        let missing = Uuid::now_v7();
+        let response = f.post(missing, "rollback-probe", permission()).await;
+        assert_error(&response, 404, "not_found");
+        // Строка разговора блокировалась FOR NO KEY UPDATE: пропуск — висячий откат.
+        let free: Option<Uuid> = sqlx::query_scalar(
+            "select id from conversations where id=$1 for no key update skip locked",
+        )
+        .bind(f.conversation)
+        .fetch_optional(&mut *probe)
+        .await
+        .unwrap();
+        assert!(free.is_some(), "conversation row still locked");
+    }
+}

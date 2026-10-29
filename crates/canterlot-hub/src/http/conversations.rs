@@ -367,153 +367,149 @@ async fn decision(
 
     let operation = "request_decision";
     let hash = idempotency::request_hash(operation, &(id, request_id, &body));
-    let mut tx = s.pool.begin().await?;
-    // All fallible work stays inside this block so every failure explicitly rolls back below.
-    let result: Result<(DecisionOutcomeView, bool), ApiError> = async {
-        let mut lock = Sha256::new();
-        lock.update(b"canterlot:idempotency:");
-        lock.update(o.owner_id.as_bytes());
-        lock.update(key.as_bytes());
-        let lock_id = i64::from_be_bytes(lock.finalize()[..8].try_into().expect("eight bytes"));
-        sqlx::query("select pg_advisory_xact_lock($1)")
-            .bind(lock_id)
-            .execute(&mut *tx)
+    // Пустой повтор тоже фиксируется: записей нет, блокировка снята в конце.
+    let (view, trigger) = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            let mut lock = Sha256::new();
+            lock.update(b"canterlot:idempotency:");
+            lock.update(o.owner_id.as_bytes());
+            lock.update(key.as_bytes());
+            let lock_id = i64::from_be_bytes(lock.finalize()[..8].try_into().expect("eight bytes"));
+            sqlx::query("select pg_advisory_xact_lock($1)")
+                .bind(lock_id)
+                .execute(&mut *conn)
+                .await?;
+            let owned: Option<Uuid> = sqlx::query_scalar(
+                "select id from conversations where id=$1 and owner_id=$2 for no key update",
+            )
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&mut *conn)
             .await?;
-        let owned: Option<Uuid> = sqlx::query_scalar(
-            "select id from conversations where id=$1 and owner_id=$2 for no key update",
-        )
-        .bind(id)
-        .bind(o.owner_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-        if owned.is_none() {
-            return Err(ApiError::new(ErrorCode::NotFound));
-        }
-        match idempotency::lookup(&mut tx, o.owner_id, &key, operation, &hash).await? {
-            idempotency::Begin::Replay(value) => {
-                let view = serde_json::from_value(value)
-                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
-                return Ok((view, false));
+            if owned.is_none() {
+                return Err(ApiError::new(ErrorCode::NotFound));
             }
-            idempotency::Begin::Conflict => {
-                return Err(ApiError::new(ErrorCode::IdempotencyConflict));
-            }
-            idempotency::Begin::New => {}
-        }
-        let row: RequestRow =
-            sqlx::query_as("select * from requests where id=$1 and conversation_id=$2 for update")
-                .bind(request_id)
-                .bind(id)
-                .fetch_optional(&mut *tx)
-                .await?
-                .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
-        if row.state == RequestState::Open {
-            validate_decision(&row, &body)?;
-        }
-        let decision = body.into();
-        let outcome =
-            requests::save_decision_in_tx(&mut tx, id, request_id, row.generation, &decision, &key)
-                .await
-                .map_err(|error| match error {
-                    RequestDomainError::NotFound(_)
-                    | RequestDomainError::ConversationNotFound(_) => {
-                        ApiError::new(ErrorCode::NotFound)
-                    }
-                    RequestDomainError::Database(error) => error.into(),
-                    RequestDomainError::Serialization(_) => ApiError::new(ErrorCode::Internal),
-                })?;
-        let row = match outcome {
-            DecisionResult::Committed { row, .. } => row,
-            DecisionResult::IdempotentReplay { row } => {
-                // The request outlives the generic idempotency key's retention period.
-                let submitted = serde_json::to_value(&decision)
-                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
-                if row.decision_payload.as_ref() != Some(&submitted) {
+            match idempotency::lookup(&mut *conn, o.owner_id, &key, operation, &hash).await? {
+                idempotency::Begin::Replay(value) => {
+                    let view = serde_json::from_value(value)
+                        .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                    return Ok((view, false));
+                }
+                idempotency::Begin::Conflict => {
                     return Err(ApiError::new(ErrorCode::IdempotencyConflict));
                 }
-                row
+                idempotency::Begin::New => {}
             }
-            DecisionResult::Conflict {
-                winner_decision,
-                current_state,
-            } => {
-                let winner_decision = serde_json::from_value(winner_decision)
-                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
-                return Err(ApiError::new(ErrorCode::DecisionConflict).with_details(
-                    super::error::ErrorDetails {
-                        winner_decision: Some(winner_decision),
-                        current_state: Some(current_state.as_str().into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-            DecisionResult::AlreadyClosed {
-                current_state,
-                reason,
-            } => {
-                return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
-                    super::error::ErrorDetails {
-                        current_state: Some(current_state.as_str().into()),
-                        reason: Some(reason),
-                        ..Default::default()
-                    },
-                ));
-            }
-            DecisionResult::StaleGeneration => {
-                return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
-                    super::error::ErrorDetails {
-                        current_state: Some(row.state.as_str().into()),
-                        reason: Some("generation_advanced".into()),
-                        ..Default::default()
-                    },
-                ));
-            }
-        };
-        let view = DecisionOutcomeView {
-            request_id: row.id,
-            winner_decision_id: row
-                .winner_decision_id
-                .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
-            state: "decision_saved".into(),
-            decision: serde_json::from_value(
-                row.decision_payload
-                    .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
+            let row: RequestRow = sqlx::query_as(
+                "select * from requests where id=$1 and conversation_id=$2 for update",
             )
-            .map_err(|_| ApiError::new(ErrorCode::Internal))?,
-        };
-        let response =
-            serde_json::to_value(&view).map_err(|_| ApiError::new(ErrorCode::Internal))?;
-        if !idempotency::record(
-            &mut tx,
-            o.owner_id,
-            &key,
-            operation,
-            &hash,
-            &response,
-            Some(id),
-        )
-        .await?
-        {
-            return Err(ApiError::new(ErrorCode::IdempotencyConflict));
-        }
-        Ok((view, true))
+            .bind(request_id)
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
+            if row.state == RequestState::Open {
+                validate_decision(&row, &body)?;
+            }
+            let decision = body.into();
+            let outcome = requests::save_decision_in_tx(
+                &mut *conn,
+                id,
+                request_id,
+                row.generation,
+                &decision,
+                &key,
+            )
+            .await
+            .map_err(|error| match error {
+                RequestDomainError::NotFound(_) | RequestDomainError::ConversationNotFound(_) => {
+                    ApiError::new(ErrorCode::NotFound)
+                }
+                RequestDomainError::Database(error) => error.into(),
+                RequestDomainError::Serialization(_) => ApiError::new(ErrorCode::Internal),
+            })?;
+            let row = match outcome {
+                DecisionResult::Committed { row, .. } => row,
+                DecisionResult::IdempotentReplay { row } => {
+                    // The request outlives the generic idempotency key's retention period.
+                    let submitted = serde_json::to_value(&decision)
+                        .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                    if row.decision_payload.as_ref() != Some(&submitted) {
+                        return Err(ApiError::new(ErrorCode::IdempotencyConflict));
+                    }
+                    row
+                }
+                DecisionResult::Conflict {
+                    winner_decision,
+                    current_state,
+                } => {
+                    let winner_decision = serde_json::from_value(winner_decision)
+                        .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                    return Err(ApiError::new(ErrorCode::DecisionConflict).with_details(
+                        super::error::ErrorDetails {
+                            winner_decision: Some(winner_decision),
+                            current_state: Some(current_state.as_str().into()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                DecisionResult::AlreadyClosed {
+                    current_state,
+                    reason,
+                } => {
+                    return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
+                        super::error::ErrorDetails {
+                            current_state: Some(current_state.as_str().into()),
+                            reason: Some(reason),
+                            ..Default::default()
+                        },
+                    ));
+                }
+                DecisionResult::StaleGeneration => {
+                    return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
+                        super::error::ErrorDetails {
+                            current_state: Some(row.state.as_str().into()),
+                            reason: Some("generation_advanced".into()),
+                            ..Default::default()
+                        },
+                    ));
+                }
+            };
+            let view = DecisionOutcomeView {
+                request_id: row.id,
+                winner_decision_id: row
+                    .winner_decision_id
+                    .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
+                state: "decision_saved".into(),
+                decision: serde_json::from_value(
+                    row.decision_payload
+                        .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
+                )
+                .map_err(|_| ApiError::new(ErrorCode::Internal))?,
+            };
+            let response =
+                serde_json::to_value(&view).map_err(|_| ApiError::new(ErrorCode::Internal))?;
+            if !idempotency::record(
+                &mut *conn,
+                o.owner_id,
+                &key,
+                operation,
+                &hash,
+                &response,
+                Some(id),
+            )
+            .await?
+            {
+                return Err(ApiError::new(ErrorCode::IdempotencyConflict));
+            }
+            Ok((view, true))
+        })
+    })
+    .await?;
+    if trigger {
+        s.dispatcher.trigger(id);
     }
-    .await;
-    match result {
-        Ok((view, true)) => {
-            tx.commit().await?;
-            s.dispatcher.trigger(id);
-            Ok(Json(view))
-        }
-        Ok((view, false)) => {
-            tx.rollback().await?;
-            Ok(Json(view))
-        }
-        Err(error) => {
-            tx.rollback().await?;
-            Err(error)
-        }
-    }
+    Ok(Json(view))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -607,35 +603,38 @@ async fn list(
         .as_deref()
         .map(|v| ListCursor::decode(v).ok_or_else(|| ApiError::new(ErrorCode::InvalidRequest)))
         .transpose()?;
-    let mut tx = s.pool.begin().await?;
-    sqlx::query("set transaction isolation level repeatable read read only")
-        .execute(&mut *tx)
-        .await?;
-    if let ListFilter::Group(id) = filter {
-        let owned: bool = sqlx::query_scalar(
-            "select exists(select 1 from conversation_groups where owner_id=$1 and id=$2)",
-        )
-        .bind(o.owner_id)
-        .bind(id)
-        .fetch_one(&mut *tx)
-        .await?;
-        if !owned {
-            return Err(ApiError::new(ErrorCode::NotFound));
-        }
-    }
-    let result = conversations::list(
-        &mut tx,
-        &ListQuery {
-            owner_id: o.owner_id,
-            filter,
-            q: p.q,
-            cursor,
-            limit: p.limit.unwrap_or(50),
-        },
-    )
-    .await
-    .map_err(query_error)?;
-    tx.commit().await?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            if let ListFilter::Group(id) = filter {
+                let owned: bool = sqlx::query_scalar(
+                    "select exists(select 1 from conversation_groups where owner_id=$1 and id=$2)",
+                )
+                .bind(o.owner_id)
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await?;
+                if !owned {
+                    return Err(ApiError::new(ErrorCode::NotFound));
+                }
+            }
+            conversations::list(
+                &mut *conn,
+                &ListQuery {
+                    owner_id: o.owner_id,
+                    filter,
+                    q: p.q,
+                    cursor,
+                    limit: p.limit.unwrap_or(50),
+                },
+            )
+            .await
+            .map_err(query_error)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 pub(super) fn query_error(e: sqlx::Error) -> ApiError {
@@ -651,14 +650,17 @@ async fn get(
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let mut tx = s.pool.begin().await?;
-    sqlx::query("set transaction isolation level repeatable read read only")
-        .execute(&mut *tx)
-        .await?;
-    let mut d = conversations::detail(&mut tx, o.owner_id, id)
-        .await?
-        .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
-    tx.commit().await?;
+    let mut d = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            conversations::detail(&mut *conn, o.owner_id, id)
+                .await?
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound))
+        })
+    })
+    .await?;
     if !s.registry.is_reconciled(d.attributes.machine.id) {
         d.holds.push(crate::model::HoldView::MachineNotReconciled);
     }

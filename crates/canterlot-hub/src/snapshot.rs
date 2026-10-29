@@ -99,30 +99,36 @@ pub async fn conversations(
     pool: &PgPool,
     owner_id: Uuid,
 ) -> Result<Snapshot<ListSnapshot>, sqlx::Error> {
-    let mut tx = begin(pool).await?;
-    let scope = Scope::Conversations { owner_id };
-    let cursor = events::boundary(&mut tx, &scope).await?.to_string();
-    let mut items = conversations::snapshot_items(&mut tx, owner_id).await?;
-    let truncated = items.len() > 500;
-    items.truncate(500);
-    let data = ListSnapshot {
-        items,
-        truncated,
-        counts: conversations::counts(&mut tx, owner_id).await?,
-        groups: groups::list(&mut tx, owner_id).await?,
-        presets: crate::presets::list(&mut tx, owner_id).await?,
-        limits: crate::limits::current(&mut tx)
-            .await?
-            .into_iter()
-            .map(ProviderLimits::from)
-            .collect(),
-    };
-    tx.commit().await?;
-    Ok(Snapshot {
-        scope: events::wire_scope(&scope),
-        cursor,
-        data,
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            let scope = Scope::Conversations { owner_id };
+            let cursor = events::boundary(&mut *conn, &scope).await?.to_string();
+            let mut items = conversations::snapshot_items(&mut *conn, owner_id).await?;
+            let truncated = items.len() > 500;
+            items.truncate(500);
+            let data = ListSnapshot {
+                items,
+                truncated,
+                counts: conversations::counts(&mut *conn, owner_id).await?,
+                groups: groups::list(&mut *conn, owner_id).await?,
+                presets: crate::presets::list(&mut *conn, owner_id).await?,
+                limits: crate::limits::current(&mut *conn)
+                    .await?
+                    .into_iter()
+                    .map(ProviderLimits::from)
+                    .collect(),
+            };
+            Ok(Snapshot {
+                scope: events::wire_scope(&scope),
+                cursor,
+                data,
+            })
+        })
     })
+    .await
 }
 pub async fn conversation(
     pool: &PgPool,
@@ -139,17 +145,22 @@ pub async fn conversation_with_registry(
     history_limit: i64,
     registry: Option<&Registry>,
 ) -> Result<Option<Snapshot<ConversationSnapshot>>, sqlx::Error> {
-    let mut tx = begin(pool).await?;
+    let registry = registry.cloned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+    sqlx::query("set transaction isolation level repeatable read read only")
+        .execute(&mut *conn)
+        .await?;
     let scope = Scope::Conversation { id };
-    let cursor = events::boundary(&mut tx, &scope).await?.to_string();
-    let Some(detail) = conversations::detail(&mut tx, owner_id, id).await? else {
+    let cursor = events::boundary(&mut *conn, &scope).await?.to_string();
+    let Some(detail) = conversations::detail(&mut *conn, owner_id, id).await? else {
         return Ok(None);
     };
     let row = sqlx::query("select * from queue_state where conversation_id=$1")
         .bind(id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
-    let queued=sqlx::query("select * from inputs where conversation_id=$1 and feed_seq is null and state in ('queued','dispatched','on_machine') order by input_seq limit 100").bind(id).fetch_all(&mut *tx).await?.into_iter().map(history::input_view).collect::<Result<Vec<_>,_>>()?;
+    let queued=sqlx::query("select * from inputs where conversation_id=$1 and feed_seq is null and state in ('queued','dispatched','on_machine') order by input_seq limit 100").bind(id).fetch_all(&mut *conn).await?.into_iter().map(history::input_view).collect::<Result<Vec<_>,_>>()?;
     let pauses: sqlx::types::Json<Vec<PauseReason>> = row.try_get("pause_reasons")?;
     let run_slot = RunSlot::from_columns(
         row.try_get("run_slot")?,
@@ -161,28 +172,28 @@ pub async fn conversation_with_registry(
     let machine = detail.attributes.machine.id;
     if !queued.is_empty()
         && detail.execution.is_some()
-        && !registry.is_some_and(|r| r.is_reconciled(machine))
+        && !registry.as_ref().is_some_and(|r| r.is_reconciled(machine))
     {
         holds.push(HoldView::MachineNotReconciled);
     }
-    if registry.is_some_and(|r| {
+    if registry.as_ref().is_some_and(|r| {
         r.session_info(machine).is_some() && !r.has_capability(machine, "pilot_v1")
-    }) && let Some(input_id) = conversations::capability_hold_input(&mut tx, id).await?
+    }) && let Some(input_id) = conversations::capability_hold_input(&mut *conn, id).await?
         && !holds
             .iter()
             .any(|h| matches!(h, HoldView::CapabilityMissing { .. }))
     {
         holds.push(HoldView::CapabilityMissing { input_id });
     }
-    let history = history::page(&mut tx, owner_id, id, HistoryCursor::Tail, history_limit)
+    let history = history::page(&mut *conn, owner_id, id, HistoryCursor::Tail, history_limit)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
-    let scheduled = scheduler::list_messages(&mut tx, owner_id, id).await?;
+    let scheduled = scheduler::list_messages(&mut *conn, owner_id, id).await?;
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
         "select * from requests where conversation_id = $1 and state = 'open' order by created_at asc",
     )
     .bind(id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
     let open_requests = open_requests_rows
         .into_iter()
@@ -200,12 +211,14 @@ pub async fn conversation_with_registry(
         scheduled,
         open_requests,
     };
-    tx.commit().await?;
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),
         cursor,
         data,
     }))
+        })
+    })
+    .await
 }
 pub async fn machines(
     pool: &PgPool,
@@ -218,22 +231,31 @@ pub async fn machines_with_config(
     owner_id: Uuid,
     config: &crate::config::MachinesConfig,
 ) -> Result<Snapshot<MachinesSnapshot>, sqlx::Error> {
-    let mut tx = begin(pool).await?;
-    let scope = Scope::Machines { owner_id };
-    let cursor = events::boundary(&mut tx, &scope).await?.to_string();
-    let ids: Vec<Uuid> =
-        sqlx::query_scalar("select id from machines where owner_id=$1 order by name,id")
-            .bind(owner_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let mut items = Vec::with_capacity(ids.len());
-    for id in ids {
-        items.push(crate::http::machines::load_stored(&mut tx, config, owner_id, id).await?);
-    }
-    tx.commit().await?;
-    Ok(Snapshot {
-        scope: events::wire_scope(&scope),
-        cursor,
-        data: MachinesSnapshot { items },
+    let config = config.clone();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            let scope = Scope::Machines { owner_id };
+            let cursor = events::boundary(&mut *conn, &scope).await?.to_string();
+            let ids: Vec<Uuid> =
+                sqlx::query_scalar("select id from machines where owner_id=$1 order by name,id")
+                    .bind(owner_id)
+                    .fetch_all(&mut *conn)
+                    .await?;
+            let mut items = Vec::with_capacity(ids.len());
+            for id in ids {
+                items.push(
+                    crate::http::machines::load_stored(&mut *conn, &config, owner_id, id).await?,
+                );
+            }
+            Ok(Snapshot {
+                scope: events::wire_scope(&scope),
+                cursor,
+                data: MachinesSnapshot { items },
+            })
+        })
     })
+    .await
 }

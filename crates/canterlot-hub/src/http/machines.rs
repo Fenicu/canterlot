@@ -198,20 +198,26 @@ async fn load(
 }
 #[utoipa::path(get,path="/api/v1/machines",tag="machines",responses((status=200,description="Машины владельца",body=Vec<MachineView>)))]
 async fn list(State(s): State<AppState>, o: Owner) -> Result<Json<Vec<MachineView>>, ApiError> {
-    let mut tx = s.pool.begin().await?;
-    sqlx::query("set transaction isolation level repeatable read read only")
-        .execute(&mut *tx)
-        .await?;
-    let ids: Vec<Uuid> =
-        sqlx::query_scalar("select id from machines where owner_id=$1 order by name,id")
-            .bind(o.owner_id)
-            .fetch_all(&mut *tx)
-            .await?;
-    let mut result = Vec::new();
-    for id in ids {
-        result.push(load(&mut tx, &s, o.owner_id, id).await?);
-    }
-    tx.commit().await?;
+    let sc = s.clone();
+    let pool = sc.pool.clone();
+    let result = crate::db::in_tx(&pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            let ids: Vec<Uuid> =
+                sqlx::query_scalar("select id from machines where owner_id=$1 order by name,id")
+                    .bind(o.owner_id)
+                    .fetch_all(&mut *conn)
+                    .await?;
+            let mut result = Vec::new();
+            for id in ids {
+                result.push(load(&mut *conn, &sc, o.owner_id, id).await?);
+            }
+            Ok::<_, ApiError>(result)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 #[utoipa::path(get,path="/api/v1/machines/{id}",tag="machines",params(("id"=Uuid,Path)),responses((status=200,description="Машина",body=MachineView)))]
@@ -220,13 +226,18 @@ async fn get(
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<MachineView>, ApiError> {
-    let mut tx = s.pool.begin().await?;
-    sqlx::query("set transaction isolation level repeatable read read only")
-        .execute(&mut *tx)
-        .await?;
-    let m = load(&mut tx, &s, o.owner_id, id).await?;
-    tx.commit().await?;
-    Ok(Json(m))
+    let sc = s.clone();
+    let pool = sc.pool.clone();
+    let view = crate::db::in_tx(&pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            load(&mut *conn, &sc, o.owner_id, id).await
+        })
+    })
+    .await?;
+    Ok(Json(view))
 }
 #[utoipa::path(get,path="/api/v1/machines/{id}/workdirs/recent",tag="machines",params(("id"=Uuid,Path)),responses((status=200,description="Недавние каталоги",body=Workdirs)))]
 async fn recent(

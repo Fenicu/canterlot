@@ -679,3 +679,19 @@ async fn stop_execution_rolls_back_pause_command_and_idempotency_on_event_failur
     assert_eq!(count, 0);
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reconcile_unknown_machine_errors_without_side_effects(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    let result = Ingest::new(pool.clone())
+        .reconcile(Uuid::now_v7(), &ReconcileReport::default())
+        .await;
+    assert!(result.is_err(), "unknown machine must fail");
+    // Пул здоров, затравка нетронута.
+    let conversations: i64 = sqlx::query_scalar("select count(*) from conversations")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(conversations, 1);
+    let _ = seed;
+    Ok(())
+}

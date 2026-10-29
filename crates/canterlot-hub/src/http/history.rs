@@ -7,7 +7,6 @@ use super::{
 use crate::{
     events::{self, ReadAfter, Scope, WireEvent},
     history::{self, BlockPage, DelegationNode, HistoryCursor, HistoryError, HistoryPage, RunInfo},
-    snapshot,
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -78,11 +77,17 @@ async fn page(
         (None, Some(n)) => HistoryCursor::After(history_key(&n)?),
         _ => HistoryCursor::Tail,
     };
-    let mut tx = snapshot::begin(&s.pool).await?;
-    let result = history::page(&mut tx, o.owner_id, id, cursor, limit)
-        .await?
-        .ok_or_else(missing)?;
-    tx.commit().await?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            history::page(&mut *conn, o.owner_id, id, cursor, limit)
+                .await?
+                .ok_or_else(missing)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 #[utoipa::path(get,path="/api/v1/conversations/{id}/blocks/{block_id}",tag="history",params(("id"=Uuid,Path),("block_id"=Uuid,Path),BlockParams),responses((status=200,description="Текст блока; смещения в байтах UTF-8",body=BlockPage)))]
@@ -92,23 +97,29 @@ async fn block(
     ApiPath((id, b)): ApiPath<(Uuid, Uuid)>,
     ApiQuery(p): ApiQuery<BlockParams>,
 ) -> Result<Json<BlockPage>, ApiError> {
-    let mut tx = snapshot::begin(&s.pool).await?;
-    let result = history::block_content(
-        &mut tx,
-        o.owner_id,
-        id,
-        b,
-        p.offset.unwrap_or(0),
-        p.limit.unwrap_or(262144),
-    )
-    .await
-    .map_err(|e| match e {
-        HistoryError::InvalidOffset => ApiError::new(ErrorCode::InvalidOffset),
-        HistoryError::InvalidLimit => invalid(),
-        HistoryError::Db(e) => ApiError::from(e),
-    })?
-    .ok_or_else(missing)?;
-    tx.commit().await?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            history::block_content(
+                &mut *conn,
+                o.owner_id,
+                id,
+                b,
+                p.offset.unwrap_or(0),
+                p.limit.unwrap_or(262144),
+            )
+            .await
+            .map_err(|e| match e {
+                HistoryError::InvalidOffset => ApiError::new(ErrorCode::InvalidOffset),
+                HistoryError::InvalidLimit => invalid(),
+                HistoryError::Db(e) => ApiError::from(e),
+            })?
+            .ok_or_else(missing)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 #[utoipa::path(get,path="/api/v1/conversations/{id}/runs/{run_id}",tag="history",params(("id"=Uuid,Path),("run_id"=Uuid,Path)),responses((status=200,description="Сведения о ходе",body=RunInfo)))]
@@ -117,11 +128,17 @@ async fn run(
     o: Owner,
     ApiPath((id, r)): ApiPath<(Uuid, Uuid)>,
 ) -> Result<Json<RunInfo>, ApiError> {
-    let mut tx = snapshot::begin(&s.pool).await?;
-    let result = history::run_info(&mut tx, o.owner_id, id, r)
-        .await?
-        .ok_or_else(missing)?;
-    tx.commit().await?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            history::run_info(&mut *conn, o.owner_id, id, r)
+                .await?
+                .ok_or_else(missing)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 #[utoipa::path(get,path="/api/v1/conversations/{id}/delegation",tag="history",params(("id"=Uuid,Path)),responses((status=200,description="Вызовы субагентов",body=Vec<DelegationNode>)))]
@@ -130,11 +147,17 @@ async fn delegation(
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Vec<DelegationNode>>, ApiError> {
-    let mut tx = snapshot::begin(&s.pool).await?;
-    let result = history::delegation(&mut tx, o.owner_id, id)
-        .await?
-        .ok_or_else(missing)?;
-    tx.commit().await?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            history::delegation(&mut *conn, o.owner_id, id)
+                .await?
+                .ok_or_else(missing)
+        })
+    })
+    .await?;
     Ok(Json(result))
 }
 #[derive(Serialize, ToSchema)]

@@ -48,11 +48,15 @@ fn batch(journal_id: Uuid, bodies: Vec<record_body::Body>) -> JournalRecords {
 }
 
 fn opened(execution: &executions::StartedExecution) -> record_body::Body {
-    record_body::Body::JournalOpened(JournalOpened {
+    record_body::Body::JournalOpened(opened_body(execution))
+}
+
+fn opened_body(execution: &executions::StartedExecution) -> JournalOpened {
+    JournalOpened {
         execution_id: execution.execution_id.to_string(),
         generation: execution.generation as u64,
         supervisor_protocol_version: 1,
-    })
+    }
 }
 
 async fn setup_running_execution(pool: &PgPool) -> (Seed, executions::StartedExecution) {
@@ -630,4 +634,51 @@ fn events_schema_validates_request_opened_decided_closed() {
         !validator("request_closed").is_valid(&invalid_closed),
         "missing reason must fail schema"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn sj_poison_record_rolls_back_synchronously(pool: PgPool) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let records = JournalRecords {
+        journal_id: journal.to_string(),
+        records: vec![
+            JournalRecord {
+                seq: 1,
+                body: Some(RecordBody {
+                    body: Some(record_body::Body::JournalOpened(opened_body(&execution))),
+                }),
+            },
+            JournalRecord { seq: 2, body: None },
+        ],
+    };
+    let mut probe = pool.acquire().await?;
+    for _ in 0..10 {
+        let result = ingest
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Sj,
+                &records,
+            )
+            .await;
+        assert!(result.is_err(), "poison record must fail");
+        // Курсор блокировался FOR UPDATE: пропуск — висячий откат.
+        let free: Option<Uuid> = sqlx::query_scalar(
+            "select machine_id from journal_cursors where journal_id=$1 for update skip locked",
+        )
+        .bind(journal)
+        .fetch_optional(&mut *probe)
+        .await?;
+        assert!(free.is_some(), "cursor row still locked");
+    }
+    // Частичный прогресс первой записи при этом зафиксирован.
+    let committed: i64 =
+        sqlx::query_scalar("select committed_seq from journal_cursors where journal_id=$1")
+            .bind(journal)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(committed, 1);
+    Ok(())
 }

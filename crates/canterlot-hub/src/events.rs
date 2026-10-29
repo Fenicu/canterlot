@@ -100,57 +100,59 @@ pub async fn read_after(
     }
 
     let scope = scope.key();
-    let mut tx = pool.begin().await?;
-    // Retention и выборка событий должны видеть один снимок.
-    sqlx::query("set transaction isolation level repeatable read read only")
-        .execute(&mut *tx)
-        .await?;
-    let (oldest, last_seq): (Option<i64>, i64) = sqlx::query_as(
-        "select (select min(scope_seq) from events where scope = $1),
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            // Retention и выборка событий должны видеть один снимок.
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            let (oldest, last_seq): (Option<i64>, i64) = sqlx::query_as(
+                "select (select min(scope_seq) from events where scope = $1),
                 coalesce((select last_seq from scope_counters where scope = $1), 0)",
-    )
-    .bind(&scope)
-    .fetch_one(&mut *tx)
-    .await?;
-    let resync_from = if after_seq > last_seq {
-        Some(
-            oldest.unwrap_or(
-                last_seq
-                    .checked_add(1)
-                    .ok_or_else(|| sqlx::Error::Protocol("scope sequence exhausted".into()))?,
-            ),
-        )
-    } else {
-        match oldest {
-            Some(oldest) if after_seq < oldest - 1 => Some(oldest),
-            None if after_seq < last_seq => Some(
-                last_seq
-                    .checked_add(1)
-                    .ok_or_else(|| sqlx::Error::Protocol("scope sequence exhausted".into()))?,
-            ),
-            _ => None,
-        }
-    };
+            )
+            .bind(&scope)
+            .fetch_one(&mut *conn)
+            .await?;
+            let resync_from =
+                if after_seq > last_seq {
+                    Some(oldest.unwrap_or(
+                        last_seq.checked_add(1).ok_or_else(|| {
+                            sqlx::Error::Protocol("scope sequence exhausted".into())
+                        })?,
+                    ))
+                } else {
+                    match oldest {
+                        Some(oldest) if after_seq < oldest - 1 => Some(oldest),
+                        None if after_seq < last_seq => {
+                            Some(last_seq.checked_add(1).ok_or_else(|| {
+                                sqlx::Error::Protocol("scope sequence exhausted".into())
+                            })?)
+                        }
+                        _ => None,
+                    }
+                };
 
-    let result = if let Some(oldest_available_seq) = resync_from {
-        ReadAfter::ResyncRequired {
-            oldest_available_seq,
-        }
-    } else {
-        let events = sqlx::query_as(
-            "select id, scope, scope_seq, kind, conversation_id, execution_id,
+            let result = if let Some(oldest_available_seq) = resync_from {
+                ReadAfter::ResyncRequired {
+                    oldest_available_seq,
+                }
+            } else {
+                let events = sqlx::query_as(
+                    "select id, scope, scope_seq, kind, conversation_id, execution_id,
                     payload, correlation_id, committed_at
              from events where scope = $1 and scope_seq > $2 order by scope_seq limit $3",
-        )
-        .bind(&scope)
-        .bind(after_seq)
-        .bind(limit)
-        .fetch_all(&mut *tx)
-        .await?;
-        ReadAfter::Events(events)
-    };
-    tx.commit().await?;
-    Ok(result)
+                )
+                .bind(&scope)
+                .bind(after_seq)
+                .bind(limit)
+                .fetch_all(&mut *conn)
+                .await?;
+                ReadAfter::Events(events)
+            };
+            Ok(result)
+        })
+    })
+    .await
 }
 
 /// Читать вместе с состоянием в одной транзакции REPEATABLE READ.
@@ -403,35 +405,42 @@ pub async fn range(
     if after < 0 || !(1..=256).contains(&limit) {
         return Err(sqlx::Error::InvalidArgument("invalid event range".into()));
     }
-    let mut tx = crate::snapshot::begin(pool).await?;
-    let head = boundary(&mut tx, scope).await?;
-    let oldest: Option<i64> =
-        sqlx::query_scalar("select min(scope_seq) from events where scope=$1")
-            .bind(scope.key())
-            .fetch_one(&mut *tx)
-            .await?;
-    let cursor_ahead = after > head;
-    let oldest = oldest.unwrap_or(head.saturating_add(1));
-    let result = if cursor_ahead || after < oldest - 1 {
-        ReadAfter::ResyncRequired {
-            oldest_available_seq: oldest,
-        }
-    } else {
-        ReadAfter::Events(
+    let scope = *scope;
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            let head = boundary(&mut *conn, &scope).await?;
+            let oldest: Option<i64> =
+                sqlx::query_scalar("select min(scope_seq) from events where scope=$1")
+                    .bind(scope.key())
+                    .fetch_one(&mut *conn)
+                    .await?;
+            let cursor_ahead = after > head;
+            let oldest = oldest.unwrap_or(head.saturating_add(1));
+            let result = if cursor_ahead || after < oldest - 1 {
+                ReadAfter::ResyncRequired {
+                    oldest_available_seq: oldest,
+                }
+            } else {
+                ReadAfter::Events(
             sqlx::query_as(
                 "select * from events where scope=$1 and scope_seq>$2 order by scope_seq limit $3",
             )
             .bind(scope.key())
             .bind(after)
             .bind(limit)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut *conn)
             .await?,
         )
-    };
-    tx.commit().await?;
-    Ok(EventRange {
-        head,
-        result,
-        cursor_ahead,
+            };
+            Ok(EventRange {
+                head,
+                result,
+                cursor_ahead,
+            })
+        })
     })
+    .await
 }

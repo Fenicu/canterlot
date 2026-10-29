@@ -1420,6 +1420,7 @@ pub(crate) async fn revalidate_pending_in_tx(
     Ok((pending, rev))
 }
 
+#[derive(Clone)]
 pub struct SubmitMessage {
     pub owner_id: Uuid,
     pub conversation_id: Uuid,
@@ -1435,30 +1436,21 @@ pub async fn submit_message(
     req: SubmitMessage,
     correlation_id: Uuid,
 ) -> Result<crate::delivery::SubmittedInput, crate::delivery::SubmitError> {
-    let mut tx = pool.begin().await?;
-    match submit_message_in_tx(&mut tx, &req, correlation_id).await {
-        Ok(value) => {
-            tx.commit().await?;
-            Ok(value)
-        }
+    // Гонка за ключ: первая попытка фиксирует или откатывает, вторая идёт в новой транзакции.
+    let retry = req.clone();
+    match crate::db::in_tx(pool, |conn| {
+        Box::pin(async move { submit_message_in_tx(conn, &req, correlation_id).await })
+    })
+    .await
+    {
+        Ok(value) => Ok(value),
         Err(crate::delivery::SubmitError::KeyRaceLost) => {
-            let _ = tx.rollback().await;
-            let mut tx = pool.begin().await?;
-            match submit_message_in_tx(&mut tx, &req, correlation_id).await {
-                Ok(value) => {
-                    tx.commit().await?;
-                    Ok(value)
-                }
-                Err(error) => {
-                    let _ = tx.rollback().await;
-                    Err(error)
-                }
-            }
+            crate::db::in_tx(pool, move |conn| {
+                Box::pin(async move { submit_message_in_tx(conn, &retry, correlation_id).await })
+            })
+            .await
         }
-        Err(error) => {
-            let _ = tx.rollback().await;
-            Err(error)
-        }
+        Err(error) => Err(error),
     }
 }
 
