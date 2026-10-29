@@ -1,0 +1,1 @@
+{"data":{"id":5,"method":"item/tool/requestUserInput","params":{"autoResolutionMs":null,"isBlocking":true,"itemId":"call-free","questions":[{"header":"H","id":"free","isOther":true,"isSecret":false,"options":null,"question":"Say anything?"}],"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":10}

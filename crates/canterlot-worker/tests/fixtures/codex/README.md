@@ -59,3 +59,15 @@
 - `settings_updated.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`).
   Покрывает подтверждение смены модели и режима задачей 3.
+- `question_free_text.jsonl` — сконструировано, подтвердить в live smoke. Источник
+  формы: `item/tool/requestUserInput` (`ev/question_default_mode.jsonl:28`) с
+  `isOther:true`, `options:null`. Покрывает свободный ответ задачей 4.
+- `permissions_request.jsonl` — сконструировано, подтвердить в live smoke. Источник
+  формы: имя метода из схемы (`item/permissions/requestApproval`); поля повторяют
+  остальные approval-запросы. Покрывает карточку разрешений задачей 4.
+- `elicitation.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
+  `mcpServer/elicitation/request` из схемы, режимы form и url. Покрывает
+  elicitation задачей 4.
+- `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
+  Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
+  Покрывает ответ-ошибку `-32601` задачей 4.

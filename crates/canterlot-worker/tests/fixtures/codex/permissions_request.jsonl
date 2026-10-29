@@ -1,0 +1,1 @@
+{"data":{"id":6,"method":"item/permissions/requestApproval","params":{"cwd":"/tmp/work","itemId":"perm-1","permissions":{"sandbox":"read-only"},"reason":"Need network?","threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":10}

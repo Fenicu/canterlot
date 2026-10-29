@@ -4,6 +4,7 @@ pub mod limits;
 pub mod mcp;
 pub mod probe;
 pub mod process;
+pub mod requests;
 pub mod rpc;
 pub mod thread;
 pub mod version;

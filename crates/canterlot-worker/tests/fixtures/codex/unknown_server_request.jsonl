@@ -1,0 +1,2 @@
+{"data":{"id":9,"method":"attestation/generate","params":{"threadId":"thread-main"}},"dir":"out","t_ms":10}
+{"data":{"id":10,"method":"item/tool/call","params":{"itemId":"dyn-1","threadId":"thread-main","tool":"fancy","turnId":"turn-main"}},"dir":"out","t_ms":20}
