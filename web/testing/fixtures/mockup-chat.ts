@@ -82,8 +82,19 @@ export function seedMockup06(api: FakeHubApi): string {
     kind: 'request_opened',
     conversation_id: id,
     payload: {
-      id: api.id(),
-      question: 'Что делать, если курсор старше журнала событий?'
+      request_id: api.id(),
+      kind: 'question',
+      payload: {
+        questions: [
+          {
+            id: 'q0',
+            text: 'Что делать, если курсор старше журнала событий?',
+            options: [{ label: 'Resync', description: 'Reload the snapshot' }, { label: 'Replay', description: 'Read the journal' }],
+            multi_select: false,
+            allow_custom: true
+          }
+        ]
+      }
     }
   });
   return id;
