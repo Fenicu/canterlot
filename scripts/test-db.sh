@@ -18,7 +18,7 @@ case "$action" in
                 --env POSTGRES_PASSWORD=canterlot \
                 --env POSTGRES_DB=canterlot \
                 --tmpfs /var/lib/postgresql \
-                postgres:18.6-trixie >/dev/null
+                postgres:18.6-trixie -c max_connections=500 >/dev/null
         fi
         for (( attempt = 0; attempt < 60; attempt++ )); do
             if docker exec "$container" pg_isready -U canterlot -d canterlot >/dev/null 2>&1; then
