@@ -147,8 +147,8 @@ async fn adapter_child() {
             assert_eq!(capabilities.streaming, Support::Supported);
             assert_eq!(capabilities.resume, Support::Supported);
             assert_eq!(capabilities.interrupt, Support::Supported);
-            assert_eq!(capabilities.approvals, Support::Unsupported);
-            assert_eq!(capabilities.questions, Support::Unsupported);
+            assert_eq!(capabilities.approvals, Support::Supported);
+            assert_eq!(capabilities.questions, Support::Supported);
             assert!(capabilities.interrupt_keeps_process);
             assert!(
                 !make("synthetic-exit-on-interrupt")

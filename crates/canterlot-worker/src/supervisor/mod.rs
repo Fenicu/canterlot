@@ -87,6 +87,9 @@ impl SupervisorFaults {
     pub fn attach_held(&self) -> bool {
         false
     }
+    pub fn decision_held(&self) -> bool {
+        false
+    }
     pub fn take_survivor(&self) -> bool {
         false
     }

@@ -1,4 +1,5 @@
-//! JSON lines: вход `input {command_id, attempt, text}`, `interrupt {id}`.
+//! JSON lines: вход `input {command_id, attempt, text}`, `interrupt {id}`,
+//! `decision {request_id, decision}`; Codex сначала получает `initialize {capabilities}`.
 //! Выход: `ready {native_conversation_id}`, `accepted {command_id}`,
 //! `interrupted {id}`, `phase {phase}`, `block_started {block_id, kind,
 //! input_command_id, parent}`, `block_delta {block_id, append}`,
@@ -7,6 +8,9 @@
 //! Скрипт: {"synthetic":[{"delta":"..."},{"delay_ms":1},{"tool":{"name":"..."}},
 //! {"error":"..."},{"unknown":{"event_type":"...","required":false}},
 //! {"exit":0},{"detach_child":true},{"hang":true}]}.
+//! Запросы: {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
+//! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}}.
+//! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
 //! Шаги: {"model":"synthetic-small"}, {"subagent":{"name":"Explore",
 //! "model":"synthetic-small","task":"…","steps":[…]}},
 //! {"usage":{"model":"…","agent":"main","input":120,"output":40,
@@ -18,18 +22,33 @@
 //! (data - base64 байтов файла) и результат «<размер> bytes». Ввод также несёт files и settings.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
+use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{io, process::Stdio, time::Duration};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 use super::{BlockKind, LocalFile, ModelUsage, Phase, SettingsChange};
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
+pub(super) struct InitializeCapabilities {
+    #[serde(rename = "experimentalApi")]
+    pub experimental_api: bool,
+}
+
+#[derive(Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(super) enum Request {
+    Initialize {
+        capabilities: InitializeCapabilities,
+    },
+    Decision {
+        request_id: String,
+        decision: DecisionPayload,
+    },
     Input {
         command_id: Uuid,
         attempt: u32,
@@ -63,7 +82,15 @@ fn trace_input(line: &str) {
         let Ok(value) = serde_json::from_str::<Value>(line) else {
             return;
         };
-        let receipt = json!({"type":value["type"], "command_id":value["command_id"], "attempt":value["attempt"]});
+        let receipt = match value["type"].as_str() {
+            Some("decision") => json!({"type":"decision", "request_id":value["request_id"]}),
+            Some("initialize") => {
+                json!({"type":"initialize", "capabilities":{"experimentalApi":value["capabilities"]["experimentalApi"]}})
+            }
+            _ => {
+                json!({"type":value["type"], "command_id":value["command_id"], "attempt":value["attempt"]})
+            }
+        };
         let _ = writeln!(file, "{receipt}");
     }
 }
@@ -106,6 +133,7 @@ struct Lane {
     accumulated: String,
 }
 struct Turn {
+    decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
     command: Uuid,
     files: Vec<LocalFile>,
     accepted: bool,
@@ -114,6 +142,54 @@ struct Turn {
     exhausted: bool,
 }
 impl Turn {
+    async fn request(&mut self, kind: &str, payload: &Value, lane: &Lane) -> io::Result<()> {
+        let id = Uuid::now_v7().to_string();
+        phase(if kind == "permission" {
+            Phase::AwaitingPermission
+        } else {
+            Phase::AwaitingAnswer
+        })
+        .await?;
+        emit(json!({"type":"request_opened", "request_id":id, "kind":kind, "payload":payload}))
+            .await?;
+        while let Some((request_id, decision)) = self.decisions.recv().await {
+            let reason = if request_id != id {
+                "request_closed"
+            } else if !super::valid_decision(kind, payload, &decision) {
+                "invalid_decision"
+            } else {
+                ""
+            };
+            if !reason.is_empty() {
+                emit(json!({"type":"decision_not_applied", "request_id":request_id, "reason":reason})).await?;
+                continue;
+            }
+            let proof_kind = if kind == "permission" {
+                let allowed = matches!(
+                    &decision,
+                    DecisionPayload::Permission {
+                        behavior: PermissionBehavior::Allow,
+                        ..
+                    }
+                );
+                self.block(
+                    BlockKind::ToolResult,
+                    if allowed { "ok" } else { "denied" },
+                    lane,
+                    payload["tool_name"].as_str(),
+                    None,
+                )
+                .await?;
+                "tool_result"
+            } else {
+                "server_request_resolved"
+            };
+            emit(json!({"type":"decision_applied", "request_id":id, "proof_kind":proof_kind, "payload":{"decision":decision}})).await?;
+            phase(Phase::Generating).await?;
+            return Ok(());
+        }
+        Err(io::Error::other("decision channel closed"))
+    }
     async fn begin(
         &self,
         id: Uuid,
@@ -213,7 +289,11 @@ fn run_steps<'a>(
                 phase(Phase::Generating).await?;
                 turn.accepted = true;
             }
-            if let Some(text) = step["delta"].as_str() {
+            if let Some(payload) = step.get("request_permission") {
+                turn.request("permission", payload, lane).await?;
+            } else if let Some(payload) = step.get("ask_question") {
+                turn.request("question", payload, lane).await?;
+            } else if let Some(text) = step["delta"].as_str() {
                 text_delta(turn, lane, text).await?;
             } else if let Some(model) = step["model"].as_str() {
                 close_text(lane).await?;
@@ -420,6 +500,7 @@ async fn run_turn(
     files: Vec<LocalFile>,
     model: &str,
     context: &mut u64,
+    decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
 ) -> io::Result<Option<i32>> {
     let steps = if text.starts_with("{\"synthetic\":") {
         let value: Value =
@@ -433,6 +514,7 @@ async fn run_turn(
         (0..3).map(|i|json!({"delta":chars[chars.len()*i/3..chars.len()*(i+1)/3].iter().collect::<String>()})).collect()
     };
     let mut turn = Turn {
+        decisions,
         command,
         files,
         accepted: false,
@@ -486,6 +568,7 @@ pub async fn run(
     profile: &str,
     native_id: Option<String>,
     model: Option<String>,
+    enabled_features: &[String],
 ) -> io::Result<()> {
     #[cfg(feature = "fault-injection")]
     if profile == "__burn_parent" {
@@ -537,12 +620,35 @@ pub async fn run(
     ) {
         return Err(io::Error::other("unknown synthetic profile"));
     }
+    let mut lines = BufReader::new(tokio::io::stdin()).lines();
+    if profile == "synthetic-codex" {
+        if !enabled_features
+            .iter()
+            .any(|f| f == "default_mode_request_user_input")
+        {
+            return Err(io::Error::other("default mode questions are disabled"));
+        }
+        let line = lines
+            .next_line()
+            .await?
+            .ok_or_else(|| io::Error::other("missing initialize"))?;
+        log_input(&line);
+        if !matches!(
+            serde_json::from_str::<Request>(&line),
+            Ok(Request::Initialize {
+                capabilities: InitializeCapabilities {
+                    experimental_api: true
+                }
+            })
+        ) {
+            return Err(io::Error::other("experimental API is disabled"));
+        }
+    }
     emit(json!({"type":"ready", "native_conversation_id":native_id.unwrap_or_else(|| format!("synthetic-{}", Uuid::now_v7()))})).await?;
     let mut model = model
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "synthetic-large".into());
     let mut context_tokens = 0;
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
         log_input(&line);
         let request: Request =
@@ -560,29 +666,50 @@ pub async fn run(
                 {
                     model = next;
                 }
-                let turn = run_turn(command_id, text, files, &model, &mut context_tokens);
+                let (decisions, receiver) = mpsc::unbounded_channel();
+                let turn = run_turn(
+                    command_id,
+                    text,
+                    files,
+                    &model,
+                    &mut context_tokens,
+                    receiver,
+                );
                 tokio::pin!(turn);
                 // Готовность объявляется после выхода из select активного хода.
-                tokio::select! {
-                        result = &mut turn => {
-                            if let Some(code) = result? { std::process::exit(code); }
-                            phase(Phase::AwaitingInput).await?;
-                        }
-                        line = lines.next_line() => {
-                            let Some(line) = line? else { return Ok(()) };
-                            log_input(&line);
-                            match serde_json::from_str::<Request>(&line).map_err(|_| io::Error::other("invalid request"))? {
-                                Request::Interrupt { id } => {
-                                    emit(json!({"type":"interrupted", "id":id})).await?;
-                                    completed(command_id,vec![],0).await?;
-                                    phase(Phase::AwaitingInput).await?;
-                                    if profile == "synthetic-exit-on-interrupt" { return Ok(()) }
-                                }
-                                Request::Input { .. } => return Err(io::Error::other("turn already active")),
+                loop {
+                    tokio::select! {
+                            result = &mut turn => {
+                                if let Some(code) = result? { std::process::exit(code); }
+                                phase(Phase::AwaitingInput).await?;
+                                break;
                             }
-                        }
+                            line = lines.next_line() => {
+                                let Some(line) = line? else { return Ok(()) };
+                                log_input(&line);
+                                match serde_json::from_str::<Request>(&line).map_err(|_| io::Error::other("invalid request"))? {
+                                    Request::Decision { request_id, decision } => {
+                                        if let Err(error) = decisions.send((request_id, decision)) {
+                                            emit(json!({"type":"decision_not_applied", "request_id":error.0.0, "reason":"request_closed"})).await?;
+                                        }
+                                    }
+                                    Request::Interrupt { id } => {
+                                        emit(json!({"type":"interrupted", "id":id})).await?;
+                                        completed(command_id,vec![],0).await?;
+                                        phase(Phase::AwaitingInput).await?;
+                                        if profile == "synthetic-exit-on-interrupt" { return Ok(()) }
+                                        break;
+                                    }
+                                Request::Input { .. } | Request::Initialize { .. } => return Err(io::Error::other("turn already active")),
+                                }
+                            }
+                    }
                 }
             }
+            Request::Decision { request_id, .. } => {
+                emit(json!({"type":"decision_not_applied", "request_id":request_id, "reason":"request_closed"})).await?;
+            }
+            Request::Initialize { .. } => return Err(io::Error::other("already initialized")),
             Request::Interrupt { id } => {
                 emit(json!({"type":"interrupted", "id":id})).await?;
                 if profile == "synthetic-exit-on-interrupt" {

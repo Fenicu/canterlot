@@ -8,18 +8,21 @@ use std::{
 
 use canterlot_proto::{
     limits::{BLOCK_FINAL_INLINE_MAX_BYTES, IPC_PROTOCOL_VERSION, MAX_BLOCK_DELTA_BYTES},
+    requests::DecisionPayload,
     worker::{
         ipc::{
-            Attached, CliStarted, ControlToSupervisor, DeliverAck, Exited, MediaResult,
-            MediaUpload, ReceivedInput, SupervisorToControl, control_to_supervisor as down,
-            supervisor_to_control as up,
+            Attached, CliStarted, ControlToSupervisor, DecisionAck, DeliverAck, Exited,
+            MediaResult, MediaUpload, ReceivedInput, SupervisorToControl,
+            control_to_supervisor as down, supervisor_to_control as up,
         },
         v1::{
             AdapterDiagnostic, BlockDelta, BlockFinal, BlockIncomplete, BlockMedia, BlockStarted,
-            InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost, InputCancelWon,
-            InputDispatchDeferred, InputRejected, InputTransmissionStarted, InputWithdrawn,
-            InterruptState, InterruptStatus, JournalClosed, JournalOpened, PhaseChanged,
-            RunFinished, content_block, record_body::Body,
+            DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, DecisionUnconfirmed,
+            DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost,
+            InputCancelWon, InputDispatchDeferred, InputRejected, InputTransmissionStarted,
+            InputWithdrawn, InterruptState, InterruptStatus, JournalClosed, JournalOpened,
+            PhaseChanged, RequestClosed, RequestOpened, RunFinished, content_block,
+            record_body::Body,
         },
     },
 };
@@ -38,9 +41,9 @@ use super::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterEvent, CloseMode, InterruptOutcome, LimitFact, LimitWindow, LocalFile,
-        MediaSource, Phase, SettingsChange, StartSpec, Transmission, TransmitOutcome,
-        registry_with_deadline,
+        Adapter, AdapterEvent, CloseMode, DecisionOutcome, InterruptOutcome, LimitFact,
+        LimitWindow, LocalFile, MediaSource, Phase, SettingsChange, StartSpec, Transmission,
+        TransmitOutcome, registry_with_deadline,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -151,6 +154,7 @@ struct Supervisor {
     known_interrupts: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
     interrupted: bool,
+    aborting_turn: bool,
     conns: HashMap<u64, Conn>,
     attached: Option<u64>,
     next_conn: u64,
@@ -223,6 +227,12 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
     }
     let containment: Arc<dyn Containment> = Arc::new(TreeContainment::new()?);
     let sj = Sj::create(&exec_dir)?;
+    let recovered = sj.last_seq() > 0;
+    let lifecycle = sj
+        .closed_reason()
+        .map_or(Lifecycle::Starting, |outcome| Lifecycle::Draining {
+            outcome,
+        });
     let socket = spec
         .ipc_socket
         .clone()
@@ -244,10 +254,10 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         start_ticks,
         adapter: None,
         adapter_exited: false,
-        start_attempted: false,
+        start_attempted: recovered,
         started: None,
         ready: false,
-        lifecycle: Lifecycle::Starting,
+        lifecycle,
         terminate: None,
         inputs: HashMap::new(),
         queue: VecDeque::new(),
@@ -262,6 +272,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         known_interrupts: HashSet::new(),
         pending_interrupts: Vec::new(),
         interrupted: false,
+        aborting_turn: false,
         conns: HashMap::new(),
         attached: None,
         next_conn: 0,
@@ -269,12 +280,14 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         media: MediaQueue::default(),
         media_jobs,
     };
-    supervisor.record(Body::JournalOpened(JournalOpened {
-        execution_id: supervisor.spec.execution_id.to_string(),
-        generation: supervisor.spec.generation,
-        supervisor_protocol_version: IPC_PROTOCOL_VERSION,
-    }))?;
-    supervisor.state_record("starting", "", "")?;
+    if !recovered {
+        supervisor.record(Body::JournalOpened(JournalOpened {
+            execution_id: supervisor.spec.execution_id.to_string(),
+            generation: supervisor.spec.generation,
+            supervisor_protocol_version: IPC_PROTOCOL_VERSION,
+        }))?;
+        supervisor.state_record("starting", "", "")?;
+    }
     while supervisor.faults.attach_held() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -559,6 +572,12 @@ impl Supervisor {
                 conn.attached = true;
             }
             self.attached = Some(id);
+            if !matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+                for request in self.sj.open_requests() {
+                    self.record(Body::RequestOpened(request))?;
+                }
+                self.sj.flush()?;
+            }
             let received = self.received_table();
             self.send(up::Msg::Attached(Attached {
                 protocol_version: IPC_PROTOCOL_VERSION,
@@ -596,6 +615,7 @@ impl Supervisor {
                 down::Msg::Deliver(_)
                 | down::Msg::ShipFrom(_)
                 | down::Msg::SjAck(_)
+                | down::Msg::DeliverDecision(_)
                 | down::Msg::Attach(_) => {}
                 _ => return Ok(()),
             }
@@ -619,7 +639,133 @@ impl Supervisor {
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
             down::Msg::MediaResult(result) => self.on_media_result(result)?,
-            down::Msg::DeliverDecision(_) => self.drop_connection(id),
+            down::Msg::DeliverDecision(decision) => self.on_decision(decision).await?,
+        }
+        Ok(())
+    }
+
+    fn decision_result(&mut self, body: Body) -> Result<(), SupervisorError> {
+        use canterlot_proto::worker::ipc::{
+            DecisionOutcome as IpcOutcome, decision_outcome::Outcome,
+        };
+        let outcome = match &body {
+            Body::DecisionApplied(f) => Outcome::Applied(f.clone()),
+            Body::DecisionNotApplied(f) => Outcome::NotApplied(f.clone()),
+            Body::DecisionUnconfirmed(f) => Outcome::Unconfirmed(f.clone()),
+            _ => return Ok(()),
+        };
+        if !matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+            self.record(body)?;
+            self.sj.flush()?;
+        }
+        self.send(up::Msg::DecisionOutcome(IpcOutcome {
+            outcome: Some(outcome),
+        }));
+        Ok(())
+    }
+
+    async fn on_decision(&mut self, cmd: DeliverDecision) -> Result<(), SupervisorError> {
+        let rejected = |reason: &str| {
+            Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: cmd.request_id.clone(),
+                decision_id: cmd.decision_id.clone(),
+                reason: reason.into(),
+            })
+        };
+        if cmd.generation != self.spec.generation {
+            return self.decision_result(rejected("stale_generation"));
+        }
+        if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
+            self.send(up::Msg::DecisionAck(DecisionAck {
+                request_id: cmd.request_id.clone(),
+                decision_id: cmd.decision_id.clone(),
+                result: "execution_closed".into(),
+            }));
+            return self.decision_result(Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: cmd.request_id,
+                decision_id: cmd.decision_id,
+                reason: "request_closed".into(),
+            }));
+        }
+        let Some(request) = self.sj.request(&cmd.request_id) else {
+            return self.decision_result(rejected("request_closed"));
+        };
+        if request.opened.generation != self.spec.generation
+            || request.opened.execution_id != self.spec.execution_id.to_string()
+        {
+            return self.decision_result(rejected("stale_generation"));
+        }
+        if request.transmission.is_some() {
+            return self.decision_result(rejected("already_transmitted"));
+        }
+        if request.terminal
+            || self.aborting_turn
+            || !matches!(self.lifecycle, Lifecycle::Running)
+            || self.adapter_exited
+            || self.active_turn.is_none()
+        {
+            return self.decision_result(rejected("request_closed"));
+        }
+        let decision = serde_json::from_slice::<DecisionPayload>(&cmd.decision_payload_json);
+        let payload = serde_json::from_slice::<serde_json::Value>(&request.opened.payload_json);
+        let (Ok(decision), Ok(payload)) = (decision, payload) else {
+            return self.decision_result(rejected("invalid_decision"));
+        };
+        if cmd.kind != request.opened.kind
+            || cmd.decision_id.is_empty()
+            || !crate::adapter::valid_decision(&cmd.kind, &payload, &decision)
+        {
+            return self.decision_result(rejected("invalid_decision"));
+        }
+        self.sj.intent(Body::DecisionTransmissionStarted(
+            DecisionTransmissionStarted {
+                request_id: cmd.request_id.clone(),
+                decision_id: cmd.decision_id.clone(),
+                machine_time_ms: now_ms(),
+            },
+        ))?;
+        self.faults.abort_at("after_decision_intention");
+        while self.faults.decision_held() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        self.send(up::Msg::DecisionAck(DecisionAck {
+            request_id: cmd.request_id.clone(),
+            decision_id: cmd.decision_id.clone(),
+            result: "transmitting".into(),
+        }));
+        let outcome = match self.adapter.as_mut() {
+            Some(adapter) => adapter.deliver_decision(&cmd.request_id, &decision).await,
+            None => DecisionOutcome::Undetermined,
+        };
+        self.faults.abort_at("after_decision_adapter_before_record");
+        let body = match outcome {
+            DecisionOutcome::Applied(proof) => Body::DecisionApplied(DecisionApplied {
+                request_id: cmd.request_id,
+                decision_id: cmd.decision_id,
+                proof_kind: proof.proof_kind,
+                proof_payload_json: serde_json::to_vec(&proof.payload)
+                    .map_err(|_| SupervisorError::Spec)?,
+            }),
+            DecisionOutcome::NotApplied(reason) => Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: cmd.request_id,
+                decision_id: cmd.decision_id,
+                reason,
+            }),
+            DecisionOutcome::Undetermined => Body::DecisionUnconfirmed(DecisionUnconfirmed {
+                request_id: cmd.request_id,
+                decision_id: cmd.decision_id,
+                reason: "undetermined".into(),
+            }),
+        };
+        self.decision_result(body)
+    }
+
+    fn close_requests(&mut self, reason: &str) -> Result<(), SupervisorError> {
+        for request in self.sj.open_requests() {
+            self.record(Body::RequestClosed(RequestClosed {
+                request_id: request.request_id,
+                reason: reason.into(),
+            }))?;
         }
         Ok(())
     }
@@ -1101,6 +1247,7 @@ impl Supervisor {
                 }))?;
             self.faults.abort_at("before_first_byte");
             self.ready = false;
+            self.aborting_turn = false;
             self.active_turn = Some(key.0);
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
@@ -1147,6 +1294,31 @@ impl Supervisor {
 
     async fn on_adapter_event(&mut self, event: AdapterEvent) -> Result<(), SupervisorError> {
         match event {
+            AdapterEvent::RequestOpened {
+                request_id,
+                kind,
+                payload,
+            } => {
+                if self.active_turn.is_some()
+                    && matches!(self.lifecycle, Lifecycle::Running)
+                    && self.sj.request(&request_id).is_none()
+                {
+                    self.record(Body::RequestOpened(RequestOpened {
+                        request_id,
+                        execution_id: self.spec.execution_id.to_string(),
+                        generation: self.spec.generation,
+                        kind,
+                        payload_json: serde_json::to_vec(&payload)
+                            .map_err(|_| SupervisorError::Spec)?,
+                    }))?;
+                    if self.aborting_turn {
+                        self.close_requests("interrupted")?;
+                    }
+                }
+            }
+            AdapterEvent::RequestClosed { request_id, reason } => {
+                self.record(Body::RequestClosed(RequestClosed { request_id, reason }))?;
+            }
             AdapterEvent::Phase {
                 phase,
                 tool_name,
@@ -1240,6 +1412,7 @@ impl Supervisor {
                     "interrupted"
                 };
                 self.close_blocks(reason)?;
+                self.close_requests(reason)?;
                 let duration_ms = self.turn_started.take().map_or(0, |at| {
                     u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
                 });
@@ -1397,6 +1570,9 @@ impl Supervisor {
             return self.interrupt_record(&id, attempt, InterruptState::NotApplicable);
         }
         self.interrupt_record(&id, attempt, InterruptState::SentToAgent)?;
+        self.aborting_turn = true;
+        self.close_requests("interrupted")?;
+        self.sj.flush()?;
         let Some(adapter) = self.adapter.as_mut() else {
             return Ok(());
         };
@@ -1446,6 +1622,13 @@ impl Supervisor {
         if matches!(cause, StopCause::Exited { .. }) {
             self.complete_interrupts()?;
         }
+        self.close_requests(
+            if matches!(cause, StopCause::User { .. } | StopCause::StartCancelled) {
+                "interrupted"
+            } else {
+                "execution_terminal"
+            },
+        )?;
         self.state_record("stopping", "", "")?;
         self.lifecycle = Lifecycle::Stopping(StopState {
             cause,

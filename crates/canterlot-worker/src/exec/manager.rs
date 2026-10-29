@@ -17,7 +17,7 @@ use canterlot_proto::{
         },
         v1::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
-            CommandRejected, ExecutionState, InputCancelLost, InputCancelWon,
+            CommandRejected, DecisionNotApplied, ExecutionState, InputCancelLost, InputCancelWon,
             InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, MediaHeader,
             StartExecution, WithdrawInput, command::Kind, content_block, record_body::Body,
         },
@@ -446,6 +446,21 @@ pub(super) async fn answer_without_execution(
         }
     }
     match &command.kind {
+        Some(Kind::DeliverDecision(decision)) => {
+            decision_rejected(
+                shared,
+                command,
+                decision,
+                if known.is_some_and(|generation| generation != command.execution_generation)
+                    || decision.generation != command.execution_generation
+                {
+                    "stale_generation"
+                } else {
+                    "request_closed"
+                },
+            )
+            .await
+        }
         Some(Kind::DeliverInput(_)) => defer_unhanded(shared, command).await,
         Some(Kind::CancelInput(CancelInput {
             target_command_id,
@@ -515,6 +530,24 @@ pub(super) async fn answer_without_execution(
         }
         _ => shared.cj(vec![], terminal_self(command)).await,
     }
+}
+
+async fn decision_rejected(
+    shared: &Shared,
+    command: &Command,
+    decision: &canterlot_proto::worker::v1::DeliverDecision,
+    reason: &str,
+) -> Result<(), ExecError> {
+    shared
+        .cj(
+            vec![Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: decision.request_id.clone(),
+                decision_id: decision.decision_id.clone(),
+                reason: reason.into(),
+            })],
+            terminal_self(command),
+        )
+        .await
 }
 
 pub(super) struct Actor {
@@ -1038,6 +1071,7 @@ impl Actor {
                     | down::Msg::Withdraw(_)
                     | down::Msg::Interrupt(_)
                     | down::Msg::Stop(_)
+                    | down::Msg::DeliverDecision(_)
             ) && {
                 let mut count = self.shared.fail_sends.lock().expect("send fault lock");
                 if *count > 0 {
@@ -1227,9 +1261,33 @@ impl Actor {
 
     async fn on_up(&mut self, message: up::Msg) -> Result<(), ExecError> {
         match message {
-            up::Msg::DecisionAck(_) | up::Msg::DecisionOutcome(_) => {
-                return Err(ExecError::InvalidCommand);
+            // После JournalClosed отказ пишется в CJ; остальные исходы приходят из SJ.
+            up::Msg::DecisionAck(ack) => {
+                if ack.result == "execution_closed" {
+                    let execution = self.id.to_string();
+                    let commands = self
+                        .shared
+                        .store
+                        .call(move |slot| {
+                            Ok(open(slot)?
+                                .stored_commands()?
+                                .into_iter()
+                                .filter(|cmd| cmd.execution_id == execution)
+                                .collect::<Vec<_>>())
+                        })
+                        .await?;
+                    for command in commands {
+                        if let Some(Kind::DeliverDecision(decision)) = &command.kind
+                            && decision.request_id == ack.request_id
+                            && decision.decision_id == ack.decision_id
+                        {
+                            decision_rejected(&self.shared, &command, decision, "request_closed")
+                                .await?;
+                        }
+                    }
+                }
             }
+            up::Msg::DecisionOutcome(_) => {}
             up::Msg::Attached(_) => {}
             up::Msg::CliStarted(started) => self.on_cli_started(started).await?,
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
@@ -1321,12 +1379,22 @@ impl Actor {
         }
         let mut terminal = Vec::new();
         let mut transmitted = Vec::new();
+        let mut decisions = Vec::new();
         for record in &batch.records {
             self.last_seq = self.last_seq.max(record.seq);
             let Some(body) = record.body.as_ref().and_then(|body| body.body.as_ref()) else {
                 continue;
             };
             match body {
+                Body::DecisionApplied(f) => {
+                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
+                }
+                Body::DecisionNotApplied(f) => {
+                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
+                }
+                Body::DecisionUnconfirmed(f) => {
+                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
+                }
                 Body::InputAccepted(fact) => {
                     terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
                 }
@@ -1368,11 +1436,25 @@ impl Actor {
         }
         let last = self.last_seq;
         self.shared.with_info(self.id, |info| info.last_seq = last);
-        if !terminal.is_empty() || !transmitted.is_empty() {
+        if !terminal.is_empty() || !transmitted.is_empty() || !decisions.is_empty() {
+            let execution = self.id.to_string();
             self.shared
                 .store
                 .call(move |store| {
                     let store = open(store)?;
+                    if !decisions.is_empty() {
+                        for command in store.stored_commands()? {
+                            if command.execution_id == execution
+                                && let Some(Kind::DeliverDecision(decision)) = &command.kind
+                                && decisions.iter().any(|(request, id)| {
+                                    request == &decision.request_id && id == &decision.decision_id
+                                })
+                            {
+                                terminal
+                                    .push((command.command_id.clone(), command.dispatch_attempt));
+                            }
+                        }
+                    }
                     for command_id in transmitted {
                         store.note_transmitted(&command_id)?;
                     }
@@ -1553,8 +1635,26 @@ impl Actor {
                 }
                 self.shared.cj(vec![], self_terminal).await
             }
-            Some(Kind::DeliverDecision(_)) => {
-                reject(&self.shared, &command, "unsupported_command").await
+            Some(Kind::DeliverDecision(decision)) => {
+                if command.execution_generation != self.generation
+                    || decision.generation != self.generation
+                {
+                    return decision_rejected(
+                        &self.shared,
+                        &command,
+                        &decision,
+                        "stale_generation",
+                    )
+                    .await;
+                }
+                if !live {
+                    return decision_rejected(&self.shared, &command, &decision, "request_closed")
+                        .await;
+                }
+                if !self.send(down::Msg::DeliverDecision(decision)).await {
+                    self.waiting.push_back(command);
+                }
+                Ok(())
             }
             None => Ok(()),
         }
@@ -1870,6 +1970,55 @@ mod tests {
         store::WorkerStore,
     };
     use canterlot_proto::worker::v1::{DeliverInput, InputCancelLost, JournalRecord, RecordBody};
+
+    #[tokio::test]
+    async fn closed_journal_decision_ack_is_persisted_in_cj() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = WorkerStore::open(&root.path().join("store")).unwrap();
+        let id = Uuid::now_v7();
+        let command_id = Uuid::now_v7().to_string();
+        let decision = canterlot_proto::worker::v1::DeliverDecision {
+            request_id: Uuid::now_v7().to_string(),
+            decision_id: Uuid::now_v7().to_string(),
+            generation: 1,
+            kind: "permission".into(),
+            decision_payload_json: br#"{"kind":"permission","behavior":"allow"}"#.to_vec(),
+        };
+        store
+            .accept_command(&Command {
+                command_id: command_id.clone(),
+                dispatch_attempt: 1,
+                execution_id: id.to_string(),
+                execution_generation: 1,
+                kind: Some(Kind::DeliverDecision(decision.clone())),
+            })
+            .unwrap();
+        let thread = StoreThread::new(store);
+        let (relay, _rx) = mpsc::channel(1);
+        let manager = ExecutionManager::new(ExecutionConfig::default(), thread.client(), relay);
+        let (_tx, rx) = mpsc::unbounded_channel();
+        let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
+        actor
+            .on_up(up::Msg::DecisionAck(
+                canterlot_proto::worker::ipc::DecisionAck {
+                    request_id: decision.request_id,
+                    decision_id: decision.decision_id,
+                    result: "execution_closed".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        thread.client().call(move |slot| {
+            let store = open(slot)?;
+            assert!(store.command_state(&command_id)?.unwrap().terminal);
+            assert!(store.cj_records_from(1, usize::MAX)?.iter().any(|record|
+                matches!(record.body.as_ref().and_then(|b| b.body.as_ref()), Some(Body::DecisionNotApplied(f)) if f.reason == "request_closed")));
+            Ok(())
+        }).await.unwrap();
+        drop(actor);
+        manager.shutdown().await;
+        thread.close().await.unwrap();
+    }
 
     #[tokio::test]
     async fn cancel_and_withdraw_of_a_redispatched_fetch_are_local() {

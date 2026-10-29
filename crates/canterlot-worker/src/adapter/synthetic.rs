@@ -16,6 +16,7 @@ use super::{synthetic_cli::Request, *};
 use crate::containment::Member;
 
 enum Frame {
+    Decision(String, DecisionOutcome),
     Ready(String),
     Accepted(Uuid),
     Interrupted(Uuid),
@@ -35,6 +36,30 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
         "ready" => return Ok(Frame::Ready(string("native_conversation_id")?)),
         "accepted" => return Ok(Frame::Accepted(uuid("command_id")?)),
         "interrupted" => return Ok(Frame::Interrupted(uuid("id")?)),
+        "decision_applied" => {
+            return Ok(Frame::Decision(
+                string("request_id")?,
+                DecisionOutcome::Applied(DecisionProof {
+                    proof_kind: string("proof_kind")?,
+                    payload: value["payload"].clone(),
+                }),
+            ));
+        }
+        "decision_not_applied" => {
+            return Ok(Frame::Decision(
+                string("request_id")?,
+                DecisionOutcome::NotApplied(string("reason")?),
+            ));
+        }
+        "request_opened" => AdapterEvent::RequestOpened {
+            request_id: string("request_id")?,
+            kind: string("kind")?,
+            payload: value["payload"].clone(),
+        },
+        "request_closed" => AdapterEvent::RequestClosed {
+            request_id: string("request_id")?,
+            reason: string("reason")?,
+        },
         "phase" => AdapterEvent::Phase {
             phase: serde_json::from_value(value["phase"].clone())
                 .map_err(|_| AdapterError::Protocol)?,
@@ -259,8 +284,8 @@ impl Adapter for SyntheticAdapter {
             streaming: Support::Supported,
             resume: Support::Supported,
             interrupt: Support::Supported,
-            approvals: Support::Unsupported,
-            questions: Support::Unsupported,
+            approvals: Support::Supported,
+            questions: Support::Supported,
             background_work: Support::Supported,
             interrupt_keeps_process: self.profile != "synthetic-exit-on-interrupt",
         }
@@ -324,6 +349,9 @@ impl Adapter for SyntheticAdapter {
         if let Some(id) = &spec.native_conversation_id {
             command.arg("--native-conversation-id").arg(id);
         }
+        if self.profile == "synthetic-codex" {
+            command.args(["--enable", "default_mode_request_user_input"]);
+        }
         group.prepare_command(&mut command);
         let mut child = command.spawn()?;
         let pid = child.id().ok_or(AdapterError::Protocol)?;
@@ -373,6 +401,14 @@ impl Adapter for SyntheticAdapter {
             exited.send_replace(true);
             let _ = sender.send(Frame::Event(event)).await;
         });
+        if self.profile == "synthetic-codex" {
+            self.send(&Request::Initialize {
+                capabilities: super::synthetic_cli::InitializeCapabilities {
+                    experimental_api: true,
+                },
+            })
+            .await?;
+        }
         let ready = tokio::time::timeout(self.transmit_deadline, self.frame()).await;
         match ready {
             Ok(Some(Frame::Ready(native_conversation_id))) => Ok(Started {
@@ -470,6 +506,41 @@ impl Adapter for SyntheticAdapter {
         })
         .await
         .unwrap_or(TransmitOutcome::Undetermined)
+    }
+
+    async fn deliver_decision(
+        &mut self,
+        request_id: &str,
+        decision: &DecisionPayload,
+    ) -> DecisionOutcome {
+        if !self.active || self.stdin.is_none() {
+            return DecisionOutcome::NotApplied("request_closed".into());
+        }
+        tokio::time::timeout(self.transmit_deadline, async {
+            if self
+                .send(&Request::Decision {
+                    request_id: request_id.into(),
+                    decision: decision.clone(),
+                })
+                .await
+                .is_err()
+            {
+                return DecisionOutcome::Undetermined;
+            }
+            while let Some(frame) = self.frame().await {
+                match frame {
+                    Frame::Decision(id, outcome) if id == request_id => return outcome,
+                    Frame::Event(event @ AdapterEvent::ProcessExited { .. }) => {
+                        self.pending.push_back(event);
+                        return DecisionOutcome::Undetermined;
+                    }
+                    other => self.queue(other),
+                }
+            }
+            DecisionOutcome::Undetermined
+        })
+        .await
+        .unwrap_or(DecisionOutcome::Undetermined)
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {

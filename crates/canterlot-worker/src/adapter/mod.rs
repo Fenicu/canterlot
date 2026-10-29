@@ -1,4 +1,5 @@
 use crate::containment::{Containment, ContainmentError};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload};
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -67,6 +68,87 @@ pub enum TransmitOutcome {
     Accepted(Proof),
     Rejected(String),
     Undetermined,
+}
+pub enum DecisionOutcome {
+    Applied(DecisionProof),
+    NotApplied(String),
+    Undetermined,
+}
+impl fmt::Debug for DecisionOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Applied(proof) => f.debug_tuple("Applied").field(proof).finish(),
+            Self::NotApplied(_) => f.debug_tuple("NotApplied").field(&"[REDACTED]").finish(),
+            Self::Undetermined => f.write_str("Undetermined"),
+        }
+    }
+}
+
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct DecisionProof {
+    pub proof_kind: String,
+    pub payload: serde_json::Value,
+}
+impl fmt::Debug for DecisionProof {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecisionProof")
+            .field("proof_kind", &self.proof_kind)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
+
+pub(crate) fn valid_decision(
+    kind: &str,
+    payload: &serde_json::Value,
+    decision: &DecisionPayload,
+) -> bool {
+    match (kind, decision) {
+        ("permission", DecisionPayload::Permission { .. }) => true,
+        ("question", DecisionPayload::Question { answers }) => {
+            let Some(questions) = payload["questions"].as_array() else {
+                return false;
+            };
+            if questions.is_empty() || questions.len() > 4 || answers.len() != questions.len() {
+                return false;
+            }
+            let mut ids = std::collections::HashSet::new();
+            questions.iter().all(|q| {
+                let Some(id) = q["id"].as_str().filter(|id| !id.is_empty()) else {
+                    return false;
+                };
+                if !ids.insert(id) {
+                    return false;
+                }
+                let valid = |answer: &str| {
+                    q["allow_custom"].as_bool() == Some(true)
+                        || q["is_other"].as_bool() == Some(true)
+                        || q["options"].as_array().is_some_and(|options| {
+                            options.iter().any(|option| {
+                                option.as_str().or_else(|| option["label"].as_str()) == Some(answer)
+                            })
+                        })
+                };
+                match answers.get(id) {
+                    Some(AnswerValue::Single(answer)) => {
+                        q["multi_select"].as_bool() != Some(true) && valid(answer)
+                    }
+                    Some(AnswerValue::Multiple(values)) => {
+                        q["multi_select"].as_bool() == Some(true)
+                            && !values.is_empty()
+                            && values
+                                .iter()
+                                .collect::<std::collections::HashSet<_>>()
+                                .len()
+                                == values.len()
+                            && values.iter().all(|value| valid(value))
+                    }
+                    None => false,
+                }
+            })
+        }
+        _ => false,
+    }
 }
 #[derive(Debug)]
 pub enum InterruptOutcome {
@@ -162,6 +244,15 @@ impl fmt::Debug for MediaSource {
 }
 #[derive(Clone)]
 pub enum AdapterEvent {
+    RequestOpened {
+        request_id: String,
+        kind: String,
+        payload: serde_json::Value,
+    },
+    RequestClosed {
+        request_id: String,
+        reason: String,
+    },
     Phase {
         phase: Phase,
         tool_name: Option<String>,
@@ -211,6 +302,18 @@ pub enum AdapterEvent {
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::RequestOpened {
+                request_id, kind, ..
+            } => f
+                .debug_struct("RequestOpened")
+                .field("request_id", request_id)
+                .field("kind", kind)
+                .field("payload", &"[REDACTED]")
+                .finish(),
+            Self::RequestClosed { request_id, .. } => f
+                .debug_struct("RequestClosed")
+                .field("request_id", request_id)
+                .finish_non_exhaustive(),
             Self::Phase { phase, .. } => f
                 .debug_struct("Phase")
                 .field("phase", phase)
@@ -345,6 +448,11 @@ pub trait Adapter: Send {
         Ok(())
     }
     async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome;
+    async fn deliver_decision(
+        &mut self,
+        request_id: &str,
+        decision: &DecisionPayload,
+    ) -> DecisionOutcome;
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
     async fn close(&mut self, mode: CloseMode, group: &dyn Containment)

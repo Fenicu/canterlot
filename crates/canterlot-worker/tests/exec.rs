@@ -1592,3 +1592,101 @@ async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending() {
         Body::DispatchDeferred(_) | Body::CancelWon(_) | Body::InputWithdrawn(_)
     )));
 }
+
+#[tokio::test]
+async fn worker_restart_with_acked_open_request_reannounces_and_delivers_decision() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(9).await;
+    env.wait_running().await;
+    env.send(deliver_command(Uuid::now_v7(), 1, env.execution, 9, env.conversation,
+        &script(r#"{"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},{"delta":"resumed"}"#))).await;
+    env.wait("request opened", |b| {
+        b.iter().any(|b| matches!(b, Body::RequestOpened(_)))
+    })
+    .await;
+    let request = env
+        .bodies
+        .iter()
+        .find_map(|b| match b {
+            Body::RequestOpened(r) => Some(r.request_id.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let supervisor = env.ownership(env.execution).await.unwrap().supervisor_pid;
+    env.close_manager().await;
+    env.reopen();
+    env.bodies.clear();
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        vec![env.execution]
+    );
+    env.hub_session();
+    env.wait("reannounced acknowledged request", |b| {
+        b.iter()
+            .any(|b| matches!(b, Body::RequestOpened(r) if r.request_id == request))
+    })
+    .await;
+    assert_eq!(
+        env.ownership(env.execution).await.unwrap().supervisor_pid,
+        supervisor
+    );
+    let decision = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        9,
+        Kind::DeliverDecision(canterlot_proto::worker::v1::DeliverDecision {
+            request_id: request,
+            decision_id: Uuid::now_v7().to_string(),
+            generation: 9,
+            kind: "permission".into(),
+            decision_payload_json: br#"{"kind":"permission","behavior":"allow","message":null}"#
+                .to_vec(),
+        }),
+    );
+    env.send(decision.clone()).await;
+    env.wait("decision applied", |b| {
+        b.iter().any(|b| matches!(b, Body::DecisionApplied(_)))
+    })
+    .await;
+    timeout(WAIT, async {
+        while !env.terminal(&decision).await {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    env.stop().await;
+    env.close_manager().await;
+}
+
+#[tokio::test]
+async fn decision_envelope_generation_is_checked_before_ipc() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(9).await;
+    env.wait_running().await;
+    let decision = command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        8,
+        Kind::DeliverDecision(canterlot_proto::worker::v1::DeliverDecision {
+            request_id: Uuid::now_v7().to_string(),
+            decision_id: Uuid::now_v7().to_string(),
+            generation: 9,
+            kind: "permission".into(),
+            decision_payload_json: br#"{"kind":"permission","behavior":"allow"}"#.to_vec(),
+        }),
+    );
+    env.send(decision.clone()).await;
+    env.wait_cj("stale envelope decision", |b| {
+        b.iter()
+            .any(|b| matches!(b, Body::DecisionNotApplied(f) if f.reason == "stale_generation"))
+    })
+    .await;
+    assert!(env.terminal(&decision).await);
+    env.stop().await;
+    env.close_manager().await;
+}

@@ -113,6 +113,7 @@ pub struct SupervisorFaults {
     abort_at: Option<String>,
     hold_gate: bool,
     hold_attach: bool,
+    hold_decision: bool,
     survivors: std::sync::atomic::AtomicU32,
     errors: std::sync::atomic::AtomicU32,
 }
@@ -123,6 +124,8 @@ impl SupervisorFaults {
             abort_at: std::env::var("CANTERLOT_FAULT_ABORT_AT").ok(),
             hold_gate: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref() == Ok("before_gate"),
             hold_attach: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref() == Ok("before_attach"),
+            hold_decision: std::env::var("CANTERLOT_FAULT_HOLD_AT").as_deref()
+                == Ok("after_decision_intention"),
             errors: std::sync::atomic::AtomicU32::new(
                 std::env::var("CANTERLOT_FAULT_TERMINATE_ERRORS")
                     .ok()
@@ -153,6 +156,9 @@ impl SupervisorFaults {
     }
     pub fn attach_held(&self) -> bool {
         self.hold_attach
+    }
+    pub fn decision_held(&self) -> bool {
+        self.hold_decision
     }
 
     pub fn take_survivor(&self) -> bool {

@@ -23,6 +23,8 @@ enum Command {
         native_conversation_id: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long)]
+        enable: Vec<String>,
     },
     Run {
         #[arg(long)]
@@ -74,9 +76,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             profile,
             native_conversation_id,
             model,
+            enable,
         } => {
-            canterlot_worker::adapter::synthetic_cli::run(&profile, native_conversation_id, model)
-                .await?;
+            canterlot_worker::adapter::synthetic_cli::run(
+                &profile,
+                native_conversation_id,
+                model,
+                &enable,
+            )
+            .await?;
             return Ok(());
         }
     };
