@@ -34,6 +34,7 @@ pub struct ConversationSnapshot {
     pub queue: QueueView,
     pub history: HistoryPage,
     pub scheduled: Vec<ScheduledMessage>,
+    /// Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением.
     pub open_requests: Vec<RequestView>,
 }
 
@@ -176,7 +177,7 @@ pub async fn conversation_with_registry(
         .ok_or(sqlx::Error::RowNotFound)?;
     let scheduled = scheduler::list_messages(&mut tx, owner_id, id).await?;
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
-        "select * from requests where conversation_id = $1 and state = 'open' order by created_at asc",
+        "select * from requests where conversation_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting') order by created_at asc, id asc",
     )
     .bind(id)
     .fetch_all(&mut *tx)

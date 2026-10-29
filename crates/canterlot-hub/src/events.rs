@@ -254,6 +254,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "request_opened",
     "request_closed",
     "request_decided",
+    "request_transmitting",
     "machine_availability_changed",
     "machine_report_updated",
     "machine_metrics",
@@ -285,6 +286,11 @@ pub struct RequestDecidedPayload {
     pub request_id: Uuid,
     pub winner_decision_id: Uuid,
     pub decision: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestTransmittingPayload {
+    pub request_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

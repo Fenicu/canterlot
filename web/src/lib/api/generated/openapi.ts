@@ -881,6 +881,7 @@ export interface components {
         ConversationSnapshot: {
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
+            /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
             open_requests: components["schemas"]["RequestView"][];
             queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
@@ -1548,6 +1549,7 @@ export interface components {
             data: {
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
+                /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
                 open_requests: components["schemas"]["RequestView"][];
                 queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
