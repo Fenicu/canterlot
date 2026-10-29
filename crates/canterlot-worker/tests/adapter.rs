@@ -489,7 +489,7 @@ async fn pilot_case(
                 entry
                     .models
                     .iter()
-                    .any(|m| m.id == "synthetic-large" && m.efforts.contains(&"high"))
+                    .any(|m| m.id == "synthetic-large" && m.efforts.iter().any(|e| e == "high"))
             );
         }
         return;

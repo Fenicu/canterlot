@@ -71,3 +71,7 @@
 - `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
   Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
   Покрывает ответ-ошибку `-32601` задачей 4.
+- `config_read.json`, `account_read.json` — сконструированные сырые ответы (без
+  обёртки) для повтора `codex-replay`: пропущенные (`<omitted>`) ответы
+  `config/read` и `account/read` и методы без записи. Форма по записям
+  `ev/start_stream.jsonl:12` и `ev/diagnostics.jsonl:23`.

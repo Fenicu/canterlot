@@ -34,6 +34,7 @@ struct Pending {
     rpc_id: RpcId,
     kind: String,
     perm: Option<PermKind>,
+    payload: Value,
     item_id: String,
     available_decisions: Option<Value>,
     question_map: Vec<(String, String)>,
@@ -153,6 +154,16 @@ impl Requests {
         self.pending.contains_key(request_id)
     }
 
+    // Вид, груз и элемент для `deliver_decision` задачи 7.
+    pub fn pending_info(&self, request_id: &str) -> Option<(String, Value, String)> {
+        let pending = self.pending.get(request_id)?;
+        Some((
+            pending.kind.clone(),
+            pending.payload.clone(),
+            pending.item_id.clone(),
+        ))
+    }
+
     fn track(&mut self, request_id: String, pending: Pending) {
         let rpc_id = pending.rpc_id.clone();
         self.pending.insert(request_id.clone(), pending);
@@ -173,11 +184,13 @@ impl Requests {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let request_id = request_id(item_id, &id);
+                let payload = command_payload(params, item_id, ctx.agent);
                 self.track(
                     request_id.clone(),
                     Pending {
                         rpc_id: id,
                         kind: "permission".into(),
+                        payload: payload.clone(),
                         perm: Some(PermKind::Command),
                         item_id: item_id.to_owned(),
                         available_decisions: params.get("availableDecisions").cloned(),
@@ -190,7 +203,7 @@ impl Requests {
                 Intake::Open(AdapterEvent::RequestOpened {
                     request_id,
                     kind: "permission".into(),
-                    payload: command_payload(params, item_id, ctx.agent),
+                    payload: payload.clone(),
                 })
             }
             "item/fileChange/requestApproval" => {
@@ -199,11 +212,13 @@ impl Requests {
                     .and_then(Value::as_str)
                     .unwrap_or_default();
                 let request_id = request_id(item_id, &id);
+                let payload = file_change_payload(params, item_id, ctx);
                 self.track(
                     request_id.clone(),
                     Pending {
                         rpc_id: id,
                         kind: "permission".into(),
+                        payload: payload.clone(),
                         perm: Some(PermKind::FileChange),
                         item_id: item_id.to_owned(),
                         available_decisions: None,
@@ -216,7 +231,7 @@ impl Requests {
                 Intake::Open(AdapterEvent::RequestOpened {
                     request_id,
                     kind: "permission".into(),
-                    payload: file_change_payload(params, item_id, ctx),
+                    payload: payload.clone(),
                 })
             }
             "item/permissions/requestApproval" => {
@@ -225,11 +240,13 @@ impl Requests {
                     .and_then(Value::as_str)
                     .unwrap_or(method);
                 let request_id = request_id(item_id, &id);
+                let payload = permissions_payload(params, item_id, ctx.agent);
                 self.track(
                     request_id.clone(),
                     Pending {
                         rpc_id: id,
                         kind: "permission".into(),
+                        payload: payload.clone(),
                         perm: Some(PermKind::Permissions),
                         item_id: item_id.to_owned(),
                         available_decisions: None,
@@ -242,7 +259,7 @@ impl Requests {
                 Intake::Open(AdapterEvent::RequestOpened {
                     request_id,
                     kind: "permission".into(),
-                    payload: permissions_payload(params, item_id, ctx.agent),
+                    payload: payload.clone(),
                 })
             }
             "item/tool/requestUserInput" => {
@@ -257,6 +274,7 @@ impl Requests {
                     Pending {
                         rpc_id: id,
                         kind: "question".into(),
+                        payload: payload.clone(),
                         perm: None,
                         item_id: item_id.to_owned(),
                         available_decisions: None,
@@ -279,11 +297,13 @@ impl Requests {
                     .unwrap_or(method);
                 let request_id = request_id(item_id, &id);
                 let url_mode = params.get("mode").and_then(Value::as_str) == Some("url");
+                let payload = elicitation_payload(params, item_id, ctx.agent);
                 self.track(
                     request_id.clone(),
                     Pending {
                         rpc_id: id,
                         kind: "permission".into(),
+                        payload: payload.clone(),
                         perm: Some(PermKind::Elicitation),
                         item_id: item_id.to_owned(),
                         available_decisions: None,
@@ -296,7 +316,7 @@ impl Requests {
                 Intake::Open(AdapterEvent::RequestOpened {
                     request_id,
                     kind: "permission".into(),
-                    payload: elicitation_payload(params, item_id, ctx.agent),
+                    payload: payload.clone(),
                 })
             }
             _ => {

@@ -341,6 +341,7 @@ pub struct Worker {
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
     claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
+    codex_catalog: Option<crate::adapter::codex::CodexCatalog>,
 }
 
 type MetricsFuture = Pin<
@@ -443,6 +444,7 @@ impl Worker {
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
             claude_version: None,
+            codex_catalog: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -520,6 +522,19 @@ impl Worker {
                     }
                 };
         }
+        if let Some(cfg) = &self.config.codex {
+            self.codex_catalog = match crate::adapter::codex::discover(cfg).await {
+                Ok(catalog) => Some(catalog),
+                Err(reason) => {
+                    tracing::warn!(
+                        kind = "codex_unavailable",
+                        ?reason,
+                        "Codex omitted from catalog"
+                    );
+                    None
+                }
+            };
+        }
         let manager = ExecutionManager::new_with_attachments(
             self.config.execution.clone(),
             self.store.client(),
@@ -528,6 +543,7 @@ impl Worker {
         );
         manager.configure_adapters(
             self.config.claude_code.clone(),
+            self.config.codex.clone(),
             self.config.instruction_profiles.clone(),
         );
         manager
@@ -947,6 +963,7 @@ impl Worker {
         let mut machine_outbound = if pilot {
             let config = self.config.clone();
             let cli = self.claude_version.clone();
+            let codex = self.codex_catalog.clone();
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
                     tokio::task::spawn_blocking(move || {
@@ -955,6 +972,7 @@ impl Worker {
                             &crate::adapter::catalog_with(
                                 config.claude_code.as_ref(),
                                 cli.as_ref(),
+                                codex.as_ref(),
                             ),
                         )
                     })

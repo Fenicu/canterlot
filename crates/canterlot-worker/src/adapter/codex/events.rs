@@ -280,6 +280,11 @@ impl Translator {
         self.retry_count = 0;
     }
 
+    // Смена модели ходом без уведомления от сервера (задача 7 правит оптимистично).
+    pub fn set_model(&mut self, model: &str) {
+        self.model = model.to_owned();
+    }
+
     // Не-JSON строка stdout: диагностика, поток жив.
     pub fn feed_unparsed(&mut self) -> Translated {
         Translated::Event(AdapterEvent::Diagnostic {
@@ -334,6 +339,7 @@ impl Translator {
             "thread/status/changed" => self.on_status_changed(params),
             "thread/tokenUsage/updated" => self.on_token_usage(params),
             "thread/started" => self.on_thread_started(params),
+            "thread/closed" => self.on_thread_closed(params),
             "thread/settings/updated" => self.on_settings_updated(params),
             "thread/compacted" => vec![self.context_maintenance()],
             "model/rerouted" => self.on_model_rerouted(params),
@@ -1386,6 +1392,17 @@ impl Translator {
                 vec![Translated::Ignored]
             }
         }
+    }
+
+    fn on_thread_closed(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
+        vec![Translated::Event(AdapterEvent::Diagnostic {
+            kind: "thread_closed",
+            event_type: "thread_closed".into(),
+            required: true,
+        })]
     }
 
     fn on_settings_updated(&mut self, params: &Value) -> Vec<Translated> {

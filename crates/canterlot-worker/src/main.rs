@@ -30,6 +30,14 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    #[cfg(feature = "synthetic-adapter")]
+    #[command(hide = true)]
+    CodexReplay {
+        #[arg(long)]
+        evidence: PathBuf,
+        #[arg(long)]
+        fixtures_dir: PathBuf,
+    },
     #[command(hide = true)]
     McpRelay {
         #[arg(long)]
@@ -43,6 +51,15 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    // Проверка версии адаптера идёт тем же бинарником без подкоманды.
+    let raw: Vec<String> = std::env::args().collect();
+    if raw.len() == 2 && raw[1] == "--version" {
+        println!("codex-cli 0.164.0");
+        return ExitCode::SUCCESS;
+    }
+    if let Some(code) = codex_replay().await {
+        return code;
+    }
     if let Some(code) = mcp_relay().await {
         return code;
     }
@@ -56,6 +73,31 @@ async fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+#[cfg(feature = "synthetic-adapter")]
+async fn codex_replay() -> Option<ExitCode> {
+    let Command::CodexReplay {
+        evidence,
+        fixtures_dir,
+    } = Cli::try_parse().ok()?.command
+    else {
+        return None;
+    };
+    Some(
+        match canterlot_worker::adapter::codex::replay::run(&evidence, &fixtures_dir).await {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                eprintln!("codex-replay: {error}");
+                ExitCode::FAILURE
+            }
+        },
+    )
+}
+
+#[cfg(not(feature = "synthetic-adapter"))]
+async fn codex_replay() -> Option<ExitCode> {
+    None
 }
 
 async fn mcp_relay() -> Option<ExitCode> {
@@ -93,6 +135,8 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
         Command::McpRelay { .. } | Command::Supervise { .. } => return Ok(()),
+        #[cfg(feature = "synthetic-adapter")]
+        Command::CodexReplay { .. } => return Ok(()),
         #[cfg(feature = "synthetic-adapter")]
         Command::SyntheticCli {
             profile,

@@ -915,6 +915,7 @@ impl Supervisor {
             transmit_deadline: timers.transmit_deadline,
             exec_dir: self.exec_dir.clone(),
             claude_code: self.spec.claude_code.clone(),
+            codex: self.spec.codex.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
             tracing::warn!(

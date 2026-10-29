@@ -58,9 +58,9 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
                     .models
                     .iter()
                     .map(|m| ModelInfo {
-                        id: m.id.into(),
-                        title: m.title.into(),
-                        efforts: m.efforts.iter().map(|s| (*s).into()).collect(),
+                        id: m.id.clone(),
+                        title: m.title.clone(),
+                        efforts: m.efforts.to_vec(),
                     })
                     .collect(),
             })

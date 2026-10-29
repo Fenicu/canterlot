@@ -48,6 +48,8 @@ pub struct SupervisorSpec {
     pub timers: SupervisorTimers,
     #[serde(default)]
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
+    #[serde(default)]
+    pub codex: Option<crate::config::CodexConfig>,
 }
 
 fn load(exec_dir: &Path) -> Result<(SupervisorSpec, Vec<u8>), SupervisorError> {

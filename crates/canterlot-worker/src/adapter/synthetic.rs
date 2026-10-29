@@ -440,8 +440,8 @@ impl Adapter for SyntheticAdapter {
             .is_some_and(|c| {
                 permission.is_some_and(|p| c.permission_modes.contains(&p.as_str()))
                     && c.models.iter().any(|m| {
-                        Some(m.id) == model.map(String::as_str)
-                            && effort.is_some_and(|e| m.efforts.contains(&e.as_str()))
+                        Some(m.id.as_str()) == model.map(String::as_str)
+                            && effort.is_some_and(|e| m.efforts.iter().any(|known| known == e))
                     })
             });
         if valid {

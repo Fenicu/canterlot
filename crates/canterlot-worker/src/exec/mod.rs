@@ -73,6 +73,7 @@ pub(crate) struct ExecInfo {
 #[derive(Clone, Default)]
 pub(crate) struct AdapterConfig {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
+    pub codex: Option<crate::config::CodexConfig>,
     pub profiles: Vec<crate::config::ProfileConfig>,
 }
 
@@ -299,10 +300,12 @@ impl ExecutionManager {
     pub fn configure_adapters(
         &self,
         claude_code: Option<crate::config::ClaudeCodeConfig>,
+        codex: Option<crate::config::CodexConfig>,
         profiles: Vec<crate::config::ProfileConfig>,
     ) {
         *self.shared.adapters.lock().expect("adapter config lock") = AdapterConfig {
             claude_code,
+            codex,
             profiles,
         };
     }

@@ -373,9 +373,9 @@ impl fmt::Debug for AdapterEvent {
     }
 }
 pub struct ModelCatalog {
-    pub id: &'static str,
-    pub title: &'static str,
-    pub efforts: Vec<&'static str>,
+    pub id: String,
+    pub title: String,
+    pub efforts: Vec<String>,
 }
 pub struct HarnessCatalog {
     pub harness: &'static str,
@@ -388,12 +388,13 @@ pub struct HarnessCatalog {
     pub models: Vec<ModelCatalog>,
 }
 pub fn catalog() -> Vec<HarnessCatalog> {
-    catalog_with(None, None)
+    catalog_with(None, None, None)
 }
 
 pub fn catalog_with(
     cfg: Option<&crate::config::ClaudeCodeConfig>,
     cli: Option<&claude_code::version::CliVersion>,
+    codex: Option<&codex::CodexCatalog>,
 ) -> Vec<HarnessCatalog> {
     let mut entries = Vec::new();
     if cfg.is_some() && cli.is_some() {
@@ -408,11 +409,26 @@ pub fn catalog_with(
             models: [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
                 .into_iter()
                 .map(|(id, title)| ModelCatalog {
-                    id,
-                    title,
-                    efforts: vec!["low", "medium", "high", "xhigh", "max"],
+                    id: id.into(),
+                    title: title.into(),
+                    efforts: ["low", "medium", "high", "xhigh", "max"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
                 })
                 .collect(),
+        });
+    }
+    if let Some(catalog) = codex {
+        entries.push(HarnessCatalog {
+            harness: "codex",
+            provider: "codex",
+            title: "Codex",
+            images: true,
+            settings_midsession: true,
+            settings_midsession_effort: true,
+            permission_modes: vec!["owner", "ask", "bypass", "read_only"],
+            models: catalog.models(),
         });
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -437,14 +453,17 @@ pub fn catalog_with(
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: vec![
                 ModelCatalog {
-                    id: "synthetic-large",
-                    title: "Большая синтетическая",
-                    efforts: vec!["low", "medium", "high"],
+                    id: "synthetic-large".into(),
+                    title: "Большая синтетическая".into(),
+                    efforts: ["low", "medium", "high"]
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
                 },
                 ModelCatalog {
-                    id: "synthetic-small",
-                    title: "Малая синтетическая",
-                    efforts: vec!["low", "medium"],
+                    id: "synthetic-small".into(),
+                    title: "Малая синтетическая".into(),
+                    efforts: ["low", "medium"].into_iter().map(str::to_owned).collect(),
                 },
             ],
         }),
@@ -511,6 +530,7 @@ pub fn registry_with_deadline(
             transmit_deadline,
             exec_dir: PathBuf::new(),
             claude_code: None,
+            codex: None,
         },
     )
 }
@@ -519,10 +539,11 @@ pub struct AdapterContext {
     pub transmit_deadline: Duration,
     pub exec_dir: PathBuf,
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
+    pub codex: Option<crate::config::CodexConfig>,
 }
 
 pub fn known_harness(profile: &str) -> bool {
-    if profile == "claude_code" {
+    if profile == "claude_code" || profile == "codex" {
         return true;
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -539,6 +560,15 @@ pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adap
     if profile == "claude_code" {
         return ctx.claude_code.clone().map(|cfg| {
             Box::new(claude_code::ClaudeCodeAdapter::new(
+                cfg,
+                ctx.exec_dir.clone(),
+                ctx.transmit_deadline,
+            )) as Box<dyn Adapter>
+        });
+    }
+    if profile == "codex" {
+        return ctx.codex.clone().map(|cfg| {
+            Box::new(codex::CodexAdapter::new(
                 cfg,
                 ctx.exec_dir.clone(),
                 ctx.transmit_deadline,

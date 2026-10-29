@@ -317,6 +317,13 @@ pub(super) async fn validate(
                 .expect("adapter config lock")
                 .claude_code
                 .is_none())
+        || (start.harness == "codex"
+            && shared
+                .adapters
+                .lock()
+                .expect("adapter config lock")
+                .codex
+                .is_none())
     {
         return Ok(Err("harness_unavailable"));
     }
@@ -790,6 +797,10 @@ impl Actor {
             if let Some(cfg) = adapters.claude_code {
                 spec["claude_code"] =
                     toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("claude_code"))?;
+            }
+            if let Some(cfg) = adapters.codex {
+                spec["codex"] =
+                    toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
             }
             if !profile.is_empty() && profile != "owner" {
                 let source = adapters

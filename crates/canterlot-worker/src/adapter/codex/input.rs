@@ -26,6 +26,7 @@ pub struct CurrentSettings {
 }
 
 // Запись model/list для проверки настроек.
+#[derive(Clone, Debug)]
 pub struct ModelEntry {
     pub id: String,
     pub title: String,
@@ -46,21 +47,12 @@ pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
                     ModelEntry {
                         id: id.to_owned(),
                         title: model
-                            .get("description")
+                            .get("displayName")
+                            .or_else(|| model.get("description"))
                             .and_then(Value::as_str)
                             .unwrap_or(id)
                             .to_owned(),
-                        efforts: model
-                            .get("efforts")
-                            .and_then(Value::as_array)
-                            .map(|efforts| {
-                                efforts
-                                    .iter()
-                                    .filter_map(Value::as_str)
-                                    .map(str::to_owned)
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
+                        efforts: model_efforts(model),
                         images: model
                             .get("inputModalities")
                             .and_then(Value::as_array)
@@ -73,6 +65,32 @@ pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
                             .unwrap_or(false),
                     }
                 })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+// `efforts` в краткой сводке или `supportedReasoningEfforts[].reasoningEffort` в схеме.
+fn model_efforts(model: &Value) -> Vec<String> {
+    if let Some(efforts) = model.get("efforts").and_then(Value::as_array) {
+        return efforts
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect();
+    }
+    model
+        .get("supportedReasoningEfforts")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .filter_map(|entry| {
+                    entry
+                        .as_str()
+                        .or_else(|| entry.get("reasoningEffort").and_then(Value::as_str))
+                })
+                .map(str::to_owned)
                 .collect()
         })
         .unwrap_or_default()
@@ -265,6 +283,7 @@ pub fn threshold_note(
 }
 
 // Активный и виденные ходы: строгий FIFO и ловля слияния ходов.
+#[derive(Clone)]
 pub struct ActiveTurn {
     pub turn_id: String,
     pub command_id: Uuid,
@@ -315,6 +334,15 @@ impl Outbox {
 
     pub fn on_turn_started(&mut self, turn_id: &str) {
         self.known_turns.insert(turn_id.to_owned());
+    }
+
+    // Привязка к живому ходу после проверки истории: без диагностики слияния.
+    pub fn attach(&mut self, turn_id: &str, command_id: Uuid) {
+        self.known_turns.insert(turn_id.to_owned());
+        self.active = Some(ActiveTurn {
+            turn_id: turn_id.to_owned(),
+            command_id,
+        });
     }
 
     // Завершение главного хода гасит активный; чужой ход не трогает.

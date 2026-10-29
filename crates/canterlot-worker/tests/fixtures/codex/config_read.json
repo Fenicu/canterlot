@@ -1,0 +1,1 @@
+{"approval_policy":"on-request","sandbox_mode":"read-only","sandbox_workspace_write":{"exclude_slash_tmp":false,"exclude_tmpdir_env_var":false,"network_access":false,"writable_roots":[]},"developer_instructions":null,"model":"gpt-6-luna"}

@@ -120,6 +120,7 @@ impl Fake {
                 executable: exe,
                 ..Default::default()
             }),
+            codex: None,
         };
         let adapter =
             adapter::registry_with("claude_code", &context).expect("Claude Code registered");
@@ -192,16 +193,16 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
     let cfg = ClaudeCodeConfig::default();
     let cli = CliVersion::Verified("2.1.311".into());
     assert!(
-        !adapter::catalog_with(None, Some(&cli))
+        !adapter::catalog_with(None, Some(&cli), None)
             .iter()
             .any(|c| c.harness == "claude_code")
     );
     assert!(
-        !adapter::catalog_with(Some(&cfg), None)
+        !adapter::catalog_with(Some(&cfg), None, None)
             .iter()
             .any(|c| c.harness == "claude_code")
     );
-    let catalog = adapter::catalog_with(Some(&cfg), Some(&cli));
+    let catalog = adapter::catalog_with(Some(&cfg), Some(&cli), None);
     let c = catalog.iter().find(|c| c.harness == "claude_code").unwrap();
     assert_eq!(c.provider, "claude");
     assert_eq!(c.title, "Claude Code");
@@ -209,11 +210,17 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
     assert!(!c.settings_midsession_effort);
     assert_eq!(c.permission_modes, ["owner", "ask", "bypass", "read_only"]);
     assert_eq!(
-        c.models.iter().map(|m| m.id).collect::<Vec<_>>(),
+        c.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
         ["opus", "sonnet", "haiku"]
     );
     for m in &c.models {
-        assert_eq!(m.efforts, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(
+            m.efforts,
+            ["low", "medium", "high", "xhigh", "max"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        );
     }
 }
 
