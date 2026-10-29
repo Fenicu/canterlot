@@ -11,6 +11,7 @@ pub mod exec;
 #[cfg(feature = "fault-injection")]
 pub mod fault_injection;
 pub mod machine;
+pub mod mcp_relay;
 pub mod media;
 pub mod ownership;
 pub mod session;

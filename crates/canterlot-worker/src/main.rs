@@ -30,6 +30,11 @@ enum Command {
         #[arg(long)]
         config: PathBuf,
     },
+    #[command(hide = true)]
+    McpRelay {
+        #[arg(long)]
+        socket: PathBuf,
+    },
     Supervise {
         #[arg(long)]
         exec_dir: PathBuf,
@@ -38,6 +43,9 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
+    if let Some(code) = mcp_relay().await {
+        return code;
+    }
     if let Some(code) = supervise().await {
         return code;
     }
@@ -46,6 +54,20 @@ async fn main() -> ExitCode {
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+async fn mcp_relay() -> Option<ExitCode> {
+    let Command::McpRelay { socket } = Cli::try_parse().ok()?.command else {
+        return None;
+    };
+    // Без tracing: в stdout идёт только JSON-RPC.
+    match canterlot_worker::mcp_relay::run(&socket).await {
+        Ok(()) => Some(ExitCode::SUCCESS),
+        Err(error) => {
+            eprintln!("mcp-relay: {error}");
+            Some(ExitCode::FAILURE)
         }
     }
 }
@@ -70,7 +92,7 @@ async fn supervise() -> Option<ExitCode> {
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let path = match Cli::parse().command {
         Command::Run { config } => config,
-        Command::Supervise { .. } => return Ok(()),
+        Command::McpRelay { .. } | Command::Supervise { .. } => return Ok(()),
         #[cfg(feature = "synthetic-adapter")]
         Command::SyntheticCli {
             profile,
