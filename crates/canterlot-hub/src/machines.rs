@@ -21,20 +21,26 @@ pub async fn add(pool: &PgPool, owner_id: Uuid, name: &str) -> Result<NewMachine
     let token = new_token()?;
     let digest = Sha256::digest(token.as_bytes());
     let machine_id = Uuid::now_v7();
-    let mut transaction = pool.begin().await?;
-    sqlx::query("insert into machines (id, owner_id, name) values ($1, $2, $3)")
-        .bind(machine_id)
-        .bind(owner_id)
-        .bind(name)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query("insert into machine_credentials (machine_id, token_sha256) values ($1, $2)")
-        .bind(machine_id)
-        .bind(digest.as_slice())
-        .execute(&mut *transaction)
-        .await?;
-    transaction.commit().await?;
-    Ok(NewMachine { machine_id, token })
+    let name = name.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("insert into machines (id, owner_id, name) values ($1, $2, $3)")
+                .bind(machine_id)
+                .bind(owner_id)
+                .bind(name)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "insert into machine_credentials (machine_id, token_sha256) values ($1, $2)",
+            )
+            .bind(machine_id)
+            .bind(digest.as_slice())
+            .execute(&mut *conn)
+            .await?;
+            Ok(NewMachine { machine_id, token })
+        })
+    })
+    .await
 }
 
 pub async fn verify(pool: &PgPool, token: &str) -> Result<Option<Uuid>, sqlx::Error> {
@@ -61,26 +67,29 @@ fn new_token() -> Result<String, sqlx::Error> {
 }
 
 pub async fn revoke(pool: &PgPool, machine_id: Uuid) -> Result<bool, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    // NO KEY UPDATE сериализует отзыв и ротацию, не блокируя FK нового курсора журнала.
-    sqlx::query("select id from machines where id = $1 for no key update")
-        .bind(machine_id)
-        .fetch_optional(&mut *tx)
-        .await?;
-    let revoked = sqlx::query(
-        "update machine_credentials set revoked_at = clock_timestamp()
-         where machine_id = $1 and revoked_at is null",
-    )
-    .bind(machine_id)
-    .execute(&mut *tx)
-    .await?
-    .rows_affected()
-        != 0;
-    if revoked {
-        notify_revoke(&mut tx, machine_id).await?;
-    }
-    tx.commit().await?;
-    Ok(revoked)
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            // NO KEY UPDATE сериализует отзыв и ротацию, не блокируя FK нового курсора журнала.
+            sqlx::query("select id from machines where id = $1 for no key update")
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+            let revoked = sqlx::query(
+                "update machine_credentials set revoked_at = clock_timestamp()
+                 where machine_id = $1 and revoked_at is null",
+            )
+            .bind(machine_id)
+            .execute(&mut *conn)
+            .await?
+            .rows_affected()
+                != 0;
+            if revoked {
+                notify_revoke(&mut *conn, machine_id).await?;
+            }
+            Ok(revoked)
+        })
+    })
+    .await
 }
 
 pub async fn rotate_token(
@@ -91,34 +100,37 @@ pub async fn rotate_token(
 ) -> Result<Option<String>, RotateTokenError> {
     let token = new_token()?;
     let digest = Sha256::digest(token.as_bytes());
-    let mut tx = pool.begin().await?;
-    if sqlx::query("select id from machines where id = $1 for no key update")
-        .bind(machine_id)
-        .fetch_optional(&mut *tx)
-        .await?
-        .is_none()
-    {
-        return Ok(None);
-    }
-    let revoked = sqlx::query("update machine_credentials set revoked_at = clock_timestamp() where machine_id = $1 and revoked_at is null")
-        .bind(machine_id).execute(&mut *tx).await?.rows_affected();
-    if revoked == 0 && !reactivate {
-        return Err(RotateTokenError::MachineRevoked);
-    }
-    sqlx::query("insert into machine_credentials (machine_id, token_sha256) values ($1, $2)")
-        .bind(machine_id)
-        .bind(digest.as_slice())
-        .execute(&mut *tx)
-        .await?;
-    if reset_local_state {
-        sqlx::query("update machines set cj_journal_id = null where id = $1")
-            .bind(machine_id)
-            .execute(&mut *tx)
-            .await?;
-    }
-    notify_revoke(&mut tx, machine_id).await?;
-    tx.commit().await?;
-    Ok(Some(token))
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if sqlx::query("select id from machines where id = $1 for no key update")
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .is_none()
+            {
+                return Ok(None);
+            }
+            let revoked = sqlx::query("update machine_credentials set revoked_at = clock_timestamp() where machine_id = $1 and revoked_at is null")
+                .bind(machine_id).execute(&mut *conn).await?.rows_affected();
+            if revoked == 0 && !reactivate {
+                return Err(RotateTokenError::MachineRevoked);
+            }
+            sqlx::query("insert into machine_credentials (machine_id, token_sha256) values ($1, $2)")
+                .bind(machine_id)
+                .bind(digest.as_slice())
+                .execute(&mut *conn)
+                .await?;
+            if reset_local_state {
+                sqlx::query("update machines set cj_journal_id = null where id = $1")
+                    .bind(machine_id)
+                    .execute(&mut *conn)
+                    .await?;
+            }
+            notify_revoke(&mut *conn, machine_id).await?;
+            Ok(Some(token))
+        })
+    })
+    .await
 }
 
 async fn notify_revoke(conn: &mut sqlx::PgConnection, machine_id: Uuid) -> Result<(), sqlx::Error> {

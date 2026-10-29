@@ -12,7 +12,7 @@ export default defineConfig({
   test: {
     include: ['tests/unit/**/*.test.ts'],
     environment: 'jsdom',
-    maxWorkers: 2,
+    maxWorkers: 6,
     testTimeout: 20000
   }
 });

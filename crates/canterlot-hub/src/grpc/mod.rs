@@ -301,30 +301,48 @@ impl HubGrpc {
             .begin()
             .await
             .map_err(|_| Status::internal("database"))?;
-        let (owner_id, previous): (Uuid, Option<Uuid>) = sqlx::query_as(
+        let (owner_id, previous): (Uuid, Option<Uuid>) = match sqlx::query_as(
             "select owner_id, cj_journal_id from machines where id = $1 for no key update",
         )
         .bind(machine_id)
         .fetch_one(&mut *tx)
         .await
-        .map_err(|_| Status::internal("database"))?;
-        if !crate::machines::credential_active(&mut tx, machine_id, &credential)
-            .await
-            .map_err(|_| Status::internal("database"))?
         {
+            Ok(row) => row,
+            Err(_) => {
+                let _ = tx.rollback().await;
+                return Err(Status::internal("database"));
+            }
+        };
+        let credential_active =
+            match crate::machines::credential_active(&mut tx, machine_id, &credential).await {
+                Ok(active) => active,
+                Err(_) => {
+                    let _ = tx.rollback().await;
+                    return Err(Status::internal("database"));
+                }
+            };
+        if !credential_active {
+            let _ = tx.rollback().await;
             return Err(Status::unauthenticated("credential_revoked"));
         }
         if let Some(previous) = previous.filter(|previous| *previous != journal_id) {
             tracing::warn!(kind = "local_state_reset", machine_id = %machine_id,
                 old_journal_id = %previous, new_journal_id = %journal_id, "local state reset");
-            crate::events::append(&mut tx, crate::events::NewEvent {
+            match crate::events::append(&mut tx, crate::events::NewEvent {
                 scope: crate::events::Scope::Conversations { owner_id },
                 kind: "local_state_reset",
                 conversation_id: None,
                 execution_id: None,
                 payload: serde_json::json!({"machine_id": machine_id, "old_journal_id": previous, "new_journal_id": journal_id}),
                 correlation_id: Uuid::now_v7(),
-            }).await.map_err(|_| Status::internal("database"))?;
+            }).await {
+                Ok(_) => {},
+                Err(_) => {
+                    let _ = tx.rollback().await;
+                    return Err(Status::internal("database"));
+                }
+            }
             tx.commit()
                 .await
                 .map_err(|_| Status::internal("database"))?;
@@ -334,14 +352,21 @@ impl HubGrpc {
             .registry
             .register(machine_id, connection_id, credential)
         else {
+            let _ = tx.rollback().await;
             return Ok(Err(rejection(RejectReason::IdentityInUse)));
         };
-        sqlx::query("update machines set cj_journal_id = $2 where id = $1")
+        match sqlx::query("update machines set cj_journal_id = $2 where id = $1")
             .bind(machine_id)
             .bind(journal_id)
             .execute(&mut *tx)
             .await
-            .map_err(|_| Status::internal("database"))?;
+        {
+            Ok(_) => {}
+            Err(_) => {
+                let _ = tx.rollback().await;
+                return Err(Status::internal("database"));
+            }
+        }
         tx.commit()
             .await
             .map_err(|_| Status::internal("database"))?;

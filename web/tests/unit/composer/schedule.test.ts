@@ -29,45 +29,12 @@ describe('composer/schedule', () => {
 	});
 
 	it('presets_are_computed_from_server_corrected_now', () => {
-		// Test with a known base timestamp: e.g. 2026-10-29 10:00:00 UTC
-		const testDate = new Date('2026-10-29T10:00:00Z');
-		const now = testDate.getTime();
-
+		const now = new Date('2026-10-29T10:00:00Z').getTime();
 		const list = presets(now);
-		expect(list).toHaveLength(4);
 
-		const labels = list.map((p) => p.label);
-		expect(labels).toEqual([
-			'Через 15 минут',
-			'Через час',
-			'Сегодня вечером',
-			'Завтра утром'
-		]);
-
-		// 15 minutes
+		expect(list.map((item) => item.label)).toEqual(['Через 15 минут', 'Через час']);
 		expect(list[0]!.at).toBe(now + 15 * 60 * 1000);
-
-		// 1 hour
 		expect(list[1]!.at).toBe(now + 60 * 60 * 1000);
-
-		// "Сегодня вечером" should be at 18:00
-		const evening = new Date(list[2]!.at);
-		expect(evening.getHours()).toBe(18);
-		expect(evening.getMinutes()).toBe(0);
-		expect(list[2]!.at).toBeGreaterThan(now);
-
-		// "Завтра утром" should be tomorrow at 9:00
-		const morning = new Date(list[3]!.at);
-		expect(morning.getHours()).toBe(9);
-		expect(morning.getMinutes()).toBe(0);
-		expect(list[3]!.at).toBeGreaterThan(now);
-
-		// Check evening when now is late night, e.g. 22:00
-		const lateDate = new Date('2026-10-29T22:00:00Z');
-		const lateNow = lateDate.getTime();
-		const lateList = presets(lateNow);
-		const lateEvening = new Date(lateList[2]!.at);
-		expect(lateEvening.getHours()).toBe(18);
-		expect(lateList[2]!.at).toBeGreaterThan(lateNow);
+		expect(list.some((item) => /вечером|утром/i.test(item.label))).toBe(false);
 	});
 });

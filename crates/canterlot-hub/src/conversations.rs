@@ -833,14 +833,20 @@ pub async fn mark_read(
     if seq < 0 {
         return Err(UpdateError::Invalid("seq"));
     }
-    let mut tx = pool.begin().await?;
-    lock_conversation(&mut tx, owner_id, id).await?;
-    sqlx::query("update conversations set last_read_seq=greatest(last_read_seq,$2) where id=$1")
-        .bind(id)
-        .bind(seq)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            lock_conversation(&mut *conn, owner_id, id).await?;
+            sqlx::query(
+                "update conversations set last_read_seq=greatest(last_read_seq,$2) where id=$1",
+            )
+            .bind(id)
+            .bind(seq)
+            .execute(&mut *conn)
+            .await?;
+            Ok::<(), UpdateError>(())
+        })
+    })
+    .await?;
     activity::refresh_with_metrics(
         pool,
         id,
@@ -1436,13 +1442,23 @@ pub async fn submit_message(
             Ok(value)
         }
         Err(crate::delivery::SubmitError::KeyRaceLost) => {
-            tx.rollback().await?;
+            let _ = tx.rollback().await;
             let mut tx = pool.begin().await?;
-            let value = submit_message_in_tx(&mut tx, &req, correlation_id).await?;
-            tx.commit().await?;
-            Ok(value)
+            match submit_message_in_tx(&mut tx, &req, correlation_id).await {
+                Ok(value) => {
+                    tx.commit().await?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    Err(error)
+                }
+            }
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
     }
 }
 

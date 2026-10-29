@@ -60,6 +60,22 @@ fn proc_stat_delta_gives_cpu_permille() {
     .unwrap();
     assert_eq!(c.sample(&[]).unwrap().cpu_permille, 500);
 }
+#[tokio::test]
+async fn proc_source_samples_through_one_collector_between_calls() {
+    use canterlot_worker::machine::metrics::{MetricsSource, ProcMetricsSource};
+    let dir = fixture();
+    let source = ProcMetricsSource::new(collector(dir.path()));
+    let first = source.sample(vec![]).await.unwrap();
+    assert_eq!(first.mem_total_bytes, 1_024_000);
+    assert_eq!(first.load1_centi, 25);
+    assert_eq!(first.cpu_permille, 0);
+    fs::write(
+        dir.path().join("stat"),
+        "cpu 150 0 150 900 0 0 0 0 50 0\ncpu0 0\n",
+    )
+    .unwrap();
+    assert_eq!(source.sample(vec![]).await.unwrap().cpu_permille, 500);
+}
 #[test]
 fn meminfo_and_loadavg_parse_fixtures() {
     assert_eq!(

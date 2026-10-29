@@ -244,31 +244,35 @@ pub async fn put(
         store.delete_blob(id).await?;
         return Err(MediaError::Invalid);
     }
-    let mut tx = pool.begin().await?;
-    sqlx::query(
-        "insert into block_media (id, execution_id, conversation_id, block_id, mime, size_bytes, sha256)
-         values ($1, $2, $3, $4, $5, $6, $7) on conflict (id) do nothing",
-    )
-    .bind(id)
-    .bind(header.execution_id)
-    .bind(conversation_id)
-    .bind(header.block_id)
-    .bind(header.mime)
-    .bind(header.size as i64)
-    .bind(&header.sha256)
-    .execute(&mut *tx)
-    .await?;
-    let row: Stored = sqlx::query_as(
-        "select execution_id, block_id, mime, size_bytes, sha256 from block_media where id=$1",
-    )
-    .bind(id)
-    .fetch_one(&mut *tx)
-    .await?;
-    if !row.same(header) {
-        return Err(MediaError::Conflict);
-    }
-    tx.commit().await?;
-    Ok(())
+    let header = header.clone();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query(
+                "insert into block_media (id, execution_id, conversation_id, block_id, mime, size_bytes, sha256)
+                 values ($1, $2, $3, $4, $5, $6, $7) on conflict (id) do nothing",
+            )
+            .bind(id)
+            .bind(header.execution_id)
+            .bind(conversation_id)
+            .bind(header.block_id)
+            .bind(header.mime)
+            .bind(header.size as i64)
+            .bind(header.sha256.clone())
+            .execute(&mut *conn)
+            .await?;
+            let row: Stored = sqlx::query_as(
+                "select execution_id, block_id, mime, size_bytes, sha256 from block_media where id=$1",
+            )
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if !row.same(&header) {
+                return Err(MediaError::Conflict);
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 async fn receive(

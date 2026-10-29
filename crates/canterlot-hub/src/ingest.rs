@@ -173,6 +173,7 @@ impl Ingest {
             })
             .collect::<Result<Vec<_>, IngestError>>()?;
         let mut tx = self.pool.begin().await?;
+        let outcome: Result<(), IngestError> = async {
         let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
             .bind(machine_id)
             .fetch_one(&mut *tx)
@@ -269,6 +270,15 @@ impl Ingest {
                 .await?;
             }
         }
+            Ok(())
+        }.await;
+        match outcome {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         tx.commit().await?;
         if let Some(dispatcher) = &self.dispatcher {
             for conversation in
@@ -373,21 +383,52 @@ impl Ingest {
                 continue;
             }
             let mut tx = self.pool.begin().await?;
-            require_active(&mut tx, machine_id, credential).await?;
-            sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
-                .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await?;
-            let rows: Vec<CursorRow> = sqlx::query_as(
+            if let Err(error) = require_active(&mut tx, machine_id, credential).await {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+            if let Err(error) = sqlx::query("insert into journal_cursors (machine_id, journal_id, kind, committed_seq) values ($1, $2, $3, 0) on conflict do nothing")
+                .bind(machine_id).bind(journal_id).bind(kind.as_str()).execute(&mut *tx).await
+            {
+                let _ = tx.rollback().await;
+                return Err(error.into());
+            }
+            let rows = match sqlx::query_as(
                 "select machine_id, kind, committed_seq, last_record_digest from journal_cursors where journal_id = $1 for update",
-            ).bind(journal_id).fetch_all(&mut *tx).await?;
-            (up_to_seq, last_digest) = checked_cursor(machine_id, kind, rows)?;
+            ).bind(journal_id).fetch_all(&mut *tx).await {
+                Ok(rows) => rows,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error.into());
+                }
+            };
+            let rows: Vec<CursorRow> = rows;
+            match checked_cursor(machine_id, kind, rows) {
+                Ok((committed, cursor_digest)) => {
+                    up_to_seq = committed;
+                    last_digest = cursor_digest;
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            }
             if record.seq <= up_to_seq {
                 if record.seq == up_to_seq && last_digest.is_some() && last_digest != digest {
                     let owner_id =
-                        sqlx::query_scalar("select owner_id from machines where id = $1")
+                        match sqlx::query_scalar("select owner_id from machines where id = $1")
                             .bind(machine_id)
                             .fetch_one(&mut *tx)
-                            .await?;
-                    events::append(
+                            .await
+                        {
+                            Ok(owner_id) => owner_id,
+                            Err(error) => {
+                                let _ = tx.rollback().await;
+                                return Err(error.into());
+                            }
+                        };
+                    let owner_id: Uuid = owner_id;
+                    if let Err(error) = events::append(
                         &mut tx,
                         NewEvent {
                             scope: Scope::Conversations { owner_id },
@@ -398,23 +439,41 @@ impl Ingest {
                             correlation_id: Uuid::now_v7(),
                         },
                     )
-                    .await?;
+                    .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error.into());
+                    }
                 }
                 tx.commit().await?;
                 continue;
             }
             if record.seq > up_to_seq + 1 {
+                let _ = tx.rollback().await;
                 return Ok(IngestOutcome::Gap {
                     committed_seq: up_to_seq,
                     got_seq: record.seq,
                 });
             }
-            let seq = i64::try_from(record.seq).map_err(|_| IngestError::InvalidRecord)?;
-            let body = record
+            let seq = match i64::try_from(record.seq).map_err(|_| IngestError::InvalidRecord) {
+                Ok(seq) => seq,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            };
+            let body = match record
                 .body
                 .as_ref()
                 .and_then(|body| body.body.as_ref())
-                .ok_or(IngestError::UnknownRecord)?;
+                .ok_or(IngestError::UnknownRecord)
+            {
+                Ok(body) => body,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            };
             let body = bounded_metadata(body);
             let body = body.as_ref();
             let correlation_id = Uuid::now_v7();
@@ -427,13 +486,27 @@ impl Ingest {
                 body,
                 correlation_id,
             )
-            .await?
+            .await
             {
-                Some(ignored) => ignored,
-                None => apply_body(&mut tx, machine_id, body, correlation_id).await?,
+                Ok(Some(ignored)) => ignored,
+                Ok(None) => match apply_body(&mut tx, machine_id, body, correlation_id).await {
+                    Ok(ignored) => ignored,
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                },
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
             };
-            sqlx::query("update journal_cursors set committed_seq = $3, last_record_digest = $4, updated_at = clock_timestamp() where machine_id = $1 and journal_id = $2")
-                .bind(machine_id).bind(journal_id).bind(seq).bind(&digest).execute(&mut *tx).await?;
+            if let Err(error) = sqlx::query("update journal_cursors set committed_seq = $3, last_record_digest = $4, updated_at = clock_timestamp() where machine_id = $1 and journal_id = $2")
+                        .bind(machine_id).bind(journal_id).bind(seq).bind(&digest).execute(&mut *tx).await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error.into());
+                    }
             tx.commit().await?;
             up_to_seq = record.seq;
             last_digest = digest;
@@ -476,9 +549,6 @@ impl Ingest {
             return Ok(IngestOutcome::Committed { up_to_seq });
         }
         let mut tx = self.pool.begin().await?;
-        // Порядок SJ: credentials → cursor → providers → queue → события.
-        // Отзыв/ротация: machines NO KEY UPDATE → credentials; FK KEY SHARE курсора с этим совместим.
-        require_active(&mut tx, machine_id, credential).await?;
         let mut locked = false;
         let mut initial_seq = up_to_seq;
         let mut ignored_count = 0;
@@ -493,6 +563,10 @@ impl Ingest {
         });
         let mut touched = BTreeSet::new();
         let mut diagnostics: Vec<(&'static str, serde_json::Value)> = Vec::new();
+        let outcome: Result<(), IngestError> = async {
+        // Порядок SJ: credentials → cursor → providers → queue → события.
+        // Отзыв/ротация: machines NO KEY UPDATE → credentials; FK KEY SHARE курсора с этим совместим.
+        require_active(&mut tx, machine_id, credential).await?;
         let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
             .bind(machine_id)
             .fetch_one(&mut *tx)
@@ -650,6 +724,15 @@ impl Ingest {
             )
             .await?;
         }
+            Ok(())
+        }.await;
+        match outcome {
+            Ok(()) => {}
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         tx.commit().await?;
         if limit_records {
             // Факт лимита мог поставить пробуждение или правило резерва.
@@ -1514,72 +1597,78 @@ impl crate::grpc::Ingest for Ingest {
             ));
         }
         observations.sort_by(|(a, _), (b, _)| a.provider.cmp(&b.provider));
-        let result = async {
-            let mut tx = self.pool.begin().await?;
-            let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
-                .bind(machine_id)
-                .fetch_one(&mut *tx)
-                .await?;
-            let providers: BTreeSet<_> = observations
-                .iter()
-                .filter(|(o, _)| limits::known_provider(&o.provider))
-                .map(|(o, _)| o.provider.as_str())
-                .collect();
-            for provider in providers {
-                limits::lock_provider(&mut tx, provider).await?;
-            }
-            let mut changed = BTreeSet::new();
-            let mut unmapped = 0_u64;
-            for (o, mapped) in observations {
-                if !limits::known_provider(&o.provider) {
-                    continue;
-                }
-                let recorded = limits::record_in_tx(&mut tx, &o, now, &self.limits, mapped).await?;
-                if recorded.provider_changed {
-                    changed.insert((o.provider, o.window));
-                }
-                if !mapped {
-                    unmapped += 1;
-                }
-            }
-            for (provider, window) in &changed {
-                limits::emit_changed(&mut tx, owner, provider, *window, Uuid::now_v7()).await?;
-            }
-            if unmapped > 0 {
-                events::append(
-                    &mut tx,
-                    NewEvent {
-                        scope: Scope::Conversations { owner_id: owner },
-                        kind: "limit_observation_unmapped",
-                        conversation_id: None,
-                        execution_id: None,
-                        payload: json!({"machine_id":machine_id,"count":unmapped}),
-                        correlation_id: Uuid::now_v7(),
-                    },
-                )
-                .await?;
-            }
-            tx.commit().await?;
-            crate::scheduler::notify_pool(&self.pool);
-            self.ignored.fetch_add(unmapped, Ordering::Relaxed);
-            if let Some(registry) = &self.registry {
-                let providers: BTreeSet<_> = changed.iter().map(|(p, _)| p).collect();
+        let pool = self.pool.clone();
+        let limits = self.limits.clone();
+        let outcome = crate::db::in_tx(&pool, move |conn| {
+            Box::pin(async move {
+                let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
+                    .bind(machine_id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                let providers: BTreeSet<_> = observations
+                    .iter()
+                    .filter(|(o, _)| limits::known_provider(&o.provider))
+                    .map(|(o, _)| o.provider.as_str())
+                    .collect();
                 for provider in providers {
-                    if limits::push_limits_snapshot(&self.pool, registry, provider)
-                        .await
-                        .is_err()
-                    {
-                        tracing::warn!(
-                            kind = "limits_snapshot_push_failed",
-                            "limits snapshot push failed"
-                        );
+                    limits::lock_provider(&mut *conn, provider).await?;
+                }
+                let mut changed = BTreeSet::new();
+                let mut unmapped = 0_u64;
+                for (o, mapped) in observations {
+                    if !limits::known_provider(&o.provider) {
+                        continue;
+                    }
+                    let recorded =
+                        limits::record_in_tx(&mut *conn, &o, now, &limits, mapped).await?;
+                    if recorded.provider_changed {
+                        changed.insert((o.provider, o.window));
+                    }
+                    if !mapped {
+                        unmapped += 1;
                     }
                 }
-            }
-            Ok::<(), sqlx::Error>(())
-        }
+                for (provider, window) in &changed {
+                    limits::emit_changed(&mut *conn, owner, provider, *window, Uuid::now_v7())
+                        .await?;
+                }
+                if unmapped > 0 {
+                    events::append(
+                        &mut *conn,
+                        NewEvent {
+                            scope: Scope::Conversations { owner_id: owner },
+                            kind: "limit_observation_unmapped",
+                            conversation_id: None,
+                            execution_id: None,
+                            payload: json!({"machine_id":machine_id,"count":unmapped}),
+                            correlation_id: Uuid::now_v7(),
+                        },
+                    )
+                    .await?;
+                }
+                Ok::<_, sqlx::Error>((changed, unmapped))
+            })
+        })
         .await;
-        result.map_err(|_| tonic::Status::internal("limits_report_database"))
+        let (changed, unmapped) =
+            outcome.map_err(|_| tonic::Status::internal("limits_report_database"))?;
+        crate::scheduler::notify_pool(&self.pool);
+        self.ignored.fetch_add(unmapped, Ordering::Relaxed);
+        if let Some(registry) = &self.registry {
+            let providers: BTreeSet<_> = changed.iter().map(|(p, _)| p).collect();
+            for provider in providers {
+                if limits::push_limits_snapshot(&self.pool, registry, provider)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(
+                        kind = "limits_snapshot_push_failed",
+                        "limits snapshot push failed"
+                    );
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn cj_records(

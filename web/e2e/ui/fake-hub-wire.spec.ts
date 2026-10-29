@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test } from './fixtures';
 import { FakeHub } from '../../testing/fake-hub';
 import type { ClientOp, ServerOp } from '../../src/lib/sync/wire';
 

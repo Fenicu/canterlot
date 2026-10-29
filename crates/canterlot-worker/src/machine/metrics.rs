@@ -4,6 +4,7 @@ use std::{
     fs,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
     time::Instant,
 };
 use uuid::Uuid;
@@ -16,6 +17,8 @@ pub enum MetricsError {
     Invalid,
     #[error("filesystem metrics failed")]
     Fs(#[from] rustix::io::Errno),
+    #[error("metrics task failed")]
+    Task,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CpuTimes {
@@ -93,6 +96,31 @@ pub fn parse_loadavg(text: &str) -> Result<(u32, u32, u32), MetricsError> {
 pub struct ExecutionProbe {
     pub execution_id: Uuid,
     pub members: Vec<(u32, u64)>,
+}
+#[async_trait::async_trait]
+pub trait MetricsSource: Send + Sync {
+    async fn sample(&self, executions: Vec<ExecutionProbe>)
+    -> Result<MachineMetrics, MetricsError>;
+}
+pub struct ProcMetricsSource(Arc<Mutex<MetricsCollector>>);
+impl ProcMetricsSource {
+    pub fn new(collector: MetricsCollector) -> Self {
+        Self(Arc::new(Mutex::new(collector)))
+    }
+}
+#[async_trait::async_trait]
+impl MetricsSource for ProcMetricsSource {
+    async fn sample(
+        &self,
+        executions: Vec<ExecutionProbe>,
+    ) -> Result<MachineMetrics, MetricsError> {
+        let collector = self.0.clone();
+        tokio::task::spawn_blocking(move || {
+            collector.lock().expect("metrics lock").sample(&executions)
+        })
+        .await
+        .map_err(|_| MetricsError::Task)?
+    }
 }
 struct Process {
     ppid: u32,

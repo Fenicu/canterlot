@@ -8,6 +8,7 @@ export const icons = {
   chevron: 'm8 5 7 7-7 7', copy: 'M9 9h12v12H9ZM3 15V3h12', branch: 'M6 3v18m0-9h8a4 4 0 0 0 4-4V3',
   share: 'M12 16V3m-5 5 5-5 5 5M5 13v8h14v-8',
   trash: 'M3 6h18M9 6V3h6v3M6 6l1 15h10l1-15M10 10v7m4-7v7', pin: 'm8 3 8 0-1 7 4 4H5l4-4ZM12 14v8',
-  warning: 'M12 3 2 21h20ZM12 9v5m0 3v1'
+  warning: 'M12 3 2 21h20ZM12 9v5m0 3v1',
+  clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4v5l3 2'
 } as const;
 export type IconName = keyof typeof icons;

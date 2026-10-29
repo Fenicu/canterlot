@@ -76,14 +76,15 @@ pub async fn dispatch_next(
     gate: GateInputs,
     correlation_id: Uuid,
 ) -> Result<DispatchOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
     let mut queue: LockedQueue =
         sqlx::query_as("select * from queue_state where conversation_id = $1 for update")
             .bind(conversation_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
     let slot = queue.slot()?;
-    let live = executions::live(&mut tx, conversation_id).await?;
+    let live = executions::live(&mut *conn, conversation_id).await?;
     let mut reasons = Vec::new();
     if queue.closed {
         reasons.push(BlockReason::Closed);
@@ -95,14 +96,14 @@ pub async fn dispatch_next(
         "select count(*) from requests where conversation_id = $1 and state = 'open'",
     )
     .bind(conversation_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
 
     let is_awaiting_phase = sqlx::query_scalar::<_, Option<bool>>(
         "select phase in ('awaiting_permission', 'awaiting_answer') from executions where conversation_id = $1 and state = 'running' order by generation desc limit 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?
     .flatten()
     .unwrap_or(false);
@@ -115,7 +116,7 @@ pub async fn dispatch_next(
         {
             queue.hold_reasons.0.push(HoldReason::AwaitingUserRequest);
             queue
-                .save(&mut tx, &slot, live.map(|(id, _, _)| id), correlation_id)
+                .save(&mut *conn, &slot, live.map(|(id, _, _)| id), correlation_id)
                 .await?;
         }
     } else if queue
@@ -128,7 +129,7 @@ pub async fn dispatch_next(
             .0
             .retain(|r| *r != HoldReason::AwaitingUserRequest);
         queue
-            .save(&mut tx, &slot, live.map(|(id, _, _)| id), correlation_id)
+            .save(&mut *conn, &slot, live.map(|(id, _, _)| id), correlation_id)
             .await?;
     }
     let mut holds: Vec<_> = queue
@@ -145,7 +146,7 @@ pub async fn dispatch_next(
         })
         .cloned()
         .collect();
-    if let Some(reserve) = derived_reserve(&mut tx, conversation_id).await?
+    if let Some(reserve) = derived_reserve(&mut *conn, conversation_id).await?
         && !holds.iter().any(|h| matches!((h, &reserve), (HoldReason::WeeklyReserve { provider: a, .. }, HoldReason::WeeklyReserve { provider: b, .. }) if a == b))
     {
         holds.push(reserve);
@@ -165,7 +166,6 @@ pub async fn dispatch_next(
         reasons.push(BlockReason::MachineNotReconciled);
     }
     if !reasons.is_empty() {
-        tx.commit().await?;
         return Ok(DispatchOutcome::Blocked(reasons));
     }
     let head: Option<(Uuid, Uuid)> = sqlx::query_as(
@@ -173,32 +173,30 @@ pub async fn dispatch_next(
          order by input_seq limit 1",
     )
     .bind(conversation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?;
     let Some((input_id, command_id)) = head else {
-        tx.commit().await?;
         return Ok(DispatchOutcome::Empty);
     };
     let (pending, rev) =
-        crate::conversations::revalidate_pending_in_tx(&mut tx, conversation_id, correlation_id)
+        crate::conversations::revalidate_pending_in_tx(&mut *conn, conversation_id, correlation_id)
             .await?;
     // Ссылки на вложения и настройки понимает только сеанс с `pilot_v1`.
     let carries_refs: bool = sqlx::query_scalar(
         "select jsonb_array_length(coalesce(payload->'attachment_ids','[]'::jsonb)) > 0 from commands where id = $1",
     )
     .bind(command_id)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     if (carries_refs || pending.as_object().is_some_and(|v| !v.is_empty()))
         && !gate.session_capabilities.iter().any(|v| v == "pilot_v1")
     {
-        tx.commit().await?;
         return Ok(DispatchOutcome::Blocked(vec![
             BlockReason::CapabilityMissing { input_id },
         ]));
     }
     sqlx::query("update commands set payload=case when $2::jsonb='{}'::jsonb then payload-'settings'-'settings_rev' else (payload-'settings'-'settings_rev') || jsonb_build_object('settings',$2::jsonb,'settings_rev',$3::bigint) end where id=$1")
-        .bind(command_id).bind(&pending).bind(rev).execute(&mut *tx).await?;
+        .bind(command_id).bind(&pending).bind(rev).execute(&mut *conn).await?;
     let (execution_id, generation, _) = live.ok_or(sqlx::Error::RowNotFound)?;
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,
@@ -209,7 +207,7 @@ pub async fn dispatch_next(
     .bind(command_id)
     .bind(execution_id)
     .bind(generation)
-    .fetch_one(&mut *tx)
+    .fetch_one(&mut *conn)
     .await?;
     let reset: Vec<Uuid> = sqlx::query_scalar(
         "update input_attachments set machine_state='pending', machine_reason=null,
@@ -218,11 +216,11 @@ pub async fn dispatch_next(
              is distinct from ('pending',null,null) returning attachment_id",
     )
     .bind(input_id)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut *conn)
     .await?;
     for attachment_id in reset {
         events::append(
-            &mut tx,
+            &mut *conn,
             NewEvent {
                 scope: Scope::Conversation {
                     id: conversation_id,
@@ -239,7 +237,7 @@ pub async fn dispatch_next(
     }
     queue
         .save(
-            &mut tx,
+            &mut *conn,
             &RunSlot::Dispatching { input_id, attempt },
             Some(execution_id),
             correlation_id,
@@ -247,10 +245,10 @@ pub async fn dispatch_next(
         .await?;
     sqlx::query("update inputs set state = 'dispatched' where id = $1")
         .bind(input_id)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     events::append(
-        &mut tx,
+        &mut *conn,
         NewEvent {
             scope: Scope::Conversation {
                 id: conversation_id,
@@ -265,9 +263,8 @@ pub async fn dispatch_next(
     .await?;
     sqlx::query("select pg_notify('canterlot_outbox', $1::text)")
         .bind(machine_id.to_string())
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
-    tx.commit().await?;
     Ok(DispatchOutcome::Dispatched {
         input_id,
         command_id,
@@ -276,4 +273,7 @@ pub async fn dispatch_next(
         execution_id,
         generation,
     })
+        })
+    })
+    .await
 }

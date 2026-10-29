@@ -1431,10 +1431,62 @@ async fn next_pilot(
         }
     }
 }
-#[tokio::test]
-async fn machine_report_follows_accepted_only_when_pilot_capability_is_echoed() {
-    use canterlot_proto::worker::v1::control_up::Msg;
-    for pilot in [false, true] {
+#[path = "support/frozen_clock.rs"]
+mod frozen_clock;
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicU32, Ordering},
+};
+
+use canterlot_proto::worker::v1::{MachineMetrics, control_up::Msg};
+use canterlot_worker::machine::metrics::{ExecutionProbe, MetricsError, MetricsSource};
+use frozen_clock::Timeline;
+
+#[derive(Default)]
+struct ScriptedMetrics {
+    calls: AtomicU32,
+    entered: tokio::sync::Notify,
+    gate: Option<tokio::sync::Semaphore>,
+}
+impl ScriptedMetrics {
+    fn instant() -> Arc<Self> {
+        Arc::default()
+    }
+    fn held() -> Arc<Self> {
+        Arc::new(Self {
+            gate: Some(tokio::sync::Semaphore::new(0)),
+            ..Default::default()
+        })
+    }
+    fn calls(&self) -> u32 {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+#[async_trait::async_trait]
+impl MetricsSource for ScriptedMetrics {
+    async fn sample(&self, _: Vec<ExecutionProbe>) -> Result<MachineMetrics, MetricsError> {
+        let number = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+        self.entered.notify_one();
+        if let Some(gate) = &self.gate {
+            gate.acquire().await.unwrap().forget();
+        }
+        Ok(MachineMetrics {
+            machine_time_ms: 1,
+            load1_centi: number,
+            ..Default::default()
+        })
+    }
+}
+
+struct FrozenWorker {
+    hub: ProtocolHub,
+    state: watch::Receiver<SessionState>,
+    stop: watch::Sender<bool>,
+    join: JoinHandle<Result<(), WorkerError>>,
+}
+impl FrozenWorker {
+    async fn start(pilot: bool, metrics_interval: Duration, metrics: Arc<ScriptedMetrics>) -> Self {
         let (mut hub, store) = ProtocolHub::start(Behavior {
             capabilities: if pilot {
                 vec!["pilot_v1".into()]
@@ -1444,57 +1496,141 @@ async fn machine_report_follows_accepted_only_when_pilot_capability_is_echoed() 
             ..Default::default()
         })
         .await;
-        let (stop, _, join) = start(hub.config.clone(), store);
-        let mut reports = 0;
-        let mut hellos = 0;
-        let until = tokio::time::Instant::now() + Duration::from_millis(200);
-        while tokio::time::Instant::now() < until {
-            match hub.event().await {
-                Observed::Hello(h, _) => {
-                    assert!(h.optional_capabilities.contains(&"pilot_v1".into()));
-                    hellos += 1
-                }
-                Observed::Control(m) if matches!(m.msg, Some(Msg::MachineReport(_))) => {
-                    assert_eq!(hellos, 2);
-                    reports += 1
-                }
-                _ => {}
+        hub.config.machine.metrics_interval = metrics_interval;
+        let worker = Worker::new(hub.config.clone(), store).with_metrics_source(metrics);
+        let state = worker.state();
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(worker.run(shutdown));
+        Self {
+            hub,
+            state,
+            stop,
+            join,
+        }
+    }
+    async fn finish(self) {
+        stop_worker(self.stop, self.join).await;
+    }
+    async fn control(&mut self) -> Msg {
+        loop {
+            if let Observed::Control(message) = self.hub.event().await {
+                return message.msg.expect("control message has a body");
             }
         }
-        assert_eq!(reports, usize::from(pilot));
-        stop_worker(stop, join).await;
+    }
+    async fn machine_report(&mut self) {
+        match self.control().await {
+            Msg::MachineReport(_) => {}
+            other => panic!("expected the machine report, got {other:?}"),
+        }
+    }
+    async fn heartbeat(&mut self, seq: u64) {
+        match self.control().await {
+            Msg::Heartbeat(beat) => assert_eq!(beat.seq, seq),
+            other => panic!("expected heartbeat {seq}, got {other:?}"),
+        }
+    }
+    async fn sample(&mut self, number: u32) {
+        match self.control().await {
+            Msg::MachineMetrics(sample) => assert_eq!(sample.load1_centi, number),
+            other => panic!("expected metrics sample {number}, got {other:?}"),
+        }
     }
 }
-#[tokio::test]
-async fn metrics_arrive_every_interval_without_delaying_heartbeats() {
-    use canterlot_proto::worker::v1::control_up::Msg;
-    let (mut hub, stop, join, _) = pilot_worker().await;
-    let mut samples = vec![];
-    let mut beats = vec![];
-    while samples.len() < 4 {
-        if let Observed::Control(m) = hub.event().await {
-            match m.msg {
-                Some(Msg::MachineMetrics(sample)) => {
-                    assert!(sample.machine_time_ms > 0);
-                    samples.push(tokio::time::Instant::now())
+
+// Часы стоят, пока тест не сдвинет их сам: порядок и сроки не зависят от нагрузки машины.
+#[tokio::test(start_paused = true)]
+async fn machine_report_follows_accepted_only_when_pilot_capability_is_echoed() {
+    frozen_clock::run(async {
+        for pilot in [false, true] {
+            let mut worker =
+                FrozenWorker::start(pilot, Duration::from_secs(30), ScriptedMetrics::instant())
+                    .await;
+            let mut hellos = 0;
+            while hellos < 2 {
+                match worker.hub.event().await {
+                    Observed::Hello(hello, _) => {
+                        assert!(hello.optional_capabilities.contains(&"pilot_v1".into()));
+                        hellos += 1;
+                    }
+                    Observed::Control(message) => {
+                        panic!("{:?} before the handshake finished", message.msg)
+                    }
+                    Observed::Data(_) => {}
                 }
-                Some(Msg::Heartbeat(_)) => beats.push(tokio::time::Instant::now()),
-                _ => {}
+            }
+            wait_state(&mut worker.state, SessionState::Live).await;
+            let timeline = Timeline::start();
+            if pilot {
+                worker.machine_report().await;
+            }
+            let heartbeat = worker.hub.config.timers.heartbeat;
+            for seq in 1..=3 {
+                timeline.at(heartbeat * seq as u32).await;
+                worker.heartbeat(seq).await;
+            }
+            worker.finish().await;
+        }
+    })
+    .await;
+}
+#[tokio::test(start_paused = true)]
+async fn metrics_arrive_every_interval_without_delaying_heartbeats() {
+    frozen_clock::run(async {
+        let interval = Duration::from_millis(35);
+        let metrics = ScriptedMetrics::instant();
+        let mut worker = FrozenWorker::start(true, interval, metrics.clone()).await;
+        worker.machine_report().await;
+        let timeline = Timeline::start();
+        let heartbeat = worker.hub.config.timers.heartbeat;
+        let mut due: Vec<_> = (1..=5)
+            .map(|k| (heartbeat * k, true))
+            .chain((1..=4).map(|k| (interval * k, false)))
+            .collect();
+        due.sort();
+        assert!(
+            due.windows(2).all(|pair| pair[0].0 != pair[1].0),
+            "heartbeat and metrics deadlines must not coincide in the checked window"
+        );
+        let (mut beats, mut samples) = (0, 0);
+        for (at, is_heartbeat) in due {
+            timeline.at(at).await;
+            if is_heartbeat {
+                beats += 1;
+                worker.heartbeat(beats).await;
+            } else {
+                samples += 1;
+                worker.sample(samples).await;
             }
         }
-    }
-    assert!(beats.len() >= 3);
-    assert!(
-        samples
-            .windows(2)
-            .all(|w| w[1] - w[0] < Duration::from_millis(160))
-    );
-    assert!(
-        beats
-            .windows(2)
-            .all(|w| w[1] - w[0] < Duration::from_millis(100))
-    );
-    stop_worker(stop, join).await;
+        assert_eq!(metrics.calls(), 4);
+        worker.finish().await;
+    })
+    .await;
+}
+#[tokio::test(start_paused = true)]
+async fn a_slow_metrics_sample_neither_delays_heartbeats_nor_overlaps_the_next_one() {
+    frozen_clock::run(async {
+        let interval = Duration::from_millis(35);
+        let metrics = ScriptedMetrics::held();
+        let mut worker = FrozenWorker::start(true, interval, metrics.clone()).await;
+        worker.machine_report().await;
+        let timeline = Timeline::start();
+        let heartbeat = worker.hub.config.timers.heartbeat;
+        timeline.at(heartbeat).await;
+        worker.heartbeat(1).await;
+        timeline.at(interval).await;
+        metrics.entered.notified().await;
+        for seq in 2..=4 {
+            timeline.at(heartbeat * seq as u32).await;
+            worker.heartbeat(seq).await;
+        }
+        assert_eq!(metrics.calls(), 1);
+        metrics.gate.as_ref().unwrap().add_permits(1);
+        worker.sample(1).await;
+        worker.finish().await;
+    })
+    .await;
 }
 #[tokio::test]
 async fn full_control_queue_drops_metrics_not_heartbeats() {
@@ -1548,34 +1684,46 @@ async fn poll_limits_request_is_answered_from_the_source() {
     assert_eq!(report.observations[1].used_permille, 960);
     stop_worker(stop, join).await;
 }
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn report_is_resent_after_reconnect_and_metrics_resume() {
-    use canterlot_proto::worker::v1::control_up::Msg;
-    let (mut hub, stop, join, _) = pilot_worker().await;
-    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
-    next_pilot(&mut hub, |m| matches!(m, Msg::MachineMetrics(_))).await;
-    hub.fail(tonic::Status::unavailable("outage")).await;
-    let mut hello = false;
-    let mut reports = 0;
-    let mut at = None;
-    loop {
-        match hub.event().await {
-            Observed::Hello(_, _) => hello = true,
-            Observed::Control(m) => match m.msg {
-                Some(Msg::MachineReport(_)) => {
-                    assert!(hello);
-                    reports += 1;
-                    at = Some(tokio::time::Instant::now())
-                }
-                Some(Msg::MachineMetrics(_)) if at.is_some() => break,
-                _ => {}
-            },
-            _ => {}
+    frozen_clock::run(async {
+        let interval = Duration::from_millis(35);
+        let metrics = ScriptedMetrics::instant();
+        let mut worker = FrozenWorker::start(true, interval, metrics.clone()).await;
+        let heartbeat = worker.hub.config.timers.heartbeat;
+        worker.machine_report().await;
+        let first = Timeline::start();
+        first.at(heartbeat).await;
+        worker.heartbeat(1).await;
+        first.at(interval).await;
+        worker.sample(1).await;
+        worker.hub.fail(tonic::Status::unavailable("outage")).await;
+        wait_backoff(&mut worker.state).await;
+        tokio::time::advance(worker.hub.config.timers.backoff_max).await;
+        let mut hellos = 0;
+        loop {
+            match worker.hub.event().await {
+                Observed::Hello(..) => hellos += 1,
+                Observed::Control(message) => match message.msg {
+                    Some(Msg::MachineReport(_)) => break,
+                    other => panic!("{other:?} before the machine report"),
+                },
+                Observed::Data(_) => {}
+            }
         }
-    }
-    assert_eq!(reports, 1);
-    assert!(at.unwrap().elapsed() < Duration::from_millis(160));
-    stop_worker(stop, join).await;
+        assert_eq!(hellos, 2);
+        let second = Timeline::start();
+        second.at(heartbeat).await;
+        worker.heartbeat(1).await;
+        second.at(interval).await;
+        worker.sample(2).await;
+        second.at(heartbeat * 2).await;
+        worker.heartbeat(2).await;
+        second.at(interval * 2).await;
+        worker.sample(3).await;
+        worker.finish().await;
+    })
+    .await;
 }
 #[tokio::test]
 async fn limits_snapshot_is_cached_volatile_and_replaced_by_the_latest() {
