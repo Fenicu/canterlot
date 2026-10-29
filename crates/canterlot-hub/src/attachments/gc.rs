@@ -36,44 +36,46 @@ async fn expire(
 ) -> Result<bool, sqlx::Error> {
     // Активное тело в любом процессе не трогаем.
     let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
-        return Ok(false);
+        return Ok::<bool, sqlx::Error>(false);
     };
     let store = &*locked;
-    let mut tx = pool.begin().await?;
-    let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
-        "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
+    let expired = crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
+                "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
+            )
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((state, updated_at, conversation_id)) = row else {
+                return Ok::<bool, sqlx::Error>(false);
+            };
+            if !matches!(state.as_str(), "created" | "uploading") || updated_at >= cutoff {
+                return Ok::<bool, sqlx::Error>(false);
+            }
+            sqlx::query(
+                "update attachments set state='failed', fail_reason='upload_expired', updated_at=clock_timestamp() where id=$1",
+            )
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+            state_event(
+                &mut *conn,
+                conversation_id,
+                id,
+                "failed",
+                Some("upload_expired"),
+                Uuid::now_v7(),
+            )
+            .await?;
+            Ok(true)
+        })
+    })
     .await?;
-    let Some((state, updated_at, conversation_id)) = row else {
-        let _ = tx.rollback().await;
-        return Ok(false);
-    };
-    if !matches!(state.as_str(), "created" | "uploading") || updated_at >= cutoff {
-        let _ = tx.rollback().await;
-        return Ok(false);
-    }
-    sqlx::query(
-        "update attachments set state='failed', fail_reason='upload_expired', updated_at=clock_timestamp() where id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    state_event(
-        &mut tx,
-        conversation_id,
-        id,
-        "failed",
-        Some("upload_expired"),
-        Uuid::now_v7(),
-    )
-    .await?;
-    tx.commit().await?;
-    if let Err(error) = store.delete_staging(id).await {
+    if expired && let Err(error) = store.delete_staging(id).await {
         log_file_error(id, &error);
     }
-    Ok(true)
+    Ok(expired)
 }
 
 /// Готовое вложение без ссылок становится `released`; blob удаляется только после commit.
@@ -84,45 +86,47 @@ async fn release(
     cutoff: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
-        return Ok(false);
+        return Ok::<bool, sqlx::Error>(false);
     };
     let store = &*locked;
-    let mut tx = pool.begin().await?;
-    let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
-        "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
+    let released = crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let row: Option<(String, DateTime<Utc>, Uuid)> = sqlx::query_as(
+                "select state, updated_at, conversation_id from attachments where id=$1 for update skip locked",
+            )
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let Some((state, updated_at, conversation_id)) = row else {
+                return Ok::<bool, sqlx::Error>(false);
+            };
+            // Новый оператор после блокировки видит ссылку, зафиксированную конкурентной привязкой.
+            if state != "ready" || updated_at >= cutoff || linked(&mut *conn, id).await? {
+                return Ok::<bool, sqlx::Error>(false);
+            }
+            sqlx::query(
+                "update attachments set state='released', updated_at=clock_timestamp() where id=$1",
+            )
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+            state_event(
+                &mut *conn,
+                conversation_id,
+                id,
+                "released",
+                None,
+                Uuid::now_v7(),
+            )
+            .await?;
+            Ok(true)
+        })
+    })
     .await?;
-    let Some((state, updated_at, conversation_id)) = row else {
-        let _ = tx.rollback().await;
-        return Ok(false);
-    };
-    // Новый оператор после блокировки видит ссылку, зафиксированную конкурентной привязкой.
-    if state != "ready" || updated_at >= cutoff || linked(&mut tx, id).await? {
-        let _ = tx.rollback().await;
-        return Ok(false);
-    }
-    sqlx::query(
-        "update attachments set state='released', updated_at=clock_timestamp() where id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    state_event(
-        &mut tx,
-        conversation_id,
-        id,
-        "released",
-        None,
-        Uuid::now_v7(),
-    )
-    .await?;
-    tx.commit().await?;
-    if let Err(error) = store.delete_blob(id).await {
+    if released && let Err(error) = store.delete_blob(id).await {
         log_file_error(id, &error);
     }
-    Ok(true)
+    Ok(released)
 }
 
 /// Картинка без ссылки из блока дольше отсрочки удаляется: строка первой, blob после commit.
@@ -134,31 +138,34 @@ async fn drop_unreferenced_media(
 ) -> Result<bool, sqlx::Error> {
     // Приём того же ID в любом процессе не трогаем.
     let Some(locked) = store.try_lock(id).map_err(sqlx::Error::Io)? else {
-        return Ok(false);
+        return Ok::<bool, sqlx::Error>(false);
     };
     let store = &*locked;
-    let mut tx = pool.begin().await?;
-    let locked: Option<Uuid> = sqlx::query_scalar(
-        "select id from block_media where id=$1 and attached_at is null and created_at < $2
-         for update skip locked",
-    )
-    .bind(id)
-    .bind(cutoff)
-    .fetch_optional(&mut *tx)
+    let dropped = crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let locked: Option<Uuid> = sqlx::query_scalar(
+                "select id from block_media where id=$1 and attached_at is null and created_at < $2
+                 for update skip locked",
+            )
+            .bind(id)
+            .bind(cutoff)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if locked.is_none() {
+                return Ok::<bool, sqlx::Error>(false);
+            }
+            sqlx::query("delete from block_media where id=$1")
+                .bind(id)
+                .execute(&mut *conn)
+                .await?;
+            Ok(true)
+        })
+    })
     .await?;
-    if locked.is_none() {
-        let _ = tx.rollback().await;
-        return Ok(false);
-    }
-    sqlx::query("delete from block_media where id=$1")
-        .bind(id)
-        .execute(&mut *tx)
-        .await?;
-    tx.commit().await?;
-    if let Err(error) = store.delete_blob(id).await {
+    if dropped && let Err(error) = store.delete_blob(id).await {
         log_file_error(id, &error);
     }
-    Ok(true)
+    Ok(dropped)
 }
 
 pub async fn run_once(

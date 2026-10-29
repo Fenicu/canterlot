@@ -460,7 +460,14 @@ impl Scheduler {
         let mut report = TickReport::default();
         loop {
             let mut tx = self.pool.begin().await?;
-            let job:Option<JobRow>=sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await?;
+            let job = sqlx::query_as("select * from scheduled_jobs where state='pending' and run_at<=$1 order by run_at,id for update skip locked limit 1").bind(now).fetch_optional(&mut *tx).await;
+            let job: Option<JobRow> = match job {
+                Ok(job) => job,
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
+            };
             let Some(job) = job else {
                 tx.commit().await?;
                 break;
@@ -503,14 +510,27 @@ impl Scheduler {
         self.faults
             .pause(crate::fault_injection::Point::SchedulerBeforeSubmit)
             .await;
-        let message = job.message()?;
+        let message = match job.message() {
+            Ok(message) => message,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         let key = format!("sched:{}", job.id);
-        let existing: Option<Uuid> =
+        let existing =
             sqlx::query_scalar("select id from inputs where owner_id=$1 and idempotency_key=$2")
                 .bind(job.owner_id)
                 .bind(&key)
                 .fetch_optional(&mut *tx)
-                .await?;
+                .await;
+        let existing: Option<Uuid> = match existing {
+            Ok(existing) => existing,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         let result = if let Some(input_id) = existing {
             Ok(input_id)
         } else {
@@ -532,8 +552,13 @@ impl Scheduler {
         };
         match result {
             Ok(input_id) => {
-                self.finish(&mut tx, job, "fired", json!({"input_id":input_id}))
-                    .await?;
+                if let Err(error) = self
+                    .finish(&mut tx, job, "fired", json!({"input_id":input_id}))
+                    .await
+                {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
                 tx.commit().await?;
                 self.dispatcher.trigger(message.conversation_id);
                 report.fired += 1;
@@ -583,8 +608,15 @@ impl Scheduler {
         report: &mut TickReport,
     ) -> Result<(), sqlx::Error> {
         let mut tx = self.pool.begin().await?;
-        let current: Option<JobRow> = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 and failures=$4 for update")
-            .bind(job.id).bind(job.attempts).bind(job.run_at).bind(job.failures).fetch_optional(&mut *tx).await?;
+        let current = sqlx::query_as("select * from scheduled_jobs where id=$1 and state='pending' and attempts=$2 and run_at=$3 and failures=$4 for update")
+            .bind(job.id).bind(job.attempts).bind(job.run_at).bind(job.failures).fetch_optional(&mut *tx).await;
+        let current: Option<JobRow> = match current {
+            Ok(current) => current,
+            Err(error) => {
+                let _ = tx.rollback().await;
+                return Err(error);
+            }
+        };
         if let Some(mut current) = current {
             current.failures = current.failures.saturating_add(1);
             if current.kind == "message" {
@@ -595,15 +627,30 @@ impl Scheduler {
                 || (!release_job && current.failures as u32 >= self.service.config.max_attempts)
             {
                 if current.kind == "message" {
-                    self.finish(&mut tx, current, "failed", json!({"error":reason}))
-                        .await?;
+                    if let Err(error) = self
+                        .finish(&mut tx, current, "failed", json!({"error":reason}))
+                        .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                 } else {
-                    sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
-                        .bind(current.id)
-                        .bind(current.failures)
-                        .execute(&mut *tx)
-                        .await?;
-                    finish_limit(&mut tx, current.id, "failed", json!({"error":reason})).await?;
+                    if let Err(error) =
+                        sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
+                            .bind(current.id)
+                            .bind(current.failures)
+                            .execute(&mut *tx)
+                            .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                    if let Err(error) =
+                        finish_limit(&mut tx, current.id, "failed", json!({"error":reason})).await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                 }
                 report.failed += 1;
             } else {
@@ -621,14 +668,36 @@ impl Scheduler {
                 if release_job {
                     delay = delay.min(Duration::from_secs(60));
                 }
-                let at = now
-                    + TimeDelta::from_std(delay).map_err(|_| {
-                        sqlx::Error::InvalidArgument("retry duration out of range".into())
-                    })?;
-                let updated: JobRow = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,updated_at=clock_timestamp() where id=$1 returning *")
-                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).fetch_one(&mut *tx).await?;
+                let at = match TimeDelta::from_std(delay)
+                    .map_err(|_| sqlx::Error::InvalidArgument("retry duration out of range".into()))
+                {
+                    Ok(at) => now + at,
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                };
+                let updated = sqlx::query_as("update scheduled_jobs set attempts=$2,run_at=$3,result=$4,failures=$5,updated_at=clock_timestamp() where id=$1 returning *")
+                    .bind(current.id).bind(current.attempts).bind(at).bind(json!({"error":reason})).bind(current.failures).fetch_one(&mut *tx).await;
+                let updated: JobRow = match updated {
+                    Ok(updated) => updated,
+                    Err(error) => {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                };
                 if updated.kind == "message" {
-                    changed(&mut tx, &updated.message()?, Uuid::now_v7()).await?;
+                    let message = match updated.message() {
+                        Ok(message) => message,
+                        Err(error) => {
+                            let _ = tx.rollback().await;
+                            return Err(error);
+                        }
+                    };
+                    if let Err(error) = changed(&mut tx, &message, Uuid::now_v7()).await {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                 }
                 report.retried += 1;
             }
@@ -669,13 +738,17 @@ impl Scheduler {
             "limit_check" => JobKind::LimitCheck,
             "limit_rule" => JobKind::LimitRule,
             _ => {
-                finish_limit(
+                if let Err(error) = finish_limit(
                     &mut tx,
                     job.id,
                     "cancelled",
                     json!({"reason":"unknown_kind"}),
                 )
-                .await?;
+                .await
+                {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
                 tx.commit().await?;
                 report.cancelled += 1;
                 return Ok(());
@@ -736,7 +809,10 @@ impl Scheduler {
         };
         match outcome {
             JobOutcome::Done(result) => {
-                finish_limit(&mut tx, job.id, "fired", result).await?;
+                if let Err(error) = finish_limit(&mut tx, job.id, "fired", result).await {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
                 tx.commit().await?;
                 report.fired += 1;
                 match kind {
@@ -762,15 +838,30 @@ impl Scheduler {
             }
             JobOutcome::Cancelled(reason) => {
                 if reason == "invalid_payload" {
-                    sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
-                        .bind(job.id)
-                        .bind(job.failures.saturating_add(1))
-                        .execute(&mut *tx)
-                        .await?;
-                    finish_limit(&mut tx, job.id, "failed", json!({"error":reason})).await?;
+                    if let Err(error) =
+                        sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
+                            .bind(job.id)
+                            .bind(job.failures.saturating_add(1))
+                            .execute(&mut *tx)
+                            .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
+                    if let Err(error) =
+                        finish_limit(&mut tx, job.id, "failed", json!({"error":reason})).await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                     report.failed += 1;
                 } else {
-                    finish_limit(&mut tx, job.id, "cancelled", json!({"reason":reason})).await?;
+                    if let Err(error) =
+                        finish_limit(&mut tx, job.id, "cancelled", json!({"reason":reason})).await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                     report.cancelled += 1;
                 }
                 tx.commit().await?;
@@ -778,8 +869,11 @@ impl Scheduler {
             JobOutcome::Retry { at, poll } => {
                 // Повтор не раньше следующей секунды: цикл тика не крутит одно задание.
                 let at = at.max(now + TimeDelta::seconds(1));
-                sqlx::query("update scheduled_jobs set run_at=$2,attempts=$3,updated_at=clock_timestamp() where id=$1")
-                    .bind(job.id).bind(at).bind(job.attempts.saturating_add(i32::from(poll))).execute(&mut *tx).await?;
+                if let Err(error) = sqlx::query("update scheduled_jobs set run_at=$2,attempts=$3,updated_at=clock_timestamp() where id=$1")
+                    .bind(job.id).bind(at).bind(job.attempts.saturating_add(i32::from(poll))).execute(&mut *tx).await {
+                    let _ = tx.rollback().await;
+                    return Err(error);
+                }
                 tx.commit().await?;
                 report.retried += 1;
                 if poll && let Some(registry) = &self.registry {
@@ -875,4 +969,82 @@ pub(crate) async fn publish_archive_cancellations(
         changed(conn, &job.message()?, correlation_id).await?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    /// Повтор с ядовитой нагрузкой: `record_failure` возвращает ошибку и синхронно
+    /// откатывает транзакцию, не оставляя блокировки строки задания.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn record_failure_retry_rolls_back_row_lock(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let job = super::JobRow {
+            id: uuid::Uuid::now_v7(),
+            kind: "message".to_string(),
+            owner_id: seed.owner_id,
+            conversation_id: Some(seed.conversation_id),
+            run_at: chrono::Utc::now() - chrono::TimeDelta::seconds(10),
+            payload: serde_json::json!({"content": 42, "attachment_ids": []}),
+            state: "pending".to_string(),
+            attempts: 0,
+            failures: 0,
+            result: None,
+        };
+        sqlx::query(
+            "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures)
+             values ($1, $2, $3, 'message', $4, $5, 0, 0)",
+        )
+        .bind(job.id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind(job.run_at)
+        .bind(&job.payload)
+        .execute(&pool)
+        .await?;
+        let scheduler = super::Scheduler::new(
+            pool.clone(),
+            crate::dispatcher::Dispatcher::channel().0,
+            crate::config::SchedulerConfig::default(),
+        );
+        let mut probe = pool.acquire().await?;
+        for i in 0..50 {
+            let id = uuid::Uuid::now_v7();
+            sqlx::query(
+                "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures)
+                 values ($1, $2, $3, 'message', $4, $5, 0, 0)",
+            )
+            .bind(id)
+            .bind(seed.owner_id)
+            .bind(seed.conversation_id)
+            .bind(job.run_at)
+            .bind(&job.payload)
+            .execute(&pool)
+            .await?;
+            let attempt = super::JobRow { id, ..job.clone() };
+            let mut report = super::TickReport::default();
+            let result = scheduler
+                .record_failure(
+                    &attempt,
+                    chrono::Utc::now(),
+                    "job_error",
+                    false,
+                    &mut report,
+                )
+                .await;
+            assert!(result.is_err(), "iteration {i}: poison job must fail");
+            let row: Option<uuid::Uuid> = sqlx::query_scalar(
+                "select id from scheduled_jobs where id=$1 for update skip locked",
+            )
+            .bind(id)
+            .fetch_optional(&mut *probe)
+            .await?;
+            assert!(
+                row.is_some(),
+                "scheduled job skipped: record_failure did not roll back synchronously"
+            );
+        }
+        Ok(())
+    }
 }

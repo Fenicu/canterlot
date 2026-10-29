@@ -66,7 +66,9 @@ pub async fn cancel_input(
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "cancel_input";
     let hash = idempotency::request_hash(OPERATION, &json!({"input_id": input_id}));
-    let mut tx = pool.begin().await?;
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
     let queue: LockedQueue = sqlx::query_as(
         "select q.* from queue_state q
          join inputs i on i.conversation_id = q.conversation_id
@@ -75,17 +77,16 @@ pub async fn cancel_input(
     )
     .bind(input_id)
     .bind(owner_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut *conn)
     .await?
     .ok_or(ControlError::NotFound)?;
-    if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
-        tx.commit().await?;
+    if let Some(outcome) = lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await? {
         return Ok(outcome);
     }
     let (state, command_id, execution_id): (String, Uuid, Option<Uuid>) =
         sqlx::query_as("select i.state, i.command_id, c.execution_id from inputs i join commands c on c.id = i.command_id where i.id = $1")
             .bind(input_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
     let state = state
         .parse()
@@ -96,10 +97,10 @@ pub async fn cancel_input(
                 "update inputs set state = 'cancelled', cancel_requested = false where id = $1",
             )
             .bind(input_id)
-            .execute(&mut *tx)
+            .execute(&mut *conn)
             .await?;
             events::append(
-                &mut tx,
+                &mut *conn,
                 NewEvent {
                     scope: Scope::Conversation {
                         id: queue.conversation_id,
@@ -117,11 +118,11 @@ pub async fn cancel_input(
         InputState::Dispatched | InputState::OnMachine => {
             sqlx::query("update inputs set cancel_requested = true where id = $1")
                 .bind(input_id)
-                .execute(&mut *tx)
+                .execute(&mut *conn)
                 .await?;
-            let cancel_command_id = target_command(&mut tx, command_id, "cancel_input").await?;
+            let cancel_command_id = target_command(&mut *conn, command_id, "cancel_input").await?;
             events::append(
-                &mut tx,
+                &mut *conn,
                 NewEvent {
                     scope: Scope::Conversation {
                         id: queue.conversation_id,
@@ -140,17 +141,19 @@ pub async fn cancel_input(
         state => CancelOutcome::TooLate { state },
     };
     record(
-        &mut tx,
+        &mut *conn,
         owner_id,
-        idempotency_key,
+        &idempotency_key,
         OPERATION,
         &hash,
         queue.conversation_id,
         &outcome,
     )
     .await?;
-    tx.commit().await?;
     Ok(outcome)
+        })
+    })
+    .await
 }
 
 pub async fn request_stop(
@@ -164,81 +167,87 @@ pub async fn request_stop(
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "request_stop";
     let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
-    let mut tx = pool.begin().await?;
-    let mut queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
-    if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
-        tx.commit().await?;
-        return Ok(outcome);
-    }
-    mark_owner_stop(&mut tx, conversation_id, false).await?;
-    crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
-    if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
-        queue.pause_reasons.0.push(PauseReason::UserStop);
-    }
-    let slot = queue.slot()?;
-    queue.save(&mut tx, &slot, None, correlation_id).await?;
-    let live = executions::live(&mut tx, conversation_id).await?;
-    let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "select id from commands where conversation_id = $1 and kind = 'interrupt'
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let mut queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            mark_owner_stop(&mut *conn, conversation_id, false).await?;
+            crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
+                .await?;
+            if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
+                queue.pause_reasons.0.push(PauseReason::UserStop);
+            }
+            let slot = queue.slot()?;
+            queue.save(&mut *conn, &slot, None, correlation_id).await?;
+            let live = executions::live(&mut *conn, conversation_id).await?;
+            let interrupt_command_id = if let Some((execution_id, generation, _)) = live {
+                let existing: Option<Uuid> = sqlx::query_scalar(
+                    "select id from commands where conversation_id = $1 and kind = 'interrupt'
              and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
              order by created_at, id limit 1",
-        )
-        .bind(conversation_id)
-        .bind(execution_id)
-        .bind(generation)
-        .fetch_optional(&mut *tx)
-        .await?;
-        Some(if let Some(existing) = existing {
-            existing
-        } else {
-            let command_id = Uuid::now_v7();
-            let machine_id: Uuid = sqlx::query_scalar(
-                "insert into commands (id, machine_id, conversation_id, execution_id,
+                )
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .fetch_optional(&mut *conn)
+                .await?;
+                Some(if let Some(existing) = existing {
+                    existing
+                } else {
+                    let command_id = Uuid::now_v7();
+                    let machine_id: Uuid = sqlx::query_scalar(
+                        "insert into commands (id, machine_id, conversation_id, execution_id,
                                        execution_generation, kind, payload, delivery_state)
                  select $1, machine_id, id, $3, $4, 'interrupt', $5, 'pending'
                  from conversations where id = $2 returning machine_id",
+                    )
+                    .bind(command_id)
+                    .bind(conversation_id)
+                    .bind(execution_id)
+                    .bind(generation)
+                    .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    notify_outbox(&mut *conn, machine_id).await?;
+                    command_id
+                })
+            } else {
+                None
+            };
+            let withdraw_command_id = withdraw_dispatch(&mut *conn, &slot).await?;
+            events::append(
+                &mut *conn,
+                queue_event(
+                    &queue,
+                    "queue_paused",
+                    live.map(|(id, _, _)| id),
+                    correlation_id,
+                ),
             )
-            .bind(command_id)
-            .bind(conversation_id)
-            .bind(execution_id)
-            .bind(generation)
-            .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
-            .fetch_one(&mut *tx)
             .await?;
-            notify_outbox(&mut tx, machine_id).await?;
-            command_id
+            let outcome = StopOutcome::Requested {
+                interrupt_command_id,
+                withdraw_command_id,
+            };
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
         })
-    } else {
-        None
-    };
-    let withdraw_command_id = withdraw_dispatch(&mut tx, &slot).await?;
-    events::append(
-        &mut tx,
-        queue_event(
-            &queue,
-            "queue_paused",
-            live.map(|(id, _, _)| id),
-            correlation_id,
-        ),
-    )
-    .await?;
-    let outcome = StopOutcome::Requested {
-        interrupt_command_id,
-        withdraw_command_id,
-    };
-    record(
-        &mut tx,
-        owner_id,
-        idempotency_key,
-        OPERATION,
-        &hash,
-        conversation_id,
-        &outcome,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(outcome)
+    })
+    .await
 }
 
 pub async fn request_stop_execution(
@@ -256,78 +265,84 @@ pub async fn request_stop_execution(
         OPERATION,
         &json!({"conversation_id": conversation_id, "force": force}),
     );
-    let mut tx = pool.begin().await?;
-    let mut queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
-    if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
-        tx.commit().await?;
-        return Ok(outcome);
-    }
-    mark_owner_stop(&mut tx, conversation_id, true).await?;
-    crate::crunch::clear_resume_in_tx(&mut tx, conversation_id, None, correlation_id).await?;
-    if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
-        queue.pause_reasons.0.push(PauseReason::UserStop);
-    }
-    let slot = queue.slot()?;
-    queue.save(&mut tx, &slot, None, correlation_id).await?;
-    let live = executions::live(&mut tx, conversation_id).await?;
-    let outcome = if let Some((execution_id, generation, _)) = live {
-        let existing: Option<Uuid> = sqlx::query_scalar(
-            "select id from commands where conversation_id = $1 and kind = 'stop_execution'
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let mut queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            mark_owner_stop(&mut *conn, conversation_id, true).await?;
+            crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
+                .await?;
+            if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
+                queue.pause_reasons.0.push(PauseReason::UserStop);
+            }
+            let slot = queue.slot()?;
+            queue.save(&mut *conn, &slot, None, correlation_id).await?;
+            let live = executions::live(&mut *conn, conversation_id).await?;
+            let outcome = if let Some((execution_id, generation, _)) = live {
+                let existing: Option<Uuid> = sqlx::query_scalar(
+                    "select id from commands where conversation_id = $1 and kind = 'stop_execution'
              and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
              and payload->>'force' = $4 order by created_at, id limit 1",
-        )
-        .bind(conversation_id)
-        .bind(execution_id)
-        .bind(generation)
-        .bind(if force { "true" } else { "false" })
-        .fetch_optional(&mut *tx)
-        .await?;
-        if let Some(command_id) = existing {
-            StopExecutionOutcome::AlreadyRequested { command_id }
-        } else {
-            let command_id = Uuid::now_v7();
-            let machine_id: Uuid = sqlx::query_scalar(
-                "insert into commands (id, machine_id, conversation_id, execution_id,
+                )
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .bind(if force { "true" } else { "false" })
+                .fetch_optional(&mut *conn)
+                .await?;
+                if let Some(command_id) = existing {
+                    StopExecutionOutcome::AlreadyRequested { command_id }
+                } else {
+                    let command_id = Uuid::now_v7();
+                    let machine_id: Uuid = sqlx::query_scalar(
+                        "insert into commands (id, machine_id, conversation_id, execution_id,
                                        execution_generation, kind, payload, delivery_state)
                  select $1, machine_id, id, $3, $4, 'stop_execution', $5, 'pending'
                  from conversations where id = $2 returning machine_id",
+                    )
+                    .bind(command_id)
+                    .bind(conversation_id)
+                    .bind(execution_id)
+                    .bind(generation)
+                    .bind(json!({"force": force}))
+                    .fetch_one(&mut *conn)
+                    .await?;
+                    notify_outbox(&mut *conn, machine_id).await?;
+                    StopExecutionOutcome::Requested { command_id, force }
+                }
+            } else {
+                StopExecutionOutcome::NothingToStop
+            };
+            withdraw_dispatch(&mut *conn, &slot).await?;
+            events::append(
+                &mut *conn,
+                queue_event(
+                    &queue,
+                    "queue_paused",
+                    live.map(|(id, _, _)| id),
+                    correlation_id,
+                ),
             )
-            .bind(command_id)
-            .bind(conversation_id)
-            .bind(execution_id)
-            .bind(generation)
-            .bind(json!({"force": force}))
-            .fetch_one(&mut *tx)
             .await?;
-            notify_outbox(&mut tx, machine_id).await?;
-            StopExecutionOutcome::Requested { command_id, force }
-        }
-    } else {
-        StopExecutionOutcome::NothingToStop
-    };
-    withdraw_dispatch(&mut tx, &slot).await?;
-    events::append(
-        &mut tx,
-        queue_event(
-            &queue,
-            "queue_paused",
-            live.map(|(id, _, _)| id),
-            correlation_id,
-        ),
-    )
-    .await?;
-    record(
-        &mut tx,
-        owner_id,
-        idempotency_key,
-        OPERATION,
-        &hash,
-        conversation_id,
-        &outcome,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(outcome)
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
 }
 
 pub(crate) async fn withdraw_dispatch(
@@ -361,25 +376,31 @@ pub async fn continue_queue(
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "continue_queue";
     let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
-    let mut tx = pool.begin().await?;
-    let _queue = lock_conversation(&mut tx, owner_id, conversation_id).await?;
-    if let Some(outcome) = lookup(&mut tx, owner_id, idempotency_key, OPERATION, &hash).await? {
-        tx.commit().await?;
-        return Ok(outcome);
-    }
-    let outcome = continue_queue_in_tx(&mut tx, owner_id, conversation_id, correlation_id).await?;
-    record(
-        &mut tx,
-        owner_id,
-        idempotency_key,
-        OPERATION,
-        &hash,
-        conversation_id,
-        &outcome,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(outcome)
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let _queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let outcome =
+                continue_queue_in_tx(&mut *conn, owner_id, conversation_id, correlation_id).await?;
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
 }
 
 pub async fn continue_queue_in_tx(

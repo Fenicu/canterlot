@@ -111,17 +111,19 @@ pub async fn start(
     conversation_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
-    let mut tx = pool.begin().await?;
-    let started = start_in_tx(
-        &mut tx,
-        owner_id,
-        conversation_id,
-        &StartOptions { resume: false },
-        correlation_id,
-    )
-    .await?;
-    tx.commit().await?;
-    Ok(started)
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            start_in_tx(
+                &mut *conn,
+                owner_id,
+                conversation_id,
+                &StartOptions { resume: false },
+                correlation_id,
+            )
+            .await
+        })
+    })
+    .await
 }
 
 pub struct StartOptions {
@@ -263,10 +265,20 @@ pub async fn set_state(
     outcome: Option<&str>,
     correlation_id: Uuid,
 ) -> Result<(), ExecutionError> {
-    let mut tx = pool.begin().await?;
-    set_state_in_tx(&mut tx, execution_id, to, outcome, correlation_id).await?;
-    tx.commit().await?;
-    Ok(())
+    let outcome = outcome.map(str::to_owned);
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            set_state_in_tx(
+                &mut *conn,
+                execution_id,
+                to,
+                outcome.as_deref(),
+                correlation_id,
+            )
+            .await
+        })
+    })
+    .await
 }
 
 pub async fn set_state_in_tx(
