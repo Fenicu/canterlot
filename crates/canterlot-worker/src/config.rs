@@ -132,6 +132,7 @@ pub enum ConfigErrorCategory {
     HubUrl,
     TokenPermissions,
     UnsupportedTokenPermissions,
+    PaidModelPollUnsupported,
 }
 
 impl ConfigError {
@@ -174,6 +175,11 @@ impl fmt::Display for ConfigError {
             ConfigErrorCategory::UnsupportedTokenPermissions => write!(
                 f,
                 "{}: token permission checks are not supported on this platform",
+                self.path.display()
+            ),
+            ConfigErrorCategory::PaidModelPollUnsupported => write!(
+                f,
+                "{}: claude_code.allow_paid_model_poll is not supported in the pilot",
                 self.path.display()
             ),
         }
@@ -236,6 +242,17 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
         .any(|profile| profile.name == "owner" || !names.insert(&profile.name))
     {
         return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
+    }
+    // Платный запрос к модели ради лимитов в пилоте не делается: явный отказ вместо тихого пути.
+    if config
+        .claude_code
+        .as_ref()
+        .is_some_and(|claude| claude.allow_paid_model_poll)
+    {
+        return Err(ConfigError::new(
+            path,
+            ConfigErrorCategory::PaidModelPollUnsupported,
+        ));
     }
     Ok(config)
 }
@@ -302,6 +319,9 @@ pub struct ClaudeCodeConfig {
     pub executable: PathBuf,
     #[serde(default)]
     pub claude_md_excludes: Vec<PathBuf>,
+    pub oauth_poll_interval_s: u64,
+    pub credentials_path: Option<PathBuf>,
+    pub allow_paid_model_poll: bool,
 }
 
 impl Default for ClaudeCodeConfig {
@@ -309,7 +329,30 @@ impl Default for ClaudeCodeConfig {
         Self {
             executable: PathBuf::from("claude"),
             claude_md_excludes: Vec::new(),
+            oauth_poll_interval_s: 1800,
+            credentials_path: None,
+            allow_paid_model_poll: false,
         }
+    }
+}
+
+impl ClaudeCodeConfig {
+    pub const MIN_OAUTH_POLL_INTERVAL_S: u64 = 900;
+
+    pub fn oauth_poll_interval(&self) -> Duration {
+        Duration::from_secs(
+            self.oauth_poll_interval_s
+                .max(Self::MIN_OAUTH_POLL_INTERVAL_S),
+        )
+    }
+
+    pub fn credentials_file(&self) -> PathBuf {
+        self.credentials_path.clone().unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".claude/.credentials.json")
+        })
     }
 }
 

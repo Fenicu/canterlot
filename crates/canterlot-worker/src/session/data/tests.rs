@@ -1,5 +1,6 @@
 use super::*;
 use crate::{
+    machine::limits::LiveLimits,
     session::tests::support::{Behavior, Observed, ProtocolHub},
     session_store::StoreThread,
 };
@@ -120,7 +121,12 @@ async fn sj_window_stops_at_eight_and_lost_head_retries_only_once() {
                 ..Default::default()
             },
             &mut active,
-            (HashMap::new(), true, JournalDiagnostics::default()),
+            (
+                HashMap::new(),
+                true,
+                JournalDiagnostics::default(),
+                LiveLimits::default(),
+            ),
         )
         .await;
         manager.shutdown().await;
@@ -193,7 +199,12 @@ async fn another_journal_progress_and_duplicate_acks_do_not_postpone_the_head() 
                 ..Default::default()
             },
             &mut active,
-            (HashMap::new(), true, JournalDiagnostics::default()),
+            (
+                HashMap::new(),
+                true,
+                JournalDiagnostics::default(),
+                LiveLimits::default(),
+            ),
         )
         .await;
         manager.shutdown().await;
@@ -269,6 +280,7 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
                 HashMap::from([(journal, 2)]),
                 true,
                 JournalDiagnostics::default(),
+                LiveLimits::default(),
             ),
         )
         .await;
@@ -338,7 +350,12 @@ async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contigu
             &mut relay,
             &timers,
             &mut active,
-            (HashMap::from([(hidden, 3)]), false, diagnostics),
+            (
+                HashMap::from([(hidden, 3)]),
+                false,
+                diagnostics,
+                LiveLimits::default(),
+            ),
         );
         let result = tokio::select! {result=ship=>result,_=shutdown_rx.changed()=>Ok(())};
         drop(stop);

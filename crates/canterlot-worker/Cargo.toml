@@ -19,6 +19,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 humantime-serde = "1.1.1"
 prost = "0.14.4"
 rand = "0.10.3"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls-native-roots", "json"] }
 rustix = { version = "1.1.5", features = ["fs", "param", "process"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

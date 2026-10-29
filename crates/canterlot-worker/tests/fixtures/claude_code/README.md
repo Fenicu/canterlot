@@ -1,4 +1,4 @@
-# Hand-built fixtures for the Claude Code stream parser (Task 2)
+# Hand-built fixtures for the Claude Code adapter tests (Tasks 2, 6)
 
 Recorded evidence lives in `docs/stage0/evidence/claude-code/` and needs no
 listing here. The files below are **constructed, confirm in live smoke**.
@@ -29,3 +29,18 @@ Each follows a recorded frame shape; the sources are given per file.
   `Read` of `/tmp/canterlot-fixture/shot.png` (the file does not exist)
   whose `tool_result` content is a single image block with a 4x3 PNG; the
   adapter must publish those bytes, not the file.
+- `limit_rejected.jsonl` — constructed, confirm in live smoke (stage 0 never
+  hit a limit). Shape source: the recorded `rate_limit_event`
+  (`resume.jsonl:25`) with the top-level `status` and the `seven_day`
+  window switched to `"rejected"` and `utilization` 1.0. Covers: a rejected
+  window becomes `LimitFact::Reached` with that window's `resetsAt`; the
+  recorded `overageStatus: "rejected"` alone is not a limit.
+- `usage_limit_429.jsonl` — constructed, confirm when a limit is actually
+  reached. Shape sources: pilot.md §15 q5 and the research
+  (`.superpowers/peer/gemini-r1-stage2-research.md`, §1 q5: `system/api_retry`
+  with `error_status: 429`, an error `assistant` frame with
+  `api_error: "usage_limit_reached"` and `api_error_params.rate_limit_info`,
+  a `result` with `is_error` and `api_error_status: 429`), the recorded error
+  `assistant` frame (`service_failure.jsonl:19`) and `rate_limit_event`
+  (`resume.jsonl:25`). Covers: the reset time of `Reached` comes from the
+  error's `rate_limit_info` (it differs from the earlier event on purpose).

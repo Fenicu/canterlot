@@ -336,6 +336,8 @@ pub struct Worker {
     relay: Option<mpsc::Receiver<SjRelay>>,
     limits_cache: LimitsCache,
     limits_source: std::sync::Arc<dyn crate::machine::limits::LimitsSource>,
+    live_limits: crate::machine::limits::LiveLimits,
+    idle_ticker: crate::machine::limits::IdleTicker,
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
 }
@@ -385,6 +387,18 @@ impl Worker {
         #[cfg(not(feature = "synthetic-adapter"))]
         let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> =
             std::sync::Arc::new(crate::machine::limits::NoLimitsSource);
+        let live_limits = crate::machine::limits::LiveLimits::default();
+        let mut idle_ticker = crate::machine::limits::IdleTicker::default();
+        let source = match &config.claude_code {
+            Some(claude) => {
+                idle_ticker.register("claude", claude.oauth_poll_interval());
+                std::sync::Arc::new(crate::machine::limits::ClaudeOAuthLimitsSource::new(
+                    claude,
+                    live_limits.clone(),
+                ))
+            }
+            None => source,
+        };
         let metrics = crate::machine::metrics::ProcMetricsSource::new(
             crate::machine::metrics::MetricsCollector::new(
                 config.data_dir.clone(),
@@ -395,6 +409,8 @@ impl Worker {
         Self {
             limits_cache: LimitsCache::default(),
             limits_source: source,
+            live_limits,
+            idle_ticker,
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
             #[cfg(feature = "fault-injection")]
@@ -895,7 +911,8 @@ impl Worker {
             None
         };
         let mut metrics_at = Instant::now() + self.config.machine.metrics_interval;
-        let mut polls: VecDeque<String> = VecDeque::new();
+        // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
+        let mut polls: VecDeque<(String, bool)> = VecDeque::new();
         let mut limits_outbound = None;
         type LimitsFuture = Pin<Box<dyn Future<Output = Vec<LimitObservation>> + Send>>;
         let mut limits_operation: Option<LimitsFuture> = None;
@@ -909,6 +926,7 @@ impl Worker {
                 probe: self.probe.clone(),
                 pilot,
                 diagnostics: diagnostics.clone(),
+                live_limits: self.live_limits.clone(),
                 client: data,
                 hello: hello.clone(),
                 tx: data_tx,
@@ -927,6 +945,7 @@ impl Worker {
             data_active,
         );
         tokio::pin!(data_loop);
+        let idle_ticker = &mut self.idle_ticker;
         type StoreFuture = Pin<Box<dyn Future<Output = Result<StoreReply, WorkerError>> + Send>>;
         let mut operation: Option<StoreFuture> = None;
         type ExecutionFuture<'a> =
@@ -935,10 +954,16 @@ impl Worker {
         loop {
             if limits_operation.is_none()
                 && limits_outbound.is_none()
-                && let Some(provider) = polls.pop_front()
+                && let Some((provider, idle)) = polls.pop_front()
             {
                 let source = self.limits_source.clone();
-                limits_operation = Some(Box::pin(async move { source.poll(&provider).await }));
+                limits_operation = Some(Box::pin(async move {
+                    if idle {
+                        source.poll_idle(&provider).await
+                    } else {
+                        source.poll(&provider).await
+                    }
+                }));
             }
             if !report_created && acknowledged >= replay_end {
                 report_created = true;
@@ -1029,7 +1054,7 @@ impl Worker {
                 message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
-                        Some(control_down::Msg::PollLimits(request)) if pilot => {polls.push_back(request.provider);}
+                        Some(control_down::Msg::PollLimits(request)) if pilot => {polls.push_back((request.provider, false));}
                         Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
@@ -1128,6 +1153,11 @@ impl Worker {
                 result = async {self.metrics_task.as_mut().unwrap().await}, if self.metrics_task.is_some() => {
                     self.metrics_task=None;
                     if let Ok(sample)=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
+                }
+                due = idle_ticker.tick(), if pilot => {
+                    for provider in due {
+                        if polls.len() < 8 && !polls.iter().any(|(queued, _)| *queued == provider) { polls.push_back((provider, true)); }
+                    }
                 }
                 observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});

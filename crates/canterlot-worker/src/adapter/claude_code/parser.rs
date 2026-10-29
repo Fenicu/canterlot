@@ -637,6 +637,14 @@ impl Parser {
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
+        // Ошибка упора несёт `rate_limit_info` отклонённого запроса: из него время сброса.
+        if let Some(info) = value
+            .get("api_error_params")
+            .and_then(|params| params.get("rate_limit_info"))
+            .filter(|info| info.is_object())
+        {
+            out.push(Parsed::RateLimit(info.clone()));
+        }
     }
 
     fn feed_user(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {

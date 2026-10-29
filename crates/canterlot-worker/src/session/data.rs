@@ -54,6 +54,7 @@ pub(super) fn session_committed(
 pub(super) struct Stream {
     pub pilot: bool,
     pub diagnostics: JournalDiagnostics,
+    pub live_limits: crate::machine::limits::LiveLimits,
     #[cfg(feature = "fault-injection")]
     pub probe: crate::fault_injection::SessionProbe,
     pub client: Client,
@@ -75,6 +76,7 @@ pub(super) async fn run(
     let Stream {
         pilot,
         diagnostics,
+        live_limits,
         #[cfg(feature = "fault-injection")]
         probe,
         mut client,
@@ -96,7 +98,7 @@ pub(super) async fn run(
             relay,
             timers,
             &mut active,
-            (cursors, pilot, diagnostics.clone()),
+            (cursors, pilot, diagnostics.clone(), live_limits.clone()),
         )
         .await
         .unwrap_err();
@@ -214,9 +216,14 @@ async fn ship(
     relay: &mut mpsc::Receiver<SjRelay>,
     timers: &WorkerTimers,
     active: &mut watch::Receiver<bool>,
-    session: (HashMap<Uuid, u64>, bool, JournalDiagnostics),
+    session: (
+        HashMap<Uuid, u64>,
+        bool,
+        JournalDiagnostics,
+        crate::machine::limits::LiveLimits,
+    ),
 ) -> Result<(), WorkerError> {
-    let (cursors, pilot, diagnostics) = session;
+    let (cursors, pilot, diagnostics, live_limits) = session;
     let mut withheld = std::collections::HashSet::new();
     let mut pending: VecDeque<Range> = VecDeque::new();
     let mut sent = cursors.clone();
@@ -259,6 +266,11 @@ async fn ship(
                 if records[0].seq != after + 1 {
                     manager.replay_sj(journal, after);
                     continue;
+                }
+                for record in &records {
+                    if let Some(RecordBody { body: Some(record_body::Body::LimitObserved(observation)), .. }) = &record.body {
+                        live_limits.note_observation(observation);
+                    }
                 }
                 ready = pack(journal, records)?;
             }

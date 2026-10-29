@@ -15,8 +15,8 @@
 | `Apache-2.0 AND ISC` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 OR BSL-1.0` | 1 | 0 | 0 | 1 |
 | `Apache-2.0 OR BSL-1.0 OR MIT` | 1 | 0 | 0 | 1 |
-| `Apache-2.0 OR ISC OR MIT` | 1 | 0 | 0 | 1 |
-| `Apache-2.0 OR MIT` | 21 | 0 | 0 | 21 |
+| `Apache-2.0 OR ISC OR MIT` | 3 | 0 | 0 | 3 |
+| `Apache-2.0 OR MIT` | 22 | 0 | 0 | 22 |
 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | 5 | 0 | 0 | 5 |
 | `Apache-2.0/MIT` | 3 | 0 | 0 | 3 |
 | `BSD-2-Clause` | 0 | 1 | 9 | 10 |
@@ -25,10 +25,11 @@
 | `BlueOak-1.0.0` | 0 | 0 | 2 | 2 |
 | `CC0-1.0` | 0 | 0 | 1 | 1 |
 | `ISC` | 2 | 1 | 10 | 13 |
-| `MIT` | 60 | 68 | 159 | 287 |
+| `MIT` | 63 | 68 | 159 | 290 |
 | `MIT AND BSD-3-Clause` | 1 | 0 | 0 | 1 |
-| `MIT OR Apache-2.0` | 196 | 0 | 0 | 196 |
+| `MIT OR Apache-2.0` | 208 | 0 | 0 | 208 |
 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | 2 | 0 | 0 | 2 |
+| `MIT OR Apache-2.0 OR Zlib` | 1 | 0 | 0 | 1 |
 | `MIT-0` | 1 | 0 | 2 | 3 |
 | `MIT/Apache-2.0` | 9 | 0 | 0 | 9 |
 | `MPL-2.0` | 0 | 12 | 2 | 14 |
@@ -38,7 +39,7 @@
 | `Unlicense OR MIT` | 3 | 0 | 0 | 3 |
 | `Zlib` | 2 | 0 | 0 | 2 |
 | `Zlib OR Apache-2.0 OR MIT` | 1 | 0 | 0 | 1 |
-| **ИТОГО** | **341** | **90** | **211** | **642** |
+| **ИТОГО** | **360** | **90** | **211** | **661** |
 
 ## Требуют внимания
 
@@ -68,7 +69,7 @@
 
 ## Крейты Rust
 
-Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 341.
+Зависимости рабочего пространства Cargo (исключая собственные крейты `canterlot-*` и прототипы `spikes`). Всего: 360.
 
 | Крейт | Версия | Лицензия | Выбрано | Репозиторий |
 | --- | --- | --- | --- | --- |
@@ -108,6 +109,7 @@
 | `bytes` | 1.12.1 | `MIT` | `MIT` | [https://github.com/tokio-rs/bytes](https://github.com/tokio-rs/bytes) |
 | `cc` | 1.10.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/cc-rs](https://github.com/rust-lang/cc-rs) |
 | `cfg-if` | 1.0.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/cfg-if](https://github.com/rust-lang/cfg-if) |
+| `cfg_aliases` | 0.2.2 | `MIT` | `MIT` | [https://github.com/katharostech/cfg_aliases](https://github.com/katharostech/cfg_aliases) |
 | `chacha20` | 0.10.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/stream-ciphers](https://github.com/RustCrypto/stream-ciphers) |
 | `chrono` | 0.4.45 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/chronotope/chrono](https://github.com/chronotope/chrono) |
 | `clap` | 4.6.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/clap-rs/clap](https://github.com/clap-rs/clap) |
@@ -117,6 +119,7 @@
 | `cmov` | 0.5.4 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
 | `colorchoice` | 1.0.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-cli/anstyle](https://github.com/rust-cli/anstyle) |
 | `const-oid` | 0.10.2 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/RustCrypto/formats](https://github.com/RustCrypto/formats) |
+| `core-foundation` | 0.10.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/servo/core-foundation-rs](https://github.com/servo/core-foundation-rs) |
 | `core-foundation-sys` | 0.8.7 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/servo/core-foundation-rs](https://github.com/servo/core-foundation-rs) |
 | `cpufeatures` | 0.2.17 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
 | `cpufeatures` | 0.3.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/utils](https://github.com/RustCrypto/utils) |
@@ -183,6 +186,7 @@
 | `humantime-serde` | 1.1.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/jean-airoldie/humantime-serde](https://github.com/jean-airoldie/humantime-serde) |
 | `hybrid-array` | 0.4.15 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hybrid-array](https://github.com/RustCrypto/hybrid-array) |
 | `hyper` | 1.12.0 | `MIT` | `MIT` | [https://github.com/hyperium/hyper](https://github.com/hyperium/hyper) |
+| `hyper-rustls` | 0.27.10 | `Apache-2.0 OR ISC OR MIT` | `MIT` | [https://github.com/rustls/hyper-rustls](https://github.com/rustls/hyper-rustls) |
 | `hyper-timeout` | 0.5.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/hjr3/hyper-timeout](https://github.com/hjr3/hyper-timeout) |
 | `hyper-util` | 0.1.21 | `MIT` | `MIT` | [https://github.com/hyperium/hyper-util](https://github.com/hyperium/hyper-util) |
 | `iana-time-zone` | 0.1.65 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/strawlab/iana-time-zone](https://github.com/strawlab/iana-time-zone) |
@@ -212,6 +216,7 @@
 | `litemap` | 0.8.3 | `Unicode-3.0` | `Unicode-3.0` | [https://github.com/unicode-org/icu4x](https://github.com/unicode-org/icu4x) |
 | `lock_api` | 0.4.14 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
 | `log` | 0.4.34 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/log](https://github.com/rust-lang/log) |
+| `lru-slab` | 0.1.3 | `MIT OR Apache-2.0 OR Zlib` | `MIT` | [https://github.com/Ralith/lru-slab](https://github.com/Ralith/lru-slab) |
 | `matchit` | 0.8.4 | `MIT AND BSD-3-Clause` | `MIT AND BSD-3-Clause` | [https://github.com/ibraheemdev/matchit](https://github.com/ibraheemdev/matchit) |
 | `md-5` | 0.11.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/RustCrypto/hashes](https://github.com/RustCrypto/hashes) |
 | `memchr` | 2.8.3 | `Unlicense OR MIT` | `MIT` | [https://github.com/BurntSushi/memchr](https://github.com/BurntSushi/memchr) |
@@ -233,6 +238,7 @@
 | `oid-registry` | 0.8.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rusticata/oid-registry](https://github.com/rusticata/oid-registry) |
 | `once_cell` | 1.21.4 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/matklad/once_cell](https://github.com/matklad/once_cell) |
 | `once_cell_polyfill` | 1.70.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/polyfill-rs/once_cell_polyfill](https://github.com/polyfill-rs/once_cell_polyfill) |
+| `openssl-probe` | 0.2.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rustls/openssl-probe](https://github.com/rustls/openssl-probe) |
 | `outref` | 0.5.2 | `MIT` | `MIT` | [https://github.com/Nugine/outref](https://github.com/Nugine/outref) |
 | `parking` | 2.2.1 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/smol-rs/parking](https://github.com/smol-rs/parking) |
 | `parking_lot` | 0.12.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/Amanieu/parking_lot](https://github.com/Amanieu/parking_lot) |
@@ -256,6 +262,9 @@
 | `prost-types` | 0.14.4 | `Apache-2.0` | `Apache-2.0` | [https://github.com/tokio-rs/prost](https://github.com/tokio-rs/prost) |
 | `pulldown-cmark` | 0.13.5 | `MIT` | `MIT` | [https://github.com/raphlinus/pulldown-cmark](https://github.com/raphlinus/pulldown-cmark) |
 | `pulldown-cmark-to-cmark` | 22.0.3 | `Apache-2.0` | `Apache-2.0` | [https://github.com/Byron/pulldown-cmark-to-cmark](https://github.com/Byron/pulldown-cmark-to-cmark) |
+| `quinn` | 0.11.12 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
+| `quinn-proto` | 0.11.19 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
+| `quinn-udp` | 0.5.16 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/quinn-rs/quinn](https://github.com/quinn-rs/quinn) |
 | `quote` | 1.0.47 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/dtolnay/quote](https://github.com/dtolnay/quote) |
 | `r-efi` | 5.3.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | `MIT` | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
 | `r-efi` | 6.0.0 | `MIT OR Apache-2.0 OR LGPL-2.1-or-later` | `MIT` | [https://github.com/r-efi/r-efi](https://github.com/r-efi/r-efi) |
@@ -264,6 +273,7 @@
 | `rand_chacha` | 0.9.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
 | `rand_core` | 0.10.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand_core](https://github.com/rust-random/rand_core) |
 | `rand_core` | 0.9.5 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rand](https://github.com/rust-random/rand) |
+| `rand_pcg` | 0.10.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-random/rngs](https://github.com/rust-random/rngs) |
 | `rcgen` | 0.14.10 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rustls/rcgen](https://github.com/rustls/rcgen) |
 | `redox_syscall` | 0.5.18 | `MIT` | `MIT` | [https://gitlab.redox-os.org/redox-os/syscall](https://gitlab.redox-os.org/redox-os/syscall) |
 | `ref-cast` | 1.0.27 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/dtolnay/ref-cast](https://github.com/dtolnay/ref-cast) |
@@ -272,16 +282,22 @@
 | `regex` | 1.13.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/regex](https://github.com/rust-lang/regex) |
 | `regex-automata` | 0.4.18 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/regex](https://github.com/rust-lang/regex) |
 | `regex-syntax` | 0.8.11 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rust-lang/regex](https://github.com/rust-lang/regex) |
+| `reqwest` | 0.12.28 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/seanmonstar/reqwest](https://github.com/seanmonstar/reqwest) |
 | `ring` | 0.17.14 | `Apache-2.0 AND ISC` | `Apache-2.0 AND ISC` | [https://github.com/briansmith/ring](https://github.com/briansmith/ring) |
+| `rustc-hash` | 2.1.3 | `Apache-2.0 OR MIT` | `MIT` | [https://github.com/rust-lang/rustc-hash](https://github.com/rust-lang/rustc-hash) |
 | `rustc_version` | 0.4.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/djc/rustc-version-rs](https://github.com/djc/rustc-version-rs) |
 | `rusticata-macros` | 4.1.0 | `MIT/Apache-2.0` | `MIT` | [https://github.com/rusticata/rusticata-macros](https://github.com/rusticata/rusticata-macros) |
 | `rustix` | 1.1.6 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | `MIT` | [https://github.com/bytecodealliance/rustix](https://github.com/bytecodealliance/rustix) |
 | `rustls` | 0.23.46 | `Apache-2.0 OR ISC OR MIT` | `MIT` | [https://github.com/rustls/rustls](https://github.com/rustls/rustls) |
+| `rustls-native-certs` | 0.8.5 | `Apache-2.0 OR ISC OR MIT` | `MIT` | [https://github.com/rustls/rustls-native-certs](https://github.com/rustls/rustls-native-certs) |
 | `rustls-pki-types` | 1.15.1 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/rustls/pki-types](https://github.com/rustls/pki-types) |
 | `rustls-webpki` | 0.103.16 | `ISC` | `ISC` | [https://github.com/rustls/webpki](https://github.com/rustls/webpki) |
 | `rustversion` | 1.0.23 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/dtolnay/rustversion](https://github.com/dtolnay/rustversion) |
 | `ryu` | 1.0.23 | `Apache-2.0 OR BSL-1.0` | `Apache-2.0` | [https://github.com/dtolnay/ryu](https://github.com/dtolnay/ryu) |
+| `schannel` | 0.1.30 | `MIT` | `MIT` | [https://github.com/steffengy/schannel-rs](https://github.com/steffengy/schannel-rs) |
 | `scopeguard` | 1.2.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/bluss/scopeguard](https://github.com/bluss/scopeguard) |
+| `security-framework` | 3.7.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/kornelski/rust-security-framework](https://github.com/kornelski/rust-security-framework) |
+| `security-framework-sys` | 2.17.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/kornelski/rust-security-framework](https://github.com/kornelski/rust-security-framework) |
 | `semver` | 1.0.28 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/dtolnay/semver](https://github.com/dtolnay/semver) |
 | `serde` | 1.0.229 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
 | `serde_core` | 1.0.229 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/serde-rs/serde](https://github.com/serde-rs/serde) |
@@ -344,6 +360,7 @@
 | `tonic-prost` | 0.14.6 | `MIT` | `MIT` | [https://github.com/hyperium/tonic](https://github.com/hyperium/tonic) |
 | `tonic-prost-build` | 0.14.6 | `MIT` | `MIT` | [https://github.com/hyperium/tonic](https://github.com/hyperium/tonic) |
 | `tower` | 0.5.3 | `MIT` | `MIT` | [https://github.com/tower-rs/tower](https://github.com/tower-rs/tower) |
+| `tower-http` | 0.6.11 | `MIT` | `MIT` | [https://github.com/tower-rs/tower-http](https://github.com/tower-rs/tower-http) |
 | `tower-layer` | 0.3.3 | `MIT` | `MIT` | [https://github.com/tower-rs/tower](https://github.com/tower-rs/tower) |
 | `tower-service` | 0.3.3 | `MIT` | `MIT` | [https://github.com/tower-rs/tower](https://github.com/tower-rs/tower) |
 | `tracing` | 0.1.44 | `MIT` | `MIT` | [https://github.com/tokio-rs/tracing](https://github.com/tokio-rs/tracing) |
@@ -376,9 +393,12 @@
 | `wasi` | 0.11.1+wasi-snapshot-preview1 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | `MIT` | [https://github.com/bytecodealliance/wasi](https://github.com/bytecodealliance/wasi) |
 | `wasip2` | 1.0.4+wasi-0.2.12 | `Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT` | `MIT` | [https://github.com/bytecodealliance/wasi-rs](https://github.com/bytecodealliance/wasi-rs) |
 | `wasm-bindgen` | 0.2.129 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen](https://github.com/wasm-bindgen/wasm-bindgen) |
+| `wasm-bindgen-futures` | 0.4.79 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/futures) |
 | `wasm-bindgen-macro` | 0.2.129 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/macro) |
 | `wasm-bindgen-macro-support` | 0.2.129 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support](https://github.com/wasm-bindgen/wasm-bindgen/tree/main/crates/macro-support) |
 | `wasm-bindgen-shared` | 0.2.129 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/shared) |
+| `web-sys` | 0.3.106 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys](https://github.com/wasm-bindgen/wasm-bindgen/tree/master/crates/web-sys) |
+| `web-time` | 1.1.0 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/daxpedda/web-time](https://github.com/daxpedda/web-time) |
 | `whoami` | 2.1.3 | `Apache-2.0 OR BSL-1.0 OR MIT` | `MIT` | [https://github.com/ardaku/whoami](https://github.com/ardaku/whoami) |
 | `windows-core` | 0.62.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/microsoft/windows-rs](https://github.com/microsoft/windows-rs) |
 | `windows-implement` | 0.60.2 | `MIT OR Apache-2.0` | `MIT` | [https://github.com/microsoft/windows-rs](https://github.com/microsoft/windows-rs) |
