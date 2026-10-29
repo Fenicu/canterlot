@@ -47,7 +47,8 @@ export type ServerOp =
         | Hidden
         | PhaseChanged
         | Oversized
-        | QueueResumed;
+        | QueueResumed
+        | InstructionPresetChanged;
     }
   | {
       op: "resync_required";
@@ -95,6 +96,7 @@ export type ContentBlock =
       sha256: string;
       image: boolean;
     };
+export type PresetKind = "clean" | "owner" | "custom";
 
 export interface InputQueued {
   v: 1;
@@ -954,4 +956,38 @@ export interface QueueResumed {
   payload: {
     pause_reasons: {}[];
   };
+}
+export interface InstructionPresetChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "instruction_preset_changed";
+  payload: {
+    preset: PresetSummary;
+    deleted: boolean;
+  };
+}
+export interface PresetSummary {
+  id: string;
+  kind: PresetKind;
+  title: string;
+  description: string;
+  revision?: number | null;
+  text_bytes?: number | null;
+  created: PresetOrigin;
+  last_edit?: PresetOrigin | null;
+  used_by: number;
+}
+export interface PresetOrigin {
+  by: string;
+  conversation_id: Uuid | null;
+  conversation_title: string | null;
+  at?: Time | null;
 }

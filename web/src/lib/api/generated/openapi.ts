@@ -595,6 +595,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/presets": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_presets"];
+        put?: never;
+        post: operations["post__api_v1_presets"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/presets/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_presets__id_"];
+        put?: never;
+        post?: never;
+        delete: operations["delete__api_v1_presets__id_"];
+        options?: never;
+        head?: never;
+        patch: operations["patch__api_v1_presets__id_"];
+        trace?: never;
+    };
     "/api/v1/scheduled/{id}": {
         parameters: {
             query?: never;
@@ -998,10 +1030,17 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict";
+        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
+            /**
+             * Format: int64
+             * @description Текущая версия пресета (`preset_revision_conflict`).
+             */
+            current_revision?: number;
             current_state?: string;
+            /** @description Поле запроса, которое не прошло проверку (`preset_invalid`). */
+            field?: string;
             question_id?: string;
             reason?: string;
             reasons?: components["schemas"]["ArchiveReason"][];
@@ -1225,6 +1264,7 @@ export interface components {
             groups: components["schemas"]["Group"][];
             items: components["schemas"]["ListItem"][];
             limits: components["schemas"]["ProviderView"][];
+            presets: components["schemas"]["PresetSummary"][];
             truncated: boolean;
         };
         LiveExecutionView: {
@@ -1385,6 +1425,52 @@ export interface components {
             used_pct: number;
             /** Format: int32 */
             used_permille: number;
+        };
+        /** @description Детальный ответ: текст только у пользовательских пресетов. */
+        Preset: components["schemas"]["PresetSummary"] & {
+            text?: string | null;
+        };
+        PresetBody: {
+            description?: string | null;
+            text: string;
+            title: string;
+        };
+        /**
+         * @description Вид пресета в списках и событиях.
+         * @enum {string}
+         */
+        PresetKind: "clean" | "owner" | "custom";
+        /** @description Кто создал пресет или внёс последнюю правку; текст правки не несёт. */
+        PresetOrigin: {
+            at?: string | null;
+            /** @description `builtin`, `owner` или `agent`. */
+            by: string;
+            /** Format: uuid */
+            conversation_id?: string | null;
+            conversation_title?: string | null;
+        };
+        PresetPatchBody: {
+            /** Format: int64 */
+            base_revision: number;
+            description?: string | null;
+            text?: string | null;
+            title?: string | null;
+        };
+        /** @description Строка списка, события и снимка: текста пресета здесь нет. */
+        PresetSummary: {
+            created: components["schemas"]["PresetOrigin"];
+            description: string;
+            /** @description `clean`, `owner` или UUID пользовательского пресета. */
+            id: string;
+            kind: components["schemas"]["PresetKind"];
+            last_edit?: components["schemas"]["PresetOrigin"] | null;
+            /** Format: int64 */
+            revision?: number | null;
+            /** Format: int64 */
+            text_bytes?: number | null;
+            title: string;
+            /** Format: int64 */
+            used_by: number;
         };
         /** @enum {string} */
         ProbeReason: "database" | "service";
@@ -1567,6 +1653,7 @@ export interface components {
                 groups: components["schemas"]["Group"][];
                 items: components["schemas"]["ListItem"][];
                 limits: components["schemas"]["ProviderView"][];
+                presets: components["schemas"]["PresetSummary"][];
                 truncated: boolean;
             };
             scope: string;
@@ -3531,6 +3618,189 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_presets: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Пресеты владельца без текста */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PresetSummary"][];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_presets: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresetBody"];
+            };
+        };
+        responses: {
+            /** @description Пресет создан */
+            201: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Preset"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_presets__id_: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Пресет; текст только у пользовательского */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Preset"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    delete__api_v1_presets__id_: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Пресет удалён, сессии держат копию */
+            204: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    patch__api_v1_presets__id_: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PresetPatchBody"];
+            };
+        };
+        responses: {
+            /** @description Пресет изменён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Preset"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

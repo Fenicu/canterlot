@@ -5,7 +5,7 @@ use std::{fs, io::Write, path::PathBuf, process::ExitCode};
 use canterlot_hub::{
     background::{Background, BackgroundDeps},
     config::HubConfig,
-    db, dispatcher, grpc, http, ingest, installation, machines,
+    db, dispatcher, grpc, http, ingest, installation, machines, presets,
     session::Registry,
 };
 use clap::{Parser, Subcommand};
@@ -137,6 +137,9 @@ async fn run(args: Args) -> Result<(), String> {
             let installation = installation::check(&pool, &config.manifest)
                 .await
                 .map_err(|error| error.to_string())?;
+            presets::seed_all_missing(&pool)
+                .await
+                .map_err(|_| "presets_seed_error".to_owned())?;
             serve(pool.clone(), config, installation).await?;
         }
         Command::Openapi => unreachable!("handled before the config is loaded"),

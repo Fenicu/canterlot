@@ -60,6 +60,7 @@
 | Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
 | Список | `conversation_created` | Создание разговора (полный элемент списка) |
 | Список | `group_changed` | Группы владельца и счётчики |
+| Список | `instruction_preset_changed` | Пресеты инструкций владельца |
 | Список | `limits_changed` | Лимиты провайдера |
 | Машины | `machine_availability_changed` | Доступность машины |
 | Машины | `machine_report_updated` | Каталог и сведения машины |
@@ -137,12 +138,18 @@
 | `upload_in_progress` | 409 | `browser` | `after_condition` | Вложение уже загружается |
 | `checksum_mismatch` | 422 | `browser` | `never` | Содержимое не совпало с контрольной суммой |
 | `attachment_conflict` | 409 | `browser` | `never` | Вложение уже завершено с другой контрольной суммой |
+| `preset_not_found` | 404 | `browser` | `never` | Пресет не найден |
+| `preset_builtin` | 409 | `browser` | `never` | Встроенный пресет нельзя изменить или удалить |
+| `preset_revision_conflict` | 409 | `browser` | `after_condition` | Пресет уже изменён |
+| `preset_title_taken` | 409 | `browser` | `never` | Пресет с таким названием уже есть |
+| `preset_limit_reached` | 409 | `browser` | `after_condition` | Слишком много пресетов |
+| `preset_invalid` | 422 | `browser` | `never` | Некорректный пресет |
 
 Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
 
-`decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
+`decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. `preset_revision_conflict` содержит `details.current_revision` (версию, с которой нужно повторить правку), `preset_invalid` — `details.field` (`title`, `description` или `text`). Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
 
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
 
@@ -187,6 +194,11 @@
 | `POST /api/v1/groups` | 201, новая группа с `name` |
 | `PATCH /api/v1/groups/{id}` | Имя и/или позиция группы |
 | `DELETE /api/v1/groups/{id}` | 204; разговоры сохраняются |
+| `GET /api/v1/presets` | Сводки пресетов без текста: сначала `clean` и `owner`, затем пользовательские по названию |
+| `GET /api/v1/presets/{id}` | Пресет; `text` только у пользовательского (`clean`, `owner` или UUID) |
+| `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
+| `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
+| `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
 | `GET /api/v1/machines` | Каталоги, профили, ОС, доступность, метрики, сессии, предупреждения |
 | `GET /api/v1/machines/{id}` | Та же структура одной машины |
 | `GET /api/v1/machines/{id}/workdirs/recent` | `workdirs`, последние 20 различных каталогов этой машины |
@@ -204,6 +216,14 @@
 У машины `availability_since` соответствует `machines.availability_at`, `heartbeat_age_ms` берётся из Registry (при отсутствии соединения `null`). Предупреждения: `disk_usage_high` при использовании диска не ниже `[machines].disk_warn_pct`, `metrics_stale` при отсутствии или возрасте метрик не меньше `[machines].metrics_stale_after`, `limits_mismatch` при расхождении лимитов вложений.
 
 История принимает `provider`, `from`, `to` (RFC 3339), `tz` (имя зоны PostgreSQL, по умолчанию UTC). По умолчанию диапазон равен `[limits].history_days`, максимальный диапазон 366 дней, правая граница исключается. Неверная зона даёт `invalid_request`. `used_permille` хранится целым числом, `used_pct = used_permille / 10` вычисляется при чтении. Серии содержат `observed_at`, `used_permille`, `used_pct`.
+
+## Пресеты инструкций
+
+Именованные тексты инструкций агента хранятся в хабе (`instruction_presets` и `instruction_preset_revisions`), а не в конфигурации воркера. Встроенные пресеты `clean` («Без инструкций», default для новых сессий) и `owner` («Как у владельца») — это код, их нельзя изменить или удалить; у них нет текста и версии. Стартовый пресет «Исполнитель (английский)» — обычный пользовательский пресет (создатель — владелец): общение, рассуждения и отчёты на английском, язык коммитов, интерфейса и документации задаёт задача; его можно менять и удалять, после удаления он не воссоздаётся.
+
+Каждая правка увеличивает `revision` на единицу и пишет полную строку версии, поэтому номер версии всегда называет один текст; идущие сессии держат применённую копию. Удаление мягкое: строки и версии остаются, из списков пресет пропадает. Название уникально без учёта регистра, не длиннее 80 символов и отличается от обоих встроенных; текст не пуст и не больше 64 КиБ; не больше 100 пользовательских пресетов на владельца. Правка требует `base_revision`, при расхождении ответ `preset_revision_conflict` с `details.current_revision`.
+
+Сводки (`PresetSummary`: вид, название, описание, версия, объём текста в байтах, создатель и последняя правка с пометкой агента, счётчик `used_by`) не содержат текста; текст отдаёт только детальное чтение и чтение агента. Изменение публикует `instruction_preset_changed` (`{preset, deleted}`) в области списка, снимок списка несёт поле `presets`. Текст пресета — данные уровня сообщения: он не попадает в журналы, `Debug`, события, снимки и списки.
 
 ## Лимиты, «кранч» и недельный резерв
 
@@ -341,7 +361,7 @@ Worker при подготовке исполнения синхронизиру
 
 Ответ диапазона показывает `head` из той же транзакции, что и события. Курсор ниже сохранённого журнала получает `cursor_too_old`, курсор выше головы `cursor_ahead`; `oldest_available_seq` является десятичной строкой (при пустом журнале это `head+1`). Клиент загружает новый снимок и начинает хвост после его `cursor`. До 256 исходных событий проходят через единую `events::project_for_client`; неизвестный вид становится `hidden` с `payload:{}`, `conversation_id:null`, `execution_id:null`. Соседние заглушки одной области с последовательными номерами объединяются: начальные `id`, `correlation_id`, `committed_at_from`, `scope_seq_from` сохраняются, конечные `scope_seq`, `committed_at` берутся из последнего события. Через разрыв, видимое событие или другую область объединение не проходит.
 
-Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
+Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
 
 ### Метаданные фактов агента
 
@@ -416,6 +436,7 @@ Pump читает журнал только при доступной ёмкос
 | 20 | Синхронизация и служебная инфраструктура | `GET /api/v1/me`, `GET /api/v1/config`, `GET /api/v1/openapi.json`, `GET /api/v1/events`, `GET /api/v1/ws`, `GET /healthz`, `GET /readyz` | `hidden`, `oversized`, `resync_required`, `lagged`, `close` | 4, 7a, 7b |
 | 21 | Основания межсессионных инструментов (§12): вычисляемое состояние с доказательствами и контракт подписок | активность (строка 15) и области WSS (строка 20) | `derived_changed` | 5, 7b |
 | 22 | Лимиты, видимые модели (§7): только путь данных; инструмент MCP и пометка 80/90/95 % в планах 2a/2b | – (`ControlDown.limits_snapshot` для сеансов `pilot_v1`) | `limits_changed` | 1, 2, 3 |
+| 23 | Пресеты инструкций: список без текста, создание и правка с контролем версий, стартовый пресет исполнителя, мягкое удаление (план 2c, задача 2) | `GET /api/v1/presets`, `POST /api/v1/presets`, `GET /api/v1/presets/{id}`, `PATCH /api/v1/presets/{id}`, `DELETE /api/v1/presets/{id}`; сводки в снимке списка | `instruction_preset_changed` | 2c-2 |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.
 

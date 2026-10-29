@@ -126,6 +126,12 @@ error_codes! {
     UploadInProgress => "upload_in_progress", 409, Browser, AfterCondition, "Вложение уже загружается";
     ChecksumMismatch => "checksum_mismatch", 422, Browser, Never, "Содержимое не совпало с контрольной суммой";
     AttachmentConflict => "attachment_conflict", 409, Browser, Never, "Вложение уже завершено с другой контрольной суммой";
+    PresetNotFound => "preset_not_found", 404, Browser, Never, "Пресет не найден";
+    PresetBuiltin => "preset_builtin", 409, Browser, Never, "Встроенный пресет нельзя изменить или удалить";
+    PresetRevisionConflict => "preset_revision_conflict", 409, Browser, AfterCondition, "Пресет уже изменён";
+    PresetTitleTaken => "preset_title_taken", 409, Browser, Never, "Пресет с таким названием уже есть";
+    PresetLimitReached => "preset_limit_reached", 409, Browser, AfterCondition, "Слишком много пресетов";
+    PresetInvalid => "preset_invalid", 422, Browser, Never, "Некорректный пресет";
 }
 
 impl From<crate::conversations::SettingsError> for ApiError {
@@ -203,6 +209,14 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub question_id: Option<String>,
+    /// Поле запроса, которое не прошло проверку (`preset_invalid`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub field: Option<String>,
+    /// Текущая версия пресета (`preset_revision_conflict`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub current_revision: Option<i64>,
 }
 
 impl ErrorDetails {
@@ -444,6 +458,31 @@ impl From<crate::groups::GroupError> for ApiError {
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             E::Db(e) => return e.into(),
         })
+    }
+}
+
+impl From<crate::presets::PresetError> for ApiError {
+    fn from(e: crate::presets::PresetError) -> Self {
+        use crate::presets::PresetError as E;
+        match e {
+            E::NotFound => Self::new(ErrorCode::PresetNotFound),
+            E::Builtin => Self::new(ErrorCode::PresetBuiltin),
+            E::RevisionConflict { current } => Self::new(ErrorCode::PresetRevisionConflict)
+                .with_details(ErrorDetails {
+                    current_revision: Some(current),
+                    ..Default::default()
+                }),
+            E::TitleTaken => Self::new(ErrorCode::PresetTitleTaken),
+            E::LimitReached => Self::new(ErrorCode::PresetLimitReached),
+            E::Invalid { field } => {
+                Self::new(ErrorCode::PresetInvalid).with_details(ErrorDetails {
+                    field: Some(field.to_owned()),
+                    ..Default::default()
+                })
+            }
+            E::IdempotencyConflict => Self::new(ErrorCode::IdempotencyConflict),
+            E::Db(e) => e.into(),
+        }
     }
 }
 

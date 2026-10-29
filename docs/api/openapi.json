@@ -3357,6 +3357,312 @@
         }
       }
     },
+    "/api/v1/presets": {
+      "get": {
+        "tags": [
+          "presets"
+        ],
+        "operationId": "get__api_v1_presets",
+        "responses": {
+          "200": {
+            "description": "Пресеты владельца без текста",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/PresetSummary"
+                  }
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "presets"
+        ],
+        "operationId": "post__api_v1_presets",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresetBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Пресет создан",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Preset"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/v1/presets/{id}": {
+      "get": {
+        "tags": [
+          "presets"
+        ],
+        "operationId": "get__api_v1_presets__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Пресет; текст только у пользовательского",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Preset"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "presets"
+        ],
+        "operationId": "delete__api_v1_presets__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Пресет удалён, сессии держат копию",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "presets"
+        ],
+        "operationId": "patch__api_v1_presets__id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PresetPatchBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Пресет изменён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Preset"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/scheduled/{id}": {
       "delete": {
         "tags": [
@@ -5003,16 +5309,31 @@
           "offset_mismatch",
           "upload_in_progress",
           "checksum_mismatch",
-          "attachment_conflict"
+          "attachment_conflict",
+          "preset_not_found",
+          "preset_builtin",
+          "preset_revision_conflict",
+          "preset_title_taken",
+          "preset_limit_reached",
+          "preset_invalid"
         ]
       },
       "ErrorDetails": {
         "type": "object",
         "description": "Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок.",
         "properties": {
+          "current_revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Текущая версия пресета (`preset_revision_conflict`)."
+          },
           "current_state": {
             "type": "string",
             "pattern": "^(open|decision_saved|decision_transmitting|decision_applied|decision_not_applied|closed_without_decision)$"
+          },
+          "field": {
+            "type": "string",
+            "description": "Поле запроса, которое не прошло проверку (`preset_invalid`)."
           },
           "question_id": {
             "type": "string"
@@ -5950,6 +6271,7 @@
           "truncated",
           "counts",
           "groups",
+          "presets",
           "limits"
         ],
         "properties": {
@@ -5972,6 +6294,12 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ProviderView"
+            }
+          },
+          "presets": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PresetSummary"
             }
           },
           "truncated": {
@@ -6581,6 +6909,177 @@
             "type": "integer",
             "format": "int32",
             "minimum": 0
+          }
+        }
+      },
+      "Preset": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/PresetSummary"
+          },
+          {
+            "type": "object",
+            "properties": {
+              "text": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          }
+        ],
+        "description": "Детальный ответ: текст только у пользовательских пресетов."
+      },
+      "PresetBody": {
+        "type": "object",
+        "required": [
+          "title",
+          "text"
+        ],
+        "properties": {
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "PresetKind": {
+        "type": "string",
+        "description": "Вид пресета в списках и событиях.",
+        "enum": [
+          "clean",
+          "owner",
+          "custom"
+        ]
+      },
+      "PresetOrigin": {
+        "type": "object",
+        "description": "Кто создал пресет или внёс последнюю правку; текст правки не несёт.",
+        "required": [
+          "by"
+        ],
+        "properties": {
+          "at": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "by": {
+            "type": "string",
+            "description": "`builtin`, `owner` или `agent`."
+          },
+          "conversation_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "conversation_title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PresetPatchBody": {
+        "type": "object",
+        "required": [
+          "base_revision"
+        ],
+        "properties": {
+          "base_revision": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "PresetSummary": {
+        "type": "object",
+        "description": "Строка списка, события и снимка: текста пресета здесь нет.",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "description",
+          "created",
+          "used_by"
+        ],
+        "properties": {
+          "created": {
+            "$ref": "#/components/schemas/PresetOrigin"
+          },
+          "description": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string",
+            "description": "`clean`, `owner` или UUID пользовательского пресета."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PresetKind"
+          },
+          "last_edit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PresetOrigin"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "text_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "used_by": {
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -7302,6 +7801,7 @@
               "truncated",
               "counts",
               "groups",
+              "presets",
               "limits"
             ],
             "properties": {
@@ -7324,6 +7824,12 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/ProviderView"
+                }
+              },
+              "presets": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PresetSummary"
                 }
               },
               "truncated": {

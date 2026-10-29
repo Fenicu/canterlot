@@ -52,7 +52,13 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   'offset_mismatch',
   'upload_in_progress',
   'checksum_mismatch',
-  'attachment_conflict'
+  'attachment_conflict',
+  'preset_not_found',
+  'preset_builtin',
+  'preset_revision_conflict',
+  'preset_title_taken',
+  'preset_limit_reached',
+  'preset_invalid'
 ];
 
 const VALID_ACTIONS: ErrorAction[] = [
@@ -81,7 +87,7 @@ describe('api/errors', () => {
   });
 
   it('error_actions_cover_every_code_in_the_api_error_table', () => {
-    expect(ALL_ERROR_CODES.length).toBe(45);
+    expect(ALL_ERROR_CODES.length).toBe(51);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(400, code, 'Server text', 'browser', 'never', 'corr-123');

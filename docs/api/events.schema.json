@@ -119,6 +119,9 @@
     },
     {
       "$ref": "#/$defs/queue_resumed"
+    },
+    {
+      "$ref": "#/$defs/instruction_preset_changed"
     }
   ],
   "$defs": {
@@ -4508,6 +4511,9 @@
                 },
                 {
                   "$ref": "#/$defs/queue_resumed"
+                },
+                {
+                  "$ref": "#/$defs/instruction_preset_changed"
                 }
               ]
             }
@@ -4897,6 +4903,206 @@
           },
           "required": [
             "pause_reasons"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
+    "PresetKind": {
+      "type": "string",
+      "enum": [
+        "clean",
+        "owner",
+        "custom"
+      ]
+    },
+    "PresetOrigin": {
+      "type": "object",
+      "properties": {
+        "by": {
+          "type": "string"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "conversation_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "at": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Time"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "by",
+        "conversation_id",
+        "conversation_title"
+      ],
+      "additionalProperties": false
+    },
+    "PresetSummary": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/PresetKind"
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "revision": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "text_bytes": {
+          "anyOf": [
+            {
+              "type": "integer",
+              "minimum": 0
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "created": {
+          "$ref": "#/$defs/PresetOrigin"
+        },
+        "last_edit": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PresetOrigin"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "used_by": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "title",
+        "description",
+        "created",
+        "used_by"
+      ],
+      "additionalProperties": false
+    },
+    "instruction_preset_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "instruction_preset_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "preset": {
+              "$ref": "#/$defs/PresetSummary"
+            },
+            "deleted": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "preset",
+            "deleted"
           ],
           "additionalProperties": false
         }

@@ -209,6 +209,30 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   attachment_conflict: {
     action: 'none',
     message: 'Вложение уже завершено с другой контрольной суммой'
+  },
+  preset_not_found: {
+    action: 'reload',
+    message: 'Пресет не найден'
+  },
+  preset_builtin: {
+    action: 'none',
+    message: 'Встроенный пресет нельзя изменить или удалить'
+  },
+  preset_revision_conflict: {
+    action: 'reload',
+    message: 'Пресет уже изменён'
+  },
+  preset_title_taken: {
+    action: 'none',
+    message: 'Пресет с таким названием уже есть'
+  },
+  preset_limit_reached: {
+    action: 'none',
+    message: 'Слишком много пресетов'
+  },
+  preset_invalid: {
+    action: 'none',
+    message: 'Некорректный пресет'
   }
 };
 

@@ -6,6 +6,7 @@ use crate::{
     groups::{self, Group},
     history::{self, HistoryCursor, HistoryPage, InputView},
     model::{HoldView, PauseReason, RunSlot},
+    presets::PresetSummary,
     scheduler::{self, ScheduledMessage},
     session::Registry,
 };
@@ -26,6 +27,7 @@ pub struct ListSnapshot {
     pub truncated: bool,
     pub counts: Counts,
     pub groups: Vec<Group>,
+    pub presets: Vec<PresetSummary>,
     pub limits: Vec<ProviderLimits>,
 }
 #[derive(Serialize, ToSchema)]
@@ -108,6 +110,7 @@ pub async fn conversations(
         truncated,
         counts: conversations::counts(&mut tx, owner_id).await?,
         groups: groups::list(&mut tx, owner_id).await?,
+        presets: crate::presets::list(&mut tx, owner_id).await?,
         limits: crate::limits::current(&mut tx)
             .await?
             .into_iter()

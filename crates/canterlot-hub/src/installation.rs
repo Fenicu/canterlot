@@ -65,6 +65,16 @@ pub async fn init(pool: &PgPool, manifest: &Path) -> Result<Installation, Instal
                 .bind(installation.owner_id)
                 .execute(&mut *conn)
                 .await?;
+            crate::presets::seed_in_tx(&mut *conn, installation.owner_id)
+                .await
+                .map_err(|error| match error {
+                    crate::presets::PresetError::Db(error) => {
+                        InstallationError::Db(error)
+                    }
+                    _ => InstallationError::Db(sqlx::Error::Protocol(
+                        "preset seed failed".into(),
+                    )),
+                })?;
             sqlx::query(
                 "insert into installation (installation_id, restore_generation, owner_id) values ($1, $2, $3)",
             )

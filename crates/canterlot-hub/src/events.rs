@@ -247,6 +247,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "crunch_woken",
     "derived_changed",
     "group_changed",
+    "instruction_preset_changed",
     "scheduled_changed",
     "limits_changed",
     "limit_reached",
