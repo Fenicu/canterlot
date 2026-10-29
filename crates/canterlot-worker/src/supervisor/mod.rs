@@ -62,6 +62,20 @@ fn load(exec_dir: &Path) -> Result<(SupervisorSpec, Vec<u8>), SupervisorError> {
     Ok((spec, secret))
 }
 
+/// Итог исполнения по выходу процесса CLI: `(terminal, outcome)`.
+/// Выход с кодом 0 после прерывания (SIGINT у Claude Code) означает остановку пользователем.
+pub fn exit_outcome(
+    code: Option<i32>,
+    signal: Option<i32>,
+    interrupted: bool,
+) -> (&'static str, &'static str) {
+    match (code, signal) {
+        (Some(0), None) if interrupted => ("stopped", "user_stop"),
+        (Some(0), None) => ("stopped", "normal_exit"),
+        _ => ("failed", "crashed"),
+    }
+}
+
 pub async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> {
     run::run(exec_dir).await
 }

@@ -1742,17 +1742,10 @@ impl Supervisor {
             StopCause::ProtocolIncompatible => {
                 ("failed", "protocol_incompatible", "protocol_incompatible")
             }
-            StopCause::Exited {
-                code: Some(0),
-                signal: None,
-            } => {
-                if self.interrupted {
-                    ("stopped", "user_stop", "process_exited")
-                } else {
-                    ("stopped", "normal_exit", "process_exited")
-                }
+            StopCause::Exited { code, signal } => {
+                let (terminal, outcome) = super::exit_outcome(code, signal, self.interrupted);
+                (terminal, outcome, "process_exited")
             }
-            StopCause::Exited { .. } => ("failed", "crashed", "process_exited"),
         };
         self.close_blocks(reason)?;
         self.complete_interrupts()?;

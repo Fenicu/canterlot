@@ -181,6 +181,9 @@ pub struct CliProcess {
     child: tokio::process::Child,
     stdin: Option<tokio::process::ChildStdin>,
     stdout: Option<tokio::io::BufReader<tokio::process::ChildStdout>>,
+    // Недочитанная строка живёт здесь, а не в локальной переменной: отмена next_line ничего не теряет.
+    partial: Vec<u8>,
+    discarded: Option<usize>,
     stderr_ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
@@ -245,6 +248,8 @@ impl CliProcess {
             child,
             stdin,
             stdout,
+            partial: Vec::new(),
+            discarded: None,
             stderr_ring: ring,
         })
     }
@@ -259,82 +264,43 @@ impl CliProcess {
             Err(std::io::Error::other("no stdin"))
         }
     }
-    #[allow(clippy::while_let_loop)]
+    /// Следующая строка stdout без `\n`; длиннее 64 МиБ пропускается до перевода строки.
     pub async fn next_line(&mut self) -> StdoutLine {
+        use tokio::io::AsyncBufReadExt;
         const CAP: usize = 64 * 1024 * 1024;
-        if let Some(stdout) = &mut self.stdout {
-            use tokio::io::AsyncBufReadExt;
-            let mut buf: Vec<u8> = Vec::new();
-            loop {
-                // read available bytes
-                let avail_len;
-                let has_nl;
-                let nl_pos;
-                {
-                    let available = match stdout.fill_buf().await {
-                        Ok(b) => b,
-                        Err(_) => {
-                            if buf.is_empty() {
-                                return StdoutLine::Eof;
-                            }
-                            let s = String::from_utf8_lossy(&buf).to_string();
-                            return StdoutLine::Line(s);
-                        }
-                    };
-                    if available.is_empty() {
-                        if buf.is_empty() {
-                            return StdoutLine::Eof;
-                        }
-                        let s = String::from_utf8_lossy(&buf).to_string();
-                        return StdoutLine::Line(s);
-                    }
-                    avail_len = available.len();
-                    if let Some(pos) = available.iter().position(|&b| b == b'\n') {
-                        has_nl = true;
-                        nl_pos = pos;
-                    } else {
-                        has_nl = false;
-                        nl_pos = 0;
-                    }
-                    if has_nl {
-                        let chunk_len = nl_pos + 1;
-                        if buf.len() + chunk_len > CAP {
-                            // Перевод строки уже в этом куске: дальше лежит следующая строка, её не трогаем.
-                            stdout.consume(chunk_len);
-                            return StdoutLine::Oversized(buf.len() + chunk_len);
-                        }
-                        buf.extend_from_slice(&available[..nl_pos]);
-                        stdout.consume(nl_pos + 1);
-                        let s = String::from_utf8_lossy(&buf).to_string();
-                        return StdoutLine::Line(s);
-                    } else {
-                        if buf.len() + avail_len > CAP {
-                            // discard
-                            stdout.consume(avail_len);
-                            loop {
-                                let a = match stdout.fill_buf().await {
-                                    Ok(b) => b,
-                                    Err(_) => break,
-                                };
-                                if a.is_empty() {
-                                    break;
-                                }
-                                if let Some(p) = a.iter().position(|&b| b == b'\n') {
-                                    stdout.consume(p + 1);
-                                    break;
-                                }
-                                let n = a.len();
-                                stdout.consume(n);
-                            }
-                            return StdoutLine::Oversized(CAP + 1);
-                        }
-                        buf.extend_from_slice(available);
-                        stdout.consume(avail_len);
-                    }
+        let Some(stdout) = &mut self.stdout else {
+            return StdoutLine::Eof;
+        };
+        loop {
+            let available = stdout.fill_buf().await.unwrap_or_default();
+            if available.is_empty() {
+                if let Some(len) = self.discarded.take() {
+                    return StdoutLine::Oversized(len);
                 }
+                if self.partial.is_empty() {
+                    return StdoutLine::Eof;
+                }
+                let line = std::mem::take(&mut self.partial);
+                return StdoutLine::Line(String::from_utf8_lossy(&line).into_owned());
             }
-        } else {
-            StdoutLine::Eof
+            let newline = available.iter().position(|&byte| byte == b'\n');
+            let chunk = newline.unwrap_or(available.len());
+            let consumed = newline.map_or(chunk, |pos| pos + 1);
+            if let Some(len) = self.discarded.as_mut() {
+                *len += consumed;
+            } else if self.partial.len() + chunk > CAP {
+                self.discarded = Some(std::mem::take(&mut self.partial).len() + consumed);
+            } else {
+                self.partial.extend_from_slice(&available[..chunk]);
+            }
+            stdout.consume(consumed);
+            if newline.is_some() {
+                if let Some(len) = self.discarded.take() {
+                    return StdoutLine::Oversized(len);
+                }
+                let line = std::mem::take(&mut self.partial);
+                return StdoutLine::Line(String::from_utf8_lossy(&line).into_owned());
+            }
         }
     }
     pub fn stderr_tail(&self) -> Vec<u8> {
@@ -352,5 +318,13 @@ impl CliProcess {
     }
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.child.wait().await
+    }
+}
+
+pub fn exit_event(status: std::process::ExitStatus) -> crate::adapter::AdapterEvent {
+    use std::os::unix::process::ExitStatusExt;
+    crate::adapter::AdapterEvent::ProcessExited {
+        code: status.code(),
+        signal: status.signal(),
     }
 }

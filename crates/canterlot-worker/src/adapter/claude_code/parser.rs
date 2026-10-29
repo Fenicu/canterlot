@@ -819,7 +819,6 @@ impl Parser {
             return;
         }
         let success = response
-            .and_then(|response| response.get("response"))
             .and_then(|response| response.get("subtype"))
             .and_then(serde_json::Value::as_str)
             == Some("success");
