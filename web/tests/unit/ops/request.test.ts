@@ -35,4 +35,20 @@ describe('opRequest', () => {
 		expect(request.url).toBe('/api/v1/conversations/conv/scheduled');
 		expect(JSON.parse(String(request.init.body)).run_at).toBe('2026-10-29T12:00:00.000Z');
 	});
+
+	it('posts_a_decision_to_the_decision_endpoint', () => {
+		const request = opRequest({
+			kind: 'other',
+			key: 'key-decision',
+			conversationId: 'conv-99',
+			body: {
+				requestId: 'req-42',
+				conversationId: 'conv-99',
+				decision: { kind: 'permission', behavior: 'allow' }
+			}
+		});
+		expect(request.url).toBe('/api/v1/conversations/conv-99/requests/req-42/decision');
+		expect(new Headers(request.init.headers).get('Idempotency-Key')).toBe('key-decision');
+		expect(JSON.parse(String(request.init.body))).toEqual({ kind: 'permission', behavior: 'allow' });
+	});
 });
