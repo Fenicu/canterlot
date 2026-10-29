@@ -310,6 +310,9 @@ while :; do sleep 0.1; done
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // Как в main: свой обработчик SIGINT сбрасывает унаследованный SIG_IGN у потомка после exec.
+    let _interrupt =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let spec = LaunchSpec {
         executable: &script,
@@ -325,27 +328,32 @@ while :; do sleep 0.1; done
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
         .unwrap();
+    let wait = std::time::Duration::from_secs(10);
     // read ready
-    loop {
-        match proc.next_line().await {
-            StdoutLine::Line(l) if l == "ready" => break,
-            StdoutLine::Eof => panic!("eof"),
-            _ => {}
+    tokio::time::timeout(wait, async {
+        loop {
+            match proc.next_line().await {
+                StdoutLine::Line(l) if l == "ready" => break,
+                StdoutLine::Eof => panic!("eof"),
+                _ => {}
+            }
         }
-    }
+    })
+    .await
+    .expect("no ready line");
     proc.signal(Signal::Int).unwrap();
     // read got-int
-    let mut got = false;
-    for _ in 0..50 {
-        match proc.next_line().await {
-            StdoutLine::Line(l) if l == "got-int" => {
-                got = true;
-                break;
+    let got = tokio::time::timeout(wait, async {
+        loop {
+            match proc.next_line().await {
+                StdoutLine::Line(l) if l == "got-int" => return true,
+                StdoutLine::Eof => return false,
+                _ => {}
             }
-            StdoutLine::Eof => break,
-            _ => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
         }
-    }
+    })
+    .await
+    .expect("no reaction to SIGINT");
     assert!(got);
 }
 
