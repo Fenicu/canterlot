@@ -33,6 +33,22 @@
   let selectedMulti = $state<Record<string, string[]>>({});
   let customValues = $state<Record<string, string>>({});
 
+  $effect(() => {
+    if (request.winnerDecision && typeof request.winnerDecision === 'object') {
+      const winner = request.winnerDecision as Record<string, unknown>;
+      const answers = (winner.answers ?? winner) as Record<string, unknown> | undefined;
+      if (answers && typeof answers === 'object') {
+        for (const [qid, ans] of Object.entries(answers)) {
+          if (Array.isArray(ans)) {
+            selectedMulti[qid] = ans.map(String);
+          } else if (ans !== null && ans !== undefined) {
+            selectedSingle[qid] = String(ans);
+          }
+        }
+      }
+    }
+  });
+
   function normalizeQuestions(raw: unknown): QuestionDef[] {
     if (!raw || typeof raw !== 'object') return [];
     const rec = raw as Record<string, unknown>;

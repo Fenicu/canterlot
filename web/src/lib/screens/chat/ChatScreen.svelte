@@ -85,20 +85,7 @@
 		}
 	});
 
-	const activeRequestItem = $derived.by((): RequestItem | null => {
-		const items = [...chat.requests.items.values()];
-		for (let i = items.length - 1; i >= 0; i--) {
-			const item = items[i];
-			if (
-				item &&
-				(item.state === 'open' ||
-					item.state === 'sending' ||
-					item.state === 'saved' ||
-					item.state === 'transmitting')
-			) {
-				return item;
-			}
-		}
+	const activityRequest = $derived.by((): RequestItem | null => {
 		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
 		if (chat.activity?.state === 'waiting_for_user' && typeof evidence?.question === 'string') {
 			return {
@@ -132,12 +119,23 @@
 
 	<Timeline {chat} {onInfo} {now} />
 
-	{#if activeRequestItem}
+	{#if chat.requests.items.size > 0}
+		<div class="request-cards-slot">
+			{#each [...chat.requests.items.values()] as req (req.id)}
+				<RequestCard
+					request={req}
+					onDecision={async (decision) => {
+						await chat.requests.submitDecision(req.id, decision, chat.ops);
+					}}
+				/>
+			{/each}
+		</div>
+	{:else if activityRequest}
 		<div class="request-card-slot">
 			<RequestCard
-				request={activeRequestItem}
+				request={activityRequest}
 				onDecision={async (decision) => {
-					await chat.requests.submitDecision(activeRequestItem.id, decision, chat.ops);
+					await chat.requests.submitDecision(activityRequest.id, decision, chat.ops);
 				}}
 			/>
 		</div>
@@ -178,9 +176,13 @@
 		position: relative;
 	}
 
+	.request-cards-slot,
 	.request-card-slot {
 		padding: var(--s3) var(--s4);
 		box-sizing: border-box;
 		width: 100%;
+		display: flex;
+		flex-direction: column;
+		gap: var(--s3);
 	}
 </style>

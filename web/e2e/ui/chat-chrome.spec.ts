@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { seedMockupChat, seedMockup06, seedMockup08 } from '../../testing/fixtures/mockup-chat';
+import { seedMockupChat, seedMockup08 } from '../../testing/fixtures/mockup-chat';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -302,28 +302,6 @@ test('resume_text_edit_saves_through_put_crunch', async ({ page }) => {
 
 	expect(puts.length).toBeGreaterThan(0);
 	expect(puts[0]?.resume_text).toBe('Лимиты сброшены, работаем!');
-});
-
-test('question_placeholder_renders_evidence_text_without_calling_the_decision_endpoint', async ({ page }) => {
-	let decisionCalls = 0;
-	page.on('request', (req) => {
-		if (req.url().includes('decide') || req.url().includes('decision')) {
-			decisionCalls += 1;
-		}
-	});
-
-	await bootChat(page, {
-		seeder: (api) => seedMockup06(api)
-	});
-
-	// Check question card
-	await expect(page.getByText('Вопрос от агента')).toBeVisible();
-	await expect(page.getByRole('heading', { name: 'Что делать, если курсор старше журнала событий?' })).toBeVisible();
-	await expect(page.getByText('Resync')).toBeVisible();
-	await expect(page.getByRole('button', { name: 'Ответить' })).toBeVisible();
-
-	// Verify no decision endpoint was called
-	expect(decisionCalls).toBe(0);
 });
 
 test('diagnostics_sheet_lists_state_cursors_and_diagnostic_events', async ({ page }) => {

@@ -646,6 +646,148 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
   });
+
+  const decisions = api.decisions;
+
+  await page.route('**/api/v1/conversations/*/requests/*/decision', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const url = new URL(route.request().url());
+    const parts = url.pathname.split('/');
+    const convId = parts[4] ?? '';
+    const reqId = parts[6] ?? '';
+    const key = route.request().headers()['idempotency-key'] ?? '';
+    const body = route.request().postDataJSON() as Record<string, unknown>;
+
+    let isClosed = false;
+    let closedReason = 'closed';
+    for (const ev of hub.log(`conversation:${convId}`)) {
+      const p = ev.payload as Record<string, unknown>;
+      if (String(p?.request_id ?? '') === reqId && ev.kind === 'request_closed') {
+        isClosed = true;
+        closedReason = String(p.reason ?? 'closed');
+      }
+    }
+
+    if (isClosed) {
+      await route.fulfill({
+        status: 409,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'request_not_open',
+            message: 'Запрос уже закрыт',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000c2',
+            details: {
+              current_state: 'closed_without_decision',
+              reason: closedReason
+            }
+          }
+        }
+      });
+      return;
+    }
+
+    const existing = decisions.get(reqId);
+    if (existing) {
+      if (JSON.stringify(existing.decision) === JSON.stringify(body)) {
+        await route.fulfill({
+          status: 200,
+          headers: headers(),
+          json: {
+            request_id: reqId,
+            winner_decision_id: existing.winnerId,
+            state: 'decision_saved',
+            decision: existing.decision
+          }
+        });
+        return;
+      } else {
+        await route.fulfill({
+          status: 409,
+          headers: headers(),
+          json: {
+            error: {
+              code: 'decision_conflict',
+              message: 'Решение уже принято другим участником',
+              scope: 'delivery',
+              retry: 'explicit_new_operation',
+              correlation_id: '00000000-0000-4000-8000-0000000000c1',
+              details: {
+                winner_decision_id: existing.winnerId,
+                winner_decision: existing.decision,
+                current_state: 'decision_saved'
+              }
+            }
+          }
+        });
+        return;
+      }
+    }
+
+    const winnerId = crypto.randomUUID();
+    decisions.set(reqId, { winnerId, decision: body, key });
+
+    hub.append(`conversation:${convId}`, {
+      kind: 'request_decided',
+      conversation_id: convId,
+      payload: {
+        request_id: reqId,
+        winner_decision_id: winnerId,
+        decision: body
+      }
+    });
+    hub.flush();
+
+    if (api.decisionAutoProgress === true) {
+      setTimeout(() => {
+        hub.append(`conversation:${convId}`, {
+          kind: 'request_transmitting',
+          conversation_id: convId,
+          payload: { request_id: reqId }
+        });
+        hub.flush();
+
+        setTimeout(() => {
+          hub.append(`conversation:${convId}`, {
+            kind: 'request_closed',
+            conversation_id: convId,
+            payload: { request_id: reqId, reason: 'applied' }
+          });
+          const detail = api.details.get(convId);
+          if (detail) {
+            detail.activity = {
+              state: 'idle',
+              evidence: {},
+              since: new Date().toISOString()
+            };
+          }
+          hub.flush();
+        }, 120);
+      }, 120);
+    } else if (api.decisionAutoProgress === 'transmitting') {
+      setTimeout(() => {
+        hub.append(`conversation:${convId}`, {
+          kind: 'request_transmitting',
+          conversation_id: convId,
+          payload: { request_id: reqId }
+        });
+        hub.flush();
+      }, 120);
+    }
+
+    await route.fulfill({
+      status: 200,
+      headers: headers(),
+      json: {
+        request_id: reqId,
+        winner_decision_id: winnerId,
+        state: 'decision_saved',
+        decision: body
+      }
+    });
+  });
 }
 
 function recount(api: FakeHubApi) {

@@ -189,6 +189,12 @@
       </div>
     {/if}
 
+    {#if request.error === 'decision_conflict'}
+      <div class="conflict-notice" role="alert" data-conflict="true">
+        Решение принято на другом устройстве
+      </div>
+    {/if}
+
     {#if request.kind === 'permission'}
       <PermissionCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else}
@@ -209,6 +215,14 @@
     color: var(--text);
     box-sizing: border-box;
     width: 100%;
+  }
+
+  .conflict-notice {
+    padding: var(--s2) var(--s3);
+    border-radius: var(--radius-sm);
+    background: var(--surface-warning, var(--badge));
+    color: var(--text);
+    font-size: var(--font-small);
   }
 
   .applied-collapsed {

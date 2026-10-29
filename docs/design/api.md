@@ -54,9 +54,9 @@
 | Разговор | `limit_reached` | Факт исчерпания окна |
 | Разговор | `scheduled_changed` | Отложенное сообщение |
 | Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
-| Разговор | `request_opened` | Зарезервировано для плана 1.3c |
-| Разговор | `request_closed` | Зарезервировано для плана 1.3c |
-| Разговор | `request_decided` | Зарезервировано для плана 1.3c |
+| Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}` |
+| Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено, остальные причины передаёт воркер (например, `execution_stopped`, `generation_closed`, `too_late`) |
+| Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}` |
 | Разговор | `request_transmitting` | Решение передаётся агенту: `{request_id}`, один раз при переходе `decision_saved` в `decision_transmitting` |
 | Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
 | Список | `conversation_created` | Создание разговора (полный элемент списка) |
@@ -406,7 +406,7 @@ Pump читает журнал только при доступной ёмкос
 | 9 | Поле ввода: отправка, вложение, прерывание, «отправить позже» (§5.2) | `POST /api/v1/conversations/{id}/inputs`, `POST /api/v1/conversations/{id}/interrupt`, вложения (строка 16), `POST /api/v1/conversations/{id}/scheduled` | `input_queued`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `interrupt_state_changed` | 5, 6b, 9 |
 | 10 | Очередь и отложенные сообщения под лентой; отмена ввода в очереди (§5.1, §5.3) | очередь и отложенные в снимке разговора; `GET /api/v1/conversations/{id}/scheduled`, `PATCH /api/v1/scheduled/{id}`, `DELETE /api/v1/scheduled/{id}`, `POST /api/v1/inputs/{id}/cancel` | `scheduled_changed`, `input_state_changed` | 5, 6b, 7a |
 | 11 | Смена модели, режима разрешений и усилия посреди сессии; ожидающее значение в шапке (§5.4) | `PATCH /api/v1/conversations/{id}/settings`; `settings{effective,pending}` в карточке | `conversation_settings_changed` | 2, 6b |
-| 12 | Карточки вопросов и разрешений (§5.5) | `POST /api/v1/conversations/{id}/requests/{request_id}/decision`: 200, проверка контракта, единственный победитель | `request_opened`, `request_closed`, `request_decided`, `request_transmitting` | HTTP реализован; события и UI в остальных задачах плана 1.3c |
+| 12 | Карточки вопросов и разрешений (§5.5) | `POST /api/v1/conversations/{id}/requests/{request_id}/decision`: 200, проверка контракта, единственный победитель | `request_opened`, `request_closed`, `request_decided`, `request_transmitting` | Реализовано: HTTP маршрут, WSS события, UI карточки с этапами и OpJournal |
 | 13 | «Инфо» об ответе и экспорт в markdown или картинку (§5.6) | `GET /api/v1/conversations/{id}/runs/{run_id}` (расход по моделям и агентам, контекст, длительность, оценка лимита), содержимое блоков | – | 3, 7a |
 | 14 | «Кранч»: переключатель, текст продолжения, удержания `quota_exhausted` и `weekly_reserve`, «Продолжить, тратя резерв» (§8) | `PUT /api/v1/conversations/{id}/crunch`, `POST /api/v1/conversations/{id}/spend-reserve`; удержания в карточке, элементе списка и снимке | `crunch_changed`, `crunch_held`, `crunch_woken`, `limit_reached`, `queue_state_changed` | 6a, 8 |
 | 15 | Состояние активности с доказательствами в списке и шапке (§9) | в элементе списка, карточке и снимках | `derived_changed` | 5 |

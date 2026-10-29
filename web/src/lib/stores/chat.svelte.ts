@@ -429,6 +429,9 @@ export class ChatStore {
 			case 'request_decided':
 				this.requests.applyDecided(event);
 				return;
+			case 'request_transmitting':
+				this.requests.applyTransmitting(event);
+				return;
 			case 'block_conflicting_final':
 			case 'adapter_diagnostic':
 			case 'state_divergence':
@@ -437,10 +440,6 @@ export class ChatStore {
 				this.diagnostics.push(event);
 				return;
 			default:
-				if ((event as { kind?: string }).kind === 'request_transmitting') {
-					this.requests.applyTransmitting(event);
-					return;
-				}
 				this.unknownKinds += 1;
 		}
 	}

@@ -228,6 +228,7 @@ export class RequestsModel {
         if (err.code === 'decision_conflict') {
           if (item) {
             item.state = 'saved';
+            item.error = 'decision_conflict';
             const details = err.details as Record<string, unknown> | undefined;
             if (details?.winner_decision) {
               item.winnerDecision = details.winner_decision;
