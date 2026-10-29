@@ -205,8 +205,7 @@
 	}
 	.data-table th, .data-table td {
 		text-align: left;
-		padding: var(--s2) 0;
-		border-bottom: var(--hairline) solid var(--line);
+		padding: var(--s3) 0;
 	}
 	.data-table th {
 		color: var(--muted);

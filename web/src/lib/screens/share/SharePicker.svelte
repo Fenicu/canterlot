@@ -66,14 +66,14 @@
         {#if busy}<p role="status">Сохраняю в сессию…</p>{/if}
         {#if target && runtime}<AttachmentTray uploads={sessionUploads()} conversationId={target} />{#if error}<a href={resolve('/c/[id]', { id: target })}>Открыть черновик сессии</a>{/if}{/if}
         <p id="share-reason" class="note">Файлы начнут загружаться после выбора сессии. Сообщение останется в черновике</p>
-      {:else if !error}<p>Переданные данные не найдены или срок хранения истёк</p><a href={resolve('/sessions')}>К сессиям</a>{/if}
+      {:else if !error}<p>Переданные данные не найдены или срок хранения истёк</p><a class="new" href={resolve('/sessions')}>К сессиям</a>{/if}
     {/if}
   </div></div>
 </main>
 <style>
   .files { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   small { display: block; color: var(--muted); }
-  input { display: block; width: 100%; min-height: var(--target); margin-block: var(--s4); padding: var(--s6); border-radius: var(--radius-pill); border: var(--hairline) solid var(--control-line); background: var(--surface); color: var(--text); }
+  input { display: block; width: 100%; min-height: var(--target); margin-block: var(--s4); padding: var(--s6); border-radius: var(--radius-pill); border: var(--s0); background: var(--surface); color: var(--text); }
   .choice-content { width: 100%; text-align: left; }
   .choice { display: block; width: 100%; margin-block: var(--s4); text-align: left; }
   .new { display: block; min-height: var(--target); padding: var(--s6); }

@@ -5,7 +5,7 @@
   import { browserRuntime, openChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '#lib/app/runtime.js';
-  import type { Snippet } from 'svelte';
+  import type { Snippet, Component } from 'svelte';
   import { onMount } from 'svelte';
   import ConnectionBanner from './ConnectionBanner.svelte';
   import { layoutMode, type LayoutMode } from './layout';
@@ -16,7 +16,6 @@
   import type { UpdateController } from '#lib/pwa/update.js';
   import { staleness } from '#lib/pwa/offline.js';
   import { announce } from '#lib/a11y/announce.js';
-  import DelegationPanel from '#lib/screens/chat/DelegationPanel.svelte';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
   let { children }: { children: Snippet } = $props();
@@ -36,6 +35,15 @@
   const onChat = $derived(path.startsWith('/c/'));
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
+  let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+
+  $effect(() => {
+    if (mode === 'desktop' && lane && !DelegationPanelComponent) {
+      import('#lib/screens/chat/DelegationPanel.svelte').then((m) => {
+        DelegationPanelComponent = m.default;
+      });
+    }
+  });
 
   $effect(() => {
     const id = chatId;
@@ -182,8 +190,8 @@
       </div>
       {#if mode === 'desktop' && lane}
         <aside data-pane="lane">
-          {#if currentChat}
-            <DelegationPanel chat={currentChat} onclose={() => lane = false} />
+          {#if currentChat && DelegationPanelComponent}
+            <DelegationPanelComponent chat={currentChat} onclose={() => lane = false} />
           {:else}
             <p>Поручения</p>
           {/if}
@@ -220,6 +228,8 @@
   }
 
   .back {
+    display: inline-flex;
+    align-items: center;
     min-height: var(--target);
     padding: var(--s4) var(--s6);
     color: var(--accent-link);

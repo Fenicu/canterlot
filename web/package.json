@@ -16,7 +16,10 @@
     "gen:api": "node scripts/gen-api.mjs",
     "test:unit": "vitest run",
     "test:ui": "playwright test e2e/ui",
-    "test:stack": "playwright test e2e/stack"
+    "test:stack": "playwright test e2e/stack",
+    "test:perf": "playwright test e2e/perf --project=phone",
+    "test:parity": "playwright test e2e/parity",
+    "stack:build": "cargo build -p canterlot-hub -p canterlot-worker --features canterlot-worker/synthetic-adapter"
   },
   "dependencies": {
     "@noble/hashes": "2.4.0",

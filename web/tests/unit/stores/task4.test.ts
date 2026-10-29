@@ -1299,26 +1299,17 @@ describe("stores task 4", () => {
     child.summary = "файл";
     child.startedAt = startedAt;
     child.state = "final";
+    // Хаб отдаёт только вызовы субагентов; имя и модель берутся у первого дочернего блока.
     const expected = [
       {
         block_id: rootId,
         parent_block_id: null,
         started_at: new Date(startedAt).toISOString(),
         finished_at: null,
-        state: "final",
+        state: "done",
         tool_name: "Agent",
         task: "найти",
         subagent: { name: "researcher", model: "opus" },
-      },
-      {
-        block_id: childId,
-        parent_block_id: rootId,
-        started_at: new Date(startedAt).toISOString(),
-        finished_at: null,
-        state: "final",
-        tool_name: "Read",
-        task: "файл",
-        subagent: null,
       },
     ];
     rememberDelegation(api, conversationId, expected);

@@ -64,7 +64,7 @@
 
 <style>
   .tool { display: flex; flex-direction: column; gap: var(--s2); }
-  .head { display: flex; gap: var(--s2); align-items: baseline; text-align: left; transition-duration: var(--duration-expand); }
+  .head { display: flex; gap: var(--s2); align-items: center; min-height: var(--target); text-align: left; transition-duration: var(--duration-expand); }
   .name, .summary { font-family: var(--font-mono); overflow-wrap: anywhere; }
   .policy-badge {
     font-size: var(--fs-xs);

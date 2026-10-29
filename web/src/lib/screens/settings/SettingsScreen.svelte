@@ -85,6 +85,7 @@
 <style>
   section { margin-bottom: var(--s10); }
   .card { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
+  section > a { display: inline-flex; align-items: center; min-height: var(--target); }
   .logout { display: block; margin-top: var(--s6); color: var(--danger); width: 100%; }
   @media (min-width: 1100px) { .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s10); } }
 </style>

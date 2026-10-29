@@ -24,5 +24,6 @@ npm run lint:tokens
 VITE_UI_TESTS=1 npm run build
 VITE_UI_TESTS=1 PWA_BUILD_DIR=build-update PWA_VERSION=ui-update-fixture npm run build
 npm run test:unit
-npx --no-install playwright test e2e/ui
-if [[ "${1:-}" == "--stack" ]]; then npm run test:stack; fi
+export PATH="${HOME}/.cargo/bin:${PATH}"
+npx --no-install playwright test e2e/ui e2e/parity
+if [[ "${1:-}" == "--stack" ]]; then npm run stack:build && npm run test:stack; fi

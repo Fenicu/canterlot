@@ -33,6 +33,14 @@
 		}
 	});
 
+	function findAnswerCard(items: BlockModel[]): HTMLElement | null {
+		for (const item of items) {
+			const card = document.querySelector(`[data-block="${item.id}"]`)?.closest('article.card');
+			if (card instanceof HTMLElement) return card;
+		}
+		return null;
+	}
+
 	function downloadFile(blob: Blob, name: string): void {
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
@@ -72,16 +80,19 @@
 
 		try {
 			// Find element to render
-			let target = answerElement;
+			// Карточка ответа из ленты даёт картинку как на экране; если окно ленты её уже убрало, собираем текст блоков.
+			let target = answerElement ?? findAnswerCard(blocks);
 			let createdTemp = false;
 
 			if (!target) {
 				target = document.createElement('div');
 				createdTemp = true;
 				for (const b of blocks) {
+					const text = b.text || b.summary || '';
+					if (!text) continue;
 					const div = document.createElement('div');
 					div.className = 'export-block';
-					div.textContent = b.body || b.summary || '';
+					div.textContent = text;
 					target.appendChild(div);
 				}
 				document.body.appendChild(target);
@@ -209,8 +220,8 @@
 	.button {
 		padding: var(--s2) var(--s4);
 		border-radius: var(--radius-card);
-		border: var(--hairline) solid var(--line);
-		background: var(--surface);
+		border: var(--s0);
+		background: var(--raised);
 		color: var(--text);
 		font-size: var(--fs-body);
 		cursor: pointer;
@@ -222,7 +233,6 @@
 	.button.primary {
 		background: var(--accent);
 		color: var(--accent-ink);
-		border-color: var(--accent);
 	}
 	.status-msg {
 		margin: var(--s2) 0 0;
@@ -247,7 +257,7 @@
 		font-size: var(--fs-meta);
 		background: var(--raised);
 		color: var(--text);
-		border: var(--hairline) solid var(--line);
+		border: var(--s0);
 		border-radius: var(--radius-card);
 	}
 </style>

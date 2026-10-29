@@ -1,13 +1,35 @@
 import { defineConfig, devices } from '@playwright/test';
-const origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
+import { existsSync, readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+
+const STACK_INFO_FILE = join(tmpdir(), 'canterlot-stack-info.json');
+const isStackOrPerf = process.argv.some(a => a.includes('e2e/stack') || a.includes('e2e/perf'));
+
+let origin = `http://127.0.0.1:${Number(process.env.PORT ?? 4173)}`;
+if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
+  try {
+    origin = JSON.parse(readFileSync(STACK_INFO_FILE, 'utf8')).baseUrl;
+  } catch {}
+}
+
 const phone = { ...devices['Pixel 7'], browserName: 'chromium' as const };
+
 export default defineConfig({
-  testDir: './e2e', fullyParallel: false, workers: process.argv.some(a => a.includes('e2e/stack')) ? 1 : 4,
+  testDir: './e2e',
+  // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
+  testIgnore: isStackOrPerf ? undefined : ['**/e2e/stack/**', '**/e2e/perf/**'],
+  fullyParallel: false,
+  workers: isStackOrPerf ? 1 : 4,
+  globalSetup: isStackOrPerf ? './e2e/stack/global-setup.ts' : undefined,
+  globalTeardown: isStackOrPerf ? './e2e/stack/global-teardown.ts' : undefined,
   use: { baseURL: origin, trace: 'retain-on-failure' },
-  webServer: { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
+  webServer: isStackOrPerf
+    ? undefined
+    : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
   projects: [
     { name: 'phone', grepInvert: /render_budget_during_long_stream/, use: phone },
-    { name: 'desktop', workers: 2, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
+    { name: 'desktop', workers: isStackOrPerf ? 1 : 2, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
     // Дроссель 4× считает время кадра по настенным часам: соседний браузер на этой машине раздувает задачу за 200 мс.
     { name: 'budget', workers: 1, dependencies: ['phone', 'desktop'], grep: /render_budget_during_long_stream/, use: phone }
   ]

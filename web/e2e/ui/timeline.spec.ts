@@ -128,7 +128,16 @@ test('expanding_a_tool_above_the_viewport_keeps_the_anchor', async ({ page }) =>
   await expect(page.locator('[data-ready]')).toBeVisible();
   const feed = page.locator('.feed');
   await feed.evaluate((el) => { el.scrollTop = 280; });
-  const key = await page.locator('[data-row]').last().getAttribute('data-key');
+  // Строка из запаса за окном может уйти из DOM при пересчёте высот; якорь проверяется по видимой строке.
+  const key = await feed.evaluate((el) => {
+    const box = el.getBoundingClientRect();
+    const rows = [...el.querySelectorAll<HTMLElement>('[data-row]')].filter((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.top >= box.top && rect.bottom <= box.bottom;
+    });
+    return rows.at(-1)?.dataset.key ?? null;
+  });
+  expect(key).not.toBeNull();
   const before = await page.locator(`[data-key="${key}"]`).boundingBox();
   await page.locator('.head').evaluate((node) => (node as HTMLButtonElement).click());
   await expect.poll(async () => {

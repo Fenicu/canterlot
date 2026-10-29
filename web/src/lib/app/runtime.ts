@@ -82,7 +82,10 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       db,
       async (op) => {
         const request = opRequest(op);
-        const response = await deps.fetch(request.url, request.init);
+        // Обрыв соединения или потерянный ответ: операция остаётся «неизвестной» и повторяется с тем же ключом.
+        const response = await deps.fetch(request.url, request.init).catch((cause: unknown) => {
+          throw new NetworkError("send_failed", { cause });
+        });
         const body = await response.json().catch(() => null);
         if (!response.ok) throw httpFailure(response, body);
         return body;

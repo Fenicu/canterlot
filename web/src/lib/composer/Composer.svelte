@@ -186,7 +186,7 @@
   <AttachmentTray {uploads} conversationId={chat.id} />
   {#if notice}<p class="reason" id={reasonId}>{notice}</p>{/if}
   <div class="capsule">
-    <input bind:this={file} class="file" type="file" multiple onchange={picked} />
+    <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
     <IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} />
     <textarea
       bind:this={node}

@@ -1,5 +1,3 @@
-import { toBlob } from 'html-to-image';
-
 export async function renderAnswerPages(
 	root: HTMLElement,
 	opts?: { pageMaxPx?: number }
@@ -71,9 +69,13 @@ export async function renderAnswerPages(
 		try {
 			let blob: Blob | null = null;
 			try {
+				// Библиотека тяжёлая и нужна только при экспорте: отдельный отложенный фрагмент.
+				const { toBlob } = await import('html-to-image');
 				blob = await toBlob(container, {
 					pixelRatio,
 					backgroundColor,
+					// Контейнер спрятан за экраном; в клоне он должен лежать на месте, иначе содержимое окажется вне картинки.
+					style: { position: 'static', left: '0', top: '0', margin: '0' },
 					filter: (node) => {
 						if (node instanceof HTMLElement && node.tagName === 'BUTTON') return false;
 						return true;

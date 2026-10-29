@@ -63,6 +63,9 @@
   }
 
   a {
+    display: inline-flex;
+    align-items: center;
+    min-height: var(--target);
     color: var(--accent-link);
   }
 </style>

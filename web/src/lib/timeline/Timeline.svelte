@@ -180,7 +180,10 @@
     requestAnimationFrame(() => requestAnimationFrame(() => {
       for (const at of marks) {
         const from = Date.parse(at);
-        if (Number.isFinite(from)) probe.record('delta_paint_ms', clock.serverNow() - from);
+        if (Number.isFinite(from)) {
+          probe.record('delta_paint_ms', clock.serverNow() - from);
+          probe.record('delta_paint_raw_ms', Date.now() - from);
+        }
       }
     }));
   });

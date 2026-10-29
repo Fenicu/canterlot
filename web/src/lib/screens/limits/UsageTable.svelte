@@ -14,7 +14,7 @@
   table { width: 100%; table-layout: fixed; border-collapse: collapse; font-size: var(--fs-meta); }
   th { text-align: left; color: var(--muted); font-weight: var(--weight-medium); }
   th:first-child { width: 45%; }
-  td, th { padding: var(--s6) var(--s2); border-bottom: var(--hairline) solid var(--line); overflow-wrap: anywhere; vertical-align: top; }
+  td, th { padding: var(--s7) var(--s2); overflow-wrap: anywhere; vertical-align: top; }
   td { font-variant-numeric: tabular-nums; }
   small { display: block; color: var(--muted); }
 </style>

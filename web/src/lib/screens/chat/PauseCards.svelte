@@ -184,19 +184,16 @@
 		padding: var(--s4);
 		border-radius: var(--radius-card);
 		background: var(--surface);
-		border: var(--hairline) solid var(--line);
 		display: flex;
 		flex-direction: column;
 		gap: var(--s2);
 		color: var(--text);
 	}
 	.pause-card.tone-warning {
-		border-color: var(--warning);
-		background: var(--surface);
+		background: var(--warning-soft);
 	}
 	.pause-card.tone-danger {
-		border-color: var(--danger);
-		background: var(--surface);
+		background: var(--danger-soft);
 	}
 	.pause-card h2 {
 		margin: 0;
@@ -226,6 +223,7 @@
 		cursor: pointer;
 		text-align: center;
 		border: none;
+		min-height: var(--target);
 	}
 	.button.full {
 		width: 100%;
@@ -237,7 +235,6 @@
 	.button.secondary {
 		background: var(--raised);
 		color: var(--text);
-		border: var(--hairline) solid var(--line);
 	}
 	.edit-crunch-field {
 		display: flex;
@@ -252,8 +249,8 @@
 	textarea {
 		padding: var(--s2);
 		border-radius: var(--radius-card);
-		border: var(--hairline) solid var(--line);
-		background: var(--surface);
+		border: var(--s0);
+		background: var(--raised);
 		color: var(--text);
 		font-size: var(--fs-body);
 	}

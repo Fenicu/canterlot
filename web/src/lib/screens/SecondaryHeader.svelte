@@ -10,4 +10,4 @@
   {#snippet leading()}<a href={resolve('/sessions')} aria-label="К сессиям"><Icon name="back" /></a>{/snippet}
   {#snippet actions()}<IconButton icon={theme.effective === 'dark' ? 'sun' : 'moon'} label="Сменить тему" onclick={() => theme.toggle()} />{/snippet}
 </TopBar>
-<style>a { min-height: var(--target); display: flex; align-items: center; padding: var(--s4); color: var(--accent-link); }</style>
+<style>a { min-height: var(--target); min-width: var(--target); justify-content: center; display: flex; align-items: center; padding: var(--s4); color: var(--accent-link); }</style>
