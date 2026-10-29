@@ -492,13 +492,40 @@ bash scripts/check-web.sh
 bash scripts/check.sh
 ```
 
-`check-web.sh` последовательно выполняет `npm ci`, установку браузеров при их отсутствии, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest (до 6 worker'ов), production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально 4 worker'а, у Firefox 2, проект `budget` выполняется изолированно после остальных). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
+`check-web.sh` последовательно выполняет `npm ci`, установку браузеров при их отсутствии, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest (до 6 worker'ов), production build, проверку доступности и визуального языка (`npm run test:parity`), и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально 4 worker'а, у Firefox 2, проект `budget` выполняется изолированно после остальных). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`.
 
-Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` настраивает параллельность под многоядерную систему: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 4, у Firefox два Playwright worker'а, а Vitest использует до 6 worker'ов.
+Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` настраивает параллельность под многоядерную систему: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 4, у Firefox два Playwright worker'а, а Vitest использует до 6 worker'ов. В `check-web.sh` входят и проверки `web/e2e/parity`: axe на каждом экране в обеих темах, отсутствие горизонтальной прокрутки на 360 и 320 px и при тексте 200 %, ходы только с клавиатуры, инварианты визуального языка по вычисленным стилям и контактный лист одиннадцати состояний макетов. Бюджет сборки (`tests/unit/budget`) входит в Vitest: JS входного маршрута не больше 180 КиБ gzip, разметка, DOMPurify, экспорт картинкой и хеш-воркер лежат в отдельных ленивых фрагментах.
 
-Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
+#### Сквозные тесты на реальном хабе и замеры
 
-Клиентские правила: [docs/design/pwa.md](docs/design/pwa.md).
+Сквозной набор поднимает настоящие `canterlot-hub` и `canterlot-worker` с синтетическим адаптером за кромкой `web/e2e/edge/serve.mjs`: кромка подставляет `Remote-User` и секрет прокси, вычищает присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`, проксирует `/api/*` и WSS и умеет рвать, глушить, задерживать и переписывать канал через отдельный управляющий порт. Глобальная подготовка (`web/e2e/stack/global-setup.ts`) создаёт отдельную базу в тестовом PostgreSQL, одноразовые CA и сертификат, конфигурации хаба и воркера, запускает процессы и кромку; завершение останавливает только запущенные ею процессы по PID, включая супервизоры исполнений, и удаляет базу и временные каталоги. Логи хаба, воркера и кромки лежат в `web/e2e/.stack/`.
+
+```bash
+# собственная тестовая база PostgreSQL (порт задаётся CANTERLOT_TEST_PG_PORT, по умолчанию общий 55440)
+export CANTERLOT_TEST_PG_PORT=55442
+bash scripts/test-db.sh up
+export DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:$CANTERLOT_TEST_PG_PORT/canterlot
+
+cd web
+VITE_UI_TESTS=1 npm run build   # собранный клиент, который раздаёт кромка
+npm run stack:build             # хаб и воркер с `--features canterlot-worker/synthetic-adapter`; не вместе с браузерами
+npm run test:stack              # сквозной набор в Chromium (телефон) и Firefox (рабочий стол)
+npm run test:perf               # замеры P-01…P-06 и P-13/P-14, только телефонный профиль
+npm run test:parity             # доступность, рефлоу, визуальный язык, контактный лист
+node scripts/contact-sheet.mjs  # только контактный лист: web/e2e/.contact/index.html
+bash ../scripts/check-web.sh --stack   # весь цикл: проверки, UI, parity и сквозной набор
+```
+
+Cargo-команды, которые обращаются к базе, нужно запускать с теми же `CANTERLOT_TEST_PG_PORT` и `DATABASE_URL`: `.cargo/config.toml` по умолчанию указывает на общий сервер 55440. Рядом с контактным листом ложатся снимки наших экранов; если рядом есть каталог утверждённых макетов (`CANTERLOT_MOCKUPS`, по умолчанию `.superpowers/design/mockups` в корне репозитория), лист показывает макеты рядом и печатает справочное совпадение пикселей. Макеты не нужны ни сборке, ни проверкам.
+
+Где лежат отчёты:
+
+- `docs/perf/pwa-first-measurements.md` собирается заново после каждого прогона `npm run test:perf` из файлов `web/e2e/.stack/perf/*.json` (по файлу на замер, поэтому повтор одного замера обновляет только его строку). Это первые информационные числа с условиями и нагрузкой хоста; промах мимо цели в них записан, а не скрыт.
+- `docs/perf/phone-acceptance.md` ручной чек-лист владельца для Samsung Galaxy S25 Ultra и Firefox; ни один пункт не отмечен пройденным.
+- `web/e2e/.contact/index.html` контактный лист одиннадцати состояний макетов для просмотра человеком.
+- `web/test-results/` следы и снимки упавших тестов Playwright.
+
+Клиентские правила и архитектура PWA: [docs/design/pwa.md](docs/design/pwa.md).
 
 ### Статическая публикация
 

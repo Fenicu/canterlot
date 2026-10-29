@@ -50,7 +50,6 @@
 		padding: var(--s4);
 		border-radius: var(--radius-card);
 		background: var(--surface);
-		border: var(--hairline) solid var(--line);
 		display: flex;
 		flex-direction: column;
 		gap: var(--s3);

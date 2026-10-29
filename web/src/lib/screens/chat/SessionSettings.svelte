@@ -7,7 +7,7 @@
 <script lang="ts">
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
-	import { updateSettings, updateCrunch } from './controls';
+	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
 	import { ApiError } from '#lib/api/http.js';
 	import Toggle from '#lib/ui/Toggle.svelte';
 
@@ -107,11 +107,17 @@
 		generalError = null;
 
 		try {
-			await updateSettings(chat.id, {
-				model: selectedModel,
-				effort: selectedEffort,
-				permission_mode: selectedPermission
-			});
+			// Хаб отклоняет значение вне каталога: у сессии без выбранного режима разрешений он пуст, поэтому уходит только изменённое.
+			const shown = {
+				model: pending?.model ?? effective.model,
+				effort: pending?.effort ?? effective.effort,
+				permission_mode: pending?.permission_mode ?? effective.permission_mode
+			};
+			const patch: SettingsPatch = {};
+			if (selectedModel !== shown.model) patch.model = selectedModel;
+			if (selectedEffort !== shown.effort) patch.effort = selectedEffort;
+			if (selectedPermission !== shown.permission_mode) patch.permission_mode = selectedPermission;
+			if (Object.keys(patch).length > 0) await updateSettings(chat.id, patch);
 
 			await updateCrunch(chat.id, {
 				enabled: crunchEnabled,

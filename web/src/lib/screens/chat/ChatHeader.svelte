@@ -98,6 +98,15 @@
 		}
 	}
 
+	let menuButton = $state<HTMLButtonElement | null>(null);
+
+	function closeMenuOnEscape(event: KeyboardEvent) {
+		if (event.key !== 'Escape' || !menuOpen) return;
+		menuOpen = false;
+		confirmingForce = false;
+		menuButton?.focus();
+	}
+
 	async function handleStart() {
 		actionError = null;
 		try {
@@ -108,6 +117,8 @@
 		}
 	}
 </script>
+
+<svelte:window onkeydown={closeMenuOnEscape} />
 
 <div class="chat-header" role="region" aria-label="Шапка чата">
 	<div class="topbar">
@@ -133,6 +144,7 @@
 
 		<div class="header-actions">
 			<button
+				bind:this={menuButton}
 				type="button"
 				class="icon-button menu-btn"
 				aria-label="Меню сессии"
@@ -273,8 +285,6 @@
 		position: relative;
 		display: flex;
 		flex-direction: column;
-		border-bottom: var(--hairline) solid var(--line);
-		background: var(--surface);
 		z-index: 5;
 	}
 	.topbar {
@@ -282,6 +292,9 @@
 		align-items: center;
 		gap: var(--s2);
 		padding: var(--s2) var(--s4);
+		margin: var(--s5) var(--s6) var(--s3);
+		border-radius: var(--radius-pill);
+		background: var(--surface);
 		min-height: var(--target);
 	}
 	.header-info {

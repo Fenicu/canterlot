@@ -32,6 +32,9 @@
   let date = $state('');
   let time = $state('');
   let armed = false;
+  let openedAt = 0;
+  let lastDown = 0;
+  let opener: HTMLElement | null = null;
 
   function pad(value: number): string {
     return String(value).padStart(2, '0');
@@ -52,8 +55,16 @@
   const clockLabel = $derived(Number.isFinite(chosen) ? fmt.clock(chosen) : '');
 
   $effect(() => {
+    const down = () => { lastDown = performance.now(); };
+    window.addEventListener('pointerdown', down, true);
+    return () => window.removeEventListener('pointerdown', down, true);
+  });
+
+  $effect(() => {
     if (open && !armed) {
       armed = true;
+      openedAt = performance.now();
+      opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
       selected = 0;
       sync(presets(now)[0]?.at ?? now);
     }
@@ -70,10 +81,22 @@
     selected = -1;
   }
 
-  function confirm() {
+  function confirm(event?: MouseEvent) {
     if (blocked || !Number.isFinite(chosen)) return;
+    // Палец, отпущенный после долгого нажатия, попадает на кнопку под ним: нажатие началось до открытия окна и не подтверждает время.
+    if (event && event.detail > 0 && lastDown < openedAt) return;
     onpick(chosen);
+    dismiss();
+  }
+
+  /** Всплывающее окно на рабочем столе закрывается и с клавиатуры, фокус возвращается туда, откуда его открыли. */
+  function dismiss() {
     onclose();
+    opener?.focus();
+  }
+
+  function escape(event: KeyboardEvent) {
+    if (event.key === 'Escape' && open && !touch) dismiss();
   }
 
   function zoneLine(at: number): string {
@@ -115,6 +138,8 @@
   {/if}
 {/snippet}
 
+<svelte:window onkeydown={escape} />
+
 {#if touch && open}
   <Sheet open title="Отправить позже" onclose={onclose}>
     {@render fields()}
@@ -123,7 +148,7 @@
   <div class="popover" id={panelId} role="dialog" aria-labelledby="{panelId}-title">
     <header>
       <h2 id="{panelId}-title">Отправить позже</h2>
-      <IconButton icon="close" label="Закрыть" onclick={onclose} />
+      <IconButton icon="close" label="Закрыть" onclick={dismiss} />
     </header>
     {@render fields()}
   </div>

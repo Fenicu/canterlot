@@ -1,10 +1,9 @@
 <script lang="ts">
-	import { onMount } from 'svelte';
+	import { onMount, type Component } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { delegation } from '#lib/api/client.js';
 	import { buildDelegation, type DelegationNode, subagentVerb } from '#lib/stores/delegation.js';
-	import Lane from './Lane.svelte';
 
 	let {
 		chat,
@@ -16,6 +15,15 @@
 
 	let selectedBlockId = $state<string | null>(null);
 	let serverNodes = $state<DelegationNode[]>([]);
+	let LaneComponent = $state<Component<{ chat: ChatStore; rootBlockId: string }> | null>(null);
+
+	$effect(() => {
+		if (selectedBlockId && !LaneComponent) {
+			import('./Lane.svelte').then((m) => {
+				LaneComponent = m.default;
+			});
+		}
+	});
 
 	const liveNodes = $derived(buildDelegation(chat.blocks.values()));
 
@@ -41,7 +49,7 @@
 
 	function getNodeVerb(node: DelegationNode): string {
 		if (node.state === 'waiting') return 'Ждёт';
-		if (node.state === 'final' || node.state === 'completed') return 'Готово';
+		if (node.state === 'done' || node.state === 'final' || node.state === 'completed') return 'Готово';
 		if (node.state === 'aborted' || node.state === 'failed' || node.state === 'error') return 'Прервано';
 		if (node.tool_name) return subagentVerb(node.tool_name);
 		return 'Работает';
@@ -100,9 +108,9 @@
 		{/each}
 	</div>
 
-	{#if selectedBlockId}
+	{#if selectedBlockId && LaneComponent}
 		<div class="selected-lane">
-			<Lane {chat} rootBlockId={selectedBlockId} />
+			<LaneComponent {chat} rootBlockId={selectedBlockId} />
 		</div>
 	{/if}
 </aside>
@@ -122,7 +130,9 @@
 		display: flex;
 		align-items: center;
 		padding: var(--s2) var(--s4);
-		border-bottom: var(--hairline) solid var(--line);
+		margin: var(--s5) var(--s6) var(--s3);
+		border-radius: var(--radius-pill);
+		background: var(--raised);
 		min-height: var(--target);
 	}
 	.panel-title {
@@ -151,7 +161,6 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--s2);
-		border-bottom: var(--hairline) solid var(--line);
 	}
 	.tree-root {
 		font-size: var(--fs-body);
@@ -170,7 +179,7 @@
 		padding: var(--s2);
 		border-radius: var(--radius-card);
 		background: var(--surface);
-		border: var(--hairline) solid transparent;
+		border: var(--s0);
 		color: var(--text);
 		text-align: left;
 		cursor: pointer;
@@ -180,8 +189,7 @@
 		background: var(--raised);
 	}
 	.tree-node.active {
-		background: var(--raised);
-		border-color: var(--line);
+		background: var(--selected);
 	}
 	.branch {
 		color: var(--muted);
@@ -224,6 +232,6 @@
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		border-top: var(--hairline) solid var(--line);
+		background: var(--surface);
 	}
 </style>

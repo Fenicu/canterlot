@@ -72,6 +72,7 @@
     gap: var(--s2);
     min-width: 0;
   }
-  header { display: flex; justify-content: space-between; gap: var(--s2); }
+  header { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); }
+  header button { min-width: var(--target); min-height: var(--target); }
   header p, p { margin: 0; }
 </style>

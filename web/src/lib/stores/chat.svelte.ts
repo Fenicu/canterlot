@@ -151,9 +151,21 @@ function scopeOf(id: string): ScopeName {
   return `conversation:${id}`;
 }
 
+/** Записи полосы меняются на месте (состояние, место, отметки): без прокси SvelteMap об этом не узнает. */
+function reactiveInput(value: InputView): InputView {
+  const view = $state(value);
+  return view;
+}
+
+class InputMap extends SvelteMap<string, InputView> {
+  override set(key: string, value: InputView): this {
+    return super.set(key, reactiveInput(value));
+  }
+}
+
 export class ChatStore {
   readonly blocks = new SvelteMap<string, BlockModel>();
-  readonly inputs = new SvelteMap<string, InputView>();
+  readonly inputs = new InputMap();
   readonly timeline = new TimelineModel();
   readonly requests: HubEvent[] = [];
   readonly diagnostics: unknown[] = [];

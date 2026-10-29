@@ -55,10 +55,12 @@ export function summarizeRun(info: RunInfo): InfoModel {
   }
 
   const parts: { title: string; sub: string; model: string }[] = [];
+  const seenParts = new Set<string>();
   for (const p of info.parts ?? []) {
     if (
       p.kind === "main" ||
       !p.agent ||
+      p.agent === "main" ||
       p.agent === "Claude Code" ||
       p.agent === "Codex" ||
       p.agent === "orchestrator"
@@ -75,6 +77,11 @@ export function summarizeRun(info: RunInfo): InfoModel {
         model: p.model,
       });
     }
+    // Хаб отдаёт часть на каждый блок: одинаковые строки сворачиваются в одну, иначе ключи списка совпадают.
+    const added = parts[parts.length - 1]!;
+    const signature = `${added.title}\u0000${added.sub}\u0000${added.model}`;
+    if (seenParts.has(signature)) parts.pop();
+    else seenParts.add(signature);
   }
 
   let mainInput = 0;
@@ -93,6 +100,7 @@ export function summarizeRun(info: RunInfo): InfoModel {
     const isMain =
       u.kind === "main" ||
       !u.agent ||
+      u.agent === "main" ||
       u.agent === "Claude Code" ||
       u.agent === "Codex" ||
       u.agent === "orchestrator";

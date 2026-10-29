@@ -121,4 +121,29 @@ describe("summarizeRun", () => {
     expect(summary.pending).toBe(true);
     expect(summary.duration).toBeNull();
   });
+
+  test("hub_main_agent_is_counted_as_main_and_repeated_parts_collapse", () => {
+    const info = {
+      run_id: "00000000-0000-4000-8000-000000000011",
+      input_id: "00000000-0000-4000-8000-000000000012",
+      started_at: "2026-10-26T22:12:00.000Z",
+      finished_at: "2026-10-26T22:12:05.000Z",
+      duration_ms: 5000,
+      usage: [
+        { agent: "main", model: "synthetic-large", input_tokens: 12000, output_tokens: 3400, cache_read_tokens: 0, cache_write_tokens: 0 },
+        { agent: "Explore", model: "synthetic-small", input_tokens: 8000, output_tokens: 900, cache_read_tokens: 0, cache_write_tokens: 0 },
+      ],
+      // Хаб отдаёт часть на каждый блок: у основного агента их несколько, имя по умолчанию «main».
+      parts: [
+        { block_id: "a", kind: "text", agent: "main", model: "synthetic-large" },
+        { block_id: "b", kind: "tool_call", agent: "main", model: "synthetic-large" },
+        { block_id: "c", kind: "text", agent: "Explore", model: "synthetic-small" },
+        { block_id: "d", kind: "tool_call", agent: "Explore", model: "synthetic-small" },
+      ],
+    } as unknown as RunInfo;
+    const model = summarizeRun(info);
+    expect(model.parts.map((part) => `${part.title}|${part.model}`)).toEqual(["Основной ответ|synthetic-large", "Explore|synthetic-small"]);
+    expect(model.tokens.find((row) => row.label === "Вход")).toMatchObject({ main: 12000, sub: 8000 });
+    expect(model.tokens.find((row) => row.label === "Выход")).toMatchObject({ main: 3400, sub: 900 });
+  });
 });
