@@ -4,6 +4,7 @@ use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 pub mod claude_code;
+pub mod codex;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]

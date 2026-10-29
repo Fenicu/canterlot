@@ -30,6 +30,8 @@ pub struct WorkerConfig {
     pub attachments: WorkerAttachmentsConfig,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeConfig>,
+    #[serde(default)]
+    pub codex: Option<CodexConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -358,6 +360,25 @@ impl ClaudeCodeConfig {
 
 fn default_claude_executable() -> PathBuf {
     PathBuf::from("claude")
+}
+
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CodexConfig {
+    #[serde(default = "default_codex_executable")]
+    pub executable: PathBuf,
+}
+
+impl Default for CodexConfig {
+    fn default() -> Self {
+        Self {
+            executable: PathBuf::from("codex"),
+        }
+    }
+}
+
+fn default_codex_executable() -> PathBuf {
+    PathBuf::from("codex")
 }
 
 #[derive(Clone, Debug, Deserialize)]

@@ -149,6 +149,7 @@ impl Fixture {
                 ..Default::default()
             },
             claude_code: None,
+            codex: None,
             timers: WorkerTimers {
                 heartbeat: Duration::from_millis(100),
                 heartbeat_ack: Duration::from_secs(2),

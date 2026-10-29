@@ -468,6 +468,7 @@ impl Pilot {
             instruction_profiles: vec![],
             attachments: Default::default(),
             claude_code: None,
+            codex: None,
             timers: WorkerTimers {
                 heartbeat: ms(100),
                 heartbeat_ack: Duration::from_secs(2),

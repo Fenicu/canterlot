@@ -1,0 +1,2 @@
+{"approval_policy":"never","developer_instructions":"Отвечай кратко.","model":"gpt-6-luna","sandbox_mode":"danger-full-access","sandbox_workspace_write":{"exclude_slash_tmp":false,"exclude_tmpdir_env_var":false,"network_access":true,"writable_roots":[]}}
+{"account":null,"requiresOpenaiAuth":true}
