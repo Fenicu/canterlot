@@ -19,3 +19,13 @@ Each follows a recorded frame shape; the sources are given per file.
   "prompt is too long" error text. Covers: an error result whose text says
   the prompt is too long, which the parser must classify as
   `ContextExhausted` instead of a plain error.
+- `read_image.jsonl` — constructed, confirm in live smoke. Shape sources:
+  the recorded `Read` tool call and `tool_result` user frame
+  (`tools.jsonl:19-57`: `tool_use` streamed through `input_json_delta`,
+  `tool_result` with `tool_use_id`, `is_error`) and the Anthropic
+  tool-result image block (`{"type":"image","source":{"type":"base64",
+  "media_type","data"}}`). No recorded run has the CLI read an image, so
+  the exact result shape is open (plan 2a, Open Questions). Covers: a
+  `Read` of `/tmp/canterlot-fixture/shot.png` (the file does not exist)
+  whose `tool_result` content is a single image block with a 4x3 PNG; the
+  adapter must publish those bytes, not the file.
