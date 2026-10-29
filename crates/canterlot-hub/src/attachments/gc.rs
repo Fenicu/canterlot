@@ -47,9 +47,11 @@ async fn expire(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((state, updated_at, conversation_id)) = row else {
+        let _ = tx.rollback().await;
         return Ok(false);
     };
     if !matches!(state.as_str(), "created" | "uploading") || updated_at >= cutoff {
+        let _ = tx.rollback().await;
         return Ok(false);
     }
     sqlx::query(
@@ -93,10 +95,12 @@ async fn release(
     .fetch_optional(&mut *tx)
     .await?;
     let Some((state, updated_at, conversation_id)) = row else {
+        let _ = tx.rollback().await;
         return Ok(false);
     };
     // Новый оператор после блокировки видит ссылку, зафиксированную конкурентной привязкой.
     if state != "ready" || updated_at >= cutoff || linked(&mut tx, id).await? {
+        let _ = tx.rollback().await;
         return Ok(false);
     }
     sqlx::query(
@@ -143,6 +147,7 @@ async fn drop_unreferenced_media(
     .fetch_optional(&mut *tx)
     .await?;
     if locked.is_none() {
+        let _ = tx.rollback().await;
         return Ok(false);
     }
     sqlx::query("delete from block_media where id=$1")

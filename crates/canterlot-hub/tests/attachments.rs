@@ -30,7 +30,7 @@ use chrono::{TimeDelta, Utc};
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{Acquire, PgPool};
 use support::*;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -2362,4 +2362,96 @@ async fn aborted_publication_holds_the_volume_lock_until_io_finishes(pool: PgPoo
     f.trace.hook(None);
     assert_eq!(f.complete(id, "recovered", None).await.status, 200);
     assert!(std::fs::read(f.blob_path(id)).unwrap() == b"GOOD");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_submit_rolls_back_immediately_releasing_attachment_share_locks(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let data = content(1024, 1);
+    let id = f
+        .create("unready.bin", "application/octet-stream", &data)
+        .await;
+    f.upload(id, &data).await;
+    assert_eq!(f.state_of(id).await, "uploading");
+
+    // Acquire a second connection before submit so we can probe immediately without waiting for pool.
+    let mut probe_conn = pool.acquire().await.unwrap();
+
+    // Call submit_message directly; it fails because attachment is unready (uploading).
+    let submit_err = canterlot_hub::conversations::submit_message(
+        &pool,
+        canterlot_hub::conversations::SubmitMessage {
+            owner_id: f.owner,
+            conversation_id: f.conversation,
+            key: "test_probe_key".into(),
+            content: vec![canterlot_hub::delivery::ContentBlock::Text {
+                text: "test".into(),
+            }],
+            attachment_ids: vec![id],
+            retry_of: None,
+            received_at: chrono::Utc::now(),
+        },
+        uuid::Uuid::now_v7(),
+    )
+    .await
+    .unwrap_err();
+
+    assert!(matches!(
+        submit_err,
+        canterlot_hub::delivery::SubmitError::Attachment(
+            canterlot_hub::attachments::AttachmentError::NotReady
+        )
+    ));
+
+    // From our second connection, immediately attempt to lock the attachment row.
+    // If submit_message did not roll back synchronously before returning, the connection
+    // dropped by submit_message still holds the ShareLock in Postgres, so FOR UPDATE SKIP LOCKED
+    // will skip the row and return None!
+    let mut probe_tx = probe_conn.begin().await.unwrap();
+    let row: Option<(String,)> =
+        sqlx::query_as("select state from attachments where id=$1 for update skip locked")
+            .bind(id)
+            .fetch_optional(&mut *probe_tx)
+            .await
+            .unwrap();
+
+    assert!(
+        row.is_some(),
+        "attachment row was skipped because failed submit_message did not roll back synchronously, leaving a lingering ShareLock in PostgreSQL"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn gc_skipped_upload_rolls_back_immediately_leaving_no_lingering_locks(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let data = content(1024, 1);
+    let id = f
+        .create("active.bin", "application/octet-stream", &data)
+        .await;
+    f.upload(id, &data).await;
+    assert_eq!(f.state_of(id).await, "uploading");
+
+    let mut probe_conn = pool.acquire().await.unwrap();
+    let mut probe_tx = probe_conn.begin().await.unwrap();
+
+    // Run GC with a 24-hour grace period; the upload is fresh so expire returns Ok(false).
+    let report =
+        attachments::gc::run_once(&f.pool, f.blobs(), Utc::now(), Duration::from_secs(86400))
+            .await
+            .unwrap();
+    assert_eq!(report.expired_uploads, 0);
+
+    // On our probe connection, immediately acquire FOR UPDATE SKIP LOCKED.
+    // If expire did not roll back its transaction before returning Ok(false), the row remains locked.
+    let row: Option<(String,)> =
+        sqlx::query_as("select state from attachments where id=$1 for update skip locked")
+            .bind(id)
+            .fetch_optional(&mut *probe_tx)
+            .await
+            .unwrap();
+
+    assert!(
+        row.is_some(),
+        "attachment row was skipped because gc expire early-return did not roll back synchronously"
+    );
 }

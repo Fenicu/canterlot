@@ -1436,13 +1436,23 @@ pub async fn submit_message(
             Ok(value)
         }
         Err(crate::delivery::SubmitError::KeyRaceLost) => {
-            tx.rollback().await?;
+            let _ = tx.rollback().await;
             let mut tx = pool.begin().await?;
-            let value = submit_message_in_tx(&mut tx, &req, correlation_id).await?;
-            tx.commit().await?;
-            Ok(value)
+            match submit_message_in_tx(&mut tx, &req, correlation_id).await {
+                Ok(value) => {
+                    tx.commit().await?;
+                    Ok(value)
+                }
+                Err(error) => {
+                    let _ = tx.rollback().await;
+                    Err(error)
+                }
+            }
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            let _ = tx.rollback().await;
+            Err(error)
+        }
     }
 }
 
