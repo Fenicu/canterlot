@@ -5,8 +5,11 @@ import { productionCsp } from '../../csp.mjs';
 test.beforeEach(async ({ page }) => { await page.goto('/__test/primitives'); });
 test('primitives_have_visible_focus_and_44px_targets', async ({ page }) => {
   for (const name of ['Открыть панель', 'Информация', 'Сменить тему']) {
-    await page.keyboard.press('Tab');
-    const button = page.getByRole('button', { name, exact: true }); await button.focus();
+    const button = page.getByRole('button', { name, exact: true });
+    // Фокус приходит клавишей Tab, как у пользователя: после button.focus() :focus-visible не гарантирован, а без него контур не рисуется.
+    await button.focus(); await page.keyboard.press('Shift+Tab'); await page.keyboard.press('Tab');
+    await expect(button).toBeFocused();
+    expect(await button.evaluate(node => node.matches(':focus-visible')), `«${name}» получает фокус с клавиатуры`).toBe(true);
     const style = await button.evaluate(node => { const css = getComputedStyle(node); return { width: node.getBoundingClientRect().width, height: node.getBoundingClientRect().height, outline: css.outlineWidth, token: css.getPropertyValue('--focus-width'), target: parseFloat(css.getPropertyValue('--target')) }; });
     expect(style.width).toBeGreaterThanOrEqual(style.target); expect(style.height).toBeGreaterThanOrEqual(style.target); expect(parseFloat(style.outline)).toBe(parseFloat(style.token));
   }
