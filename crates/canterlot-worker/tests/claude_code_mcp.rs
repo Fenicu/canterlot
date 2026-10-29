@@ -546,3 +546,28 @@ async fn limits_tool_reports_latest_observation_or_no_data() {
         .to_owned();
     assert_eq!(text, "no limit data yet in this session");
 }
+
+#[test]
+fn tool_without_prompt_in_manual_mode_is_marked_cli_policy_and_not_in_bypass() {
+    use canterlot_worker::adapter::claude_code::mcp::cli_policy_mark;
+    use std::collections::HashSet;
+    let approved: HashSet<String> = ["toolu_approved".to_owned()].into_iter().collect();
+    assert_eq!(cli_policy_mark("manual", &approved, "toolu_approved"), None);
+    assert_eq!(
+        cli_policy_mark("manual", &approved, "toolu_fresh"),
+        Some("cli_policy")
+    );
+    assert_eq!(
+        cli_policy_mark("bypassPermissions", &approved, "toolu_fresh"),
+        None,
+        "in bypass everything is CLI-approved already"
+    );
+    assert_eq!(
+        cli_policy_mark("default", &approved, "toolu_fresh"),
+        Some("cli_policy")
+    );
+    assert_eq!(
+        cli_policy_mark("plan", &approved, "toolu_fresh"),
+        Some("cli_policy")
+    );
+}

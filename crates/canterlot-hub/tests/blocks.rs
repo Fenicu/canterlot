@@ -501,3 +501,50 @@ async fn sj_record_bounds_are_checked_before_applying_any_record(pool: PgPool) -
     }
     Ok(())
 }
+
+fn start_approved(id: Uuid) -> Body {
+    Body::BlockStarted(BlockStarted {
+        block_id: id.to_string(),
+        rev: 0,
+        kind: "tool_call".into(),
+        tool_name: "Bash".into(),
+        approved_by: "cli_policy".into(),
+        ..Default::default()
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cli_policy_mark_survives_ingest_to_block_json(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![start_approved(id)]).await;
+    let mut conn = pool.acquire().await?;
+    let stored: Option<String> =
+        sqlx::query_scalar("select approved_by from blocks where block_id=$1")
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+    assert_eq!(stored.as_deref(), Some("cli_policy"));
+    let ev = events(&pool, id).await;
+    assert_eq!(ev[0].0, "block_started");
+    assert_eq!(ev[0].2["approved_by"], "cli_policy");
+    let page = canterlot_hub::history::page(
+        &mut conn,
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        canterlot_hub::history::HistoryCursor::Tail,
+        10,
+    )
+    .await?
+    .expect("history page");
+    let view = page
+        .items
+        .iter()
+        .find_map(|item| match item {
+            canterlot_hub::history::TimelineItem::Block(view) if view.id == id => Some(view),
+            _ => None,
+        })
+        .expect("tool call block in snapshot");
+    assert_eq!(view.approved_by.as_deref(), Some("cli_policy"));
+    Ok(())
+}

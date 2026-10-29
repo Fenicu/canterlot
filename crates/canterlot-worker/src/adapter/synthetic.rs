@@ -97,6 +97,7 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                 model: string("model")?,
                 tool_name: value["tool_name"].as_str().map(str::to_owned),
                 summary: value["summary"].as_str().map(str::to_owned),
+                approved_by: None,
             }
         }
         "block_delta" => {

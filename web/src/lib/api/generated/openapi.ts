@@ -781,6 +781,11 @@ export interface components {
         };
         BlockView: {
             agent: string;
+            /**
+             * @description Set to `"cli_policy"` when the tool ran without an `approve` prompt
+             *     while the effective mode was not `bypassPermissions`.
+             */
+            approved_by?: string | null;
             block_kind: string;
             content: string;
             /** Format: int64 */

@@ -63,6 +63,9 @@ pub struct BlockView {
     pub input_command_id: Option<Uuid>,
     pub tool_name: Option<String>,
     pub summary: Option<String>,
+    /// Set to `"cli_policy"` when the tool ran without an `approve` prompt
+    /// while the effective mode was not `bypassPermissions`.
+    pub approved_by: Option<String>,
     pub state: String,
     pub created_seq: String,
     pub created_at: String,
@@ -82,7 +85,7 @@ pub struct BlockView {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TimelineItem {
     Input(InputView),
-    Block(BlockView),
+    Block(Box<BlockView>),
 }
 #[derive(Serialize, ToSchema)]
 pub struct HistoryPage {
@@ -162,6 +165,7 @@ async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx
         input_command_id: r.try_get("input_command_id")?,
         tool_name: r.try_get("tool_name")?,
         summary: r.try_get("summary")?,
+        approved_by: r.try_get("approved_by")?,
         state: r.try_get("state")?,
         created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
         created_at: at.clone(),
@@ -227,7 +231,7 @@ pub async fn page(
                 .await?;
             items.push(TimelineItem::Input(input_view(r)?));
         } else {
-            items.push(TimelineItem::Block(block_view(conn, id).await?));
+            items.push(TimelineItem::Block(Box::new(block_view(conn, id).await?)));
         }
     }
     Ok(Some(HistoryPage {

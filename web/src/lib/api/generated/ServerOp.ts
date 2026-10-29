@@ -266,6 +266,7 @@ export interface BlockStarted {
     model: string;
     tool_name: string | null;
     summary: string | null;
+    approved_by: string | null;
   };
 }
 export interface BlockDelta {

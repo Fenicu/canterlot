@@ -1111,6 +1111,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         model: "model".into(),
         tool_name: "shell".into(),
         summary: "Проверка".into(),
+        approved_by: String::new(),
     };
     assert_eq!(
         OldBlockStarted::decode(new.encode_to_vec().as_slice()).unwrap(),

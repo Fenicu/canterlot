@@ -107,7 +107,8 @@ export async function streamAnswer(
 			agent: 'agent',
 			model: 'opus',
 			tool_name: null,
-			summary: null
+			summary: null,
+			approved_by: null
 		}
 	});
 	let rev = 0;

@@ -258,6 +258,20 @@ pub fn deny_message(message: Option<&str>) -> String {
     message.unwrap_or("Denied by the owner").to_owned()
 }
 
+/// Marks a tool call block as approved by CLI policy: the tool result arrived
+/// for a `tool_use_id` that never went through `approve`, while the effective
+/// mode is not `bypassPermissions` (there everything is CLI-approved already).
+pub fn cli_policy_mark(
+    effective_mode: &str,
+    approved: &std::collections::HashSet<String>,
+    tool_use_id: &str,
+) -> Option<&'static str> {
+    if effective_mode == "bypassPermissions" || approved.contains(tool_use_id) {
+        return None;
+    }
+    Some("cli_policy")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

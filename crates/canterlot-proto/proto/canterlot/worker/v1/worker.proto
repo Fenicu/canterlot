@@ -343,6 +343,7 @@ message BlockStarted {
   string model = 7;
   string tool_name = 8;
   string summary = 9;
+  string approved_by = 10;
 }
 
 message BlockDelta {

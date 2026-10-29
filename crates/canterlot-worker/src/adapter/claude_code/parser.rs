@@ -330,6 +330,7 @@ impl Parser {
             model: self.current_model.clone(),
             tool_name: None,
             summary: None,
+            approved_by: None,
         }));
     }
 
@@ -474,6 +475,7 @@ impl Parser {
                             model: self.current_model.clone(),
                             tool_name: Some(name.to_owned()),
                             summary: None,
+                            approved_by: None,
                         }));
                         out.push(Parsed::Event(AdapterEvent::Phase {
                             phase: Phase::RunningTool,
@@ -595,6 +597,7 @@ impl Parser {
                                         model: self.current_model.clone(),
                                         tool_name: Some(tool_name),
                                         summary: Some("invalid tool input".to_owned()),
+                                        approved_by: None,
                                     }));
                                     out.push(Parsed::Event(AdapterEvent::BlockFinal {
                                         block_id: block.block_id,
@@ -685,6 +688,7 @@ impl Parser {
                 model: self.current_model.clone(),
                 tool_name: None,
                 summary: None,
+                approved_by: None,
             }));
             out.push(Parsed::Event(AdapterEvent::BlockFinal {
                 block_id,

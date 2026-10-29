@@ -268,6 +268,9 @@ pub enum AdapterEvent {
         model: String,
         tool_name: Option<String>,
         summary: Option<String>,
+        /// Set to `"cli_policy"` when the tool ran without an `approve` prompt
+        /// while the effective mode was not `bypassPermissions`.
+        approved_by: Option<String>,
     },
     BlockDelta {
         block_id: Uuid,

@@ -1344,6 +1344,7 @@ impl Supervisor {
                 model,
                 tool_name,
                 summary,
+                approved_by,
             } => {
                 self.open_blocks.insert(block_id, 1);
                 self.record(Body::BlockStarted(BlockStarted {
@@ -1358,6 +1359,7 @@ impl Supervisor {
                     model,
                     tool_name: tool_name.unwrap_or_default(),
                     summary: summary.unwrap_or_default(),
+                    approved_by: approved_by.unwrap_or_default(),
                 }))?;
             }
             AdapterEvent::BlockDelta { block_id, append } => {

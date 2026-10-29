@@ -421,7 +421,8 @@ function started(blockId: string) {
     agent: 'агент',
     model: 'opus',
     tool_name: null,
-    summary: null
+    summary: null,
+    approved_by: null
   };
 }
 

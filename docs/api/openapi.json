@@ -4115,6 +4115,13 @@
           "agent": {
             "type": "string"
           },
+          "approved_by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set to `\"cli_policy\"` when the tool ran without an `approve` prompt\nwhile the effective mode was not `bypassPermissions`."
+          },
           "block_kind": {
             "type": "string"
           },

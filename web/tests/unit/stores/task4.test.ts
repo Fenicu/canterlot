@@ -950,7 +950,7 @@ describe('stores task 4', () => {
 		const scope = `conversation:${id}`;
 		hub.append(scope, {
 			kind: 'block_started', conversation_id: id,
-			payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'agent', model: 'opus', tool_name: null, summary: null }
+			payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'agent', model: 'opus', tool_name: null, summary: null, approved_by: null }
 		});
 		hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'При' } });
 		hub.flush();

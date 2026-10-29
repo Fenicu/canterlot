@@ -1269,6 +1269,17 @@
                   "type": "null"
                 }
               ]
+            },
+            "approved_by": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -1280,7 +1291,8 @@
             "agent",
             "model",
             "tool_name",
-            "summary"
+            "summary",
+            "approved_by"
           ],
           "additionalProperties": false
         }
