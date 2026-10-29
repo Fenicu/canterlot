@@ -148,6 +148,7 @@ impl Fixture {
                 fetch_retry: Duration::from_millis(10),
                 ..Default::default()
             },
+            claude_code: None,
             timers: WorkerTimers {
                 heartbeat: Duration::from_millis(100),
                 heartbeat_ack: Duration::from_secs(2),

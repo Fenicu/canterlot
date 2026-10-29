@@ -127,6 +127,7 @@ impl Fixture {
             machine: Default::default(),
             instruction_profiles: Vec::new(),
             attachments: Default::default(),
+            claude_code: None,
             hub_url: proxy.url.clone(),
             ca_cert,
             token_file,

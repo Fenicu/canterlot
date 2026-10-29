@@ -28,6 +28,8 @@ pub struct WorkerConfig {
     pub instruction_profiles: Vec<ProfileConfig>,
     #[serde(default)]
     pub attachments: WorkerAttachmentsConfig,
+    #[serde(default)]
+    pub claude_code: Option<ClaudeCodeConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -289,6 +291,30 @@ pub struct ProfileConfig {
     pub title: String,
     pub description: String,
     pub harnesses: Vec<String>,
+    #[serde(default)]
+    pub instructions_file: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ClaudeCodeConfig {
+    #[serde(default = "default_claude_executable")]
+    pub executable: PathBuf,
+    #[serde(default)]
+    pub claude_md_excludes: Vec<PathBuf>,
+}
+
+impl Default for ClaudeCodeConfig {
+    fn default() -> Self {
+        Self {
+            executable: PathBuf::from("claude"),
+            claude_md_excludes: Vec::new(),
+        }
+    }
+}
+
+fn default_claude_executable() -> PathBuf {
+    PathBuf::from("claude")
 }
 
 #[derive(Clone, Debug, Deserialize)]

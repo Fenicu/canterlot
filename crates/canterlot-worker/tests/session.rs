@@ -44,6 +44,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
         machine: Default::default(),
         instruction_profiles: Vec::new(),
         attachments: Default::default(),
+        claude_code: None,
         hub_url: format!("https://localhost:{}", hub.addr.port()),
         ca_cert,
         token_file,

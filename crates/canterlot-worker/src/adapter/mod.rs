@@ -8,6 +8,8 @@ pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic_cli;
 
+pub mod claude_code;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Support {
     Supported,
