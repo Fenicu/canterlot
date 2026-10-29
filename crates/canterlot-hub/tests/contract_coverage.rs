@@ -103,6 +103,10 @@ fn distinct_rust_views_publish_unique_schema_names() {
         canterlot_hub::http::health::ActivityView,
         canterlot_hub::conversations::QueueView,
         canterlot_hub::snapshot::QueueView,
+        canterlot_hub::http::conversations::DecisionBody,
+        canterlot_hub::http::conversations::DecisionOutcomeView,
+        canterlot_hub::http::conversations::DecisionAnswer,
+        canterlot_hub::http::conversations::DecisionBehavior,
     );
 }
 
@@ -256,13 +260,6 @@ fn coverage_table_matches_openapi_and_event_schema() {
 
 // ---------------------------------------------------------------- идемпотентность всего API
 
-enum Expect {
-    /// Ключ записан один раз; повтор возвращает тот же ответ, другой запрос с ключом даёт 409.
-    Recorded,
-    /// Маршрут зарезервирован (план 1.3c): `501 not_implemented`, ключ не записывается.
-    Reserved,
-}
-
 struct Case {
     method: Method,
     template: &'static str,
@@ -270,7 +267,6 @@ struct Case {
     body: Option<Value>,
     /// Другое тело того же маршрута; без тела ключ повторяется на другом маршруте.
     changed: Option<Value>,
-    expect: Expect,
 }
 
 fn case(
@@ -286,7 +282,6 @@ fn case(
         path,
         body,
         changed,
-        expect: Expect::Recorded,
     }
 }
 
@@ -394,6 +389,19 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 .to_owned(),
         );
     }
+    let decision_conversation = testkit::seed_conversation(&pool, owner, machine).await;
+    let decision_execution = Uuid::now_v7();
+    let decision_request = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,1,'running')",
+    )
+    .bind(decision_execution)
+    .bind(decision_conversation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload) values($1,$2,$3,1,'permission','coverage','open','{}')")
+        .bind(decision_request).bind(decision_conversation).bind(decision_execution).execute(&pool).await.unwrap();
     let cases = vec![
         case(
             Method::POST,
@@ -553,17 +561,15 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             None,
             None,
         ),
-        Case {
-            method: Method::POST,
-            template: "/api/v1/conversations/{id}/requests/{request_id}/decision",
-            path: format!(
-                "/api/v1/conversations/{id}/requests/{}/decision",
-                Uuid::now_v7()
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/requests/{request_id}/decision",
+            format!(
+                "/api/v1/conversations/{decision_conversation}/requests/{decision_request}/decision"
             ),
-            body: None,
-            changed: None,
-            expect: Expect::Reserved,
-        },
+            Some(json!({"kind":"permission","behavior":"allow","message":null})),
+            Some(json!({"kind":"permission","behavior":"deny","message":null})),
+        ),
     ];
 
     let mutating: BTreeSet<(String, String)> = operations(&openapi_document())
@@ -607,40 +613,29 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             .send(c.method.clone(), &c.path, Some(&key), c.body.clone())
             .await;
         let after_replay = keys(&key).await;
-        match c.expect {
-            Expect::Reserved => {
-                for response in [&first, &replay] {
-                    assert_eq!(response.status, 501, "{route}");
-                    assert_eq!(error_code(response), "not_implemented", "{route}");
-                }
-                assert_eq!((after_first, after_replay), (0, 0), "{route}");
+        assert!(first.status.is_success(), "{route}: {}", first.status);
+        assert_eq!(after_first, 1, "{route}: key after the first call");
+        assert_eq!(replay.status, first.status, "{route}");
+        assert_eq!(replay.body, first.body, "{route}: replay is byte-identical");
+        assert_eq!(after_replay, 1, "{route}: key after the replay");
+        let conflict = match c.changed {
+            Some(changed) => {
+                client
+                    .send(c.method.clone(), &c.path, Some(&key), Some(changed))
+                    .await
             }
-            Expect::Recorded => {
-                assert!(first.status.is_success(), "{route}: {}", first.status);
-                assert_eq!(after_first, 1, "{route}: key after the first call");
-                assert_eq!(replay.status, first.status, "{route}");
-                assert_eq!(replay.body, first.body, "{route}: replay is byte-identical");
-                assert_eq!(after_replay, 1, "{route}: key after the replay");
-                let conflict = match c.changed {
-                    Some(changed) => {
-                        client
-                            .send(c.method.clone(), &c.path, Some(&key), Some(changed))
-                            .await
-                    }
-                    None => {
-                        let other = if c.template.ends_with("/interrupt") {
-                            format!("/api/v1/conversations/{id}/queue/continue")
-                        } else {
-                            format!("/api/v1/conversations/{id}/interrupt")
-                        };
-                        client.send(Method::POST, &other, Some(&key), None).await
-                    }
+            None => {
+                let other = if c.template.ends_with("/interrupt") {
+                    format!("/api/v1/conversations/{id}/queue/continue")
+                } else {
+                    format!("/api/v1/conversations/{id}/interrupt")
                 };
-                assert_eq!(conflict.status, 409, "{route}");
-                assert_eq!(error_code(&conflict), "idempotency_conflict", "{route}");
-                assert_eq!(keys(&key).await, 1, "{route}: key after the conflict");
+                client.send(Method::POST, &other, Some(&key), None).await
             }
-        }
+        };
+        assert_eq!(conflict.status, 409, "{route}");
+        assert_eq!(error_code(&conflict), "idempotency_conflict", "{route}");
+        assert_eq!(keys(&key).await, 1, "{route}: key after the conflict");
         checked.insert(route, first.status.as_u16());
     }
     assert_eq!(checked.len(), mutating.len());

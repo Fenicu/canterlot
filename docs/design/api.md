@@ -100,6 +100,9 @@
 | `not_found` | 404 | `browser` | `never` | Не найдено |
 | `method_not_allowed` | 405 | `browser` | `never` | Метод не поддерживается |
 | `idempotency_conflict` | 409 | `browser` | `never` | Ключ идемпотентности уже использован с другим запросом |
+| `decision_conflict` | 409 | `browser` | `never` | Решение уже принято с другого устройства |
+| `request_not_open` | 409 | `browser` | `never` | Запрос уже закрыт |
+| `decision_invalid` | 422 | `browser` | `never` | Ответ не подходит к вопросу |
 | `resource_limit` | 413 | `browser` | `never` | Превышен допустимый размер данных |
 | `not_implemented` | 501 | `hub_db` | `never` | Функция пока не реализована |
 | `too_many_requests` | 429 | `hub_db` | `safe_same_key` | Слишком много запросов, повторите позже |
@@ -138,6 +141,8 @@
 Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
+
+`decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
 
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
 
@@ -225,11 +230,15 @@
 | `PATCH /api/v1/conversations/{id}/settings` | `model?`, `effort?`, `permission_mode?` | `{effective, pending, rev}` |
 | `POST /api/v1/conversations/{id}/executions` | - | 201, первый запуск |
 | `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение с последним `native_conversation_id`; с `continue_queue` снятие паузы в той же транзакции |
-| `POST /api/v1/conversations/{id}/requests/{request_id}/decision` | - | зарезервирован для плана 1.3c, `501 not_implemented` |
+| `POST /api/v1/conversations/{id}/requests/{request_id}/decision` | `DecisionBody` | 200 `DecisionOutcomeView`, первый ответ побеждает |
 
 Доменные функции отмены, остановки, продолжения и ввода сами ведут ключ идемпотентности; `settings`, `executions` и `resume` оборачивает `idempotency::run_in_tx`. Чужой идентификатор даёт `404 not_found`. После фиксации транзакции маршрут будит диспетчер разговора.
 
 Настройки проверяются как итоговая комбинация по сохранённому каталогу машины: модель, усилие этой модели, режим разрешений харнесса. Допустимое изменение попадает в `pending_settings`, увеличивает `settings_rev` и публикует `conversation_settings_changed {effective, pending, rev}` в области разговора. Диспетчер повторно проверяет комбинацию под блокировкой очереди, кладёт действующие значения в команду (`settings`, `settings_rev`) и снимает недопустимые ключи с событием, где добавлено `rejected:{keys, reason:"settings_unavailable"}`. `input_accepted` делает отправленные значения эффективными и убирает из ожидающих только ключи с тем же значением. Отказ до передачи с причиной `settings_unavailable` убирает ключи отклонённой команды и не ставит паузу. Ввод с настройками не уходит в сеанс без `pilot_v1`: он остаётся в очереди, а `detail` показывает вычисляемое удержание `capability_missing`.
+
+`POST …/requests/{request_id}/decision` требует `Idempotency-Key` и `X-Canterlot-Client: 1`. `DecisionBody` различается по `kind`: `permission` принимает `behavior: "allow" | "deny"` и необязательный `message`, `question` принимает `answers`, словарь по id вопросов со строкой для одиночного выбора или массивом строк для множественного. Контракт из `requests.request_payload.questions` должен содержать от 1 до 4 вопросов. Каждый вопрос требует ответ, посторонние id, пустые и повторные значения отклоняются. Значения совпадают с `options[].label` точно, без перевода или обрезки; свободный текст допускается только при явном `allow_custom`, `isOther` или `is_other`, равном `true`. Множественный выбор задаётся `multiSelect` или `multi_select`, равным `true`.
+
+Успех: 200 `{request_id, winner_decision_id, state: "decision_saved", decision}`. Решение и команда `deliver_decision` сохраняются атомарно. Одинаковый ключ и тело возвращают первый ответ, даже после продвижения состояния запроса; другое тело, request id или сессия с тем же ключом дают `409 idempotency_conflict`. Другой ключ после принятого решения даёт `409 decision_conflict`; закрытый запрос или смена поколения дают `409 request_not_open`. Отсутствующий запрос, запрос другой сессии и чужая сессия дают `404 not_found`. Неверная форма тела даёт `400 invalid_request`, несовпадение с контрактом запроса даёт `422 decision_invalid`.
 
 `retry_of` обязан указывать на ввод той же сессии в состоянии `acceptance_unconfirmed`, иначе `422 invalid_request`; значение входит в хеш запроса. Первый ввод сессии с автоматическим названием задаёт название: первые 60 символов по границе слова, пробелы сжимаются, запасное значение `Новая сессия`.
 
@@ -396,7 +405,7 @@ Pump читает журнал только при доступной ёмкос
 | 9 | Поле ввода: отправка, вложение, прерывание, «отправить позже» (§5.2) | `POST /api/v1/conversations/{id}/inputs`, `POST /api/v1/conversations/{id}/interrupt`, вложения (строка 16), `POST /api/v1/conversations/{id}/scheduled` | `input_queued`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `interrupt_state_changed` | 5, 6b, 9 |
 | 10 | Очередь и отложенные сообщения под лентой; отмена ввода в очереди (§5.1, §5.3) | очередь и отложенные в снимке разговора; `GET /api/v1/conversations/{id}/scheduled`, `PATCH /api/v1/scheduled/{id}`, `DELETE /api/v1/scheduled/{id}`, `POST /api/v1/inputs/{id}/cancel` | `scheduled_changed`, `input_state_changed` | 5, 6b, 7a |
 | 11 | Смена модели, режима разрешений и усилия посреди сессии; ожидающее значение в шапке (§5.4) | `PATCH /api/v1/conversations/{id}/settings`; `settings{effective,pending}` в карточке | `conversation_settings_changed` | 2, 6b |
-| 12 | Карточки вопросов и разрешений (§5.5), резерв | `POST /api/v1/conversations/{id}/requests/{request_id}/decision` отвечает `501 not_implemented` | `request_opened`, `request_closed`, `request_decided` | только контракт (план 1.3c) |
+| 12 | Карточки вопросов и разрешений (§5.5) | `POST /api/v1/conversations/{id}/requests/{request_id}/decision`: 200, проверка контракта, единственный победитель | `request_opened`, `request_closed`, `request_decided` | HTTP реализован; события и UI в остальных задачах плана 1.3c |
 | 13 | «Инфо» об ответе и экспорт в markdown или картинку (§5.6) | `GET /api/v1/conversations/{id}/runs/{run_id}` (расход по моделям и агентам, контекст, длительность, оценка лимита), содержимое блоков | – | 3, 7a |
 | 14 | «Кранч»: переключатель, текст продолжения, удержания `quota_exhausted` и `weekly_reserve`, «Продолжить, тратя резерв» (§8) | `PUT /api/v1/conversations/{id}/crunch`, `POST /api/v1/conversations/{id}/spend-reserve`; удержания в карточке, элементе списка и снимке | `crunch_changed`, `crunch_held`, `crunch_woken`, `limit_reached`, `queue_state_changed` | 6a, 8 |
 | 15 | Состояние активности с доказательствами в списке и шапке (§9) | в элементе списка, карточке и снимках | `derived_changed` | 5 |
@@ -415,7 +424,7 @@ Pump читает журнал только при доступной ёмкос
 Контракт для плана 1.3b заморожен тестами хаба `contract_coverage`:
 
 - `coverage_table_matches_openapi_and_event_schema`: каждый маршрут этой таблицы есть в `openapi.json` и наоборот; каждый вид события таблицы покрытия и таблицы видов есть в `events.schema.json` (и в `CLIENT_KINDS`) и наоборот; каждый `ErrorCode` перечисления и `components.schemas.ErrorCode` есть в таблице ошибок; закоммиченный `openapi.json` совпадает с генерацией.
-- `every_mutating_endpoint_records_its_key_once_across_the_whole_api`: каждая изменяющая операция `openapi.json`, кроме `PATCH /api/v1/attachments/{id}/content` и `POST /api/v1/conversations/{id}/read`, после первого вызова и повтора оставляет одну запись ключа, повтор возвращает тот же ответ, другой запрос с тем же ключом даёт `409 idempotency_conflict`. Маршрут без фикстуры проваливает тест. Зарезервированный `…/decision` отвечает `501 not_implemented` и ключ не записывает.
+- `every_mutating_endpoint_records_its_key_once_across_the_whole_api`: каждая изменяющая операция `openapi.json`, кроме `PATCH /api/v1/attachments/{id}/content` и `POST /api/v1/conversations/{id}/read`, после первого вызова и повтора оставляет одну запись ключа, повтор возвращает тот же ответ, другой запрос с тем же ключом даёт `409 idempotency_conflict`. Маршрут без фикстуры проваливает тест. Маршрут `…/decision` входит в общую проверку идемпотентности.
 
 Сквозные сценарии пилота через HTTP, WSS, настоящий хаб, управляющую службу воркера, процессы сопровождения и синтетический CLI: `crates/canterlot-worker/tests/pilot_e2e.rs`. Каждый сценарий сверяет поток WSS с журналом: только клиентские виды и `hidden` без payload, непрерывные номера каждой области (в том числе после переподключения с курсора), каждое событие базы покрыто ровно одним кадром.
 

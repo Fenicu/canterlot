@@ -8,7 +8,7 @@ source ~/.cargo/env
 cd "$(dirname "$0")/.."
 temporary=$(mktemp docs/api/openapi.json.XXXXXX)
 trap 'rm -f "$temporary"' EXIT
-cargo run --quiet -p canterlot-hub -- openapi > "$temporary"
+cargo run --locked --quiet -p canterlot-hub -- openapi > "$temporary"
 chmod 644 "$temporary"
 mv "$temporary" docs/api/openapi.json
 trap - EXIT

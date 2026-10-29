@@ -200,25 +200,322 @@ async fn cancel_input(
     }
     Ok(Json(result))
 }
-#[utoipa::path(post,path="/api/v1/conversations/{id}/requests/{request_id}/decision",tag="conversations",params(("id"=Uuid,Path),("request_id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=501,description="Решение пока не поддерживается")))]
+#[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum DecisionBody {
+    Permission {
+        behavior: DecisionBehavior,
+        message: Option<String>,
+    },
+    Question {
+        answers: std::collections::BTreeMap<String, DecisionAnswer>,
+    },
+}
+
+impl std::fmt::Debug for DecisionBody {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DecisionBody([REDACTED])")
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionBehavior {
+    Allow,
+    Deny,
+}
+
+#[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum DecisionAnswer {
+    Single(String),
+    Multiple(Vec<String>),
+}
+
+impl From<DecisionBody> for canterlot_proto::requests::DecisionPayload {
+    fn from(body: DecisionBody) -> Self {
+        use canterlot_proto::requests::{AnswerValue, PermissionBehavior};
+        match body {
+            DecisionBody::Permission { behavior, message } => Self::Permission {
+                behavior: match behavior {
+                    DecisionBehavior::Allow => PermissionBehavior::Allow,
+                    DecisionBehavior::Deny => PermissionBehavior::Deny,
+                },
+                message,
+            },
+            DecisionBody::Question { answers } => Self::Question {
+                answers: answers
+                    .into_iter()
+                    .map(|(id, answer)| {
+                        (
+                            id,
+                            match answer {
+                                DecisionAnswer::Single(value) => AnswerValue::Single(value),
+                                DecisionAnswer::Multiple(values) => AnswerValue::Multiple(values),
+                            },
+                        )
+                    })
+                    .collect(),
+            },
+        }
+    }
+}
+
+#[derive(Deserialize, serde::Serialize, ToSchema)]
+pub struct DecisionOutcomeView {
+    pub request_id: Uuid,
+    pub winner_decision_id: Uuid,
+    #[schema(pattern = "^decision_saved$")]
+    pub state: String,
+    pub decision: DecisionBody,
+}
+
+fn invalid_decision(question_id: Option<&str>) -> ApiError {
+    ApiError::new(ErrorCode::DecisionInvalid).with_details(super::error::ErrorDetails {
+        question_id: question_id.map(str::to_owned),
+        ..Default::default()
+    })
+}
+
+fn validate_decision(
+    row: &crate::requests::RequestRow,
+    decision: &DecisionBody,
+) -> Result<(), ApiError> {
+    use crate::requests::RequestKind;
+    match (row.kind, decision) {
+        (RequestKind::Permission, DecisionBody::Permission { .. }) => Ok(()),
+        (RequestKind::Question, DecisionBody::Question { answers }) => {
+            let questions = row
+                .request_payload
+                .get("questions")
+                .and_then(serde_json::Value::as_array)
+                .filter(|q| (1..=4).contains(&q.len()))
+                .ok_or_else(|| invalid_decision(None))?;
+            let mut ids = std::collections::BTreeSet::new();
+            for question in questions {
+                let id = question
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .ok_or_else(|| invalid_decision(None))?;
+                if !ids.insert(id) {
+                    return Err(invalid_decision(Some(id)));
+                }
+                let answer = answers.get(id).ok_or_else(|| invalid_decision(Some(id)))?;
+                let multi = ["multiSelect", "multi_select"]
+                    .iter()
+                    .any(|key| question.get(key) == Some(&serde_json::Value::Bool(true)));
+                let custom = ["allow_custom", "isOther", "is_other"]
+                    .iter()
+                    .any(|key| question.get(key) == Some(&serde_json::Value::Bool(true)));
+                let values = match answer {
+                    DecisionAnswer::Single(value) if !multi => std::slice::from_ref(value),
+                    DecisionAnswer::Multiple(values) if multi && !values.is_empty() => {
+                        values.as_slice()
+                    }
+                    _ => return Err(invalid_decision(Some(id))),
+                };
+                let mut selected = std::collections::BTreeSet::new();
+                for value in values {
+                    let known = question
+                        .get("options")
+                        .and_then(serde_json::Value::as_array)
+                        .is_some_and(|options| {
+                            options.iter().any(|option| {
+                                option.get("label").and_then(serde_json::Value::as_str)
+                                    == Some(value.as_str())
+                            })
+                        });
+                    if value.is_empty() || !selected.insert(value) || (!known && !custom) {
+                        return Err(invalid_decision(Some(id)));
+                    }
+                }
+            }
+            if let Some(id) = answers.keys().find(|id| !ids.contains(id.as_str())) {
+                return Err(invalid_decision(Some(id)));
+            }
+            Ok(())
+        }
+        _ => Err(invalid_decision(None)),
+    }
+}
+
+#[utoipa::path(
+    post, path="/api/v1/conversations/{id}/requests/{request_id}/decision", tag="conversations",
+    params(("id"=Uuid,Path),("request_id"=Uuid,Path),("Idempotency-Key"=String,Header),("X-Canterlot-Client"=String,Header,description="1")),
+    request_body=DecisionBody,
+    responses(
+        (status=200,description="Решение сохранено; повтор возвращает первый ответ",body=DecisionOutcomeView),
+        (status=400,description="Некорректный запрос",body=super::error::ErrorEnvelope),
+        (status=404,description="Запрос или сессия не найдены",body=super::error::ErrorEnvelope),
+        (status=409,description="decision_conflict, request_not_open или idempotency_conflict",body=super::error::ErrorEnvelope),
+        (status=422,description="decision_invalid: ответ не подходит к контракту",body=super::error::ErrorEnvelope)
+    )
+)]
 async fn decision(
     State(s): State<AppState>,
     o: Owner,
-    ApiPath((id, _request_id)): ApiPath<(Uuid, Uuid)>,
-    IdempotencyKey(_key): IdempotencyKey,
-) -> Result<StatusCode, ApiError> {
-    let owned: bool = sqlx::query_scalar(
-        "select exists(select 1 from conversations where id=$1 and owner_id=$2)",
-    )
-    .bind(id)
-    .bind(o.owner_id)
-    .fetch_one(&s.pool)
-    .await?;
-    if !owned {
-        return Err(ApiError::new(ErrorCode::NotFound));
+    ApiPath((id, request_id)): ApiPath<(Uuid, Uuid)>,
+    IdempotencyKey(key): IdempotencyKey,
+    ApiJson(body): ApiJson<DecisionBody>,
+) -> Result<Json<DecisionOutcomeView>, ApiError> {
+    use crate::{
+        idempotency,
+        requests::{self, DecisionResult, RequestDomainError, RequestRow, RequestState},
+    };
+    use sha2::{Digest, Sha256};
+
+    let operation = "request_decision";
+    let hash = idempotency::request_hash(operation, &(id, request_id, &body));
+    let mut tx = s.pool.begin().await?;
+    // All fallible work stays inside this block so every failure explicitly rolls back below.
+    let result: Result<(DecisionOutcomeView, bool), ApiError> = async {
+        let mut lock = Sha256::new();
+        lock.update(b"canterlot:idempotency:");
+        lock.update(o.owner_id.as_bytes());
+        lock.update(key.as_bytes());
+        let lock_id = i64::from_be_bytes(lock.finalize()[..8].try_into().expect("eight bytes"));
+        sqlx::query("select pg_advisory_xact_lock($1)")
+            .bind(lock_id)
+            .execute(&mut *tx)
+            .await?;
+        let owned: Option<Uuid> = sqlx::query_scalar(
+            "select id from conversations where id=$1 and owner_id=$2 for no key update",
+        )
+        .bind(id)
+        .bind(o.owner_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if owned.is_none() {
+            return Err(ApiError::new(ErrorCode::NotFound));
+        }
+        match idempotency::lookup(&mut tx, o.owner_id, &key, operation, &hash).await? {
+            idempotency::Begin::Replay(value) => {
+                let view = serde_json::from_value(value)
+                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                return Ok((view, false));
+            }
+            idempotency::Begin::Conflict => {
+                return Err(ApiError::new(ErrorCode::IdempotencyConflict));
+            }
+            idempotency::Begin::New => {}
+        }
+        let row: RequestRow =
+            sqlx::query_as("select * from requests where id=$1 and conversation_id=$2 for update")
+                .bind(request_id)
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?
+                .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?;
+        if row.state == RequestState::Open {
+            validate_decision(&row, &body)?;
+        }
+        let decision = body.into();
+        let outcome =
+            requests::save_decision_in_tx(&mut tx, id, request_id, row.generation, &decision, &key)
+                .await
+                .map_err(|error| match error {
+                    RequestDomainError::NotFound(_)
+                    | RequestDomainError::ConversationNotFound(_) => {
+                        ApiError::new(ErrorCode::NotFound)
+                    }
+                    RequestDomainError::Database(error) => error.into(),
+                    RequestDomainError::Serialization(_) => ApiError::new(ErrorCode::Internal),
+                })?;
+        let row = match outcome {
+            DecisionResult::Committed { row, .. } => row,
+            DecisionResult::IdempotentReplay { row } => {
+                // The request outlives the generic idempotency key's retention period.
+                let submitted = serde_json::to_value(&decision)
+                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                if row.decision_payload.as_ref() != Some(&submitted) {
+                    return Err(ApiError::new(ErrorCode::IdempotencyConflict));
+                }
+                row
+            }
+            DecisionResult::Conflict {
+                winner_decision,
+                current_state,
+            } => {
+                let winner_decision = serde_json::from_value(winner_decision)
+                    .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                return Err(ApiError::new(ErrorCode::DecisionConflict).with_details(
+                    super::error::ErrorDetails {
+                        winner_decision: Some(winner_decision),
+                        current_state: Some(current_state.as_str().into()),
+                        ..Default::default()
+                    },
+                ));
+            }
+            DecisionResult::AlreadyClosed {
+                current_state,
+                reason,
+            } => {
+                return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
+                    super::error::ErrorDetails {
+                        current_state: Some(current_state.as_str().into()),
+                        reason: Some(reason),
+                        ..Default::default()
+                    },
+                ));
+            }
+            DecisionResult::StaleGeneration => {
+                return Err(ApiError::new(ErrorCode::RequestNotOpen).with_details(
+                    super::error::ErrorDetails {
+                        current_state: Some(row.state.as_str().into()),
+                        reason: Some("generation_advanced".into()),
+                        ..Default::default()
+                    },
+                ));
+            }
+        };
+        let view = DecisionOutcomeView {
+            request_id: row.id,
+            winner_decision_id: row
+                .winner_decision_id
+                .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
+            state: "decision_saved".into(),
+            decision: serde_json::from_value(
+                row.decision_payload
+                    .ok_or_else(|| ApiError::new(ErrorCode::Internal))?,
+            )
+            .map_err(|_| ApiError::new(ErrorCode::Internal))?,
+        };
+        let response =
+            serde_json::to_value(&view).map_err(|_| ApiError::new(ErrorCode::Internal))?;
+        if !idempotency::record(
+            &mut tx,
+            o.owner_id,
+            &key,
+            operation,
+            &hash,
+            &response,
+            Some(id),
+        )
+        .await?
+        {
+            return Err(ApiError::new(ErrorCode::IdempotencyConflict));
+        }
+        Ok((view, true))
     }
-    Err(ApiError::new(ErrorCode::NotImplemented))
+    .await;
+    match result {
+        Ok((view, true)) => {
+            tx.commit().await?;
+            s.dispatcher.trigger(id);
+            Ok(Json(view))
+        }
+        Ok((view, false)) => {
+            tx.rollback().await?;
+            Ok(Json(view))
+        }
+        Err(error) => {
+            tx.rollback().await?;
+            Err(error)
+        }
+    }
 }
+
 #[derive(Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct CreateBody {

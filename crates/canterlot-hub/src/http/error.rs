@@ -89,6 +89,9 @@ error_codes! {
     NotFound => "not_found", 404, Browser, Never, "Не найдено";
     MethodNotAllowed => "method_not_allowed", 405, Browser, Never, "Метод не поддерживается";
     IdempotencyConflict => "idempotency_conflict", 409, Browser, Never, "Ключ идемпотентности уже использован с другим запросом";
+    DecisionConflict => "decision_conflict", 409, Browser, Never, "Решение уже принято с другого устройства";
+    RequestNotOpen => "request_not_open", 409, Browser, Never, "Запрос уже закрыт";
+    DecisionInvalid => "decision_invalid", 422, Browser, Never, "Ответ не подходит к вопросу";
     ResourceLimit => "resource_limit", 413, Browser, Never, "Превышен допустимый размер данных";
     NotImplemented => "not_implemented", 501, HubDb, Never, "Функция пока не реализована";
     TooManyRequests => "too_many_requests", 429, HubDb, SafeSameKey, "Слишком много запросов, повторите позже";
@@ -176,18 +179,37 @@ pub enum ArchiveReason {
     LiveExecution,
 }
 
-/// Закрытый словарь дополнительных полей: только перечисления и числа, без пользовательского текста.
+/// Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, ToSchema)]
 pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
     pub reasons: Option<Vec<ArchiveReason>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub winner_decision: Option<super::conversations::DecisionBody>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(
+        nullable = false,
+        pattern = "^(open|decision_saved|decision_transmitting|decision_applied|decision_not_applied|closed_without_decision)$"
+    )]
+    pub current_state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(
+        nullable = false,
+        pattern = "^(closed_without_decision|generation_advanced)$"
+    )]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[schema(nullable = false)]
+    pub question_id: Option<String>,
 }
 
 impl ErrorDetails {
     pub fn archive_active(reasons: Vec<ArchiveReason>) -> Self {
         Self {
             reasons: Some(reasons),
+            ..Default::default()
         }
     }
 }
@@ -199,7 +221,7 @@ pub struct ApiError {
     pub scope: ErrorScope,
     pub retry: Retry,
     pub message: &'static str,
-    pub details: Option<ErrorDetails>,
+    pub details: Option<Box<ErrorDetails>>,
     pub correlation_id: Uuid,
     /// Текущее смещение загрузки вложения для заголовка `Upload-Offset`.
     pub upload_offset: Option<u64>,
@@ -214,7 +236,7 @@ pub struct ErrorBody {
     pub correlation_id: Uuid,
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(nullable = false)]
-    pub details: Option<ErrorDetails>,
+    pub details: Option<Box<ErrorDetails>>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -250,7 +272,7 @@ impl ApiError {
     }
 
     pub fn with_details(mut self, details: ErrorDetails) -> Self {
-        self.details = Some(details);
+        self.details = Some(Box::new(details));
         self
     }
 }

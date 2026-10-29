@@ -8,7 +8,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn decision_endpoint_is_reserved_and_answers_501(pool: PgPool) {
+async fn decision_endpoint_unknown_request_answers_404(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
@@ -29,11 +29,11 @@ async fn decision_endpoint_is_reserved_and_answers_501(pool: PgPool) {
                 Uuid::now_v7()
             ),
             Some("decision"),
-            None,
+            Some(serde_json::json!({"kind":"permission","behavior":"allow"})),
         )
         .await;
-    assert_eq!(response.status, 501);
-    assert_eq!(response.json::<Value>()["error"]["code"], "not_implemented");
+    assert_eq!(response.status, 404);
+    assert_eq!(response.json::<Value>()["error"]["code"], "not_found");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -864,7 +864,7 @@ async fn foreign_ids_are_not_found_on_every_control_endpoint(pool: PgPool) {
                 "/api/v1/conversations/{c}/requests/{}/decision",
                 Uuid::now_v7()
             ),
-            None,
+            Some(serde_json::json!({"kind":"permission","behavior":"allow"})),
         ),
         (
             Method::POST,

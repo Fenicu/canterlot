@@ -930,6 +930,29 @@ export interface components {
         CrunchView: {
             enabled: boolean;
         };
+        DecisionAnswer: string | string[];
+        /** @enum {string} */
+        DecisionBehavior: "allow" | "deny";
+        DecisionBody: {
+            behavior: components["schemas"]["DecisionBehavior"];
+            /** @enum {string} */
+            kind: "permission";
+            message?: string | null;
+        } | {
+            answers: {
+                [key: string]: components["schemas"]["DecisionAnswer"];
+            };
+            /** @enum {string} */
+            kind: "question";
+        };
+        DecisionOutcomeView: {
+            decision: components["schemas"]["DecisionBody"];
+            /** Format: uuid */
+            request_id: string;
+            state: string;
+            /** Format: uuid */
+            winner_decision_id: string;
+        };
         DefaultsView: {
             crunch_resume_text: string;
         };
@@ -970,10 +993,14 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict";
-        /** @description Закрытый словарь дополнительных полей: только перечисления и числа, без пользовательского текста. */
+        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict";
+        /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
+            current_state?: string;
+            question_id?: string;
+            reason?: string;
             reasons?: components["schemas"]["ArchiveReason"][];
+            winner_decision?: components["schemas"]["DecisionBody"];
         };
         ErrorEnvelope: {
             error: components["schemas"]["ErrorBody"];
@@ -2540,6 +2567,8 @@ export interface operations {
             query?: never;
             header: {
                 "Idempotency-Key": string;
+                /** @description 1 */
+                "X-Canterlot-Client": string;
             };
             path: {
                 id: string;
@@ -2547,16 +2576,66 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DecisionBody"];
+            };
+        };
         responses: {
-            /** @description Решение пока не поддерживается */
-            501: {
+            /** @description Решение сохранено; повтор возвращает первый ответ */
+            200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
                     "X-Server-Time-Ms"?: number;
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["DecisionOutcomeView"];
+                };
+            };
+            /** @description Некорректный запрос */
+            400: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Запрос или сессия не найдены */
+            404: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description decision_conflict, request_not_open или idempotency_conflict */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description decision_invalid: ответ не подходит к контракту */
+            422: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {

@@ -14,6 +14,7 @@ use utoipa_axum::router::OpenApiRouter;
 
 use super::{
     api_routes,
+    conversations::{DecisionAnswer, DecisionBehavior, DecisionBody, DecisionOutcomeView},
     error::{ArchiveReason, ErrorBody, ErrorCode, ErrorDetails, ErrorEnvelope, ErrorScope, Retry},
 };
 
@@ -31,7 +32,11 @@ use super::{
         ErrorEnvelope,
         ErrorBody,
         ErrorDetails,
-        ArchiveReason
+        ArchiveReason,
+        DecisionBody,
+        DecisionAnswer,
+        DecisionBehavior,
+        DecisionOutcomeView
     ))
 )]
 struct ApiDoc;

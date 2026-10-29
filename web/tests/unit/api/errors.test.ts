@@ -16,6 +16,9 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   'not_found',
   'method_not_allowed',
   'idempotency_conflict',
+  'decision_conflict',
+  'request_not_open',
+  'decision_invalid',
   'resource_limit',
   'not_implemented',
   'too_many_requests',
@@ -78,7 +81,7 @@ describe('api/errors', () => {
   });
 
   it('error_actions_cover_every_code_in_the_api_error_table', () => {
-    expect(ALL_ERROR_CODES.length).toBe(42);
+    expect(ALL_ERROR_CODES.length).toBe(45);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(400, code, 'Server text', 'browser', 'never', 'corr-123');

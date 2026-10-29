@@ -1620,11 +1620,30 @@
             "schema": {
               "type": "string"
             }
+          },
+          {
+            "name": "X-Canterlot-Client",
+            "in": "header",
+            "description": "1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
           }
         ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DecisionBody"
+              }
+            }
+          },
+          "required": true
+        },
         "responses": {
-          "501": {
-            "description": "Решение пока не поддерживается",
+          "200": {
+            "description": "Решение сохранено; повтор возвращает первый ответ",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -1632,6 +1651,89 @@
                   "minimum": 0
                 },
                 "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DecisionOutcomeView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Некорректный запрос",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Запрос или сессия не найдены",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "decision_conflict, request_not_open или idempotency_conflict",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "decision_invalid: ответ не подходит к контракту",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
               }
             }
           },
@@ -4604,6 +4706,104 @@
           }
         }
       },
+      "DecisionAnswer": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        ]
+      },
+      "DecisionBehavior": {
+        "type": "string",
+        "enum": [
+          "allow",
+          "deny"
+        ]
+      },
+      "DecisionBody": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "behavior",
+              "kind"
+            ],
+            "properties": {
+              "behavior": {
+                "$ref": "#/components/schemas/DecisionBehavior"
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "permission"
+                ]
+              },
+              "message": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "answers",
+              "kind"
+            ],
+            "properties": {
+              "answers": {
+                "type": "object",
+                "additionalProperties": {
+                  "$ref": "#/components/schemas/DecisionAnswer"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "question"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "DecisionOutcomeView": {
+        "type": "object",
+        "required": [
+          "request_id",
+          "winner_decision_id",
+          "state",
+          "decision"
+        ],
+        "properties": {
+          "decision": {
+            "$ref": "#/components/schemas/DecisionBody"
+          },
+          "request_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "state": {
+            "type": "string",
+            "pattern": "^decision_saved$"
+          },
+          "winner_decision_id": {
+            "type": "string",
+            "format": "uuid"
+          }
+        }
+      },
       "DefaultsView": {
         "type": "object",
         "required": [
@@ -4760,6 +4960,9 @@
           "not_found",
           "method_not_allowed",
           "idempotency_conflict",
+          "decision_conflict",
+          "request_not_open",
+          "decision_invalid",
           "resource_limit",
           "not_implemented",
           "too_many_requests",
@@ -4798,13 +5001,27 @@
       },
       "ErrorDetails": {
         "type": "object",
-        "description": "Закрытый словарь дополнительных полей: только перечисления и числа, без пользовательского текста.",
+        "description": "Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок.",
         "properties": {
+          "current_state": {
+            "type": "string",
+            "pattern": "^(open|decision_saved|decision_transmitting|decision_applied|decision_not_applied|closed_without_decision)$"
+          },
+          "question_id": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string",
+            "pattern": "^(closed_without_decision|generation_advanced)$"
+          },
           "reasons": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/ArchiveReason"
             }
+          },
+          "winner_decision": {
+            "$ref": "#/components/schemas/DecisionBody"
           }
         }
       },
