@@ -208,7 +208,6 @@
     padding: var(--s4);
     border-radius: var(--radius-card);
     background: var(--surface);
-    border: var(--hairline) solid var(--line);
     display: flex;
     flex-direction: column;
     gap: var(--s3);
@@ -220,20 +219,21 @@
   .conflict-notice {
     padding: var(--s2) var(--s3);
     border-radius: var(--radius-sm);
-    background: var(--surface-warning, var(--badge));
+    background: var(--warning-soft);
     color: var(--text);
-    font-size: var(--font-small);
+    font-size: var(--fs-meta);
   }
 
   .applied-collapsed {
+    justify-content: center;
+    min-height: var(--target);
     padding: var(--s3) var(--s4);
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
   }
 
   .applied-collapsed:hover {
     background: var(--raised);
-    border-color: var(--control-line);
   }
 
   .applied-collapsed:focus-visible {
@@ -265,7 +265,6 @@
     align-items: center;
     gap: var(--s3);
     padding-bottom: var(--s2);
-    border-bottom: var(--hairline) solid var(--line);
   }
 
   .collapse-btn {
@@ -274,7 +273,6 @@
     border-radius: var(--radius-pill);
     background: var(--raised);
     color: var(--secondary);
-    border: var(--hairline) solid var(--control-line);
     font-size: var(--fs-sm);
     cursor: pointer;
     transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
@@ -292,6 +290,5 @@
 
   .track-wrapper {
     padding-bottom: var(--s2);
-    border-bottom: var(--hairline) solid var(--line);
   }
 </style>

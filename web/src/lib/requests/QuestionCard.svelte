@@ -321,15 +321,26 @@
   .option-item {
     display: flex;
     align-items: center;
+    gap: var(--s6);
     padding: var(--s3) var(--s4);
     min-height: var(--target);
     border-radius: var(--radius-sm);
     background: var(--raised);
-    border: var(--hairline) solid var(--control-line);
     color: var(--text);
     text-align: left;
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), border-color var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
+  }
+
+  .option-item::before {
+    content: '';
+    flex-shrink: 0;
+    width: var(--mark);
+    height: var(--mark);
+    margin: var(--s2);
+    border-radius: var(--radius-round);
+    outline: var(--focus-width) solid var(--muted);
+    outline-offset: var(--s1);
   }
 
   .option-item:focus-visible {
@@ -341,9 +352,14 @@
     background: var(--hover);
   }
 
-  .option-item[data-selected] {
+  .option-item[data-selected],
+  .option-item[data-selected]:hover:not(:disabled) {
     background: var(--selected);
-    border-color: var(--accent);
+  }
+
+  .option-item[data-selected]::before {
+    background: var(--accent);
+    outline-color: var(--accent);
   }
 
   .option-item:disabled {
@@ -355,6 +371,7 @@
     display: flex;
     flex-direction: column;
     gap: var(--s1);
+    min-width: var(--s0);
   }
 
   .opt-label {
@@ -378,13 +395,18 @@
     width: 100%;
     box-sizing: border-box;
     min-height: var(--target);
-    padding: var(--s2) var(--s3);
+    padding: var(--s2) var(--s6);
+    border: var(--s0);
     border-radius: var(--radius-sm);
-    background: var(--code);
-    border: var(--hairline) solid var(--control-line);
+    background: var(--raised);
     color: var(--text);
     font-size: var(--fs-body);
     font-family: var(--font-sans);
+  }
+
+  .custom-input::placeholder {
+    color: var(--muted);
+    opacity: 1;
   }
 
   .custom-input:focus-visible {
@@ -403,6 +425,7 @@
   }
 
   .submit-btn {
+    flex: 1;
     min-height: var(--target);
     padding: var(--s2) var(--s6);
     border-radius: var(--radius-pill);
@@ -411,7 +434,6 @@
     font-size: var(--fs-body);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    border: var(--hairline) solid var(--transparent);
     transition: background var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
   }
 

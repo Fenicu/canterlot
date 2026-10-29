@@ -110,7 +110,6 @@
     border-radius: var(--radius-sm);
     background: var(--raised);
     color: var(--secondary);
-    border: var(--hairline) solid var(--control-line);
   }
 
   .description {
@@ -125,7 +124,6 @@
     padding: var(--s3);
     border-radius: var(--radius-sm);
     background: var(--code);
-    border: var(--hairline) solid var(--line);
     overflow-x: auto;
   }
 
@@ -144,13 +142,13 @@
   }
 
   .btn {
+    flex: 1;
     min-height: var(--target);
     padding: var(--s2) var(--s6);
     border-radius: var(--radius-pill);
     font-size: var(--fs-body);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    border: var(--hairline) solid var(--transparent);
     transition: background var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
   }
 
@@ -170,9 +168,8 @@
   }
 
   .btn-deny {
-    background: var(--surface);
+    background: var(--raised);
     color: var(--danger);
-    border-color: var(--control-line);
   }
 
   .btn-deny:not(:disabled):hover {
