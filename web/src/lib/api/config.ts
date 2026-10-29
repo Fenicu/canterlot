@@ -1,5 +1,6 @@
 import { getConfig } from '$lib/api/client';
 import type { components } from '$lib/api/generated/openapi';
+import { notifyIncompatible } from '$lib/pwa/update';
 
 export type LimitsView = components['schemas']['LimitsView'];
 
@@ -10,10 +11,12 @@ const DEFAULTS = {
 };
 
 let limits: LimitsView | null = null;
+export function resetConfig(): void { limits = null; }
 
 export async function loadConfig(): Promise<components['schemas']['ConfigView']> {
   const response = await getConfig();
   limits = response.data.limits;
+  if (response.data.schema_version !== 1) notifyIncompatible();
   return response.data;
 }
 

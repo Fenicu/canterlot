@@ -11,6 +11,10 @@
   import { layoutMode, type LayoutMode } from './layout';
   import Nav from './Nav.svelte';
   import SessionExpired from './SessionExpired.svelte';
+  import { installation, register } from '$lib/pwa/register';
+  import type { UpdateController } from '$lib/pwa/update';
+  import { staleness } from '$lib/pwa/offline';
+  import { announce } from '$lib/a11y/announce';
 
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
@@ -18,6 +22,10 @@
   let laidOut = $state(false);
   let tick = $state(0);
   let lane = $state(false);
+  let update = $state<UpdateController | null>(null);
+  let updateState = $state('idle');
+  let offlineLabel = $state('');
+  let updateError = $state('');
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
@@ -31,6 +39,31 @@
   });
 
   onMount(() => {
+    installation();
+    let alive = true;
+    const offlineChanged = () => { offlineLabel = staleness.label(Date.now()); };
+    const online = () => staleness.setOnline(navigator.onLine);
+    staleness.addEventListener('change', offlineChanged);
+    window.addEventListener('online', online);
+    window.addEventListener('offline', online);
+    online();
+    const changed = () => { updateState = update?.state ?? 'idle'; };
+    const incompatible = () => update?.incompatible();
+    window.addEventListener('canterlot:incompatible', incompatible);
+    void register({
+      isSafe: () => !runtime?.drafts.pending && !(document.activeElement instanceof HTMLTextAreaElement && document.activeElement.closest('[data-composer]') && document.activeElement.value.length > 0),
+      flushDrafts: async () => { await runtime?.drafts.flush(); }
+    }).then(value => {
+      if (!alive) { value?.destroy(); return; }
+      update = value;
+      update?.addEventListener('change', changed);
+      changed();
+    }).catch(() => { updateError = 'Не удалось подготовить обновление. Повторите при восстановлении связи'; });
+    const visibility = () => {
+      if (document.hidden && update?.state === 'ready') void applyUpdate();
+      else if (!document.hidden) void update?.check().catch(() => undefined);
+    };
+    document.addEventListener('visibilitychange', visibility);
     const read = () => {
       width = document.documentElement.clientWidth;
     };
@@ -40,22 +73,53 @@
     const timer = window.setInterval(() => tick++, 1000);
     void browserRuntime().then((value) => {
       runtime = value;
-    });
+      offlineChanged();
+    }).catch(() => undefined);
     return () => {
+      alive = false;
+      update?.removeEventListener('change', changed);
+      update?.destroy();
+      staleness.removeEventListener('change', offlineChanged);
+      window.removeEventListener('online', online);
+      window.removeEventListener('offline', online);
+      window.removeEventListener('canterlot:incompatible', incompatible);
+      document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
       window.clearInterval(timer);
     };
   });
+
+  async function applyUpdate() {
+    try {
+      await runtime?.drafts.flush();
+      await update?.apply();
+    } catch { updateError = 'Не удалось сохранить черновик. Обновление отложено'; }
+  }
+  $effect(() => {
+    if (runtime?.connection.status.phase === 'incompatible') update?.incompatible();
+  });
+  $effect(() => {
+    if (offlineLabel) announce(offlineLabel);
+    else if (updateState !== 'idle') announce('Доступна новая версия');
+  });
 </script>
 
 <div class="shell" data-layout={laidOut ? mode : undefined}>
+  {#if offlineLabel}<p class="platform-banner" data-offline>{offlineLabel}</p>{/if}
+  {#if updateState !== 'idle'}
+    <p class="platform-banner" data-update>
+      Доступна новая версия
+      {#if updateState === 'applying'}Сохраняю и обновляю…{:else}<button type="button" onclick={applyUpdate}>Обновить</button>{/if}
+    </p>
+  {/if}
+  {#if updateError}<p class="platform-banner">{updateError}</p>{/if}
   {#if runtime}
     <ConnectionBanner
       phase={runtime.connection.status.phase}
       since={runtime.connection.status.since}
       {now}
       scope={runtime.list.status}
-      onrefresh={() => window.location.reload()}
+      onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
     />
     <SessionExpired phase={runtime.connection.status.phase} {now} />
   {/if}
@@ -99,4 +163,6 @@
   [data-pane='chat'] { flex: 1; display: flex; flex-direction: column; }
   [data-pane='lane'] { width: var(--lane-width); flex: 0 0 var(--lane-width); padding: var(--s6); }
   button { min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--accent-link); }
+  .platform-banner { margin: var(--s4) var(--s6) 0; padding: var(--s4) var(--s6); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); }
+  .platform-banner button { margin-left: var(--s4); }
 </style>

@@ -75,6 +75,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({
       headers: headers(),
       json: {
+        schema_version: 1,
         limits: {
           max_attachment_bytes: 104_857_600,
           max_attachments_per_input: 10,
@@ -149,7 +150,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     });
   });
 
-  await page.route('**/api/v1/attachments/**', async (route) => {
+  await page.route(/\/api\/v1\/attachments(?:\/|$)/, async (route) => {
     const url = new URL(route.request().url());
     const method = route.request().method();
     const parts = url.pathname.split('/');

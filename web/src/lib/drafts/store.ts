@@ -41,6 +41,7 @@ export class DraftStore {
   #pending = new Map<string, PendingDraft>();
   #known = new Map<string, Draft>();
   #inflight = new Map<string, Draft>();
+  #writes = new Set<Promise<void>>();
   #retired = false;
   #timers = new Map<string, ReturnType<typeof setTimeout>>();
   #onVisibilityChange?: () => void;
@@ -147,11 +148,16 @@ export class DraftStore {
     if (this.#pending.get(conversationId) === pending) this.#pending.delete(conversationId);
     this.#known.set(conversationId, draft);
 
+    const write = this.db.put('drafts', conversationId, draft);
+    this.#writes.add(write);
     try {
-      await this.db.put('drafts', conversationId, draft);
+      await write;
     } catch (err) {
       if (this.#retired) return;
+      if (!this.#pending.has(conversationId)) this.#pending.set(conversationId, pending);
       throw err;
+    } finally {
+      this.#writes.delete(write);
     }
     if (this.#inflight.get(conversationId) === draft) this.#inflight.delete(conversationId);
 
@@ -162,6 +168,7 @@ export class DraftStore {
   }
 
   async load(conversationId: string): Promise<Draft | null> {
+    if (this.#retired) return null;
     let mirrorDraft: Draft | undefined;
     const tailKey = this.#tailKey(conversationId);
     if (typeof localStorage !== 'undefined') {
@@ -177,10 +184,12 @@ export class DraftStore {
       }
     }
     const idbDraft = await this.db.get<Draft>('drafts', conversationId);
+    if (this.#retired) return null;
     if (mirrorDraft) {
       if (typeof localStorage !== 'undefined') localStorage.removeItem(tailKey);
       if (!idbDraft || mirrorDraft.updatedAt >= idbDraft.updatedAt) {
         await this.db.put('drafts', conversationId, mirrorDraft);
+        if (this.#retired) return null;
         this.#known.set(conversationId, mirrorDraft);
         return mirrorDraft;
       }
@@ -228,7 +237,10 @@ export class DraftStore {
 
     const convIds = Array.from(this.#pending.keys());
     await Promise.all(convIds.map(id => this.#flushConversation(id)));
+    await Promise.all(this.#writes);
   }
+
+  get pending(): boolean { return this.#pending.size > 0 || this.#writes.size > 0; }
 
   destroy(): void {
     this.retire();
@@ -241,6 +253,7 @@ export class DraftStore {
     this.#timers.clear();
     this.#pending.clear();
     this.#inflight.clear();
+    this.#known.clear();
     this.#detach();
   }
 

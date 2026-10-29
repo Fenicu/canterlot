@@ -27,7 +27,7 @@ export interface JournalEnv {
 const openJournals = new Set<OpJournal>();
 
 export function closeOpenJournals(): void {
-  for (const journal of [...openJournals]) journal.close();
+  for (const journal of [...openJournals]) journal.retire();
 }
 
 export class OpJournal {
@@ -64,6 +64,11 @@ export class OpJournal {
     window.removeEventListener('online', this.#onOnline);
     window.removeEventListener('pageshow', this.#onPageShow);
     document.removeEventListener('visibilitychange', this.#onVisible);
+  }
+
+  retire(): void {
+    for (const key of this.ops.keys()) this.#stop(key);
+    this.close();
   }
 
   async begin<B>(kind: OpKind, body: B, opts: { conversationId?: string; persist: boolean; key?: string }): Promise<Op<B>> {

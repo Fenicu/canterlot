@@ -68,6 +68,13 @@ export class UploadManager {
 	#queue: StoredUpload[] = [];
 	#active = 0;
 	#controllers = new Map<string, AbortController>();
+	#disposed = false;
+
+	dispose(): void {
+		this.#disposed = true;
+		for (const controller of this.#controllers.values()) controller.abort();
+		this.#queue = []; this.#records.clear(); this.#views.clear();
+	}
 
 	constructor(deps: {
 		api?: AttachmentApi;
@@ -156,6 +163,7 @@ export class UploadManager {
 	}
 
 	#enqueue(record: StoredUpload): void {
+		if (this.#disposed) return;
 		if (this.#queue.some((item) => item.id === record.id)) return;
 		this.#queue.push(record);
 		void this.#drain();
@@ -261,6 +269,7 @@ export class UploadManager {
 
 	async #resumeAll(): Promise<void> {
 		const records = await this.db.list<StoredUpload>('uploads');
+		if (this.#disposed) return;
 		for (const record of records) {
 			if (!record?.id || !record.file || !ACTIVE.has(record.phase)) continue;
 			if (!this.#views.has(record.id)) {

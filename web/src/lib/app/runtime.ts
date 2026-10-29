@@ -1,10 +1,12 @@
 import { me, eventsRange, snapshotConversations, snapshotMachines } from '$lib/api/client';
-import { ApiError, NetworkError, type ErrorCode, type ErrorDetails, type ErrorScope, type Retry } from '$lib/api/http';
+import { ApiError, NetworkError, session, type ErrorCode, type ErrorDetails, type ErrorScope, type Retry } from '$lib/api/http';
 import { DraftStore } from '$lib/drafts/store';
 import { OpJournal } from '$lib/ops/journal';
 import { opRequest } from '$lib/ops/request';
 import { openDb, type Idb } from '$lib/storage/idb';
-import { bindOwner } from '$lib/storage/owner';
+import { bindOwner, onOwnerRetired } from '$lib/storage/owner';
+import { staleness } from '$lib/pwa/offline';
+import { sweepShares } from '$lib/pwa/share';
 import { ListStore, type ListSnapshot } from '$lib/stores/list.svelte';
 import { MachinesStore, type MachineRecord } from '$lib/stores/machines.svelte';
 import { browserLifecycle } from '$lib/sync/lifecycle';
@@ -22,6 +24,7 @@ export interface RuntimeDeps {
 }
 
 export interface Runtime {
+	dispose(): void;
 	ownerId: string;
 	db: Idb;
 	journal: OpJournal;
@@ -42,10 +45,21 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 	globalThis.fetch = deps.fetch;
 	globalThis.WebSocket = deps.WebSocket;
 	{
-		const who = await me();
-		const ownerId = who.data.owner_id;
-		await bindOwner({ owner_id: ownerId });
+		let ownerId: string;
+		try {
+			if (!navigator.onLine) throw new NetworkError('offline');
+			const who = await me();
+			ownerId = who.data.owner_id;
+			await bindOwner({ owner_id: ownerId });
+		} catch (error) {
+			if (!(error instanceof NetworkError)) throw error;
+			const saved = await (await openDb('__system__')).get<string>('kv', 'current_owner');
+			if (!saved) throw error;
+			ownerId = saved;
+		}
 		const db = await openDb(ownerId);
+		await sweepShares(db, deps.clock.now());
+		staleness.lastSyncAt = await db.get<number>('kv', 'last_sync_at') ?? null;
 		const journal = new OpJournal(
 			db,
 			async (op) => {
@@ -58,8 +72,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 			{
 				now: deps.clock.now,
 				schedule: deps.schedule,
-				online: () => true,
-				authExpired: () => false
+				online: () => navigator.onLine,
+				authExpired: () => session.state === 'expired'
 			}
 		);
 		await journal.recover();
@@ -75,7 +89,13 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 				monotonic: deps.clock.now,
 				schedule: deps.schedule
 			}),
-			probeAuth: async () => 'ok',
+			probeAuth: async () => {
+				try {
+					const who = await me();
+					if (who.data.owner_id !== ownerId) { await bindOwner(who.data); location.reload(); return 'expired'; }
+					return 'ok';
+				} catch { return session.state === 'expired' ? 'expired' : 'down'; }
+			},
 			now: deps.clock.now,
 			schedule: deps.schedule,
 			rng: deps.rng ?? Math.random
@@ -85,6 +105,9 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 			api: {
 				snapshot: async () => {
 					const response = await snapshotConversations();
+					const syncedAt = deps.clock.now();
+					staleness.synced(syncedAt);
+					await db.put('kv', 'last_sync_at', syncedAt);
 					return { cursor: response.data.cursor, data: response.data.data as unknown as ListSnapshot };
 				},
 				events: async (after, limit): Promise<RangeResult> => {
@@ -114,7 +137,17 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 		});
 		machines.open();
 		const drafts = new DraftStore(ownerId, db);
-		const runtime: Runtime = { ownerId, db, journal, drafts, connection, list, machines };
+		let disposed = false;
+		const runtime: Runtime = { ownerId, db, journal, drafts, connection, list, machines, dispose() {
+			if (disposed) return;
+			disposed = true;
+			connection.dispose(); journal.retire(); drafts.retire();
+			list.close(); list.items.clear(); list.groups = []; list.limits = []; list.counts = { all: 0, pinned: 0, archived: 0, groups: [] };
+			machines.close(); machines.items.clear();
+			if (singleton === runtime) singleton = null;
+			release();
+		} };
+		const release = onOwnerRetired(() => runtime.dispose());
 		singleton = runtime;
 		return runtime;
 	}

@@ -37,6 +37,7 @@
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
   import SessionSheet from './SessionSheet.svelte';
+  import { installation } from '$lib/pwa/register';
 
   let { main = false, create = false }: { main?: boolean; create?: boolean } = $props();
 
@@ -49,6 +50,7 @@
   let sheetId = $state('');
   let groupsOpen = $state(false);
   let menu = $state(false);
+  let canInstall = $state(false);
   let tick = $state(0);
   let scroller = $state<HTMLElement | null>(null);
   let thresholds = $state<LimitThresholds>({ stale_after_secs: 35 * 60, warn_pcts: [80], weekly_reserve_pct: 95 });
@@ -59,6 +61,10 @@
   });
 
   onMount(() => {
+    const install = installation();
+    const changed = () => { canInstall = install.canInstall; };
+    changed();
+    install.addEventListener('change', changed);
     collapsed = readCollapsed();
     let alive = true;
     void browserRuntime().then(async (value) => {
@@ -66,7 +72,7 @@
       runtime = value;
       const config = await loadConfig().catch(() => null);
       if (config?.limit_thresholds) thresholds = config.limit_thresholds;
-    });
+    }).catch(() => undefined);
     let timer = 0;
     const arm = () => {
       timer = window.setInterval(() => tick++, 1000);
@@ -80,6 +86,7 @@
     arm();
     document.addEventListener('visibilitychange', visible);
     return () => {
+      install.removeEventListener('change', changed);
       alive = false;
       window.clearInterval(timer);
       document.removeEventListener('visibilitychange', visible);
@@ -167,6 +174,7 @@
       <div class="menu" role="menu">
         <button type="button" role="menuitem" onclick={() => { groupsOpen = true; menu = false; }}>Группы</button>
         <button type="button" role="menuitem" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</button>
+        {#if canInstall}<button type="button" role="menuitem" onclick={() => { menu = false; void installation().prompt(); }}>Установить</button>{/if}
       </div>
     {/if}
   </div>

@@ -23,7 +23,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 | Путь | Назначение |
 | --- | --- |
-| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, тестовый двойник хаба FakeHub в `testing/fake-hub`, хранилища ленты и списка, окно ленты чата, поле ввода, оболочка и экраны списка сессий, unit и браузерные проверки |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, FakeHub в `testing/fake-hub`, лента чата, поле ввода, оболочка и список сессий, платформа `src/lib/pwa` (установка, offline, обновление, share, очистка), manifest и иконки из токенов, unit и браузерные проверки |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
 | `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
@@ -421,7 +421,7 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 ## PWA
 
-Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. Клиент Task 1 показывает место будущего списка сессий. Ядро Task 2 уже в `web/src/lib`: типизированные вызовы `api/client.ts` по контракту OpenAPI, разбор ошибок, часы по `X-Server-Time-Ms`, журнал операций, черновики с зеркалом `localStorage` и докачка вложений. Manifest, service worker и установка остаются следующими задачами плана 1.3b. Сборка и инструменты работают без обращения к внешним сервисам во время выполнения.
+Нужны Node.js 24 LTS и npm. Версии зависимостей закреплены точно в `web/package.json`, дерево в `web/package-lock.json`. В `web/src/lib` находятся типизированный API, синхронизация, журнал операций, черновики, докачка вложений, список сессий и чат. Платформа `pwa/` добавляет установку, безопасное обновление, offline-оболочку и приём Android «Поделиться». Сборка и инструменты работают без обращения к внешним сервисам во время выполнения.
 
 Рендеринг (`web/src/lib/render`): безопасный потоковый Markdown (markdown-it без сырого HTML, замена изображений на ссылки, строгий allow-list DOMPurify, открытие ссылок в новой вкладке с noopener/noreferrer/nofollow), кеширование закрытых блоков, plain-хвост свыше 8 КиБ, ленивая подсветка highlight.js и очистка ANSI.
 
@@ -498,7 +498,7 @@ bash scripts/check.sh
 
 ### Статическая публикация
 
-После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, будущий service worker, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
+После `npm run build` Caddy обслуживает `web/build`, глубокие ссылки получают `200.html`. Весь origin защищён одним `forward_auth`, включая HTML, JS, manifest, service worker, API и WSS. Перед аутентификацией удаляются присланные клиентом `Remote-*`, `X-Forwarded-*` и `X-Canterlot-Proxy`; секрет к хабу добавляет только `header_up`. Заголовок CSP формируется из `web/csp.mjs` с точными hashes bootstrap-скрипта текущей сборки и единственным `wss://<origin-host>`:
 
 ```bash
 node web/scripts/print-csp.mjs https://chat.example
@@ -517,6 +517,7 @@ chat.example {
             copy_headers Remote-User Remote-Groups Remote-Name Remote-Email
         }
         header Content-Security-Policy "{$CANTERLOT_CSP}"
+        header X-Content-Type-Options "nosniff"
         @api path /api/* /healthz
         handle @api {
             reverse_proxy hub:8080 {
@@ -533,6 +534,8 @@ chat.example {
         handle {
             @fresh path /service-worker.js /manifest.webmanifest
             header @fresh Cache-Control "no-cache"
+            @worker path /service-worker.js
+            header @worker Service-Worker-Allowed "/"
             root * /srv/canterlot/web/build
             try_files {path} /200.html
             file_server
@@ -541,4 +544,12 @@ chat.example {
 }
 ```
 
-WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive` (обработчик и экран добавляются Tasks 9a/9b); тестовый edge уже повторяет это поведение. Для manifest используется `crossorigin="use-credentials"`. Заголовки и `no-cache` для manifest/service worker остаются обязательными после их появления. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Этот task не выполняет реальный деплой.
+WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive`; объяснение и выбор сессии принадлежат Task 9b. Активный worker сохраняет файлы и текст в `share_inbox` текущего владельца на 24 часа и отвечает `303` на `/share?id=…`. Текст и URL остаются полями черновика, вложениями становятся только файлы. Для manifest используется `crossorigin="use-credentials"`. Worker запрашивает ресурсы с credentials, отклоняет auth redirect и приватные ответы. `service-worker.js` обслуживается как JavaScript, manifest как `application/manifest+json`; для обоих обязателен `Cache-Control: no-cache`, для worker `Service-Worker-Allowed: /`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
+
+### Установка и обновление
+
+Manifest генерирует Vite из тёмного `--bg` в `tokens.css`. PNG уже лежат в `web/static/icons`; после изменения токенов или `source.svg` пересоздайте их командой `cd web && PLAYWRIGHT_BROWSERS_PATH=/tmp/canterlot-playwright node scripts/gen-icons.mjs`. Знак повторяет букву c и круглую точку состояния интерфейса; весь рисунок помещается в безопасный круг maskable-иконки. На Chromium пункт «Установить» появляется в меню «Ещё», когда браузер разрешает установку, и исчезает после использования. В Firefox установка остаётся возможностью браузера, собственного неработающего пункта нет.
+
+Новый worker ждёт, пока владелец завершит ввод; баннер «Доступна новая версия» предлагает «Обновить». Перед активацией все черновики записываются в IndexedDB. Пока поле с непустым текстом в фокусе или запись ещё не завершена, перезагрузки нет. Скрытая вкладка может применить готовую версию после записи черновиков. `skipWaiting` вызывается только по сообщению страницы, никогда из `install`. После первого успешного посещения offline открываются `/c/{id}`, `/new`, `/machines` и другие глубокие ссылки через `200.html`; доступны черновики, история не кэшируется. Метка «Нет связи · данные от …» указывает последнюю успешную синхронизацию списка. После выхода локальные данные и настройки владельца очищаются через `purgeLocal` (экран выхода добавляет Task 9b).
+
+`bash scripts/check-web.sh` собирает также вторую версию в игнорируемый `web/build-update`, чтобы проверить настоящую смену worker без перезагрузки во время ввода. Проверка Android «Поделиться» на телефоне остаётся пунктом приёмки Task 10.

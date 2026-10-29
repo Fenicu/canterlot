@@ -11,18 +11,37 @@ import { UploadManager } from '$lib/uploads/manager';
 import { sha256Hex, type BlockPage } from '$lib/stores/blocks';
 import { ChatStore, type HistoryPage, type SnapshotData } from '$lib/stores/chat.svelte';
 import type { RangeResult } from '$lib/sync/scope';
+import { onOwnerRetired } from '$lib/storage/owner';
+import { resetConfig } from '$lib/api/config';
+import { restoreComposerText } from '$lib/composer/restore';
 
 let pending: Promise<Runtime> | null = null;
 const chats = new Map<string, ChatStore>();
 let uploads: UploadManager | null = null;
+let cleanupBound = false;
+
+function bindCleanup(): void {
+  if (cleanupBound) return;
+  cleanupBound = true;
+  onOwnerRetired(() => {
+    restoreComposerText('');
+    for (const chat of chats.values()) chat.dispose();
+    chats.clear(); uploads?.dispose(); uploads = null; pending = null;
+    resetConfig(); cleanupBound = false;
+  });
+}
 
 export function sessionUploads(): UploadManager {
 	const runtime = getRuntime();
-	if (!uploads || uploads.db !== runtime.db) uploads = new UploadManager({ db: runtime.db });
+	if (!uploads || uploads.db !== runtime.db) {
+		uploads = new UploadManager({ db: runtime.db });
+		void uploads.resumePending();
+	}
 	return uploads;
 }
 
 export function browserRuntime(): Promise<Runtime> {
+  bindCleanup();
   try {
     return Promise.resolve(getRuntime());
   } catch {
@@ -36,7 +55,7 @@ export function browserRuntime(): Promise<Runtime> {
         return () => clearTimeout(id);
       }
     });
-    return pending;
+    return pending.then(runtime => { bindCleanup(); return runtime; }).catch(error => { pending = null; throw error; });
   }
 }
 

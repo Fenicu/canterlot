@@ -5,6 +5,7 @@ import { createHash } from 'node:crypto';
 import { productionCsp } from '../../csp.mjs';
 const root = resolve(process.env.WEB_BUILD ?? 'build');
 const port = Number(process.env.PORT ?? 4173);
+const nextRoot = resolve('build-update');
 const shell = await readFile(resolve(root, '200.html'), 'utf8');
 const fixturePath = resolve('e2e/edge/fixtures/ws-smoke.html');
 const fixture = await readFile(fixturePath, 'utf8');
@@ -19,6 +20,12 @@ const server = createServer(async (request, response) => {
   response.setHeader('Cache-Control', 'no-cache');
   try {
     const url = new URL(request.url, `http://127.0.0.1:${port}`);
+    const selectedRoot = /(?:^|;\s*)pwa-build=next(?:;|$)/.test(request.headers.cookie ?? '') ? nextRoot : root;
+    if (selectedRoot === nextRoot) {
+      const nextShell = await readFile(resolve(nextRoot, '200.html'), 'utf8');
+      response.setHeader('Content-Security-Policy', productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(nextShell) }));
+    }
+    if (url.pathname === '/service-worker.js') response.setHeader('Service-Worker-Allowed', '/');
     if (request.method === 'POST' && url.pathname === '/_share') { response.writeHead(303, { Location: '/share?error=sw_inactive' }); response.end(); return; }
     if (!['GET', 'HEAD'].includes(request.method)) { response.writeHead(405); response.end(); return; }
     if (url.pathname === '/__fixtures__/ws-smoke.html') {
@@ -26,10 +33,10 @@ const server = createServer(async (request, response) => {
       response.setHeader('Content-Type', mime['.html']); response.writeHead(200);
       response.end(request.method === 'HEAD' ? undefined : fixture); return;
     }
-    let file = resolve(root, `.${decodeURIComponent(url.pathname)}`);
-    if (file !== root && !file.startsWith(root + sep)) { response.writeHead(403); response.end(); return; }
-    try { if (!(await stat(file)).isFile()) file = resolve(root, '200.html'); }
-    catch { if (extname(url.pathname)) { response.writeHead(404); response.end(); return; } file = resolve(root, '200.html'); }
+    let file = resolve(selectedRoot, `.${decodeURIComponent(url.pathname)}`);
+    if (file !== selectedRoot && !file.startsWith(selectedRoot + sep)) { response.writeHead(403); response.end(); return; }
+    try { if (!(await stat(file)).isFile()) file = resolve(selectedRoot, '200.html'); }
+    catch { if (extname(url.pathname)) { response.writeHead(404); response.end(); return; } file = resolve(selectedRoot, '200.html'); }
     const body = await readFile(file);
     response.setHeader('Content-Type', mime[extname(file)] ?? 'application/octet-stream');
     response.writeHead(200);

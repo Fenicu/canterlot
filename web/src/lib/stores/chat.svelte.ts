@@ -206,6 +206,15 @@ export class ChatStore {
 		this.#noteTimers.clear();
 	}
 
+	dispose(): void {
+		this.close();
+		this.blocks.clear(); this.inputs.clear(); this.timeline.clear(); this.attachments.clear();
+		this.requests.length = 0; this.diagnostics.length = 0; this.#held = [];
+		this.detail = null; this.execution = null; this.activity = null; this.scheduled = [];
+		this.settings = { effective: null, pending: null, rev: 0 };
+		this.crunch = { enabled: false, resume_pending: false };
+	}
+
 	async loadOlder(): Promise<void> {
 		const page = await this.deps.api.history(this.id, { before: this.timeline.oldestSeq() ?? undefined });
 		this.#ingest(page.items, 'older');

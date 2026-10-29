@@ -1,8 +1,18 @@
 import { purgeAllStores, openDb } from '$lib/storage/idb';
 import { stopDraftWriters } from '$lib/drafts/store';
 import { session } from '$lib/api/http';
+import { closeOpenJournals } from '$lib/ops/journal';
 
 const OWNER_STORAGE_KEY = 'canterlot:current_owner';
+const ownerCleanup = new Set<() => void>();
+export function onOwnerRetired(cleanup: () => void): () => void {
+  ownerCleanup.add(cleanup);
+  return () => ownerCleanup.delete(cleanup);
+}
+export function retireOwner(): void {
+  for (const cleanup of [...ownerCleanup]) cleanup();
+  ownerCleanup.clear();
+}
 
 export async function bindOwner(
   meOrId: string | { owner_id: string }
@@ -37,13 +47,15 @@ export async function bindOwner(
 
   // Владелец изменился: остановить писателей, затем очистить IDB, кэши и черновики.
   session.state = 'expired';
+  retireOwner();
   stopDraftWriters();
+  closeOpenJournals();
   await purgeAllStores();
 
   if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
     try {
       const cacheKeys = await caches.keys();
-      await Promise.all(cacheKeys.map(k => caches.delete(k)));
+      await Promise.all(cacheKeys.filter(k => !k.startsWith('canterlot-shell-')).map(k => caches.delete(k)));
     } catch {
       // Игнорируем ошибки доступа к ServiceWorker cache
     }
@@ -55,7 +67,9 @@ export async function bindOwner(
       const key = localStorage.key(i);
       if (
         key?.startsWith('canterlot:draft:') ||
-        key?.startsWith('canterlot.draft-tail.')
+        key?.startsWith('canterlot.draft-tail.') ||
+        key === 'canterlot.theme' || key === 'canterlot.enter' ||
+        key === 'canterlot.collapsed' || key === 'canterlot.motion'
       ) {
         toRemove.push(key);
       }

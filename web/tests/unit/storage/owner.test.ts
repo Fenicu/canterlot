@@ -66,8 +66,8 @@ describe('storage/owner', () => {
 
     const changed = await bindOwner({ owner_id: 'bob' });
     expect(changed).toBe('changed');
-    expect(localStorage.getItem('canterlot.theme')).toBe('dark');
-    expect(localStorage.getItem('canterlot.enter')).toBe('newline');
+    expect(localStorage.getItem('canterlot.theme')).toBeNull();
+    expect(localStorage.getItem('canterlot.enter')).toBeNull();
     expect(localStorage.getItem('canterlot.draft-tail.conv-1')).toBeNull();
     expect(await (await openDb('alice')).get('drafts', 'conv-1')).toBeUndefined();
   });
