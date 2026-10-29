@@ -881,6 +881,7 @@ export interface components {
         ConversationSnapshot: {
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
+            open_requests: components["schemas"]["RequestView"][];
             queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
         };
@@ -1404,6 +1405,25 @@ export interface components {
         ReadBody: {
             seq: string;
         };
+        RequestView: {
+            /** Format: uuid */
+            conversation_id: string;
+            created_at: string;
+            decision_payload?: unknown;
+            /** Format: uuid */
+            execution_id: string;
+            /** Format: int64 */
+            generation: number;
+            /** Format: uuid */
+            id: string;
+            kind: string;
+            native_request_id: string;
+            request_payload: unknown;
+            state: string;
+            updated_at: string;
+            /** Format: uuid */
+            winner_decision_id?: string | null;
+        };
         ResumeBody: {
             continue_queue?: boolean;
         };
@@ -1501,6 +1521,7 @@ export interface components {
             data: {
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
+                open_requests: components["schemas"]["RequestView"][];
                 queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
             };

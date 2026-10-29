@@ -9,7 +9,7 @@ use crate::{
     scheduler::{self, ScheduledMessage},
     session::Registry,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Postgres, Row, Transaction};
 use utoipa::ToSchema;
 use uuid::Uuid;
@@ -34,6 +34,44 @@ pub struct ConversationSnapshot {
     pub queue: QueueView,
     pub history: HistoryPage,
     pub scheduled: Vec<ScheduledMessage>,
+    pub open_requests: Vec<RequestView>,
+}
+
+pub type ConversationSnapshotView = ConversationSnapshot;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct RequestView {
+    pub id: Uuid,
+    pub conversation_id: Uuid,
+    pub execution_id: Uuid,
+    pub generation: i64,
+    pub kind: String,
+    pub native_request_id: String,
+    pub state: String,
+    pub request_payload: serde_json::Value,
+    pub decision_payload: Option<serde_json::Value>,
+    pub winner_decision_id: Option<Uuid>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+impl From<crate::requests::RequestRow> for RequestView {
+    fn from(row: crate::requests::RequestRow) -> Self {
+        Self {
+            id: row.id,
+            conversation_id: row.conversation_id,
+            execution_id: row.execution_id,
+            generation: row.generation,
+            kind: row.kind.as_str().to_string(),
+            native_request_id: row.native_request_id,
+            state: row.state.as_str().to_string(),
+            request_payload: row.request_payload,
+            decision_payload: row.decision_payload,
+            winner_decision_id: row.winner_decision_id,
+            created_at: crate::conversations::time(row.created_at),
+            updated_at: crate::conversations::time(row.updated_at),
+        }
+    }
 }
 #[derive(Serialize, ToSchema)]
 #[schema(as = SnapshotQueueView)]
@@ -137,6 +175,16 @@ pub async fn conversation_with_registry(
         .await?
         .ok_or(sqlx::Error::RowNotFound)?;
     let scheduled = scheduler::list_messages(&mut tx, owner_id, id).await?;
+    let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
+        "select * from requests where conversation_id = $1 and state = 'open' order by created_at asc",
+    )
+    .bind(id)
+    .fetch_all(&mut *tx)
+    .await?;
+    let open_requests = open_requests_rows
+        .into_iter()
+        .map(RequestView::from)
+        .collect();
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -147,6 +195,7 @@ pub async fn conversation_with_registry(
         },
         history,
         scheduled,
+        open_requests,
     };
     tx.commit().await?;
     Ok(Some(Snapshot {

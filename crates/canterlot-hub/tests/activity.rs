@@ -47,6 +47,7 @@ fn inputs() -> ActivityInputs {
         link: LinkState::Available,
         awaiting_attachments: false,
         background_work: None,
+        question_summary: None,
     }
 }
 

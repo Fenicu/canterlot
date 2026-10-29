@@ -161,6 +161,96 @@ pub struct ActivityInputs {
     pub link: LinkState,
     pub awaiting_attachments: bool,
     pub background_work: Option<u32>,
+    pub question_summary: Option<String>,
+}
+
+pub fn extract_request_summary(
+    kind: crate::requests::RequestKind,
+    payload: &Value,
+) -> Option<String> {
+    let summary = match kind {
+        crate::requests::RequestKind::Question => {
+            if let Some(questions) = payload.get("questions").and_then(|q| q.as_array()) {
+                questions.first().and_then(|q| {
+                    if let Some(s) = q.as_str() {
+                        Some(s.to_string())
+                    } else {
+                        q.get("text")
+                            .or_else(|| q.get("question"))
+                            .or_else(|| q.get("prompt"))
+                            .or_else(|| q.get("title"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    }
+                })
+            } else if let Some(questions) = payload
+                .get("ask_question")
+                .and_then(|a| a.get("questions"))
+                .and_then(|q| q.as_array())
+            {
+                questions.first().and_then(|q| {
+                    if let Some(s) = q.as_str() {
+                        Some(s.to_string())
+                    } else {
+                        q.get("text")
+                            .or_else(|| q.get("question"))
+                            .or_else(|| q.get("prompt"))
+                            .or_else(|| q.get("title"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    }
+                })
+            } else {
+                payload
+                    .get("question")
+                    .or_else(|| payload.get("text"))
+                    .or_else(|| payload.get("prompt"))
+                    .or_else(|| payload.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }
+        }
+        crate::requests::RequestKind::Permission => {
+            if let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str()) {
+                if let Some(cmd) = payload
+                    .get("command")
+                    .or_else(|| payload.get("input").and_then(|i| i.get("command")))
+                    .and_then(|v| v.as_str())
+                {
+                    Some(format!("{tool}: {cmd}"))
+                } else {
+                    Some(tool.to_string())
+                }
+            } else if let Some(perm) = payload.get("request_permission") {
+                if let Some(tool) = perm.get("tool_name").and_then(|v| v.as_str()) {
+                    if let Some(cmd) = perm.get("command").and_then(|v| v.as_str()) {
+                        Some(format!("{tool}: {cmd}"))
+                    } else {
+                        Some(tool.to_string())
+                    }
+                } else {
+                    perm.get("description")
+                        .or_else(|| perm.get("message"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                }
+            } else {
+                payload
+                    .get("description")
+                    .or_else(|| payload.get("message"))
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            }
+        }
+    };
+    summary.map(|s| {
+        let s = s.trim();
+        if s.chars().count() > 120 {
+            s.chars().take(120).collect()
+        } else {
+            s.to_string()
+        }
+    })
 }
 
 pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
@@ -213,18 +303,17 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
     if e.state == ExecutionState::Stopping {
         return working("stopping");
     }
+    if i.open_requests > 0 || matches!(e.phase.as_str(), "awaiting_permission" | "awaiting_answer")
+    {
+        return Activity {
+            state: S::WaitingForUser,
+            evidence: Evidence::WaitingForUser {
+                phase: e.phase.clone(),
+                question: i.question_summary.clone(),
+            },
+        };
+    }
     if !matches!(i.queue.slot, RunSlot::Free) {
-        if i.open_requests > 0
-            || matches!(e.phase.as_str(), "awaiting_permission" | "awaiting_answer")
-        {
-            return Activity {
-                state: S::WaitingForUser,
-                evidence: Evidence::WaitingForUser {
-                    phase: e.phase.clone(),
-                    question: None,
-                },
-            };
-        }
         if i.link != LinkState::Available {
             return working("no_link");
         }
@@ -392,6 +481,20 @@ pub async fn load_inputs(
             .await?
         }
     };
+    let open_requests_rows: Vec<(String, Value)> = sqlx::query_as(
+        "select kind, request_payload from requests where conversation_id = $1 and state = 'open' order by created_at asc",
+    )
+    .bind(conversation_id)
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let open_requests = open_requests_rows.len() as u32;
+    let question_summary = open_requests_rows.first().and_then(|(kind_str, payload)| {
+        let kind = kind_str
+            .parse()
+            .unwrap_or(crate::requests::RequestKind::Question);
+        extract_request_summary(kind, payload)
+    });
     Ok(ActivityInputs {
         now,
         execution,
@@ -401,7 +504,7 @@ pub async fn load_inputs(
             pause_reasons: q.try_get::<Json<Vec<PauseReason>>, _>("pause_reasons")?.0,
             hold_reasons: q.try_get::<Json<Vec<HoldReason>>, _>("hold_reasons")?.0,
         },
-        open_requests: 0,
+        open_requests,
         last_event_at,
         last_turn_at,
         process,
@@ -412,6 +515,7 @@ pub async fn load_inputs(
         },
         awaiting_attachments,
         background_work: None,
+        question_summary,
     })
 }
 

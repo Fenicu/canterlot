@@ -91,6 +91,46 @@ pub async fn dispatch_next(
     if !queue.pause_reasons.0.is_empty() {
         reasons.push(BlockReason::Paused(queue.pause_reasons.0.clone()));
     }
+    let open_requests_count: i64 = sqlx::query_scalar(
+        "select count(*) from requests where conversation_id = $1 and state = 'open'",
+    )
+    .bind(conversation_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    let is_awaiting_phase = sqlx::query_scalar::<_, Option<bool>>(
+        "select phase in ('awaiting_permission', 'awaiting_answer') from executions where conversation_id = $1 and state = 'running' order by generation desc limit 1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .flatten()
+    .unwrap_or(false);
+
+    if open_requests_count > 0 || is_awaiting_phase {
+        if !queue
+            .hold_reasons
+            .0
+            .contains(&HoldReason::AwaitingUserRequest)
+        {
+            queue.hold_reasons.0.push(HoldReason::AwaitingUserRequest);
+            queue
+                .save(&mut tx, &slot, live.map(|(id, _, _)| id), correlation_id)
+                .await?;
+        }
+    } else if queue
+        .hold_reasons
+        .0
+        .contains(&HoldReason::AwaitingUserRequest)
+    {
+        queue
+            .hold_reasons
+            .0
+            .retain(|r| *r != HoldReason::AwaitingUserRequest);
+        queue
+            .save(&mut tx, &slot, live.map(|(id, _, _)| id), correlation_id)
+            .await?;
+    }
     let mut holds: Vec<_> = queue
         .hold_reasons
         .0

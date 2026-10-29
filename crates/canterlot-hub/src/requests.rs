@@ -297,6 +297,26 @@ pub async fn save_decision_in_tx(
             .execute(&mut *tx)
             .await?;
 
+        // Шаг 12 порядка блокировок: публикация события request_decided
+        crate::events::append(
+            tx,
+            crate::events::NewEvent {
+                scope: crate::events::Scope::Conversation {
+                    id: conversation_id,
+                },
+                kind: "request_decided",
+                conversation_id: Some(conversation_id),
+                execution_id: Some(row.execution_id),
+                payload: json!({
+                    "request_id": row.id,
+                    "winner_decision_id": winner_decision_id,
+                    "decision": decision_json,
+                }),
+                correlation_id: Uuid::now_v7(),
+            },
+        )
+        .await?;
+
         Ok(DecisionResult::Committed {
             row: updated_row,
             command_id,

@@ -273,6 +273,26 @@ pub fn wire_scope(scope: &Scope) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestOpenedPayload {
+    pub request_id: Uuid,
+    pub kind: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestDecidedPayload {
+    pub request_id: Uuid,
+    pub winner_decision_id: Uuid,
+    pub decision: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RequestClosedPayload {
+    pub request_id: Uuid,
+    pub reason: String,
+}
+
 #[derive(Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct WireEvent {
     pub v: u8,

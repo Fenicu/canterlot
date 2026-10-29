@@ -737,7 +737,11 @@ export interface RequestOpened {
   execution_id: Uuid | null;
   correlation_id: Uuid;
   kind: "request_opened";
-  payload: {};
+  payload: {
+    request_id: Uuid;
+    kind: string;
+    payload: {};
+  };
 }
 export interface RequestClosed {
   v: 1;
@@ -751,7 +755,10 @@ export interface RequestClosed {
   execution_id: Uuid | null;
   correlation_id: Uuid;
   kind: "request_closed";
-  payload: {};
+  payload: {
+    request_id: Uuid;
+    reason: string;
+  };
 }
 export interface RequestDecided {
   v: 1;
@@ -765,7 +772,11 @@ export interface RequestDecided {
   execution_id: Uuid | null;
   correlation_id: Uuid;
   kind: "request_decided";
-  payload: {};
+  payload: {
+    request_id: Uuid;
+    winner_decision_id: Uuid;
+    decision: {};
+  };
 }
 export interface MachineAvailabilityChanged {
   v: 1;

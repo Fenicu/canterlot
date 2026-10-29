@@ -3701,7 +3701,24 @@
           "const": "request_opened"
         },
         "payload": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "kind": {
+              "type": "string"
+            },
+            "payload": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "request_id",
+            "kind",
+            "payload"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3771,7 +3788,20 @@
           "const": "request_closed"
         },
         "payload": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "reason": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "request_id",
+            "reason"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
@@ -3841,7 +3871,24 @@
           "const": "request_decided"
         },
         "payload": {
-          "type": "object"
+          "type": "object",
+          "properties": {
+            "request_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "winner_decision_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "decision": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "request_id",
+            "winner_decision_id",
+            "decision"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
