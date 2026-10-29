@@ -1,0 +1,3 @@
+{"data":{"method":"item/started","params":{"item":{"arguments":{"query":"hello","retries":2},"id":"mcp-1","server":"s","status":"inProgress","tool":"t","type":"mcpToolCall"},"startedAtMs":1,"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":10}
+{"data":{"method":"item/mcpToolCall/progress","params":{"itemId":"mcp-1","message":"calling","threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":20}
+{"data":{"method":"item/completed","params":{"completedAtMs":2,"item":{"arguments":{"query":"hello","retries":2},"id":"mcp-1","result":{"content":[{"text":"out","type":"text"}]},"server":"s","status":"completed","tool":"t","type":"mcpToolCall"},"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":30}

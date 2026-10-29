@@ -1,3 +1,4 @@
+pub mod events;
 pub mod mcp;
 pub mod process;
 pub mod rpc;

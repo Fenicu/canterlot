@@ -1,0 +1,871 @@
+//! Разбор событий Codex (задача 2 плана 2b, шаг 1). Записанные кадры —
+//! docs/stage0/evidence/codex/, сконструированные — tests/fixtures/codex/.
+
+use canterlot_worker::adapter::{
+    AdapterEvent, BlockKind, MediaSource, Phase,
+    codex::events::{Translated, Translator, TurnStatus},
+};
+use serde_json::Value;
+use uuid::Uuid;
+
+#[path = "support/fixtures.rs"]
+#[allow(dead_code)] // Цель берёт только codex-повтор из общего файла.
+mod fixtures;
+
+use fixtures::codex::{self, Frame};
+
+fn command_id() -> Uuid {
+    Uuid::parse_str("f9ec973c-53f4-4369-9109-786f38fcb361").unwrap()
+}
+
+// Уведомления (`out` с `method`, включая запросы сервера) в переводчик;
+// ответы, входящие, `err`, `Omitted` и `note` пропускаются.
+fn feed_frames(translator: &mut Translator, frames: &[Frame]) -> Vec<Translated> {
+    let mut out = Vec::new();
+    for frame in frames {
+        if let Frame::Out(data) = frame
+            && let Some(method) = data.get("method").and_then(Value::as_str)
+        {
+            let params = data.get("params").cloned().unwrap_or(Value::Null);
+            out.extend(translator.feed(method, &params));
+        }
+    }
+    out
+}
+
+fn feed_line(
+    translator: &mut Translator,
+    name: &str,
+    line: usize,
+    method: &str,
+) -> Vec<Translated> {
+    let data = codex::replay_lines(name)
+        .into_iter()
+        .find_map(|(n, frame)| match frame {
+            Frame::Out(data) if n == line => Some(data),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{name}:{line} is not an out frame"));
+    assert_eq!(data["method"], method);
+    translator.feed(method, &data.get("params").cloned().unwrap_or(Value::Null))
+}
+
+fn events_of(all: &[Translated]) -> Vec<&AdapterEvent> {
+    all.iter()
+        .filter_map(|t| match t {
+            Translated::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn agent_message_deltas_join_and_completed_text_is_final() {
+    let frames = codex::replay("start_stream");
+    let mut translator = Translator::new("01a171c0-2add-72c0-934b-89a64fa8f188", "gpt-6-luna");
+    translator.begin_turn("01a171c0-2b09-7951-a207-05d1f9128391", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let started = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::Text,
+                ..
+            } => Some(*block_id),
+            _ => None,
+        })
+        .expect("text block");
+    let joined: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockDelta { block_id, append } if *block_id == started => {
+                Some(append.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(joined, "PONG");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+        if *block_id == started && text == "PONG"
+    )));
+    // 28 дельт второго захвата тоже дают финальный текст.
+    let frames = codex::replay("question");
+    let mut translator = Translator::new("01a171c1-daf4-7b03-9198-680fc7eb0395", "gpt-6-luna");
+    translator.begin_turn("01a171c1-ddc1-7323-a29b-42ef20d9a74b", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let started = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::Text,
+                ..
+            } => Some(*block_id),
+            _ => None,
+        })
+        .expect("text block");
+    let joined: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockDelta { block_id, append } if *block_id == started => {
+                Some(append.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    let final_text = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. } if *block_id == started => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("final");
+    assert_eq!(joined, final_text);
+    assert!(!joined.is_empty());
+}
+
+#[test]
+fn command_items_become_call_and_result_blocks() {
+    let frames = codex::replay("tools");
+    let mut translator = Translator::new("01a171c0-fdcd-7db1-91ca-9804eb1229dd", "gpt-6-luna");
+    translator.begin_turn("01a171c0-fdf7-7b12-a07f-38fb50befd0d", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let calls: Vec<(Uuid, Option<String>, Option<String>)> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } => Some((*block_id, tool_name.clone(), summary.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls.len(), 2);
+    assert!(
+        calls
+            .iter()
+            .all(|(_, name, _)| name.as_deref() == Some("shell"))
+    );
+    assert_eq!(calls[0].2.as_deref(), Some("echo canterlot-tool-ok"));
+    assert_eq!(calls[1].2.as_deref(), Some("ls /nonexistent-canterlot-dir"));
+    let results: Vec<String> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. }
+                if events.iter().any(|s| {
+                    matches!(
+                        s,
+                        AdapterEvent::BlockStarted {
+                            block_id: parent,
+                            kind: BlockKind::ToolResult,
+                            ..
+                        } if *parent == *block_id
+                    )
+                }) =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0], "canterlot-tool-ok\n");
+    assert!(results[1].contains("No such file or directory"));
+    let finals: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockFinal {
+                block_id, summary, ..
+            } if calls.iter().any(|(id, _, _)| id == block_id) => {
+                Some(summary.as_deref().unwrap_or(""))
+            }
+            _ => None,
+        })
+        .collect();
+    assert!(finals[0].contains("exit 0"), "{finals:?}");
+    assert!(finals[1].contains("exit 2"), "{finals:?}");
+    // Упавший инструмент — обычный результат, ход продолжается текстом "0 2".
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { text, .. } if text == "0 2"
+    )));
+    // Подтверждения доставки нет: входной userMessage блока не даёт.
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { text, .. } if text.contains("canterlot-tool-ok") && text.contains("separate tool calls")
+    )));
+    let proofs: Vec<&Translated> = out
+        .iter()
+        .filter(|t| matches!(t, Translated::UserMessage { .. }))
+        .collect();
+    assert_eq!(proofs.len(), 1);
+}
+
+#[test]
+fn file_change_item_carries_diff_and_declined_status() {
+    let frames = codex::replay("permissions");
+    let mut translator = Translator::new("01a171c1-2578-7941-bc6d-d6ddc5b5ca1f", "gpt-6-luna");
+    translator.set_workdir(std::path::Path::new(
+        "/tmp/canterlot-stage0/codex/permissions/run-1792909845506",
+    ));
+    translator.begin_turn("01a171c1-259e-7d31-a49c-500a44d9eed4", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some("apply_patch") => Some((*block_id, summary.clone())),
+            _ => None,
+        })
+        .expect("apply_patch block");
+    assert_eq!(call.1.as_deref(), Some("note.txt"));
+    let final_text = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. } if *block_id == call.0 => {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("apply_patch final");
+    assert_eq!(final_text, "hi\n");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, summary, .. }
+        if *block_id == call.0 && summary.as_deref().is_some_and(|s| s.contains("declined"))
+    )));
+    // Оба запроса разрешений прошли через переводчик: метка CLI не ставится.
+    let completed: Vec<(&str, &str, bool)> = out
+        .iter()
+        .filter_map(|t| match t {
+            Translated::ItemCompleted {
+                item_id,
+                item_type: _,
+                status,
+                approved_by_cli,
+            } => Some((
+                item_id.as_str(),
+                status.as_deref().unwrap_or(""),
+                *approved_by_cli,
+            )),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        completed
+            .iter()
+            .any(|(id, _, approved)| id.starts_with("exec-") && !approved)
+    );
+    assert!(completed.iter().any(|(_, _, _)| {
+        completed
+            .iter()
+            .any(|(id, status, _)| id.starts_with("exec-579f86a8") && *status == "declined")
+    }));
+}
+
+#[test]
+fn late_completion_of_an_earlier_turn_is_dropped() {
+    let mut translator = Translator::new("01a171c6-3ae7-7a63-8b6f-428ed24276d2", "gpt-6-luna");
+    translator.begin_turn("01a171c6-3ece-7bc1-9ce0-38db51bc35cc", command_id());
+    // ev/interrupt.jsonl:26 — команда sleep открывается…
+    let out26 = feed_line(&mut translator, "interrupt", 26, "item/started");
+    assert!(events_of(&out26).into_iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockStarted {
+            kind: BlockKind::ToolCall,
+            ..
+        }
+    )));
+    // …:34 — ход прерван и забыт…
+    let out34 = feed_line(&mut translator, "interrupt", 34, "turn/completed");
+    assert!(out34.iter().any(|t| matches!(
+        t,
+        Translated::TurnCompleted {
+            status: TurnStatus::Interrupted,
+            ..
+        }
+    )));
+    // …:41 — позднее завершение команды старого хода ничего не даёт.
+    let out41 = feed_line(&mut translator, "interrupt", 41, "item/completed");
+    assert!(
+        events_of(&out41).is_empty(),
+        "late completion leaked: {out41:?}"
+    );
+}
+
+#[test]
+fn usage_is_sum_of_last_per_turn_and_matches_total() {
+    let frames = codex::replay("tools");
+    let mut translator = Translator::new("01a171c0-fdcd-7db1-91ca-9804eb1229dd", "gpt-6-luna");
+    translator.begin_turn("01a171c0-fdf7-7b12-a07f-38fb50befd0d", command_id());
+    feed_frames(&mut translator, &frames);
+    match translator.finish_turn() {
+        AdapterEvent::RunFinished {
+            usage,
+            context_tokens,
+            context_window_tokens,
+            ..
+        } => {
+            assert_eq!(usage.len(), 1);
+            let u = &usage[0];
+            assert_eq!(u.model, "gpt-6-luna");
+            assert_eq!(u.agent, "orchestrator");
+            assert_eq!(u.input_tokens, 31964 - 30336);
+            assert_eq!(u.output_tokens, 45 + 47 + 7);
+            assert_eq!(u.cache_read_tokens, 30336);
+            assert_eq!(u.cache_write_tokens, 0);
+            assert_eq!(
+                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens,
+                32063
+            );
+            assert_eq!(context_tokens, 10777);
+            assert_eq!(context_window_tokens, 258400);
+        }
+        other => panic!("expected RunFinished, got {other:?}"),
+    }
+}
+
+#[test]
+fn usage_replayed_after_resume_is_not_counted() {
+    let mut translator = Translator::new("01a171c3-4681-7b81-bd8b-be81cac722c8", "gpt-6-luna");
+    translator.begin_turn("01a171c3-54f3-76e1-83b3-3568b95f3060", command_id());
+    // ev/resume.jsonl:52 — повтор старого хода после thread/resume: мимо.
+    let out52 = feed_line(&mut translator, "resume", 52, "thread/tokenUsage/updated");
+    assert!(out52.iter().all(|t| matches!(t, Translated::Ignored)));
+    // :105 — обновление нового хода: считается.
+    feed_line(&mut translator, "resume", 105, "thread/tokenUsage/updated");
+    match translator.finish_turn() {
+        AdapterEvent::RunFinished {
+            usage,
+            context_tokens,
+            context_window_tokens,
+            ..
+        } => {
+            assert_eq!(usage.len(), 1);
+            let u = &usage[0];
+            assert_eq!(u.input_tokens, 10539 - 10368);
+            assert_eq!(u.output_tokens, 9);
+            assert_eq!(u.cache_read_tokens, 10368);
+            assert_eq!(context_tokens, 10548);
+            assert_eq!(context_window_tokens, 258400);
+        }
+        other => panic!("expected RunFinished, got {other:?}"),
+    }
+}
+
+#[test]
+fn context_tokens_and_window_from_last_update() {
+    let frames = codex::replay("tools");
+    let mut translator = Translator::new("01a171c0-fdcd-7db1-91ca-9804eb1229dd", "gpt-6-luna");
+    translator.begin_turn("01a171c0-fdf7-7b12-a07f-38fb50befd0d", command_id());
+    feed_frames(&mut translator, &frames);
+    match translator.finish_turn() {
+        AdapterEvent::RunFinished {
+            context_tokens,
+            context_window_tokens,
+            ..
+        } => {
+            assert_eq!(context_tokens, 10777);
+            assert_eq!(context_window_tokens, 258400);
+        }
+        other => panic!("expected RunFinished, got {other:?}"),
+    }
+}
+
+fn is_phase(event: &AdapterEvent, phase: &Phase) -> bool {
+    matches!(event, AdapterEvent::Phase { phase: p, .. } if std::mem::discriminant(p) == std::mem::discriminant(phase))
+}
+
+#[test]
+fn phases_follow_status_flags_and_awaiting_input_waits_for_turn_end() {
+    let mut translator = Translator::new("01a171c1-2578-7941-bc6d-d6ddc5b5ca1f", "gpt-6-luna");
+    let out25 = feed_line(&mut translator, "permissions", 25, "thread/status/changed");
+    assert!(
+        events_of(&out25)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::AwaitingPermission))
+    );
+    let out30 = feed_line(&mut translator, "permissions", 30, "thread/status/changed");
+    assert!(
+        events_of(&out30)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::Generating))
+    );
+    let mut translator = Translator::new("01a171cb-3faf-7f01-996d-a42835bb3524", "gpt-6-luna");
+    let out27 = feed_line(
+        &mut translator,
+        "question_default_mode",
+        27,
+        "thread/status/changed",
+    );
+    assert!(
+        events_of(&out27)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::AwaitingAnswer))
+    );
+    let out31 = feed_line(
+        &mut translator,
+        "question_default_mode",
+        31,
+        "thread/status/changed",
+    );
+    assert!(
+        events_of(&out31)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::Generating))
+    );
+    // idle приходит раньше turn/completed: AwaitingInput не издаём.
+    let frames = codex::replay("start_stream");
+    let mut translator = Translator::new("01a171c0-2add-72c0-934b-89a64fa8f188", "gpt-6-luna");
+    translator.begin_turn("01a171c0-2b09-7951-a207-05d1f9128391", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    assert!(
+        !events_of(&out)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::AwaitingInput))
+    );
+    assert!(out.iter().any(|t| matches!(
+        t,
+        Translated::TurnCompleted {
+            status: TurnStatus::Completed,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn retrying_errors_become_phase_summaries_and_final_error_is_kept() {
+    let frames = codex::replay("service_failure");
+    let mut translator = Translator::new("01a171c6-1373-7730-9f41-665a0cd58fb2", "gpt-6-luna");
+    translator.begin_turn("01a171c6-16c1-7103-9495-c288ebdf54e3", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let summaries: Vec<String> = events_of(&out)
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Phase {
+                phase: Phase::Generating,
+                summary: Some(summary),
+                ..
+            } => Some(summary.clone()),
+            _ => None,
+        })
+        .collect();
+    let retries: Vec<&String> = summaries.iter().filter(|s| s.contains("повтор")).collect();
+    assert_eq!(retries.len(), 6);
+    for (i, summary) in retries.iter().enumerate() {
+        assert!(summary.contains(&format!("({})", i + 1)), "{summary}");
+    }
+    assert!(out.iter().any(|t| matches!(
+        t,
+        Translated::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some(_),
+            ..
+        }
+    )));
+    let error = out
+        .iter()
+        .find_map(|t| match t {
+            Translated::TurnCompleted { error: Some(e), .. } => Some(e),
+            _ => None,
+        })
+        .expect("turn error");
+    assert_eq!(error.kind, "other");
+}
+
+#[test]
+fn warning_becomes_warning_block_and_feature_warning_is_dropped() {
+    let mut translator = Translator::new("01a171c6-1373-7730-9f41-665a0cd58fb2", "gpt-6-luna");
+    translator.begin_turn("01a171c6-16c1-7103-9495-c288ebdf54e3", command_id());
+    let out62 = feed_line(&mut translator, "service_failure", 62, "warning");
+    let events = events_of(&out62);
+    let block = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::Warning,
+                input_command_id,
+                ..
+            } => Some((*block_id, *input_command_id)),
+            _ => None,
+        })
+        .expect("warning block");
+    assert_eq!(block.1, Some(command_id()));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+        if *block_id == block.0 && text.contains("canterlot-no-such-model")
+    )));
+    // Вне хода — необязательная диагностика.
+    let mut translator = Translator::new("01a171c6-1373-7730-9f41-665a0cd58fb2", "gpt-6-luna");
+    let out = feed_line(&mut translator, "service_failure", 62, "warning");
+    assert!(events_of(&out).into_iter().any(|e| matches!(
+        e,
+        AdapterEvent::Diagnostic {
+            required: false,
+            ..
+        }
+    )));
+    // Штатное предупреждение о флаге давится.
+    let mut translator = Translator::new("01a171cb-3faf-7f01-996d-a42835bb3524", "gpt-6-luna");
+    translator.begin_turn("turn-x", command_id());
+    let out20 = feed_line(&mut translator, "question_default_mode", 20, "warning");
+    assert!(events_of(&out20).is_empty(), "{out20:?}");
+}
+
+#[test]
+fn unknown_and_noise_notifications_never_end_the_stream() {
+    let mut translator = Translator::new("01a171c1-daf4-7b03-9198-680fc7eb0395", "gpt-6-luna");
+    translator.begin_turn("01a171c1-ddc1-7323-a29b-42ef20d9a74b", command_id());
+    for (index, method) in [
+        (103, "turn/moderationMetadata"),
+        (112, "thread/readState/changed"),
+    ] {
+        let out = feed_line(&mut translator, "question", index, method);
+        assert!(
+            out.iter().all(|t| matches!(t, Translated::Ignored)),
+            "{out:?}"
+        );
+    }
+    let out7 = feed_line(
+        &mut translator,
+        "start_stream",
+        7,
+        "remoteControl/status/changed",
+    );
+    assert!(out7.iter().all(|t| matches!(t, Translated::Ignored)));
+    // Выдуманный метод — Ignored плюс одна диагностика на метод за исполнение.
+    let first = translator.feed("turn/frobnicate", &Value::Null);
+    assert!(
+        first
+            .iter()
+            .any(|t| matches!(t, Translated::Event(AdapterEvent::Diagnostic { .. })))
+    );
+    let second = translator.feed("turn/frobnicate", &Value::Null);
+    assert!(
+        !second
+            .iter()
+            .any(|t| matches!(t, Translated::Event(AdapterEvent::Diagnostic { .. })))
+    );
+    // Неизвестный тип элемента — именованный ToolCall-блок.
+    let out = translator.feed(
+        "item/started",
+        &serde_json::json!({"threadId": "01a171c1-daf4-7b03-9198-680fc7eb0395", "turnId": "01a171c1-ddc1-7323-a29b-42ef20d9a74b", "item": {"id": "x1", "type": "hookPrompt"}}),
+    );
+    assert!(events_of(&out).into_iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockStarted { tool_name: Some(name), .. } if name == "hookPrompt"
+    )));
+    // Не-JSON строка stdout — диагностика, поток жив.
+    match translator.feed_unparsed() {
+        Translated::Event(AdapterEvent::Diagnostic { .. }) => {}
+        other => panic!("expected diagnostic, got {other:?}"),
+    }
+    let after = translator.feed("turn/moderationMetadata", &Value::Null);
+    assert!(after.iter().all(|t| matches!(t, Translated::Ignored)));
+}
+
+#[test]
+fn subagent_items_carry_agent_model_and_spawn_parent() {
+    let frames = codex::replay("subagent");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let spawn = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                model,
+                ..
+            } if tool_name.as_deref() == Some("spawn_agent") => {
+                Some((*block_id, summary.clone(), model.clone()))
+            }
+            _ => None,
+        })
+        .expect("spawn block");
+    assert_eq!(spawn.1.as_deref(), Some("Check the tests"));
+    assert_eq!(spawn.2, "gpt-6-mini");
+    let child_text = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::Text,
+                agent,
+                model,
+                parent,
+                ..
+            } if agent == "helper" => Some((*block_id, model.clone(), *parent)),
+            _ => None,
+        })
+        .expect("child text block");
+    assert_eq!(child_text.1, "gpt-6-mini");
+    assert_eq!(child_text.2, Some(spawn.0));
+    // Конец детского хода главный не завершает: ровно один TurnCompleted.
+    assert_eq!(
+        out.iter()
+            .filter(|t| matches!(t, Translated::TurnCompleted { .. }))
+            .count(),
+        1
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::Phase { summary: Some(s), .. } if s == "Субагент helper: working"
+    )));
+    match translator.finish_turn() {
+        AdapterEvent::RunFinished { usage, .. } => {
+            assert_eq!(usage.len(), 2);
+            let helper = usage
+                .iter()
+                .find(|u| u.agent == "helper")
+                .expect("helper usage");
+            assert_eq!(helper.model, "gpt-6-mini");
+            assert_eq!(helper.input_tokens, 90);
+            assert_eq!(helper.output_tokens, 5);
+            assert_eq!(helper.cache_read_tokens, 10);
+            assert_eq!(helper.cache_write_tokens, 2);
+            let main = usage
+                .iter()
+                .find(|u| u.agent == "orchestrator")
+                .expect("main usage");
+            assert_eq!(main.input_tokens, 180);
+            assert_eq!(main.output_tokens, 7);
+        }
+        other => panic!("expected RunFinished, got {other:?}"),
+    }
+}
+
+#[test]
+fn reasoning_summary_parts_become_one_reasoning_block() {
+    let frames = codex::replay("reasoning");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let started: Vec<Uuid> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::Reasoning,
+                ..
+            } => Some(*block_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(started.len(), 1);
+    let deltas: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockDelta { block_id, append } if *block_id == started[0] => {
+                Some(append.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(deltas, "First\n\nSecond");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+        if *block_id == started[0] && text == "First\n\nSecond"
+    )));
+    // Пустой элемент r2 ничего не дал: финалов ровно один.
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AdapterEvent::BlockFinal { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn image_view_publishes_media_from_path_once() {
+    let frames = codex::replay("image_view");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let block = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some("view_image") => Some((*block_id, summary.clone())),
+            _ => None,
+        })
+        .expect("view_image block");
+    assert_eq!(block.1.as_deref(), Some("pic.png"));
+    let media: Vec<&&AdapterEvent> = events
+        .iter()
+        .filter(|e| matches!(e, AdapterEvent::Media { .. }))
+        .collect();
+    assert_eq!(media.len(), 1);
+    match media[0] {
+        AdapterEvent::Media { block_id, source } => {
+            assert_eq!(*block_id, block.0);
+            match source {
+                MediaSource::Path(path) => assert_eq!(path.to_str().unwrap(), "/tmp/pic.png"),
+                other => panic!("expected path, got {other:?}"),
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+#[test]
+fn mcp_tool_call_and_output_delta_blocks() {
+    let frames = codex::replay("mcp_tool");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                summary,
+                ..
+            } if tool_name.as_deref() == Some("s.t") => Some((*block_id, summary.clone())),
+            _ => None,
+        })
+        .expect("mcp block");
+    assert_eq!(call.1.as_deref(), Some("hello"));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::Phase {
+            phase: Phase::RunningTool,
+            summary: Some(s),
+            ..
+        } if s == "calling"
+    )));
+    let result_text = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockFinal { block_id, text, .. }
+                if events.iter().any(|s| {
+                    matches!(
+                        s,
+                        AdapterEvent::BlockStarted {
+                            block_id: parent,
+                            kind: BlockKind::ToolResult,
+                            ..
+                        } if *parent == *block_id
+                    )
+                }) =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        })
+        .expect("mcp result");
+    assert_eq!(result_text, "out");
+    // Дельты вывода открывают ToolResult, финал — из aggregatedOutput.
+    let frames = codex::replay("output_delta");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    let joined: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockDelta { append, .. } => Some(append.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(joined, "tick tock");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { text, summary, .. }
+        if text == "tick tock" && summary.is_none()
+    )));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { text, summary, .. }
+        if text.contains("sleep 1") && summary.as_deref().is_some_and(|s| s.contains("exit 0"))
+    )));
+}
+
+#[test]
+fn compaction_sets_context_maintenance_and_window_exceeded_is_context_exhausted() {
+    let frames = codex::replay("compaction");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    assert!(
+        events_of(&out)
+            .into_iter()
+            .any(|e| is_phase(e, &Phase::ContextMaintenance))
+    );
+    let frames = codex::replay("context_exceeded");
+    let out = feed_frames(&mut translator, &frames);
+    assert!(out.iter().any(|t| matches!(
+        t,
+        Translated::TurnCompleted {
+            status: TurnStatus::Failed,
+            error: Some(e),
+            ..
+        } if e.kind == "contextWindowExceeded"
+    )));
+    assert!(
+        events_of(&out)
+            .into_iter()
+            .any(|e| matches!(e, AdapterEvent::ContextExhausted))
+    );
+}
+
+#[test]
+fn debug_output_contains_no_text() {
+    let holding = Translated::TurnCompleted {
+        turn_id: "t".into(),
+        status: TurnStatus::Failed,
+        error: Some(canterlot_worker::adapter::codex::events::TurnErrorInfo {
+            kind: "other".into(),
+            http_status: None,
+            message: "secret-msg".into(),
+        }),
+    };
+    let debug = format!("{holding:?}");
+    assert!(!debug.contains("secret-msg"), "{debug}");
+    let holding = Translated::Event(AdapterEvent::BlockFinal {
+        block_id: command_id(),
+        text: "secret-text".into(),
+        summary: Some("secret-summary".into()),
+    });
+    let debug = format!("{holding:?}");
+    assert!(!debug.contains("secret-text"), "{debug}");
+    assert!(!debug.contains("secret-summary"), "{debug}");
+    let translator = Translator::new("thread-main", "gpt-6-luna");
+    let debug = format!("{translator:?}");
+    assert!(!debug.is_empty());
+}

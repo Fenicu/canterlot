@@ -1,0 +1,1 @@
+{"data":{"method":"turn/completed","params":{"threadId":"thread-main","turn":{"error":{"codexErrorInfo":"contextWindowExceeded","message":"context full"},"id":"turn-main","items":[],"status":"failed"}}},"dir":"out","t_ms":10}

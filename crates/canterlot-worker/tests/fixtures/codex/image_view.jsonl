@@ -1,0 +1,2 @@
+{"data":{"method":"item/started","params":{"item":{"id":"img-1","path":"/tmp/pic.png","type":"imageView"},"startedAtMs":1,"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":10}
+{"data":{"method":"item/completed","params":{"completedAtMs":2,"item":{"id":"img-1","path":"/tmp/pic.png","type":"imageView"},"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":20}

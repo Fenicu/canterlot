@@ -14,6 +14,32 @@
   собственный текст инструкций). Строка 2 — ответ `account/read` без входа
   (`account: null`, `requiresOpenaiAuth: true`). Значения `<redacted>` оставлены
   как в записях.
+- `subagent.jsonl` — сконструировано, подтвердить в live smoke. Источники формы:
+  `collabAgentToolCall` и `thread/started` с `parentThreadId` из схемы `ThreadItem`
+  и `thread/started`; `subAgentActivity` из схемы уведомлений; `tokenUsage`
+  повторяет форму `ev/tools.jsonl:27`. Покрывает: главный `spawnAgent` с
+  `receiverThreadIds`, регистрацию ребёнка по `parentThreadId`, детские ходы
+  (не завершают главный), расход ребёнка под его агентом и моделью.
+- `reasoning.jsonl` — сконструировано, подтвердить в live smoke. Источники формы:
+  элемент `reasoning` и методы `item/reasoning/summaryPartAdded`,
+  `summaryTextDelta` из схемы (`generate-ts`, типы `Reasoning*`). Покрывает:
+  две части сводки через пустую строку и пустой элемент без событий.
+- `image_view.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
+  элемент `imageView` с путём из схемы `ThreadItem`. Покрывает: блок
+  `view_image` и одну `Media` по пути.
+- `mcp_tool.jsonl` — сконструировано, подтвердить в live smoke. Источники формы:
+  элемент `mcpToolCall` и `item/mcpToolCall/progress` из схемы. Покрывает:
+  блок `<server>.<tool>`, фазу из прогресса, результат текстовыми частями.
+- `output_delta.jsonl` — сконструировано, подтвердить в live smoke. Источник
+  формы: `item/commandExecution/outputDelta` из схемы (в записях отсутствует
+  даже для `sleep 6`, `ev/multi_input.jsonl:76, 89`). Покрывает: блок результата
+  из дельт и финал из `aggregatedOutput`.
+- `compaction.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
+  элемент `contextCompaction` из схемы `ThreadItem`. Покрывает фазу
+  `ContextMaintenance`.
+- `context_exceeded.jsonl` — сконструировано, подтвердить в live smoke. Источник
+  формы: `turn/completed failed` с `codexErrorInfo` (форма `ev/service_failure.jsonl:70`).
+  Покрывает `ContextExhausted`.
 
 - `mcp_status.jsonl` — сконструировано, подтвердить в live smoke. Две строки
   уведомлений `mcpServer/startupStatus/updated` для сервера `canterlot`: статусы

@@ -1,0 +1,2 @@
+{"data":{"method":"item/started","params":{"item":{"id":"cc-1","type":"contextCompaction"},"startedAtMs":1,"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":10}
+{"data":{"method":"item/completed","params":{"completedAtMs":2,"item":{"id":"cc-1","type":"contextCompaction"},"threadId":"thread-main","turnId":"turn-main"}},"dir":"out","t_ms":20}
