@@ -37,6 +37,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
 | `crates/canterlot-hub/src/{presets,http/presets}.rs` | Пресеты инструкций: версии текста, CRUD API, события, снимок и стартовый пресет исполнителя |
 | `crates/canterlot-hub/src/http/{conversations,groups,machines,limits}.rs` | HTTP сессий и групп, чтение машин, лимитов и недавних каталогов |
+| `crates/canterlot-hub/src/requests.rs`, `migrations/0018_requests.sql` | Запросы агента и разрешения: таблица requests, первый ответ побеждает, `POST /api/v1/conversations/{id}/requests/{id}/decision`, события `request_opened`, `request_decided`, `request_transmitting`, `request_closed`, удержание очереди и активность `WaitingForUser` |
 | `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
 | `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
 | `crates/canterlot-hub/src/{subscriptions.rs,http/ws.rs}` | WSS canterlot.v1: подписки по курсору, pull-based pump, слияние дельт и отключение зависшего клиента |
@@ -445,7 +446,7 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 `POST /api/v1/conversations/{id}/inputs` ставит текст и готовые `attachment_ids` в очередь; `retry_of` ссылается на неподтверждённый ввод той же сессии. `PATCH /api/v1/conversations/{id}/settings` сохраняет изменения для следующего ввода; они становятся эффективными после подтверждения воркера. `POST /api/v1/conversations/{id}/executions` запускает исполнение, а `POST /api/v1/conversations/{id}/resume` продолжает сессию с последним native ID и при запросе снимает паузу очереди в той же транзакции.
 
-Чтения: `GET /api/v1/snapshot/conversations`, `GET /api/v1/snapshot/machines`, `GET /api/v1/conversations/{id}/snapshot`, `/history`, `/blocks/{block_id}`, `/runs/{run_id}`, `/delegation`. Снимок и его курсор читаются в одной `REPEATABLE READ` транзакции; `GET /api/v1/events?scope=&after=&limit=` восстанавливает хвост с сохранением номеров внутренних событий через `hidden`. При устаревшем или опережающем курсоре нужен новый снимок. Подробные поля и ограничения: `docs/design/api.md`; схема событий: `docs/api/events.schema.json`. Новых таблиц конфигурации в задаче 7a нет: действуют `[http]` и пороги `[machines]`.
+Чтения: `GET /api/v1/snapshot/conversations`, `GET /api/v1/snapshot/machines`, `GET /api/v1/conversations/{id}/snapshot`, `/history`, `/blocks/{block_id}`, `/runs/{run_id}`, `/delegation`. Снимок и его курсор читаются в одной `REPEATABLE READ` транзакции; `GET /api/v1/events?scope=&after=&limit=` восстанавливает хвост с сохранением номеров внутренних событий через `hidden`. При устаревшем или опережающем курсоре нужен новый снимок. Снимок разговора отдаёт в `open_requests` все незавершённые запросы (`open`, `decision_saved`, `decision_transmitting`); при переходе решения к передаче агенту хаб выпускает событие `request_transmitting`. Подробные поля и ограничения: `docs/design/api.md`; схема событий: `docs/api/events.schema.json`. Новых таблиц конфигурации в задаче 7a нет: действуют `[http]` и пороги `[machines]`.
 
 ## Обновление контракта пилота
 
@@ -468,7 +469,9 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 
 Оболочка и список (`web/src/lib/shell`, `web/src/lib/screens/sessions`): телефон показывает один экран с нижней навигацией, планшет список и чат, стол добавляет панель поручений. Список группирует сессии, ищет на сервере и показывает полосу лимитов по порогам из конфигурации. Новая сессия создаётся отдельным запросом с тем же ключом при повторе.
 
-Шапка чата и управление сессией (`web/src/lib/screens/chat`, Task 8a): шапка чата (`ChatHeader`) с заголовком, цветной меткой сессии, строкой статуса (`StateChip`) и индикатором отложенной смены модели; меню управления (остановка с подтверждением принудительного прерывания, возобновление сессии и очереди, запуск); настройки посреди сессии (`SessionSettings`) с валидацией каталога машины и переключателем «кранча»; карточки пауз и удержаний (`PauseCards`, `pauseCards.ts`), включая переопределение недельного лимита (`spend-reserve`); заглушка вопроса агента (`RequestSlot`) и защищённая диагностика сессии (`Diagnostics`).
+Шапка чата и управление сессией (`web/src/lib/screens/chat`, Task 8a): шапка чата (`ChatHeader`) с заголовком, цветной меткой сессии, строкой статуса (`StateChip`) и индикатором отложенной смены модели; меню управления (остановка с подтверждением принудительного прерывания, возобновление сессии и очереди, запуск); настройки посреди сессии (`SessionSettings`) с валидацией каталога машины и переключателем «кранча»; карточки пауз и удержаний (`PauseCards`, `pauseCards.ts`), включая переопределение недельного лимита (`spend-reserve`); карточки запросов агента и защищённая диагностика сессии (`Diagnostics`).
+
+Запросы агента и разрешения (`web/src/lib/requests`, `stores/requests.svelte.ts`, Task 7, Task 8): интерактивные карточки вопросов (`QuestionCard.svelte`) и разрешений (`PermissionCard.svelte`), встроенные над полем ввода через `RequestCard.svelte`. Отправка решения создаёт операцию в `OpJournal`, карточка проходит этапы «отправка → сохранено хабом → передано агенту → применено» на `StageTrack`, при конфликте решений от другого устройства показывает предупреждение и отключает ввод (AT-D-01), а после применения сворачивается в компактную строку с возможностью разворачивания по клику.
 
 ### Модули `web/src/lib`
 
@@ -481,10 +484,11 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 - `ops/` — журнал клиентских операций `OpJournal` (`journal.ts`, `op.svelte.ts`) и сборка HTTP-запроса операции с ключом повтора (`request.ts`).
 - `perf/` — опциональный легковесный замер производительности и журнал метрик (`probe.ts`), выключенный по умолчанию.
 - `render/` — безопасный потоковый рендеринг Markdown (`markdown.ts`, `streamingMarkdown.ts`), подсветка синтаксиса highlight.js (`highlight.ts`), очистка ANSI (`ansi.ts`) и санитайзинг DOMPurify (`sanitize.ts`, `Html.svelte`).
+- `requests/` — карточки вопросов и разрешений (`QuestionCard.svelte`, `PermissionCard.svelte`, `RequestCard.svelte`), этапы `StageTrack` и валидация ввода.
 - `screens/` — экраны PWA; экран чата (`screens/chat/ChatScreen.svelte`) собирает шапку, ленту сообщений, поле ввода и боковые панели.
 - `shell/` — оболочка приложения: раскладка телефон / планшет / десктоп (`AppShell.svelte`, `layout.ts`), навигация (`Nav.svelte`), баннеры связи (`ConnectionBanner.svelte`) и диалог истёкшей сессии (`SessionExpired.svelte`).
 - `storage/` — изоляция хранилища IndexedDB по `owner_id` пользователя (`owner.ts`) и типизированная обёртка транзакций `idb.ts`.
-- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
+- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), запросы агента и разрешения (`requests.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
 - `sync/` — постоянное WSS-соединение `ConnectionManager` (`connection.ts`), подписки на скоупы (`scope.ts`), дочитка пропусков по HTTP (`transport.ts`, `batcher.ts`) и экспоненциальный backoff (`backoff.ts`).
 - `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), полоса очереди (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
 - `ui/` — библиотека дизайн-компонентов на CSS-токенах: `Button`, `IconButton`, `Sheet`, `Disclosure`, `Pill`, `Segmented`, `StageTrack`, `TopBar`, `BottomNav`, `icons.ts`.

@@ -9,12 +9,12 @@
 	import Timeline from '$lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
-	import RequestSlot, { type RequestView } from './RequestSlot.svelte';
+	import RequestCard from '$lib/requests/RequestCard.svelte';
+	import type { RequestItem } from '$lib/stores/requests.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import type { ProviderLimits, LimitThresholds } from '$lib/stores/limits';
 	import type { MachineRecord } from '$lib/stores/machines.svelte';
-	import type { Activity } from '$lib/screens/sessions/activityText';
 	import Sheet from '$lib/ui/Sheet.svelte';
 
 	interface MachineRef {
@@ -23,11 +23,6 @@
 
 	interface ChatDetailWithMachine {
 		machine?: MachineRef;
-	}
-
-	interface RequestEventLike {
-		kind?: string;
-		payload?: RequestView;
 	}
 
 	let {
@@ -90,12 +85,23 @@
 		}
 	});
 
-	const activeRequest = $derived.by(() => {
-		const reqs = chat.requests ?? [];
-		for (let i = reqs.length - 1; i >= 0; i--) {
-			const r = reqs[i] as RequestEventLike | undefined;
-			if (r?.kind === 'request_closed' || r?.kind === 'request_decided') return null;
-			if (r?.kind === 'request_opened') return r.payload ?? null;
+	const activityRequest = $derived.by((): RequestItem | null => {
+		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
+		if (chat.activity?.state === 'waiting_for_user' && typeof evidence?.question === 'string') {
+			return {
+				id: 'activity-request',
+				conversationId: chat.id,
+				kind: 'question',
+				state: 'open',
+				payload: {
+					questions: [
+						{
+							id: 'q0',
+							text: evidence.question
+						}
+					]
+				}
+			};
 		}
 		return null;
 	});
@@ -113,7 +119,27 @@
 
 	<Timeline {chat} {onInfo} {now} />
 
-	<RequestSlot request={activeRequest} activity={chat.activity as Activity | null} />
+	{#if chat.requests.items.size > 0}
+		<div class="request-cards-slot">
+			{#each [...chat.requests.items.values()] as req (req.id)}
+				<RequestCard
+					request={req}
+					onDecision={async (decision) => {
+						await chat.requests.submitDecision(req.id, decision, chat.ops);
+					}}
+				/>
+			{/each}
+		</div>
+	{:else if activityRequest}
+		<div class="request-card-slot">
+			<RequestCard
+				request={activityRequest}
+				onDecision={async (decision) => {
+					await chat.requests.submitDecision(activityRequest.id, decision, chat.ops);
+				}}
+			/>
+		</div>
+	{/if}
 
 	<PauseCards {chat} {now} />
 
@@ -148,5 +174,15 @@
 		min-width: 0;
 		min-height: 0;
 		position: relative;
+	}
+
+	.request-cards-slot,
+	.request-card-slot {
+		padding: var(--s3) var(--s4);
+		box-sizing: border-box;
+		width: 100%;
+		display: flex;
+		flex-direction: column;
+		gap: var(--s3);
 	}
 </style>

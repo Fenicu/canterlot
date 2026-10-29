@@ -4815,7 +4815,8 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RequestView"
-            }
+            },
+            "description": "Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением."
           },
           "queue": {
             "$ref": "#/components/schemas/SnapshotQueueView"
@@ -7765,7 +7766,8 @@
                 "type": "array",
                 "items": {
                   "$ref": "#/components/schemas/RequestView"
-                }
+                },
+                "description": "Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением."
               },
               "queue": {
                 "$ref": "#/components/schemas/SnapshotQueueView"

@@ -318,10 +318,12 @@ export function continueQueue(
   return http('POST', `/api/v1/conversations/${id(conversationId)}/queue/continue`, undefined, keyed(key, opts));
 }
 
+export type DecisionBody = Body<operations['post__api_v1_conversations__id__requests__request_id__decision']>;
+
 export function decideRequest(
   conversationId: string,
   requestId: string,
-  body: Body<operations['post__api_v1_conversations__id__requests__request_id__decision']>,
+  body: DecisionBody,
   key: string,
   opts?: RequestOptions
 ): Promise<HttpResponse<Ok<operations['post__api_v1_conversations__id__requests__request_id__decision']>>> {

@@ -2093,11 +2093,11 @@ async fn apply_decision_transmission_started(
     conn: &mut PgConnection,
     run: &ExecutionRef,
     fact: &DecisionTransmissionStarted,
-    _correlation_id: Uuid,
+    correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
     let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let row: Option<(Uuid, String)> = sqlx::query_as(
-        "select id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
+    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "select id, conversation_id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
     )
     .bind(req_uuid)
     .bind(&fact.request_id)
@@ -2105,7 +2105,7 @@ async fn apply_decision_transmission_started(
     .fetch_optional(&mut *conn)
     .await?;
 
-    let Some((req_id, state)) = row else {
+    let Some((req_id, conv_id, state)) = row else {
         return Ok(true);
     };
 
@@ -2114,6 +2114,19 @@ async fn apply_decision_transmission_started(
             .bind(req_id)
             .execute(&mut *conn)
             .await?;
+
+        events::append(
+            conn,
+            NewEvent {
+                scope: Scope::Conversation { id: conv_id },
+                kind: "request_transmitting",
+                conversation_id: Some(conv_id),
+                execution_id: Some(run.execution_id),
+                payload: json!({ "request_id": req_id }),
+                correlation_id,
+            },
+        )
+        .await?;
     }
     Ok(false)
 }

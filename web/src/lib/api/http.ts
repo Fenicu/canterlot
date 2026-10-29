@@ -101,7 +101,8 @@ const SCOPES = new Set<ErrorScope>([
 ]);
 const CODES = new Set<ErrorCode>([
   'unauthenticated', 'forbidden_user', 'origin_rejected', 'invalid_request', 'invalid_offset', 'not_found',
-  'method_not_allowed', 'idempotency_conflict', 'resource_limit', 'not_implemented', 'too_many_requests',
+  'method_not_allowed', 'idempotency_conflict', 'decision_conflict', 'request_not_open', 'decision_invalid',
+  'resource_limit', 'not_implemented', 'too_many_requests',
   'db_unavailable', 'internal', 'queue_full', 'conversation_closed', 'execution_already_live', 'invalid_state',
   'not_pending', 'schedule_time_out_of_range', 'too_many_scheduled', 'machine_not_found', 'machine_unavailable',
   'capability_missing', 'limits_mismatch', 'harness_unknown', 'model_unknown', 'effort_not_allowed',

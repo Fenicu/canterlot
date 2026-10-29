@@ -23,6 +23,7 @@ import {
 	type InputView
 } from './inputs';
 import { TimelineModel, cmpSeq, type TimelineEntry } from './timeline';
+import { RequestsModel } from './requests.svelte';
 
 export interface HistoryBlock {
 	kind: 'block';
@@ -81,6 +82,7 @@ export interface SnapshotData {
 	queue?: { pause_reasons?: unknown[]; hold_reasons?: unknown[]; queued?: number; run_slot?: RunSlot };
 	history?: HistoryPage;
 	scheduled?: unknown[];
+	open_requests?: unknown[];
 }
 
 export type RunSlot =
@@ -120,7 +122,7 @@ export class ChatStore {
 	readonly blocks = new SvelteMap<string, BlockModel>();
 	readonly inputs = new SvelteMap<string, InputView>();
 	readonly timeline = new TimelineModel();
-	readonly requests: HubEvent[] = [];
+	readonly requests: RequestsModel;
 	readonly diagnostics: unknown[] = [];
 	readonly queue = $state({
 		pause_reasons: [] as unknown[],
@@ -173,10 +175,15 @@ export class ChatStore {
 		}
 	) {
 		this.#sync = new BlockSync(this.blocks, deps.blockIO);
+		this.requests = new RequestsModel(this.id);
 	}
 
 	get status(): ScopeStatus {
 		return this.#sub?.status ?? 'idle';
+	}
+
+	get ops(): OpJournal {
+		return this.deps.ops;
 	}
 
 	get applier(): ScopeApplier {
@@ -406,12 +413,24 @@ export class ChatStore {
 				}
 				return;
 			case 'interrupt_state_changed':
-				if (event.kind === 'interrupt_state_changed') this.interrupt = { ...event.payload };
+				if (event.kind === 'interrupt_state_changed') {
+					this.interrupt = { ...event.payload };
+					if (event.payload.status === 'completed' || event.payload.status === 'acknowledged') {
+						this.requests.applyInterrupt(event);
+					}
+				}
 				return;
 			case 'request_opened':
+				this.requests.applyOpened(event);
+				return;
 			case 'request_closed':
+				this.requests.applyClosed(event);
+				return;
 			case 'request_decided':
-				this.requests.push(event);
+				this.requests.applyDecided(event);
+				return;
+			case 'request_transmitting':
+				this.requests.applyTransmitting(event);
 				return;
 			case 'block_conflicting_final':
 			case 'adapter_diagnostic':
@@ -569,6 +588,7 @@ export class ChatStore {
 			if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
 		}
 		if (data.scheduled) this.scheduled = data.scheduled;
+		if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
 		if (data.history) this.timeline.hasOlder = Boolean(data.history.next_before);
 		const items = data.history?.items ?? [];
 		const oldest = [...items].sort((a, b) => cmpSeq(seqOf(a), seqOf(b)))[0];

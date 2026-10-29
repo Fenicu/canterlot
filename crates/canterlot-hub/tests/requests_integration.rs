@@ -520,6 +520,209 @@ async fn conversation_snapshot_includes_open_requests(pool: PgPool) -> TestResul
     Ok(())
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_transmission_started_emits_request_transmitting_event(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let journal = Uuid::now_v7();
+    let ingest = Ingest::new(pool.clone());
+    let req_id = Uuid::now_v7();
+
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    opened(&execution),
+                    record_body::Body::RequestOpened(RequestOpened {
+                        request_id: req_id.to_string(),
+                        execution_id: execution.execution_id.to_string(),
+                        generation: execution.generation as u64,
+                        kind: "permission".into(),
+                        payload_json: br#"{"tool_name":"Bash","command":"cargo test"}"#.to_vec(),
+                    }),
+                ],
+            ),
+        )
+        .await?;
+
+    let mut tx = pool.begin().await?;
+    canterlot_hub::requests::save_decision_in_tx(
+        &mut tx,
+        seed.conversation_id,
+        req_id,
+        execution.generation,
+        &canterlot_proto::requests::DecisionPayload::Permission {
+            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
+            message: None,
+        },
+        "idemp-transmitting",
+    )
+    .await?;
+    tx.commit().await?;
+
+    let count_transmitting = || async {
+        sqlx::query_scalar::<_, i64>(
+            "select count(*) from events where conversation_id = $1 and kind = 'request_transmitting'",
+        )
+        .bind(seed.conversation_id)
+        .fetch_one(&pool)
+        .await
+    };
+    assert_eq!(
+        count_transmitting().await?,
+        0,
+        "до передачи агенту события нет"
+    );
+
+    let started = |seq: u64| {
+        let mut records = batch(
+            journal,
+            vec![record_body::Body::DecisionTransmissionStarted(
+                DecisionTransmissionStarted {
+                    request_id: req_id.to_string(),
+                    decision_id: "dec-1".into(),
+                    machine_time_ms: 100,
+                },
+            )],
+        );
+        records.records[0].seq = seq;
+        records
+    };
+
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &started(3),
+        )
+        .await?;
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 3 });
+
+    let row: RequestRow = sqlx::query_as("select * from requests where id = $1")
+        .bind(req_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(row.state, RequestState::DecisionTransmitting);
+
+    let event: StoredEvent = sqlx::query_as(
+        "select * from events where conversation_id = $1 and kind = 'request_transmitting'",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(event.payload, json!({"request_id": req_id.to_string()}));
+    assert_eq!(event.conversation_id, Some(seed.conversation_id));
+    assert_eq!(event.execution_id, Some(execution.execution_id));
+    assert!(
+        canterlot_hub::events::is_client_visible("request_transmitting"),
+        "событие видно клиентам"
+    );
+    let wire = canterlot_hub::events::project_for_client(vec![event]);
+    assert_eq!(wire[0].kind, "request_transmitting");
+    assert!(
+        validator("request_transmitting").is_valid(&serde_json::to_value(&wire[0])?),
+        "request_transmitting must pass schema"
+    );
+
+    // Повтор той же записи (курсор журнала) и новая запись с тем же фактом (состояние
+    // уже сдвинулось) не дают второго события.
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &started(3),
+        )
+        .await?;
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &started(4),
+        )
+        .await?;
+    assert_eq!(
+        count_transmitting().await?,
+        1,
+        "replayed fact must not emit a second request_transmitting"
+    );
+
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn snapshot_open_requests_include_saved_and_transmitting_requests(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+
+    let states = [
+        ("transmitting", "decision_transmitting"),
+        ("applied", "decision_applied"),
+        ("open", "open"),
+        ("not-applied", "decision_not_applied"),
+        ("saved", "decision_saved"),
+        ("closed", "closed_without_decision"),
+    ];
+    let mut ids = std::collections::HashMap::new();
+    let mut tx = pool.begin().await?;
+    for (offset, (name, state)) in states.iter().enumerate() {
+        let id = Uuid::now_v7();
+        canterlot_hub::requests::create_request_in_tx(
+            &mut tx,
+            &canterlot_hub::requests::NewRequest {
+                id,
+                conversation_id: seed.conversation_id,
+                execution_id: execution.execution_id,
+                generation: execution.generation,
+                kind: RequestKind::Permission,
+                native_request_id: format!("native-{name}"),
+                request_payload: json!({"tool_name": "Bash"}),
+            },
+        )
+        .await?;
+        sqlx::query(
+            "update requests set state = $2, created_at = now() + make_interval(secs => $3) where id = $1",
+        )
+        .bind(id)
+        .bind(state)
+        .bind(offset as f64)
+        .execute(&mut *tx)
+        .await?;
+        ids.insert(*name, id);
+    }
+    tx.commit().await?;
+
+    let snap = snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 50)
+        .await?
+        .expect("snapshot must exist");
+
+    let listed: Vec<(Uuid, String)> = snap
+        .data
+        .open_requests
+        .iter()
+        .map(|r| (r.id, r.state.clone()))
+        .collect();
+    assert_eq!(
+        listed,
+        vec![
+            (ids["transmitting"], "decision_transmitting".to_owned()),
+            (ids["open"], "open".to_owned()),
+            (ids["saved"], "decision_saved".to_owned()),
+        ],
+        "незавершённые запросы по created_at, завершённые и закрытые исключены"
+    );
+
+    Ok(())
+}
+
 #[test]
 fn events_schema_validates_request_opened_decided_closed() {
     let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
