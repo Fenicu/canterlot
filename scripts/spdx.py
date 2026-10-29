@@ -199,3 +199,16 @@ def parse_spdx(expr_str, allowlist=None):
         return ast.evaluate(allowlist)
     except Exception as e:
         return False, None, [f'Ошибка разбора: {e}']
+
+
+def rust_allowlist_dependency_phrase(count: int) -> str:
+    """Фраза «все N … allowlist» с согласованием числительного и глагола."""
+    if count % 100 in (11, 12, 13, 14):
+        noun, verb = 'зависимостей', 'удовлетворяют'
+    elif count % 10 == 1:
+        noun, verb = 'зависимость', 'удовлетворяет'
+    elif count % 10 in (2, 3, 4):
+        noun, verb = 'зависимости', 'удовлетворяют'
+    else:
+        noun, verb = 'зависимостей', 'удовлетворяют'
+    return f'все {count} {noun} {verb} allowlist'

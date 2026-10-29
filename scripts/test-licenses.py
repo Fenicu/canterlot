@@ -7,7 +7,30 @@ import unittest
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(__file__))
-from spdx import parse_spdx, ALLOWLIST
+from spdx import parse_spdx, ALLOWLIST, rust_allowlist_dependency_phrase
+
+
+class TestRussianDependencyPhrase(unittest.TestCase):
+    def test_rust_allowlist_dependency_phrase(self):
+        cases = {
+            1: 'все 1 зависимость удовлетворяет allowlist',
+            2: 'все 2 зависимости удовлетворяют allowlist',
+            4: 'все 4 зависимости удовлетворяют allowlist',
+            5: 'все 5 зависимостей удовлетворяют allowlist',
+            11: 'все 11 зависимостей удовлетворяют allowlist',
+            12: 'все 12 зависимостей удовлетворяют allowlist',
+            14: 'все 14 зависимостей удовлетворяют allowlist',
+            21: 'все 21 зависимость удовлетворяет allowlist',
+            22: 'все 22 зависимости удовлетворяют allowlist',
+            25: 'все 25 зависимостей удовлетворяют allowlist',
+            101: 'все 101 зависимость удовлетворяет allowlist',
+            111: 'все 111 зависимостей удовлетворяют allowlist',
+            341: 'все 341 зависимость удовлетворяет allowlist',
+            360: 'все 360 зависимостей удовлетворяют allowlist',
+        }
+        for n, expected in cases.items():
+            with self.subTest(n=n):
+                self.assertEqual(rust_allowlist_dependency_phrase(n), expected)
 
 
 class TestSpdxLicenseEvaluation(unittest.TestCase):

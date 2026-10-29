@@ -26,7 +26,7 @@ import sys, os, json, subprocess, re
 from collections import Counter
 
 sys.path.insert(0, os.path.abspath('scripts'))
-from spdx import parse_spdx, ALLOWLIST
+from spdx import parse_spdx, ALLOWLIST, rust_allowlist_dependency_phrase
 
 def clean_repo(repo_val):
     if not repo_val:
@@ -234,7 +234,10 @@ else:
         doc.append('')
     else:
         doc.append('### Rust-крейты\n')
-        doc.append('Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют (все 341 зависимость удовлетворяют allowlist).\n')
+        phrase = rust_allowlist_dependency_phrase(len(rust_crates))
+        doc.append(
+            f'Среди Rust-крейтов рабочего пространства пакеты с неразрешёнными лицензиями отсутствуют ({phrase}).\n'
+        )
 
     if flagged_npm_run:
         doc.append('### npm (runtime)\n')
