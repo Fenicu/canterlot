@@ -62,6 +62,18 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "new_operation",
     message: "Ключ идемпотентности уже использован с другим запросом",
   },
+  decision_conflict: {
+    action: "none",
+    message: "Решение уже принято с другого устройства",
+  },
+  request_not_open: {
+    action: "none",
+    message: "Запрос уже закрыт",
+  },
+  decision_invalid: {
+    action: "none",
+    message: "Ответ не подходит к вопросу",
+  },
   resource_limit: {
     action: "none",
     message: "Превышен допустимый размер данных",

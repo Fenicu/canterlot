@@ -1,11 +1,11 @@
 import 'fake-indexeddb/auto';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { RequestsModel } from '$lib/stores/requests.svelte';
-import { closeOpenJournals, OpJournal, type JournalEnv, type Op } from '$lib/ops/journal';
-import { openDb, purgeAllStores } from '$lib/storage/idb';
-import { ApiError, NetworkError, type ErrorCode, type ErrorScope, type ErrorDetails } from '$lib/api/http';
-import type { DecisionBody } from '$lib/api/client';
-import type { HubEvent } from '$lib/sync/wire';
+import { RequestsModel } from '#lib/stores/requests.svelte.js';
+import { closeOpenJournals, OpJournal, type JournalEnv, type Op } from '#lib/ops/journal.js';
+import { openDb, purgeAllStores } from '#lib/storage/idb.js';
+import { ApiError, NetworkError, type ErrorCode, type ErrorScope, type ErrorDetails } from '#lib/api/http.js';
+import type { DecisionBody } from '#lib/api/client.js';
+import type { HubEvent } from '#lib/sync/wire.js';
 
 class TestEnv implements JournalEnv {
   nowMs = 1000;

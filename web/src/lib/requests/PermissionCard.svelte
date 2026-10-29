@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { RequestItem } from '$lib/stores/requests.svelte';
-  import type { DecisionBody } from '$lib/api/client';
+  import type { RequestItem } from '#lib/stores/requests.svelte.js';
+  import type { DecisionBody } from '#lib/api/client.js';
 
   let {
     request,

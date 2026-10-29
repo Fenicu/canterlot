@@ -141,7 +141,7 @@ test('reduced_motion_disables_sheet_and_caret_animation', async ({ page }) => {
   const { hub, api, ids } = await boot(page);
   await page.emulateMedia({ reducedMotion: 'reduce' });
   const blockId = api.id();
-  hub.append(`conversation:${ids.pinned}`, { kind: 'block_started', conversation_id: ids.pinned, payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'агент', model: 'opus', tool_name: null, summary: null } });
+  hub.append(`conversation:${ids.pinned}`, { kind: 'block_started', conversation_id: ids.pinned, payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'агент', model: 'opus', tool_name: null, summary: null, approved_by: null } });
   hub.append(`conversation:${ids.pinned}`, { kind: 'block_delta', conversation_id: ids.pinned, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'Продолжаю ответ' } });
   hub.flush();
   await expect(page.locator('.caret')).toBeVisible();

@@ -1,10 +1,10 @@
 <script lang="ts">
-  import StageTrack from '$lib/ui/StageTrack.svelte';
-  import type { Stage, StageState } from '$lib/ui/stage-track';
+  import StageTrack from '#lib/ui/StageTrack.svelte';
+  import type { Stage, StageState } from '#lib/ui/stage-track.js';
   import PermissionCard from './PermissionCard.svelte';
   import QuestionCard from './QuestionCard.svelte';
-  import type { RequestItem } from '$lib/stores/requests.svelte';
-  import type { DecisionBody } from '$lib/api/client';
+  import type { RequestItem } from '#lib/stores/requests.svelte.js';
+  import type { DecisionBody } from '#lib/api/client.js';
 
   let {
     request,

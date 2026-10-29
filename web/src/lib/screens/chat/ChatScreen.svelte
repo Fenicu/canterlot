@@ -9,8 +9,8 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
-	import RequestCard from '$lib/requests/RequestCard.svelte';
-	import type { RequestItem } from '$lib/stores/requests.svelte';
+	import RequestCard from '#lib/requests/RequestCard.svelte';
+	import type { RequestItem } from '#lib/stores/requests.svelte.js';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';

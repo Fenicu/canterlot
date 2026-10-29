@@ -1,8 +1,8 @@
 import { SvelteMap } from 'svelte/reactivity';
-import type { HubEvent } from '$lib/sync/wire';
-import type { OpJournal } from '$lib/ops/journal';
-import type { DecisionBody } from '$lib/api/client';
-import { ApiError } from '$lib/api/http';
+import type { HubEvent } from '#lib/sync/wire.js';
+import type { OpJournal } from '#lib/ops/journal.js';
+import type { DecisionBody } from '#lib/api/client.js';
+import { ApiError } from '#lib/api/http.js';
 
 export type RequestClientState =
   | 'open'

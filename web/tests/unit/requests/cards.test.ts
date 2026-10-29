@@ -1,12 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mount, unmount, flushSync } from 'svelte';
-import RequestCard from '$lib/requests/RequestCard.svelte';
-import PermissionCard from '$lib/requests/PermissionCard.svelte';
-import QuestionCard from '$lib/requests/QuestionCard.svelte';
-import ToolBlock from '$lib/timeline/ToolBlock.svelte';
-import { BlockModel } from '$lib/stores/blocks';
-import { RequestsModel, createRequestItem, type RequestItem } from '$lib/stores/requests.svelte';
-import type { HubEvent } from '$lib/sync/wire';
+import RequestCard from '#lib/requests/RequestCard.svelte';
+import PermissionCard from '#lib/requests/PermissionCard.svelte';
+import QuestionCard from '#lib/requests/QuestionCard.svelte';
+import ToolBlock from '#lib/timeline/ToolBlock.svelte';
+import { BlockModel } from '#lib/stores/blocks.js';
+import { RequestsModel, createRequestItem, type RequestItem } from '#lib/stores/requests.svelte.js';
+import type { HubEvent } from '#lib/sync/wire.js';
 
 beforeEach(() => {
   vi.stubGlobal('matchMedia', (query: string) => ({
