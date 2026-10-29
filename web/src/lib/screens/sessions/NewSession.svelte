@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { loadConfig } from '$lib/api/config';
@@ -85,7 +86,9 @@
     if (!model || !gate.ok) return;
     try {
       const created = await model.submit();
-      await goto(resolve(`/c/${created.conversationId}` as '/'));
+      const share = page.url.searchParams.get('share');
+      if (share) await goto(resolve(`/share?id=${encodeURIComponent(share)}&conversation=${encodeURIComponent(created.conversationId)}` as '/share'));
+      else await goto(resolve(`/c/${created.conversationId}` as '/'));
     } catch (err) {
       error = err instanceof Error ? err.message : 'Не удалось создать сессию';
     }

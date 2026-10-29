@@ -172,6 +172,7 @@
     <button type="button" aria-label="Ещё" aria-expanded={menu} onclick={() => (menu = !menu)}><Icon name="more" /></button>
     {#if menu}
       <div class="menu" role="menu">
+        <a role="menuitem" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</a>
         <button type="button" role="menuitem" onclick={() => { groupsOpen = true; menu = false; }}>Группы</button>
         <button type="button" role="menuitem" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</button>
         {#if canInstall}<button type="button" role="menuitem" onclick={() => { menu = false; void installation().prompt(); }}>Установить</button>{/if}

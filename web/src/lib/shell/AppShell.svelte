@@ -11,6 +11,7 @@
   import { layoutMode, type LayoutMode } from './layout';
   import Nav from './Nav.svelte';
   import SessionExpired from './SessionExpired.svelte';
+  import { applyMotion } from '$lib/screens/settings/preferences';
   import { installation, register } from '$lib/pwa/register';
   import type { UpdateController } from '$lib/pwa/update';
   import { staleness } from '$lib/pwa/offline';
@@ -31,6 +32,7 @@
   const mode: LayoutMode = $derived(layoutMode(width || 412));
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
+  const standalonePage = $derived(path === '/settings' || path === '/share');
   const onChat = $derived(path.startsWith('/c/'));
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
@@ -61,6 +63,7 @@
 
   onMount(() => {
     installation();
+    applyMotion();
     let alive = true;
     const offlineChanged = () => { offlineLabel = staleness.label(Date.now()); };
     const online = () => staleness.setOnline(navigator.onLine);
@@ -154,12 +157,12 @@
     {#if !onSessions}
       <div class="page">{@render children()}</div>
     {/if}
-    {#if !onChat}
-      <Nav current={nav} />
+    {#if !onChat && !standalonePage}
+      <Nav current={nav} create={onSessions || onNew} />
     {/if}
   {:else if laidOut}
     <div class="panes">
-      <aside data-pane="list"><SessionList create /></aside>
+      <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
       <div data-pane="chat">
         {#if mode === 'desktop' && onChat}
           <button type="button" onclick={() => (lane = !lane)}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>

@@ -8,6 +8,7 @@
   import SendLater from '$lib/composer/SendLater.svelte';
   import { bindDraft } from '$lib/composer/draftBinding';
   import { ComposerModel, type Limits } from '$lib/composer/model.svelte';
+  import { takeAttachmentNotice } from '$lib/composer/attachmentNotice';
   import { getEnterPref } from '$lib/composer/prefs';
   import { bindComposerRestore } from '$lib/composer/restore';
   import { decideEnter, isTouchPrimary } from '$lib/composer/sendRules';
@@ -42,6 +43,8 @@
         serverNow: () => clock.serverNow()
       })
   );
+
+  untrack(() => { model.errorMessage = takeAttachmentNotice(chat.id); });
 
   let node = $state<HTMLTextAreaElement | null>(null);
   let file = $state<HTMLInputElement | null>(null);
