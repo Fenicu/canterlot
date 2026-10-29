@@ -1,0 +1,2 @@
+{"method":"mcpServer/startupStatus/updated","params":{"name":"canterlot","status":"ready"}}
+{"method":"mcpServer/startupStatus/updated","params":{"name":"canterlot","status":"failed"}}

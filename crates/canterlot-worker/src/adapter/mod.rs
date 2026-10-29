@@ -3,6 +3,7 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload};
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
+pub mod canterlot_mcp;
 pub mod claude_code;
 pub mod codex;
 #[cfg(feature = "synthetic-adapter")]

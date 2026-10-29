@@ -14,3 +14,7 @@
   собственный текст инструкций). Строка 2 — ответ `account/read` без входа
   (`account: null`, `requiresOpenaiAuth: true`). Значения `<redacted>` оставлены
   как в записях.
+
+- `mcp_status.jsonl` — сконструировано, подтвердить в live smoke. Две строки
+  уведомлений `mcpServer/startupStatus/updated` для сервера `canterlot`: статусы
+  `ready` и `failed` (форма `McpServerStatusUpdatedNotification`).

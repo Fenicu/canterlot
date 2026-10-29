@@ -55,25 +55,15 @@ pub fn build_args(spec: &LaunchSpec) -> Result<Vec<OsString>, LaunchError> {
     if !spec.workdir.is_dir() {
         return Err(LaunchError::WorkdirNotDir);
     }
-    Ok(vec![
+    let mut args = vec![
         "app-server".into(),
         "--listen".into(),
         "stdio://".into(),
         "--enable".into(),
         "default_mode_request_user_input".into(),
-        "-c".into(),
-        format!(
-            "mcp_servers.canterlot.command={}",
-            mcp_command_value(spec.relay_exe)
-        )
-        .into(),
-        "-c".into(),
-        format!(
-            "mcp_servers.canterlot.args={}",
-            mcp_args_value(spec.exec_dir)
-        )
-        .into(),
-    ])
+    ];
+    args.extend(super::mcp::launch_overrides(spec.relay_exe, spec.exec_dir));
+    Ok(args)
 }
 
 // Чужие ключи биллинга и просочившееся окружение родителя отрезаем, ничего не добавляем.
