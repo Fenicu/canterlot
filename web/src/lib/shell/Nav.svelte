@@ -1,6 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import BottomNav from '$lib/ui/BottomNav.svelte';
+  import BottomNav from '#lib/ui/BottomNav.svelte';
   let { current, create = true }: { current: 'sessions' | 'machines' | 'limits'; create?: boolean } = $props();
 </script>
 

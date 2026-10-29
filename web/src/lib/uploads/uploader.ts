@@ -1,19 +1,19 @@
-import { ApiError, NetworkError } from '$lib/api/http';
+import { ApiError, NetworkError } from "#lib/api/http.js";
 import {
   completeAttachment as completeAttachmentRequest,
   createAttachment as createAttachmentRequest,
   deleteAttachment as deleteAttachmentRequest,
-  headAttachmentContent
-} from '$lib/api/client';
-import type { components } from '$lib/api/generated/openapi';
-import { patchChunk } from '$lib/uploads/patch';
-import { browserHasher, type Hasher } from '$lib/uploads/hasher';
+  headAttachmentContent,
+} from "#lib/api/client.js";
+import type { components } from "#lib/api/generated/openapi.js";
+import { patchChunk } from "#lib/uploads/patch.js";
+import { browserHasher, type Hasher } from "#lib/uploads/hasher.js";
 
-export type AttachmentRecord = components['schemas']['AttachmentRecord'];
-export type CreatedAttachment = components['schemas']['CreatedAttachment'];
+export type AttachmentRecord = components["schemas"]["AttachmentRecord"];
+export type CreatedAttachment = components["schemas"]["CreatedAttachment"];
 
 export function attachmentName(name: string): string {
-  const base = name.split(/[/\\]/).pop() || 'file';
+  const base = name.split(/[/\\]/).pop() || "file";
   const bytes = new TextEncoder().encode(base);
   if (bytes.length <= 255) return base;
   let end = 255;
@@ -22,38 +22,41 @@ export function attachmentName(name: string): string {
 }
 
 export class UploadLimitError extends Error {
-  readonly reason: 'empty' | 'too_large' | 'too_many';
+  readonly reason: "empty" | "too_large" | "too_many";
 
-  constructor(reason: 'empty' | 'too_large' | 'too_many') {
+  constructor(reason: "empty" | "too_large" | "too_many") {
     const message =
-      reason === 'empty'
-        ? 'Файл пустой'
-        : reason === 'too_large'
-          ? 'Файл больше 100 МиБ'
-          : 'Не более 10 файлов в одном сообщении';
+      reason === "empty"
+        ? "Файл пустой"
+        : reason === "too_large"
+          ? "Файл больше 100 МиБ"
+          : "Не более 10 файлов в одном сообщении";
     super(message);
-    this.name = 'UploadLimitError';
+    this.name = "UploadLimitError";
     this.reason = reason;
   }
 }
 
 export interface AttachmentApi {
   createAttachment(
-    body: components['schemas']['NewAttachment'],
-    options?: { idempotencyKey?: string }
-  ): Promise<Pick<CreatedAttachment, 'id' | 'state' | 'upload'>>;
+    body: components["schemas"]["NewAttachment"],
+    options?: { idempotencyKey?: string },
+  ): Promise<Pick<CreatedAttachment, "id" | "state" | "upload">>;
   headContent(id: string): Promise<{ offset: number; length: number }>;
   patchContent(
     id: string,
     chunk: Blob,
     offset: number,
-    options?: { signal?: AbortSignal; onProgress?: (loaded: number, total: number) => void }
+    options?: {
+      signal?: AbortSignal;
+      onProgress?: (loaded: number, total: number) => void;
+    },
   ): Promise<{ offset: number }>;
   completeAttachment(
     id: string,
-    body?: components['schemas']['CompleteBody'],
-    options?: { idempotencyKey?: string }
-  ): Promise<Pick<AttachmentRecord, 'id' | 'state'>>;
+    body?: components["schemas"]["CompleteBody"],
+    options?: { idempotencyKey?: string },
+  ): Promise<Pick<AttachmentRecord, "id" | "state">>;
   deleteAttachment?(id: string): Promise<void>;
 }
 
@@ -66,16 +69,23 @@ export const defaultAttachmentApi: AttachmentApi = {
 
   async headContent(id: string) {
     const res = await headAttachmentContent(id);
-    const offsetHeader = res.headers.get('Upload-Offset');
-    const lengthHeader = res.headers.get('Upload-Length');
+    const offsetHeader = res.headers.get("Upload-Offset");
+    const lengthHeader = res.headers.get("Upload-Length");
     return {
       offset: offsetHeader ? parseInt(offsetHeader, 10) : 0,
-      length: lengthHeader ? parseInt(lengthHeader, 10) : 0
+      length: lengthHeader ? parseInt(lengthHeader, 10) : 0,
     };
   },
 
-  async patchContent(id: string, chunk: Blob, offset: number, options?: { signal?: AbortSignal }) {
-    return patchChunk(`/api/v1/attachments/${id}/content`, chunk, offset, { signal: options?.signal });
+  async patchContent(
+    id: string,
+    chunk: Blob,
+    offset: number,
+    options?: { signal?: AbortSignal },
+  ) {
+    return patchChunk(`/api/v1/attachments/${id}/content`, chunk, offset, {
+      signal: options?.signal,
+    });
   },
 
   async completeAttachment(id: string, body, options) {
@@ -86,7 +96,7 @@ export const defaultAttachmentApi: AttachmentApi = {
 
   async deleteAttachment(id: string) {
     await deleteAttachmentRequest(id, crypto.randomUUID());
-  }
+  },
 };
 
 export interface UploadFileOptions {
@@ -99,7 +109,9 @@ export interface UploadFileOptions {
   retryDelayMs?: number;
   currentDraftCount?: number;
   onProgress?: (p: { uploaded: number; total: number }) => void;
-  onPhase?: (phase: 'hashing' | 'creating' | 'uploading' | 'completing') => void;
+  onPhase?: (
+    phase: "hashing" | "creating" | "uploading" | "completing",
+  ) => void;
   signal?: AbortSignal;
   onAttachmentCreated?: (id: string, chunkBytes: number) => void;
 }
@@ -114,17 +126,20 @@ export interface UploadFileResult {
 export async function uploadFile(
   file: File,
   conversationId: string,
-  options?: UploadFileOptions
+  options?: UploadFileOptions,
 ): Promise<UploadFileResult> {
   // 1. Валидация
   if (file.size === 0) {
-    throw new UploadLimitError('empty');
+    throw new UploadLimitError("empty");
   }
   if (file.size > 104857600) {
-    throw new UploadLimitError('too_large');
+    throw new UploadLimitError("too_large");
   }
-  if (options?.currentDraftCount !== undefined && options.currentDraftCount + 1 > 10) {
-    throw new UploadLimitError('too_many');
+  if (
+    options?.currentDraftCount !== undefined &&
+    options.currentDraftCount + 1 > 10
+  ) {
+    throw new UploadLimitError("too_many");
   }
 
   const api = options?.api ?? defaultAttachmentApi;
@@ -134,35 +149,40 @@ export async function uploadFile(
   const createKey = options?.idempotencyKey ?? crypto.randomUUID();
   const finishKey = options?.completeKey ?? crypto.randomUUID();
 
-  options?.onPhase?.('hashing');
-  const digest = await hasher.sha256(file, () => undefined, signal ?? new AbortController().signal);
+  options?.onPhase?.("hashing");
+  const digest = await hasher.sha256(
+    file,
+    () => undefined,
+    signal ?? new AbortController().signal,
+  );
   throwIfAborted(signal);
 
   let attachmentId = options?.resumeAttachmentId;
   let chunkBytes = options?.sliceBytes ?? 8 * 1024 * 1024;
 
   if (!attachmentId) {
-    options?.onPhase?.('creating');
+    options?.onPhase?.("creating");
     const regRes = await retrying(
       () =>
         api.createAttachment(
           {
             conversation_id: conversationId,
             name: attachmentName(file.name),
-            mime: file.type || 'application/octet-stream',
+            mime: file.type || "application/octet-stream",
             size: file.size,
-            sha256: digest
+            sha256: digest,
           },
-          { idempotencyKey: createKey }
+          { idempotencyKey: createKey },
         ),
       retryDelay,
-      signal
+      signal,
     );
     attachmentId = regRes.id;
-    if (regRes.upload?.upload_chunk_bytes) chunkBytes = regRes.upload.upload_chunk_bytes;
+    if (regRes.upload?.upload_chunk_bytes)
+      chunkBytes = regRes.upload.upload_chunk_bytes;
   }
   options?.onAttachmentCreated?.(attachmentId, chunkBytes);
-  options?.onPhase?.('uploading');
+  options?.onPhase?.("uploading");
   let offset = (await readHead(api, attachmentId, retryDelay, signal)).offset;
 
   // 3. Цикл передачи слайсов
@@ -173,22 +193,26 @@ export async function uploadFile(
     const slice = file.slice(offset, nextEnd);
 
     try {
-      const patchRes = await api.patchContent(attachmentId, slice, offset, { signal });
+      const patchRes = await api.patchContent(attachmentId, slice, offset, {
+        signal,
+      });
       offset = patchRes.offset;
       options?.onProgress?.({ uploaded: offset, total: file.size });
     } catch (err) {
-      if (aborted(err, signal)) throw new Error('Загрузка отменена');
-      if (err instanceof ApiError && err.code === 'offset_mismatch') {
-        const fromHeader = err.headers?.get('Upload-Offset');
-        offset = fromHeader ? parseInt(fromHeader, 10) : (await readHead(api, attachmentId, retryDelay, signal)).offset;
+      if (aborted(err, signal)) throw new Error("Загрузка отменена");
+      if (err instanceof ApiError && err.code === "offset_mismatch") {
+        const fromHeader = err.headers?.get("Upload-Offset");
+        offset = fromHeader
+          ? parseInt(fromHeader, 10)
+          : (await readHead(api, attachmentId, retryDelay, signal)).offset;
         continue;
       }
-      if (err instanceof ApiError && err.code === 'upload_in_progress') {
+      if (err instanceof ApiError && err.code === "upload_in_progress") {
         await pause(retryDelay, signal);
         offset = (await readHead(api, attachmentId, retryDelay, signal)).offset;
         continue;
       }
-      if (err instanceof ApiError && err.code === 'too_many_requests') {
+      if (err instanceof ApiError && err.code === "too_many_requests") {
         await pause(retryDelay, signal);
         continue;
       }
@@ -201,14 +225,26 @@ export async function uploadFile(
     }
   }
 
-  options?.onPhase?.('completing');
+  options?.onPhase?.("completing");
   while (true) {
     try {
-      const completeRes = await api.completeAttachment(attachmentId, { sha256: digest }, { idempotencyKey: finishKey });
-      return { id: attachmentId, status: completeRes.state, sha256: digest, size: file.size };
+      const completeRes = await api.completeAttachment(
+        attachmentId,
+        { sha256: digest },
+        { idempotencyKey: finishKey },
+      );
+      return {
+        id: attachmentId,
+        status: completeRes.state,
+        sha256: digest,
+        size: file.size,
+      };
     } catch (err) {
-      if (aborted(err, signal)) throw new Error('Загрузка отменена');
-      if (transient(err) || (err instanceof ApiError && err.code === 'too_many_requests')) {
+      if (aborted(err, signal)) throw new Error("Загрузка отменена");
+      if (
+        transient(err) ||
+        (err instanceof ApiError && err.code === "too_many_requests")
+      ) {
         await pause(retryDelay, signal);
         continue;
       }
@@ -218,18 +254,22 @@ export async function uploadFile(
 }
 
 function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new Error('Загрузка отменена');
+  if (signal?.aborted) throw new Error("Загрузка отменена");
 }
 
 function aborted(err: unknown, signal?: AbortSignal): boolean {
-  return signal?.aborted === true || (err instanceof DOMException && err.name === 'AbortError') || (err instanceof Error && /отмен/i.test(err.message));
+  return (
+    signal?.aborted === true ||
+    (err instanceof DOMException && err.name === "AbortError") ||
+    (err instanceof Error && /отмен/i.test(err.message))
+  );
 }
 
 function transient(err: unknown): boolean {
   if (err instanceof NetworkError) return true;
   if (!(err instanceof ApiError)) return false;
-  if (err.code === 'too_many_requests') return true;
-  return err.status >= 500 || err.retry === 'safe_same_key';
+  if (err.code === "too_many_requests") return true;
+  return err.status >= 500 || err.retry === "safe_same_key";
 }
 
 async function pause(ms: number, signal?: AbortSignal): Promise<void> {
@@ -237,22 +277,27 @@ async function pause(ms: number, signal?: AbortSignal): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(resolve, ms);
     signal?.addEventListener(
-      'abort',
+      "abort",
       () => {
         clearTimeout(timer);
-        reject(new Error('Загрузка отменена'));
+        reject(new Error("Загрузка отменена"));
       },
-      { once: true }
+      { once: true },
     );
   });
 }
 
-async function retrying<T>(work: () => Promise<T>, delay: number, signal?: AbortSignal): Promise<T> {
+async function retrying<T>(
+  work: () => Promise<T>,
+  delay: number,
+  signal?: AbortSignal,
+): Promise<T> {
   for (;;) {
     try {
       return await work();
     } catch (err) {
-      if (aborted(err, signal) || !transient(err)) throw aborted(err, signal) ? new Error('Загрузка отменена') : err;
+      if (aborted(err, signal) || !transient(err))
+        throw aborted(err, signal) ? new Error("Загрузка отменена") : err;
       await pause(delay, signal);
     }
   }
@@ -262,14 +307,17 @@ async function readHead(
   api: AttachmentApi,
   id: string,
   delay: number,
-  signal?: AbortSignal
+  signal?: AbortSignal,
 ): Promise<{ offset: number; length: number }> {
   for (;;) {
     try {
       return await api.headContent(id);
     } catch (err) {
-      if (aborted(err, signal)) throw new Error('Загрузка отменена');
-      if (err instanceof ApiError && (err.code === 'upload_in_progress' || transient(err))) {
+      if (aborted(err, signal)) throw new Error("Загрузка отменена");
+      if (
+        err instanceof ApiError &&
+        (err.code === "upload_in_progress" || transient(err))
+      ) {
         await pause(delay, signal);
         continue;
       }

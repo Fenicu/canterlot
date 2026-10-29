@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import type { BlockModel } from '$lib/stores/blocks';
-  import { subagentCopy } from '$lib/timeline/present';
+  import type { BlockModel } from '#lib/stores/blocks.js';
+  import { subagentCopy } from '#lib/timeline/present.js';
   let { call, nodes, conversationId }: { call: BlockModel; nodes: BlockModel[]; conversationId: string } = $props();
   const copy = $derived(subagentCopy(call, nodes));
 </script>

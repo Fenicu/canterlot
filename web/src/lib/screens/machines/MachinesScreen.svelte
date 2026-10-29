@@ -1,15 +1,15 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { resolve } from '$app/paths';
-  import { browserRuntime } from '$lib/screens/chat/open';
-  import type { Runtime } from '$lib/app/runtime';
-  import { loadConfig } from '$lib/api/config';
-  import { clock } from '$lib/clock';
-  import { fmt } from '$lib/format/ru';
-  import Segmented from '$lib/ui/Segmented.svelte';
+  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import type { Runtime } from '#lib/app/runtime.js';
+  import { loadConfig } from '#lib/api/config.js';
+  import { clock } from '#lib/clock.js';
+  import { fmt } from '#lib/format/ru.js';
+  import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
-  import { diskView, machineStatus, machineWarnings } from './model';
+  import { diskView, machineStatus, machineWarnings } from './model.js';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);

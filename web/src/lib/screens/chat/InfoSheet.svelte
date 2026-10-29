@@ -1,11 +1,11 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import { getRun } from '$lib/api/client';
-	import type { RunInfo } from '$lib/stores/run';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { getRun } from '#lib/api/client.js';
+	import type { RunInfo } from '#lib/stores/run.js';
 	import { summarizeRun } from './info';
 	import ExportActions from './ExportActions.svelte';
-	import Sheet from '$lib/ui/Sheet.svelte';
+	import Sheet from '#lib/ui/Sheet.svelte';
 
 	let {
 		chat,

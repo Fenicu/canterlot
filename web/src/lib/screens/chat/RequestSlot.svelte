@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { Activity } from '$lib/screens/sessions/activityText';
+	import type { Activity } from '#lib/screens/sessions/activityText.js';
 
 	export type RequestView = {
 		id?: string;

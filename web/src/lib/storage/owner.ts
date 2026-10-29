@@ -1,9 +1,9 @@
-import { purgeAllStores, openDb } from '$lib/storage/idb';
-import { stopDraftWriters } from '$lib/drafts/store';
-import { session } from '$lib/api/http';
-import { closeOpenJournals } from '$lib/ops/journal';
+import { purgeAllStores, openDb } from "#lib/storage/idb.js";
+import { stopDraftWriters } from "#lib/drafts/store.js";
+import { session } from "#lib/api/http.js";
+import { closeOpenJournals } from "#lib/ops/journal.js";
 
-const OWNER_STORAGE_KEY = 'canterlot:current_owner';
+const OWNER_STORAGE_KEY = "canterlot:current_owner";
 const ownerCleanup = new Set<() => void>();
 export function onOwnerRetired(cleanup: () => void): () => void {
   ownerCleanup.add(cleanup);
@@ -15,61 +15,67 @@ export function retireOwner(): void {
 }
 
 export async function bindOwner(
-  meOrId: string | { owner_id: string }
-): Promise<'first' | 'same' | 'changed'> {
-  const newOwnerId = typeof meOrId === 'string' ? meOrId : meOrId.owner_id;
+  meOrId: string | { owner_id: string },
+): Promise<"first" | "same" | "changed"> {
+  const newOwnerId = typeof meOrId === "string" ? meOrId : meOrId.owner_id;
   let prevOwner: string | undefined | null = null;
 
-  if (typeof localStorage !== 'undefined') {
+  if (typeof localStorage !== "undefined") {
     prevOwner = localStorage.getItem(OWNER_STORAGE_KEY);
   }
 
   if (!prevOwner) {
-    const sysDb = await openDb('__system__');
-    const stored = await sysDb.get<string>('kv', 'current_owner');
+    const sysDb = await openDb("__system__");
+    const stored = await sysDb.get<string>("kv", "current_owner");
     if (stored) {
       prevOwner = stored;
     }
   }
 
   if (!prevOwner) {
-    if (typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== "undefined") {
       localStorage.setItem(OWNER_STORAGE_KEY, newOwnerId);
     }
-    const sysDb = await openDb('__system__');
-    await sysDb.put('kv', 'current_owner', newOwnerId);
-    return 'first';
+    const sysDb = await openDb("__system__");
+    await sysDb.put("kv", "current_owner", newOwnerId);
+    return "first";
   }
 
   if (prevOwner === newOwnerId) {
-    return 'same';
+    return "same";
   }
 
   // Владелец изменился: остановить писателей, затем очистить IDB, кэши и черновики.
-  session.state = 'expired';
+  session.state = "expired";
   retireOwner();
   stopDraftWriters();
   closeOpenJournals();
   await purgeAllStores();
 
-  if (typeof caches !== 'undefined' && typeof caches.keys === 'function') {
+  if (typeof caches !== "undefined" && typeof caches.keys === "function") {
     try {
       const cacheKeys = await caches.keys();
-      await Promise.all(cacheKeys.filter(k => !k.startsWith('canterlot-shell-')).map(k => caches.delete(k)));
+      await Promise.all(
+        cacheKeys
+          .filter((k) => !k.startsWith("canterlot-shell-"))
+          .map((k) => caches.delete(k)),
+      );
     } catch {
       // Игнорируем ошибки доступа к ServiceWorker cache
     }
   }
 
-  if (typeof localStorage !== 'undefined') {
+  if (typeof localStorage !== "undefined") {
     const toRemove: string[] = [];
     for (let i = 0; i < localStorage.length; i++) {
       const key = localStorage.key(i);
       if (
-        key?.startsWith('canterlot:draft:') ||
-        key?.startsWith('canterlot.draft-tail.') ||
-        key === 'canterlot.theme' || key === 'canterlot.enter' ||
-        key === 'canterlot.collapsed' || key === 'canterlot.motion'
+        key?.startsWith("canterlot:draft:") ||
+        key?.startsWith("canterlot.draft-tail.") ||
+        key === "canterlot.theme" ||
+        key === "canterlot.enter" ||
+        key === "canterlot.collapsed" ||
+        key === "canterlot.motion"
       ) {
         toRemove.push(key);
       }
@@ -80,9 +86,9 @@ export async function bindOwner(
     localStorage.setItem(OWNER_STORAGE_KEY, newOwnerId);
   }
 
-  const sysDb = await openDb('__system__');
-  await sysDb.put('kv', 'current_owner', newOwnerId);
-  session.state = 'ok';
+  const sysDb = await openDb("__system__");
+  await sysDb.put("kv", "current_owner", newOwnerId);
+  session.state = "ok";
 
-  return 'changed';
+  return "changed";
 }

@@ -1,4 +1,4 @@
-import { setMotionScale } from '$lib/motion';
+import { setMotionScale } from '#lib/motion.js';
 export type MotionPref = 'off' | 'slower' | 'normal' | 'faster';
 const scales = { off: 0, slower: 1.5, normal: 1, faster: 0.5 } as const;
 export function motionPref(): MotionPref {

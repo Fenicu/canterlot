@@ -196,11 +196,7 @@ test('csp_directives_are_complete_and_the_built_shell_has_only_hashed_or_externa
   const bootstrapId = built.match(/(__sveltekit_\w+) =/)?.[1];
   const start = built.match(/import\("([^\"]*entry\/start[^\"]+)"\)/)?.[1];
   expect(bootstrapId).toBeTruthy(); expect(start).toBeTruthy();
-  const entry = readFileSync(`build${start}`, 'utf8');
-  const clientPath = entry.match(/from["`]([^"`]+)["`]/)?.[1];
-  expect(clientPath).toBeTruthy();
-  const { resolve, dirname } = await import('node:path');
-  expect(readFileSync(resolve(dirname(`build${start}`), clientPath!), 'utf8')).toContain(bootstrapId);
+  expect(built).toContain(`kit.init(${bootstrapId})`);
 });
 test('kit_csp_connect_src_is_self_only_and_the_header_adds_the_wss_origin', async () => {
   const path = '../../../csp.mjs'; const { directives, productionCsp } = await import(path);

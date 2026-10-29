@@ -6,7 +6,7 @@
 ![этап](https://shields.fenicu.com/badge/%D1%8D%D1%82%D0%B0%D0%BF-1.3b%20PWA-00f4ee)
 ![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex-1f5457)
 ![Rust](https://shields.fenicu.com/badge/rust-1.99-orange?logo=rust)
-![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white)
+![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-3-FF3E00?logo=svelte&logoColor=white)
 ![PostgreSQL](https://shields.fenicu.com/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
 ![Node](https://shields.fenicu.com/badge/node-24-339933?logo=node.js&logoColor=white)
 

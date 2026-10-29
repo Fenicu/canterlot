@@ -1,3 +1,3 @@
-<script lang="ts">import MachinesScreen from '$lib/screens/machines/MachinesScreen.svelte';</script>
+<script lang="ts">import MachinesScreen from '#lib/screens/machines/MachinesScreen.svelte';</script>
 <svelte:head><title>Машины · canterlot</title></svelte:head>
 <MachinesScreen />

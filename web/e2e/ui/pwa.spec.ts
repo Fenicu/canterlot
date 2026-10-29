@@ -76,6 +76,7 @@ test('install_menu_prompts_once_and_hides_after_install_in_both_themes', async (
   });
   await boot(page);
   await page.goto('/sessions');
+  await expect(page.getByRole('button', { name: 'Ещё', exact: true })).toBeVisible();
   await page.evaluate(() => {
     window.dispatchEvent(Object.assign(new Event('beforeinstallprompt', { cancelable: true }), {
       prompt: async () => { document.documentElement.dataset.installPrompt = 'called'; },

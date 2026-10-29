@@ -1,4 +1,4 @@
-import type { components } from '$lib/api/generated/openapi';
+import type { components } from '#lib/api/generated/openapi.js';
 
 export function machineStatus(value: string): string {
   return ({ available: 'В сети', ready: 'В сети', degraded: 'Связь нестабильна', unavailable: 'Не в сети' })[value] ?? 'Не в сети';

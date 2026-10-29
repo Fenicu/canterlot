@@ -1,16 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { browserRuntime } from '$lib/screens/chat/open';
-  import type { Runtime } from '$lib/app/runtime';
-  import { limitsHistory } from '$lib/api/client';
-  import { loadConfig } from '$lib/api/config';
-  import type { components } from '$lib/api/generated/openapi';
-  import { limitView } from '$lib/stores/limits';
-  import { clock } from '$lib/clock';
+  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import type { Runtime } from '#lib/app/runtime.js';
+  import { limitsHistory } from '#lib/api/client.js';
+  import { loadConfig } from '#lib/api/config.js';
+  import type { components } from '#lib/api/generated/openapi.js';
+  import { limitView } from '#lib/stores/limits.js';
+  import { clock } from '#lib/clock.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import UsageChart from './UsageChart.svelte';
   import UsageTable from './UsageTable.svelte';
-  import { providerName, sevenDays, usageRows, historyRange } from './model';
+  import { providerName, sevenDays, usageRows, historyRange } from './model.js';
   import '../secondary.css';
   let runtime = $state<Runtime | null>(null);
   let series = $state<components['schemas']['ProviderSeries'][]>([]);

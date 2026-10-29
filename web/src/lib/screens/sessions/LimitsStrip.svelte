@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { limitStrip } from './limitsText';
-  import type { LimitThresholds, ProviderLimits } from '$lib/stores/limits';
+  import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 
   let {
     providers,
@@ -27,16 +27,42 @@
       {#if view.tone === 'reserve'}<span>резерв</span>{/if}
     </summary>
     <p>{view.details}</p>
-    {#if view.staleNote}<p>{view.staleNote}</p>{/if}
-    <a href={resolve('/limits')}>История лимитов</a>
+
+    {#if view.staleNote}
+      <p>{view.staleNote}</p>
+    {/if}
+
+    <a href={resolve('limits')}>История лимитов</a>
   </details>
 {/if}
 
 <style>
-  .limits { margin: var(--s3) var(--s6); padding: var(--s4) var(--s6); border-radius: var(--radius-pill); background: var(--surface); }
-  summary { min-height: var(--target); cursor: pointer; }
-  [data-tone='warning'] summary { color: var(--warning); }
-  [data-tone='reserve'] summary { color: var(--warning); }
-  p { white-space: pre-line; color: var(--secondary); }
-  a { color: var(--accent-link); }
+  .limits {
+    margin: var(--s3) var(--s6);
+    padding: var(--s4) var(--s6);
+    border-radius: var(--radius-pill);
+    background: var(--surface);
+  }
+
+  summary {
+    min-height: var(--target);
+    cursor: pointer;
+  }
+
+  [data-tone="warning"] summary {
+    color: var(--warning);
+  }
+
+  [data-tone="reserve"] summary {
+    color: var(--warning);
+  }
+
+  p {
+    white-space: pre-line;
+    color: var(--secondary);
+  }
+
+  a {
+    color: var(--accent-link);
+  }
 </style>

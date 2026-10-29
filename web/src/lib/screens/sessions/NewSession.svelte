@@ -2,14 +2,14 @@
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
-  import { loadConfig } from '$lib/api/config';
-  import type { Runtime } from '$lib/app/runtime';
-  import { isTouchPrimary } from '$lib/composer/sendRules';
-  import { browserRuntime } from '$lib/screens/chat/open';
-  import Button from '$lib/ui/Button.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
-  import Sheet from '$lib/ui/Sheet.svelte';
-  import Toggle from '$lib/ui/Toggle.svelte';
+  import { loadConfig } from '#lib/api/config.js';
+  import type { Runtime } from '#lib/app/runtime.js';
+  import { isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import Button from '#lib/ui/Button.svelte';
+  import Segmented from '#lib/ui/Segmented.svelte';
+  import Sheet from '#lib/ui/Sheet.svelte';
+  import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount } from 'svelte';
   import { machineProblem, NewSessionModel } from './newSessionModel';
 
@@ -144,7 +144,11 @@
 {/snippet}
 
 {#if touch}
-  <Sheet open title="Новая сессия" onclose={() => goto(resolve('/sessions'))}>{@render fields()}</Sheet>
+  <Sheet
+    open
+    title="Новая сессия"
+    onclose={() => goto(resolve('sessions'))}
+  >{@render fields()}</Sheet>
 {:else}
   <dialog open aria-label="Новая сессия">
     <h2>Новая сессия</h2>

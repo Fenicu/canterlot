@@ -1,22 +1,22 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { browserRuntime } from './open';
-	import { getRuntime, type Runtime } from '$lib/app/runtime';
-	import { loadConfig } from '$lib/api/config';
-	import Composer from '$lib/composer/Composer.svelte';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import PendingStrip from '$lib/timeline/PendingStrip.svelte';
-	import Timeline from '$lib/timeline/Timeline.svelte';
+	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
+	import { loadConfig } from '#lib/api/config.js';
+	import Composer from '#lib/composer/Composer.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import PendingStrip from '#lib/timeline/PendingStrip.svelte';
+	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
 	import RequestSlot, { type RequestView } from './RequestSlot.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
-	import type { ProviderLimits, LimitThresholds } from '$lib/stores/limits';
-	import type { MachineRecord } from '$lib/stores/machines.svelte';
-	import type { Activity } from '$lib/screens/sessions/activityText';
-	import Sheet from '$lib/ui/Sheet.svelte';
+	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
+	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
+	import type { Activity } from '#lib/screens/sessions/activityText.js';
+	import Sheet from '#lib/ui/Sheet.svelte';
 
 	interface MachineRef {
 		id?: string;

@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ChatStore } from '$lib/stores/chat.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { pauseHoldCards, type QueueView } from './pauseCards';
 	import {
 		continueSessionQueue,
@@ -8,7 +8,7 @@
 		spendSessionReserve,
 		updateCrunch
 	} from './controls';
-	import { announce } from '$lib/a11y/announce';
+	import { announce } from '#lib/a11y/announce.js';
 
 	let {
 		chat,

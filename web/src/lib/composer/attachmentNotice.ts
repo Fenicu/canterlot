@@ -1,4 +1,4 @@
-import { onOwnerRetired } from '$lib/storage/owner';
+import { onOwnerRetired } from '#lib/storage/owner.js';
 
 const notices = new Map<string, string>();
 onOwnerRetired(() => notices.clear());

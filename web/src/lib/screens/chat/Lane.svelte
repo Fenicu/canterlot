@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import Timeline from '$lib/timeline/Timeline.svelte';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
-	import { theme } from '$lib/theme';
+	import { theme } from '#lib/theme.js';
 
 	let {
 		chat,
@@ -27,9 +27,12 @@
 
 <div class="lane-screen" data-ready>
 	<header class="topbar lane-header">
-		<a class="icon-button back" href={resolve(`/c/${chat.id}`)} aria-label="К оркестратору">
-			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7" /></svg>
-		</a>
+		<a
+			class="icon-button back"
+			href={resolve(`c/${chat.id}`)}
+			aria-label="К оркестратору"
+		><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7"></path></svg></a>
+
 		<div class="grow header-info">
 			<div class="row title-row">
 				<span class="mark"></span>
@@ -49,7 +52,10 @@
 	</header>
 
 	<nav class="breadcrumb" aria-label="Путь делегирования">
-		<a href={resolve(`/c/${chat.id}`)}>{model.breadcrumb[0]}</a> → <span class="secondary">{model.breadcrumb[1]}</span>
+		<a href={resolve(`c/${chat.id}`)}>{model.breadcrumb[0]}</a>
+		→ 
+		<span class="secondary">{model.breadcrumb[1]}</span>
+
 		<div class="live-line">
 			<span class="live-dot" class:active={model.running}></span>
 			{model.status}
@@ -66,7 +72,12 @@
 	{/if}
 
 	<div class="lane-timeline-container">
-		<Timeline {chat} {onInfo} {now} laneRoot={rootBlockId} />
+		<Timeline
+			chat={chat}
+			onInfo={onInfo}
+			now={now}
+			laneRoot={rootBlockId}
+		/>
 	</div>
 
 	<footer class="lane-footer">
@@ -76,7 +87,10 @@
 			</div>
 		</aside>
 		<div class="lane-nav-back">
-			<a class="button return-link" href={resolve(`/c/${chat.id}`)}>К основной сессии</a>
+			<a
+				class="button return-link"
+				href={resolve(`c/${chat.id}`)}
+			>К основной сессии</a>
 		</div>
 	</footer>
 </div>

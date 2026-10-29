@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Upload, UploadManager } from '$lib/uploads/manager';
+  import type { Upload, UploadManager } from '#lib/uploads/manager.js';
 
   let { uploads, conversationId }: { uploads: UploadManager; conversationId: string } = $props();
   let items = $state<Upload[]>([]);

@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
-	import Lane from '$lib/screens/chat/Lane.svelte';
-	import { openChatSession } from '$lib/screens/chat/open';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
+	import Lane from '#lib/screens/chat/Lane.svelte';
+	import { openChatSession } from '#lib/screens/chat/open.js';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
 	let chat = $state<ChatStore | null>(null);
 	let error = $state('');

@@ -1,21 +1,21 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { resolve } from '$app/paths';
-  import { browserRuntime } from '$lib/screens/chat/open';
-  import type { Runtime } from '$lib/app/runtime';
-  import { loadConfig } from '$lib/api/config';
-  import { me } from '$lib/api/client';
-  import type { components } from '$lib/api/generated/openapi';
-  import { fmt } from '$lib/format/ru';
-  import { theme, type ThemePref } from '$lib/theme';
-  import { getEnterPref, setEnterPref, type EnterPref } from '$lib/composer/prefs';
-  import { currentUpdate, installation } from '$lib/pwa/register';
-  import { staleness } from '$lib/pwa/offline';
-  import { purgeLocal } from '$lib/pwa/signout';
+  import { browserRuntime } from '#lib/screens/chat/open.js';
+  import type { Runtime } from '#lib/app/runtime.js';
+  import { loadConfig } from '#lib/api/config.js';
+  import { me } from '#lib/api/client.js';
+  import type { components } from '#lib/api/generated/openapi.js';
+  import { fmt } from '#lib/format/ru.js';
+  import { theme, type ThemePref } from '#lib/theme.js';
+  import { getEnterPref, setEnterPref, type EnterPref } from '#lib/composer/prefs.js';
+  import { currentUpdate, installation } from '#lib/pwa/register.js';
+  import { staleness } from '#lib/pwa/offline.js';
+  import { purgeLocal } from '#lib/pwa/signout.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
-  import Button from '$lib/ui/Button.svelte';
-  import Segmented from '$lib/ui/Segmented.svelte';
-  import { motionPref, saveMotion, type MotionPref } from './preferences';
+  import Button from '#lib/ui/Button.svelte';
+  import Segmented from '#lib/ui/Segmented.svelte';
+  import { motionPref, saveMotion, type MotionPref } from './preferences.js';
   import '../secondary.css';
 
   let ready = $state(false);

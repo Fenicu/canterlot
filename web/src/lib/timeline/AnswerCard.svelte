@@ -1,13 +1,13 @@
 <script lang="ts">
-  import { fmt } from '$lib/format/ru';
-  import type { BlockPage } from '$lib/stores/blocks';
-  import type { TimelineEntry } from '$lib/stores/timeline';
-  import { childBlocks } from '$lib/timeline/rows';
-  import LiveLine from '$lib/timeline/LiveLine.svelte';
-  import NoticeBlock from '$lib/timeline/NoticeBlock.svelte';
-  import SubagentRow from '$lib/timeline/SubagentRow.svelte';
-  import TextBlock from '$lib/timeline/TextBlock.svelte';
-  import ToolBlock from '$lib/timeline/ToolBlock.svelte';
+  import { fmt } from '#lib/format/ru.js';
+  import type { BlockPage } from '#lib/stores/blocks.js';
+  import type { TimelineEntry } from '#lib/stores/timeline.js';
+  import { childBlocks } from '#lib/timeline/rows.js';
+  import LiveLine from '#lib/timeline/LiveLine.svelte';
+  import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
+  import SubagentRow from '#lib/timeline/SubagentRow.svelte';
+  import TextBlock from '#lib/timeline/TextBlock.svelte';
+  import ToolBlock from '#lib/timeline/ToolBlock.svelte';
 
   let {
     entries,

@@ -1,6 +1,6 @@
 # PWA: основа клиента
 
-Клиент работает как статическое SPA: SvelteKit 2, Svelte 5 с runes, adapter-static, `200.html` для глубоких ссылок. Сервер Node нужен только локальному тестовому edge. Task 9a добавляет manifest, service worker и контроллеры установки, обновления, offline и выхода поверх API и синхронизации Tasks 2–7.
+Клиент работает как статическое SPA: SvelteKit 3, Svelte 5 с runes, adapter-static 4, `200.html` для глубоких ссылок. Сервер Node нужен только локальному тестовому edge. Task 9a добавляет manifest, service worker и контроллеры установки, обновления, offline и выхода поверх API и синхронизации Tasks 2–7.
 
 ## Токены и форма
 
@@ -34,7 +34,7 @@ Sheet использует модальный dialog, aria-modal, inert фона
 
 ESLint запрещает eval, console.log, HTML sinks и `{@html}` вне единственного будущего renderer. Локальное правило требует label у IconButton. Token lint сканирует CSS, style-блоки, inline стили, SVG paint и строковые цвета TypeScript. Отдельные правила проверяют цепочки длительностей до scaled-токенов и отсутствие emoji/галочек. Исключение обязано иметь причину. Тесты содержат отрицательные примеры каждого правила.
 
-`web/csp.mjs` служит единственным источником CSP для SvelteKit, тестового edge и Caddy. SvelteKit использует hash mode. В закреплённом Kit 2 встроенный announcer генерируется с inline style и вторым live region. Узкий markup-preprocessor `scripts/kit-announcer.mjs` удаляет только этот блок из `.svelte-kit/generated/root.svelte`; приложение объявляет смену страницы через afterNavigate в своём единственном polite host. Тест и явная ошибка при изменении структуры генератора защищают эту интеграцию. Заголовок edge содержит hashes inline-bootstrap из актуального `200.html` и конкретный локальный WebSocket origin, остальные источники закрыты. Production заголовок печатает `node web/scripts/print-csp.mjs https://<хост>` после каждой сборки; универсальные `unsafe-inline`, `unsafe-eval`, `ws:` и `wss:` не разрешены.
+`web/csp.mjs` служит единственным источником CSP для SvelteKit, тестового edge и Caddy. SvelteKit использует hash mode. В закреплённом Kit 3 встроенный announcer генерируется с inline style и вторым live region. Узкий markup-preprocessor `scripts/kit-announcer.mjs` удаляет только этот блок из `.svelte-kit/generated/root.svelte`; приложение объявляет смену страницы через afterNavigate в своём единственном polite host. Тест и явная ошибка при изменении структуры генератора защищают эту интеграцию. Заголовок edge содержит hashes inline-bootstrap из актуального `200.html` и конкретный локальный WebSocket origin, остальные источники закрыты. Production заголовок печатает `node web/scripts/print-csp.mjs https://<хост>` после каждой сборки; универсальные `unsafe-inline`, `unsafe-eval`, `ws:` и `wss:` не разрешены.
 
 Тестовая страница `/__test/primitives` доступна только в сборке с `VITE_UI_TESTS=1` (её включает check-web.sh). Обычная сборка не показывает тестовые контролы. Стенд проверяет фокус, Back, клавиатуру, ширины 320/360 и 200 % текста, оба оформления, реальный progress, reduced motion и отсутствие CSP violations.
 

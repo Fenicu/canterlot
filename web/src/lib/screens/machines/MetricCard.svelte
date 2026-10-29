@@ -1,5 +1,5 @@
 <script lang="ts">
-  import Gauge from '$lib/ui/Gauge.svelte';
+  import Gauge from '#lib/ui/Gauge.svelte';
   let { title, value, caption = '', pct, warn = false }: { title: string; value: string; caption?: string; pct?: number | null; warn?: boolean } = $props();
 </script>
 <section class:warn>

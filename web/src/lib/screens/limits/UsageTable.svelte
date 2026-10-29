@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import { fmt } from '$lib/format/ru';
-  import type { usageRows } from './model';
+  import { fmt } from '#lib/format/ru.js';
+  import type { usageRows } from './model.js';
   let { rows }: { rows: ReturnType<typeof usageRows> } = $props();
 </script>
 <h2>Сегодня по сессиям</h2>

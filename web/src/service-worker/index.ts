@@ -1,12 +1,19 @@
 /// <reference lib="webworker" />
-import { build, files, version } from '$service-worker';
-import { cacheable, classify, navigationResponse } from './lib/pwa/sw-routing';
-import { openDb } from './lib/storage/idb';
-import { stashShare } from './lib/pwa/share';
+import { version } from '$app/env';
+import { assets as manifestAssets, immutable } from '$app/manifest';
+import { cacheable, classify, navigationResponse } from '#lib/pwa/sw-routing.js';
+import { openDb } from '#lib/storage/idb.js';
+import { stashShare } from '#lib/pwa/share.js';
 
 const sw = self as unknown as ServiceWorkerGlobalScope;
 const cacheName = `canterlot-shell-${version}`;
-const assets = new Set([...build, ...files, '/manifest.webmanifest', '/200.html']);
+const toPath = (p: string) => (p.startsWith('/') ? p : '/' + p);
+const assets = new Set([
+  ...immutable.map((f) => toPath(f.path)),
+  ...manifestAssets.map((f) => toPath(f.path)),
+  '/manifest.webmanifest',
+  '/200.html'
+]);
 
 sw.addEventListener('install', event => {
   event.waitUntil((async () => {

@@ -1,6 +1,6 @@
 <script lang="ts">
-  import { session } from '$lib/api/http';
-  import type { ConnectionPhase } from '$lib/sync/connection';
+  import { session } from '#lib/api/http.js';
+  import type { ConnectionPhase } from '#lib/sync/connection.js';
 
   let { phase, now }: { phase: ConnectionPhase; now: number } = $props();
   let dialog = $state<HTMLDialogElement | null>(null);

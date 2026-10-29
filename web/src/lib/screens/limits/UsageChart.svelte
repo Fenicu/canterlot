@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { components } from '$lib/api/generated/openapi';
-  import { chartModel, providerName } from './model';
-  import { styleProperty } from '$lib/ui/style-property';
+  import type { components } from '#lib/api/generated/openapi.js';
+  import { chartModel, providerName } from './model.js';
+  import { styleProperty } from '#lib/ui/style-property.js';
   let { series, days, zone }: { series: components['schemas']['ProviderSeries'][]; days: string[]; zone: string } = $props();
   const model = $derived(chartModel(series, days, zone));
   const summary = $derived(`Дневные снимки лимитов. ${model.map(p => {

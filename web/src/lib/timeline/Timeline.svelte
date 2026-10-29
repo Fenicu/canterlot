@@ -1,22 +1,22 @@
 <script lang="ts">
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
-  import { announce } from '$lib/a11y/announce';
-  import { clock } from '$lib/clock';
-  import { probe } from '$lib/perf/probe';
-  import type { BlockPage } from '$lib/stores/blocks';
-  import type { ChatStore } from '$lib/stores/chat.svelte';
-  import AnswerCard from '$lib/timeline/AnswerCard.svelte';
-  import UserBubble from '$lib/timeline/UserBubble.svelte';
-  import { buildRows, type Row } from '$lib/timeline/rows';
-  import { ScrollController } from '$lib/timeline/scrollController';
+  import { announce } from '#lib/a11y/announce.js';
+  import { clock } from '#lib/clock.js';
+  import { probe } from '#lib/perf/probe.js';
+  import type { BlockPage } from '#lib/stores/blocks.js';
+  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import UserBubble from '#lib/timeline/UserBubble.svelte';
+  import { buildRows, type Row } from '#lib/timeline/rows.js';
+  import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
     captureAnchor,
     restoreAnchor,
     rowEstimate,
     visibleRange
-  } from '$lib/timeline/virtual';
+  } from '#lib/timeline/virtual.js';
 
   let {
     chat,

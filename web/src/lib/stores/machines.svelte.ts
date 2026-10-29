@@ -1,8 +1,8 @@
-import type { components } from '$lib/api/generated/openapi';
+import type { components } from '#lib/api/generated/openapi.js';
 import { SvelteMap } from 'svelte/reactivity';
-import type { ConnectionManager } from '$lib/sync/connection';
-import type { RangeResult, ScopeApplier, ScopeStatus } from '$lib/sync/scope';
-import type { HubEvent } from '$lib/sync/wire';
+import type { ConnectionManager } from '#lib/sync/connection.js';
+import type { RangeResult, ScopeApplier, ScopeStatus } from '#lib/sync/scope.js';
+import type { HubEvent } from '#lib/sync/wire.js';
 
 export type MachineMetrics = Pick<components['schemas']['MetricsView'], 'observed_at'> & Partial<components['schemas']['MetricsView']>;
 

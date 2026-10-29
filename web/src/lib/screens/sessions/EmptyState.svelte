@@ -7,7 +7,7 @@
   <p>Нет подключённых машин. Добавьте машину командой <a href={resolve('/')}>machine add</a></p>
 {:else if kind === 'sessions'}
   <p>Сессий пока нет.</p>
-  <a href={resolve('/new')}>Создать первую сессию</a>
+  <a href={resolve('new')}>Создать первую сессию</a>
 {:else}
   <p>Ничего не найдено</p>
   <button type="button" onclick={() => onreset?.()}>Сбросить</button>

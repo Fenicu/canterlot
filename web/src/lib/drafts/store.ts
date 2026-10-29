@@ -1,4 +1,4 @@
-import type { CanterlotDb } from '$lib/storage/idb';
+import type { CanterlotDb } from "#lib/storage/idb.js";
 
 export interface DraftAttachment {
   id: string;
@@ -55,24 +55,24 @@ export class DraftStore {
     this.options = options;
     writers.add(this);
 
-    if (typeof document !== 'undefined') {
+    if (typeof document !== "undefined") {
       this.#onVisibilityChange = () => {
-        if (document.visibilityState === 'hidden') {
+        if (document.visibilityState === "hidden") {
           void this.flush();
         }
       };
-      document.addEventListener('visibilitychange', this.#onVisibilityChange);
+      document.addEventListener("visibilitychange", this.#onVisibilityChange);
     }
 
-    if (typeof window !== 'undefined') {
+    if (typeof window !== "undefined") {
       this.#onPageHide = () => {
         this.flushSync();
       };
-      window.addEventListener('pagehide', this.#onPageHide);
+      window.addEventListener("pagehide", this.#onPageHide);
       this.#onFreeze = () => {
         void this.flush();
       };
-      window.addEventListener('freeze', this.#onFreeze);
+      window.addEventListener("freeze", this.#onFreeze);
     }
   }
 
@@ -81,33 +81,55 @@ export class DraftStore {
   }
 
   flushSync(): void {
-    if (this.#retired || typeof localStorage === 'undefined') return;
+    if (this.#retired || typeof localStorage === "undefined") return;
     const mirrored = new Set<string>();
     for (const [conversationId, pending] of this.#pending.entries()) {
       mirrored.add(conversationId);
-      this.#mirror(conversationId, pending.text, pending.attachments, pending.updatedAt);
+      this.#mirror(
+        conversationId,
+        pending.text,
+        pending.attachments,
+        pending.updatedAt,
+      );
     }
     for (const [conversationId, draft] of this.#inflight.entries()) {
       if (mirrored.has(conversationId)) continue;
-      this.#mirror(conversationId, draft.text, draft.attachments, draft.updatedAt);
+      this.#mirror(
+        conversationId,
+        draft.text,
+        draft.attachments,
+        draft.updatedAt,
+      );
     }
   }
 
-  #mirror(conversationId: string, text: string, attachments: DraftAttachment[], updatedAt: number): void {
-    const draft: Draft = { ownerId: this.ownerId, conversationId, text, attachments, updatedAt };
+  #mirror(
+    conversationId: string,
+    text: string,
+    attachments: DraftAttachment[],
+    updatedAt: number,
+  ): void {
+    const draft: Draft = {
+      ownerId: this.ownerId,
+      conversationId,
+      text,
+      attachments,
+      updatedAt,
+    };
     localStorage.setItem(this.#tailKey(conversationId), JSON.stringify(draft));
   }
 
   set(conversationId: string, patch: Partial<Draft>): void {
     if (this.#retired) return;
     const now = Date.now();
-    const existing = this.#pending.get(conversationId) ?? this.#known.get(conversationId);
+    const existing =
+      this.#pending.get(conversationId) ?? this.#known.get(conversationId);
     const pendingSince = now;
     const pending: PendingDraft = {
-      text: patch.text ?? existing?.text ?? '',
+      text: patch.text ?? existing?.text ?? "",
       attachments: patch.attachments ?? existing?.attachments ?? [],
       updatedAt: patch.updatedAt ?? now,
-      pendingSince
+      pendingSince,
     };
     this.#pending.set(conversationId, pending);
     this.#known.set(conversationId, {
@@ -115,7 +137,7 @@ export class DraftStore {
       conversationId,
       text: pending.text,
       attachments: pending.attachments,
-      updatedAt: pending.updatedAt
+      updatedAt: pending.updatedAt,
     });
 
     const existingTimer = this.#timers.get(conversationId);
@@ -142,24 +164,27 @@ export class DraftStore {
       conversationId,
       text: pending.text,
       attachments: pending.attachments,
-      updatedAt: pending.updatedAt
+      updatedAt: pending.updatedAt,
     };
     this.#inflight.set(conversationId, draft);
-    if (this.#pending.get(conversationId) === pending) this.#pending.delete(conversationId);
+    if (this.#pending.get(conversationId) === pending)
+      this.#pending.delete(conversationId);
     this.#known.set(conversationId, draft);
 
-    const write = this.db.put('drafts', conversationId, draft);
+    const write = this.db.put("drafts", conversationId, draft);
     this.#writes.add(write);
     try {
       await write;
     } catch (err) {
       if (this.#retired) return;
-      if (!this.#pending.has(conversationId)) this.#pending.set(conversationId, pending);
+      if (!this.#pending.has(conversationId))
+        this.#pending.set(conversationId, pending);
       throw err;
     } finally {
       this.#writes.delete(write);
     }
-    if (this.#inflight.get(conversationId) === draft) this.#inflight.delete(conversationId);
+    if (this.#inflight.get(conversationId) === draft)
+      this.#inflight.delete(conversationId);
 
     const lag = Date.now() - pending.pendingSince;
     this.lag.lastMs = lag;
@@ -171,7 +196,7 @@ export class DraftStore {
     if (this.#retired) return null;
     let mirrorDraft: Draft | undefined;
     const tailKey = this.#tailKey(conversationId);
-    if (typeof localStorage !== 'undefined') {
+    if (typeof localStorage !== "undefined") {
       const raw = localStorage.getItem(tailKey);
       if (raw) {
         try {
@@ -183,12 +208,12 @@ export class DraftStore {
         }
       }
     }
-    const idbDraft = await this.db.get<Draft>('drafts', conversationId);
+    const idbDraft = await this.db.get<Draft>("drafts", conversationId);
     if (this.#retired) return null;
     if (mirrorDraft) {
-      if (typeof localStorage !== 'undefined') localStorage.removeItem(tailKey);
+      if (typeof localStorage !== "undefined") localStorage.removeItem(tailKey);
       if (!idbDraft || mirrorDraft.updatedAt >= idbDraft.updatedAt) {
-        await this.db.put('drafts', conversationId, mirrorDraft);
+        await this.db.put("drafts", conversationId, mirrorDraft);
         if (this.#retired) return null;
         this.#known.set(conversationId, mirrorDraft);
         return mirrorDraft;
@@ -208,17 +233,18 @@ export class DraftStore {
       clearTimeout(timer);
       this.#timers.delete(conversationId);
     }
-    if (typeof localStorage !== 'undefined') localStorage.removeItem(this.#tailKey(conversationId));
-    await this.db.delete('drafts', conversationId);
+    if (typeof localStorage !== "undefined")
+      localStorage.removeItem(this.#tailKey(conversationId));
+    await this.db.delete("drafts", conversationId);
   }
 
   watchComposer(node: EventTarget): () => void {
     const onBlur = () => {
       void this.flush();
     };
-    node.addEventListener('blur', onBlur);
+    node.addEventListener("blur", onBlur);
     const stop = () => {
-      node.removeEventListener('blur', onBlur);
+      node.removeEventListener("blur", onBlur);
       this.#composerStops = this.#composerStops.filter((item) => item !== stop);
     };
     this.#composerStops.push(stop);
@@ -236,11 +262,13 @@ export class DraftStore {
     this.#timers.clear();
 
     const convIds = Array.from(this.#pending.keys());
-    await Promise.all(convIds.map(id => this.#flushConversation(id)));
+    await Promise.all(convIds.map((id) => this.#flushConversation(id)));
     await Promise.all(this.#writes);
   }
 
-  get pending(): boolean { return this.#pending.size > 0 || this.#writes.size > 0; }
+  get pending(): boolean {
+    return this.#pending.size > 0 || this.#writes.size > 0;
+  }
 
   destroy(): void {
     this.retire();
@@ -258,14 +286,17 @@ export class DraftStore {
   }
 
   #detach(): void {
-    if (this.#onVisibilityChange && typeof document !== 'undefined') {
-      document.removeEventListener('visibilitychange', this.#onVisibilityChange);
+    if (this.#onVisibilityChange && typeof document !== "undefined") {
+      document.removeEventListener(
+        "visibilitychange",
+        this.#onVisibilityChange,
+      );
     }
-    if (this.#onPageHide && typeof window !== 'undefined') {
-      window.removeEventListener('pagehide', this.#onPageHide);
+    if (this.#onPageHide && typeof window !== "undefined") {
+      window.removeEventListener("pagehide", this.#onPageHide);
     }
-    if (this.#onFreeze && typeof window !== 'undefined') {
-      window.removeEventListener('freeze', this.#onFreeze);
+    if (this.#onFreeze && typeof window !== "undefined") {
+      window.removeEventListener("freeze", this.#onFreeze);
     }
     for (const stop of [...this.#composerStops]) stop();
   }

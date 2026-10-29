@@ -1,4 +1,4 @@
-import type { components } from '$lib/api/generated/openapi';
+import type { components } from '#lib/api/generated/openapi.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
 

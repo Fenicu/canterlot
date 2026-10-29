@@ -1,9 +1,9 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
-  import TopBar from '$lib/ui/TopBar.svelte';
-  import Icon from '$lib/ui/Icon.svelte';
-  import IconButton from '$lib/ui/IconButton.svelte';
-  import { theme } from '$lib/theme';
+  import TopBar from '#lib/ui/TopBar.svelte';
+  import Icon from '#lib/ui/Icon.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import { theme } from '#lib/theme.js';
   let { title, subtitle }: { title: string; subtitle?: string } = $props();
 </script>
 <TopBar {title} {subtitle}>

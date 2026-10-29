@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import type { BlockModel } from '$lib/stores/blocks';
-	import { answerToMarkdown } from '$lib/export/markdown';
-	import { renderAnswerPages } from '$lib/export/image';
-	import { deliverImage, type Delivery } from '$lib/export/deliver';
+	import type { BlockModel } from '#lib/stores/blocks.js';
+	import { answerToMarkdown } from '#lib/export/markdown.js';
+	import { renderAnswerPages } from '#lib/export/image.js';
+	import { deliverImage, type Delivery } from '#lib/export/deliver.js';
 
 	let {
 		blocks = [],

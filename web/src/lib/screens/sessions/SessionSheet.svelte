@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { ApiError } from '$lib/api/http';
-  import { patchConversation, setConversationGroups, patchSettings, setCrunch } from '$lib/api/client';
-  import { isTouchPrimary } from '$lib/composer/sendRules';
+  import { ApiError } from '#lib/api/http.js';
+  import { patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
+  import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { untrack } from 'svelte';
-  import Sheet from '$lib/ui/Sheet.svelte';
-  import Toggle from '$lib/ui/Toggle.svelte';
-  import type { ListRow } from '$lib/stores/list.svelte';
+  import Sheet from '#lib/ui/Sheet.svelte';
+  import Toggle from '#lib/ui/Toggle.svelte';
+  import type { ListRow } from '#lib/stores/list.svelte.js';
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
 
   let {

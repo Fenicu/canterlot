@@ -1,10 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
-import { machineStatus, machineWarnings, diskView } from '$lib/screens/machines/model';
-import { chartModel, usageRows, historyRange } from '$lib/screens/limits/model';
-import { applyShare } from '$lib/screens/share/model';
-import { MachinesStore } from '$lib/stores/machines.svelte';
-import { FakeHub } from '../../../testing/fake-hub';
-import type { components } from '$lib/api/generated/openapi';
+import { machineStatus, machineWarnings, diskView } from '#lib/screens/machines/model.js';
+import { chartModel, usageRows, historyRange } from '#lib/screens/limits/model.js';
+import { applyShare } from '#lib/screens/share/model.js';
+import { MachinesStore } from '#lib/stores/machines.svelte.js';
+import { FakeHub } from '../../../testing/fake-hub/index.js';
+import type { components } from '#lib/api/generated/openapi.js';
 
 type Usage = components['schemas']['UsageDay'];
 const usage = (patch: Partial<Usage>): Usage => ({ day: '2026-10-29', conversation_id: 'abcdef12-0000', provider: 'claude', agent: 'main', model: 'opus', input_tokens: 100, output_tokens: 10, cache_read_tokens: 20, cache_write_tokens: 30, weekly_delta_permille: 20, overlapped_runs: 0, runs: 1, ...patch });

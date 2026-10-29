@@ -1,9 +1,9 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
-	import type { ChatStore } from '$lib/stores/chat.svelte';
-	import { delegation } from '$lib/api/client';
-	import { buildDelegation, type DelegationNode, subagentVerb } from '$lib/stores/delegation';
+	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { delegation } from '#lib/api/client.js';
+	import { buildDelegation, type DelegationNode, subagentVerb } from '#lib/stores/delegation.js';
 	import Lane from './Lane.svelte';
 
 	let {
