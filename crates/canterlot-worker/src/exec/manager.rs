@@ -1227,6 +1227,9 @@ impl Actor {
 
     async fn on_up(&mut self, message: up::Msg) -> Result<(), ExecError> {
         match message {
+            up::Msg::DecisionAck(_) | up::Msg::DecisionOutcome(_) => {
+                return Err(ExecError::InvalidCommand);
+            }
             up::Msg::Attached(_) => {}
             up::Msg::CliStarted(started) => self.on_cli_started(started).await?,
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
@@ -1549,6 +1552,9 @@ impl Actor {
                     return Ok(());
                 }
                 self.shared.cj(vec![], self_terminal).await
+            }
+            Some(Kind::DeliverDecision(_)) => {
+                reject(&self.shared, &command, "unsupported_command").await
             }
             None => Ok(()),
         }

@@ -619,6 +619,7 @@ impl Supervisor {
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
             down::Msg::MediaResult(result) => self.on_media_result(result)?,
+            down::Msg::DeliverDecision(_) => self.drop_connection(id),
         }
         Ok(())
     }

@@ -1264,7 +1264,13 @@ async fn apply_body(
                 .await?;
             }
         }
-        Body::LimitObserved(_)
+        Body::RequestOpened(_)
+        | Body::RequestClosed(_)
+        | Body::DecisionTransmissionStarted(_)
+        | Body::DecisionApplied(_)
+        | Body::DecisionNotApplied(_)
+        | Body::DecisionUnconfirmed(_)
+        | Body::LimitObserved(_)
         | Body::LimitReached(_)
         | Body::AttachmentReady(_)
         | Body::AttachmentFailed(_)

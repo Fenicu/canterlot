@@ -40,6 +40,7 @@ impl fmt::Debug for command::Kind {
             Self::WithdrawInput(input) => f.debug_tuple("WithdrawInput").field(input).finish(),
             Self::Interrupt(input) => f.debug_tuple("Interrupt").field(input).finish(),
             Self::StartExecution(input) => f.debug_tuple("StartExecution").field(input).finish(),
+            Self::DeliverDecision(input) => f.debug_tuple("DeliverDecision").field(input).finish(),
             Self::StopExecution(input) => f.debug_tuple("StopExecution").field(input).finish(),
         }
     }
@@ -182,5 +183,40 @@ impl fmt::Debug for crate::worker::v1::media_chunk::Part {
                 .field("data_bytes", &data.len())
                 .finish(),
         }
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::DeliverDecision {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeliverDecision")
+            .field("request_id", &self.request_id)
+            .field("decision_id", &self.decision_id)
+            .field("generation", &self.generation)
+            .field("kind", &self.kind)
+            .field("decision_payload_json", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::RequestOpened {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestOpened")
+            .field("request_id", &self.request_id)
+            .field("execution_id", &self.execution_id)
+            .field("generation", &self.generation)
+            .field("kind", &self.kind)
+            .field("payload_json", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::DecisionApplied {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DecisionApplied")
+            .field("request_id", &self.request_id)
+            .field("decision_id", &self.decision_id)
+            .field("proof_kind", &self.proof_kind)
+            .field("proof_payload_json", &"[REDACTED]")
+            .finish()
     }
 }

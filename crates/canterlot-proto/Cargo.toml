@@ -7,8 +7,12 @@ publish.workspace = true
 
 [dependencies]
 prost = "0.14.4"
+serde = { version = "1.0.229", features = ["derive"] }
 tonic = { version = "0.14.6", features = ["tls-ring"] }
 tonic-prost = "0.14.6"
+
+[dev-dependencies]
+serde_json = "1.0.154"
 
 [build-dependencies]
 tonic-prost-build = "0.14.6"

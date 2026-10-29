@@ -163,6 +163,7 @@ message Command {
     Interrupt interrupt = 13;
     StartExecution start_execution = 14;
     StopExecution stop_execution = 15;
+    DeliverDecision deliver_decision = 16;
   }
 }
 
@@ -241,6 +242,12 @@ message RecordBody {
     AttachmentReady attachment_ready = 25;
     AttachmentFailed attachment_failed = 26;
     BlockMedia block_media = 27;
+    RequestOpened request_opened = 28;
+    RequestClosed request_closed = 29;
+    DecisionTransmissionStarted decision_transmission_started = 30;
+    DecisionApplied decision_applied = 31;
+    DecisionNotApplied decision_not_applied = 32;
+    DecisionUnconfirmed decision_unconfirmed = 33;
   }
 }
 
@@ -577,4 +584,51 @@ message BlockMedia {
   string sha256 = 5;
   uint32 width = 6;
   uint32 height = 7;
+}
+
+message DeliverDecision {
+  string request_id = 1;
+  string decision_id = 2;
+  uint64 generation = 3;
+  string kind = 4;
+  bytes decision_payload_json = 5;
+}
+
+message RequestOpened {
+  string request_id = 1;
+  string execution_id = 2;
+  uint64 generation = 3;
+  string kind = 4;
+  bytes payload_json = 5;
+}
+
+message RequestClosed {
+  string request_id = 1;
+  string reason = 2;
+}
+
+// Намерение синхронизируется на диск до передачи решения адаптеру.
+message DecisionTransmissionStarted {
+  string request_id = 1;
+  string decision_id = 2;
+  uint64 machine_time_ms = 3;
+}
+
+message DecisionApplied {
+  string request_id = 1;
+  string decision_id = 2;
+  string proof_kind = 3;
+  bytes proof_payload_json = 4;
+}
+
+message DecisionNotApplied {
+  string request_id = 1;
+  string decision_id = 2;
+  string reason = 3;
+}
+
+message DecisionUnconfirmed {
+  string request_id = 1;
+  string decision_id = 2;
+  string reason = 3;
 }

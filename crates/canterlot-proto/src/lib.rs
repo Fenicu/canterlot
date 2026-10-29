@@ -12,5 +12,6 @@ pub mod worker {
 
 pub mod harness;
 pub mod limits;
+pub mod requests;
 
 mod redacted_debug;

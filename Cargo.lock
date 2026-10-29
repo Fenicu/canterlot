@@ -394,6 +394,8 @@ name = "canterlot-proto"
 version = "0.1.0"
 dependencies = [
  "prost",
+ "serde",
+ "serde_json",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",

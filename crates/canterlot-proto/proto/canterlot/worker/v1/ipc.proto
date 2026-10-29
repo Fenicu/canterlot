@@ -16,6 +16,7 @@ message ControlToSupervisor {
     ShipFrom ship_from = 8;
     SjAck sj_ack = 9;
     MediaResult media_result = 10;
+    canterlot.worker.v1.DeliverDecision deliver_decision = 11;
   }
 }
 
@@ -27,6 +28,8 @@ message SupervisorToControl {
     SjBatch sj_batch = 4;
     Exited exited = 5;
     MediaUpload media_upload = 6;
+    DecisionAck decision_ack = 7;
+    DecisionOutcome decision_outcome = 8;
   }
 }
 
@@ -155,4 +158,18 @@ message MediaResult {
   string media_id = 1;
   bool stored = 2;
   string reason = 3;
+}
+
+message DecisionAck {
+  string request_id = 1;
+  string decision_id = 2;
+  string result = 3;
+}
+
+message DecisionOutcome {
+  oneof outcome {
+    canterlot.worker.v1.DecisionApplied applied = 1;
+    canterlot.worker.v1.DecisionNotApplied not_applied = 2;
+    canterlot.worker.v1.DecisionUnconfirmed unconfirmed = 3;
+  }
 }
