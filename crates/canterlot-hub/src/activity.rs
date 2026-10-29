@@ -110,6 +110,7 @@ pub struct Activity {
     pub state: ActivityState,
     pub evidence: Evidence,
 }
+#[derive(Clone, Copy)]
 pub struct Thresholds {
     pub stalled_generating: Duration,
     pub stalled_tool: Duration,
@@ -551,25 +552,27 @@ pub async fn refresh_with_metrics(
     stale_after: Duration,
     correlation_id: Uuid,
 ) -> Result<Refresh, sqlx::Error> {
-    let mut tx = pool.begin().await?;
+    let thresholds = *thresholds;
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(conversation_id)
-        .fetch_one(&mut *tx)
+        .fetch_one(&mut *conn)
         .await?;
     let (owner_id, read_seq, model, effort, permission, crunch): (Uuid, i64, String, String, String, bool) =
         sqlx::query_as("select owner_id,last_read_seq,model,effort,permission_mode,crunch_enabled from conversations where id=$1 for no key update")
             .bind(conversation_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(&mut *conn)
             .await?;
-    let inputs = load_inputs(&mut tx, conversation_id, now, stale_after).await?;
-    let activity = compute(&inputs, thresholds);
+    let inputs = load_inputs(&mut *conn, conversation_id, now, stale_after).await?;
+    let activity = compute(&inputs, &thresholds);
     let evidence =
         serde_json::to_value(&activity.evidence).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    let unread:i64=sqlx::query_scalar("select count(*) from blocks where conversation_id=$1 and kind in ('text','warning','error') and state in ('streaming','final') and created_seq>$2").bind(conversation_id).bind(read_seq).fetch_one(&mut *tx).await?;
-    let last_activity:Option<DateTime<Utc>>=sqlx::query_scalar("select date_trunc('minute',greatest((select max(committed_at) from inputs where conversation_id=$1),(select max(created_at) from blocks where conversation_id=$1)))").bind(conversation_id).fetch_one(&mut *tx).await?;
+    let unread:i64=sqlx::query_scalar("select count(*) from blocks where conversation_id=$1 and kind in ('text','warning','error') and state in ('streaming','final') and created_seq>$2").bind(conversation_id).bind(read_seq).fetch_one(&mut *conn).await?;
+    let last_activity:Option<DateTime<Utc>>=sqlx::query_scalar("select date_trunc('minute',greatest((select max(committed_at) from inputs where conversation_id=$1),(select max(created_at) from blocks where conversation_id=$1)))").bind(conversation_id).fetch_one(&mut *conn).await?;
     let old = sqlx::query("select * from conversation_derived where conversation_id=$1 for update")
         .bind(conversation_id)
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut *conn)
         .await?;
     let pauses = json!(inputs.queue.pause_reasons);
     let mut holds: Vec<HoldView> = inputs
@@ -580,7 +583,7 @@ pub async fn refresh_with_metrics(
         .map(HoldView::from)
         .collect();
     for (input_id, reason) in
-        crate::conversations::attachments_pending(&mut tx, conversation_id).await?
+        crate::conversations::attachments_pending(&mut *conn, conversation_id).await?
     {
         holds.push(HoldView::AttachmentsPending { input_id, reason });
     }
@@ -604,18 +607,17 @@ pub async fn refresh_with_metrics(
             && old.try_get::<bool, _>("crunch_enabled")? == crunch
         {
             sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
-                .bind(conversation_id).execute(&mut *tx).await?;
-            tx.commit().await?;
+                .bind(conversation_id).execute(&mut *conn).await?;
             return Ok(Refresh::Unchanged);
         }
     }
     sqlx::query("update conversations set last_activity_at=$2 where id=$1")
         .bind(conversation_id)
         .bind(last_activity)
-        .execute(&mut *tx)
+        .execute(&mut *conn)
         .await?;
     sqlx::query("insert into conversation_derived(conversation_id,activity_state,activity_evidence,activity_since,unread_count,queue_queued,pause_reasons,hold_reasons,last_activity_at,effective_model,effective_effort,effective_permission_mode,crunch_enabled) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) on conflict(conversation_id) do update set activity_state=excluded.activity_state,activity_evidence=excluded.activity_evidence,activity_since=excluded.activity_since,unread_count=excluded.unread_count,queue_queued=excluded.queue_queued,pause_reasons=excluded.pause_reasons,hold_reasons=excluded.hold_reasons,last_activity_at=excluded.last_activity_at,effective_model=excluded.effective_model,effective_effort=excluded.effective_effort,effective_permission_mode=excluded.effective_permission_mode,crunch_enabled=excluded.crunch_enabled,updated_at=clock_timestamp()")
-        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).execute(&mut *tx).await?;
+        .bind(conversation_id).bind(activity.state.as_str()).bind(&evidence).bind(since).bind(unread as i32).bind(inputs.queue.queued as i32).bind(&pauses).bind(&holds).bind(last_activity).bind(&model).bind(&effort).bind(&permission).bind(crunch).execute(&mut *conn).await?;
     let payload = json!({"conversation_id":conversation_id,"activity":{"state":activity.state,"evidence":evidence,"since":since.to_rfc3339_opts(SecondsFormat::Millis,true)},"unread_count":unread,"queue":{"queued":inputs.queue.queued,"pause_reasons":pauses,"hold_reasons":holds},"last_activity_at":last_activity.map(|at|at.to_rfc3339_opts(SecondsFormat::Millis,true)),"settings":{"model":model,"effort":effort,"permission_mode":permission},"crunch":{"enabled":crunch}});
     for scope in [
         Scope::Conversation {
@@ -624,7 +626,7 @@ pub async fn refresh_with_metrics(
         Scope::Conversations { owner_id },
     ] {
         events::append(
-            &mut tx,
+            &mut *conn,
             NewEvent {
                 scope,
                 kind: "derived_changed",
@@ -636,8 +638,10 @@ pub async fn refresh_with_metrics(
         )
         .await?;
     }
-    tx.commit().await?;
     Ok(Refresh::Changed)
+        })
+    })
+    .await
 }
 
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {

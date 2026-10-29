@@ -984,12 +984,16 @@ pub(crate) async fn clear_resume_in_tx(
 pub(crate) async fn expire_pending(pool: &PgPool, now: DateTime<Utc>) -> Result<(), sqlx::Error> {
     let ids: Vec<Uuid> = sqlx::query_scalar("select id from conversations where resume_pending and resume_pending_until <= $1 order by id").bind(now).fetch_all(pool).await?;
     for id in ids {
-        let mut tx = pool.begin().await?;
-        let locked: Option<Uuid> = sqlx::query_scalar("select conversation_id from queue_state where conversation_id=$1 for update skip locked").bind(id).fetch_optional(&mut *tx).await?;
-        if locked.is_some() {
-            clear_resume_in_tx(&mut tx, id, Some(now), Uuid::now_v7()).await?;
-        }
-        tx.commit().await?;
+        crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                let locked: Option<Uuid> = sqlx::query_scalar("select conversation_id from queue_state where conversation_id=$1 for update skip locked").bind(id).fetch_optional(&mut *conn).await?;
+                if locked.is_some() {
+                    clear_resume_in_tx(&mut *conn, id, Some(now), Uuid::now_v7()).await?;
+                }
+                Ok::<_, sqlx::Error>(())
+            })
+        })
+        .await?;
     }
     Ok(())
 }

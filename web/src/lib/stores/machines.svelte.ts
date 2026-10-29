@@ -22,6 +22,7 @@ export interface MachineRecord {
 	worker_version?: string | null;
 	capabilities?: string[];
 	limits_ok?: boolean;
+	allowed_roots?: string[];
 }
 
 export class MachinesStore {

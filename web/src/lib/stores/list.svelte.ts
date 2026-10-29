@@ -133,8 +133,10 @@ export class ListStore {
 		}
 		if (kind === 'conversation_updated' && event.kind === 'conversation_updated') {
 			const row = this.items.get(event.payload.id);
-			if (row) copyAttributes(row, event.payload);
-			else this.items.set(event.payload.id, rowFromUpdated(event.payload));
+			if (row) {
+				copyAttributes(row, event.payload);
+				this.items.set(row.id, { ...row });
+			} else this.items.set(event.payload.id, rowFromUpdated(event.payload));
 			this.counts = event.payload.counts;
 			return;
 		}
@@ -149,6 +151,7 @@ export class ListStore {
 			row.effort = event.payload.settings.effort;
 			row.permission_mode = event.payload.settings.permission_mode;
 			row.crunch = { enabled: event.payload.crunch.enabled };
+			this.items.set(row.id, { ...row });
 			return;
 		}
 		if (kind === 'group_changed' && event.kind === 'group_changed') {

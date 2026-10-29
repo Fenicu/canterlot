@@ -58,6 +58,15 @@ export interface PendingDelta {
 	append: string;
 }
 
+export interface BlockMedia {
+	media_id: string;
+	mime: string;
+	width: number;
+	height: number;
+	ready: boolean;
+	failed?: boolean;
+}
+
 export class BlockModel {
 	readonly id: string;
 	readonly kind: BlockKind;
@@ -85,6 +94,7 @@ export class BlockModel {
 	#state = cell<BlockStateName>('streaming');
 	#reason = cell<string | null>(null);
 	#truncated = cell(false);
+	#media = cell<BlockMedia[]>([]);
 
 	constructor(id: string, kind: BlockKind) {
 		this.id = id;
@@ -121,6 +131,12 @@ export class BlockModel {
 	}
 	set truncated(value: boolean) {
 		this.#truncated.set(value);
+	}
+	get media(): BlockMedia[] {
+		return this.#media.get();
+	}
+	set media(value: BlockMedia[]) {
+		this.#media.set(value);
 	}
 }
 

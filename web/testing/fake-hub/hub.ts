@@ -17,6 +17,7 @@ export class FakeHub {
   private clock: HubClock = realClock;
   private uuid = 0n;
   private cancelFlush?: () => void;
+  acceptConnections = true;
   readonly chaos: Chaos;
   readonly routes = new Map<string, (route: Route) => Promise<void>>();
   readonly wire: { memory(clock: FakeClock): MemoryWire; playwright(page: Page): Promise<void> };

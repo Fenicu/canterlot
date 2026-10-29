@@ -398,27 +398,32 @@ async fn fail(
     reason: &str,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let failed: Option<Uuid> = sqlx::query_scalar(
-        "update attachments set state='failed', fail_reason=$2, updated_at=clock_timestamp()
-         where id=$1 and state in ('created','uploading') returning conversation_id",
-    )
-    .bind(id)
-    .bind(reason)
-    .fetch_optional(&mut *tx)
-    .await?;
-    if let Some(conversation_id) = failed {
-        state_event(
-            &mut tx,
-            conversation_id,
-            id,
-            "failed",
-            Some(reason),
-            correlation_id,
-        )
-        .await?;
-    }
-    tx.commit().await
+    let reason = reason.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let failed: Option<Uuid> = sqlx::query_scalar(
+                "update attachments set state='failed', fail_reason=$2, updated_at=clock_timestamp()
+                 where id=$1 and state in ('created','uploading') returning conversation_id",
+            )
+            .bind(id)
+            .bind(&reason)
+            .fetch_optional(&mut *conn)
+            .await?;
+            if let Some(conversation_id) = failed {
+                state_event(
+                    &mut *conn,
+                    conversation_id,
+                    id,
+                    "failed",
+                    Some(reason.as_str()),
+                    correlation_id,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// Завершение загрузки. Ключ проверяется первым, затем вне транзакций: отметка активности,

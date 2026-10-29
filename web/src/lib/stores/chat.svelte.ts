@@ -43,6 +43,9 @@ export interface HistoryBlock {
 	input_command_id?: string | null;
 	incomplete_reason?: string | null;
 	line_count?: number | null;
+	started_at?: string | null;
+	finished_at?: string | null;
+	media?: { media_id: string; mime: string; width?: number | null; height?: number | null; ready?: boolean }[];
 }
 
 export interface HistoryInput {
@@ -128,7 +131,12 @@ export class ChatStore {
 	detail = $state<Record<string, unknown> | null>(null);
 	execution = $state<Record<string, unknown> | null>(null);
 	activity = $state<Record<string, unknown> | null>(null);
-	settings = $state<{ effective: unknown; pending: unknown; rev: number }>({ effective: null, pending: null, rev: 0 });
+	settings = $state<{ effective: unknown; pending: unknown; rev: number; rejected?: { keys: string[]; reason: string } | null }>({
+		effective: null,
+		pending: null,
+		rev: 0,
+		rejected: null
+	});
 	crunch = $state<{ enabled: boolean; resume_pending: boolean; resume_text?: string | null; reserve_override_until?: string | null }>({
 		enabled: false,
 		resume_pending: false
@@ -141,6 +149,8 @@ export class ChatStore {
 	hiddenCount = $state(0);
 	queuePausedCount = $state(0);
 	following = true;
+	deltaMarks: string[] = [];
+	deltaSerial = $state(0);
 
 	readonly #sync: BlockSync;
 	#sub: { release(): void; readonly status: ScopeStatus; readonly cursor: string } | null = null;
@@ -303,6 +313,9 @@ export class ChatStore {
 			case 'block_incomplete':
 				this.#block(event);
 				return;
+			case 'block_media_attached':
+				if (event.kind === 'block_media_attached') this.#attachMedia(event.payload);
+				return;
 			case 'run_finished':
 				if (event.kind === 'run_finished') this.execution = { ...(this.execution ?? {}), last_run: event.payload };
 				return;
@@ -327,7 +340,12 @@ export class ChatStore {
 				return;
 			case 'conversation_settings_changed':
 				if (event.kind === 'conversation_settings_changed') {
-					this.settings = { effective: event.payload.effective, pending: event.payload.pending, rev: event.payload.rev };
+					this.settings = {
+						effective: event.payload.effective,
+						pending: event.payload.pending,
+						rev: event.payload.rev,
+						rejected: event.payload.rejected ?? null
+					};
 				}
 				return;
 			case 'conversation_updated':
@@ -407,10 +425,31 @@ export class ChatStore {
 		}
 	}
 
+	#attachMedia(payload: { block_id: string; media_id: string; mime: string; width: number | null; height: number | null }): void {
+		const block = this.blocks.get(payload.block_id);
+		if (!block) return;
+		const next = block.media.map((item) => ({ ...item }));
+		const found = next.find((item) => item.media_id === payload.media_id);
+		const ready = {
+			media_id: payload.media_id,
+			mime: payload.mime,
+			width: payload.width ?? 1,
+			height: payload.height ?? 1,
+			ready: true
+		};
+		if (found) Object.assign(found, ready);
+		else next.push(ready);
+		block.media = next;
+	}
+
 	#block(event: HubEvent): void {
 		const effects = applyBlockEvent(this.blocks, event);
 		this.#sync.handle(effects);
 		for (const effect of effects) if (effect.type === 'diag') this.diagnostics.push(effect);
+		if (event.kind === 'block_delta') {
+			this.deltaMarks.push(event.committed_at_from);
+			this.deltaSerial += 1;
+		}
 		if (event.kind === 'block_started') {
 			const block = this.blocks.get(event.payload.block_id);
 			if (block) this.timeline.upsert({ kind: 'block', key: `block:${block.id}`, seq: block.createdSeq, block });
@@ -505,7 +544,24 @@ export class ChatStore {
 	}
 
 	#applySnapshot(data: SnapshotData): void {
-		if (data.detail) this.detail = data.detail;
+		if (data.detail) {
+			this.detail = data.detail;
+			if (data.detail.execution) this.execution = data.detail.execution as Record<string, unknown>;
+			if (data.detail.activity) this.activity = data.detail.activity as Record<string, unknown>;
+			if (data.detail.settings) {
+				const s = data.detail.settings as { effective?: unknown; pending?: unknown; rev?: number };
+				this.settings = { effective: s.effective ?? null, pending: s.pending ?? null, rev: s.rev ?? 0, rejected: null };
+			}
+			if (data.detail.crunch) {
+				const c = data.detail.crunch as { enabled?: boolean; resume_pending?: boolean; resume_text?: string | null; reserve_override_until?: string | null };
+				this.crunch = {
+					enabled: Boolean(c.enabled),
+					resume_pending: Boolean(c.resume_pending),
+					resume_text: c.resume_text,
+					reserve_override_until: c.reserve_override_until
+				};
+			}
+		}
 		if (data.queue) {
 			this.queue.pause_reasons = data.queue.pause_reasons ?? [];
 			this.queue.hold_reasons = data.queue.hold_reasons ?? [];
@@ -513,6 +569,7 @@ export class ChatStore {
 			if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
 		}
 		if (data.scheduled) this.scheduled = data.scheduled;
+		if (data.history) this.timeline.hasOlder = Boolean(data.history.next_before);
 		const items = data.history?.items ?? [];
 		const oldest = [...items].sort((a, b) => cmpSeq(seqOf(a), seqOf(b)))[0];
 		const floor = oldest ? seqOf(oldest) : null;
@@ -556,6 +613,18 @@ export class ChatStore {
 		block.inputCommandId = item.input_command_id ?? block.inputCommandId;
 		block.createdSeq = item.created_seq;
 		block.createdAt = Date.parse(item.created_at);
+		if (item.started_at) block.startedAt = Date.parse(item.started_at);
+		else if (block.startedAt === null) block.startedAt = block.createdAt;
+		if (item.finished_at) block.finishedAt = Date.parse(item.finished_at);
+		if (item.media) {
+			block.media = item.media.map((shot) => ({
+				media_id: shot.media_id,
+				mime: shot.mime,
+				width: shot.width ?? 1,
+				height: shot.height ?? 1,
+				ready: shot.ready !== false
+			}));
+		}
 		block.lineCount = item.line_count ?? block.lineCount;
 		block.truncated = item.content_truncated;
 		block.contentBytes = item.content_bytes;

@@ -43,38 +43,42 @@ struct Manifest {
 
 pub async fn init(pool: &PgPool, manifest: &Path) -> Result<Installation, InstallationError> {
     refuse_existing_manifest(manifest)?;
-    let mut transaction = pool.begin().await?;
-    sqlx::query("lock table installation in exclusive mode")
-        .execute(&mut *transaction)
-        .await?;
-    let initialized: bool = sqlx::query_scalar("select exists(select 1 from installation)")
-        .fetch_one(&mut *transaction)
-        .await?;
-    if initialized {
-        return Err(InstallationError::AlreadyInitialized);
-    }
-    refuse_existing_manifest(manifest)?;
-    let installation = Installation {
-        installation_id: Uuid::now_v7(),
-        restore_generation: Uuid::now_v7(),
-        owner_id: Uuid::now_v7(),
-    };
-    sqlx::query("insert into owners (id) values ($1)")
-        .bind(installation.owner_id)
-        .execute(&mut *transaction)
-        .await?;
-    sqlx::query(
-        "insert into installation (installation_id, restore_generation, owner_id) values ($1, $2, $3)",
-    )
-    .bind(installation.installation_id)
-    .bind(installation.restore_generation)
-    .bind(installation.owner_id)
-    .execute(&mut *transaction)
-    .await?;
-    write_manifest(manifest, &installation)?;
-    // При сбое commit манифест сохраняется: повторный init требует административной сверки.
-    transaction.commit().await?;
-    Ok(installation)
+    let manifest = manifest.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("lock table installation in exclusive mode")
+                .execute(&mut *conn)
+                .await?;
+            let initialized: bool = sqlx::query_scalar("select exists(select 1 from installation)")
+                .fetch_one(&mut *conn)
+                .await?;
+            if initialized {
+                return Err(InstallationError::AlreadyInitialized);
+            }
+            refuse_existing_manifest(&manifest)?;
+            let installation = Installation {
+                installation_id: Uuid::now_v7(),
+                restore_generation: Uuid::now_v7(),
+                owner_id: Uuid::now_v7(),
+            };
+            sqlx::query("insert into owners (id) values ($1)")
+                .bind(installation.owner_id)
+                .execute(&mut *conn)
+                .await?;
+            sqlx::query(
+                "insert into installation (installation_id, restore_generation, owner_id) values ($1, $2, $3)",
+            )
+            .bind(installation.installation_id)
+            .bind(installation.restore_generation)
+            .bind(installation.owner_id)
+            .execute(&mut *conn)
+            .await?;
+            write_manifest(&manifest, &installation)?;
+            // При сбое commit манифест сохраняется: повторный init требует административной сверки.
+            Ok(installation)
+        })
+    })
+    .await
 }
 
 pub async fn check(pool: &PgPool, manifest: &Path) -> Result<Installation, InstallationError> {

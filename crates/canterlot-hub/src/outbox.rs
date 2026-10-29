@@ -497,23 +497,29 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
 }
 
 async fn reject(pool: &PgPool, row: &CommandRow, reason: &str) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    if row.kind == "deliver_input" {
-        let outcome = apply_input_receipt_in_tx(
-            &mut tx,
-            row.id,
-            row.dispatch_attempt,
-            InputReceipt::RejectedBeforeTransmission {
-                reason: reason.to_owned(),
-            },
-            Uuid::now_v7(),
-        )
-        .await?;
-        if matches!(outcome, ApplyOutcome::Ignored(_)) {
-            return tx.commit().await;
-        }
-    }
-    sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = $2 where id = $1 and dispatch_attempt = $3 and (delivery_state = 'pending' or (kind = 'deliver_input' and last_status = 'rejected_before_transmission'))")
-        .bind(row.id).bind(json!({"rejected": reason})).bind(row.dispatch_attempt).execute(&mut *tx).await?;
-    tx.commit().await
+    let (kind, id, attempt) = (row.kind.clone(), row.id, row.dispatch_attempt);
+    let reason = reason.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if kind == "deliver_input" {
+                let outcome = apply_input_receipt_in_tx(
+                    &mut *conn,
+                    id,
+                    attempt,
+                    InputReceipt::RejectedBeforeTransmission {
+                        reason: reason.clone(),
+                    },
+                    Uuid::now_v7(),
+                )
+                .await?;
+                if matches!(outcome, ApplyOutcome::Ignored(_)) {
+                    return Ok(());
+                }
+            }
+            sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = $2 where id = $1 and dispatch_attempt = $3 and (delivery_state = 'pending' or (kind = 'deliver_input' and last_status = 'rejected_before_transmission'))")
+                .bind(id).bind(json!({"rejected": reason})).bind(attempt).execute(&mut *conn).await?;
+            Ok(())
+        })
+    })
+    .await
 }

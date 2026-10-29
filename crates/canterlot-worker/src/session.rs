@@ -336,11 +336,13 @@ pub struct Worker {
     relay: Option<mpsc::Receiver<SjRelay>>,
     limits_cache: LimitsCache,
     limits_source: std::sync::Arc<dyn crate::machine::limits::LimitsSource>,
-    metrics: std::sync::Arc<std::sync::Mutex<crate::machine::metrics::MetricsCollector>>,
-    metrics_task: Option<
-        tokio::task::JoinHandle<Result<MachineMetrics, crate::machine::metrics::MetricsError>>,
-    >,
+    metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
+    metrics_task: Option<MetricsFuture>,
 }
+
+type MetricsFuture = Pin<
+    Box<dyn Future<Output = Result<MachineMetrics, crate::machine::metrics::MetricsError>> + Send>,
+>;
 
 struct Pending {
     message: ControlUp,
@@ -383,15 +385,17 @@ impl Worker {
         #[cfg(not(feature = "synthetic-adapter"))]
         let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> =
             std::sync::Arc::new(crate::machine::limits::NoLimitsSource);
-        let metrics = crate::machine::metrics::MetricsCollector::new(
-            config.data_dir.clone(),
-            config.execution.allowed_workdir_roots.clone(),
-            "/proc".into(),
+        let metrics = crate::machine::metrics::ProcMetricsSource::new(
+            crate::machine::metrics::MetricsCollector::new(
+                config.data_dir.clone(),
+                config.execution.allowed_workdir_roots.clone(),
+                "/proc".into(),
+            ),
         );
         Self {
             limits_cache: LimitsCache::default(),
             limits_source: source,
-            metrics: std::sync::Arc::new(std::sync::Mutex::new(metrics)),
+            metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
@@ -411,6 +415,14 @@ impl Worker {
         source: std::sync::Arc<dyn crate::machine::limits::LimitsSource>,
     ) -> Self {
         self.limits_source = source;
+        self
+    }
+
+    pub fn with_metrics_source(
+        mut self,
+        source: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
+    ) -> Self {
+        self.metrics = source;
         self
     }
 
@@ -1109,13 +1121,13 @@ impl Worker {
                 _ = sleep_until(metrics_at), if pilot => {
                     metrics_at=Instant::now()+self.config.machine.metrics_interval;
                     if self.metrics_task.is_none() {
-                        let metrics=self.metrics.clone();let probes=manager.probes();
-                        self.metrics_task=Some(tokio::task::spawn_blocking(move||metrics.lock().expect("metrics lock").sample(&probes)));
+                        let source=self.metrics.clone();let probes=manager.probes();
+                        self.metrics_task=Some(Box::pin(async move{source.sample(probes).await}));
                     }
                 }
                 result = async {self.metrics_task.as_mut().unwrap().await}, if self.metrics_task.is_some() => {
                     self.metrics_task=None;
-                    if let Ok(Ok(sample))=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
+                    if let Ok(sample)=result && heartbeat_outbound.is_none() && Instant::now()<heartbeat_deadline {try_send_metrics(&tx,sample);}
                 }
                 observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});

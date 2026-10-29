@@ -346,4 +346,31 @@ describe('composer/model', () => {
 		expect(model.text).toBe('Очередь заполнена, текст должен сохраниться');
 		expect(deps.ops.begin).not.toHaveBeenCalled();
 	});
+
+	it('interrupt_label_stays_until_terminal_status', async () => {
+		const { deps } = createMockDeps();
+		let calls = 0;
+		deps.interruptApi = async () => {
+			calls += 1;
+		};
+		const model = new ComposerModel(deps);
+		const first = model.interrupt();
+		const second = model.interrupt();
+		await first;
+		await second;
+		expect(calls).toBe(1);
+		expect(model.interruptLabel).toBe('Прерываю…');
+		expect(model.interruptRunning).toBe(true);
+		model.applyInterruptStatus('acknowledged');
+		expect(model.interruptLabel).toBe('Прерываю…');
+		model.applyInterruptStatus('completed');
+		expect(model.interruptLabel).toBe('Прервано');
+		expect(model.interruptRunning).toBe(false);
+		model.applyInterruptStatus('not_applicable');
+		expect(model.interruptLabel).toBe('Прерывание не требуется');
+		model.applyInterruptStatus('superseded');
+		expect(model.interruptLabel).toBe('Прерывание заменено');
+		model.applyInterruptStatus('rejected_stale');
+		expect(model.interruptLabel).toBe('Прерывание устарело');
+	});
 });

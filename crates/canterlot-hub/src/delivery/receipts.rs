@@ -90,11 +90,13 @@ pub async fn apply_input_receipt(
     receipt: InputReceipt,
     correlation_id: Uuid,
 ) -> Result<ApplyOutcome, sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    let outcome =
-        apply_input_receipt_in_tx(&mut tx, command_id, attempt, receipt, correlation_id).await?;
-    tx.commit().await?;
-    Ok(outcome)
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            apply_input_receipt_in_tx(&mut *conn, command_id, attempt, receipt, correlation_id)
+                .await
+        })
+    })
+    .await
 }
 
 pub async fn apply_input_receipt_in_tx(
@@ -342,10 +344,13 @@ pub async fn apply_run_finished(
     input_command_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let mut tx = pool.begin().await?;
-    apply_run_finished_in_tx(&mut tx, execution_id, input_command_id, correlation_id).await?;
-    tx.commit().await?;
-    Ok(())
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            apply_run_finished_in_tx(&mut *conn, execution_id, input_command_id, correlation_id)
+                .await
+        })
+    })
+    .await
 }
 
 pub async fn apply_run_finished_in_tx(

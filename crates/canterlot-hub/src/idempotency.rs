@@ -140,16 +140,20 @@ where
         .bind(lock_id)
         .execute(&mut *tx)
         .await?;
-    match lookup(&mut tx, owner_id, key, operation, &hash).await? {
-        Begin::Replay(stored) => {
+    match lookup(&mut tx, owner_id, key, operation, &hash).await {
+        Ok(Begin::Replay(stored)) => {
             tx.rollback().await?;
             return replay(stored);
         }
-        Begin::Conflict => {
+        Ok(Begin::Conflict) => {
             tx.rollback().await?;
             return Err(IdempotencyConflict.into());
         }
-        Begin::New => {}
+        Ok(Begin::New) => {}
+        Err(error) => {
+            let _ = tx.rollback().await;
+            return Err(error.into());
+        }
     }
     let value = match op(&mut tx).await {
         Ok(value) => value,
@@ -158,9 +162,14 @@ where
             return Err(error);
         }
     };
-    let response =
-        serde_json::to_value(&value).map_err(|error| sqlx::Error::Encode(Box::new(error)))?;
-    if record(
+    let response = match serde_json::to_value(&value) {
+        Ok(response) => response,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            return Err(E::from(sqlx::Error::Encode(Box::new(error))));
+        }
+    };
+    let inserted = match record(
         &mut tx,
         owner_id,
         key,
@@ -169,8 +178,15 @@ where
         &response,
         conversation_id,
     )
-    .await?
+    .await
     {
+        Ok(inserted) => inserted,
+        Err(error) => {
+            let _ = tx.rollback().await;
+            return Err(error.into());
+        }
+    };
+    if inserted {
         tx.commit().await?;
         return Ok(Outcome {
             value,

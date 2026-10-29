@@ -64,37 +64,40 @@ pub async fn upload_offset(
 
 /// Отмечает активность загрузки; `created` переходит в `uploading` с событием.
 async fn touch(pool: &PgPool, id: Uuid, correlation_id: Uuid) -> Result<(), AttachmentError> {
-    let mut tx = pool.begin().await?;
-    let current: Option<(String, Uuid)> =
-        sqlx::query_as("select state, conversation_id from attachments where id=$1 for update")
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let current: Option<(String, Uuid)> =
+                sqlx::query_as("select state, conversation_id from attachments where id=$1 for update")
+                    .bind(id)
+                    .fetch_optional(&mut *conn)
+                    .await?;
+            let Some((state, conversation_id)) = current else {
+                return Err(AttachmentError::NotFound);
+            };
+            if !matches!(state.as_str(), "created" | "uploading") {
+                return Err(AttachmentError::NotUploadable);
+            }
+            sqlx::query(
+                "update attachments set state='uploading', updated_at=clock_timestamp() where id=$1",
+            )
             .bind(id)
-            .fetch_optional(&mut *tx)
+            .execute(&mut *conn)
             .await?;
-    let Some((state, conversation_id)) = current else {
-        return Err(AttachmentError::NotFound);
-    };
-    if !matches!(state.as_str(), "created" | "uploading") {
-        return Err(AttachmentError::NotUploadable);
-    }
-    sqlx::query(
-        "update attachments set state='uploading', updated_at=clock_timestamp() where id=$1",
-    )
-    .bind(id)
-    .execute(&mut *tx)
-    .await?;
-    if state == "created" {
-        state_event(
-            &mut tx,
-            conversation_id,
-            id,
-            "uploading",
-            None,
-            correlation_id,
-        )
-        .await?;
-    }
-    tx.commit().await?;
-    Ok(())
+            if state == "created" {
+                state_event(
+                    &mut *conn,
+                    conversation_id,
+                    id,
+                    "uploading",
+                    None,
+                    correlation_id,
+                )
+                .await?;
+            }
+            Ok(())
+        })
+    })
+    .await
 }
 
 /// `PATCH …/content`: тело пишется в staging потоком с ограниченным буфером, без транзакции.
@@ -155,4 +158,45 @@ pub async fn upload_chunk(
         return Err(AttachmentError::NotUploadable);
     }
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::touch;
+    use crate::attachments::AttachmentError;
+
+    /// Готовое вложение нельзя отметить активным: `touch` возвращает `NotUploadable`
+    /// и синхронно откатывает транзакцию, не оставляя блокировки строки.
+    #[sqlx::test(migrations = "./migrations")]
+    async fn touch_not_uploadable_rolls_back_row_lock(
+        pool: sqlx::PgPool,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let seed = crate::testkit::seed(&pool).await;
+        let id = uuid::Uuid::now_v7();
+        sqlx::query(
+            "insert into attachments (id, owner_id, conversation_id, name, size_bytes, sha256, state)
+             values ($1, $2, $3, 'ready.bin', 10, $4, 'ready')",
+        )
+        .bind(id)
+        .bind(seed.owner_id)
+        .bind(seed.conversation_id)
+        .bind("a".repeat(64))
+        .execute(&pool)
+        .await?;
+        let mut probe = pool.acquire().await?;
+        for _ in 0..50 {
+            let result = touch(&pool, id, uuid::Uuid::now_v7()).await;
+            assert!(matches!(result, Err(AttachmentError::NotUploadable)));
+            let row: Option<uuid::Uuid> =
+                sqlx::query_scalar("select id from attachments where id=$1 for update skip locked")
+                    .bind(id)
+                    .fetch_optional(&mut *probe)
+                    .await?;
+            assert!(
+                row.is_some(),
+                "attachment row skipped: touch did not roll back synchronously"
+            );
+        }
+        Ok(())
+    }
 }

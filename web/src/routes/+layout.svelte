@@ -5,10 +5,11 @@
   import { afterNavigate } from '$app/navigation';
   import { initTheme } from '$lib/theme';
   import { announce, mountAnnouncements } from '$lib/a11y/announce';
+  import AppShell from '$lib/shell/AppShell.svelte';
   let { children }: { children: Snippet } = $props();
   onMount(initTheme);
   afterNavigate(() => announce(document.title));
 </script>
 <a class="skip-link" href="#main">К содержимому</a>
-<div id="app-shell">{@render children()}</div>
+<div id="app-shell"><AppShell>{@render children()}</AppShell></div>
 <div class="sr-only" aria-live="polite" aria-atomic="true" use:mountAnnouncements></div>

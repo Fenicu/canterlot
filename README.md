@@ -1,5 +1,17 @@
 # canterlot
 
+<p align="center">
+
+[![Forgejo](https://shields.fenicu.com/badge/Forgejo-Fenicu%2Fcanterlot-brightgreen?logo=forgejo)](https://git.fenicu.com/Fenicu/canterlot)
+![этап](https://shields.fenicu.com/badge/%D1%8D%D1%82%D0%B0%D0%BF-1.3b%20PWA-00f4ee)
+![агенты](https://shields.fenicu.com/badge/%D0%B0%D0%B3%D0%B5%D0%BD%D1%82%D1%8B-Claude%20Code%20%C2%B7%20Codex-1f5457)
+![Rust](https://shields.fenicu.com/badge/rust-1.99-orange?logo=rust)
+![SvelteKit](https://shields.fenicu.com/badge/SvelteKit-2-FF3E00?logo=svelte&logoColor=white)
+![PostgreSQL](https://shields.fenicu.com/badge/PostgreSQL-18-4169E1?logo=postgresql&logoColor=white)
+![Node](https://shields.fenicu.com/badge/node-24-339933?logo=node.js&logoColor=white)
+
+</p>
+
 Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на рабочих машинах, PWA на SvelteKit, PostgreSQL, gRPC между хабом и воркерами. Первая версия поддерживает Claude Code и Codex.
 
 ## Состояние
@@ -11,7 +23,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 
 | Путь | Назначение |
 | --- | --- |
-| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, тестовый двойник хаба FakeHub в `testing/fake-hub`, хранилища ленты и списка, логика поля ввода и очереди (Task 6a), unit и браузерные проверки |
+| `web/` | Статический клиент SvelteKit: токены, тема, примитивы, StageTrack, типизированный HTTP, журнал операций, черновики, загрузка вложений, синхронизация WSS в `src/lib/sync`, тестовый двойник хаба FakeHub в `testing/fake-hub`, хранилища ленты и списка, окно ленты чата, поле ввода, оболочка и экраны списка сессий, unit и браузерные проверки |
 | `crates/canterlot-journal/` | Локальный журнал команд и событий воркера |
 | `crates/canterlot-proto/` | Типы protobuf, контракты gRPC и локального IPC управляющей службы с сопровождением |
 | `crates/canterlot-worker/` | Воркер: TLS-сеанс, журналы, сопровождение исполнений, адаптеры и `machine/{metrics,limits}` |
@@ -72,6 +84,10 @@ cargo test -p canterlot-hub
 `DATABASE_URL` задан в `.cargo/config.toml`; переменная окружения позволяет использовать другую тестовую базу.
 Каждый тест схемы создаёт отдельную базу через `sqlx::test`, поэтому пользователю PostgreSQL нужно право `CREATEDB`.
 Функции подготовки данных доступны с feature `testkit` и автоматически подключаются при тестировании хаба.
+Параллельные рабочие копии на одной машине поднимают отдельный сервер: `CANTERLOT_TEST_PG_PORT=55441 scripts/test-db.sh up`.
+Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo test -p canterlot-hub`.
+sqlx называет тестовые базы по пути теста, поэтому две копии на одном сервере удаляли бы базы друг друга.
+`down` и `psql` принимают ту же переменную.
 
 ```bash
 scripts/test-db.sh psql
@@ -411,9 +427,43 @@ WSS `GET /api/v1/ws` использует подпротокол `canterlot.v1`;
 
 Синхронизация (`web/src/lib/sync`): один `ConnectionManager` держит единственное WSS-соединение с подпротоколом `canterlot.v1` и следит за областями подписок (до 16). После обрыва каждая область сохраняет свой последний применённый курсор и возобновляется с него на новом сокете; пробелы в курсоре заполняются HTTP-запросами диапазона порциями до 256 событий, которые применяются по порядку, а буфер свыше 5 000 событий или 8 МиБ переводит область к пересинхронизации: unsubscribe, снимок с границей, подписка с неё. Вторая пересинхронизация за 60 секунд ждёт backoff (250 мс × 2ⁿ с джиттером, предел 15 секунд), третья ставит область в `degraded` с повтором раз в 30 секунд. На видимой странице соединение пингуется каждые 25 секунд; отсутствие pong за 5 секунд или любых кадров 45 секунд пересоздаёт сокет, а после пробуждения страницы пробный ping с дедлайном 2 секунды заменяет зависший сокет. Событие `hidden` двигает курсор без изменения состояния, крупное событие `oversized` догружается отдельным запросом диапазона из одного события до сдвига курсора. Подробности поведения: [Синхронизация в docs/design/pwa.md](docs/design/pwa.md#синхронизация).
 
-Task 4 держит состояние сессии в `web/src/lib/stores`: текст блока сходится по ревизиям и UTF-8-смещениям, ввод встаёт в ленту по `feed_seq`, список и машины читают свои снимки.
+Task 4 держит состояние сессии в `web/src/lib/stores`: текст блока сходится по ревизиям и UTF-8-смещениям, ввод встаёт в ленту по `feed_seq`, список и машины читают свои снимки. Task 5 рисует ленту в `web/src/lib/timeline`: в DOM только окно строк, прокрутка держит якорь, карточка ответа собирает текст, инструменты и субагентов, полоса очереди стоит отдельно от живой строки.
 
-Логика поля ввода и очереди (`web/src/lib/composer`, `web/src/lib/timeline/QueueActions.ts`, Task 6a): мобильные правила Enter без случайных отправок (на сенсорном экране Enter переносит строку, IME-композиция игнорируется), затвор отправки с русскими причинами, сохранение черновиков, отложенная отправка по окну хаба и действия очереди.
+Логика поля ввода и очереди (`web/src/lib/composer`, `web/src/lib/timeline/QueueActions.ts`, Task 6a): мобильные правила Enter без случайных отправок (на сенсорном экране Enter переносит строку, IME-композиция игнорируется), затвор отправки с русскими причинами, сохранение черновиков, отложенная отправка по окну хаба и действия очереди. Само поле (`Composer.svelte` на экране чата, Task 6b) ставит капсулу, «Отправить позже» (лист на телефоне, поповер у кнопки с часами на столе), лоток вложений и пилюлю прерывания; оно не подписано на строки ленты.
+
+Оболочка и список (`web/src/lib/shell`, `web/src/lib/screens/sessions`): телефон показывает один экран с нижней навигацией, планшет список и чат, стол добавляет панель поручений. Список группирует сессии, ищет на сервере и показывает полосу лимитов по порогам из конфигурации. Новая сессия создаётся отдельным запросом с тем же ключом при повторе.
+
+Шапка чата и управление сессией (`web/src/lib/screens/chat`, Task 8a): шапка чата (`ChatHeader`) с заголовком, цветной меткой сессии, строкой статуса (`StateChip`) и индикатором отложенной смены модели; меню управления (остановка с подтверждением принудительного прерывания, возобновление сессии и очереди, запуск); настройки посреди сессии (`SessionSettings`) с валидацией каталога машины и переключателем «кранча»; карточки пауз и удержаний (`PauseCards`, `pauseCards.ts`), включая переопределение недельного лимита (`spend-reserve`); заглушка вопроса агента (`RequestSlot`) и защищённая диагностика сессии (`Diagnostics`).
+
+### Модули `web/src/lib`
+
+- `api/` — типизированный клиент OpenAPI (`client.ts`), HTTP-транспорт (`http.ts`), разбор и классификация ошибок (`errors.ts`), конфигурация и шлюз авторизации (`gate.ts`), сгенерированные схемы (`generated/`).
+- `a11y/` — единый live region скринридера `announce.ts` (`aria-live="polite"`, `role="status"`) для озвучивания навигации и событий без дублирующих анонсеров.
+- `app/` — корень композиции приложения (`runtime.ts`), связывающий хранилища, менеджер WSS, транспорт, черновики и загрузку вложений.
+- `composer/` — компонент и модель поля ввода (`Composer.svelte`, `model.svelte.ts`), правила Enter на телефоне и десктопе, лоток вложений (`AttachmentTray.svelte`), лист отложенной отправки (`SendLater.svelte`) и кнопка прерывания (`InterruptButton.svelte`).
+- `drafts/` — сохранение черновиков ввода (`store.ts`, `DraftStore`) с транзакционной записью в IndexedDB и синхронным зеркалом в `localStorage`.
+- `format/` — русскоязычные форматтеры дат, относительного времени, длительностей и размеров байтов (`ru.ts`).
+- `ops/` — журнал клиентских операций `OpJournal` (`journal.ts`, `op.svelte.ts`) и сборка HTTP-запроса операции с ключом повтора (`request.ts`).
+- `perf/` — опциональный легковесный замер производительности и журнал метрик (`probe.ts`), выключенный по умолчанию.
+- `render/` — безопасный потоковый рендеринг Markdown (`markdown.ts`, `streamingMarkdown.ts`), подсветка синтаксиса highlight.js (`highlight.ts`), очистка ANSI (`ansi.ts`) и санитайзинг DOMPurify (`sanitize.ts`, `Html.svelte`).
+- `screens/` — экраны PWA; экран чата (`screens/chat/ChatScreen.svelte`) собирает шапку, ленту сообщений, поле ввода и боковые панели.
+- `shell/` — оболочка приложения: раскладка телефон / планшет / десктоп (`AppShell.svelte`, `layout.ts`), навигация (`Nav.svelte`), баннеры связи (`ConnectionBanner.svelte`) и диалог истёкшей сессии (`SessionExpired.svelte`).
+- `storage/` — изоляция хранилища IndexedDB по `owner_id` пользователя (`owner.ts`) и типизированная обёртка транзакций `idb.ts`.
+- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
+- `sync/` — постоянное WSS-соединение `ConnectionManager` (`connection.ts`), подписки на скоупы (`scope.ts`), дочитка пропусков по HTTP (`transport.ts`, `batcher.ts`) и экспоненциальный backoff (`backoff.ts`).
+- `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), полоса очереди (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
+- `ui/` — библиотека дизайн-компонентов на CSS-токенах: `Button`, `IconButton`, `Sheet`, `Disclosure`, `Pill`, `Segmented`, `StageTrack`, `TopBar`, `BottomNav`, `icons.ts`.
+- `uploads/` — возобновляемая загрузка вложений частями (`manager.ts`, `uploader.ts`, `patch.ts`) с параллельным расчётом SHA-256 в веб-воркере (`hasher.ts`, `hash.worker.ts`).
+
+### Вспомогательные скрипты
+
+- `web/scripts/check-tokens.mjs` (`check-tokens`) — проверка стилей `web/src` на прямое использование hex-цветов, пикселей и таймингов в обход дизайн-токенов (`npm run lint:tokens`).
+- `web/scripts/token-lint.mjs` (`token-lint`) — ядро линтера токенов на PostCSS и TypeScript: валидация CSS-переменных, длин, анимаций и запрет неразрешённых эмодзи.
+- `web/scripts/eslint-rules.mjs` (`eslint-rules`) — локальное правило ESLint `iconLabel`, требующее обязательный непустой атрибут `label` у компонентов `IconButton`.
+- `web/scripts/gen-api.mjs` (`gen-api`) — генерация TypeScript-типов из `docs/api/openapi.json` и схем событий `docs/api/events.schema.json` в `web/src/lib/api/generated/`.
+- `web/scripts/kit-announcer.mjs` (`kit-announcer`) — препроцессор сборки Svelte, вырезающий встроенный элемент `svelte-announcer` SvelteKit для исключения конфликтов с `a11y/announce.ts`.
+- `scripts/spdx.py` — токенизатор, парсер сложных выражений лицензий SPDX и валидатор зависимостей по списку `ALLOWLIST`.
+- `scripts/test-licenses.py` — юнит-тесты парсинга SPDX-выражений и проверки допустимости лицензий проекта.
 
 ```bash
 cd web
@@ -432,15 +482,15 @@ npm run preview
 
 ```bash
 cd web
-PLAYWRIGHT_BROWSERS_PATH=/tmp/canterlot-playwright npx --no-install playwright install chromium firefox
+PLAYWRIGHT_BROWSERS_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright" npx --no-install playwright install chromium firefox
 cd ..
 bash scripts/check-web.sh
 bash scripts/check.sh
 ```
 
-`check-web.sh` последовательно выполняет `npm ci`, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest, production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально не больше двух worker'ов, у Firefox один). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `/tmp/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
+`check-web.sh` последовательно выполняет `npm ci`, установку браузеров при их отсутствии, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest (до 6 worker'ов), production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально 4 worker'а, у Firefox 2, проект `budget` выполняется изолированно после остальных). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
 
-Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` ограничивает расход ресурсов: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 2, а у Firefox один Playwright worker: два экземпляра в этой среде упирались в лимит потоков (EAGAIN) и роняли content-процессы.
+Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` настраивает параллельность под многоядерную систему: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 4, у Firefox два Playwright worker'а, а Vitest использует до 6 worker'ов.
 
 Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
 
