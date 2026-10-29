@@ -315,6 +315,279 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: row });
   });
 
+  await page.route('**/api/v1/conversations/*/settings', async (route) => {
+    if (route.request().method() !== 'PATCH') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const body = route.request().postDataJSON() as { model?: string; effort?: string; permission_mode?: string };
+    const row = api.list.get(id);
+    const detail = api.details.get(id) as (Record<string, unknown> & { settings_midsession?: boolean }) | undefined;
+
+    if (body.model === 'unknown-model' || body.model === 'invalid') {
+      await route.fulfill({
+        status: 422,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'model_unknown',
+            message: 'Модель неизвестна или недоступна на этой машине',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000e4'
+          }
+        }
+      });
+      return;
+    }
+    if (body.effort === 'forbidden-effort' || (body.model === 'haiku' && body.effort === 'high')) {
+      await route.fulfill({
+        status: 422,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'effort_not_allowed',
+            message: 'Усилие не поддерживается для этой модели',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000e5'
+          }
+        }
+      });
+      return;
+    }
+    if (body.permission_mode === 'invalid-permission') {
+      await route.fulfill({
+        status: 422,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'permission_mode_unknown',
+            message: 'Режим разрешений не поддерживается',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000e6'
+          }
+        }
+      });
+      return;
+    }
+    if (detail?.settings_midsession === false) {
+      await route.fulfill({
+        status: 422,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'settings_midsession_unsupported',
+            message: 'Настройка посреди сессии не поддерживается',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000e7'
+          }
+        }
+      });
+      return;
+    }
+
+    if (row) {
+      if (body.model) row.model = body.model;
+      if (body.effort) row.effort = body.effort;
+      if (body.permission_mode) row.permission_mode = body.permission_mode;
+    }
+    if (detail) {
+      if (body.model) detail.model = body.model;
+      if (body.effort) detail.effort = body.effort;
+      if (body.permission_mode) detail.permission_mode = body.permission_mode;
+    }
+
+    hub.append(`conversation:${id}`, {
+      kind: 'conversation_settings_changed',
+      conversation_id: id,
+      payload: {
+        effective: {
+          model: row?.model ?? body.model ?? 'opus-5.5',
+          effort: row?.effort ?? body.effort ?? 'medium',
+          permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default'
+        },
+        pending: {
+          model: body.model ?? null,
+          effort: body.effort ?? null,
+          permission_mode: body.permission_mode ?? null
+        },
+        rev: 1
+      }
+    });
+    hub.flush();
+
+    await route.fulfill({
+      status: 200,
+      headers: headers(),
+      json: {
+        effective: {
+          model: row?.model ?? body.model ?? 'opus-5.5',
+          effort: row?.effort ?? body.effort ?? 'medium',
+          permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default'
+        },
+        pending: {
+          model: body.model ?? null,
+          effort: body.effort ?? null,
+          permission_mode: body.permission_mode ?? null
+        },
+        rev: 1
+      }
+    });
+  });
+
+  await page.route('**/api/v1/conversations/*/crunch', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const body = route.request().postDataJSON() as { enabled: boolean; resume_text?: string | null };
+    const row = api.list.get(id);
+    const detail = api.details.get(id) as (Record<string, unknown> & { settings_midsession?: boolean }) | undefined;
+    if (row) row.crunch = { enabled: body.enabled };
+    if (detail) detail.crunch = { enabled: body.enabled, resume_pending: false, resume_text: body.resume_text };
+
+    hub.append(`conversation:${id}`, {
+      kind: 'crunch_changed',
+      conversation_id: id,
+      payload: {
+        enabled: body.enabled,
+        resume_text: body.resume_text ?? null,
+        resume_pending: false,
+        reserve_override_until: null
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: { enabled: body.enabled, resume_text: body.resume_text } });
+  });
+
+  await page.route('**/api/v1/conversations/*/spend-reserve', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const detail = api.details.get(id) as (Record<string, unknown> & { _spendOutcome?: string; queue?: { hold_reasons?: { reason?: string }[] } }) | undefined;
+    const outcome = detail?._spendOutcome ?? 'continued';
+
+    if (outcome === 'continued') {
+      if (detail?.queue?.hold_reasons) {
+        detail.queue.hold_reasons = detail.queue.hold_reasons.filter(
+          (h) => h.reason !== 'weekly_reserve'
+        );
+      }
+      hub.append(`conversation:${id}`, {
+        kind: 'queue_state_changed',
+        conversation_id: id,
+        payload: {
+          pause_reasons: [],
+          hold_reasons: [],
+          run_slot: 'free'
+        }
+      });
+      hub.flush();
+    }
+
+    await route.fulfill({ status: 200, headers: headers(), json: outcome });
+  });
+
+  await page.route('**/api/v1/conversations/*/stop', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const body = route.request().postDataJSON() as { force?: boolean } | null;
+    const force = Boolean(body?.force);
+
+    hub.append(`conversation:${id}`, {
+      kind: 'execution_state_changed',
+      conversation_id: id,
+      payload: { generation: 1, outcome: null, state: 'stopping' }
+    });
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: [{ reason: 'user_stop' }],
+        hold_reasons: force ? [{ reason: 'no_live_execution' }] : [],
+        run_slot: 'free'
+      }
+    });
+    if (force) {
+      hub.append(`conversation:${id}`, {
+        kind: 'execution_state_changed',
+        conversation_id: id,
+        payload: { generation: 1, state: 'stopped', outcome: 'force_stopped' }
+      });
+    }
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: { status: 'stopping' } });
+  });
+
+  await page.route('**/api/v1/conversations/*/resume', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const body = route.request().postDataJSON() as { continue_queue?: boolean } | null;
+    void body;
+
+    hub.append(`conversation:${id}`, {
+      kind: 'execution_state_changed',
+      conversation_id: id,
+      payload: { generation: 1, outcome: null, state: 'running' }
+    });
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: [],
+        hold_reasons: [],
+        run_slot: 'free'
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: {} });
+  });
+
+  await page.route('**/api/v1/conversations/*/queue/continue', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-3) ?? '';
+
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: [],
+        hold_reasons: [],
+        run_slot: 'free'
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: { remaining: [], removed: [{ reason: 'user_stop' }] } });
+  });
+
+  await page.route('**/api/v1/conversations/*/executions', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+
+    hub.append(`conversation:${id}`, {
+      kind: 'execution_state_changed',
+      conversation_id: id,
+      payload: { generation: 1, outcome: null, state: 'running' }
+    });
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: [],
+        hold_reasons: [],
+        run_slot: 'free'
+      }
+    });
+    hub.flush();
+    await route.fulfill({
+      status: 201,
+      headers: headers(),
+      json: {
+        command_id: api.id(),
+        execution_id: api.id(),
+        generation: 1
+      }
+    });
+  });
+
   await page.route('**/api/v1/conversations/*/groups', async (route) => {
     if (route.request().method() !== 'PUT') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';

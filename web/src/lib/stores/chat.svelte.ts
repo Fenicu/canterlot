@@ -131,7 +131,12 @@ export class ChatStore {
 	detail = $state<Record<string, unknown> | null>(null);
 	execution = $state<Record<string, unknown> | null>(null);
 	activity = $state<Record<string, unknown> | null>(null);
-	settings = $state<{ effective: unknown; pending: unknown; rev: number }>({ effective: null, pending: null, rev: 0 });
+	settings = $state<{ effective: unknown; pending: unknown; rev: number; rejected?: { keys: string[]; reason: string } | null }>({
+		effective: null,
+		pending: null,
+		rev: 0,
+		rejected: null
+	});
 	crunch = $state<{ enabled: boolean; resume_pending: boolean; resume_text?: string | null; reserve_override_until?: string | null }>({
 		enabled: false,
 		resume_pending: false
@@ -335,7 +340,12 @@ export class ChatStore {
 				return;
 			case 'conversation_settings_changed':
 				if (event.kind === 'conversation_settings_changed') {
-					this.settings = { effective: event.payload.effective, pending: event.payload.pending, rev: event.payload.rev };
+					this.settings = {
+						effective: event.payload.effective,
+						pending: event.payload.pending,
+						rev: event.payload.rev,
+						rejected: event.payload.rejected ?? null
+					};
 				}
 				return;
 			case 'conversation_updated':
@@ -534,7 +544,24 @@ export class ChatStore {
 	}
 
 	#applySnapshot(data: SnapshotData): void {
-		if (data.detail) this.detail = data.detail;
+		if (data.detail) {
+			this.detail = data.detail;
+			if (data.detail.execution) this.execution = data.detail.execution as Record<string, unknown>;
+			if (data.detail.activity) this.activity = data.detail.activity as Record<string, unknown>;
+			if (data.detail.settings) {
+				const s = data.detail.settings as { effective?: unknown; pending?: unknown; rev?: number };
+				this.settings = { effective: s.effective ?? null, pending: s.pending ?? null, rev: s.rev ?? 0, rejected: null };
+			}
+			if (data.detail.crunch) {
+				const c = data.detail.crunch as { enabled?: boolean; resume_pending?: boolean; resume_text?: string | null; reserve_override_until?: string | null };
+				this.crunch = {
+					enabled: Boolean(c.enabled),
+					resume_pending: Boolean(c.resume_pending),
+					resume_text: c.resume_text,
+					reserve_override_until: c.reserve_override_until
+				};
+			}
+		}
 		if (data.queue) {
 			this.queue.pause_reasons = data.queue.pause_reasons ?? [];
 			this.queue.hold_reasons = data.queue.hold_reasons ?? [];

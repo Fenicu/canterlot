@@ -294,18 +294,20 @@ export function interrupt(
 
 export function resume(
   conversationId: string,
+  body: Body<operations['post__api_v1_conversations__id__resume']>,
   key: string,
   opts?: RequestOptions
 ): Promise<HttpResponse<Ok<operations['post__api_v1_conversations__id__resume']>>> {
-  return http('POST', `/api/v1/conversations/${id(conversationId)}/resume`, undefined, keyed(key, opts));
+  return http('POST', `/api/v1/conversations/${id(conversationId)}/resume`, body, keyed(key, opts));
 }
 
 export function stop(
   conversationId: string,
+  body: Body<operations['post__api_v1_conversations__id__stop']>,
   key: string,
   opts?: RequestOptions
 ): Promise<HttpResponse<Ok<operations['post__api_v1_conversations__id__stop']>>> {
-  return http('POST', `/api/v1/conversations/${id(conversationId)}/stop`, undefined, keyed(key, opts));
+  return http('POST', `/api/v1/conversations/${id(conversationId)}/stop`, body, keyed(key, opts));
 }
 
 export function continueQueue(

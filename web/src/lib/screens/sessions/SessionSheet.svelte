@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError } from '$lib/api/http';
-  import { patchConversation, setConversationGroups } from '$lib/api/client';
+  import { patchConversation, setConversationGroups, patchSettings, setCrunch } from '$lib/api/client';
   import { isTouchPrimary } from '$lib/composer/sendRules';
   import { untrack } from 'svelte';
   import Sheet from '$lib/ui/Sheet.svelte';
@@ -25,6 +25,11 @@
   let pinned = $state(seed.pinned);
   let chosen = $state(seed.color ?? 'neutral');
   let members = $state(seed.groups.slice());
+  let model = $state(seed.model ?? 'opus');
+  let effort = $state(seed.effort ?? 'medium');
+  let permission = $state(seed.permission_mode ?? 'default');
+  let crunch = $state(seed.crunch?.enabled ?? false);
+  let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
   let reasons = $state<string[]>([]);
   let sentPin = seed.pinned;
 
@@ -52,6 +57,25 @@
   async function saveColor(value: string) {
     chosen = value;
     await patch({ color: value });
+  }
+
+  async function saveModel(val: string) {
+    model = val;
+    await patchSettings(item.id, { model: val }, crypto.randomUUID());
+  }
+
+  async function saveEffort(val: string) {
+    effort = val;
+    await patchSettings(item.id, { effort: val }, crypto.randomUUID());
+  }
+
+  async function savePermission(val: string) {
+    permission = val;
+    await patchSettings(item.id, { permission_mode: val }, crypto.randomUUID());
+  }
+
+  async function saveCrunch() {
+    await setCrunch(item.id, { enabled: crunch, resume_text: resumeText }, crypto.randomUUID());
   }
 
   async function saveGroups(id: string, on: boolean) {
@@ -82,6 +106,39 @@
     {/each}
   </div>
   <Toggle label="Закрепить" bind:checked={pinned} />
+  <div class="sheet-field">
+    <label class="field-label" for="sheet-model">Модель</label>
+    <select id="sheet-model" bind:value={model} onchange={() => void saveModel(model)}>
+      <option value="opus">opus</option>
+      <option value="opus-5.5">opus-5.5</option>
+      <option value="sonnet-5">sonnet-5</option>
+      <option value="haiku">haiku</option>
+    </select>
+  </div>
+  <div class="sheet-field">
+    <label class="field-label" for="sheet-effort">Усилие</label>
+    <select id="sheet-effort" bind:value={effort} onchange={() => void saveEffort(effort)}>
+      <option value="low">Низкое</option>
+      <option value="medium">Обычное</option>
+      <option value="high">Высокое</option>
+    </select>
+  </div>
+  <div class="sheet-field">
+    <label class="field-label" for="sheet-permission">Режим разрешений</label>
+    <select id="sheet-permission" bind:value={permission} onchange={() => void savePermission(permission)}>
+      <option value="default">По умолчанию</option>
+      <option value="ask">Спрашивать</option>
+      <option value="auto_edit">Автоправки</option>
+      <option value="full_access">Полный доступ</option>
+    </select>
+  </div>
+  <div class="sheet-field">
+    <Toggle label="Автопродолжение после лимитов" bind:checked={crunch} />
+    {#if crunch}
+      <label class="field-label" for="sheet-resume">Текст продолжения</label>
+      <textarea id="sheet-resume" rows="2" bind:value={resumeText} onblur={() => void saveCrunch()}></textarea>
+    {/if}
+  </div>
   <div>
     <p>Группы</p>
     {#each groups as group (group.id)}

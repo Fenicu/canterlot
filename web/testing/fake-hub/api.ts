@@ -48,7 +48,7 @@ export class FakeHubApi {
 	conversationData(id: string): SnapshotData {
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
-			queue: { pause_reasons: [], hold_reasons: [], queued: 0, run_slot: 'free' },
+			queue: (this.details.get(id)?.queue as SnapshotData['queue']) ?? { pause_reasons: [], hold_reasons: [], queued: 0, run_slot: 'free' },
 			history: this.page(id, {}),
 			scheduled: []
 		};

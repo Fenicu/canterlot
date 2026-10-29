@@ -62,3 +62,64 @@ export function seedMockupChat(api: FakeHubApi): string {
   api.bindConversation(id);
   return id;
 }
+
+export function seedMockup06(api: FakeHubApi): string {
+  const id = seedConversation(api, {
+    title: 'Граница snapshot / replay',
+    model: 'opus-5.5',
+    effort: 'high',
+    permission_mode: 'ask',
+    activity: {
+      state: 'waiting_for_user',
+      evidence: { question: 'Что делать, если курсор старше журнала событий?' },
+      since: AT
+    }
+  });
+  const detail = api.details.get(id)!;
+  detail.harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
+  detail.machine = { id: 'workstation', name: 'workstation' };
+  api.hub.append(`conversation:${id}`, {
+    kind: 'request_opened',
+    conversation_id: id,
+    payload: {
+      id: api.id(),
+      question: 'Что делать, если курсор старше журнала событий?'
+    }
+  });
+  return id;
+}
+
+export function seedMockup08(api: FakeHubApi): string {
+  const id = seedConversation(api, {
+    title: 'Восстановление воркера',
+    model: 'opus-5.5',
+    effort: 'medium',
+    permission_mode: 'default',
+    activity: {
+      state: 'quota_paused',
+      evidence: { reason: 'weekly_reserve' },
+      since: AT
+    },
+    crunch: {
+      enabled: true
+    }
+  });
+  const detail = api.details.get(id)!;
+  detail.harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
+  detail.machine = { id: 'mini', name: 'mini' };
+  detail.crunch = {
+    enabled: true,
+    resume_pending: true,
+    resume_text: 'Лимиты восстановлены, продолжай с того места, где остановился.'
+  };
+  detail.queue = {
+    pause_reasons: [],
+    hold_reasons: [
+      { reason: 'weekly_reserve', provider: 'claude', resets_at: '2026-10-30T09:00:00.000Z' },
+      { reason: 'quota_exhausted', provider: 'claude', wake_at: '2026-10-29T01:30:00.000Z', window: '5h' }
+    ],
+    queued: 0,
+    run_slot: 'free'
+  };
+  return id;
+}
