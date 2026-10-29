@@ -12,7 +12,7 @@
   `ev/diagnostics.jsonl:23` (`account` с `type`/`planType`, `requiresOpenaiAuth`).
   Строка 1 — ответ `config/read` владельца (`never` + `danger-full-access`,
   собственный текст инструкций). Строка 2 — ответ `account/read` без входа
-  (`account: null`, `requiresOpenaiAuth: true`). Значения `<redacted>` оставлены
+  (`account: null`,   `requiresOpenaiAuth: true`). Значения `<redacted>` оставлены
   как в записях.
 - `subagent.jsonl` — сконструировано, подтвердить в live smoke. Источники формы:
   `collabAgentToolCall` и `thread/started` с `parentThreadId` из схемы `ThreadItem`
@@ -40,6 +40,14 @@
 - `context_exceeded.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `turn/completed failed` с `codexErrorInfo` (форма `ev/service_failure.jsonl:70`).
   Покрывает `ContextExhausted`.
+
+- `rate_limits_read.json` — сконструировано, подтвердить в live smoke. Ответ
+  `account/rateLimits/read` (`schema:GetAccountRateLimitsResponse`) с окнами
+  `primary`/`secondary` и дубликатом в `rateLimitsByLimitId.codex`.
+
+- `usage_limit_turn.jsonl`, `usage_limit_need_read.jsonl`, `usage_limit_read.json`,
+  `rate_limit_turn.jsonl` — сконструировано, подтвердить в live smoke. Сценарии
+  «кранча» для `usageLimitExceeded` и `rateLimitExceeded` (Task 6).
 
 - `mcp_status.jsonl` — сконструировано, подтвердить в live smoke. Две строки
   уведомлений `mcpServer/startupStatus/updated` для сервера `canterlot`: статусы

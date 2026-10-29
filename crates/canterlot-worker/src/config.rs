@@ -367,14 +367,32 @@ fn default_claude_executable() -> PathBuf {
 pub struct CodexConfig {
     #[serde(default = "default_codex_executable")]
     pub executable: PathBuf,
+    #[serde(default = "default_codex_rate_limits_poll_interval_s")]
+    pub rate_limits_poll_interval_s: u64,
 }
 
 impl Default for CodexConfig {
     fn default() -> Self {
         Self {
             executable: PathBuf::from("codex"),
+            rate_limits_poll_interval_s: default_codex_rate_limits_poll_interval_s(),
         }
     }
+}
+
+impl CodexConfig {
+    pub const MIN_RATE_LIMITS_POLL_INTERVAL_S: u64 = 60;
+
+    pub fn rate_limits_poll_interval(&self) -> Duration {
+        Duration::from_secs(
+            self.rate_limits_poll_interval_s
+                .max(Self::MIN_RATE_LIMITS_POLL_INTERVAL_S),
+        )
+    }
+}
+
+fn default_codex_rate_limits_poll_interval_s() -> u64 {
+    300
 }
 
 fn default_codex_executable() -> PathBuf {

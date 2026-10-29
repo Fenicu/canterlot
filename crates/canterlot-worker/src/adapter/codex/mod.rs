@@ -1,6 +1,8 @@
 pub mod events;
 pub mod input;
+pub mod limits;
 pub mod mcp;
+pub mod probe;
 pub mod process;
 pub mod rpc;
 pub mod thread;

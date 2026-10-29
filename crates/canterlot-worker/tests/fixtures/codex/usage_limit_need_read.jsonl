@@ -1,0 +1,2 @@
+{"dir":"out","data":{"method":"account/rateLimits/updated","params":{"rateLimits":{"limitId":"codex","primary":{"usedPercent":55,"resetsAt":1792927784,"windowDurationMins":300},"secondary":{"usedPercent":20,"resetsAt":1793514584,"windowDurationMins":10080}}}}}
+{"dir":"out","data":{"method":"turn/completed","params":{"turn":{"status":"failed","error":{"codexErrorInfo":"usageLimitExceeded"}}}}}

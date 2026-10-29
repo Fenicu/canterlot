@@ -299,6 +299,7 @@ allow_paid_model_poll = false
 
 [codex]
 executable = "codex" # Либо абсолютный путь к CLI.
+rate_limits_poll_interval_s = 300
 ```
 
 Замените `/home/user` своим домашним каталогом; `~` внутри TOML не раскрывается.
@@ -324,7 +325,7 @@ executable = "codex" # Либо абсолютный путь к CLI.
 
 Профиль `owner` («Как у владельца») сохраняет настройки, плагины, MCP-серверы и инструкции владельца. Именованный профиль из `[[instruction_profiles]]` использует `instructions_file`: копия с правами `0600` хранится в каталоге исполнения и добавляется к системным инструкциям; файлы репозитория остаются на месте. Пресеты хаба, «Без инструкций», `--system-prompt-snapshot off`, минимум 2.1.311 и перезапуск при смене инструкций относятся к плану 2c и здесь ещё не включены.
 
-Адаптер Codex говорит с `codex app-server` по stdio JSON-RPC и собирается без дополнительных feature. Таблица `[codex]` задаёт только путь к CLI (по умолчанию `codex` из `PATH`); минимум 0.164.0, проверена 0.164.0, более новая версия допускается с диагностикой `untested_cli_version`. Запуск добавляет лишь флаг `--enable default_mode_request_user_input` и свой MCP-сервер через `-c mcp_servers.canterlot.*`, конфигурация владельца не меняется. Окружение наследуется за вычетом `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CANTERLOT_*` и `RUST_LOG`. Рукопожатие: `initialize` с `experimentalApi`, затем `account/read` без обновления токена (без входа — `auth_required`) и `config/read`. Профиль `owner` сохраняет инструкции владельца и добавляет блок сервера; остальные режимы (`ask` без песочницы, `bypass`, `read_only`) и разбор событий относятся к следующим задачам плана 2b.
+Адаптер Codex говорит с `codex app-server` по stdio JSON-RPC и собирается без дополнительных feature. Таблица `[codex]` задаёт путь к CLI (по умолчанию `codex` из `PATH`) и интервал фонового опроса лимитов `rate_limits_poll_interval_s` (по умолчанию 300, меньше 60 поднимается до 60); без живой сессии воркер раз в 60 с ставит Codex в очередь опроса и при необходимости вызывает `account/rateLimits/read` через короткий probe app-server. Минимум 0.164.0, проверена 0.164.0, более новая версия допускается с диагностикой `untested_cli_version`. Запуск добавляет лишь флаг `--enable default_mode_request_user_input` и свой MCP-сервер через `-c mcp_servers.canterlot.*`, конфигурация владельца не меняется. Окружение наследуется за вычетом `OPENAI_API_KEY`, `CODEX_API_KEY`, `OPENAI_BASE_URL`, `CLAUDECODE`, `CLAUDE_CODE_*`, `CANTERLOT_*` и `RUST_LOG`. Рукопожатие: `initialize` с `experimentalApi`, затем `account/read` без обновления токена (без входа — `auth_required`) и `config/read`. Профиль `owner` сохраняет инструкции владельца и добавляет блок сервера; остальные режимы (`ask` без песочницы, `bypass`, `read_only`) и разбор событий относятся к следующим задачам плана 2b.
 
 Сопровождение добавляет свой MCP-сервер для разрешений, вопросов и чтения лимитов. SIGINT завершает ход и процесс CLI с исходом `user_stop`; продолжение запускает новое исполнение с `--resume` и тем же нативным ID. Отсутствие авторизации даёт `auth_required`, несовпадение ID или несовместимая версия дают `cli_incompatible`, недоступность canterlot MCP даёт `start_failed`.
 

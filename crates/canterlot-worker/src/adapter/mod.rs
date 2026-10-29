@@ -196,7 +196,7 @@ pub enum LimitWindow {
     FiveHour,
     Weekly,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LimitFact {
     Observed {
         window: LimitWindow,

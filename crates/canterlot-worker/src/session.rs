@@ -381,24 +381,52 @@ impl Pending {
 
 impl Worker {
     pub fn new(config: WorkerConfig, store: WorkerStore) -> Worker {
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
         #[cfg(feature = "synthetic-adapter")]
-        let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> = std::sync::Arc::new(
+        let default_source: Arc<dyn crate::machine::limits::LimitsSource> = Arc::new(
             crate::machine::limits::FileLimitsSource::new(config.data_dir.clone()),
         );
         #[cfg(not(feature = "synthetic-adapter"))]
-        let source: std::sync::Arc<dyn crate::machine::limits::LimitsSource> =
-            std::sync::Arc::new(crate::machine::limits::NoLimitsSource);
+        let default_source: Arc<dyn crate::machine::limits::LimitsSource> =
+            Arc::new(crate::machine::limits::NoLimitsSource);
         let live_limits = crate::machine::limits::LiveLimits::default();
+        let limits_cache = LimitsCache::default();
         let mut idle_ticker = crate::machine::limits::IdleTicker::default();
-        let source = match &config.claude_code {
-            Some(claude) => {
-                idle_ticker.register("claude", claude.oauth_poll_interval());
-                std::sync::Arc::new(crate::machine::limits::ClaudeOAuthLimitsSource::new(
+        let mut routes: HashMap<String, Arc<dyn crate::machine::limits::LimitsSource>> =
+            HashMap::new();
+        if let Some(claude) = &config.claude_code {
+            idle_ticker.register("claude", claude.oauth_poll_interval());
+            routes.insert(
+                "claude".into(),
+                Arc::new(crate::machine::limits::ClaudeOAuthLimitsSource::new(
                     claude,
                     live_limits.clone(),
-                ))
-            }
-            None => source,
+                )),
+            );
+        }
+        if let Some(codex) = &config.codex {
+            idle_ticker.register("codex", crate::machine::limits::CODEX_IDLE_TICK_INTERVAL);
+            let cache_for_hub = limits_cache.clone();
+            let hub_age: crate::machine::limits::HubLimitsAge =
+                Arc::new(move |provider| cache_for_hub.get(provider).map(|c| c.received_at));
+            routes.insert(
+                "codex".into(),
+                Arc::new(crate::machine::limits::CodexRateLimitsSource::new(
+                    codex,
+                    live_limits.clone(),
+                    hub_age,
+                )),
+            );
+        }
+        let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
+            default_source
+        } else {
+            Arc::new(crate::machine::limits::RoutedLimitsSource::new(
+                routes,
+                default_source,
+            ))
         };
         let metrics = crate::machine::metrics::ProcMetricsSource::new(
             crate::machine::metrics::MetricsCollector::new(
@@ -408,8 +436,8 @@ impl Worker {
             ),
         );
         Self {
-            limits_cache: LimitsCache::default(),
-            limits_source: source,
+            limits_cache,
+            limits_source,
             live_limits,
             idle_ticker,
             metrics: std::sync::Arc::new(metrics),

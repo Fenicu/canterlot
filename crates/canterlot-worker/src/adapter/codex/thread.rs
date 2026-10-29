@@ -95,6 +95,13 @@ impl StartError {
     }
 }
 
+pub fn probe_initialize_params(worker_version: &str) -> Value {
+    serde_json::json!({
+        "clientInfo": {"name": "canterlot", "title": "canterlot", "version": worker_version},
+        "capabilities": {"experimentalApi": false},
+    })
+}
+
 pub fn initialize_params(worker_version: &str) -> Value {
     serde_json::json!({
         "clientInfo": {"name": "canterlot", "title": "canterlot", "version": worker_version},

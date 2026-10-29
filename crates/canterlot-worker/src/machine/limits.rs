@@ -8,7 +8,13 @@ use std::{
 };
 use tokio::time::Instant;
 
-use crate::config::ClaudeCodeConfig;
+use crate::adapter::codex::{limits::observations_from_read_response, probe};
+use crate::config::{ClaudeCodeConfig, CodexConfig};
+
+pub const CODEX_IDLE_TICK_INTERVAL: Duration = Duration::from_secs(60);
+const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+
+pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
 
 #[async_trait::async_trait]
 pub trait LimitsSource: Send + Sync {
@@ -462,4 +468,138 @@ fn rfc3339_ms(text: &str) -> Option<u64> {
         .checked_mul(1000)?
         .checked_add(i64::from(time.nanosecond.unwrap_or(0) / 1_000_000))?;
     u64::try_from(millis).ok()
+}
+
+/// Опрос лимитов Codex без живой сессии: короткий `account/rateLimits/read` через probe.
+pub struct CodexRateLimitsSource {
+    executable: PathBuf,
+    interval: Duration,
+    live: LiveLimits,
+    hub_age: HubLimitsAge,
+    clock: Clock,
+    state: Mutex<PollState>,
+}
+
+impl fmt::Debug for CodexRateLimitsSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CodexRateLimitsSource")
+            .field("interval", &self.interval)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CodexRateLimitsSource {
+    pub fn new(config: &CodexConfig, live: LiveLimits, hub_age: HubLimitsAge) -> Self {
+        Self {
+            executable: config.executable.clone(),
+            interval: config.rate_limits_poll_interval(),
+            live,
+            hub_age,
+            clock: Arc::new(Instant::now),
+            state: Mutex::default(),
+        }
+    }
+
+    pub fn with_executable(mut self, executable: PathBuf) -> Self {
+        self.executable = executable;
+        self
+    }
+
+    pub fn with_clock(mut self, clock: impl Fn() -> Instant + Send + Sync + 'static) -> Self {
+        self.clock = Arc::new(clock);
+        self
+    }
+
+    pub async fn fetch(&self) -> Result<Vec<LimitObservation>, probe::ProbeError> {
+        let response = probe::probe(
+            &self.executable,
+            "account/rateLimits/read",
+            serde_json::json!({}),
+            CODEX_PROBE_TIMEOUT,
+        )
+        .await?;
+        Ok(observations_from_read_response(&response, super::now_ms()))
+    }
+}
+
+#[async_trait::async_trait]
+impl LimitsSource for CodexRateLimitsSource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        self.poll_with(provider, false).await
+    }
+
+    async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
+        self.poll_with(provider, true).await
+    }
+}
+
+impl CodexRateLimitsSource {
+    async fn poll_with(&self, provider: &str, idle: bool) -> Vec<LimitObservation> {
+        if provider != "codex" {
+            return Vec::new();
+        }
+        let now = (self.clock)();
+        {
+            let mut state = self.state.lock().expect("codex poll state");
+            let since = |at: Option<Instant>, gap: Duration| {
+                at.is_some_and(|at| now.saturating_duration_since(at) < gap)
+            };
+            if state.backoff_until.is_some_and(|until| now < until)
+                || since(state.last_request, HUB_POLL_DEBOUNCE)
+                || (idle
+                    && (since(state.last_request, self.interval)
+                        || since(self.live.last(provider), self.interval)
+                        || since((self.hub_age)(provider), self.interval)))
+            {
+                return Vec::new();
+            }
+            state.last_request = Some(now);
+        }
+        match self.fetch().await {
+            Ok(observations) => {
+                let mut state = self.state.lock().expect("codex poll state");
+                state.rate_limited = 0;
+                state.backoff_until = None;
+                observations
+            }
+            Err(error) => {
+                if error == probe::ProbeError::Timeout {
+                    tracing::debug!(
+                        kind = "codex_limits_probe_timeout",
+                        "codex limits probe timed out"
+                    );
+                } else {
+                    tracing::warn!(kind = "codex_limits_probe_failed", reason = ?error, "codex limits probe failed");
+                }
+                Vec::new()
+            }
+        }
+    }
+}
+
+pub struct RoutedLimitsSource {
+    routes: HashMap<String, Arc<dyn LimitsSource>>,
+    default: Arc<dyn LimitsSource>,
+}
+
+impl RoutedLimitsSource {
+    pub fn new(
+        routes: HashMap<String, Arc<dyn LimitsSource>>,
+        default: Arc<dyn LimitsSource>,
+    ) -> Self {
+        Self { routes, default }
+    }
+}
+
+#[async_trait::async_trait]
+impl LimitsSource for RoutedLimitsSource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        let source = self.routes.get(provider).unwrap_or(&self.default).clone();
+        source.poll(provider).await
+    }
+
+    async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
+        let source = self.routes.get(provider).unwrap_or(&self.default).clone();
+        source.poll_idle(provider).await
+    }
 }
