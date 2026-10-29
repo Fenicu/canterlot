@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect } from './fixtures';
 
 test('xhr_patch_sender_reports_progress_and_sets_required_headers', async ({ page }) => {
   await page.goto('/__test/primitives');
