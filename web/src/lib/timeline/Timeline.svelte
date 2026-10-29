@@ -18,7 +18,17 @@
     visibleRange
   } from '$lib/timeline/virtual';
 
-  let { chat, onInfo, now = Date.now() }: { chat: ChatStore; onInfo?: (runId: string) => void; now?: number } = $props();
+  let {
+    chat,
+    onInfo,
+    now = Date.now(),
+    laneRoot
+  }: {
+    chat: ChatStore;
+    onInfo?: (runId: string) => void;
+    now?: number;
+    laneRoot?: string;
+  } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
   let range = $state({ start: 0, end: 0, padTop: 0, padBottom: 0 });
@@ -37,7 +47,7 @@
   let queued: { key: string; height: number; node?: HTMLElement }[] = [];
   const PIN_PX = 48;
 
-  const rows = $derived(buildRows(chat.timeline.entries, { now }));
+  const rows = $derived(buildRows(chat.timeline.entries, { now, laneRoot }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   let seenRows: string | null = null;
   $effect(() => {

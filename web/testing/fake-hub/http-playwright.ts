@@ -644,6 +644,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { id } });
   });
 
+  await page.route('**/api/v1/conversations/*/runs/*', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const runId = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const info = api.runs.get(runId);
+    if (!info) {
+      await route.fulfill({
+        status: 404,
+        headers: headers(),
+        json: { error: { code: 'not_found', message: 'Run not found' } }
+      });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: info });
+  });
+
+  await page.route('**/api/v1/conversations/*/delegation', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const list = api.delegations.get(id) ?? [];
+    await route.fulfill({ headers: headers(), json: list });
+  });
+
   await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
   });

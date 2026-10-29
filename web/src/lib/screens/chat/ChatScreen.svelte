@@ -12,6 +12,7 @@
 	import RequestSlot, { type RequestView } from './RequestSlot.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
+	import InfoSheet from './InfoSheet.svelte';
 	import type { ProviderLimits, LimitThresholds } from '$lib/stores/limits';
 	import type { MachineRecord } from '$lib/stores/machines.svelte';
 	import type { Activity } from '$lib/screens/sessions/activityText';
@@ -69,6 +70,7 @@
 
 	let showSettings = $state(false);
 	let showDiagnostics = $state(false);
+	let infoRunId = $state<string | null>(null);
 
 	onMount(async () => {
 		try {
@@ -111,7 +113,14 @@
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 	/>
 
-	<Timeline {chat} {onInfo} {now} />
+	<Timeline
+		{chat}
+		onInfo={(runId) => {
+			infoRunId = runId;
+			onInfo?.(runId);
+		}}
+		{now}
+	/>
 
 	<RequestSlot request={activeRequest} activity={chat.activity as Activity | null} />
 
@@ -135,6 +144,14 @@
 		<Diagnostics
 			{chat}
 			onclose={() => (showDiagnostics = false)}
+		/>
+	{/if}
+
+	{#if infoRunId}
+		<InfoSheet
+			{chat}
+			runId={infoRunId}
+			onclose={() => (infoRunId = null)}
 		/>
 	{/if}
 </section>

@@ -2,7 +2,7 @@
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { clock } from '$lib/clock';
-  import { browserRuntime } from '$lib/screens/chat/open';
+  import { browserRuntime, openChatSession } from '$lib/screens/chat/open';
   import SessionList from '$lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '$lib/app/runtime';
   import type { Snippet } from 'svelte';
@@ -15,6 +15,8 @@
   import type { UpdateController } from '$lib/pwa/update';
   import { staleness } from '$lib/pwa/offline';
   import { announce } from '$lib/a11y/announce';
+  import DelegationPanel from '$lib/screens/chat/DelegationPanel.svelte';
+  import type { ChatStore } from '$lib/stores/chat.svelte';
 
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
@@ -30,6 +32,25 @@
   const path = $derived(page.url.pathname);
   const onSessions = $derived(path === '/' || path === '/sessions');
   const onChat = $derived(path.startsWith('/c/'));
+  const chatId = $derived(onChat ? path.split('/')[2] : null);
+  let currentChat = $state<ChatStore | null>(null);
+
+  $effect(() => {
+    const id = chatId;
+    if (onChat && id) {
+      let alive = true;
+      openChatSession(id)
+        .then((store) => {
+          if (alive) currentChat = store;
+        })
+        .catch(() => {});
+      return () => {
+        alive = false;
+      };
+    } else {
+      currentChat = null;
+    }
+  });
   const onNew = $derived(path === '/new');
   const harness = $derived(path.startsWith('/__test'));
   const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : 'sessions');
@@ -146,7 +167,13 @@
         {@render children()}
       </div>
       {#if mode === 'desktop' && lane}
-        <aside data-pane="lane"><p>Поручения</p></aside>
+        <aside data-pane="lane">
+          {#if currentChat}
+            <DelegationPanel chat={currentChat} onclose={() => (lane = false)} />
+          {:else}
+            <p>Поручения</p>
+          {/if}
+        </aside>
       {/if}
     </div>
   {/if}
