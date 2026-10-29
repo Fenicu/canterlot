@@ -85,7 +85,7 @@ cargo test -p canterlot-hub
 Каждый тест схемы создаёт отдельную базу через `sqlx::test`, поэтому пользователю PostgreSQL нужно право `CREATEDB`.
 Функции подготовки данных доступны с feature `testkit` и автоматически подключаются при тестировании хаба.
 Параллельные рабочие копии на одной машине поднимают отдельный сервер: `CANTERLOT_TEST_PG_PORT=55441 scripts/test-db.sh up`.
-Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo test -p canterlot-hub`.
+Затем `DATABASE_URL=postgres://canterlot:canterlot@127.0.0.1:55441/canterlot cargo test -p canterlot-hub`. Одной переменной порта для `cargo test` мало: `.cargo/config.toml` указывает на общую базу 55440. `scripts/check.sh` сам выставляет `DATABASE_URL` по `CANTERLOT_TEST_PG_PORT`, если `DATABASE_URL` не задан.
 sqlx называет тестовые базы по пути теста, поэтому две копии на одном сервере удаляли бы базы друг друга.
 `down` и `psql` принимают ту же переменную.
 
