@@ -180,6 +180,13 @@ impl WorkerData for Proxy {
         Err(Status::unimplemented("media upload is not implemented"))
     }
 
+    async fn agent_call(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::AgentCallRequest>,
+    ) -> Result<Response<canterlot_proto::worker::v1::AgentCallResponse>, Status> {
+        Err(Status::unimplemented("agent calls are not implemented"))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,

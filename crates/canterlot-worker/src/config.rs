@@ -25,8 +25,6 @@ pub struct WorkerConfig {
     #[serde(default)]
     pub machine: MachineConfig,
     #[serde(default)]
-    pub instruction_profiles: Vec<ProfileConfig>,
-    #[serde(default)]
     pub attachments: WorkerAttachmentsConfig,
     #[serde(default)]
     pub claude_code: Option<ClaudeCodeConfig>,
@@ -237,14 +235,6 @@ pub fn load(path: &Path) -> Result<WorkerConfig, ConfigError> {
     {
         return Err(invalid_url());
     }
-    let mut names = std::collections::BTreeSet::new();
-    if config
-        .instruction_profiles
-        .iter()
-        .any(|profile| profile.name == "owner" || !names.insert(&profile.name))
-    {
-        return Err(ConfigError::new(path, ConfigErrorCategory::Parse));
-    }
     // Платный запрос к модели ради лимитов в пилоте не делается: явный отказ вместо тихого пути.
     if config
         .claude_code
@@ -301,17 +291,6 @@ impl Default for MachineConfig {
             metrics_interval: Duration::from_secs(30),
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct ProfileConfig {
-    pub name: String,
-    pub title: String,
-    pub description: String,
-    pub harnesses: Vec<String>,
-    #[serde(default)]
-    pub instructions_file: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, serde::Serialize, Deserialize)]

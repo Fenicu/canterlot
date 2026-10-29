@@ -220,3 +220,57 @@ impl fmt::Debug for crate::worker::v1::DecisionApplied {
             .finish()
     }
 }
+
+impl fmt::Debug for crate::worker::v1::Instructions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Instructions")
+            .field("mode", &self.mode)
+            .field("preset_id", &self.preset_id)
+            .field("revision", &self.revision)
+            .field("title_bytes", &self.title.len())
+            .field("text_bytes", &self.text.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::AgentCallRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentCallRequest")
+            .field("execution_id", &self.execution_id)
+            .field("generation", &self.generation)
+            .field("call_id", &self.call_id)
+            .field("tool", &self.tool)
+            .field("arguments_bytes", &self.arguments_json.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::AgentCallResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentCallResponse")
+            .field("result_bytes", &self.result_json.len())
+            .field("error_code", &self.error_code)
+            .field("error_message_bytes", &self.error_message.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::ipc::AgentCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentCall")
+            .field("call_id", &self.call_id)
+            .field("tool", &self.tool)
+            .field("arguments_bytes", &self.arguments_json.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::ipc::AgentCallResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentCallResult")
+            .field("call_id", &self.call_id)
+            .field("result_bytes", &self.result_json.len())
+            .field("error_code", &self.error_code)
+            .finish_non_exhaustive()
+    }
+}

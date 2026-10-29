@@ -27,6 +27,14 @@ impl WorkerData for HubGrpc {
 
     type DataStream = ReplyStream<DataDown>;
 
+    async fn agent_call(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::AgentCallRequest>,
+    ) -> Result<Response<canterlot_proto::worker::v1::AgentCallResponse>, Status> {
+        // Вызовы инструментов агента — задача 4 плана 2c.
+        Err(Status::unimplemented("agent calls are not supported yet"))
+    }
+
     async fn data(
         &self,
         mut request: Request<Streaming<DataUp>>,

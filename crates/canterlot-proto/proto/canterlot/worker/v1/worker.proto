@@ -11,6 +11,7 @@ service WorkerData {
   rpc Data(stream DataUp) returns (stream DataDown);
   rpc FetchAttachment(FetchAttachmentRequest) returns (stream AttachmentChunk);
   rpc PutMedia(stream MediaChunk) returns (MediaStored);
+  rpc AgentCall(AgentCallRequest) returns (AgentCallResponse);
 }
 
 enum StreamKind {
@@ -207,6 +208,7 @@ message StartExecution {
   string permission_mode = 7;
   string instruction_profile = 8;
   repeated string capabilities = 9;
+  Instructions instructions = 10;
 }
 
 message StopExecution {
@@ -520,6 +522,36 @@ message SettingsOverride {
   string model = 1;
   string effort = 2;
   string permission_mode = 3;
+  Instructions instructions = 4;
+}
+
+// Инструкции агента на одно исполнение или смену настроек: текст — данные
+// уровня сообщения, в журналах и Debug его нет (см. redacted_debug.rs).
+message Instructions {
+  // "clean" | "owner" | "preset".
+  string mode = 1;
+  // Только preset, 1..=MAX_PRESET_TEXT_BYTES байт.
+  string text = 2;
+  // Только preset, UUID пресета.
+  string preset_id = 3;
+  // Только preset.
+  uint64 revision = 4;
+  // Только preset; заметка для смены Codex.
+  string title = 5;
+}
+
+message AgentCallRequest {
+  string execution_id = 1;
+  uint64 generation = 2;
+  string call_id = 3;
+  string tool = 4;
+  string arguments_json = 5;
+}
+
+message AgentCallResponse {
+  string result_json = 1;
+  string error_code = 2;
+  string error_message = 3;
 }
 
 message AttachmentRef {

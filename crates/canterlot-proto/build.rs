@@ -8,6 +8,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.ipc.v1.LocalFile",
             ".canterlot.worker.ipc.v1.Attach",
             ".canterlot.worker.ipc.v1.Ownership",
+            ".canterlot.worker.ipc.v1.AgentCall",
+            ".canterlot.worker.ipc.v1.AgentCallResult",
         ])
         .compile_protos(&["proto/canterlot/worker/v1/ipc.proto"], &["proto"])?;
     tonic_prost_build::configure()
@@ -30,6 +32,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.AttachmentRef",
             ".canterlot.worker.v1.AttachmentChunk",
             ".canterlot.worker.v1.MediaChunk",
+            ".canterlot.worker.v1.Instructions",
+            ".canterlot.worker.v1.AgentCallRequest",
+            ".canterlot.worker.v1.AgentCallResponse",
         ])
         .build_server(true)
         .build_client(true)

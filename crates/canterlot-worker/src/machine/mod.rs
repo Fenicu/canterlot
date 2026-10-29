@@ -1,7 +1,7 @@
 use crate::{adapter::HarnessCatalog, config::WorkerConfig};
 use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT},
-    worker::v1::{HarnessInfo, InstructionProfile, MachineReport, ModelInfo},
+    worker::v1::{HarnessInfo, MachineReport, ModelInfo},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
 pub mod limits;
@@ -14,24 +14,9 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> MachineReport {
-    let mut profiles = vec![InstructionProfile {
-        name: "owner".into(),
-        title: "Как у владельца".into(),
-        description: String::new(),
-        harnesses: catalog.iter().map(|c| c.harness.into()).collect(),
-    }];
-    profiles.extend(
-        config
-            .instruction_profiles
-            .iter()
-            .filter(|p| p.name != "owner")
-            .map(|p| InstructionProfile {
-                name: p.name.clone(),
-                title: p.title.clone(),
-                description: p.description.clone(),
-                harnesses: p.harnesses.clone(),
-            }),
-    );
+    // Профили инструкций воркера убраны планом 2c: пресеты хранит хаб,
+    // поле `profiles` оставлено пустым до резервирования в задаче 3.
+    let profiles = Vec::new();
     let mut roots: Vec<_> = config
         .execution
         .allowed_workdir_roots

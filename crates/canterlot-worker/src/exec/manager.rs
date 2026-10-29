@@ -62,6 +62,10 @@ pub(crate) enum Msg {
         media_id: Uuid,
         result: Result<(), PutError>,
     },
+    AgentCallDone {
+        call_id: Uuid,
+        result: crate::adapter::AgentCallResult,
+    },
 }
 
 /// Загрузка картинки агента на хаб; прерывается вместе с актором.
@@ -777,11 +781,6 @@ impl Actor {
             .lock()
             .expect("adapter config lock")
             .clone();
-        let profile = if start.harness == "claude_code" {
-            start.instruction_profile.clone()
-        } else {
-            String::new()
-        };
         let prepared = tokio::task::spawn_blocking(move || {
             let prepared = spawn::prepare(
                 &data_dir,
@@ -801,18 +800,6 @@ impl Actor {
             if let Some(cfg) = adapters.codex {
                 spec["codex"] =
                     toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
-            }
-            if !profile.is_empty() && profile != "owner" {
-                let source = adapters
-                    .profiles
-                    .iter()
-                    .find(|p| p.name == profile)
-                    .and_then(|p| p.instructions_file.as_ref())
-                    .ok_or(ExecError::Verify("profile"))?;
-                let target = prepared.dir.join("profile-source.md");
-                fs::copy(source, &target)?;
-                use std::os::unix::fs::PermissionsExt;
-                fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
             }
             fs::write(
                 &spec_path,
@@ -937,6 +924,7 @@ impl Actor {
                 effort: start.effort.clone(),
                 permission_mode: start.permission_mode.clone(),
                 instruction_profile: start.instruction_profile.clone(),
+                instructions: start.instructions.clone(),
                 pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
             }))
             .await;
@@ -1311,6 +1299,28 @@ impl Actor {
                     Err(_) => reject(&self.shared, &fetch.command, "attachment_unavailable").await,
                 }
             }
+            Msg::AgentCallDone { call_id, result } => {
+                let (result_json, error_code, error_message) = match result {
+                    crate::adapter::AgentCallResult::Ok(value) => (
+                        serde_json::to_string(&value).unwrap_or_default(),
+                        String::new(),
+                        String::new(),
+                    ),
+                    crate::adapter::AgentCallResult::Err { code, message } => {
+                        (String::new(), code, message)
+                    }
+                };
+                self.send(down::Msg::AgentCallResult(
+                    canterlot_proto::worker::ipc::AgentCallResult {
+                        call_id: call_id.to_string(),
+                        result_json,
+                        error_code,
+                        error_message,
+                    },
+                ))
+                .await;
+                Ok(())
+            }
         }
     }
 
@@ -1345,6 +1355,25 @@ impl Actor {
             up::Msg::DecisionOutcome(_) => {}
             up::Msg::Attached(_) => {}
             up::Msg::CliStarted(started) => self.on_cli_started(started).await?,
+            up::Msg::AgentCall(call) => {
+                let shared = self.shared.clone();
+                let (id, generation) = (self.id, self.generation);
+                if let Ok(call_id) = Uuid::parse_str(&call.call_id) {
+                    let tool = call.tool.clone();
+                    let arguments: serde_json::Value = serde_json::from_str(&call.arguments_json)
+                        .unwrap_or(serde_json::Value::Null);
+                    tokio::spawn(async move {
+                        let caller = shared.agent_caller.borrow().clone();
+                        let result =
+                            super::agent_call(caller, id, generation, call_id, tool, arguments)
+                                .await;
+                        let sender = shared.actors.lock().expect("actors lock").get(&id).cloned();
+                        if let Some(sender) = sender {
+                            let _ = sender.send(Msg::AgentCallDone { call_id, result });
+                        }
+                    });
+                }
+            }
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
             up::Msg::SjBatch(batch) => self.on_batch(batch).await?,
             up::Msg::MediaUpload(request) => self.start_upload(request),

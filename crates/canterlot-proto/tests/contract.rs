@@ -962,6 +962,7 @@ fn attachment_chunk_and_refs_fit_message_limits() {
         model: "model".into(),
         effort: "high".into(),
         permission_mode: "bypass".into(),
+        instructions: None,
     });
     assert_eq!(check_deliver_input(&command), Ok(()));
     assert_roundtrip(command);
@@ -1134,6 +1135,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         effort: "high".into(),
         permission_mode: "bypass".into(),
         instruction_profile: "owner".into(),
+        instructions: None,
         capabilities: vec!["pilot_v1".into()],
     };
     assert_eq!(
@@ -1199,6 +1201,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         effort: "high".into(),
         permission_mode: "bypass".into(),
         instruction_profile: "owner".into(),
+        instructions: None,
         pilot_v1: true,
     });
     assert_roundtrip(PhaseChanged {
@@ -1377,4 +1380,93 @@ fn media_messages_roundtrip_fit_limits_and_redact_bytes() {
     assert_eq!(check_ipc_message(&result), Ok(()));
     assert_roundtrip(upload);
     assert_roundtrip(result);
+}
+
+#[test]
+fn instructions_and_agent_call_messages_are_stable() {
+    use canterlot_proto::{
+        limits::{MAX_AGENT_CALL_BYTES, MAX_PRESET_TEXT_BYTES},
+        worker::{ipc, v1::*},
+    };
+    assert_eq!(MAX_PRESET_TEXT_BYTES, 65_536);
+    assert_eq!(MAX_AGENT_CALL_BYTES, 262_144);
+    // Instructions: mode=1, text=2, preset_id=3, revision=4, title=5.
+    let instructions = Instructions {
+        mode: "preset".into(),
+        text: "текст".into(),
+        preset_id: "id".into(),
+        revision: 2,
+        title: "T".into(),
+    };
+    let bytes = instructions.encode_to_vec();
+    assert_eq!(&bytes[..7], &[0x0a, 6, b'p', b'r', b'e', b's', b'e']);
+    assert!(bytes.windows(2).any(|w| w == [0x2a, 1]));
+    assert_roundtrip(instructions.clone());
+    // StartExecution.instructions=10, SettingsOverride.instructions=4.
+    let start = StartExecution {
+        instructions: Some(instructions.clone()),
+        ..Default::default()
+    };
+    assert!(start.encode_to_vec().contains(&0x52));
+    assert_roundtrip(start);
+    let settings = SettingsOverride {
+        instructions: Some(instructions),
+        ..Default::default()
+    };
+    assert!(settings.encode_to_vec().contains(&0x22));
+    assert_roundtrip(settings);
+    // AgentCallRequest 1..=5, AgentCallResponse 1..=3.
+    let request = AgentCallRequest {
+        execution_id: "execution".into(),
+        generation: 3,
+        call_id: "call".into(),
+        tool: "canterlot_presets_list".into(),
+        arguments_json: "{}".into(),
+    };
+    let bytes = request.encode_to_vec();
+    assert_eq!(&bytes[..11], b"\x0a\x09execution");
+    assert!(bytes.windows(2).any(|w| w == [0x1a, 4]));
+    assert_roundtrip(request);
+    assert_roundtrip(AgentCallResponse {
+        result_json: "{}".into(),
+        error_code: "hub_timeout".into(),
+        error_message: "превышено ожидание".into(),
+    });
+    // ipc: StartCli.instructions=9, AgentCall 1..=3, AgentCallResult 1..=4.
+    let start_cli = ipc::StartCli {
+        instructions: Some(Instructions {
+            mode: "clean".into(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert!(start_cli.encode_to_vec().contains(&0x4a));
+    assert_roundtrip(start_cli);
+    assert_roundtrip(ipc::AgentCall {
+        call_id: "call".into(),
+        tool: "t".into(),
+        arguments_json: "{}".into(),
+    });
+    assert_roundtrip(ipc::AgentCallResult {
+        call_id: "call".into(),
+        result_json: "{}".into(),
+        error_code: "hub_timeout".into(),
+        error_message: String::new(),
+    });
+    // SupervisorToControl.agent_call=9, ControlToSupervisor.agent_call_result=12.
+    let up = ipc::SupervisorToControl {
+        msg: Some(ipc::supervisor_to_control::Msg::AgentCall(ipc::AgentCall {
+            call_id: "call".into(),
+            ..Default::default()
+        })),
+    };
+    assert_eq!(up.encode_to_vec()[0], 0x4a);
+    assert_roundtrip(up);
+    let down = ipc::ControlToSupervisor {
+        msg: Some(ipc::control_to_supervisor::Msg::AgentCallResult(
+            ipc::AgentCallResult::default(),
+        )),
+    };
+    assert_eq!(down.encode_to_vec()[0], 0x62);
+    assert_roundtrip(down);
 }

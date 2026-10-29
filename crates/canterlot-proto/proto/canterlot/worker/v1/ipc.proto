@@ -17,6 +17,7 @@ message ControlToSupervisor {
     SjAck sj_ack = 9;
     MediaResult media_result = 10;
     canterlot.worker.v1.DeliverDecision deliver_decision = 11;
+    AgentCallResult agent_call_result = 12;
   }
 }
 
@@ -30,6 +31,7 @@ message SupervisorToControl {
     MediaUpload media_upload = 6;
     DecisionAck decision_ack = 7;
     DecisionOutcome decision_outcome = 8;
+    AgentCall agent_call = 9;
   }
 }
 
@@ -65,6 +67,22 @@ message StartCli {
   string permission_mode = 6;
   string instruction_profile = 7;
   bool pilot_v1 = 8;
+  canterlot.worker.v1.Instructions instructions = 9;
+}
+
+// Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.
+// Аргументы и результат — данные уровня сообщения, в журналах их нет.
+message AgentCall {
+  string call_id = 1;
+  string tool = 2;
+  string arguments_json = 3;
+}
+
+message AgentCallResult {
+  string call_id = 1;
+  string result_json = 2;
+  string error_code = 3;
+  string error_message = 4;
 }
 
 message CliStarted {

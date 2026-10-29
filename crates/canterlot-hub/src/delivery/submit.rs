@@ -104,6 +104,7 @@ pub enum LimitKind {
     InputText,
     InputMeta,
     Message,
+    InstructionsText,
 }
 
 pub enum SubmitError {
@@ -303,6 +304,11 @@ pub(crate) fn check_bounds(content: &[ContentBlock]) -> Result<(), SubmitError> 
             LimitError::InputMeta { actual } => {
                 (LimitKind::InputMeta, MAX_INPUT_META_BYTES, actual)
             }
+            LimitError::InstructionsText { actual } => (
+                LimitKind::InstructionsText,
+                canterlot_proto::limits::MAX_PRESET_TEXT_BYTES,
+                actual,
+            ),
             LimitError::Message { actual } => (LimitKind::Message, MAX_MESSAGE_BYTES, actual),
             LimitError::EventBatch { .. } => {
                 unreachable!("command check cannot return an event batch limit")

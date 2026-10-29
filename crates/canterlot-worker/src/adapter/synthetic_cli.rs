@@ -11,6 +11,10 @@
 //! Запросы: {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
 //! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}}.
 //! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
+//! {"echo_instructions":true} пишет блок с режимом и версией инструкций ввода;
+//! {"agent_call":{"tool":"...","arguments":{...}}} отдаёт вызов инструмента агента
+//! (кадр `agent_call`, затем блок с результатом из хаба). Текста пресета в кадрах
+//! нет: только режим, версия, длина и SHA-256.
 //! Шаги: {"model":"synthetic-small"}, {"subagent":{"name":"Explore",
 //! "model":"synthetic-small","task":"…","steps":[…]}},
 //! {"usage":{"model":"…","agent":"main","input":120,"output":40,
@@ -30,7 +34,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::{BlockKind, LocalFile, ModelUsage, Phase, SettingsChange};
+use super::{BlockKind, InstructionSpec, LocalFile, ModelUsage, Phase, SettingsChange};
 use sha2::{Digest, Sha256};
 
 #[derive(Deserialize, Serialize)]
@@ -136,6 +140,7 @@ struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
     command: Uuid,
     files: Vec<LocalFile>,
+    instructions: Option<InstructionSpec>,
     accepted: bool,
     usage: std::collections::BTreeMap<(String, String), ModelUsage>,
     output_chars: u64,
@@ -295,6 +300,40 @@ fn run_steps<'a>(
                 turn.request("question", payload, lane).await?;
             } else if let Some(text) = step["delta"].as_str() {
                 text_delta(turn, lane, text).await?;
+            } else if step["echo_instructions"].as_bool() == Some(true) {
+                let (mode, revision, bytes, digest) = match &turn.instructions {
+                    Some(spec) => {
+                        let mode = match spec.mode {
+                            super::InstructionMode::Clean => "clean",
+                            super::InstructionMode::Owner => "owner",
+                            super::InstructionMode::Preset => "preset",
+                        };
+                        let digest: String = Sha256::digest(spec.text.as_bytes())
+                            .iter()
+                            .take(6)
+                            .map(|b| format!("{b:02x}"))
+                            .collect();
+                        (mode, spec.revision, spec.text.len(), digest)
+                    }
+                    None => ("owner", 0, 0, hex_empty()),
+                };
+                text_delta(
+                    turn,
+                    lane,
+                    &format!(
+                        "instructions mode={mode} revision={revision} bytes={bytes} sha256={digest}"
+                    ),
+                )
+                .await?;
+            } else if let Some(call) = step.get("agent_call") {
+                let tool = call["tool"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid agent_call step"))?;
+                let arguments = call.get("arguments").cloned().unwrap_or(Value::Null);
+                if !arguments.is_object() {
+                    return Err(io::Error::other("invalid agent_call step"));
+                }
+                emit(json!({"type":"agent_call","tool":tool,"arguments":arguments})).await?;
             } else if let Some(model) = step["model"].as_str() {
                 close_text(lane).await?;
                 lane.model = model.into();
@@ -494,10 +533,19 @@ fn run_steps<'a>(
         Ok(None)
     })
 }
+fn hex_empty() -> String {
+    Sha256::digest(b"")
+        .iter()
+        .take(6)
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
 async fn run_turn(
     command: Uuid,
     text: String,
     files: Vec<LocalFile>,
+    instructions: Option<InstructionSpec>,
     model: &str,
     context: &mut u64,
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
@@ -517,6 +565,7 @@ async fn run_turn(
         decisions,
         command,
         files,
+        instructions,
         accepted: false,
         usage: Default::default(),
         output_chars: 0,
@@ -661,6 +710,9 @@ pub async fn run(
                 settings,
                 ..
             } => {
+                let instructions = settings
+                    .as_ref()
+                    .and_then(|change| change.instructions.clone());
                 if let Some(change) = settings
                     && let Some(next) = change.model
                 {
@@ -671,6 +723,7 @@ pub async fn run(
                     command_id,
                     text,
                     files,
+                    instructions,
                     &model,
                     &mut context_tokens,
                     receiver,

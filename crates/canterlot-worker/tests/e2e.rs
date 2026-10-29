@@ -125,7 +125,6 @@ impl Fixture {
         fs::write(&ca_cert, &hub.pki.ca_pem).unwrap();
         let config = WorkerConfig {
             machine: Default::default(),
-            instruction_profiles: Vec::new(),
             attachments: Default::default(),
             claude_code: None,
             codex: None,

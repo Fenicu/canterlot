@@ -9,6 +9,10 @@ pub const MAX_METRICS_EXECUTIONS: usize = 256;
 /// Картинка, на которую смотрел агент: крупнее показывается только путь и размер.
 pub const MAX_MEDIA_BYTES: u64 = 20_971_520;
 pub const MEDIA_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
+/// Текст пресета инструкций агента: данные уровня сообщения, в лимит меты не входит.
+pub const MAX_PRESET_TEXT_BYTES: usize = 65_536;
+/// Аргументы одного вызова инструмента агента по каналу данных.
+pub const MAX_AGENT_CALL_BYTES: usize = 262_144;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
@@ -26,6 +30,7 @@ pub const BLOCK_FINAL_INLINE_MAX_BYTES: usize = 65_536;
 pub enum LimitError {
     InputText { actual: usize },
     InputMeta { actual: usize },
+    InstructionsText { actual: usize },
     Message { actual: usize },
     EventBatch { actual: usize },
 }
@@ -39,6 +44,14 @@ pub fn check_deliver_input(cmd: &Command) -> Result<(), LimitError> {
     }
 
     let Some(command::Kind::DeliverInput(input)) = &cmd.kind else {
+        if let Some(command::Kind::StartExecution(start)) = &cmd.kind
+            && let Some(instructions) = &start.instructions
+            && instructions.text.len() > MAX_PRESET_TEXT_BYTES
+        {
+            return Err(LimitError::InstructionsText {
+                actual: instructions.text.len(),
+            });
+        }
         return Ok(());
     };
     let text_bytes = input
@@ -52,8 +65,19 @@ pub fn check_deliver_input(cmd: &Command) -> Result<(), LimitError> {
     if text_bytes > MAX_INPUT_TEXT_BYTES {
         return Err(LimitError::InputText { actual: text_bytes });
     }
+    let instructions_bytes = input
+        .settings
+        .as_ref()
+        .and_then(|settings| settings.instructions.as_ref())
+        .map(|instructions| instructions.text.len())
+        .unwrap_or(0);
+    if instructions_bytes > MAX_PRESET_TEXT_BYTES {
+        return Err(LimitError::InstructionsText {
+            actual: instructions_bytes,
+        });
+    }
 
-    let meta_bytes = message_bytes - text_bytes;
+    let meta_bytes = message_bytes - text_bytes - instructions_bytes;
     if meta_bytes > MAX_INPUT_META_BYTES {
         return Err(LimitError::InputMeta { actual: meta_bytes });
     }

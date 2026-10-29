@@ -151,6 +151,15 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                     .ok_or(AdapterError::Protocol)?,
             }
         }
+        "agent_call" => AdapterEvent::AgentCall {
+            call_id: Uuid::now_v7(),
+            tool: string("tool")?,
+            arguments: value
+                .get("arguments")
+                .cloned()
+                .filter(|v| v.is_object())
+                .ok_or(AdapterError::Protocol)?,
+        },
         "limit_observed" | "limit_reached" => {
             let window = serde_json::from_value(value["window"].clone())
                 .map_err(|_| AdapterError::Protocol)?;
@@ -191,13 +200,19 @@ pub struct SyntheticAdapter {
     transmit_deadline: Duration,
     close_grace: Duration,
     stdin: Option<ChildStdin>,
-    frames: Option<mpsc::Receiver<Frame>>,
+    frames: Option<mpsc::Receiver<(u64, Frame)>>,
     pending: VecDeque<AdapterEvent>,
     exited: Option<watch::Receiver<bool>>,
     cli: Option<Member>,
     started: bool,
     active: bool,
     settings: SettingsChange,
+    workdir: PathBuf,
+    native_id: Option<String>,
+    pending_calls: std::collections::HashSet<Uuid>,
+    /// Поколение процесса CLI: кадры заменённого процесса отбрасываются,
+    /// иначе его выход завершил бы исполнение после перезапуска.
+    generation: u64,
 }
 
 impl SyntheticAdapter {
@@ -218,7 +233,12 @@ impl SyntheticAdapter {
                 model: Some("synthetic-large".into()),
                 effort: Some("medium".into()),
                 permission_mode: Some("owner".into()),
+                instructions: None,
             },
+            workdir: PathBuf::new(),
+            native_id: None,
+            pending_calls: std::collections::HashSet::new(),
+            generation: 0,
         }
     }
     pub fn with_executable(mut self, executable: PathBuf) -> Self {
@@ -242,11 +262,148 @@ impl SyntheticAdapter {
         stdin.flush().await?;
         Ok(())
     }
+    async fn spawn_cli(
+        &mut self,
+        group: &dyn Containment,
+        workdir: &PathBuf,
+        model: &str,
+        native_id: Option<String>,
+    ) -> Result<(u32, u64, String), AdapterError> {
+        let executable = match &self.executable {
+            Some(path) => path.clone(),
+            None => std::env::current_exe()?,
+        };
+        let mut command = tokio::process::Command::new(executable);
+        command
+            .args([
+                "synthetic-cli",
+                "--profile",
+                &self.profile,
+                "--model",
+                model,
+            ])
+            .current_dir(workdir)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        if let Some(id) = &native_id {
+            command.arg("--native-conversation-id").arg(id);
+        }
+        if self.profile == "synthetic-codex" {
+            command.args(["--enable", "default_mode_request_user_input"]);
+        }
+        group.prepare_command(&mut command);
+        let mut child = command.spawn()?;
+        let pid = child.id().ok_or(AdapterError::Protocol)?;
+        let member = group
+            .members()?
+            .into_iter()
+            .find(|m| m.pid == pid)
+            .ok_or(AdapterError::Protocol)?;
+        self.cli = Some(member.clone());
+        self.stdin = child.stdin.take();
+        let stdout = child.stdout.take().ok_or(AdapterError::Protocol)?;
+        let (sender, receiver) = mpsc::channel(256);
+        let (exited, exited_rx) = watch::channel(false);
+        let generation = self.generation;
+        self.frames = Some(receiver);
+        self.exited = Some(exited_rx);
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stdout).lines();
+            let mut blocks = HashMap::new();
+            while let Ok(Some(line)) = lines.next_line().await {
+                let frame = serde_json::from_str(&line)
+                    .ok()
+                    .and_then(|value| decode(value, &mut blocks).ok())
+                    .unwrap_or_else(|| {
+                        Frame::Event(AdapterEvent::Diagnostic {
+                            kind: "invalid_event",
+                            event_type: "invalid_frame".into(),
+                            required: true,
+                        })
+                    });
+                if sender.send((generation, frame)).await.is_err() {
+                    break;
+                }
+            }
+            let event = match child.wait().await {
+                Ok(status) => {
+                    use std::os::unix::process::ExitStatusExt;
+                    AdapterEvent::ProcessExited {
+                        code: status.code(),
+                        signal: status.signal(),
+                    }
+                }
+                Err(_) => AdapterEvent::ProcessExited {
+                    code: None,
+                    signal: None,
+                },
+            };
+            exited.send_replace(true);
+            let _ = sender.send((generation, Frame::Event(event))).await;
+        });
+        if self.profile == "synthetic-codex" {
+            self.send(&Request::Initialize {
+                capabilities: super::synthetic_cli::InitializeCapabilities {
+                    experimental_api: true,
+                },
+            })
+            .await?;
+        }
+        let ready = tokio::time::timeout(self.transmit_deadline, self.frame()).await;
+        match ready {
+            Ok(Some(Frame::Ready(native_conversation_id))) => {
+                Ok((pid, member.start_ticks, native_conversation_id))
+            }
+            _ => {
+                self.close(CloseMode::Force, group).await?;
+                Err(AdapterError::Protocol)
+            }
+        }
+    }
+
+    async fn restart_cli(
+        &mut self,
+        group: &dyn Containment,
+        model: &str,
+        instructions: &InstructionSpec,
+    ) -> Result<(), AdapterError> {
+        // Смена инструкций применяется перезапуском CLI между ходами с тем же нативным ID.
+        // Поколение растёт до закрытия: кадры заменённого процесса отбрасываются,
+        // иначе его выход завершил бы исполнение после перезапуска.
+        self.generation += 1;
+        let closed = self.close(CloseMode::Graceful, group).await;
+        closed?;
+        let workdir = self.workdir.clone();
+        let spawned = self
+            .spawn_cli(group, &workdir, model, self.native_id.clone())
+            .await;
+        let (pid, start_ticks, _) = spawned?;
+        self.instructions(instructions.clone());
+        self.pending.push_back(AdapterEvent::CliRestarted {
+            cli_pid: pid,
+            cli_start_ticks: start_ticks,
+        });
+        Ok(())
+    }
+
+    fn instructions(&mut self, instructions: InstructionSpec) {
+        self.settings.instructions = Some(instructions);
+    }
     async fn frame(&mut self) -> Option<Frame> {
-        self.frames.as_mut()?.recv().await
+        loop {
+            let (generation, frame) = self.frames.as_mut()?.recv().await?;
+            if generation != self.generation {
+                continue;
+            }
+            return Some(frame);
+        }
     }
     fn queue(&mut self, frame: Frame) {
         if let Frame::Event(event) = frame {
+            if let AdapterEvent::AgentCall { call_id, .. } = &event {
+                self.pending_calls.insert(*call_id);
+            }
             self.pending.push_back(event);
         }
     }
@@ -256,10 +413,15 @@ impl SyntheticAdapter {
         };
         tokio::time::timeout(grace, async {
             while !*exited.borrow_and_update() {
+                let current = self.generation;
                 tokio::select! {
                     result = exited.changed() => { result.map_err(|_| AdapterError::Protocol)?; }
                     frame = async { match self.frames.as_mut() { Some(frames) => frames.recv().await, None => std::future::pending().await } } => {
-                        if let Some(Frame::Event(event)) = frame { self.pending.push_back(event); }
+                        if let Some((generation, Frame::Event(event))) = frame
+                            && generation == current
+                        {
+                            self.pending.push_back(event);
+                        }
                     }
                 }
             }
@@ -328,100 +490,25 @@ impl Adapter for SyntheticAdapter {
                 }
                 .into(),
             ),
+            instructions: Some(spec.instructions.clone()),
         };
+        self.workdir = spec.workdir.clone();
         self.started = true;
-        let executable = match &self.executable {
-            Some(path) => path.clone(),
-            None => std::env::current_exe()?,
-        };
-        let mut command = tokio::process::Command::new(executable);
-        command
-            .args([
-                "synthetic-cli",
-                "--profile",
-                &self.profile,
-                "--model",
-                self.settings.model.as_deref().unwrap(),
-            ])
-            .current_dir(&spec.workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(id) = &spec.native_conversation_id {
-            command.arg("--native-conversation-id").arg(id);
-        }
-        if self.profile == "synthetic-codex" {
-            command.args(["--enable", "default_mode_request_user_input"]);
-        }
-        group.prepare_command(&mut command);
-        let mut child = command.spawn()?;
-        let pid = child.id().ok_or(AdapterError::Protocol)?;
-        let member = group
-            .members()?
-            .into_iter()
-            .find(|m| m.pid == pid)
-            .ok_or(AdapterError::Protocol)?;
-        self.cli = Some(member.clone());
-        self.stdin = child.stdin.take();
-        let stdout = child.stdout.take().ok_or(AdapterError::Protocol)?;
-        let (sender, receiver) = mpsc::channel(256);
-        let (exited, exited_rx) = watch::channel(false);
-        self.frames = Some(receiver);
-        self.exited = Some(exited_rx);
-        tokio::spawn(async move {
-            let mut lines = BufReader::new(stdout).lines();
-            let mut blocks = HashMap::new();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let frame = serde_json::from_str(&line)
-                    .ok()
-                    .and_then(|value| decode(value, &mut blocks).ok())
-                    .unwrap_or_else(|| {
-                        Frame::Event(AdapterEvent::Diagnostic {
-                            kind: "invalid_event",
-                            event_type: "invalid_frame".into(),
-                            required: true,
-                        })
-                    });
-                if sender.send(frame).await.is_err() {
-                    break;
-                }
-            }
-            let event = match child.wait().await {
-                Ok(status) => {
-                    use std::os::unix::process::ExitStatusExt;
-                    AdapterEvent::ProcessExited {
-                        code: status.code(),
-                        signal: status.signal(),
-                    }
-                }
-                Err(_) => AdapterEvent::ProcessExited {
-                    code: None,
-                    signal: None,
-                },
-            };
-            exited.send_replace(true);
-            let _ = sender.send(Frame::Event(event)).await;
-        });
-        if self.profile == "synthetic-codex" {
-            self.send(&Request::Initialize {
-                capabilities: super::synthetic_cli::InitializeCapabilities {
-                    experimental_api: true,
-                },
-            })
+        let model = self.settings.model.clone().unwrap_or_default();
+        let (pid, start_ticks, native_conversation_id) = self
+            .spawn_cli(
+                group,
+                &spec.workdir,
+                &model,
+                spec.native_conversation_id.clone(),
+            )
             .await?;
-        }
-        let ready = tokio::time::timeout(self.transmit_deadline, self.frame()).await;
-        match ready {
-            Ok(Some(Frame::Ready(native_conversation_id))) => Ok(Started {
-                native_conversation_id,
-                cli_pid: pid,
-                cli_start_ticks: member.start_ticks,
-            }),
-            _ => {
-                self.close(CloseMode::Force, group).await?;
-                Err(AdapterError::Protocol)
-            }
-        }
+        self.native_id = Some(native_conversation_id.clone());
+        Ok(Started {
+            native_conversation_id,
+            cli_pid: pid,
+            cli_start_ticks: start_ticks,
+        })
     }
 
     fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
@@ -450,7 +537,7 @@ impl Adapter for SyntheticAdapter {
             Err("settings_unavailable")
         }
     }
-    async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome {
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
         if let Err(reason) = self.validate_transmission(input) {
             return TransmitOutcome::Rejected(reason.into());
         }
@@ -471,11 +558,25 @@ impl Adapter for SyntheticAdapter {
             if change.permission_mode.is_some() {
                 self.settings.permission_mode = change.permission_mode.clone();
             }
+            // Смена инструкций применяется перезапуском CLI до записи ввода.
+            if let Some(instructions) = change.instructions.as_ref()
+                && self
+                    .settings
+                    .instructions
+                    .as_ref()
+                    .is_none_or(|current| !instructions.same_effect(current))
+            {
+                let model = self.settings.model.clone().unwrap_or_default();
+                if let Err(error) = self.restart_cli(group, &model, instructions).await {
+                    let _ = error;
+                    return TransmitOutcome::Rejected("instructions_change_failed".into());
+                }
+            }
         }
         let deadline = self.transmit_deadline;
         self.active = true;
         tokio::time::timeout(deadline, async {
-            if self
+            let sent = self
                 .send(&Request::Input {
                     command_id: input.command_id,
                     attempt: input.attempt,
@@ -483,9 +584,8 @@ impl Adapter for SyntheticAdapter {
                     files: input.files.clone(),
                     settings: input.settings.clone(),
                 })
-                .await
-                .is_err()
-            {
+                .await;
+            if sent.is_err() {
                 return TransmitOutcome::Undetermined;
             }
             while let Some(frame) = self.frame().await {
@@ -507,6 +607,34 @@ impl Adapter for SyntheticAdapter {
         })
         .await
         .unwrap_or(TransmitOutcome::Undetermined)
+    }
+
+    async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+        if !self.pending_calls.remove(&call_id) {
+            return;
+        }
+        let text = match result {
+            AgentCallResult::Ok(value) => serde_json::to_string(&value).unwrap_or_default(),
+            AgentCallResult::Err { code, message } => format!("{code}: {message}"),
+        };
+        let block_id = Uuid::now_v7();
+        let model = self.settings.model.clone().unwrap_or_default();
+        self.pending.push_back(AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::Text,
+            input_command_id: None,
+            parent: None,
+            agent: "main".into(),
+            model,
+            tool_name: None,
+            summary: None,
+            approved_by: None,
+        });
+        self.pending.push_back(AdapterEvent::BlockFinal {
+            block_id,
+            text,
+            summary: None,
+        });
     }
 
     async fn deliver_decision(
@@ -573,16 +701,13 @@ impl Adapter for SyntheticAdapter {
 
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
-            let event = if let Some(event) = self.pending.pop_front() {
-                Some(event)
-            } else {
+            if self.pending.is_empty() {
                 match self.frame().await {
-                    Some(Frame::Event(event)) => Some(event),
-                    Some(_) => None,
+                    Some(frame) => self.queue(frame),
                     None => std::future::pending().await,
                 }
-            };
-            if let Some(event) = event {
+            }
+            if let Some(event) = self.pending.pop_front() {
                 if matches!(
                     event,
                     AdapterEvent::RunFinished { .. } | AdapterEvent::ProcessExited { .. }

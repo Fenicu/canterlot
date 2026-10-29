@@ -330,6 +330,7 @@ fn settings_become_turn_start_overrides() {
             model: model.map(str::to_owned),
             effort: effort.map(str::to_owned),
             permission_mode: mode.map(str::to_owned),
+            instructions: None,
         });
         build_turn_start("thread-main", &t, &current(), &owner, None).unwrap()
     };
@@ -403,6 +404,7 @@ fn unknown_model_or_effort_is_rejected() {
         model: Some("gpt-6-luna".into()),
         effort: Some("ultra".into()),
         permission_mode: None,
+        instructions: None,
     };
     assert_eq!(
         validate_settings(&change, &models),
@@ -412,6 +414,7 @@ fn unknown_model_or_effort_is_rejected() {
         model: Some("canterlot-no-such-model".into()),
         effort: None,
         permission_mode: None,
+        instructions: None,
     };
     assert_eq!(
         validate_settings(&change, &models),
@@ -421,6 +424,7 @@ fn unknown_model_or_effort_is_rejected() {
         model: Some("gpt-6-luna".into()),
         effort: Some("high".into()),
         permission_mode: None,
+        instructions: None,
     };
     assert_eq!(validate_settings(&change, &models), Ok(()));
     assert_eq!(

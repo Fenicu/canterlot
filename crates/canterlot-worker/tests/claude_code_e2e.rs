@@ -3,8 +3,9 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, StartSpec, Transmission,
-        TransmitOutcome, claude_code::version::CliVersion,
+        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, InstructionMode,
+        InstructionSpec, StartSpec, Transmission, TransmitOutcome,
+        claude_code::version::CliVersion,
     },
     config::ClaudeCodeConfig,
     containment::TreeContainment,
@@ -133,7 +134,13 @@ impl Fake {
             model: "haiku".into(),
             effort: "low".into(),
             permission_mode: "ask".into(),
-            instruction_profile: "owner".into(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
         };
         Self {
             dir,
@@ -157,7 +164,7 @@ impl Fake {
             .expect("adapter event timeout")
     }
     async fn send(&mut self, t: &Transmission) {
-        match tokio::time::timeout(WAIT, self.adapter.transmit(t))
+        match tokio::time::timeout(WAIT, self.adapter.transmit(t, &self.group))
             .await
             .unwrap()
         {
@@ -711,7 +718,7 @@ async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);
     f.start().await;
     assert!(matches!(
-        tokio::time::timeout(WAIT, f.adapter.transmit(&tx(Uuid::now_v7())))
+        tokio::time::timeout(WAIT, f.adapter.transmit(&tx(Uuid::now_v7()), &f.group))
             .await
             .unwrap(),
         TransmitOutcome::Undetermined
@@ -766,7 +773,7 @@ time.sleep(30)
     .await
     .unwrap();
     assert!(matches!(
-        tokio::time::timeout(WAIT, f.adapter.transmit(&tx(Uuid::now_v7())))
+        tokio::time::timeout(WAIT, f.adapter.transmit(&tx(Uuid::now_v7()), &f.group))
             .await
             .unwrap(),
         TransmitOutcome::Undetermined

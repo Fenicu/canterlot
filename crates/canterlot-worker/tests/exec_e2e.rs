@@ -286,7 +286,6 @@ impl Fixture {
         fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
         let config = WorkerConfig {
             machine: Default::default(),
-            instruction_profiles: Vec::new(),
             attachments: Default::default(),
             claude_code: None,
             codex: None,

@@ -691,8 +691,13 @@ impl CodexAdapter {
             .ok_or(AdapterError::StartFailed("model_list_failed"))?
             .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
         self.models = model_entries(&models);
+        // Пресеты инструкций — задача 7 плана 2c: пока поддерживается только «Как у владельца».
+        let profile_name = match spec.instructions.mode {
+            crate::adapter::InstructionMode::Owner => "owner",
+            _ => return Err(AdapterError::StartFailed("instructions_unsupported")),
+        };
         let instructions = thread::compose_developer_instructions(
-            &spec.instruction_profile,
+            profile_name,
             &self.owner,
             mcp::SERVER_INSTRUCTIONS,
         )
@@ -1011,7 +1016,11 @@ impl Adapter for CodexAdapter {
         )
     }
 
-    async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome {
+    async fn transmit(
+        &mut self,
+        input: &Transmission,
+        _group: &dyn Containment,
+    ) -> TransmitOutcome {
         if self.proc.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }

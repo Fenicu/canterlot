@@ -38,7 +38,7 @@ pub struct StartSpec {
     pub model: String,
     pub effort: String,
     pub permission_mode: String,
-    pub instruction_profile: String,
+    pub instructions: InstructionSpec,
 }
 #[derive(Debug)]
 pub struct Started {
@@ -213,6 +213,124 @@ pub struct SettingsChange {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    pub instructions: Option<InstructionSpec>,
+}
+
+/// Инструкции агента на исполнение: режим, текст и версия пресета.
+/// Текст — данные уровня сообщения: в Debug только длина.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InstructionMode {
+    Clean,
+    Owner,
+    Preset,
+}
+
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct InstructionSpec {
+    pub mode: InstructionMode,
+    pub text: String,
+    pub preset_id: Option<Uuid>,
+    pub revision: u64,
+    pub title: String,
+}
+
+impl fmt::Debug for InstructionSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("InstructionSpec")
+            .field("mode", &self.mode)
+            .field("preset_id", &self.preset_id)
+            .field("revision", &self.revision)
+            .field("text_bytes", &self.text.len())
+            .finish()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InstructionError {
+    UnknownMode,
+    EmptyText,
+    TextTooLarge,
+    UnexpectedText,
+    BadPresetId,
+}
+
+impl InstructionSpec {
+    /// Разбирает proto-инструкции хаба; `None` — старший хаб, значит «Как у владельца».
+    pub fn from_proto(
+        proto: Option<&canterlot_proto::worker::v1::Instructions>,
+    ) -> Result<Self, InstructionError> {
+        use canterlot_proto::limits::MAX_PRESET_TEXT_BYTES;
+        let Some(proto) = proto else {
+            return Ok(Self {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            });
+        };
+        match proto.mode.as_str() {
+            "clean" | "owner" => {
+                if !proto.text.is_empty() || !proto.preset_id.is_empty() || proto.revision != 0 {
+                    return Err(InstructionError::UnexpectedText);
+                }
+                Ok(Self {
+                    mode: if proto.mode == "clean" {
+                        InstructionMode::Clean
+                    } else {
+                        InstructionMode::Owner
+                    },
+                    text: String::new(),
+                    preset_id: None,
+                    revision: 0,
+                    title: String::new(),
+                })
+            }
+            "preset" => {
+                if proto.text.trim().is_empty() {
+                    return Err(InstructionError::EmptyText);
+                }
+                if proto.text.len() > MAX_PRESET_TEXT_BYTES {
+                    return Err(InstructionError::TextTooLarge);
+                }
+                Ok(Self {
+                    mode: InstructionMode::Preset,
+                    text: proto.text.clone(),
+                    preset_id: Some(
+                        proto
+                            .preset_id
+                            .parse()
+                            .map_err(|_| InstructionError::BadPresetId)?,
+                    ),
+                    revision: proto.revision,
+                    title: proto.title.clone(),
+                })
+            }
+            _ => Err(InstructionError::UnknownMode),
+        }
+    }
+
+    pub fn to_proto(&self) -> canterlot_proto::worker::v1::Instructions {
+        canterlot_proto::worker::v1::Instructions {
+            mode: match self.mode {
+                InstructionMode::Clean => "clean".into(),
+                InstructionMode::Owner => "owner".into(),
+                InstructionMode::Preset => "preset".into(),
+            },
+            text: self.text.clone(),
+            preset_id: self.preset_id.map(|id| id.to_string()).unwrap_or_default(),
+            revision: self.revision,
+            title: self.title.clone(),
+        }
+    }
+
+    /// Одинаковый эффект: режим, пресет и версия совпали; текст из хаба всегда свежий.
+    pub fn same_effect(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.preset_id == other.preset_id
+            && self.revision == other.revision
+    }
 }
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct LocalFile {
@@ -305,6 +423,17 @@ pub enum AdapterEvent {
         code: Option<i32>,
         signal: Option<i32>,
     },
+    /// Агент перезапущен между ходами со сменой инструкций; нативный ID тот же.
+    CliRestarted {
+        cli_pid: u32,
+        cli_start_ticks: u64,
+    },
+    /// Агент вызывает инструмент canterlot через хаб; аргументы — данные сообщения.
+    AgentCall {
+        call_id: Uuid,
+        tool: String,
+        arguments: serde_json::Value,
+    },
 }
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -369,6 +498,37 @@ impl fmt::Debug for AdapterEvent {
                 .field("code", code)
                 .field("signal", signal)
                 .finish(),
+            Self::CliRestarted {
+                cli_pid,
+                cli_start_ticks,
+            } => f
+                .debug_struct("CliRestarted")
+                .field("cli_pid", cli_pid)
+                .field("cli_start_ticks", cli_start_ticks)
+                .finish(),
+            Self::AgentCall { call_id, tool, .. } => f
+                .debug_struct("AgentCall")
+                .field("call_id", call_id)
+                .field("tool", tool)
+                .finish_non_exhaustive(),
+        }
+    }
+}
+
+/// Ответ хаба на вызов инструмента агента; результат — данные сообщения.
+pub enum AgentCallResult {
+    Ok(serde_json::Value),
+    Err { code: String, message: String },
+}
+
+impl fmt::Debug for AgentCallResult {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Ok(_) => f.debug_tuple("Ok").field(&"[REDACTED]").finish(),
+            Self::Err { code, .. } => f
+                .debug_struct("Err")
+                .field("code", code)
+                .finish_non_exhaustive(),
         }
     }
 }
@@ -504,7 +664,7 @@ pub trait Adapter: Send {
     fn validate_transmission(&self, _input: &Transmission) -> Result<(), &'static str> {
         Ok(())
     }
-    async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome;
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome;
     async fn deliver_decision(
         &mut self,
         request_id: &str,
@@ -512,6 +672,7 @@ pub trait Adapter: Send {
     ) -> DecisionOutcome;
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
+    async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}
     async fn close(&mut self, mode: CloseMode, group: &dyn Containment)
     -> Result<(), AdapterError>;
 }

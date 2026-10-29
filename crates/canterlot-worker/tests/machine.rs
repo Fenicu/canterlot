@@ -174,18 +174,15 @@ fn metrics_message_has_only_whitelisted_labels_and_stays_small() {
     assert!(!format!("{sample:?}").contains(dir.path().to_str().unwrap()));
 }
 fn config(dir: &Path) -> WorkerConfig {
-    toml::from_str(&format!("hub_url='https://localhost'\nca_cert='ca'\ntoken_file='token'\nmachine_id='{}'\ninstallation_id='{}'\nrestore_generation='{}'\ndata_dir='{}'\n[execution]\nallowed_workdir_roots=['{}']\n[[instruction_profiles]]\nname='custom'\ntitle='Особый'\ndescription='Профиль'\nharnesses=['synthetic']",Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7(),dir.display(),dir.join(".").display())).unwrap()
+    toml::from_str(&format!("hub_url='https://localhost'\nca_cert='ca'\ntoken_file='token'\nmachine_id='{}'\ninstallation_id='{}'\nrestore_generation='{}'\ndata_dir='{}'\n[execution]\nallowed_workdir_roots=['{}']",Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7(),dir.display(),dir.join(".").display())).unwrap()
 }
 #[test]
-fn report_always_contains_the_owner_profile_and_canonical_roots() {
+fn report_carries_an_empty_profile_list_and_canonical_roots() {
+    // Профили инструкций воркера убраны планом 2c: хаб хранит пресеты, поле `profiles`
+    // отправляется пустым до резервирования в задаче 3.
     let dir = fixture();
     let report = build_report(&config(dir.path()), &catalog());
-    assert_eq!(
-        report.profiles.iter().filter(|p| p.name == "owner").count(),
-        1
-    );
-    assert_eq!(report.profiles[0].title, "Как у владельца");
-    assert!(report.profiles.iter().any(|p| p.name == "custom"));
+    assert!(report.profiles.is_empty());
     assert_eq!(
         report.allowed_roots,
         vec![dir.path().canonicalize().unwrap().to_string_lossy()]

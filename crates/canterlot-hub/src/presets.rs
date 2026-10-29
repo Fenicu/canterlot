@@ -10,14 +10,13 @@
 //! событиях, снимках и списках его нет.
 
 use crate::{conversations, idempotency};
+use canterlot_proto::limits::MAX_PRESET_TEXT_BYTES;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool, Row};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-/// Максимальный размер текста пресета в байтах (сообщение уровня payload).
-pub const MAX_PRESET_TEXT_BYTES: usize = 65_536;
 /// Максимальная длина названия пресета в символах.
 pub const MAX_PRESET_TITLE_CHARS: usize = 80;
 /// Максимальная длина описания пресета в символах.

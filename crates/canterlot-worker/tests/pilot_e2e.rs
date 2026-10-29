@@ -465,7 +465,6 @@ impl Pilot {
             machine: MachineConfig {
                 metrics_interval: options.metrics_interval,
             },
-            instruction_profiles: vec![],
             attachments: Default::default(),
             claude_code: None,
             codex: None,
@@ -796,13 +795,9 @@ async fn pilot_flow_over_http_and_wss(pool: PgPool) {
         .collect();
     assert_eq!(harnesses["synthetic"], "claude");
     assert_eq!(harnesses["synthetic-codex"], "codex");
-    assert!(
-        machine["profiles"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|profile| profile["name"] == "owner")
-    );
+    // Профили инструкций воркера убраны планом 2c: хаб хранит пресеты,
+    // поле `profiles` отправляется пустым до резервирования в задаче 3.
+    assert!(machine["profiles"].as_array().unwrap().is_empty());
 
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;

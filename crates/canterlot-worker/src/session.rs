@@ -32,7 +32,7 @@ use crate::{
 
 mod data;
 
-pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1"];
+pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1", "instructions_v1"];
 
 #[derive(Clone)]
 pub struct CachedLimits {
@@ -262,6 +262,27 @@ pub struct GrpcMediaSink {
     client: WorkerDataClient<
         tonic::service::interceptor::InterceptedService<tonic::transport::Channel, Bearer>,
     >,
+}
+
+/// Вызовы инструментов агента в хаб через канал данных: то же соединение, что и вложения.
+pub struct GrpcAgentCaller {
+    client: WorkerDataClient<
+        tonic::service::interceptor::InterceptedService<tonic::transport::Channel, Bearer>,
+    >,
+}
+
+#[async_trait::async_trait]
+impl crate::exec::AgentCaller for GrpcAgentCaller {
+    async fn call(
+        &self,
+        request: canterlot_proto::worker::v1::AgentCallRequest,
+    ) -> Result<canterlot_proto::worker::v1::AgentCallResponse, tonic::Status> {
+        self.client
+            .clone()
+            .agent_call(request)
+            .await
+            .map(|response| response.into_inner())
+    }
 }
 
 fn put_error(status: &Status) -> PutError {
@@ -496,6 +517,7 @@ impl Worker {
         if let Some(manager) = self.manager.take() {
             manager.set_attachment_source(None);
             manager.set_media_sink(None);
+            manager.set_agent_caller(None);
             manager.shutdown().await;
         }
         let closed = self.store.close().await;
@@ -541,11 +563,7 @@ impl Worker {
             sender,
             self.config.attachments.clone(),
         );
-        manager.configure_adapters(
-            self.config.claude_code.clone(),
-            self.config.codex.clone(),
-            self.config.instruction_profiles.clone(),
-        );
+        manager.configure_adapters(self.config.claude_code.clone(), self.config.codex.clone());
         manager
             .startup_verify()
             .await
@@ -609,6 +627,7 @@ impl Worker {
             }
             self.manager.as_ref().unwrap().set_attachment_source(None);
             self.manager.as_ref().unwrap().set_media_sink(None);
+            self.manager.as_ref().unwrap().set_agent_caller(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
             if let WorkerError::Hub { code, .. } = &error {
@@ -908,6 +927,14 @@ impl Worker {
                 std::sync::Arc::new(GrpcMediaSink {
                     client: media.clone(),
                 }) as std::sync::Arc<dyn MediaSink>
+            }));
+        self.manager
+            .as_ref()
+            .unwrap()
+            .set_agent_caller(pilot.then(|| {
+                std::sync::Arc::new(GrpcAgentCaller {
+                    client: data.clone(),
+                }) as std::sync::Arc<dyn crate::exec::AgentCaller>
             }));
         self.manager.as_ref().unwrap().set_enabled(exec_enabled);
         self.transition(SessionState::Reconciling);

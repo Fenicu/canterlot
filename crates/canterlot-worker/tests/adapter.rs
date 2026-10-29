@@ -5,8 +5,9 @@ use std::{path::PathBuf, time::Duration};
 
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, BlockKind, CloseMode, InterruptOutcome, StartSpec, Transmission,
-        TransmitOutcome, registry, synthetic::SyntheticAdapter,
+        Adapter, AdapterEvent, BlockKind, CloseMode, InstructionMode, InstructionSpec,
+        InterruptOutcome, StartSpec, Transmission, TransmitOutcome, registry,
+        synthetic::SyntheticAdapter,
     },
     containment::{Containment, Termination, TreeContainment},
 };
@@ -101,7 +102,13 @@ async fn adapter_child() {
         .into(),
         effort: "medium".into(),
         permission_mode: "owner".into(),
-        instruction_profile: "owner".into(),
+        instructions: InstructionSpec {
+            mode: InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
     };
     let make = |profile: &str| {
         SyntheticAdapter::new(profile)
@@ -134,7 +141,10 @@ async fn adapter_child() {
         "wave_w_member_signals_use_supplied_containment" => {
             assert!(matches!(
                 adapter
-                    .transmit(&input(r#"{"synthetic":[{"delta":"x"},{"hang":true}]}"#))
+                    .transmit(
+                        &input(r#"{"synthetic":[{"delta":"x"},{"hang":true}]}"#),
+                        &group
+                    )
                     .await,
                 TransmitOutcome::Accepted(_)
             ));
@@ -158,11 +168,11 @@ async fn adapter_child() {
         }
         "oversized_input_is_rejected_before_writing" => {
             assert!(matches!(
-                adapter.transmit(&input(&"x".repeat(262145))).await,
+                adapter.transmit(&input(&"x".repeat(262145)), &group).await,
                 TransmitOutcome::Rejected(_)
             ));
             assert!(matches!(
-                adapter.transmit(&input("valid")).await,
+                adapter.transmit(&input("valid"), &group).await,
                 TransmitOutcome::Accepted(_)
             ));
         }
@@ -175,7 +185,7 @@ async fn adapter_child() {
         "exit_script_reports_code" => {
             assert!(matches!(
                 adapter
-                    .transmit(&input(r#"{"synthetic":[{"exit":7}]}"#))
+                    .transmit(&input(r#"{"synthetic":[{"exit":7}]}"#), &group)
                     .await,
                 TransmitOutcome::Undetermined
             ));
@@ -222,7 +232,10 @@ async fn adapter_child() {
             let before = tokio::time::Instant::now();
             assert!(matches!(
                 adapter
-                    .transmit(&input(r#"{"synthetic":[{"hang":true},{"delta":"later"}]}"#))
+                    .transmit(
+                        &input(r#"{"synthetic":[{"hang":true},{"delta":"later"}]}"#),
+                        &group
+                    )
                     .await,
                 TransmitOutcome::Undetermined
             ));
@@ -263,7 +276,7 @@ async fn adapter_child() {
                     .unwrap();
                 let transmission = input(r#"{"synthetic":[{"delta":"begin"},{"hang":true}]}"#);
                 assert!(matches!(
-                    adapter.transmit(&transmission).await,
+                    adapter.transmit(&transmission, &group).await,
                     TransmitOutcome::Accepted(_)
                 ));
                 assert!(matches!(
@@ -288,7 +301,7 @@ async fn adapter_child() {
                             .any(|m| m.pid == started.cli_pid)
                     );
                     assert!(matches!(
-                        adapter.transmit(&input("second")).await,
+                        adapter.transmit(&input("second"), &group).await,
                         TransmitOutcome::Accepted(_)
                     ));
                 } else {
@@ -305,7 +318,7 @@ async fn adapter_child() {
             }
         }
         name if PILOT_CASES.contains(&name) => {
-            pilot_case(name, &mut adapter, &directory, &input).await;
+            pilot_case(name, &mut adapter, &group, &directory, &input).await;
         }
         _ => {
             let text = match case.as_str() {
@@ -320,7 +333,7 @@ async fn adapter_child() {
                 _ => panic!("unknown case"),
             };
             let transmission = input(&text);
-            let proof = adapter.transmit(&transmission).await;
+            let proof = adapter.transmit(&transmission, &group).await;
             assert!(
                 matches!(proof, TransmitOutcome::Accepted(ref p) if p.command_id == transmission.command_id && p.kind == "cli_accepted")
             );
@@ -473,6 +486,7 @@ const PILOT_CASES: &[&str] = &[
 async fn pilot_case(
     name: &str,
     adapter: &mut SyntheticAdapter,
+    group: &dyn Containment,
     directory: &tempfile::TempDir,
     input: &impl Fn(&str) -> Transmission,
 ) {
@@ -536,6 +550,7 @@ async fn pilot_case(
     if name == "settings_in_transmission_change_the_model_before_the_turn" {
         transmission.settings = Some(SettingsChange {
             model: Some("synthetic-small".into()),
+            instructions: None,
             ..Default::default()
         });
     }
@@ -543,25 +558,29 @@ async fn pilot_case(
         for setting in [
             SettingsChange {
                 model: Some("invalid".into()),
+                instructions: None,
                 ..Default::default()
             },
             SettingsChange {
                 effort: Some("invalid".into()),
+                instructions: None,
                 ..Default::default()
             },
             SettingsChange {
                 permission_mode: Some("invalid".into()),
+                instructions: None,
                 ..Default::default()
             },
             SettingsChange {
                 model: Some("synthetic-small".into()),
                 effort: Some("high".into()),
                 permission_mode: None,
+                instructions: None,
             },
         ] {
             transmission.settings = Some(setting);
             assert!(
-                matches!(adapter.transmit(&transmission).await, TransmitOutcome::Rejected(reason) if reason == "settings_unavailable")
+                matches!(adapter.transmit(&transmission, group).await, TransmitOutcome::Rejected(reason) if reason == "settings_unavailable")
             );
         }
         transmission.settings = None;
@@ -584,7 +603,7 @@ async fn pilot_case(
         .unwrap()
         .as_millis() as u64;
     assert!(matches!(
-        adapter.transmit(&transmission).await,
+        adapter.transmit(&transmission, group).await,
         TransmitOutcome::Accepted(_)
     ));
     let mut events = vec![];

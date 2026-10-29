@@ -322,6 +322,15 @@ impl WorkerData for Service {
         Err(Status::unimplemented("media_not_supported_by_test_hub"))
     }
 
+    async fn agent_call(
+        &self,
+        _request: Request<canterlot_proto::worker::v1::AgentCallRequest>,
+    ) -> Result<Response<canterlot_proto::worker::v1::AgentCallResponse>, Status> {
+        Err(Status::unimplemented(
+            "agent_calls_not_supported_by_test_hub",
+        ))
+    }
+
     type DataStream = ReceiverStream<Result<DataDown, Status>>;
     async fn data(
         &self,
@@ -438,7 +447,6 @@ impl ProtocolHub {
         });
         let config = WorkerConfig {
             machine: Default::default(),
-            instruction_profiles: Vec::new(),
             attachments: Default::default(),
             claude_code: None,
             codex: None,

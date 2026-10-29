@@ -41,9 +41,9 @@ use super::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterContext, AdapterEvent, CloseMode, DecisionOutcome, InterruptOutcome,
-        LimitFact, LimitWindow, LocalFile, MediaSource, Phase, SettingsChange, StartSpec,
-        Transmission, TransmitOutcome, registry_with,
+        Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, DecisionOutcome,
+        InstructionSpec, InterruptOutcome, LimitFact, LimitWindow, LocalFile, MediaSource, Phase,
+        SettingsChange, StartSpec, Transmission, TransmitOutcome, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -51,6 +51,8 @@ use crate::{
 
 /// Картинки в подготовке и ожидании загрузки на одно исполнение; сверх этого событие пропускается.
 const MAX_PENDING_MEDIA: usize = 32;
+/// Ожидание ответа хаба на вызов инструмента агента.
+const AGENT_CALL_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct MediaJob {
     media_id: Uuid,
@@ -102,6 +104,7 @@ enum StopCause {
     },
     StartCancelled,
     StartFailed,
+    InvalidInstructions,
     Exited {
         code: Option<i32>,
         signal: Option<i32>,
@@ -157,6 +160,8 @@ struct Supervisor {
     pending_interrupts: Vec<(String, u32)>,
     interrupted: bool,
     aborting_turn: bool,
+    /// Вызовы инструментов агента в ожидании ответа хаба: срок ответа.
+    agent_calls: HashMap<Uuid, Instant>,
     conns: HashMap<u64, Conn>,
     attached: Option<u64>,
     next_conn: u64,
@@ -275,6 +280,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         pending_interrupts: Vec::new(),
         interrupted: false,
         aborting_turn: false,
+        agent_calls: HashMap::new(),
         conns: HashMap::new(),
         attached: None,
         next_conn: 0,
@@ -444,6 +450,9 @@ impl Supervisor {
         if let Some(at) = self.attach_deadline.filter(|_| self.attached.is_none()) {
             consider(at);
         }
+        if let Some(earliest) = self.agent_calls.values().min() {
+            consider(*earliest);
+        }
         wake
     }
 
@@ -451,6 +460,7 @@ impl Supervisor {
         self.sj.flush()?;
         self.drive_stop().await?;
         self.try_transmit().await?;
+        self.expire_agent_calls().await;
         self.sj.flush()?;
         self.pump_shipping();
         if let Lifecycle::Draining { outcome } = &self.lifecycle
@@ -642,8 +652,87 @@ impl Supervisor {
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
             down::Msg::MediaResult(result) => self.on_media_result(result)?,
             down::Msg::DeliverDecision(decision) => self.on_decision(decision).await?,
+            down::Msg::AgentCallResult(result) => self.on_agent_call_result(result).await,
         }
         Ok(())
+    }
+
+    async fn on_agent_call_result(
+        &mut self,
+        result: canterlot_proto::worker::ipc::AgentCallResult,
+    ) {
+        let Ok(call_id) = Uuid::parse_str(&result.call_id) else {
+            return;
+        };
+        if self.agent_calls.remove(&call_id).is_none() {
+            return;
+        }
+        let Some(adapter) = self.adapter.as_mut() else {
+            return;
+        };
+        let outcome = if result.error_code.is_empty() {
+            match serde_json::from_str(&result.result_json) {
+                Ok(value) => AgentCallResult::Ok(value),
+                Err(_) => AgentCallResult::Err {
+                    code: "hub_error".into(),
+                    message: "некорректный ответ хаба".into(),
+                },
+            }
+        } else {
+            AgentCallResult::Err {
+                code: result.error_code,
+                message: result.error_message,
+            }
+        };
+        adapter.agent_call_result(call_id, outcome).await;
+    }
+
+    /// Просроченные вызовы получают `hub_timeout`; вызывается после каждого события.
+    async fn expire_agent_calls(&mut self) {
+        let now = Instant::now();
+        let expired: Vec<Uuid> = self
+            .agent_calls
+            .iter()
+            .filter(|(_, at)| **at <= now)
+            .map(|(id, _)| *id)
+            .collect();
+        for call_id in expired {
+            self.agent_calls.remove(&call_id);
+            if let Some(adapter) = self.adapter.as_mut() {
+                tracing::info!(
+                    kind = "agent_call",
+                    call_id = %call_id,
+                    outcome = "hub_timeout",
+                    "agent call timed out"
+                );
+                adapter
+                    .agent_call_result(
+                        call_id,
+                        AgentCallResult::Err {
+                            code: "hub_timeout".into(),
+                            message: "хаб не ответил вовремя".into(),
+                        },
+                    )
+                    .await;
+            }
+        }
+    }
+
+    /// При остановке все ожидающие вызовы получают `supervisor_stopping`.
+    async fn fail_agent_calls(&mut self) {
+        for call_id in std::mem::take(&mut self.agent_calls).keys() {
+            if let Some(adapter) = self.adapter.as_mut() {
+                adapter
+                    .agent_call_result(
+                        *call_id,
+                        AgentCallResult::Err {
+                            code: "supervisor_stopping".into(),
+                            message: "сопровождение останавливается".into(),
+                        },
+                    )
+                    .await;
+            }
+        }
     }
 
     fn decision_result(&mut self, body: Body) -> Result<(), SupervisorError> {
@@ -930,6 +1019,17 @@ impl Supervisor {
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
             .into();
+        let instructions = match InstructionSpec::from_proto(start.instructions.as_ref()) {
+            Ok(instructions) => instructions,
+            Err(_) => {
+                tracing::warn!(
+                    kind = "start_failed",
+                    reason = "invalid_instructions",
+                    "adapter start failed"
+                );
+                return self.begin_stop(StopCause::InvalidInstructions, false);
+            }
+        };
         let spec = StartSpec {
             execution_id: self.spec.execution_id,
             generation: self.spec.generation,
@@ -940,7 +1040,7 @@ impl Supervisor {
             model: start.model,
             effort: start.effort,
             permission_mode: start.permission_mode,
-            instruction_profile: start.instruction_profile,
+            instructions,
         };
         let outcome = timeout(
             timers.ready_deadline,
@@ -1007,6 +1107,29 @@ impl Supervisor {
         let (Some(id), Some(text)) = (parsed, input_text(&command)) else {
             return self.send(ack(command.command_id, command.dispatch_attempt, "invalid"));
         };
+        let settings = match &command.kind {
+            Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => input
+                .settings
+                .as_ref()
+                .map(|settings| {
+                    Ok::<_, crate::adapter::InstructionError>(SettingsChange {
+                        model: (!settings.model.is_empty()).then(|| settings.model.clone()),
+                        effort: (!settings.effort.is_empty()).then(|| settings.effort.clone()),
+                        permission_mode: (!settings.permission_mode.is_empty())
+                            .then(|| settings.permission_mode.clone()),
+                        instructions: settings
+                            .instructions
+                            .as_ref()
+                            .map(|preset| InstructionSpec::from_proto(Some(preset)))
+                            .transpose()?,
+                    })
+                })
+                .transpose(),
+            _ => Ok(None),
+        };
+        let Ok(settings) = settings else {
+            return self.send(ack(command.command_id, command.dispatch_attempt, "invalid"));
+        };
         let attempt = command.dispatch_attempt;
         let key = (id, attempt);
         let result = if command.execution_id != self.spec.execution_id.to_string()
@@ -1053,18 +1176,7 @@ impl Supervisor {
                             image: f.image,
                         })
                         .collect(),
-                    settings: match &command.kind {
-                        Some(canterlot_proto::worker::v1::command::Kind::DeliverInput(input)) => {
-                            input.settings.as_ref().map(|settings| SettingsChange {
-                                model: (!settings.model.is_empty()).then(|| settings.model.clone()),
-                                effort: (!settings.effort.is_empty())
-                                    .then(|| settings.effort.clone()),
-                                permission_mode: (!settings.permission_mode.is_empty())
-                                    .then(|| settings.permission_mode.clone()),
-                            })
-                        }
-                        _ => None,
-                    },
+                    settings,
                 },
             );
             self.queue.push_back(key);
@@ -1265,7 +1377,7 @@ impl Supervisor {
             let Some(adapter) = self.adapter.as_mut() else {
                 break;
             };
-            let outcome = adapter.transmit(&transmission).await;
+            let outcome = adapter.transmit(&transmission, &*self.containment).await;
             match outcome {
                 TransmitOutcome::Accepted(_) => {
                     self.faults.abort_at("after_accepted_before_record");
@@ -1544,6 +1656,49 @@ impl Supervisor {
                 self.active_turn = None;
                 self.begin_stop(StopCause::Exited { code, signal }, false)?;
             }
+            AdapterEvent::CliRestarted {
+                cli_pid,
+                cli_start_ticks,
+            } => {
+                // Перезапуск CLI между ходами: нативный ID тот же, владелец следит за новым pid.
+                if let Some(started) = self.started.as_mut() {
+                    started.pid = cli_pid;
+                    started.start_ticks = cli_start_ticks;
+                    let info = started.clone();
+                    self.send(up::Msg::CliStarted(info));
+                }
+            }
+            AdapterEvent::AgentCall {
+                call_id,
+                tool,
+                arguments,
+            } => {
+                use canterlot_proto::limits::MAX_AGENT_CALL_BYTES;
+                let arguments_json = serde_json::to_string(&arguments).unwrap_or_default();
+                if arguments_json.len() > MAX_AGENT_CALL_BYTES {
+                    if let Some(adapter) = self.adapter.as_mut() {
+                        adapter
+                            .agent_call_result(
+                                call_id,
+                                AgentCallResult::Err {
+                                    code: "too_large".into(),
+                                    message: "аргументы больше лимита".into(),
+                                },
+                            )
+                            .await;
+                    }
+                    return Ok(());
+                }
+                self.agent_calls
+                    .insert(call_id, Instant::now() + AGENT_CALL_TIMEOUT);
+                self.send(up::Msg::AgentCall(
+                    canterlot_proto::worker::ipc::AgentCall {
+                        call_id: call_id.to_string(),
+                        tool,
+                        arguments_json,
+                    },
+                ));
+            }
         }
         Ok(())
     }
@@ -1681,6 +1836,7 @@ impl Supervisor {
             if let Lifecycle::Stopping(state) = &mut self.lifecycle {
                 state.closed = true;
             }
+            self.fail_agent_calls().await;
             if let Some(adapter) = self.adapter.as_mut() {
                 let mode = if force {
                     CloseMode::Force
@@ -1764,6 +1920,9 @@ impl Supervisor {
                 ("stopped", "start_cancelled", "stopped")
             }
             StopCause::StartFailed => ("failed", "start_failed", "start_failed"),
+            StopCause::InvalidInstructions => {
+                ("failed", "invalid_instructions", "invalid_instructions")
+            }
             StopCause::AuthRequired => ("failed", "auth_required", "auth_required"),
             StopCause::CliIncompatible => ("failed", "cli_incompatible", "cli_incompatible"),
             StopCause::ContextExhausted => ("failed", "context_exhausted", "context_exhausted"),

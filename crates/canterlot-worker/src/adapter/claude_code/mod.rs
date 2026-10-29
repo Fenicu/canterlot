@@ -474,9 +474,11 @@ impl Adapter for ClaudeCodeAdapter {
             .native_conversation_id
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
-        let instructions_file = (spec.instruction_profile != "owner"
-            && !spec.instruction_profile.is_empty())
-        .then(|| self.exec_dir.join("profile-source.md"));
+        // Пресеты инструкций — задача 6 плана 2c: пока поддерживается только «Как у владельца».
+        let profile_name = match spec.instructions.mode {
+            InstructionMode::Owner => "owner",
+            _ => return Err(AdapterError::StartFailed("instructions_unsupported")),
+        };
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
             exec_dir: &self.exec_dir,
@@ -489,8 +491,8 @@ impl Adapter for ClaudeCodeAdapter {
             model: &spec.model,
             effort: &spec.effort,
             permission_mode: &spec.permission_mode,
-            instruction_profile: &spec.instruction_profile,
-            instructions_file: instructions_file.as_deref(),
+            instruction_profile: profile_name,
+            instructions_file: None,
         };
         // The exec manager stages a named Task-1 profile before starting the supervisor.
         let broker = Broker::bind(&self.exec_dir).await?;
@@ -526,7 +528,11 @@ impl Adapter for ClaudeCodeAdapter {
             .ok_or("cli_not_started")?
             .validate(input.settings.as_ref())
     }
-    async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome {
+    async fn transmit(
+        &mut self,
+        input: &Transmission,
+        _group: &dyn Containment,
+    ) -> TransmitOutcome {
         if self.cli.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }

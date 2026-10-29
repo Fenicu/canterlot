@@ -6,11 +6,12 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
+    time::Duration,
 };
 
 use canterlot_proto::worker::v1::{
-    Command, ExecutionObservation, JournalCursor, JournalRecord, StartExecution, command::Kind,
-    record_body::Body,
+    AgentCallRequest, Command, ExecutionObservation, JournalCursor, JournalRecord, StartExecution,
+    command::Kind, record_body::Body,
 };
 use tokio::{
     sync::{OnceCell, mpsc, watch},
@@ -57,6 +58,96 @@ pub enum ExecError {
     Shutdown,
 }
 
+/// Вызов инструмента агента в хаб через канал данных; реализацию ставит сессия.
+#[async_trait::async_trait]
+pub trait AgentCaller: Send + Sync {
+    async fn call(
+        &self,
+        request: AgentCallRequest,
+    ) -> Result<canterlot_proto::worker::v1::AgentCallResponse, tonic::Status>;
+}
+
+/// Срок RPC вызова инструмента агента по каналу данных.
+pub const AGENT_CALL_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Выполняет вызов инструмента агента от имени исполнения: заполняет идентификатор
+/// и поколение из состояния управляющей службы. Без сессии хаба — быстрый отказ;
+/// `UNIMPLEMENTED` старшего хаба — отдельная ошибка. В журнал попадают только
+/// инструмент, идентификатор вызова и код исхода, не аргументы и не результат.
+pub async fn agent_call(
+    caller: Option<Arc<dyn AgentCaller>>,
+    execution_id: Uuid,
+    generation: u64,
+    call_id: Uuid,
+    tool: String,
+    arguments: serde_json::Value,
+) -> crate::adapter::AgentCallResult {
+    use crate::adapter::AgentCallResult;
+    let outcome = |result: AgentCallResult| {
+        let outcome = match &result {
+            AgentCallResult::Ok(_) => "ok",
+            AgentCallResult::Err { code, .. } => code.as_str(),
+        };
+        tracing::info!(
+            kind = "agent_call",
+            tool = %tool,
+            call_id = %call_id,
+            outcome = outcome,
+            "agent call finished"
+        );
+        result
+    };
+    let Some(caller) = caller else {
+        return outcome(AgentCallResult::Err {
+            code: "hub_unreachable".into(),
+            message: "нет связи с хабом".into(),
+        });
+    };
+    let arguments_json = serde_json::to_string(&arguments).unwrap_or_default();
+    let response = tokio::time::timeout(
+        AGENT_CALL_RPC_TIMEOUT,
+        caller.call(AgentCallRequest {
+            execution_id: execution_id.to_string(),
+            generation,
+            call_id: call_id.to_string(),
+            tool: tool.clone(),
+            arguments_json,
+        }),
+    )
+    .await;
+    match response {
+        Err(_) => outcome(AgentCallResult::Err {
+            code: "hub_timeout".into(),
+            message: "хаб не ответил вовремя".into(),
+        }),
+        Ok(Err(status)) => outcome(AgentCallResult::Err {
+            code: if status.code() == tonic::Code::Unimplemented {
+                "hub_unsupported"
+            } else {
+                "hub_error"
+            }
+            .into(),
+            message: "хаб отклонил вызов".into(),
+        }),
+        Ok(Ok(response)) => {
+            if response.error_code.is_empty() {
+                match serde_json::from_str(&response.result_json) {
+                    Ok(value) => outcome(AgentCallResult::Ok(value)),
+                    Err(_) => outcome(AgentCallResult::Err {
+                        code: "hub_error".into(),
+                        message: "некорректный ответ хаба".into(),
+                    }),
+                }
+            } else {
+                outcome(AgentCallResult::Err {
+                    code: response.error_code,
+                    message: response.error_message,
+                })
+            }
+        }
+    }
+}
+
 pub(crate) struct ExecInfo {
     pub conversation_id: Uuid,
     pub generation: u64,
@@ -74,7 +165,6 @@ pub(crate) struct ExecInfo {
 pub(crate) struct AdapterConfig {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
-    pub profiles: Vec<crate::config::ProfileConfig>,
 }
 
 pub(crate) struct Shared {
@@ -84,6 +174,8 @@ pub(crate) struct Shared {
     pub attachment_config: WorkerAttachmentsConfig,
     pub attachment_source: watch::Sender<Option<Arc<dyn AttachmentSource>>>,
     pub media_sink: watch::Sender<Option<Arc<dyn MediaSink>>>,
+    /// Клиент канала данных для вызовов инструментов агента; `None` без сессии хаба.
+    pub agent_caller: watch::Sender<Option<Arc<dyn AgentCaller>>>,
     pub fetch_slots: Arc<tokio::sync::Semaphore>,
     pub store: StoreClient,
     pub relay: mpsc::Sender<SjRelay>,
@@ -265,6 +357,7 @@ impl ExecutionManager {
                 attachment_config,
                 attachment_source: watch::channel(None).0,
                 media_sink: watch::channel(None).0,
+                agent_caller: watch::channel(None).0,
                 store,
                 relay,
                 enabled: AtomicBool::new(true),
@@ -301,13 +394,14 @@ impl ExecutionManager {
         &self,
         claude_code: Option<crate::config::ClaudeCodeConfig>,
         codex: Option<crate::config::CodexConfig>,
-        profiles: Vec<crate::config::ProfileConfig>,
     ) {
-        *self.shared.adapters.lock().expect("adapter config lock") = AdapterConfig {
-            claude_code,
-            codex,
-            profiles,
-        };
+        *self.shared.adapters.lock().expect("adapter config lock") =
+            AdapterConfig { claude_code, codex };
+    }
+
+    /// Клиент вызовов инструментов агента; `None` на время разрыва.
+    pub fn set_agent_caller(&self, caller: Option<Arc<dyn AgentCaller>>) {
+        self.shared.agent_caller.send_replace(caller);
     }
 
     pub fn set_attachment_source(&self, source: Option<Arc<dyn AttachmentSource>>) {

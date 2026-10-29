@@ -42,7 +42,6 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
     let store = WorkerStore::open(&data_dir).unwrap();
     let config = WorkerConfig {
         machine: Default::default(),
-        instruction_profiles: Vec::new(),
         attachments: Default::default(),
         claude_code: None,
         codex: None,

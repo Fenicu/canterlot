@@ -142,7 +142,6 @@ impl Fixture {
             restore_generation: hub.installation.restore_generation,
             data_dir: root.path().join("store"),
             machine: Default::default(),
-            instruction_profiles: vec![],
             attachments: canterlot_worker::config::WorkerAttachmentsConfig {
                 fetch_attempts: 2,
                 fetch_retry: Duration::from_millis(10),

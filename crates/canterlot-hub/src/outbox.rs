@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ControlDown, DeliverInput, Interrupt, SettingsOverride,
+        CancelInput, Command, ControlDown, DeliverInput, Instructions, Interrupt, SettingsOverride,
         StartExecution, StopExecution, WithdrawInput, command, control_down,
     },
 };
@@ -70,6 +70,33 @@ struct SettingsPayload {
     model: Option<String>,
     effort: Option<String>,
     permission_mode: Option<String>,
+    /// Снимок инструкций пресета (задача 3 кладёт сюда объект `instructions`).
+    #[serde(default)]
+    instructions: Option<InstructionPayload>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionPayload {
+    mode: String,
+    #[serde(default)]
+    text: String,
+    #[serde(default)]
+    preset_id: String,
+    #[serde(default)]
+    revision: u64,
+    #[serde(default)]
+    title: String,
+}
+
+fn instructions_proto(payload: &Option<InstructionPayload>) -> Option<Instructions> {
+    payload.as_ref().map(|preset| Instructions {
+        mode: preset.mode.clone(),
+        text: preset.text.clone(),
+        preset_id: preset.preset_id.clone(),
+        revision: preset.revision,
+        title: preset.title.clone(),
+    })
 }
 
 fn text(payload: &Value, key: &str) -> Result<String, OutboxError> {
@@ -150,6 +177,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                     model: s.model.unwrap_or_default(),
                     effort: s.effort.unwrap_or_default(),
                     permission_mode: s.permission_mode.unwrap_or_default(),
+                    instructions: instructions_proto(&s.instructions),
                 }),
             })
         }
@@ -190,6 +218,21 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
+            instructions: row
+                .payload
+                .get("instructions")
+                .map(|value| {
+                    serde_json::from_value::<InstructionPayload>(value.clone())
+                        .map(|preset| Instructions {
+                            mode: preset.mode,
+                            text: preset.text,
+                            preset_id: preset.preset_id,
+                            revision: preset.revision,
+                            title: preset.title,
+                        })
+                        .map_err(|_| OutboxError::InvalidCommand)
+                })
+                .transpose()?,
             capabilities: vec![],
         }),
         "cancel_input" => {

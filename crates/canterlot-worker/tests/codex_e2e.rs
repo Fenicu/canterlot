@@ -219,7 +219,13 @@ impl Fake {
             model: "gpt-6-luna".into(),
             effort: "low".into(),
             permission_mode: "ask".into(),
-            instruction_profile: "owner".into(),
+            instructions: canterlot_worker::adapter::InstructionSpec {
+                mode: canterlot_worker::adapter::InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
         };
         Self {
             dir,
@@ -261,7 +267,7 @@ impl Fake {
     async fn start_turn(&mut self, text: &str) -> Uuid {
         let t = self.tx(text);
         let id = t.command_id;
-        match tokio::time::timeout(WAIT, self.adapter.transmit(&t))
+        match tokio::time::timeout(WAIT, self.adapter.transmit(&t, &self.group))
             .await
             .unwrap()
         {
@@ -688,7 +694,13 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
             model: "gpt-6-luna".into(),
             effort: "low".into(),
             permission_mode: "ask".into(),
-            instruction_profile: "owner".into(),
+            instructions: canterlot_worker::adapter::InstructionSpec {
+                mode: canterlot_worker::adapter::InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
         };
         spec.workdir = dir.path().into();
         let group = TreeContainment::new().unwrap();
@@ -728,7 +740,13 @@ async fn start_fails_when_app_server_exits_at_once() {
         model: "gpt-6-luna".into(),
         effort: "low".into(),
         permission_mode: "ask".into(),
-        instruction_profile: "owner".into(),
+        instructions: canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
     };
     let group = TreeContainment::new().unwrap();
     match tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -1092,7 +1110,7 @@ async fn merged_turn_response_is_required_and_undetermined() {
         files: vec![],
         settings: None,
     };
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t))
+    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
         .await
         .unwrap()
     {
@@ -1108,7 +1126,7 @@ async fn merged_turn_response_is_required_and_undetermined() {
         files: vec![],
         settings: None,
     };
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t2))
+    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t2, &fake.group))
         .await
         .unwrap()
     {
@@ -1152,7 +1170,7 @@ async fn process_exit_mid_turn_is_undetermined_then_exited() {
         settings: None,
     };
     // Ответ на turn/start прочитан, дальше процесс умер: исход не определён.
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t))
+    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
         .await
         .unwrap()
     {
@@ -1244,7 +1262,7 @@ async fn broken_pipe_is_undetermined() {
         settings: None,
     };
     // Ответ прочитан, дальше процесс умер в ожидании доказательства.
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t))
+    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
         .await
         .unwrap()
     {
@@ -1265,7 +1283,7 @@ async fn broken_pipe_is_undetermined() {
         files: vec![],
         settings: None,
     };
-    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t))
+    match tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
         .await
         .unwrap()
     {
@@ -1340,7 +1358,13 @@ async fn live_smoke() {
         model: model.clone(),
         effort: "low".into(),
         permission_mode: "ask".into(),
-        instruction_profile: "owner".into(),
+        instructions: canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
     };
     let started = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
         .await
@@ -1353,12 +1377,16 @@ async fn live_smoke() {
 
     async fn send(
         adapter: &mut Box<dyn Adapter>,
+        group: &TreeContainment,
         transmission: Transmission,
     ) -> (Uuid, Vec<AdapterEvent>) {
         let id = transmission.command_id;
-        match tokio::time::timeout(Duration::from_secs(120), adapter.transmit(&transmission))
-            .await
-            .expect("transmit in time")
+        match tokio::time::timeout(
+            Duration::from_secs(120),
+            adapter.transmit(&transmission, group),
+        )
+        .await
+        .expect("transmit in time")
         {
             TransmitOutcome::Accepted(proof) => assert_eq!(proof.command_id, id),
             other => panic!("live delivery: {other:?}"),
@@ -1412,6 +1440,7 @@ async fn live_smoke() {
     // Текст без инструментов.
     let (_, events) = send(
         &mut adapter,
+        &group,
         text("Reply with exactly CANTERLOT-SMOKE. Do not use tools."),
     )
     .await;
@@ -1422,9 +1451,12 @@ async fn live_smoke() {
         "Ask me one question with options Red and Blue using request_user_input, header Color.",
     );
     let qid = transmission.command_id;
-    match tokio::time::timeout(Duration::from_secs(120), adapter.transmit(&transmission))
-        .await
-        .expect("transmit in time")
+    match tokio::time::timeout(
+        Duration::from_secs(120),
+        adapter.transmit(&transmission, &group),
+    )
+    .await
+    .expect("transmit in time")
     {
         TransmitOutcome::Accepted(_) => {}
         other => panic!("live delivery: {other:?}"),
@@ -1454,11 +1486,15 @@ async fn live_smoke() {
         model: None,
         effort: None,
         permission_mode: Some("read_only".into()),
+        instructions: None,
     });
     let aid = approval.command_id;
-    match tokio::time::timeout(Duration::from_secs(120), adapter.transmit(&approval))
-        .await
-        .expect("transmit in time")
+    match tokio::time::timeout(
+        Duration::from_secs(120),
+        adapter.transmit(&approval, &group),
+    )
+    .await
+    .expect("transmit in time")
     {
         TransmitOutcome::Accepted(_) => {}
         other => panic!("live delivery: {other:?}"),
@@ -1486,15 +1522,18 @@ async fn live_smoke() {
         size: PIXEL_PNG.len() as u64,
         image: true,
     }];
-    let (_, events) = send(&mut adapter, image).await;
+    let (_, events) = send(&mut adapter, &group, image).await;
     assert!(!Fake::final_text(&events).is_empty());
     eprintln!("SMOKE: localImage turn ok (attachments OPEN closed)");
     // Прерывание долгого сна.
     let sleeping = text("Run the shell command `sleep 30` and then reply DONE.");
     let sid = sleeping.command_id;
-    match tokio::time::timeout(Duration::from_secs(120), adapter.transmit(&sleeping))
-        .await
-        .expect("transmit in time")
+    match tokio::time::timeout(
+        Duration::from_secs(120),
+        adapter.transmit(&sleeping, &group),
+    )
+    .await
+    .expect("transmit in time")
     {
         TransmitOutcome::Accepted(_) => {}
         other => panic!("live delivery: {other:?}"),
@@ -1512,6 +1551,7 @@ async fn live_smoke() {
     // Кодовое слово и возобновление по id.
     let (_, events) = send(
         &mut adapter,
+        &group,
         text("Remember this code word: ZEBRA-SMOKE. Reply OK."),
     )
     .await;
@@ -1539,7 +1579,13 @@ async fn live_smoke() {
         model,
         effort: "low".into(),
         permission_mode: "ask".into(),
-        instruction_profile: "owner".into(),
+        instructions: canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
     };
     let resumed = tokio::time::timeout(Duration::from_secs(90), adapter.start(&spec, &group))
         .await
@@ -1551,6 +1597,7 @@ async fn live_smoke() {
     );
     let (_, events) = send(
         &mut adapter,
+        &group,
         text("What is the code word I asked you to remember? Reply with it only."),
     )
     .await;
