@@ -82,7 +82,9 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
           max_input_text_bytes: 262_144,
           queue_limit: 100,
           upload_chunk_bytes: 8_388_608
-        }
+        },
+        defaults: { crunch_resume_text: 'продолжи с места остановки' },
+        limit_thresholds: { stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 }
       }
     });
   });
@@ -207,4 +209,181 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     }
     await route.fallback();
   });
+
+  const keys = new Map<string, unknown>();
+
+  await page.route(/\/api\/v1\/conversations(?:\?|#|$)/, async (route) => {
+    const url = new URL(route.request().url());
+    if (url.pathname !== '/api/v1/conversations') return route.fallback();
+    if (route.request().method() === 'GET') {
+      const q = url.searchParams.get('q') ?? '';
+      const items = [...api.list.values()].filter((item) => item.title.includes(q));
+      await route.fulfill({ headers: headers(), json: { counts: api.counts, items, next_cursor: null } });
+      return;
+    }
+    if (route.request().method() === 'POST') {
+      const key = route.request().headers()['idempotency-key'] ?? '';
+      const prior = key ? keys.get(key) : undefined;
+      if (prior) {
+        await route.fulfill({ status: 201, headers: headers(), json: prior });
+        return;
+      }
+      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string };
+      const id = api.id();
+      const created = { conversation_id: id };
+      if (key) keys.set(key, created);
+      const row = {
+        id,
+        title: 'Новая сессия',
+        title_source: 'auto',
+        color: null,
+        pinned: false,
+        archived: false,
+        groups: [],
+        machine: { id: body.machine_id ?? api.id(), name: 'workstation' },
+        harness: { id: body.harness ?? 'claude', title: 'Claude Code', provider: 'claude' },
+        workdir: body.workdir ?? '/',
+        created_at: new Date().toISOString(),
+        model: body.model ?? '',
+        effort: body.effort ?? '',
+        permission_mode: 'default',
+        activity: { state: 'idle' as const, evidence: {}, since: new Date().toISOString() },
+        unread_count: 0,
+        queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+        crunch: { enabled: false },
+        last_activity_at: null
+      };
+      api.list.set(id, row);
+      api.details.set(id, { ...row });
+      api.bindConversation(id);
+      await route.fulfill({ status: 201, headers: headers(), json: created });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.route('**/api/v1/conversations/*', async (route) => {
+    if (route.request().method() !== 'PATCH') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const body = route.request().postDataJSON() as { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean };
+    const row = api.list.get(id);
+    if (!row) return route.fallback();
+    if (body.archived && !body.force && row.crunch.enabled) {
+      await route.fulfill({
+        status: 409,
+        headers: headers(),
+        json: {
+          error: {
+            code: 'archive_active',
+            message: 'Сессия ещё работает',
+            scope: 'delivery',
+            retry: 'explicit_new_operation',
+            correlation_id: '00000000-0000-4000-8000-0000000000e3',
+            details: { reasons: ['crunch'] }
+          }
+        }
+      });
+      return;
+    }
+    if (body.title !== undefined && body.title !== null) {
+      row.title = body.title;
+      row.title_source = 'user';
+    }
+    if (body.color !== undefined) row.color = body.color;
+    if (body.pinned !== undefined && body.pinned !== null) row.pinned = body.pinned;
+    if (body.archived !== undefined && body.archived !== null) row.archived = body.archived;
+    api.counts = recount(api);
+    hub.append('conversations', {
+      kind: 'conversation_updated',
+      conversation_id: id,
+      payload: {
+        id: row.id,
+        title: row.title,
+        title_source: row.title_source === 'auto' ? 'auto' : 'user',
+        color: row.color,
+        pinned: row.pinned,
+        archived: row.archived,
+        groups: row.groups,
+        machine: row.machine,
+        harness: row.harness,
+        workdir: row.workdir,
+        created_at: row.created_at,
+        counts: api.counts
+      }
+    });
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: row });
+  });
+
+  await page.route('**/api/v1/conversations/*/groups', async (route) => {
+    if (route.request().method() !== 'PUT') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const body = route.request().postDataJSON() as { group_ids?: string[] };
+    const row = api.list.get(id);
+    if (!row) return route.fallback();
+    row.groups = body.group_ids ?? [];
+    api.counts = recount(api);
+    hub.append('conversations', {
+      kind: 'conversation_updated',
+      conversation_id: id,
+      payload: {
+        id: row.id,
+        title: row.title,
+        title_source: 'user',
+        color: row.color,
+        pinned: row.pinned,
+        archived: row.archived,
+        groups: row.groups,
+        machine: row.machine,
+        harness: row.harness,
+        workdir: row.workdir,
+        created_at: row.created_at,
+        counts: api.counts
+      }
+    });
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: { group_ids: row.groups } });
+  });
+
+  await page.route('**/api/v1/groups', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const body = route.request().postDataJSON() as { name?: string };
+    const group = { id: api.id(), name: body.name ?? 'Группа', position: api.groups.length, created_at: new Date().toISOString() };
+    api.groups = [...api.groups, group];
+    hub.append('conversations', { kind: 'group_changed', payload: { group, groups: api.groups, counts: api.counts } });
+    hub.flush();
+    await route.fulfill({ status: 201, headers: headers(), json: group });
+  });
+
+  await page.route('**/api/v1/groups/*', async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    if (route.request().method() === 'PATCH') {
+      const body = route.request().postDataJSON() as { name?: string | null; position?: number | null };
+      api.groups = api.groups.map((group) => group.id === id ? { ...group, name: body.name ?? group.name, position: body.position ?? group.position } : group);
+    } else if (route.request().method() === 'DELETE') {
+      api.groups = api.groups.filter((group) => group.id !== id);
+    } else {
+      return route.fallback();
+    }
+    hub.append('conversations', { kind: 'group_changed', payload: { group: null, groups: api.groups, counts: api.counts } });
+    hub.flush();
+    await route.fulfill({ headers: headers(), json: { id } });
+  });
+
+  await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
+    await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
+  });
+}
+
+function recount(api: FakeHubApi) {
+  const items = [...api.list.values()];
+  return {
+    all: items.filter((item) => !item.archived).length,
+    pinned: items.filter((item) => item.pinned && !item.archived).length,
+    archived: items.filter((item) => item.archived).length,
+    groups: api.counts.groups.map((group) => ({
+      ...group,
+      count: items.filter((item) => !item.archived && item.groups.includes(group.id)).length
+    }))
+  };
 }

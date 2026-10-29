@@ -44,6 +44,8 @@ export async function openChatSession(id: string): Promise<ChatStore> {
   const existing = chats.get(id);
   if (existing) return existing;
   const runtime = await browserRuntime();
+  const raced = chats.get(id);
+  if (raced) return raced;
   const chat = new ChatStore(id, {
     api: {
       async conversationSnapshot(conversationId) {

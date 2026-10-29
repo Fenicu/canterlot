@@ -13,5 +13,5 @@
 </section>
 
 <style>
-  .screen { height: 100dvh; display: flex; flex-direction: column; min-width: 0; }
+  .screen { flex: 1; height: auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
 </style>

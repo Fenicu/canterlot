@@ -7,9 +7,11 @@ export function opRequest(op: Pick<Op, 'kind' | 'key' | 'conversationId' | 'body
 } {
 	const conversation = op.conversationId ?? '_';
 	const url =
-		op.kind === 'scheduled'
-			? `/api/v1/conversations/${conversation}/scheduled`
-			: `/api/v1/conversations/${conversation}/inputs`;
+		op.kind === 'create_conversation'
+			? '/api/v1/conversations'
+			: op.kind === 'scheduled'
+				? `/api/v1/conversations/${conversation}/scheduled`
+				: `/api/v1/conversations/${conversation}/inputs`;
 	return {
 		url,
 		init: {

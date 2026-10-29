@@ -25,7 +25,7 @@
 </script>
 
 <svelte:head><title>Сессия</title></svelte:head>
-<main id="main">
+<main id="main" class="chat-route">
   {#if chat}
     <ChatScreen {chat} />
   {:else if error}
@@ -34,3 +34,6 @@
     <p>Открываю сессию</p>
   {/if}
 </main>
+<style>
+  .chat-route { height: 100%; min-height: 0; display: flex; flex-direction: column; }
+</style>

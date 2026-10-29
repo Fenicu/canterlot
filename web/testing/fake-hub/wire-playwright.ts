@@ -4,6 +4,10 @@ import type { FakeHub } from './hub';
 
 export async function playwrightWire(hub: FakeHub, page: Page): Promise<void> {
   await page.routeWebSocket('**/api/v1/ws', socket => {
+    if (!hub.acceptConnections) {
+      socket.close({ code: 1011 });
+      return;
+    }
     const session = hub.attach({
       clock: { now: () => Date.now(), schedule: (fn, ms) => { const id = setTimeout(fn, ms); return () => clearTimeout(id); } },
       message: op => socket.send(JSON.stringify(op)), close: code => socket.close({ code: code === 1006 ? 1011 : code })

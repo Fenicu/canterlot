@@ -14,6 +14,17 @@ describe('opRequest', () => {
 		expect(request.init.method).toBe('POST');
 	});
 
+	it('posts_a_new_conversation_to_the_collection', () => {
+		const request = opRequest({
+			kind: 'create_conversation',
+			key: 'key-3',
+			body: { machine_id: 'm', workdir: '/srv', harness: 'claude', model: 'opus', effort: 'low', start: true }
+		});
+		expect(request.url).toBe('/api/v1/conversations');
+		expect(new Headers(request.init.headers).get('Idempotency-Key')).toBe('key-3');
+		expect(JSON.parse(String(request.init.body)).start).toBe(true);
+	});
+
 	it('posts_a_scheduled_message_to_the_scheduled_endpoint', () => {
 		const request = opRequest({
 			kind: 'scheduled',

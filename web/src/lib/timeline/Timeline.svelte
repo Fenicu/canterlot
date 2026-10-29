@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, untrack } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { announce } from '$lib/a11y/announce';
   import { clock } from '$lib/clock';
@@ -32,7 +32,7 @@
   let lock: { key: string; top: number; until: number } | null = null;
   let ownedTop: number | null = null;
   let seen = 0;
-  let settling = 0;
+  let settling = false;
   let measuring = false;
   let queued: { key: string; height: number; node?: HTMLElement }[] = [];
   const PIN_PX = 48;
@@ -196,20 +196,28 @@
     lock = { key: anchor.key, top: node.getBoundingClientRect().top - el.getBoundingClientRect().top, until: performance.now() + 1500 };
   });
 
-  function settle(): void {
-    if (!lock || !host || !controller) return;
+  async function settle(): Promise<void> {
+    if (!lock || !host || !controller || settling) return;
     if (performance.now() > lock.until) {
       lock = null;
       return;
     }
-    if (settling > 6) return;
-    const node = rowNode(host, lock.key);
-    if (!node) return;
-    const drift = node.getBoundingClientRect().top - host.getBoundingClientRect().top - lock.top;
-    if (Math.abs(drift) < 1) return;
-    settling += 1;
-    scrollTo(host.scrollTop + drift);
-    settling -= 1;
+    settling = true;
+    try {
+      for (let pass = 0; pass < 8; pass++) {
+        // Высоты и распорки должны попасть в DOM до следующего измерения якоря.
+        await tick();
+        if (!lock || !host || !controller) return;
+        const node = rowNode(host, lock.key);
+        if (!node) return;
+        const drift = node.getBoundingClientRect().top - host.getBoundingClientRect().top - lock.top;
+        if (Math.abs(drift) < 1) return;
+        scrollTo(host.scrollTop + drift);
+        layout(rows, host.scrollTop, host.clientHeight || 1);
+      }
+    } finally {
+      settling = false;
+    }
   }
 
   function scrollTo(top: number): void {
