@@ -433,6 +433,36 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 
 Оболочка и список (`web/src/lib/shell`, `web/src/lib/screens/sessions`): телефон показывает один экран с нижней навигацией, планшет список и чат, стол добавляет панель поручений. Список группирует сессии, ищет на сервере и показывает полосу лимитов по порогам из конфигурации. Новая сессия создаётся отдельным запросом с тем же ключом при повторе.
 
+### Модули `web/src/lib`
+
+- `api/` — типизированный клиент OpenAPI (`client.ts`), HTTP-транспорт (`http.ts`), разбор и классификация ошибок (`errors.ts`), конфигурация и шлюз авторизации (`gate.ts`), сгенерированные схемы (`generated/`).
+- `a11y/` — единый live region скринридера `announce.ts` (`aria-live="polite"`, `role="status"`) для озвучивания навигации и событий без дублирующих анонсеров.
+- `app/` — корень композиции приложения (`runtime.ts`), связывающий хранилища, менеджер WSS, транспорт, черновики и загрузку вложений.
+- `composer/` — компонент и модель поля ввода (`Composer.svelte`, `model.svelte.ts`), правила Enter на телефоне и десктопе, лоток вложений (`AttachmentTray.svelte`), лист отложенной отправки (`SendLater.svelte`) и кнопка прерывания (`InterruptButton.svelte`).
+- `drafts/` — сохранение черновиков ввода (`store.ts`, `DraftStore`) с транзакционной записью в IndexedDB и синхронным зеркалом в `localStorage`.
+- `format/` — русскоязычные форматтеры дат, относительного времени, длительностей и размеров байтов (`ru.ts`).
+- `ops/` — журнал клиентских операций `OpJournal` (`journal.ts`, `op.svelte.ts`) и сборка HTTP-запроса операции с ключом повтора (`request.ts`).
+- `perf/` — опциональный легковесный замер производительности и журнал метрик (`probe.ts`), выключенный по умолчанию.
+- `render/` — безопасный потоковый рендеринг Markdown (`markdown.ts`, `streamingMarkdown.ts`), подсветка синтаксиса highlight.js (`highlight.ts`), очистка ANSI (`ansi.ts`) и санитайзинг DOMPurify (`sanitize.ts`, `Html.svelte`).
+- `screens/` — экраны PWA; экран чата (`screens/chat/ChatScreen.svelte`) собирает шапку, ленту сообщений, поле ввода и боковые панели.
+- `shell/` — оболочка приложения: раскладка телефон / планшет / десктоп (`AppShell.svelte`, `layout.ts`), навигация (`Nav.svelte`), баннеры связи (`ConnectionBanner.svelte`) и диалог истёкшей сессии (`SessionExpired.svelte`).
+- `storage/` — изоляция хранилища IndexedDB по `owner_id` пользователя (`owner.ts`) и типизированная обёртка транзакций `idb.ts`.
+- `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
+- `sync/` — постоянное WSS-соединение `ConnectionManager` (`connection.ts`), подписки на скоупы (`scope.ts`), дочитка пропусков по HTTP (`transport.ts`, `batcher.ts`) и экспоненциальный backoff (`backoff.ts`).
+- `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), полоса очереди (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
+- `ui/` — библиотека дизайн-компонентов на CSS-токенах: `Button`, `IconButton`, `Sheet`, `Disclosure`, `Pill`, `Segmented`, `StageTrack`, `TopBar`, `BottomNav`, `icons.ts`.
+- `uploads/` — возобновляемая загрузка вложений частями (`manager.ts`, `uploader.ts`, `patch.ts`) с параллельным расчётом SHA-256 в веб-воркере (`hasher.ts`, `hash.worker.ts`).
+
+### Вспомогательные скрипты
+
+- `web/scripts/check-tokens.mjs` (`check-tokens`) — проверка стилей `web/src` на прямое использование hex-цветов, пикселей и таймингов в обход дизайн-токенов (`npm run lint:tokens`).
+- `web/scripts/token-lint.mjs` (`token-lint`) — ядро линтера токенов на PostCSS и TypeScript: валидация CSS-переменных, длин, анимаций и запрет неразрешённых эмодзи.
+- `web/scripts/eslint-rules.mjs` (`eslint-rules`) — локальное правило ESLint `iconLabel`, требующее обязательный непустой атрибут `label` у компонентов `IconButton`.
+- `web/scripts/gen-api.mjs` (`gen-api`) — генерация TypeScript-типов из `docs/api/openapi.json` и схем событий `docs/api/events.schema.json` в `web/src/lib/api/generated/`.
+- `web/scripts/kit-announcer.mjs` (`kit-announcer`) — препроцессор сборки Svelte, вырезающий встроенный элемент `svelte-announcer` SvelteKit для исключения конфликтов с `a11y/announce.ts`.
+- `scripts/spdx.py` — токенизатор, парсер сложных выражений лицензий SPDX и валидатор зависимостей по списку `ALLOWLIST`.
+- `scripts/test-licenses.py` — юнит-тесты парсинга SPDX-выражений и проверки допустимости лицензий проекта.
+
 ```bash
 cd web
 npm ci
