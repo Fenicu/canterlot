@@ -1095,6 +1095,7 @@ export interface components {
             permission_modes: string[];
             provider: string;
             settings_midsession: boolean;
+            settings_midsession_effort: boolean;
             title: string;
         };
         History: {

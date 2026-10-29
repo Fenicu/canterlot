@@ -851,6 +851,7 @@ fn pilot_records_roundtrip() {
             title: "Клод".into(),
             images: true,
             settings_midsession: true,
+            settings_midsession_effort: Some(true),
             permission_modes: vec!["bypass".into()],
             models: vec![ModelInfo {
                 id: "model".into(),

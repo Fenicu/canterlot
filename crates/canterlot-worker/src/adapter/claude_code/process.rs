@@ -196,7 +196,9 @@ impl CliProcess {
         let args = build_args(spec, cfg)?;
         let envs = build_env(std::env::vars_os());
         let mut cmd = TokioCommand::new(spec.executable);
-        cmd.args(&args)
+        cmd.env_clear()
+            .kill_on_drop(true)
+            .args(&args)
             .current_dir(spec.workdir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -306,6 +308,9 @@ impl CliProcess {
     pub fn stderr_tail(&self) -> Vec<u8> {
         self.stderr_ring.lock().unwrap().clone()
     }
+    pub fn close_stdin(&mut self) {
+        self.stdin.take();
+    }
     pub fn signal(&self, sig: Signal) -> std::io::Result<()> {
         use rustix::process::{Pid, Signal as RSignal, kill_process};
         let pid = Pid::from_raw(self.pid as i32).ok_or_else(|| std::io::Error::other("bad pid"))?;
@@ -315,6 +320,9 @@ impl CliProcess {
             Signal::Kill => RSignal::KILL,
         };
         kill_process(pid, rsignal).map_err(std::io::Error::other)
+    }
+    pub fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
     }
     pub async fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.child.wait().await

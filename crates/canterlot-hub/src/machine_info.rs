@@ -57,8 +57,8 @@ pub async fn apply_report(
             .iter()
             .map(|m| json!({"id":m.id,"title":m.title,"efforts":m.efforts}))
             .collect();
-        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models) values($1,$2,$3,$4,$5,$6,$7,$8)")
-  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).execute(&mut *conn).await?;
+        sqlx::query("insert into machine_harnesses(machine_id,harness,provider,title,images,settings_midsession,permission_modes,models,settings_midsession_effort) values($1,$2,$3,$4,$5,$6,$7,$8,$9)")
+  .bind(machine_id).bind(&h.harness).bind(&h.provider).bind(&h.title).bind(h.images).bind(h.settings_midsession).bind(json!(h.permission_modes)).bind(json!(models)).bind(h.settings_midsession_effort.unwrap_or(true)).execute(&mut *conn).await?;
     }
     for p in &report.profiles {
         sqlx::query("insert into machine_profiles(machine_id,name,title,description,harnesses) values($1,$2,$3,$4,$5)").bind(machine_id).bind(&p.name).bind(&p.title).bind(&p.description).bind(json!(p.harnesses)).execute(&mut *conn).await?;

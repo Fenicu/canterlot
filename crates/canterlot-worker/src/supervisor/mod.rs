@@ -46,6 +46,8 @@ pub struct SupervisorSpec {
     pub ipc_socket: Option<PathBuf>,
     #[serde(default)]
     pub timers: SupervisorTimers,
+    #[serde(default)]
+    pub claude_code: Option<crate::config::ClaudeCodeConfig>,
 }
 
 fn load(exec_dir: &Path) -> Result<(SupervisorSpec, Vec<u8>), SupervisorError> {

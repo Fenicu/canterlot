@@ -380,44 +380,73 @@ pub struct HarnessCatalog {
     pub title: &'static str,
     pub images: bool,
     pub settings_midsession: bool,
+    pub settings_midsession_effort: bool,
     pub permission_modes: Vec<&'static str>,
     pub models: Vec<ModelCatalog>,
 }
 pub fn catalog() -> Vec<HarnessCatalog> {
+    catalog_with(None, None)
+}
+
+pub fn catalog_with(
+    cfg: Option<&crate::config::ClaudeCodeConfig>,
+    cli: Option<&claude_code::version::CliVersion>,
+) -> Vec<HarnessCatalog> {
+    let mut entries = Vec::new();
+    if cfg.is_some() && cli.is_some() {
+        entries.push(HarnessCatalog {
+            harness: "claude_code",
+            provider: "claude",
+            title: "Claude Code",
+            images: true,
+            settings_midsession: true,
+            settings_midsession_effort: false,
+            permission_modes: vec!["owner", "ask", "bypass", "read_only"],
+            models: [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
+                .into_iter()
+                .map(|(id, title)| ModelCatalog {
+                    id,
+                    title,
+                    efforts: vec!["low", "medium", "high", "xhigh", "max"],
+                })
+                .collect(),
+        });
+    }
     #[cfg(feature = "synthetic-adapter")]
-    return [
-        "synthetic",
-        "synthetic-exit-on-interrupt",
-        "synthetic-codex",
-    ]
-    .into_iter()
-    .map(|harness| HarnessCatalog {
-        harness,
-        provider: canterlot_proto::harness::provider_of(harness).expect("known harness"),
-        title: match harness {
-            "synthetic-codex" => "Синтетический Codex",
-            "synthetic-exit-on-interrupt" => "Синтетический с выходом при прерывании",
-            _ => "Синтетический",
-        },
-        images: true,
-        settings_midsession: true,
-        permission_modes: vec!["owner", "ask", "bypass", "read_only"],
-        models: vec![
-            ModelCatalog {
-                id: "synthetic-large",
-                title: "Большая синтетическая",
-                efforts: vec!["low", "medium", "high"],
+    entries.extend(
+        [
+            "synthetic",
+            "synthetic-exit-on-interrupt",
+            "synthetic-codex",
+        ]
+        .into_iter()
+        .map(|harness| HarnessCatalog {
+            harness,
+            provider: canterlot_proto::harness::provider_of(harness).expect("known harness"),
+            title: match harness {
+                "synthetic-codex" => "Синтетический Codex",
+                "synthetic-exit-on-interrupt" => "Синтетический с выходом при прерывании",
+                _ => "Синтетический",
             },
-            ModelCatalog {
-                id: "synthetic-small",
-                title: "Малая синтетическая",
-                efforts: vec!["low", "medium"],
-            },
-        ],
-    })
-    .collect();
-    #[cfg(not(feature = "synthetic-adapter"))]
-    Vec::new()
+            images: true,
+            settings_midsession: true,
+            settings_midsession_effort: true,
+            permission_modes: vec!["owner", "ask", "bypass", "read_only"],
+            models: vec![
+                ModelCatalog {
+                    id: "synthetic-large",
+                    title: "Большая синтетическая",
+                    efforts: vec!["low", "medium", "high"],
+                },
+                ModelCatalog {
+                    id: "synthetic-small",
+                    title: "Малая синтетическая",
+                    efforts: vec!["low", "medium"],
+                },
+            ],
+        }),
+    );
+    entries
 }
 #[derive(Clone, Copy)]
 pub enum CloseMode {
@@ -426,6 +455,8 @@ pub enum CloseMode {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
+    #[error("{0}")]
+    StartFailed(&'static str),
     #[error("adapter I/O failed")]
     Io(#[from] std::io::Error),
     #[error("containment failed")]
@@ -471,16 +502,55 @@ pub fn registry_with_deadline(
     profile: &str,
     transmit_deadline: Duration,
 ) -> Option<Box<dyn Adapter>> {
+    registry_with(
+        profile,
+        &AdapterContext {
+            transmit_deadline,
+            exec_dir: PathBuf::new(),
+            claude_code: None,
+        },
+    )
+}
+
+pub struct AdapterContext {
+    pub transmit_deadline: Duration,
+    pub exec_dir: PathBuf,
+    pub claude_code: Option<crate::config::ClaudeCodeConfig>,
+}
+
+pub fn known_harness(profile: &str) -> bool {
+    if profile == "claude_code" {
+        return true;
+    }
+    #[cfg(feature = "synthetic-adapter")]
+    if matches!(
+        profile,
+        "synthetic" | "synthetic-exit-on-interrupt" | "synthetic-codex"
+    ) {
+        return true;
+    }
+    false
+}
+
+pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adapter>> {
+    if profile == "claude_code" {
+        return ctx.claude_code.clone().map(|cfg| {
+            Box::new(claude_code::ClaudeCodeAdapter::new(
+                cfg,
+                ctx.exec_dir.clone(),
+                ctx.transmit_deadline,
+            )) as Box<dyn Adapter>
+        });
+    }
     #[cfg(feature = "synthetic-adapter")]
     if matches!(
         profile,
         "synthetic" | "synthetic-exit-on-interrupt" | "synthetic-codex"
     ) {
         return Some(Box::new(
-            synthetic::SyntheticAdapter::new(profile).with_transmit_deadline(transmit_deadline),
+            synthetic::SyntheticAdapter::new(profile).with_transmit_deadline(ctx.transmit_deadline),
         ));
     }
-    let _ = (profile, transmit_deadline);
     None
 }
 

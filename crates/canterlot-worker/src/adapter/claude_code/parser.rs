@@ -246,7 +246,7 @@ impl Parser {
     }
 
     fn answer_frame(value: &serde_json::Value) -> Option<Parsed> {
-        let uuids: Vec<Uuid> = value
+        let mut uuids: Vec<Uuid> = value
             .get("user_message_uuids")
             .and_then(serde_json::Value::as_array)
             .map(|list| {
@@ -256,6 +256,14 @@ impl Parser {
                     .collect()
             })
             .unwrap_or_default();
+        if uuids.is_empty()
+            && let Some(id) = value
+                .get("user_message_uuid")
+                .and_then(serde_json::Value::as_str)
+                .and_then(|id| Uuid::parse_str(id).ok())
+        {
+            uuids.push(id);
+        }
         if uuids.is_empty() {
             None
         } else {

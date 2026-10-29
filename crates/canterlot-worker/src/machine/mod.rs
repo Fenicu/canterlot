@@ -52,6 +52,7 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
                 title: c.title.into(),
                 images: c.images,
                 settings_midsession: c.settings_midsession,
+                settings_midsession_effort: Some(c.settings_midsession_effort),
                 permission_modes: c.permission_modes.iter().map(|s| (*s).into()).collect(),
                 models: c
                     .models

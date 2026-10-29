@@ -524,6 +524,7 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
             title: "Тестовый".into(),
             images: true,
             settings_midsession: true,
+            settings_midsession_effort: Some(true),
             permission_modes: vec!["bypass".into()],
             models: ["synthetic-small", "synthetic-large"]
                 .into_iter()

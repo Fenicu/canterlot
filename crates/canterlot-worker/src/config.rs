@@ -312,7 +312,7 @@ pub struct ProfileConfig {
     pub instructions_file: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ClaudeCodeConfig {
     #[serde(default = "default_claude_executable")]

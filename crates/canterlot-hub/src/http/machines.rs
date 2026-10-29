@@ -46,6 +46,7 @@ pub struct HarnessView {
     pub provider: String,
     pub images: bool,
     pub settings_midsession: bool,
+    pub settings_midsession_effort: bool,
     #[schema(value_type=Vec<String>)]
     pub permission_modes: Value,
     #[schema(value_type=Vec<ModelView>)]
@@ -101,6 +102,7 @@ pub(crate) async fn load_stored(
                     provider: h.try_get("provider")?,
                     images: h.try_get("images")?,
                     settings_midsession: h.try_get("settings_midsession")?,
+                    settings_midsession_effort: h.try_get("settings_midsession_effort")?,
                     permission_modes: h.try_get("permission_modes")?,
                     models: h.try_get("models")?,
                 })

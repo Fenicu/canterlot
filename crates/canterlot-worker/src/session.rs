@@ -340,6 +340,7 @@ pub struct Worker {
     idle_ticker: crate::machine::limits::IdleTicker,
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
+    claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
 }
 
 type MetricsFuture = Pin<
@@ -413,6 +414,7 @@ impl Worker {
             idle_ticker,
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
+            claude_version: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -476,11 +478,29 @@ impl Worker {
             .call(move |store| initialize_generation(store.as_mut().unwrap(), configured))
             .await?;
         let (sender, relay) = mpsc::channel(8);
+        if let Some(cfg) = &self.config.claude_code {
+            self.claude_version =
+                match crate::adapter::claude_code::version::check(&cfg.executable).await {
+                    Ok(version) => Some(version),
+                    Err(reason) => {
+                        tracing::warn!(
+                            kind = "claude_code_unavailable",
+                            ?reason,
+                            "Claude Code omitted from catalog"
+                        );
+                        None
+                    }
+                };
+        }
         let manager = ExecutionManager::new_with_attachments(
             self.config.execution.clone(),
             self.store.client(),
             sender,
             self.config.attachments.clone(),
+        );
+        manager.configure_adapters(
+            self.config.claude_code.clone(),
+            self.config.instruction_profiles.clone(),
         );
         manager
             .startup_verify()
@@ -898,10 +918,17 @@ impl Worker {
         let mut reconciled = false;
         let mut machine_outbound = if pilot {
             let config = self.config.clone();
+            let cli = self.claude_version.clone();
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
                     tokio::task::spawn_blocking(move || {
-                        crate::machine::build_report(&config, &crate::adapter::catalog())
+                        crate::machine::build_report(
+                            &config,
+                            &crate::adapter::catalog_with(
+                                config.claude_code.as_ref(),
+                                cli.as_ref(),
+                            ),
+                        )
                     })
                     .await
                     .map_err(|_| WorkerError::StoreThread)?,

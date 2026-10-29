@@ -46,7 +46,7 @@ pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
     let mut cmd = Command::new(executable);
-    cmd.arg("--version");
+    cmd.arg("--version").kill_on_drop(true);
     let out = match timeout(Duration::from_secs(5), cmd.output()).await {
         Ok(Ok(o)) => o,
         Ok(Err(_)) => return Err(VersionError::NotFound),

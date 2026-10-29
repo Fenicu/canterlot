@@ -70,7 +70,14 @@ pub(crate) struct ExecInfo {
     pub cj_terminal_seq: Option<u64>,
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct AdapterConfig {
+    pub claude_code: Option<crate::config::ClaudeCodeConfig>,
+    pub profiles: Vec<crate::config::ProfileConfig>,
+}
+
 pub(crate) struct Shared {
+    pub adapters: Mutex<AdapterConfig>,
     pub route_lock: tokio::sync::Mutex<()>,
     pub config: ExecutionConfig,
     pub attachment_config: WorkerAttachmentsConfig,
@@ -250,6 +257,7 @@ impl ExecutionManager {
             shared: Arc::new(Shared {
                 route_lock: tokio::sync::Mutex::new(()),
                 config,
+                adapters: Mutex::default(),
                 fetch_slots: Arc::new(tokio::sync::Semaphore::new(
                     attachment_config.fetch_parallelism.clamp(1, 2),
                 )),
@@ -286,6 +294,17 @@ impl ExecutionManager {
     #[cfg(feature = "fault-injection")]
     pub fn fail_next_ipc_send(&self) {
         *self.shared.fail_sends.lock().expect("send fault lock") += 1;
+    }
+
+    pub fn configure_adapters(
+        &self,
+        claude_code: Option<crate::config::ClaudeCodeConfig>,
+        profiles: Vec<crate::config::ProfileConfig>,
+    ) {
+        *self.shared.adapters.lock().expect("adapter config lock") = AdapterConfig {
+            claude_code,
+            profiles,
+        };
     }
 
     pub fn set_attachment_source(&self, source: Option<Arc<dyn AttachmentSource>>) {

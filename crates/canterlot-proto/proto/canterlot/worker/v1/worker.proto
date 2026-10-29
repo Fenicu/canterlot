@@ -429,6 +429,7 @@ message HarnessInfo {
   bool settings_midsession = 5;
   repeated string permission_modes = 6;
   repeated ModelInfo models = 7;
+  optional bool settings_midsession_effort = 8;
 }
 
 message ModelInfo {

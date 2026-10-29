@@ -5378,6 +5378,7 @@
           "provider",
           "images",
           "settings_midsession",
+          "settings_midsession_effort",
           "permission_modes",
           "models"
         ],
@@ -5404,6 +5405,9 @@
             "type": "string"
           },
           "settings_midsession": {
+            "type": "boolean"
+          },
+          "settings_midsession_effort": {
             "type": "boolean"
           },
           "title": {

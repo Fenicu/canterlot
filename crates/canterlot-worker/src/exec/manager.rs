@@ -309,7 +309,15 @@ pub(super) async fn validate(
     if !shared.enabled.load(Ordering::Relaxed) {
         return Ok(Err("hub_capability_missing"));
     }
-    if adapter::registry(&start.harness).is_none() {
+    if !adapter::known_harness(&start.harness)
+        || (start.harness == "claude_code"
+            && shared
+                .adapters
+                .lock()
+                .expect("adapter config lock")
+                .claude_code
+                .is_none())
+    {
         return Ok(Err("harness_unavailable"));
     }
     let workdir = start.workdir.clone();
@@ -756,15 +764,51 @@ impl Actor {
         let data_dir = self.shared.data_dir().await?.clone();
         let generation = self.generation;
         let runtime_dir = self.shared.runtime_dir.clone();
+        let adapters = self
+            .shared
+            .adapters
+            .lock()
+            .expect("adapter config lock")
+            .clone();
+        let profile = if start.harness == "claude_code" {
+            start.instruction_profile.clone()
+        } else {
+            String::new()
+        };
         let prepared = tokio::task::spawn_blocking(move || {
-            spawn::prepare(
+            let prepared = spawn::prepare(
                 &data_dir,
                 id,
                 generation,
                 conversation_id,
                 &timers,
                 runtime_dir.as_deref(),
-            )
+            )?;
+            let spec_path = prepared.dir.join("spec.toml");
+            let mut spec: toml::Value = toml::from_str(&fs::read_to_string(&spec_path)?)
+                .map_err(|_| ExecError::Verify("spec"))?;
+            if let Some(cfg) = adapters.claude_code {
+                spec["claude_code"] =
+                    toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("claude_code"))?;
+            }
+            if !profile.is_empty() && profile != "owner" {
+                let source = adapters
+                    .profiles
+                    .iter()
+                    .find(|p| p.name == profile)
+                    .and_then(|p| p.instructions_file.as_ref())
+                    .ok_or(ExecError::Verify("profile"))?;
+                let target = prepared.dir.join("profile-source.md");
+                fs::copy(source, &target)?;
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(target, fs::Permissions::from_mode(0o600))?;
+            }
+            fs::write(
+                &spec_path,
+                toml::to_string(&spec).map_err(|_| ExecError::Verify("spec"))?,
+            )?;
+            fs::File::open(&spec_path)?.sync_all()?;
+            Ok::<_, ExecError>(prepared)
         })
         .await
         .map_err(|_| ExecError::Shutdown)?;

@@ -761,7 +761,13 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         hub.config.timers.http2_keepalive_interval = quiet;
         hub.config.timers.http2_keepalive_timeout = quiet;
         hub.config.machine.metrics_interval = quiet;
+        let cli_dir = tempfile::tempdir().unwrap();
+        let executable = cli_dir.path().join("fake-cli");
+        fs::write(&executable, "#!/bin/sh\nprintf '2.1.311\\n'\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         hub.config.claude_code = Some(ClaudeCodeConfig {
+            executable,
             oauth_poll_interval_s: 900,
             ..ClaudeCodeConfig::default()
         });

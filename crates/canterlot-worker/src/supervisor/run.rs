@@ -41,9 +41,9 @@ use super::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterEvent, CloseMode, DecisionOutcome, InterruptOutcome, LimitFact,
-        LimitWindow, LocalFile, MediaSource, Phase, SettingsChange, StartSpec, Transmission,
-        TransmitOutcome, registry_with_deadline,
+        Adapter, AdapterContext, AdapterEvent, CloseMode, DecisionOutcome, InterruptOutcome,
+        LimitFact, LimitWindow, LocalFile, MediaSource, Phase, SettingsChange, StartSpec,
+        Transmission, TransmitOutcome, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -107,6 +107,8 @@ enum StopCause {
         signal: Option<i32>,
     },
     ProtocolIncompatible,
+    AuthRequired,
+    CliIncompatible,
     ContextExhausted,
 }
 
@@ -909,8 +911,12 @@ impl Supervisor {
         }
         self.start_attempted = true;
         let timers = self.spec.timers.clone();
-        let Some(mut adapter) = registry_with_deadline(&start.profile, timers.transmit_deadline)
-        else {
+        let context = AdapterContext {
+            transmit_deadline: timers.transmit_deadline,
+            exec_dir: self.exec_dir.clone(),
+            claude_code: self.spec.claude_code.clone(),
+        };
+        let Some(mut adapter) = registry_with(&start.profile, &context) else {
             tracing::warn!(
                 kind = "start_failed",
                 reason = "unknown_profile",
@@ -943,7 +949,7 @@ impl Supervisor {
         let started = match outcome {
             Ok(Ok(started)) => started,
             other => {
-                let detail = match other {
+                let detail = match &other {
                     Ok(Err(error)) => error.to_string(),
                     _ => "deadline".to_owned(),
                 };
@@ -953,7 +959,13 @@ impl Supervisor {
                     detail,
                     "adapter start failed"
                 );
-                return self.begin_stop(StopCause::StartFailed, false);
+                let cause = match other {
+                    Ok(Err(crate::adapter::AdapterError::StartFailed("cli_too_old"))) => {
+                        StopCause::CliIncompatible
+                    }
+                    _ => StopCause::StartFailed,
+                };
+                return self.begin_stop(cause, false);
             }
         };
         let info = CliStarted {
@@ -1495,6 +1507,7 @@ impl Supervisor {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }
             AdapterEvent::Diagnostic {
+                kind,
                 event_type,
                 required,
                 ..
@@ -1507,10 +1520,22 @@ impl Supervisor {
                         "unknown_optional_event"
                     }
                     .into(),
-                    event_type: safe_event_type(&event_type),
+                    event_type: safe_event_type(if kind == "unknown_event" {
+                        &event_type
+                    } else {
+                        kind
+                    }),
                 }))?;
                 if required {
-                    self.begin_stop(StopCause::ProtocolIncompatible, false)?;
+                    self.begin_stop(
+                        match kind {
+                            "auth_required" => StopCause::AuthRequired,
+                            "cli_too_old" | "session_id_mismatch" => StopCause::CliIncompatible,
+                            "mcp_unavailable" => StopCause::StartFailed,
+                            _ => StopCause::ProtocolIncompatible,
+                        },
+                        false,
+                    )?;
                 }
             }
             AdapterEvent::ProcessExited { code, signal } => {
@@ -1738,6 +1763,8 @@ impl Supervisor {
                 ("stopped", "start_cancelled", "stopped")
             }
             StopCause::StartFailed => ("failed", "start_failed", "start_failed"),
+            StopCause::AuthRequired => ("failed", "auth_required", "auth_required"),
+            StopCause::CliIncompatible => ("failed", "cli_incompatible", "cli_incompatible"),
             StopCause::ContextExhausted => ("failed", "context_exhausted", "context_exhausted"),
             StopCause::ProtocolIncompatible => {
                 ("failed", "protocol_incompatible", "protocol_incompatible")
