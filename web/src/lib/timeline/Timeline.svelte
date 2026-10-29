@@ -39,6 +39,15 @@
 
   const rows = $derived(buildRows(chat.timeline.entries, { now }));
   const windowRows = $derived(rows.slice(range.start, range.end));
+  let seenRows: string | null = null;
+  $effect(() => {
+    const next = rows.map((row) => row.key).join('\n');
+    const node = host;
+    if (!node || seenRows === next) return;
+    seenRows = next;
+    probe.count('timeline_render');
+    node.setAttribute('data-renders', String(Number(node.getAttribute('data-renders') ?? '0') + 1));
+  });
   const streaming = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || entry.block.state === 'incomplete')));
 
@@ -279,6 +288,7 @@
     data-loaded={chat.timeline.entries.length}
     data-pinned={controller?.pinned ? '' : undefined}
     data-rows={windowRows.length}
+    data-renders="0"
   >
     <div class="sentinel" use:sentinel></div>
     <div class="pad" style:height={`${range.padTop}px`}></div>
@@ -287,7 +297,7 @@
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
-          <UserBubble input={row.entries[0].input} agentWorking={streaming} />
+          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming} />
         {:else if row.kind === 'answer'}
           <AnswerCard entries={row.entries} all={chat.timeline.entries} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}

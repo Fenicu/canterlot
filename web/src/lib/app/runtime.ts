@@ -2,6 +2,7 @@ import { me, eventsRange, snapshotConversations } from '$lib/api/client';
 import { NetworkError } from '$lib/api/http';
 import { DraftStore } from '$lib/drafts/store';
 import { OpJournal } from '$lib/ops/journal';
+import { opRequest } from '$lib/ops/request';
 import { openDb, type Idb } from '$lib/storage/idb';
 import { bindOwner } from '$lib/storage/owner';
 import { ListStore, type ListSnapshot } from '$lib/stores/list.svelte';
@@ -46,11 +47,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
 		const journal = new OpJournal(
 			db,
 			async (op) => {
-				const response = await deps.fetch(`/api/v1/conversations/${op.conversationId ?? '_'}/inputs`, {
-					method: 'POST',
-					headers: { 'content-type': 'application/json' },
-					body: JSON.stringify(op.body ?? {})
-				});
+				const request = opRequest(op);
+				const response = await deps.fetch(request.url, request.init);
 				if (!response.ok) throw new NetworkError('send_failed');
 				return response.json();
 			},

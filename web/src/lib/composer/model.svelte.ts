@@ -249,8 +249,25 @@ export class ComposerModel {
 			}
 		} catch {
 			this.interruptLabel = 'Прервать';
-		} finally {
 			this.interruptRunning = false;
 		}
 	}
+
+	applyInterruptStatus(status: string): void {
+		const label = terminalInterruptLabel(status);
+		if (!label) return;
+		this.interruptLabel = label;
+		this.interruptRunning = false;
+	}
+}
+
+const TERMINAL_INTERRUPT: Record<string, string> = {
+	completed: 'Прервано',
+	not_applicable: 'Прерывание не требуется',
+	superseded: 'Прерывание заменено',
+	rejected_stale: 'Прерывание устарело'
+};
+
+export function terminalInterruptLabel(status: string): string | null {
+	return TERMINAL_INTERRUPT[status] ?? null;
 }

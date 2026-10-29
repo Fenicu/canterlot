@@ -7,12 +7,20 @@ import {
 } from '$lib/api/client';
 import { createRuntime, getRuntime, type Runtime } from '$lib/app/runtime';
 import { probe } from '$lib/perf/probe';
+import { UploadManager } from '$lib/uploads/manager';
 import { sha256Hex, type BlockPage } from '$lib/stores/blocks';
 import { ChatStore, type HistoryPage, type SnapshotData } from '$lib/stores/chat.svelte';
 import type { RangeResult } from '$lib/sync/scope';
 
 let pending: Promise<Runtime> | null = null;
 const chats = new Map<string, ChatStore>();
+let uploads: UploadManager | null = null;
+
+export function sessionUploads(): UploadManager {
+	const runtime = getRuntime();
+	if (!uploads || uploads.db !== runtime.db) uploads = new UploadManager({ db: runtime.db });
+	return uploads;
+}
 
 export function browserRuntime(): Promise<Runtime> {
   try {
