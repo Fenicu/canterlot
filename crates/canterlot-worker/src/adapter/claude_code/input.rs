@@ -14,14 +14,14 @@ use uuid::Uuid;
 use super::parser::{Parsed, Parser};
 use super::process::{CliProcess, Signal, StdoutLine};
 use crate::adapter::{
-    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, Transmission, TransmitOutcome,
+    AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, Transmission,
+    TransmitOutcome, limit_note,
 };
 
 pub const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
 pub const PROOF_KIND: &str = "claude_code_answer_frame";
 const MAX_NATIVE_IMAGE_BYTES: u64 = 5 * 1024 * 1024;
 const NATIVE_IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-const WEEKLY_THRESHOLDS: [u16; 3] = [800, 900, 950];
 
 /// Модель, усилие и режим разрешений в словаре canterlot.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -342,19 +342,7 @@ impl InputQueue {
     }
 
     fn weekly_note(&self, weekly: Option<(u16, Option<u64>)>) -> Option<(u16, String)> {
-        let (permille, resets_at_ms) = weekly?;
-        let threshold = WEEKLY_THRESHOLDS
-            .into_iter()
-            .filter(|threshold| permille >= *threshold && *threshold > self.weekly_noted)
-            .max()?;
-        let percent = permille.min(1000) / 10;
-        let text = match resets_at_ms.and_then(local_time) {
-            Some(when) => {
-                format!("[canterlot] Weekly Claude limit: {percent} % used, resets {when}.")
-            }
-            None => format!("[canterlot] Weekly Claude limit: {percent} % used."),
-        };
-        Some((threshold, text))
+        limit_note::next_threshold(weekly, self.weekly_noted, "Claude")
     }
 
     /// Доказательство доставки, конец хода, ответы на управляющие запросы.
@@ -426,15 +414,6 @@ impl InputQueue {
     pub fn interrupt_acknowledged(&self) -> bool {
         self.interrupt == Interrupt::Acknowledged
     }
-}
-
-fn local_time(ms: u64) -> Option<String> {
-    let at = chrono::DateTime::from_timestamp_millis(i64::try_from(ms).ok()?)?;
-    Some(
-        at.with_timezone(&chrono::Local)
-            .format("%Y-%m-%d %H:%M %:z")
-            .to_string(),
-    )
 }
 
 /// Сообщение пользователя stream-json: строка, если есть только текст владельца;

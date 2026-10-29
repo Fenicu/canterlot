@@ -6,6 +6,7 @@ use uuid::Uuid;
 pub mod canterlot_mcp;
 pub mod claude_code;
 pub mod codex;
+pub mod limit_note;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]

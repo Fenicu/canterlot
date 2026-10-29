@@ -1,0 +1,1 @@
+{"data":{"method":"thread/settings/updated","params":{"threadId":"thread-main","threadSettings":{"activePermissionProfile":null,"approvalPolicy":"never","approvalsReviewer":"user","cwd":"/tmp/work","effort":"high","model":"gpt-6-luna","modelProvider":"openai","reasoningEffort":"high","sandbox":{"networkAccess":true,"type":"dangerFullAccess"}}}},"dir":"out","t_ms":10}

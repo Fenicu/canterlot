@@ -44,3 +44,10 @@
 - `mcp_status.jsonl` — сконструировано, подтвердить в live smoke. Две строки
   уведомлений `mcpServer/startupStatus/updated` для сервера `canterlot`: статусы
   `ready` и `failed` (форма `McpServerStatusUpdatedNotification`).
+- `model_list.json` — сконструировано, подтвердить в live smoke. Источник формы:
+  запись `ev/diagnostics.jsonl:28` (поля моделей `id`, `description`, `efforts`,
+  `inputModalities`, `isDefault`); сырой ответ `model/list`, без обёртки.
+  Покрывает проверку настроек задачи 3 (`gpt-6-luna` без `ultra`).
+- `settings_updated.jsonl` — сконструировано, подтвердить в live smoke. Источник
+  формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`).
+  Покрывает подтверждение смены модели и режима задачей 3.
