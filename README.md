@@ -480,15 +480,15 @@ npm run preview
 
 ```bash
 cd web
-PLAYWRIGHT_BROWSERS_PATH=/tmp/canterlot-playwright npx --no-install playwright install chromium firefox
+PLAYWRIGHT_BROWSERS_PATH="${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright" npx --no-install playwright install chromium firefox
 cd ..
 bash scripts/check-web.sh
 bash scripts/check.sh
 ```
 
-`check-web.sh` последовательно выполняет `npm ci`, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest, production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально не больше двух worker'ов, у Firefox один). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `/tmp/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
+`check-web.sh` последовательно выполняет `npm ci`, установку браузеров при их отсутствии, проверку типов и предупреждений Svelte, ESLint, token lint, Vitest (до 6 worker'ов), production build и Playwright UI (Chromium телефон, Firefox рабочий стол; глобально 4 worker'а, у Firefox 2, проект `budget` выполняется изолированно после остальных). Для тестов включается `VITE_UI_TESTS=1`: отдельная страница `/__test/primitives`, отсутствующая в обычной production-сборке. Браузеры хранятся в `${XDG_CACHE_HOME:-$HOME/.cache}/canterlot-playwright`; можно задать другой `PLAYWRIGHT_BROWSERS_PATH`. Флаг `--stack` добавляет `npm run test:stack` (real-hub suite реализует Task 10, с PostgreSQL из `scripts/test-db.sh`, workers 1). Rust и Playwright не запускают одновременно. При свободном месте меньше 5 ГБ скрипт останавливается с BLOCKED.
 
-Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` ограничивает расход ресурсов: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 2, а у Firefox один Playwright worker: два экземпляра в этой среде упирались в лимит потоков (EAGAIN) и роняли content-процессы.
+Поведение синхронизации проверяет FakeHub (`web/testing/fake-hub`): двойник исполняет тот же wire-контракт, проверяет события схемой Ajv, хаос-режимом меняет доставку событий и рвёт соединения, а `hub.wire` даёт два транспорта: in-memory с `FakeClock` для Vitest и Playwright-перехват `page.routeWebSocket` на `/api/v1/ws` и HTTP-обработчиков `/api/v1/**` для смока `web/e2e/ui/fake-hub-wire.spec.ts`. Одни только тесты синхронизации запускаются из каталога `web` командой `npm run test:unit -- tests/unit/sync`. `check-web.sh` настраивает параллельность под многоядерную систему: переменные `TOKIO_WORKER_THREADS`, `RAYON_NUM_THREADS` и `MOZ_TASKCONTROLLER_THREADCOUNT` выставлены в 4, у Firefox два Playwright worker'а, а Vitest использует до 6 worker'ов.
 
 Документы первых измерений и ручной приёмки телефона запланированы в Task 10: `docs/perf/pwa-first-measurements.md`, `docs/perf/phone-acceptance.md`; результаты производительности пока не заявлены.
 
