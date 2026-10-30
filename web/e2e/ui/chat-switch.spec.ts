@@ -95,3 +95,19 @@ test('waiting_activity_without_a_request_shows_a_notice_not_an_answer_form', asy
   await expect(page.getByRole('button', { name: 'Ответить' })).toHaveCount(0);
   expect(decisions).toEqual([]);
 });
+
+test('elapsed_time_of_a_running_answer_keeps_counting', async ({ page }) => {
+  const { hub, a } = await bootPair(page);
+  await page.goto(`/c/${a}`);
+  await expect(page.locator('[data-pane="chat"] [data-ready]')).toBeVisible({ timeout: 15_000 });
+  const blockId = '00000000-0000-4000-8000-00000000f001';
+  hub.append(`conversation:${a}`, {
+    kind: 'block_started',
+    conversation_id: a,
+    payload: { block_id: blockId, rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'agent', model: 'opus', tool_name: null, summary: null, approved_by: null }
+  });
+  hub.append(`conversation:${a}`, { kind: 'block_delta', conversation_id: a, payload: { block_id: blockId, base_rev: 0, rev: 1, append: 'идёт ответ' } });
+  hub.flush();
+  await expect(page.getByText('идёт ответ')).toBeVisible();
+  await expect(page.getByText(/Генерирует · [2-9] с/)).toBeVisible({ timeout: 6_000 });
+});

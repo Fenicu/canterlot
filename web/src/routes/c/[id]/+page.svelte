@@ -1,12 +1,20 @@
 <script lang="ts">
   import { page } from '$app/state';
+  import { onMount } from 'svelte';
+  import { clock } from '#lib/clock.js';
   import ChatScreen from '#lib/screens/chat/ChatScreen.svelte';
   import { leaseChatSession } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
   let chat = $state<ChatStore | null>(null);
   let error = $state('');
+  let now = $state(clock.serverNow());
   const id = $derived(page.params.id ?? '');
+
+  onMount(() => {
+    const timer = setInterval(() => (now = clock.serverNow()), 1000);
+    return () => clearInterval(timer);
+  });
 
   $effect(() => {
     const current = id;
@@ -33,7 +41,7 @@
 <main id="main" class="chat-route">
   {#key id}
     {#if chat && chat.id === id}
-      <ChatScreen {chat} />
+      <ChatScreen {chat} {now} />
     {:else if error}
       <p>{error}</p>
     {:else}
