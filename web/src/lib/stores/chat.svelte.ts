@@ -20,7 +20,9 @@ import {
 import { utf8Length } from "./blocks";
 import {
   assignFeedSeq,
+  blankAttachment,
   freshInput,
+  inputOfBody,
   marksFor,
   placeInput,
   type AttachmentRef,
@@ -226,6 +228,7 @@ export class ChatStore {
   #readAt = -10_000;
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
+  #stopRefused: (() => void) | null = null;
 
   constructor(
     readonly id: string,
@@ -271,6 +274,9 @@ export class ChatStore {
 
   open(): void {
     this.#adoptSaving();
+    this.#stopRefused ??= this.deps.ops.onOrphanRefused((op) => {
+      this.inputs.delete(op.key);
+    });
     if (this.#sub) return;
     this.#sub = this.deps.connection.subscribe(scopeOf(this.id), this.applier);
   }
@@ -284,6 +290,8 @@ export class ChatStore {
 
   dispose(): void {
     this.close();
+    this.#stopRefused?.();
+    this.#stopRefused = null;
     this.#sync.stop();
     this.blocks.clear();
     this.inputs.clear();
@@ -661,15 +669,7 @@ export class ChatStore {
         const prior = existing.attachments.find(
           (a) => a.attachment_id === b.attachment_id,
         );
-        if (prior) return prior;
-        return {
-          attachment_id: b.attachment_id!,
-          name: "",
-          mime: "",
-          size: 0,
-          sha256: "",
-          image: false,
-        };
+        return prior ?? blankAttachment(b.attachment_id!);
       });
     }
     existing.state = "queued";
@@ -929,18 +929,15 @@ export class ChatStore {
       if (op.kind !== "input" || op.conversationId !== this.id) continue;
       if (op.state !== "saving" && op.state !== "unknown") continue;
       if (this.inputs.has(op.key)) continue;
-      const text =
-        typeof (op.body as { text?: string } | null)?.text === "string"
-          ? (op.body as { text: string }).text
-          : "";
-      const attachments = Array.isArray(
-        (op.body as { attachments?: AttachmentRef[] } | null)?.attachments,
-      )
-        ? (op.body as { attachments: AttachmentRef[] }).attachments
-        : [];
+      const { text, attachmentIds } = inputOfBody(op.body);
       this.inputs.set(
         op.key,
-        freshInput(op.key, text, op.createdAt, attachments),
+        freshInput(
+          op.key,
+          text,
+          op.createdAt,
+          attachmentIds.map(blankAttachment),
+        ),
       );
     }
   }

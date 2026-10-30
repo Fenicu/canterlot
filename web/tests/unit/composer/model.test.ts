@@ -688,6 +688,26 @@ describe("composer/model", () => {
     expect(model.errorMessage).toBe("Слишком много");
   });
 
+  it("taking_a_message_back_prepends_it_and_restores_the_files", () => {
+    const { deps, draftsMap } = createMockDeps();
+    deps.uploads.restore = vi.fn();
+    const model = new ComposerModel(deps);
+    model.text = "набираю";
+
+    model.takeBack({
+      text: "вернулось",
+      attachments: [{ id: "att-1" }],
+      notice: "Не доставлено",
+    });
+
+    expect(model.text).toBe("вернулось\nнабираю");
+    expect(draftsMap.get("conv-1")?.text).toBe("вернулось\nнабираю");
+    expect(deps.uploads.restore).toHaveBeenCalledWith("conv-1", [
+      { id: "att-1" },
+    ]);
+    expect(model.errorMessage).toBe("Не доставлено");
+  });
+
   it("offline_press_keeps_a_draft_and_creates_no_operation", async () => {
     const { deps, inputs, draftsMap } = createMockDeps({
       canSend: vi.fn(async () => "offline" as const),

@@ -81,6 +81,25 @@ export function freshInput(key: string, text: string, createdAt: number, attachm
 	};
 }
 
+/** Текст и вложения из тела операции журнала: это же тело уходит в POST. */
+export function inputOfBody(body: unknown): { text: string; attachmentIds: string[] } {
+	const { content, attachment_ids } = (body ?? {}) as {
+		content?: { type: string; text?: string }[];
+		attachment_ids?: string[];
+	};
+	return {
+		text: (content ?? [])
+			.filter((block) => block.type === 'text')
+			.map((block) => block.text ?? '')
+			.join(''),
+		attachmentIds: attachment_ids ?? []
+	};
+}
+
+export function blankAttachment(attachment_id: string): AttachmentRef {
+	return { attachment_id, name: '', mime: '', size: 0, sha256: '', image: false };
+}
+
 const FEED_STATES: ReadonlySet<string> = FEED;
 
 export function assignFeedSeq(input: InputView, state: InputUiState, scopeSeq: string): void {

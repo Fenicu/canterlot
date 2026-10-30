@@ -782,7 +782,7 @@ describe("stores task 4", () => {
             kind: "input",
             conversationId: CONV,
             state: "saving",
-            body: { text: "черновик" },
+            body: { content: [{ type: "text", text: "черновик" }] },
             createdAt: 1,
             attempts: 0,
           },
@@ -792,6 +792,7 @@ describe("stores task 4", () => {
         this.ops.delete(id);
         settled.push(id);
       },
+      onOrphanRefused: () => () => undefined,
     };
     const chat = chatOf(ops as unknown as OpJournal);
     chat.open();
@@ -968,7 +969,43 @@ describe("stores task 4", () => {
     expect(chat.strip()).toEqual([]);
     expect(chat.inputs.size).toBe(0);
     chat.open();
-    expect(chat.strip().map((item) => item.key)).toEqual([key]);
+    expect(chat.strip().map((item) => item.text)).toEqual(["из журнала"]);
+  });
+
+  it("recovered_entry_keeps_its_text_and_leaves_when_the_hub_refuses_it", () => {
+    const key = "idem-recovered";
+    let refuse: (op: Op) => void = () => undefined;
+    const op = {
+      key,
+      kind: "input",
+      conversationId: CONV,
+      state: "unknown",
+      body: {
+        content: [{ type: "text", text: "после перезагрузки" }],
+        attachment_ids: ["att-1"],
+      },
+      createdAt: 1,
+      attempts: 1,
+    } as Op;
+    const ops = {
+      ops: new Map([[key, op]]),
+      settle() {},
+      onOrphanRefused(fn: (item: Op) => void) {
+        refuse = fn;
+        return () => undefined;
+      },
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
+    const [entry] = chat.strip();
+    expect(entry?.text).toBe("после перезагрузки");
+    expect(entry?.attachments.map((item) => item.attachment_id)).toEqual([
+      "att-1",
+    ]);
+
+    ops.ops.delete(key);
+    refuse(op);
+    expect(chat.strip()).toEqual([]);
   });
 
   it("cancelled_input_leaves_the_feed_and_notes_in_the_strip_for_four_seconds", () => {
@@ -1745,7 +1782,11 @@ describe("stores task 4", () => {
     });
     const chat = new ChatStore(id, {
       api: adapt(api),
-      ops: { ops: new Map(), settle() {} } as unknown as OpJournal,
+      ops: {
+        ops: new Map(),
+        settle() {},
+        onOrphanRefused: () => () => undefined,
+      } as unknown as OpJournal,
       drafts: {} as DraftStore,
       connection,
       blockIO: {
@@ -2044,19 +2085,26 @@ describe("stores task 4", () => {
             kind: "input",
             conversationId: CONV,
             state: "saving",
-            body: { text: "с файлом", attachments: [attRef] },
+            body: {
+              content: [{ type: "text", text: "с файлом" }],
+              attachment_ids: [attRef.attachment_id],
+            },
             createdAt: 100,
             attempts: 0,
           },
         ],
       ]),
       settle() {},
+      onOrphanRefused: () => () => undefined,
     };
     const chat = chatOf(ops as unknown as OpJournal);
     chat.open();
     const saving = chat.strip().find((i) => i.key === attKey);
     expect(saving).toBeDefined();
-    expect(saving!.attachments).toEqual([attRef]);
+    expect(saving!.text).toBe("с файлом");
+    expect(saving!.attachments.map((item) => item.attachment_id)).toEqual([
+      attRef.attachment_id,
+    ]);
 
     chat.applier.applyEvents([
       {
@@ -2230,7 +2278,13 @@ function chatOf(
   };
   return new ChatStore(CONV, {
     api,
-    ops: ops ?? ({ ops: new Map(), settle() {} } as unknown as OpJournal),
+    ops:
+      ops ??
+      ({
+        ops: new Map(),
+        settle() {},
+        onOrphanRefused: () => () => undefined,
+      } as unknown as OpJournal),
     drafts: {} as DraftStore,
     connection: {
       subscribe: () => ({ release() {}, status: "idle", cursor: "0" }),

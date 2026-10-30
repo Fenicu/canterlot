@@ -46,6 +46,7 @@ export class OpJournal {
   #running = new Set<string>();
   #stopped = new Set<string>();
   #wake = new Map<string, () => void>();
+  #orphanRefused = new Set<(op: Op) => void>();
   #onOnline = () => this.#resumeWaiting();
   #onPageShow = () => this.#resumeWaiting();
   #onVisible = () => {
@@ -79,6 +80,12 @@ export class OpJournal {
   retire(): void {
     for (const key of this.ops.keys()) this.#stop(key);
     this.close();
+  }
+
+  /** Отказ операции без вызывающего, например восстановленной после перезагрузки: вернуть текст больше некому. */
+  onOrphanRefused(fn: (op: Op) => void): () => void {
+    this.#orphanRefused.add(fn);
+    return () => this.#orphanRefused.delete(fn);
   }
 
   async begin<B>(
@@ -204,7 +211,7 @@ export class OpJournal {
       (this.ops as SvelteMap<string, Op>).set(op.key, op);
       pending[pending.indexOf(row)] = op;
     }
-    for (const op of pending) void this.run(op).catch(() => undefined);
+    for (const op of pending) this.#runOrphan(op);
     return pending;
   }
 
@@ -218,11 +225,18 @@ export class OpJournal {
     op.state = "unknown";
     const wake = this.#wake.get(key);
     if (wake) wake();
-    else void this.run(op);
+    else this.#runOrphan(op);
   }
 
   discard(key: string): void {
     this.#stop(key);
+  }
+
+  #runOrphan(op: Op): void {
+    void this.run(op).catch(() => {
+      if (op.state !== "refused") return;
+      for (const fn of this.#orphanRefused) fn(op);
+    });
   }
 
   #stop(key: string): void {

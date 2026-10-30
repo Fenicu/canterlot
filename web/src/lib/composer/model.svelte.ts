@@ -2,6 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
+import type { Returned } from "#lib/composer/returned.js";
 import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
@@ -210,6 +211,14 @@ export class ComposerModel {
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
     this.deps.chat.inputs.delete(key);
     this.deps.uploads.reattach(detached);
+  }
+
+  /** Сообщение вернулось не из этого нажатия: например, хаб отказал после перезагрузки. */
+  takeBack({ text, attachments, notice }: Returned): void {
+    this.#giveBack(text);
+    this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    this.deps.uploads.restore(this.deps.conversationId, attachments);
+    if (notice) this.errorMessage = notice;
   }
 
   async sendLater(at: number): Promise<void> {

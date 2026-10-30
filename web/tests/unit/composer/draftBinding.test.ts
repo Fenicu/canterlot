@@ -26,6 +26,27 @@ describe("composer/draftBinding", () => {
     } as unknown as DraftStore;
   });
 
+  it("hands_over_draft_attachments_even_when_the_field_has_text", async () => {
+    const textarea = document.createElement("textarea");
+    textarea.value = "уже набрано";
+    (draftsMock.load as ReturnType<typeof vi.fn>).mockResolvedValue({
+      text: "черновик",
+      attachments: [{ id: "att-1", name: "файл" }],
+    });
+    const taken: unknown[] = [];
+
+    const binding = bindDraft(textarea, {
+      drafts: draftsMock,
+      conversationId: "conv-123",
+      onAttachments: (list) => taken.push(...list),
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(taken).toEqual([{ id: "att-1", name: "файл" }]);
+    binding.destroy();
+  });
+
   it("restores_draft_on_mount_and_does_not_auto_send", async () => {
     const textarea = document.createElement("textarea");
     let restoredText = "";
