@@ -36,7 +36,7 @@
       tabindex={same(item.tab, current) ? 0 : -1}
       onclick={() => onselect(item.tab)}
     >
-      {item.label} {item.count}
+      {item.label} <span class="count">{item.count}</span>
     </button>
   {/each}
 </div>
@@ -48,11 +48,13 @@
     min-width: 0;
     overflow-x: auto;
     scrollbar-width: none;
-    margin: var(--s3) var(--s6);
+    margin: var(--s3) var(--gutter);
     padding: var(--s2);
     border-radius: var(--radius-pill);
     background: var(--raised);
+    mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9));
   }
+  :global([data-pane='list']) .tabs { mask-image: none; }
   button {
     flex: 1 0 auto;
     min-height: var(--target);
@@ -62,8 +64,10 @@
     color: var(--muted);
     font-size: var(--fs-meta);
     padding: var(--s4) var(--s6);
+    white-space: nowrap;
   }
-  button[aria-selected='true'] { background: var(--selected); color: var(--accent-link); }
+  .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
+  button[aria-selected='true'] { background: var(--tab-selected); color: var(--accent-link); font-weight: var(--weight-medium); }
   :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; border-radius: var(--radius-card); }
   :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 </style>

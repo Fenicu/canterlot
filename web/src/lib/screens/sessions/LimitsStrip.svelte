@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import Icon from '#lib/ui/Icon.svelte';
   import { limitStrip } from './limitsText';
   import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 
@@ -8,64 +9,79 @@
     now,
     thresholds,
     prefer = '',
-    crunch = false
+    crunch = false,
+    compact = false
   }: {
     providers: ProviderLimits[];
     now: number;
     thresholds: LimitThresholds;
     prefer?: string;
     crunch?: boolean;
+    compact?: boolean;
   } = $props();
 
   const view = $derived(limitStrip(providers, now, thresholds, { prefer, crunch }));
+  const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
 </script>
 
 {#if providers.length > 0}
   <details class="limits" data-tone={view.tone}>
     <summary>
-      {#if view.crunchLabel}{view.crunchLabel}{:else}{view.summary}{/if}
-      {#if view.tone === 'reserve'}<span>резерв</span>{/if}
+      <span class="rows">
+        {#if view.crunchLabel}
+          <span>{view.crunchLabel}</span>
+        {:else}
+          {#each shown as row (row.label)}
+            <span class="row">{compact ? 'Лимиты ·' : row.label} 5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b> · неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span>
+          {/each}
+        {/if}
+        {#if view.tone === 'reserve'}<span class="reserve">резерв</span>{/if}
+      </span>
+      <span class="chevron"><Icon name="down" /></span>
     </summary>
-    <p>{view.details}</p>
+    <div class="open">
+      <p>{view.details}</p>
 
-    {#if view.staleNote}
-      <p>{view.staleNote}</p>
-    {/if}
+      {#if view.staleNote}
+        <p>{view.staleNote}</p>
+      {/if}
 
-    <a href={resolve('limits')}>История лимитов</a>
+      <a href={resolve('limits')}>История лимитов</a>
+    </div>
   </details>
 {/if}
 
 <style>
   .limits {
-    margin: var(--s3) var(--s6);
-    padding: var(--s4) var(--s6);
+    margin: var(--s0) var(--gutter) var(--s3);
     border-radius: var(--radius-pill);
     background: var(--surface);
+    font-size: var(--fs-sm);
   }
-
+  .limits[open] { border-radius: var(--radius-card); }
   summary {
-    min-height: var(--target);
-    cursor: pointer;
-  }
-
-  [data-tone="warning"] summary {
-    color: var(--warning);
-  }
-
-  [data-tone="reserve"] summary {
-    color: var(--warning);
-  }
-
-  p {
-    white-space: pre-line;
-    color: var(--secondary);
-  }
-
-  a {
-    display: inline-flex;
+    display: flex;
     align-items: center;
+    justify-content: space-between;
+    gap: var(--s4);
     min-height: var(--target);
-    color: var(--accent-link);
+    padding: var(--s2) var(--s6);
+    border-radius: var(--radius-pill);
+    color: var(--secondary);
+    cursor: pointer;
+    list-style: none;
   }
+  summary::-webkit-details-marker { display: none; }
+  summary::marker { content: ''; }
+  .rows { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s6); min-width: 0; }
+  :global([data-pane='list']) .rows { flex-direction: column; }
+  .row { white-space: nowrap; }
+  b { font-weight: var(--weight-semibold); }
+  .hot, .reserve { color: var(--warning); }
+  .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
+  .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
+  .limits[open] .chevron { transform: rotate(180deg); }
+  .open { padding: var(--s0) var(--s6) var(--s4); }
+  p { margin: 0 0 var(--s2); white-space: pre-line; color: var(--secondary); }
+  a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>

@@ -167,24 +167,21 @@
 </script>
 
 <div class="shell" data-layout={laidOut ? mode : undefined}>
-  {#if offlineLabel}<p class="platform-banner" data-offline>{offlineLabel}</p>{/if}
-  {#if updateState !== 'idle'}
-    <p class="platform-banner" data-update>
-      Доступна новая версия
-      {#if updateState === 'applying'}Сохраняю и обновляю…{:else}<button type="button" onclick={applyUpdate}>Обновить</button>{/if}
-    </p>
-  {/if}
-  {#if updateError}<p class="platform-banner">{updateError}</p>{/if}
-  {#if runtime}
+  {#snippet banner()}
     <ConnectionBanner
-      phase={runtime.connection.status.phase}
-      since={runtime.connection.status.since}
+      phase={runtime?.connection.status.phase ?? 'connecting'}
+      since={runtime?.connection.status.since ?? 0}
       now={now}
-      scope={runtime.list.status}
+      scope={runtime?.list.status ?? 'idle'}
+      offline={offlineLabel}
+      update={updateState}
+      failure={updateError}
+      onupdate={applyUpdate}
       onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
     />
-    <SessionExpired phase={runtime.connection.status.phase} now={now} />
-  {/if}
+  {/snippet}
+  {#if harness || !laidOut || mode === 'phone'}{@render banner()}{/if}
+  {#if runtime}<SessionExpired phase={runtime.connection.status.phase} now={now} />{/if}
   {#if harness}
     <div class="page">{@render children()}</div>
   {:else if laidOut && mode === 'phone'}
@@ -202,6 +199,7 @@
     <div class="panes">
       <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
       <div data-pane="chat">
+        {@render banner()}
         {@render children()}
       </div>
       {#if mode === 'desktop' && onChat && pane.view}
@@ -275,24 +273,5 @@
   [data-pane="lane"] {
     width: var(--lane-width);
     flex: 0 0 var(--lane-width);
-  }
-
-  button {
-    min-height: var(--target);
-    border: var(--s0);
-    background: var(--transparent);
-    color: var(--accent-link);
-  }
-
-  .platform-banner {
-    margin: var(--s4) var(--s6) 0;
-    padding: var(--s4) var(--s6);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    color: var(--text);
-  }
-
-  .platform-banner button {
-    margin-left: var(--s4);
   }
 </style>

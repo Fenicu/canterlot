@@ -52,6 +52,13 @@ export const fmt = {
 	clock(ts: number): string {
 		return clockFmt.format(ts);
 	},
+	/** Диапазон дат ISO: «24–30 октября» или «28 октября – 2 ноября». */
+	dayRange(from: string | undefined, to: string | undefined): string {
+		if (!from || !to) return from ?? to ?? '';
+		const [first, last] = [new Date(`${from}T12:00:00`), new Date(`${to}T12:00:00`)];
+		if (first.getMonth() === last.getMonth()) return `${first.getDate()}–${dayFmt.format(last)}`;
+		return `${dayFmt.format(first)} – ${dayFmt.format(last)}`;
+	},
 	dayLabel(ts: number, now: number): string {
 		const date = new Date(ts);
 		const today = new Date(now);

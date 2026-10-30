@@ -384,3 +384,45 @@ test.describe('очередь и вложения', () => {
     await expect(dialog.getByRole('link', { name: 'Сохранить' })).toBeVisible();
   });
 });
+
+test.describe('лимиты и баннеры', () => {
+  async function list(page: Page) {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const ids = seedMockupSessions(api);
+    await installChatRoutes(page, hub, api, ids.pinned);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    return { hub, api, ids };
+  }
+
+  test('limits_strip_colours_only_the_hot_value_and_keeps_providers_apart', async ({ page }) => {
+    await list(page);
+    const strip = page.locator('.limits').first();
+    await expect(strip.locator('.row')).toHaveCount(2);
+    await expect(strip.locator('b.hot')).toHaveText(['96%']);
+    const open = await strip.locator('.row').evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).whiteSpace));
+    expect(open).toEqual(['nowrap', 'nowrap']);
+    await strip.locator('summary').click();
+    const radius = await strip.evaluate((node) => parseFloat(getComputedStyle(node).borderTopLeftRadius));
+    expect(radius).toBeLessThan(40);
+  });
+
+  test('archive_tab_explains_that_it_is_empty', async ({ page }) => {
+    await list(page);
+    await page.getByRole('tab', { name: /Архив/ }).click();
+    await expect(page.getByText('В архиве пока пусто')).toBeVisible();
+  });
+
+  test('offline_shows_one_banner_without_a_reload_action', async ({ page, context, isMobile }) => {
+    test.skip(!isMobile, 'офлайн проверяется в Chromium');
+    await list(page);
+    await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+    await context.setOffline(true);
+    await expect(page.locator('[data-offline]')).toBeVisible({ timeout: 10_000 });
+    await expect(page.locator('.banner')).toHaveCount(1);
+    await expect(page.locator('.banner').getByRole('button')).toHaveCount(0);
+    await context.setOffline(false);
+  });
+});

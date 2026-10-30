@@ -5,8 +5,16 @@ import {
   type ProviderLimits,
 } from "#lib/stores/limits.js";
 
+export interface LimitRow {
+  label: string;
+  fiveHour: string;
+  weekly: string;
+  hot: { fiveHour: boolean; weekly: boolean };
+}
+
 export interface LimitStrip {
   summary: string;
+  rows: LimitRow[];
   details: string;
   tone: "default" | "warning" | "reserve";
   staleNote: string;
@@ -59,6 +67,12 @@ export function limitStrip(
   const reserve = views.some((item) => item.provider.weekly_reserve_active);
   return {
     summary,
+    rows: views.map(({ provider, view }) => ({
+      label: label(provider.provider),
+      fiveHour: view.fiveHour,
+      weekly: view.weekly,
+      hot: view.hot,
+    })),
     details,
     tone,
     staleNote: staleAt !== undefined ? `данные от ${fmt.clock(staleAt)}` : "",

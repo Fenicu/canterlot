@@ -328,6 +328,7 @@
       </div>
     {/each}
     <div class="pad" style:height={`${range.padBottom}px`}></div>
+    {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
   </div>
   {#if chat.timeline.tailDetached}
     <button type="button" class="jump" onclick={() => chat.reloadTail()}>К последним сообщениям</button>

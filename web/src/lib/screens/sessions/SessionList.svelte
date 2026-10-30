@@ -120,6 +120,12 @@
       ? [{ id: 'search', title: 'Результаты', count: results.length, items: results, collapsed: false }]
       : buildSections(rows, groups, tab, collapsedSet(collapsed))
   );
+  const emptyTab = $derived.by(() => {
+    if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
+    if (tab.kind === 'archive') return 'В архиве пока пусто';
+    if (tab.kind === 'pinned') return 'Закреплённых сессий нет';
+    return 'В этой группе пока нет сессий';
+  });
   const openRow = $derived(rows.find((item) => item.id === (page.params.id ?? '')) ?? null);
   const sheetItem = $derived(rows.find((item) => item.id === sheetId) ?? null);
   const groupCounts = $derived.by(() => {
@@ -248,6 +254,14 @@
       <EmptyState kind="search" onreset={resetSearch} />
     {:else if ready && rows.length === 0 && !results}
       <EmptyState kind="sessions" />
+    {:else if !ready}
+      <div class="placeholder" aria-hidden="true">
+        {#each [56, 74, 46, 63, 51] as width (width)}
+          <div class="ghost"><span class="skeleton" style:width={`var(--bar-${width})`}></span><span class="skeleton" style:width="var(--bar-81)"></span></div>
+        {/each}
+      </div>
+    {:else if emptyTab}
+      <EmptyState kind="tab" text={emptyTab} />
     {:else}
       {#each sections as section (section.id)}
         <Section
@@ -283,4 +297,6 @@
   .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }
   .menu-slot { position: absolute; z-index: 4; top: calc(100% + var(--s2)); right: var(--s3); }
   .scroll { overflow: auto; min-height: 0; flex: 1; }
+  .placeholder { display: flex; flex-direction: column; gap: var(--s8); padding: var(--s4) var(--gutter); }
+  .ghost { display: flex; flex-direction: column; gap: var(--s3); padding-inline: var(--s6); }
 </style>

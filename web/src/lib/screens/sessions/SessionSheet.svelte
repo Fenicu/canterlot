@@ -86,7 +86,7 @@
     if (!panel || !(parent instanceof HTMLElement)) return;
     const height = parent.clientHeight;
     // Окно остаётся под своей строкой и прокручивается внутри; вверх уходит, только если снизу почти нет места.
-    const fits = height - anchor >= Math.min(panel.offsetHeight, height / 2);
+    const fits = height - anchor >= Math.min(panel.offsetHeight, height / 3);
     top = fits ? anchor : Math.max(0, height - panel.offsetHeight);
     room = height - top;
   });

@@ -199,6 +199,7 @@
 				thresholds={thresholds}
 				prefer={provider}
 				crunch={chat.crunch.enabled}
+				compact
 			/>
 		</div>
 	{/if}
@@ -349,9 +350,6 @@
 	.pane-action[aria-pressed='true'] {
 		background: var(--selected);
 		color: var(--accent-link);
-	}
-	.header-limits {
-		padding: 0 var(--gutter) var(--s2);
 	}
 	.session-dropdown {
 		position: absolute;
