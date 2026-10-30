@@ -691,3 +691,60 @@ async fn migration_maps_existing_conversations_to_owner(pool: PgPool) -> Result<
     assert!(bare.is_err());
     Ok(())
 }
+
+#[sqlx::test(migrations = false)]
+async fn approved_by_migration_rewrites_only_rows_it_normalizes(
+    pool: PgPool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let old = sqlx::migrate::Migrator {
+        migrations: canterlot_hub::db::MIGRATOR
+            .iter()
+            .filter(|migration| migration.version < 25)
+            .cloned()
+            .collect::<Vec<_>>()
+            .into(),
+        ..sqlx::migrate::Migrator::DEFAULT
+    };
+    old.run(&pool).await?;
+    let seed = testkit::seed(&pool).await;
+    let execution = Uuid::now_v7();
+    sqlx::query(
+        "insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')",
+    )
+    .bind(execution)
+    .bind(seed.conversation_id)
+    .execute(&pool)
+    .await?;
+    let (absent, policy, stale) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    for (block, approved_by) in [
+        (absent, None),
+        (policy, Some("cli_policy")),
+        (stale, Some("owner")),
+    ] {
+        sqlx::query("insert into blocks (block_id, execution_id, conversation_id, kind, state, rev, approved_by) values ($1, $2, $3, 'text', 'final', 1, $4)")
+            .bind(block)
+            .bind(execution)
+            .bind(seed.conversation_id)
+            .bind(approved_by)
+            .execute(&pool)
+            .await?;
+    }
+    let version = |block: Uuid| {
+        sqlx::query_scalar::<_, String>("select ctid::text from blocks where block_id = $1")
+            .bind(block)
+            .fetch_one(&pool)
+    };
+    let (absent_before, policy_before) = (version(absent).await?, version(policy).await?);
+
+    canterlot_hub::db::MIGRATOR.run(&pool).await?;
+
+    assert_eq!(version(absent).await?, absent_before);
+    assert_eq!(version(policy).await?, policy_before);
+    let normalized: Option<String> =
+        sqlx::query_scalar("select approved_by from blocks where block_id = $1")
+            .bind(stale)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(normalized, None);
+    Ok(())
+}
