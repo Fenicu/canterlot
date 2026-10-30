@@ -170,7 +170,7 @@
   function markSend(node: HTMLButtonElement) {
     $effect(() => {
       void tick;
-      node.setAttribute('aria-disabled', model.gate.ok ? 'false' : 'true');
+      node.setAttribute('aria-disabled', model.gate.ok && !model.sending ? 'false' : 'true');
     });
   }
 
@@ -226,8 +226,9 @@
     <button
       type="button"
       class="send"
-      class:off={!model.gate.ok}
+      class:off={!model.gate.ok || model.sending}
       aria-label="Отправить"
+      aria-busy={model.sending}
       use:markSend
       onpointerdown={pointerDown}
       onpointermove={pointerMove}

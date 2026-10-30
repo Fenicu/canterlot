@@ -43,9 +43,8 @@ export class ComposerModel {
   errorMessage = $state<string | null>(null);
   interruptLabel = $state("Прервать");
   interruptRunning = $state(false);
-
-  #lastSendAt = 0;
-  #lastSendText = "";
+  /** Отправка идёт: повторное нажатие во время проверки сети не создаёт второе сообщение. */
+  sending = $state(false);
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
@@ -93,15 +92,20 @@ export class ComposerModel {
   }
 
   async send(): Promise<void> {
-    if (!this.gate.ok) return;
-
-    // Защита от двойного нажатия: идентичное нажатие в пределах 600 мс игнорируется
-    const now = Date.now();
-    if (now - this.#lastSendAt < 600 && this.text === this.#lastSendText) {
-      return;
+    if (this.sending || !this.gate.ok) return;
+    this.sending = true;
+    try {
+      await this.#send();
+    } finally {
+      this.sending = false;
     }
-    this.#lastSendAt = now;
-    this.#lastSendText = this.text;
+  }
+
+  async #send(): Promise<void> {
+    const sendText = this.text;
+    const readyUploads = this.deps.uploads
+      .list(this.deps.conversationId)
+      .filter((u) => u.phase === "ready");
 
     // Проверка доступности сети (HTTP-проверка, не зависит от WSS)
     const canSend = await this.deps.canSend();
@@ -111,11 +115,7 @@ export class ComposerModel {
       this.deps.drafts.set(this.deps.conversationId, { text: this.text });
       return;
     }
-
-    const sendText = this.text;
-    const readyUploads = this.deps.uploads
-      .list(this.deps.conversationId)
-      .filter((u) => u.phase === "ready");
+    if (!this.gate.ok) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -161,9 +161,11 @@ export class ComposerModel {
 
     // Шаг 3: очистка поля ввода, черновика и лотка: отправленные файлы принадлежат сообщению
     const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
-    this.text = "";
     this.errorMessage = null;
-    await this.deps.drafts.clear(this.deps.conversationId);
+    if (this.text === sendText) {
+      this.text = "";
+      await this.deps.drafts.clear(this.deps.conversationId);
+    }
 
     // Шаг 4: запуск операции
     try {
@@ -192,6 +194,16 @@ export class ComposerModel {
   }
 
   async sendLater(at: number): Promise<void> {
+    if (this.sending) return;
+    this.sending = true;
+    try {
+      await this.#sendLater(at);
+    } finally {
+      this.sending = false;
+    }
+  }
+
+  async #sendLater(at: number): Promise<void> {
     const now = this.deps.serverNow ? this.deps.serverNow() : Date.now();
     const valid = validateScheduleTime(at, now);
     if (valid !== "ok") {
@@ -204,6 +216,11 @@ export class ComposerModel {
 
     if (!this.gate.ok) return;
 
+    const sendText = this.text;
+    const readyUploads = this.deps.uploads
+      .list(this.deps.conversationId)
+      .filter((u) => u.phase === "ready");
+
     const canSend = await this.deps.canSend();
     if (canSend === "offline") {
       this.errorMessage =
@@ -211,11 +228,7 @@ export class ComposerModel {
       this.deps.drafts.set(this.deps.conversationId, { text: this.text });
       return;
     }
-
-    const sendText = this.text;
-    const readyUploads = this.deps.uploads
-      .list(this.deps.conversationId)
-      .filter((u) => u.phase === "ready");
+    if (!this.gate.ok) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -231,9 +244,11 @@ export class ComposerModel {
     );
 
     this.deps.uploads.detach(readyUploads.map((u) => u.id));
-    this.text = "";
     this.errorMessage = null;
-    await this.deps.drafts.clear(this.deps.conversationId);
+    if (this.text === sendText) {
+      this.text = "";
+      await this.deps.drafts.clear(this.deps.conversationId);
+    }
 
     void this.deps.ops.run(op);
   }
