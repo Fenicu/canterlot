@@ -1056,6 +1056,47 @@ describe("stores task 4", () => {
     expect(chat.inputs.has(key)).toBe(false);
   });
 
+  it("cancel_note_does_not_stick_after_leaving_the_chat", () => {
+    const clock = new FakeClock(1);
+    clock.advance(1_000);
+    const chat = chatOf(undefined, clock);
+    const queued = (key: string, id: string, seq: string) => ({
+      event: ev(
+        "input_queued",
+        {
+          input_id: id,
+          input_seq: seq,
+          idempotency_key: key,
+          state: "queued",
+          content: [{ type: "text", text: key }],
+        },
+        seq,
+      ),
+      overlap: false,
+    });
+    const cancelled = (id: string, seq: string) => ({
+      event: ev("input_state_changed", { input_id: id, state: "cancelled" }, seq),
+      overlap: false,
+    });
+    const first = "00000000-0000-4000-8000-0000000000d1";
+    const second = "00000000-0000-4000-8000-0000000000d2";
+    chat.applier.applyEvents([
+      queued("early", first, "1"),
+      queued("late", second, "2"),
+      cancelled(first, "3"),
+    ]);
+    clock.advance(3000);
+    chat.applier.applyEvents([cancelled(second, "4")]);
+    chat.close();
+
+    clock.advance(2000);
+    chat.open();
+
+    expect(chat.strip().map((item) => item.key)).toEqual(["late"]);
+    clock.advance(2000);
+    expect(chat.strip()).toEqual([]);
+  });
+
   it("queue_state_changed_updates_pauses_holds_and_run_slot", () => {
     const chat = chatOf();
     const hold = {

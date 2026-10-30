@@ -275,6 +275,7 @@ export class ChatStore {
 
   open(): void {
     this.#adoptSaving();
+    this.#reviveNotes();
     this.#stopRefused ??= this.deps.ops.onOrphanRefused((op) => {
       this.inputs.delete(op.key);
     });
@@ -717,7 +718,17 @@ export class ChatStore {
     } else this.timeline.remove(`input:${input.key}`);
   }
 
-  #armNote(key: string): void {
+  /** close снимает таймеры заметок: при возврате просроченные убираются, остальные дожидаются срока. */
+  #reviveNotes(): void {
+    for (const input of [...this.inputs.values()]) {
+      if (input.state !== "cancelled" || input.stripUntil === null) continue;
+      const left = input.stripUntil - this.deps.clock.now();
+      if (left > 0) this.#armNote(input.key, left);
+      else this.inputs.delete(input.key);
+    }
+  }
+
+  #armNote(key: string, ms = 4000): void {
     this.#noteTimers.get(key)?.();
     const drop = (): void => {
       this.#noteTimers.delete(key);
@@ -728,9 +739,9 @@ export class ChatStore {
       this.inputs.delete(key);
     };
     if (this.deps.clock.schedule)
-      this.#noteTimers.set(key, this.deps.clock.schedule(drop, 4000));
+      this.#noteTimers.set(key, this.deps.clock.schedule(drop, ms));
     else {
-      const timer = setTimeout(drop, 4000);
+      const timer = setTimeout(drop, ms);
       this.#noteTimers.set(key, () => clearTimeout(timer));
     }
   }
