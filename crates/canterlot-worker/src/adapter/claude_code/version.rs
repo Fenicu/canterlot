@@ -5,8 +5,8 @@ use tokio::time::timeout;
 
 use crate::adapter::spawn_with_retry_io;
 
-pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (2, 1, 310);
-pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 310), (2, 1, 311)];
+pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (2, 1, 311);
+pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(2, 1, 311)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CliVersion {

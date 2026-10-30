@@ -6,7 +6,8 @@
 //! docs/stage0/evidence/claude-code/, процесс CLI заменяет скрипт bash.
 
 use canterlot_worker::adapter::{
-    AdapterEvent, InterruptOutcome, LocalFile, SettingsChange, Transmission, TransmitOutcome,
+    AdapterEvent, InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, SettingsChange,
+    Transmission, TransmitOutcome,
     claude_code::{
         input::{InputDriver, InputQueue, LaunchSettings, Next, user_message},
         parser::{Parsed, Parser},
@@ -22,6 +23,16 @@ use tempfile::TempDir;
 use uuid::Uuid;
 
 const WAIT: Duration = Duration::from_secs(10);
+
+fn owner_instructions() -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Owner,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    }
+}
 const DEADLINE: Duration = Duration::from_secs(10);
 
 const ALPHA: &str = "1c8c60ee-df06-42e6-b98a-2d9597113db7";
@@ -188,8 +199,7 @@ impl Fake {
             model: "haiku",
             effort: "low",
             permission_mode: "ask",
-            instruction_profile: "owner",
-            instructions_file: None,
+            instructions: &owner_instructions(),
         };
         let cli = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
             .await
@@ -936,8 +946,7 @@ async fn stdout_reading_survives_cancelled_waits() {
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner_instructions(),
     };
     let mut cli = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

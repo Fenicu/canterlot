@@ -1,6 +1,7 @@
 //! Отдельный бинарник: `TreeContainment::terminate` завершает всех потомков тестового процесса,
 //! поэтому рядом с другими тестами он обрывал бы их дочерние процессы.
 use canterlot_worker::adapter::claude_code::process::{CliProcess, LaunchSpec, SessionArg};
+use canterlot_worker::adapter::{InstructionMode, InstructionSpec};
 use canterlot_worker::config::ClaudeCodeConfig;
 use canterlot_worker::containment::Containment;
 use tempfile::TempDir;
@@ -22,6 +23,13 @@ sleep 60
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
+    let owner = InstructionSpec {
+        mode: InstructionMode::Owner,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    };
     let spec = LaunchSpec {
         executable: &script,
         exec_dir: td.path(),
@@ -30,8 +38,7 @@ sleep 60
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

@@ -46,6 +46,9 @@ pub struct ClaudeCodeAdapter {
     events: VecDeque<AdapterEvent>,
     native_id: String,
     permission_mode: String,
+    workdir: PathBuf,
+    instructions: InstructionSpec,
+    first_session: Option<SessionArg>,
     approved: HashSet<String>,
     tools: HashMap<Uuid, AdapterEvent>,
     tool_ids: HashMap<String, Uuid>,
@@ -73,6 +76,15 @@ impl ClaudeCodeAdapter {
             events: VecDeque::new(),
             native_id: String::new(),
             permission_mode: String::new(),
+            workdir: PathBuf::new(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
+            first_session: None,
             approved: HashSet::new(),
             tools: HashMap::new(),
             tool_ids: HashMap::new(),
@@ -403,6 +415,192 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
+    /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
+    /// и до 2 с, затем SIGKILL. Открытые запросы закрываются как прерванные.
+    async fn stop_old_cli(&mut self) {
+        let Some(cli) = self.cli.as_mut() else {
+            return;
+        };
+        cli.close_stdin();
+        if !drain_until_exit(
+            cli,
+            &mut self.parser,
+            &mut self.queue,
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            signal_group(cli.pid, process::Signal::Term);
+            if !drain_until_exit(
+                cli,
+                &mut self.parser,
+                &mut self.queue,
+                Duration::from_secs(2),
+            )
+            .await
+            {
+                signal_group(cli.pid, process::Signal::Kill);
+                drain_to_eof(cli, &mut self.parser, &mut self.queue).await;
+            }
+        }
+        self.cli = None;
+        self.eof = false;
+        self.exited = false;
+        for request_id in self.requests.keys().cloned().collect::<Vec<_>>() {
+            self.requests.remove(&request_id);
+            self.events.push_back(AdapterEvent::RequestClosed {
+                request_id,
+                reason: "interrupted".into(),
+            });
+        }
+    }
+
+    /// Запустить CLI для перезапуска: мгновенно вышедший процесс считается
+    /// неудачей запуска (init приходит только после первого ввода).
+    async fn spawn_for_restart(
+        &mut self,
+        launch: &process::LaunchSpec<'_>,
+        group: &dyn Containment,
+    ) -> Option<CliProcess> {
+        if version::check(&self.cfg.executable).await.is_err() {
+            return None;
+        }
+        let mut cli = CliProcess::spawn(launch, &self.cfg, group).await.ok()?;
+        if exited_early(&mut cli).await {
+            return None;
+        }
+        Some(cli)
+    }
+
+    /// Перезапустить CLI между ходами с новыми инструкциями: новый процесс
+    /// поднимается с `--resume` и флагами из действующих настроек с применённой
+    /// сменой; ввод пишется только в новый процесс. Ошибка — запасной запуск
+    /// со старыми настройками; его успех — отказ входа, провал — остановка.
+    async fn restart_for_instructions(
+        &mut self,
+        change: &SettingsChange,
+        group: &dyn Containment,
+    ) -> Result<(), &'static str> {
+        let next = change
+            .instructions
+            .clone()
+            .ok_or("instructions_change_failed")?;
+        let (model, effort, permission_mode) = match self.queue.as_ref() {
+            Some(queue) => {
+                let effective = queue.effective();
+                (
+                    change
+                        .model
+                        .clone()
+                        .unwrap_or_else(|| effective.model.clone()),
+                    change
+                        .effort
+                        .clone()
+                        .unwrap_or_else(|| effective.effort.clone()),
+                    change
+                        .permission_mode
+                        .clone()
+                        .unwrap_or_else(|| effective.permission_mode.clone()),
+                )
+            }
+            None => return Err("instructions_change_failed"),
+        };
+        let workdir = self.workdir.clone();
+        let exec_dir = self.exec_dir.clone();
+        let executable = self.cfg.executable.clone();
+        let native_id = self.native_id.clone();
+        // 1. Файл инструкций нового запуска (или удаление устаревшего).
+        if process::write_instructions_file(&exec_dir, &next).is_err() {
+            eprintln!("RESTART file fail");
+            return Err("instructions_change_failed");
+        }
+        // 2. Остановить старый CLI.
+        self.stop_old_cli().await;
+        // 3. Сбросить состояние разбора, запустить новый CLI с --resume.
+        self.parser.reset_process();
+        let launch = process::LaunchSpec {
+            executable: &executable,
+            exec_dir: &exec_dir,
+            workdir: &workdir,
+            session: SessionArg::Resume(native_id),
+            model: &model,
+            effort: &effort,
+            permission_mode: &permission_mode,
+            instructions: &next,
+        };
+        let spawned = self.spawn_for_restart(&launch, group).await;
+        let Some(cli) = spawned else {
+            eprintln!("RESTART fallback");
+            return self.respawn_previous(group).await;
+        };
+        let started = (cli.pid, cli.start_ticks);
+        self.cli = Some(cli);
+        if let Some(queue) = self.queue.as_mut() {
+            queue.apply_restarted(&model, &effort, &permission_mode);
+        }
+        self.instructions = next;
+        self.events.push_back(AdapterEvent::CliRestarted {
+            cli_pid: started.0,
+            cli_start_ticks: started.1,
+        });
+        Ok(())
+    }
+
+    /// Запасной запуск со старыми инструкциями и настройками после неудачного
+    /// перезапуска. Успех — отказ входа, провал — остановка исполнения.
+    async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
+        let previous = self.instructions.clone();
+        let (model, effort, permission_mode) = match self.queue.as_ref() {
+            Some(queue) => {
+                let effective = queue.effective();
+                (
+                    effective.model.clone(),
+                    effective.effort.clone(),
+                    effective.permission_mode.clone(),
+                )
+            }
+            None => return Err("instructions_change_failed"),
+        };
+        // Вернуть файл прежних инструкций (перезапись из памяти, удаление для Owner/Clean).
+        let _ = process::write_instructions_file(&self.exec_dir, &previous);
+        let workdir = self.workdir.clone();
+        let exec_dir = self.exec_dir.clone();
+        let executable = self.cfg.executable.clone();
+        let session = self
+            .first_session
+            .clone()
+            .unwrap_or_else(|| SessionArg::Resume(self.native_id.clone()));
+        let launch = process::LaunchSpec {
+            executable: &executable,
+            exec_dir: &exec_dir,
+            workdir: &workdir,
+            session,
+            model: &model,
+            effort: &effort,
+            permission_mode: &permission_mode,
+            instructions: &previous,
+        };
+        match self.spawn_for_restart(&launch, group).await {
+            Some(cli) => {
+                let started = (cli.pid, cli.start_ticks);
+                self.cli = Some(cli);
+                self.events.push_back(AdapterEvent::CliRestarted {
+                    cli_pid: started.0,
+                    cli_start_ticks: started.1,
+                });
+                Err("instructions_change_failed")
+            }
+            None => {
+                self.events.push_back(AdapterEvent::ProcessExited {
+                    code: None,
+                    signal: None,
+                });
+                Err("instructions_change_failed")
+            }
+        }
+    }
+
     // Every wait is cancellation-safe: the line reader retains partial bytes.
     async fn pump(&mut self) {
         if self.exited || self.cli.is_none() {
@@ -431,6 +629,114 @@ impl ClaudeCodeAdapter {
                     }
                 }
             }
+        }
+    }
+}
+
+/// Ранний выход CLI сразу после запуска: процесс не прожил и секунды.
+/// Ребёнок уже убран другой проверкой `members` (общий супервизор тестового
+/// процесса): `ECHILD` означает, что процесса точно нет.
+fn reaped(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error())
+}
+
+async fn exited_early(cli: &mut CliProcess) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
+        match cli.try_wait() {
+            Ok(Some(_)) => {
+                let _ = cli.wait().await;
+                return true;
+            }
+            Err(error) if reaped(&error) => return true,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// Сигнал группе процесса CLI (CLI запускается лидером своей группы).
+fn signal_group(pid: u32, signal: process::Signal) {
+    use rustix::process::{Pid, Signal as RSignal, kill_process_group};
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return;
+    };
+    let signal = match signal {
+        process::Signal::Int => RSignal::INT,
+        process::Signal::Term => RSignal::TERM,
+        process::Signal::Kill => RSignal::KILL,
+    };
+    let _ = kill_process_group(pid, signal);
+}
+
+/// Питать разбор строками stdout, пока процесс не выйдет или не кончится срок.
+async fn drain_until_exit(
+    cli: &mut CliProcess,
+    parser: &mut Parser,
+    queue: &mut Option<InputQueue>,
+    limit: Duration,
+) -> bool {
+    let start = Instant::now();
+    loop {
+        match cli.try_wait() {
+            Ok(Some(_)) => {
+                drain_available(cli, parser, queue).await;
+                return true;
+            }
+            // Убран чужой проверкой: процесса нет, остаток stdout уже не прочитать.
+            Err(error) if reaped(&error) => return true,
+            _ => {}
+        }
+        if start.elapsed() >= limit {
+            return false;
+        }
+        match timeout(Duration::from_millis(50), cli.next_line()).await {
+            Ok(StdoutLine::Line(line)) => {
+                for parsed in parser.feed(&line) {
+                    if let Some(queue) = queue.as_mut() {
+                        queue.on_parsed(&parsed);
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => {}
+        }
+    }
+}
+
+/// Добрать остаток stdout без разбора событий: процесс умирает, кадры не нужны.
+async fn drain_available(
+    cli: &mut CliProcess,
+    parser: &mut Parser,
+    queue: &mut Option<InputQueue>,
+) {
+    loop {
+        match timeout(Duration::from_millis(50), cli.next_line()).await {
+            Ok(StdoutLine::Line(line)) => {
+                for parsed in parser.feed(&line) {
+                    if let Some(queue) = queue.as_mut() {
+                        queue.on_parsed(&parsed);
+                    }
+                }
+            }
+            _ => return,
+        }
+    }
+}
+
+/// Читать stdout до конца после SIGKILL.
+async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Option<InputQueue>) {
+    loop {
+        match cli.next_line().await {
+            StdoutLine::Line(line) => {
+                for parsed in parser.feed(&line) {
+                    if let Some(queue) = queue.as_mut() {
+                        queue.on_parsed(&parsed);
+                    }
+                }
+            }
+            _ => return,
         }
     }
 }
@@ -474,11 +780,7 @@ impl Adapter for ClaudeCodeAdapter {
             .native_conversation_id
             .clone()
             .unwrap_or_else(|| Uuid::now_v7().to_string());
-        // Пресеты инструкций — задача 6 плана 2c: пока поддерживается только «Как у владельца».
-        let profile_name = match spec.instructions.mode {
-            InstructionMode::Owner => "owner",
-            _ => return Err(AdapterError::StartFailed("instructions_unsupported")),
-        };
+        // Пресеты инструкций принимает все режимы: текст пишет хаб через StartSpec.
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
             exec_dir: &self.exec_dir,
@@ -491,9 +793,11 @@ impl Adapter for ClaudeCodeAdapter {
             model: &spec.model,
             effort: &spec.effort,
             permission_mode: &spec.permission_mode,
-            instruction_profile: profile_name,
-            instructions_file: None,
+            instructions: &spec.instructions,
         };
+        self.workdir = spec.workdir.clone();
+        self.instructions = spec.instructions.clone();
+        self.first_session = Some(launch.session.clone());
         // The exec manager stages a named Task-1 profile before starting the supervisor.
         let broker = Broker::bind(&self.exec_dir).await?;
         process::write_exec_files(
@@ -523,20 +827,29 @@ impl Adapter for ClaudeCodeAdapter {
         Ok(started)
     }
     fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
+        // Смена инструкций обрабатывается перезапуском CLI, а не управляющими запросами.
+        if let Some(change) = input.settings.as_ref()
+            && process::needs_restart(&self.instructions, change)
+        {
+            return Ok(());
+        }
         self.queue
             .as_ref()
             .ok_or("cli_not_started")?
             .validate(input.settings.as_ref())
     }
-    async fn transmit(
-        &mut self,
-        input: &Transmission,
-        _group: &dyn Containment,
-    ) -> TransmitOutcome {
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
         if self.cli.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }
         if let Err(reason) = self.validate_transmission(input) {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
+        if let Some(change) = input.settings.clone()
+            && process::needs_restart(&self.instructions, &change)
+            && let Err(reason) = self.restart_for_instructions(&change, group).await
+        {
             return TransmitOutcome::Rejected(reason.into());
         }
         self.queue.as_mut().unwrap().enqueue(input);

@@ -1,7 +1,8 @@
 use canterlot_worker::adapter::claude_code::process::{
     CliProcess, LaunchSpec, SessionArg, Signal, StdoutLine, build_args, build_env, write_exec_files,
 };
-use canterlot_worker::adapter::claude_code::version::parse_version;
+use canterlot_worker::adapter::claude_code::version::{check, parse_version};
+use canterlot_worker::adapter::{InstructionMode, InstructionSpec};
 use canterlot_worker::config::ClaudeCodeConfig;
 use canterlot_worker::containment::Containment;
 use std::fs;
@@ -13,6 +14,26 @@ fn cfg() -> ClaudeCodeConfig {
     ClaudeCodeConfig::default()
 }
 
+fn owner_instructions() -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Owner,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    }
+}
+
+fn preset_instructions(text: &str) -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Preset,
+        text: text.to_string(),
+        preset_id: Some(Uuid::now_v7()),
+        revision: 1,
+        title: "t".to_string(),
+    }
+}
+
 #[tokio::test]
 async fn version_parsing_and_classification() {
     assert_eq!(parse_version("2.1.310 (Claude Code)").unwrap(), (2, 1, 310));
@@ -20,15 +41,29 @@ async fn version_parsing_and_classification() {
     assert_eq!(parse_version("2.1.400 (Claude Code)").unwrap(), (2, 1, 400));
     assert_eq!(parse_version("2.1.309 (Claude Code)").unwrap(), (2, 1, 309));
     assert!(parse_version("garbage").is_err());
+    // Минимум 2.1.311: 2.1.310 ниже минимума, 2.1.311 проверена.
+    for (text, below) in [
+        ("2.1.310 (Claude Code)", true),
+        ("2.1.311 (Claude Code)", false),
+    ] {
+        use std::os::unix::fs::PermissionsExt;
+        let td = TempDir::new().unwrap();
+        let script = td.path().join("fake.sh");
+        std::fs::write(&script, format!("#!/bin/sh\necho '{text}'\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let verdict = check(&script).await;
+        assert_eq!(verdict.is_err(), below, "{text}: {verdict:?}");
+    }
 }
 
 #[test]
-fn owner_profile_args_keep_owner_configuration() {
+fn owner_preset_args_keep_owner_configuration() {
     let td = TempDir::new().unwrap();
     let exec_dir = td.path().join("exec");
     fs::create_dir_all(&exec_dir).unwrap();
     let workdir = td.path().join("work");
     fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: Path::new("/usr/bin/claude"),
         exec_dir: &exec_dir,
@@ -37,8 +72,7 @@ fn owner_profile_args_keep_owner_configuration() {
         model: "claude-haiku-5-5",
         effort: "medium",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -47,21 +81,65 @@ fn owner_profile_args_keep_owner_configuration() {
         .collect();
     assert!(!s.contains(&"--setting-sources".to_string()));
     assert!(!s.contains(&"--strict-mcp-config".to_string()));
+    assert!(!s.contains(&"--bare".to_string()));
     assert!(!s.contains(&"--permission-mode".to_string()));
+    assert!(!s.contains(&"--append-system-prompt-file".to_string()));
     let idx = s.iter().position(|x| x == "--settings").unwrap();
     assert_eq!(s[idx + 1], "{\"crossSessionInbound\":\"refuse\"}");
+    assert_eq!(s[idx + 2], "--system-prompt-snapshot");
+    assert_eq!(s[idx + 3], "off");
     assert!(s.contains(&"--mcp-config".to_string()));
 }
 
 #[test]
-fn named_profile_adds_excludes_and_prompt_file_without_touching_workdir() {
+fn no_preset_passes_bare_setting_sources_or_strict_mcp() {
     let td = TempDir::new().unwrap();
     let exec_dir = td.path().join("exec");
     fs::create_dir_all(&exec_dir).unwrap();
     let workdir = td.path().join("work");
-    fs::create_dir_all(&workdir).unwrap();
-    let profile = td.path().join("profile.md");
-    fs::write(&profile, "hi").unwrap();
+    fs::create_dir_all(workdir.join(".git")).unwrap();
+    let owner = owner_instructions();
+    let clean = InstructionSpec {
+        mode: InstructionMode::Clean,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    };
+    let preset = preset_instructions("текст");
+    for instructions in [&owner, &clean, &preset] {
+        let spec = LaunchSpec {
+            executable: Path::new("/usr/bin/claude"),
+            exec_dir: &exec_dir,
+            workdir: &workdir,
+            session: SessionArg::New(Uuid::nil()),
+            model: "m",
+            effort: "e",
+            permission_mode: "owner",
+            instructions,
+        };
+        let args = build_args(&spec, &cfg()).unwrap();
+        let s: Vec<String> = args
+            .iter()
+            .map(|o| o.to_string_lossy().to_string())
+            .collect();
+        for forbidden in ["--bare", "--setting-sources", "--strict-mcp-config"] {
+            assert!(!s.contains(&forbidden.to_string()), "{forbidden}");
+        }
+        let idx = s.iter().position(|x| x == "--settings").unwrap();
+        assert_eq!(s[idx + 2], "--system-prompt-snapshot");
+        assert_eq!(s[idx + 3], "off");
+    }
+}
+
+#[test]
+fn custom_preset_writes_instructions_file_0600_and_appends_it() {
+    let td = TempDir::new().unwrap();
+    let exec_dir = td.path().join("exec");
+    fs::create_dir_all(&exec_dir).unwrap();
+    let workdir = td.path().join("work");
+    fs::create_dir_all(workdir.join(".git")).unwrap();
+    let preset = preset_instructions("секретный текст");
     let before: Vec<_> = fs::read_dir(&workdir).unwrap().collect();
     let spec = LaunchSpec {
         executable: Path::new("/usr/bin/claude"),
@@ -71,8 +149,7 @@ fn named_profile_adds_excludes_and_prompt_file_without_touching_workdir() {
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "p",
-        instructions_file: Some(&profile),
+        instructions: &preset,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -81,8 +158,23 @@ fn named_profile_adds_excludes_and_prompt_file_without_touching_workdir() {
         .collect();
     let idx = s.iter().position(|x| x == "--settings").unwrap();
     assert!(s[idx + 1].contains("claudeMdExcludes"));
-    assert!(s.contains(&"--append-system-prompt-file".to_string()));
+    let append = s
+        .iter()
+        .position(|x| x == "--append-system-prompt-file")
+        .unwrap();
+    assert_eq!(
+        s[append + 1],
+        exec_dir.join("instructions.md").to_string_lossy()
+    );
     write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker")).unwrap();
+    let dst = exec_dir.join("instructions.md");
+    assert_eq!(std::fs::read_to_string(&dst).unwrap(), "секретный текст");
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&dst).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Рабочий каталог не тронут, текст — только в exec_dir.
     let after: Vec<_> = fs::read_dir(&workdir).unwrap().collect();
     assert_eq!(before.len(), after.len());
 }
@@ -100,6 +192,7 @@ fn permission_modes_map_to_cli_values() {
         fs::create_dir_all(&exec_dir).unwrap();
         let workdir = td.path().join("work");
         fs::create_dir_all(&workdir).unwrap();
+        let owner = owner_instructions();
         let spec = LaunchSpec {
             executable: Path::new("/usr/bin/claude"),
             exec_dir: &exec_dir,
@@ -108,8 +201,7 @@ fn permission_modes_map_to_cli_values() {
             model: "m",
             effort: "e",
             permission_mode: input,
-            instruction_profile: "owner",
-            instructions_file: None,
+            instructions: &owner,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -129,6 +221,7 @@ fn permission_modes_map_to_cli_values() {
     fs::create_dir_all(&exec_dir).unwrap();
     let workdir = td.path().join("work");
     fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: Path::new("/usr/bin/claude"),
         exec_dir: &exec_dir,
@@ -137,8 +230,7 @@ fn permission_modes_map_to_cli_values() {
         model: "m",
         effort: "e",
         permission_mode: "nope",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     assert!(build_args(&spec, &cfg()).is_err());
 }
@@ -182,6 +274,7 @@ fn mcp_json_points_relay_at_exec_socket() {
     let exec_dir = td.path().join("exec");
     let workdir = td.path().join("work");
     fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: Path::new("/usr/bin/claude"),
         exec_dir: &exec_dir,
@@ -190,8 +283,7 @@ fn mcp_json_points_relay_at_exec_socket() {
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     fs::create_dir_all(&exec_dir).unwrap();
     write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker")).unwrap();
@@ -230,6 +322,7 @@ printf '%s\n' '{"type":"x"}'
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: &script,
         exec_dir: td.path(),
@@ -238,8 +331,7 @@ printf '%s\n' '{"type":"x"}'
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -272,6 +364,7 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: &script,
         exec_dir: td.path(),
@@ -280,8 +373,7 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -314,6 +406,7 @@ while :; do sleep 0.1; done
     let _interrupt =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: &script,
         exec_dir: td.path(),
@@ -322,8 +415,7 @@ while :; do sleep 0.1; done
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -371,6 +463,7 @@ sleep 1
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
+    let owner = owner_instructions();
     let spec = LaunchSpec {
         executable: &script,
         exec_dir: td.path(),
@@ -379,8 +472,7 @@ sleep 1
         model: "m",
         effort: "e",
         permission_mode: "owner",
-        instruction_profile: "owner",
-        instructions_file: None,
+        instructions: &owner,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -394,29 +486,4 @@ sleep 1
         .unwrap();
     assert_eq!(member.start_ticks, proc.start_ticks);
     let _ = proc;
-}
-
-#[test]
-fn default_excludes_are_absolute_home_paths() {
-    let spec = LaunchSpec {
-        executable: std::path::Path::new("/usr/bin/claude"),
-        exec_dir: std::path::Path::new("/tmp/xd"),
-        workdir: std::path::Path::new("/tmp"),
-        session: SessionArg::New(uuid::Uuid::nil()),
-        model: "m",
-        effort: "e",
-        permission_mode: "owner",
-        instruction_profile: "p",
-        instructions_file: Some(std::path::Path::new("/tmp/p.md")),
-    };
-    let cfg = ClaudeCodeConfig::default();
-    let args = build_args(&spec, &cfg).unwrap();
-    let s: Vec<String> = args
-        .iter()
-        .map(|o| o.to_string_lossy().to_string())
-        .collect();
-    let idx = s.iter().position(|x| x == "--settings").unwrap();
-    assert!(s[idx + 1].contains("claudeMdExcludes"));
-    // HOME-based absolute paths: check no literal ~
-    assert!(!s[idx + 1].contains("\"~"));
 }

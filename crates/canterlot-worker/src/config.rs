@@ -298,8 +298,8 @@ impl Default for MachineConfig {
 pub struct ClaudeCodeConfig {
     #[serde(default = "default_claude_executable")]
     pub executable: PathBuf,
-    #[serde(default)]
-    pub claude_md_excludes: Vec<PathBuf>,
+    // claude_md_excludes удалён планом 2c (задача 6): список исключений
+    // вычисляется при каждом запуске (owner_instruction_excludes).
     pub oauth_poll_interval_s: u64,
     pub credentials_path: Option<PathBuf>,
     pub allow_paid_model_poll: bool,
@@ -309,7 +309,6 @@ impl Default for ClaudeCodeConfig {
     fn default() -> Self {
         Self {
             executable: PathBuf::from("claude"),
-            claude_md_excludes: Vec::new(),
             oauth_poll_interval_s: 1800,
             credentials_path: None,
             allow_paid_model_poll: false,

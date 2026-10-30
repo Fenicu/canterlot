@@ -1,7 +1,8 @@
+use crate::adapter::{InstructionMode, InstructionSpec, SettingsChange};
 use crate::config::ClaudeCodeConfig;
 use crate::containment::Containment;
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use uuid::Uuid;
@@ -12,9 +13,136 @@ pub enum SessionArg {
     Resume(String),
 }
 
+/// Корень репозитория рабочего каталога: ближайший каталог (сам workdir или выше),
+/// содержащий запись `.git` (каталог, файл worktree/субмодуля или ссылка); без git — сам workdir.
+pub fn repository_root(workdir: &Path) -> PathBuf {
+    let start = std::path::absolute(workdir).unwrap_or_else(|_| workdir.to_path_buf());
+    let mut current: Option<&Path> = Some(start.as_path());
+    while let Some(dir) = current {
+        if std::fs::symlink_metadata(dir.join(".git")).is_ok() {
+            return dir.to_path_buf();
+        }
+        current = dir.parent();
+    }
+    start
+}
+
+/// Экранировать glob-метасимволы скобками: `*` → `[*]` (и так далее).
+fn escape_glob_segment(segment: &str) -> String {
+    let mut out = String::with_capacity(segment.len());
+    for ch in segment.chars() {
+        match ch {
+            '*' | '?' | '{' | '}' => {
+                out.push('[');
+                out.push(ch);
+                out.push(']');
+            }
+            '[' => out.push_str("[[]"),
+            ']' => out.push_str("[]]"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Абсолютные пути файлов инструкций владельца строго выше корня репозитория
+/// плюс пользовательский уровень; файлы самого репозитория никогда не входят.
+/// Ничего не читает, кроме прохода `.git` вверх.
+pub fn owner_instruction_excludes(workdir: &Path, home: &Path) -> Vec<String> {
+    let root = repository_root(workdir);
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |dir: &str| {
+        for suffix in [
+            "CLAUDE.md",
+            "CLAUDE.local.md",
+            ".claude/CLAUDE.md",
+            "AGENTS.md",
+            ".claude/AGENTS.md",
+            ".claude/rules/**",
+        ] {
+            // Корень `/` склеивается без двойного слеша.
+            let entry = if dir == "/" {
+                format!("/{suffix}")
+            } else {
+                format!("{dir}/{suffix}")
+            };
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    };
+    // Каталоги строго выше корня репозитория, вплоть до `/` включительно.
+    let mut above: Option<&Path> = root.parent();
+    while let Some(dir) = above {
+        let escaped = escape_glob_segment(&dir.display().to_string());
+        push(&escaped);
+        above = dir.parent();
+    }
+    // Пользовательский уровень — для любого workdir.
+    let home_escaped = escape_glob_segment(&home.display().to_string());
+    for suffix in [".claude/CLAUDE.md", ".claude/rules/**"] {
+        let entry = format!("{home_escaped}/{suffix}");
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+    // Личные файлы владельца — даже если корень репозитория это сам $HOME.
+    if root == home {
+        for name in ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"] {
+            let entry = format!("{home_escaped}/{name}");
+            if !out.contains(&entry) {
+                out.push(entry);
+            }
+        }
+    }
+    out
+}
+
+/// JSON для `--settings` по режиму инструкций.
+pub fn settings_json(mode: InstructionMode, excludes: &[String]) -> serde_json::Value {
+    let mut settings = serde_json::json!({"crossSessionInbound": "refuse"});
+    if mode != InstructionMode::Owner {
+        settings["claudeMdExcludes"] = serde_json::json!(excludes);
+        settings["autoMemoryEnabled"] = serde_json::json!(false);
+    }
+    settings
+}
+
+/// Текст пресета в `<exec_dir>/instructions.md` (0600); Clean/Owner удаляют устаревший файл.
+pub fn write_instructions_file(
+    exec_dir: &Path,
+    spec: &InstructionSpec,
+) -> Result<Option<PathBuf>, LaunchError> {
+    let path = exec_dir.join("instructions.md");
+    if spec.mode != InstructionMode::Preset {
+        if std::fs::symlink_metadata(&path).is_ok() {
+            std::fs::remove_file(&path).map_err(LaunchError::Io)?;
+        }
+        return Ok(None);
+    }
+    if spec.text.is_empty() {
+        return Err(LaunchError::MissingInstructions);
+    }
+    std::fs::create_dir_all(exec_dir).map_err(LaunchError::Io)?;
+    let tmp = exec_dir.join(format!("instructions.md.tmp-{}", std::process::id()));
+    std::fs::write(&tmp, spec.text.as_bytes()).map_err(LaunchError::Io)?;
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+        .map_err(LaunchError::Io)?;
+    std::fs::rename(&tmp, &path).map_err(LaunchError::Io)?;
+    Ok(Some(path))
+}
+
+/// Смена инструкций требует перезапуска CLI между ходами.
+pub fn needs_restart(effective: &InstructionSpec, change: &SettingsChange) -> bool {
+    change
+        .instructions
+        .as_ref()
+        .is_some_and(|next| !next.same_effect(effective))
+}
+
 #[derive(Debug)]
 pub enum LaunchError {
-    UnknownProfile,
     UnknownPermissionMode,
     MissingInstructions,
     WorkdirNotDir,
@@ -45,8 +173,7 @@ pub struct LaunchSpec<'a> {
     pub model: &'a str,
     pub effort: &'a str,
     pub permission_mode: &'a str,
-    pub instruction_profile: &'a str,
-    pub instructions_file: Option<&'a Path>,
+    pub instructions: &'a InstructionSpec,
 }
 
 pub fn map_permission_mode(m: &str) -> Result<Option<&'static str>, LaunchError> {
@@ -59,12 +186,14 @@ pub fn map_permission_mode(m: &str) -> Result<Option<&'static str>, LaunchError>
     }
 }
 
-pub fn build_args(spec: &LaunchSpec, cfg: &ClaudeCodeConfig) -> Result<Vec<OsString>, LaunchError> {
+pub fn build_args(
+    spec: &LaunchSpec,
+    _cfg: &ClaudeCodeConfig,
+) -> Result<Vec<OsString>, LaunchError> {
     if !spec.workdir.is_dir() {
         return Err(LaunchError::WorkdirNotDir);
     }
-    let is_owner = spec.instruction_profile.is_empty() || spec.instruction_profile == "owner";
-    if !is_owner && spec.instructions_file.is_none() {
+    if spec.instructions.mode == InstructionMode::Preset && spec.instructions.text.is_empty() {
         return Err(LaunchError::MissingInstructions);
     }
     let mut args: Vec<OsString> = vec![
@@ -85,24 +214,14 @@ pub fn build_args(spec: &LaunchSpec, cfg: &ClaudeCodeConfig) -> Result<Vec<OsStr
         "--effort".into(),
         spec.effort.into(),
     ];
-    let mut settings = serde_json::json!({"crossSessionInbound":"refuse"});
-    if !is_owner {
-        let excludes: Vec<String> = if cfg.claude_md_excludes.is_empty() {
-            let home = std::env::var("HOME").unwrap_or_default();
-            vec![
-                format!("{}/CLAUDE.md", home),
-                format!("{}/.claude/CLAUDE.md", home),
-            ]
-        } else {
-            cfg.claude_md_excludes
-                .iter()
-                .map(|p| p.display().to_string())
-                .collect()
-        };
-        settings["claudeMdExcludes"] = serde_json::json!(excludes);
-    }
+    // Домашний каталог — из окружения воркера; файлы не читаются, только пути.
+    let home = std::env::var("HOME").unwrap_or_default();
+    let excludes = owner_instruction_excludes(spec.workdir, Path::new(&home));
+    let settings = settings_json(spec.instructions.mode, &excludes);
     args.push("--settings".into());
     args.push(settings.to_string().into());
+    args.push("--system-prompt-snapshot".into());
+    args.push("off".into());
     if let Some(mode) = map_permission_mode(spec.permission_mode)? {
         args.push("--permission-mode".into());
         args.push(mode.into());
@@ -117,9 +236,9 @@ pub fn build_args(spec: &LaunchSpec, cfg: &ClaudeCodeConfig) -> Result<Vec<OsStr
             args.push(id.clone().into());
         }
     }
-    if !is_owner {
+    if spec.instructions.mode == InstructionMode::Preset {
         args.push("--append-system-prompt-file".into());
-        args.push(spec.exec_dir.join("profile.md").into_os_string());
+        args.push(spec.exec_dir.join("instructions.md").into_os_string());
     }
     Ok(args)
 }
@@ -162,16 +281,7 @@ pub fn write_exec_files(
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(&mcp_path, std::fs::Permissions::from_mode(0o600))
         .map_err(LaunchError::Io)?;
-    if !spec.instruction_profile.is_empty() && spec.instruction_profile != "owner" {
-        if let Some(src) = spec.instructions_file {
-            let dst = spec.exec_dir.join("profile.md");
-            std::fs::copy(src, &dst).map_err(LaunchError::Io)?;
-            std::fs::set_permissions(&dst, std::fs::Permissions::from_mode(0o600))
-                .map_err(LaunchError::Io)?;
-        } else {
-            return Err(LaunchError::MissingInstructions);
-        }
-    }
+    write_instructions_file(spec.exec_dir, spec.instructions)?;
     Ok(())
 }
 

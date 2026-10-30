@@ -138,6 +138,17 @@ impl InputQueue {
         &self.effective
     }
 
+    /// Применить настройки перезапущенного CLI: флаги уже переданы при запуске,
+    /// управляющие запросы для этой смены не нужны.
+    pub fn apply_restarted(&mut self, model: &str, effort: &str, permission_mode: &str) {
+        self.effective.model = model.to_owned();
+        self.effective.effort = effort.to_owned();
+        self.effective.permission_mode = permission_mode.to_owned();
+        if permission_mode == "bypass" {
+            self.bypass_allowed = true;
+        }
+    }
+
     pub fn active(&self) -> Option<&ActiveTurn> {
         self.active.as_ref()
     }

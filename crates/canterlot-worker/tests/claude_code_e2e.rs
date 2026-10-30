@@ -954,10 +954,27 @@ async fn required_diagnostic_kinds_stop_with_matching_reason() {
 }
 
 async fn smoke_turn(f: &mut Fake, input: Transmission) -> Vec<AdapterEvent> {
-    f.send(&input).await;
+    smoke_turn_raw(&mut f.adapter, &f.group, input).await
+}
+
+async fn smoke_turn_raw(
+    adapter: &mut Box<dyn Adapter>,
+    group: &TreeContainment,
+    input: Transmission,
+) -> Vec<AdapterEvent> {
+    match tokio::time::timeout(WAIT, adapter.transmit(&input, group))
+        .await
+        .unwrap()
+    {
+        TransmitOutcome::Accepted(p) => {
+            assert_eq!(p.command_id, input.command_id);
+            assert_eq!(p.kind, "claude_code_answer_frame");
+        }
+        other => panic!("delivery: {other:?}"),
+    }
     let mut events = vec![];
     loop {
-        let event = tokio::time::timeout(Duration::from_secs(90), f.adapter.next_event())
+        let event = tokio::time::timeout(Duration::from_secs(90), adapter.next_event())
             .await
             .expect("live turn deadline");
         if let AdapterEvent::Diagnostic {
@@ -1000,7 +1017,7 @@ async fn smoke_turn(f: &mut Fake, input: Transmission) -> Vec<AdapterEvent> {
                 }
             };
             assert!(matches!(
-                tokio::time::timeout(WAIT, f.adapter.deliver_decision(request_id, &decision))
+                tokio::time::timeout(WAIT, adapter.deliver_decision(request_id, &decision))
                     .await
                     .unwrap(),
                 adapter::DecisionOutcome::Applied(_)
@@ -1207,6 +1224,143 @@ async fn live_smoke() {
     );
     f.close().await;
     eprintln!("CONFIRMED: new process resumes same native conversation; six turns total");
+
+    // План 2c, задача 6, live: пресеты в репозитории под $HOME (предки владельца
+    // существуют), настоящее CLI только под флагом smoke.
+    let home = std::env::var("HOME").expect("smoke needs HOME");
+    let smoke_home = PathBuf::from(format!("{home}/canterlot-smoke-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&smoke_home);
+    let repo = smoke_home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(&repo)
+            .status()
+            .await
+            .unwrap()
+            .success()
+    );
+    std::fs::write(repo.join("CLAUDE.md"), "# canterlot smoke repo\n").unwrap();
+    let exe = std::env::var_os("CANTERLOT_CLAUDE_CODE_EXECUTABLE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| "claude".into());
+    let mut preset_adapter: Box<dyn Adapter> = Box::new(
+        adapter::claude_code::ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: exe,
+                ..Default::default()
+            },
+            smoke_home.join("exec"),
+            Duration::from_secs(60),
+        )
+        .with_relay_executable(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker"))),
+    );
+    let preset_group = TreeContainment::new().unwrap();
+    let preset_spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir: repo.clone(),
+        native_conversation_id: None,
+        profile: "claude_code".into(),
+        model: "haiku".into(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
+    };
+    tokio::time::timeout(WAIT, preset_adapter.start(&preset_spec, &preset_group))
+        .await
+        .expect("preset start deadline")
+        .expect("preset start ok");
+    let mut input = tx(Uuid::now_v7());
+    input.text = "/context".into();
+    let events = smoke_turn_raw(&mut preset_adapter, &preset_group, input).await;
+    let context_text: String = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::BlockFinal { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    eprintln!("SMOKE /context: {context_text}");
+    assert!(
+        !context_text.contains("MEMORY.md"),
+        "clean preset must drop auto-memory"
+    );
+    assert!(
+        context_text.contains("CLAUDE.md"),
+        "repository file stays in context"
+    );
+
+    for canary in ["CANARY-PRESET-A", "CANARY-PRESET-B"] {
+        let mut input = tx(Uuid::now_v7());
+        input.text =
+            "Reply with exactly the canary word from your system prompt or NONE. No tools.".into();
+        input.settings = Some(adapter::SettingsChange {
+            instructions: Some(InstructionSpec {
+                mode: InstructionMode::Preset,
+                text: format!("The canary word is {canary}."),
+                preset_id: Some(Uuid::now_v7()),
+                revision: 1,
+                title: canary.into(),
+            }),
+            ..Default::default()
+        });
+        let events = smoke_turn_raw(&mut preset_adapter, &preset_group, input).await;
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, AdapterEvent::BlockFinal {text, ..} if text.contains(canary))),
+            "preset {canary} must reach the model after restart"
+        );
+    }
+    eprintln!("CONFIRMED: preset text reaches the model, CLI restarts between turns");
+    let mut input = tx(Uuid::now_v7());
+    input.text =
+        "Reply with exactly the canary word from your system prompt or NONE. No tools.".into();
+    input.settings = Some(adapter::SettingsChange {
+        instructions: Some(InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        }),
+        ..Default::default()
+    });
+    let events = smoke_turn_raw(&mut preset_adapter, &preset_group, input).await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::BlockFinal {text, ..} if text.contains("NONE"))),
+        "clean preset must drop the canary"
+    );
+    for _ in 0..2 {
+        let input = tx(Uuid::now_v7());
+        let events = smoke_turn_raw(&mut preset_adapter, &preset_group, input).await;
+        let cached: u64 = events
+            .iter()
+            .filter_map(|e| match e {
+                AdapterEvent::RunFinished { usage, .. } => {
+                    Some(usage.iter().map(|u| u.cache_read_tokens).sum::<u64>())
+                }
+                _ => None,
+            })
+            .sum();
+        eprintln!("SMOKE cache_read_input_tokens after unchanged turn: {cached}");
+    }
+    tokio::time::timeout(WAIT, preset_adapter.close(CloseMode::Force, &preset_group))
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&smoke_home);
+    eprintln!("CONFIRMED: presets smoke done (context, canaries A/B/NONE, cache report)");
 }
 
 #[tokio::test]
