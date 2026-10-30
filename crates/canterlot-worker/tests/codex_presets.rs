@@ -147,7 +147,16 @@ struct PresetHarness {
 
 impl PresetHarness {
     async fn new() -> Self {
+        Self::start_with(owner_spec(), None, |_| {}).await
+    }
+
+    async fn start_with(
+        instructions: InstructionSpec,
+        native: Option<&str>,
+        setup: impl FnOnce(&std::path::Path),
+    ) -> Self {
         let dir = TempDir::new().unwrap();
+        setup(dir.path());
         let exe = dir.path().join("fake-codex");
         fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
         let owner = dir.path().join("owner-home");
@@ -172,12 +181,12 @@ impl PresetHarness {
             execution_id: Uuid::now_v7(),
             generation: 1,
             workdir: dir.path().into(),
-            native_conversation_id: None,
+            native_conversation_id: native.map(str::to_owned),
             profile: "codex".into(),
             model: "gpt-6-luna".into(),
             effort: "low".into(),
             permission_mode: "ask".into(),
-            instructions: owner_spec(),
+            instructions,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -315,6 +324,69 @@ async fn owner_launch_keeps_environment_untouched() {
         env["CODEX_HOME"],
         Value::Null,
         "owner keeps real environment: {env}"
+    );
+    assert!(
+        !h.dir.path().join("codex-home").exists(),
+        "owner start builds no canterlot home"
+    );
+    assert!(
+        !spawns[0].1.contains(&"memories".to_string()),
+        "{:?}",
+        spawns[0].1
+    );
+}
+
+#[tokio::test]
+async fn clean_and_preset_start_spawns_the_first_app_server_under_canterlot_home() {
+    for (mode, spec) in [("clean", clean_spec()), ("preset", preset_spec("текст"))] {
+        let h = PresetHarness::start_with(spec, None, |_| {}).await;
+        let spawns = h.spawns();
+        assert_eq!(spawns.len(), 1, "{mode}: no restart needed");
+        let env = h.env_of(h.old_pid);
+        let canterlot = h.dir.path().join("codex-home");
+        assert_eq!(
+            env["CODEX_HOME"].as_str(),
+            Some(canterlot.to_str().unwrap()),
+            "{mode}: first process runs under the canterlot home: {env}"
+        );
+        assert!(
+            env.get("CODEX_SQLITE_HOME").is_none_or(Value::is_null),
+            "{mode}: {env}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(canterlot.join("AGENTS.md")).unwrap(),
+            canterlot_worker::adapter::codex::mcp::SERVER_INSTRUCTIONS,
+            "{mode}: home prepared before the spawn"
+        );
+        assert!(
+            canterlot.join("config.toml").is_symlink(),
+            "{mode}: owner entries linked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clean_start_resume_falls_back_to_owner_rollout_path() {
+    // Тред создан под домом владельца: в доме canterlot его нет.
+    let h = PresetHarness::start_with(clean_spec(), Some("thread-1"), |dir| {
+        std::fs::write(
+            dir.join("resume-error.json"),
+            r#"{"code": -32000, "message": "Thread thread-1 not found"}"#,
+        )
+        .unwrap();
+        let sessions = dir.join("owner-home").join("sessions").join("2026");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
+    })
+    .await;
+    let resumes = h.method_params("thread/resume");
+    assert_eq!(resumes.len(), 2, "retry with path: {resumes:?}");
+    assert!(
+        resumes[1]["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("rollout-2026-thread-1.jsonl")),
+        "{}",
+        resumes[1]
     );
 }
 

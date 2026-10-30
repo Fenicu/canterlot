@@ -740,27 +740,6 @@ impl CodexAdapter {
         self.models = self.list_models().await?;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
-        // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c, задача 7).
-        self.codex_home = match spec.instructions.mode {
-            InstructionMode::Owner => None,
-            _ => {
-                let home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
-                    .map_err(|error| {
-                        AdapterError::StartFailed(match error {
-                            HomeError::Unusable => "codex_home_unusable",
-                            HomeError::Io(_) => "codex_home_failed",
-                        })
-                    })?;
-                home.prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
-                    .map_err(|error| {
-                        AdapterError::StartFailed(match error {
-                            HomeError::Unusable => "codex_home_unusable",
-                            HomeError::Io(_) => "codex_home_failed",
-                        })
-                    })?;
-                Some(home)
-            }
-        };
         let instructions = thread::compose_developer_instructions(
             &spec.instructions,
             &self.owner,
@@ -769,24 +748,17 @@ impl CodexAdapter {
         );
         let model = (!spec.model.is_empty()).then(|| spec.model.clone());
         let effective = if let Some(native) = spec.native_conversation_id.as_deref() {
-            let result = self
-                .rpc_round(
-                    "thread/resume",
-                    thread::thread_resume_params(
-                        native,
-                        self.mode,
-                        model.as_deref(),
-                        &spec.workdir,
-                        &instructions,
-                        None,
-                    ),
-                    HANDSHAKE_STEP,
-                )
-                .await
-                .ok_or(AdapterError::StartFailed("app_server_failed"))?
-                .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
-            thread::parse_thread_result(&result)
-                .map_err(|_| AdapterError::StartFailed("resume_failed"))?
+            // Тред, созданный под другим домом, ищется по рулону в доме владельца.
+            let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
+            let launch = ResumeLaunch {
+                mode: self.mode,
+                launch_mode: spec.instructions.mode,
+                model: model.as_deref(),
+                dev: &instructions,
+                home: None,
+                owner_home: owner_home.as_deref(),
+            };
+            self.resume_with_fallback(native, launch).await?
         } else {
             let result = self
                 .rpc_round(
@@ -879,9 +851,10 @@ impl CodexAdapter {
     /// рулона из дома владельца.
     async fn resume_with_fallback(
         &mut self,
+        thread_id: &str,
         launch: ResumeLaunch<'_>,
     ) -> Result<thread::Effective, AdapterError> {
-        let thread_id = self.thread_id();
+        let thread_id = thread_id.to_owned();
         let workdir = self.workdir.clone();
         let params = thread::thread_resume_params(
             &thread_id,
@@ -1019,7 +992,8 @@ impl CodexAdapter {
         };
         self.proc = Some(proc);
         self.handshake_base().await?;
-        self.resume_with_fallback(launch).await
+        let thread_id = self.thread_id();
+        self.resume_with_fallback(&thread_id, launch).await
     }
 
     /// Запасной запуск со старыми инструкциями и домом после неудачного
@@ -1433,6 +1407,12 @@ impl Adapter for CodexAdapter {
             .relay_executable
             .clone()
             .unwrap_or(std::env::current_exe()?);
+        // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c,
+        // задача 7): готов до запуска, иначе первый сервер видит ~/.codex.
+        self.codex_home = match spec.instructions.mode {
+            InstructionMode::Owner => None,
+            _ => Some(prepare_home(&self.cfg, &self.exec_dir).map_err(AdapterError::StartFailed)?),
+        };
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
             exec_dir: &self.exec_dir,
