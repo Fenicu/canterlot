@@ -1,6 +1,11 @@
 //! Сторона супervisor: сокет MCP, JSON-RPC и события брокера.
 
-use std::{collections::HashMap, os::unix::fs::DirBuilderExt as _, path::Path, sync::Arc};
+use std::{
+    collections::HashMap,
+    os::unix::fs::DirBuilderExt as _,
+    path::Path,
+    sync::{Arc, Mutex as SyncMutex},
+};
 
 use canterlot_proto::{
     requests::{DecisionPayload, PermissionBehavior},
@@ -8,13 +13,16 @@ use canterlot_proto::{
 };
 use serde_json::{Value, json};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, unix::OwnedWriteHalf},
+    io::{AsyncBufReadExt, AsyncReadExt as _, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream, unix::OwnedWriteHalf},
     sync::{Mutex, mpsc},
     task::JoinHandle,
 };
 
 use super::mcp::{self, ToolSet};
+
+/// Предел строки JSON-RPC от relay: как у stdout CLI; длиннее — соединение закрывается.
+pub const MAX_MCP_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Вид ожидающего вызова задаётся при открытии, а не ключами входа инструмента.
 enum PendingKind {
@@ -22,9 +30,28 @@ enum PendingKind {
     Question { normalized: Value, original: Value },
 }
 
+/// Ответ уходит в то соединение, откуда пришёл вызов.
+type ConnWriter = Arc<Mutex<OwnedWriteHalf>>;
+
 struct PendingCall {
     rpc_id: Value,
     kind: PendingKind,
+    conn: u64,
+    writer: ConnWriter,
+}
+
+/// Вызов `canterlot_limits`: ответ пишется в соединение вызова.
+pub struct LimitsCall {
+    pub rpc_id: Value,
+    writer: ConnWriter,
+}
+
+impl std::fmt::Debug for LimitsCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LimitsCall")
+            .field("rpc_id", &self.rpc_id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -38,30 +65,63 @@ pub enum BrokerEvent {
         request_id: String,
     },
     LimitsQuery {
-        rpc_id: Value,
+        call: LimitsCall,
     },
 }
 
-type SharedWriter = Arc<Mutex<Option<OwnedWriteHalf>>>;
+/// Допуск соединений. С approve (Claude Code) живо одно соединение relay:
+/// новое принимается, только если живого нет или адаптер взвёл допуск перед
+/// запуском CLI; взведённое вытесняет прежнее. Без approve (Codex) соединений
+/// может быть несколько, у каждого свой ответ и свои вызовы.
+#[derive(Default)]
+struct Gate {
+    single: bool,
+    live: Option<u64>,
+    armed: bool,
+    next: u64,
+}
 
-async fn write_line(writer: &SharedWriter, value: &Value) -> std::io::Result<()> {
+impl Gate {
+    fn admit(&mut self) -> Option<u64> {
+        if self.single && self.live.is_some() && !self.armed {
+            return None;
+        }
+        self.armed = false;
+        self.next += 1;
+        self.live = Some(self.next);
+        Some(self.next)
+    }
+
+    fn current(&self, conn: u64) -> bool {
+        !self.single || self.live == Some(conn)
+    }
+}
+
+type Pending = Arc<Mutex<HashMap<String, PendingCall>>>;
+
+async fn write_line(writer: &ConnWriter, value: &Value) -> std::io::Result<()> {
     let mut line = value.to_string();
     line.push('\n');
-    let mut guard = writer.lock().await;
-    let Some(stream) = guard.as_mut() else {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::NotConnected,
-            "relay is gone",
-        ));
-    };
+    let mut stream = writer.lock().await;
     stream.write_all(line.as_bytes()).await?;
     stream.flush().await
 }
 
+fn rpc_error(id: &Value, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32602, "message": message}})
+}
+
+/// Соединение от процесса того же пользователя.
+fn same_user(stream: &UnixStream) -> bool {
+    stream
+        .peer_cred()
+        .is_ok_and(|cred| cred.uid() == rustix::process::getuid().as_raw())
+}
+
 pub struct Broker {
     events: mpsc::UnboundedReceiver<BrokerEvent>,
-    pending: Arc<Mutex<HashMap<String, PendingCall>>>,
-    writer: SharedWriter,
+    pending: Pending,
+    gate: Arc<SyncMutex<Gate>>,
     task: JoinHandle<()>,
     limits_provider: String,
 }
@@ -92,24 +152,34 @@ impl Broker {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let (tx, rx) = mpsc::unbounded_channel();
-        let pending: Arc<Mutex<HashMap<String, PendingCall>>> = Arc::default();
-        let writer: SharedWriter = Arc::default();
+        let pending: Pending = Arc::default();
+        let gate = Arc::new(SyncMutex::new(Gate {
+            single: tool_set == ToolSet::ApproveAndLimits,
+            ..Gate::default()
+        }));
         let provider = limits_provider.to_owned();
         let task = {
             let pending = pending.clone();
-            let writer = writer.clone();
+            let gate = gate.clone();
             let provider = provider.clone();
             tokio::spawn(async move {
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
                     };
+                    if !same_user(&stream) {
+                        continue;
+                    }
+                    let Some(conn) = gate.lock().expect("mcp gate").admit() else {
+                        continue;
+                    };
                     let (read, write) = stream.into_split();
-                    *writer.lock().await = Some(write);
                     tokio::spawn(serve_conn(
+                        conn,
                         read,
-                        writer.clone(),
+                        Arc::new(Mutex::new(write)),
                         pending.clone(),
+                        gate.clone(),
                         tx.clone(),
                         tool_set,
                         provider.clone(),
@@ -120,10 +190,16 @@ impl Broker {
         Ok(Self {
             events: rx,
             pending,
-            writer,
+            gate,
             task,
             limits_provider: provider,
         })
+    }
+
+    /// Разрешить следующее соединение relay: адаптер зовёт перед запуском
+    /// (или перезапуском) CLI, новое соединение вытесняет прежнее.
+    pub fn arm(&self) {
+        self.gate.lock().expect("mcp gate").armed = true;
     }
 
     pub async fn next(&mut self) -> BrokerEvent {
@@ -191,7 +267,7 @@ impl Broker {
         };
         drop(pending);
         let reply = mcp::tool_call_reply(&call.rpc_id, &text_value(&text));
-        if write_line(&self.writer, &reply).await.is_err() {
+        if write_line(&call.writer, &reply).await.is_err() {
             self.pending
                 .lock()
                 .await
@@ -215,15 +291,15 @@ impl Broker {
         })
     }
 
-    pub async fn answer_limits(&mut self, rpc_id: Value, snapshot: &LimitsSnapshot) {
+    pub async fn answer_limits(&mut self, call: LimitsCall, snapshot: &LimitsSnapshot) {
         let provider = if snapshot.provider.is_empty() {
             self.limits_provider.as_str()
         } else {
             snapshot.provider.as_str()
         };
         let text = mcp::limits_tool_text(snapshot, provider);
-        let reply = mcp::tool_call_reply(&rpc_id, &Value::String(text));
-        let _ = write_line(&self.writer, &reply).await;
+        let reply = mcp::tool_call_reply(&call.rpc_id, &Value::String(text));
+        let _ = write_line(&call.writer, &reply).await;
     }
 
     pub async fn shutdown(&mut self) {
@@ -233,7 +309,7 @@ impl Broker {
                 &call.rpc_id,
                 &json!({"behavior": "deny", "message": "canterlot supervisor stopped"}),
             );
-            let _ = write_line(&self.writer, &reply).await;
+            let _ = write_line(&call.writer, &reply).await;
         }
         self.task.abort();
     }
@@ -243,21 +319,41 @@ fn text_value(text: &str) -> Value {
     serde_json::from_str(text).unwrap_or(Value::Null)
 }
 
+/// Следующая строка без `\n`; `None` — конец потока, ошибка или строка
+/// длиннее предела (соединение закрывается, CLI видит отказ сервера, а не тишину).
+async fn next_line(
+    reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>,
+    buf: &mut Vec<u8>,
+) -> Option<String> {
+    buf.clear();
+    let limit = MAX_MCP_LINE_BYTES as u64 + 1;
+    match (&mut *reader).take(limit).read_until(b'\n', buf).await {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    } else if buf.len() > MAX_MCP_LINE_BYTES {
+        return None;
+    }
+    Some(String::from_utf8_lossy(buf).into_owned())
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn serve_conn(
+    conn: u64,
     read: tokio::net::unix::OwnedReadHalf,
-    writer: SharedWriter,
-    pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    writer: ConnWriter,
+    pending: Pending,
+    gate: Arc<SyncMutex<Gate>>,
     events: mpsc::UnboundedSender<BrokerEvent>,
     tool_set: ToolSet,
     provider: String,
 ) {
-    let mut lines = BufReader::new(read).lines();
+    let mut reader = BufReader::new(read);
+    let mut buf = Vec::new();
     let mut rpc_to_request: HashMap<String, String> = HashMap::new();
-    loop {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            _ => break,
-        };
+    while let Some(line) = next_line(&mut reader, &mut buf).await {
         let Ok(msg) = serde_json::from_str::<Value>(&line) else {
             continue;
         };
@@ -271,7 +367,12 @@ async fn serve_conn(
                 arguments,
             } => {
                 if kind == mcp::ToolKind::Limits {
-                    let _ = events.send(BrokerEvent::LimitsQuery { rpc_id });
+                    let _ = events.send(BrokerEvent::LimitsQuery {
+                        call: LimitsCall {
+                            rpc_id,
+                            writer: writer.clone(),
+                        },
+                    });
                     continue;
                 }
                 let Some(request_id) = arguments
@@ -280,74 +381,101 @@ async fn serve_conn(
                     .map(str::to_owned)
                 else {
                     // Без id ответа не будет никогда: CLI ждал бы вечно.
-                    let reply = json!({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "tool_use_id is required"}});
-                    let _ = write_line(&writer, &reply).await;
+                    let _ =
+                        write_line(&writer, &rpc_error(&rpc_id, "tool_use_id is required")).await;
                     continue;
                 };
-                rpc_to_request.insert(rpc_id.to_string(), request_id.clone());
-                match kind {
-                    mcp::ToolKind::Permission => {
-                        let payload = json!({
-                            "tool_name": arguments.get("tool_name").cloned().unwrap_or(Value::Null),
-                            "input": arguments.get("input").cloned().unwrap_or(Value::Null),
-                            "tool_use_id": request_id,
-                        });
-                        pending.lock().await.insert(
-                            request_id.clone(),
-                            PendingCall {
-                                rpc_id,
-                                kind: PendingKind::Permission {
-                                    input: arguments.get("input").cloned().unwrap_or(Value::Null),
-                                },
-                            },
-                        );
-                        let _ = events.send(BrokerEvent::Opened {
-                            request_id,
-                            kind: "permission",
-                            payload,
-                        });
-                    }
-                    mcp::ToolKind::Question => {
-                        let payload = mcp::normalize_questions(
-                            &arguments.get("input").cloned().unwrap_or(Value::Null),
-                        );
-                        pending.lock().await.insert(
-                            request_id.clone(),
-                            PendingCall {
-                                rpc_id,
-                                kind: PendingKind::Question {
-                                    normalized: payload.clone(),
-                                    original: arguments
-                                        .get("input")
-                                        .and_then(|input| input.get("questions"))
-                                        .cloned()
-                                        .unwrap_or(Value::Null),
-                                },
-                            },
-                        );
-                        let _ = events.send(BrokerEvent::Opened {
-                            request_id,
-                            kind: "question",
-                            payload,
-                        });
-                    }
-                    mcp::ToolKind::Limits => {}
+                // Вытесненное соединение (CLI уже заменён) запросов владельцу не открывает.
+                if !gate.lock().expect("mcp gate").current(conn) {
+                    let _ = write_line(&writer, &rpc_error(&rpc_id, "connection superseded")).await;
+                    continue;
                 }
+                let input = arguments.get("input").cloned().unwrap_or(Value::Null);
+                let (kind, call_kind, payload) = match kind {
+                    mcp::ToolKind::Question => {
+                        let payload = mcp::normalize_questions(&input);
+                        let original = input.get("questions").cloned().unwrap_or(Value::Null);
+                        (
+                            "question",
+                            PendingKind::Question {
+                                normalized: payload.clone(),
+                                original,
+                            },
+                            payload,
+                        )
+                    }
+                    _ => (
+                        "permission",
+                        PendingKind::Permission {
+                            input: input.clone(),
+                        },
+                        json!({
+                            "tool_name": arguments.get("tool_name").cloned().unwrap_or(Value::Null),
+                            "input": input,
+                            "tool_use_id": request_id,
+                        }),
+                    ),
+                };
+                {
+                    let mut pending = pending.lock().await;
+                    // Повтор id не перезаписывает ожидающий вызов: тот ждёт своего ответа.
+                    if pending.contains_key(&request_id) {
+                        drop(pending);
+                        let _ =
+                            write_line(&writer, &rpc_error(&rpc_id, "duplicate tool_use_id")).await;
+                        continue;
+                    }
+                    rpc_to_request.insert(rpc_id.to_string(), request_id.clone());
+                    pending.insert(
+                        request_id.clone(),
+                        PendingCall {
+                            rpc_id,
+                            kind: call_kind,
+                            conn,
+                            writer: writer.clone(),
+                        },
+                    );
+                }
+                let _ = events.send(BrokerEvent::Opened {
+                    request_id,
+                    kind,
+                    payload,
+                });
             }
             mcp::McpAction::Cancelled { request_id } => {
-                if let Some(mapped) = rpc_to_request.remove(&request_id.to_string())
-                    && pending.lock().await.remove(&mapped).is_some()
-                {
+                let Some(mapped) = rpc_to_request.remove(&request_id.to_string()) else {
+                    continue;
+                };
+                let mut pending = pending.lock().await;
+                if pending.get(&mapped).is_some_and(|call| call.conn == conn) {
+                    pending.remove(&mapped);
+                    drop(pending);
                     let _ = events.send(BrokerEvent::Cancelled { request_id: mapped });
                 }
             }
             mcp::McpAction::Ignore => {}
         }
     }
-    let open: Vec<String> = pending.lock().await.keys().cloned().collect();
-    for request_id in open {
-        if pending.lock().await.remove(&request_id).is_some() {
-            let _ = events.send(BrokerEvent::Cancelled { request_id });
+    {
+        let mut gate = gate.lock().expect("mcp gate");
+        if gate.live == Some(conn) {
+            gate.live = None;
         }
+    }
+    // Разрыв отменяет только вызовы этого соединения.
+    let open: Vec<String> = {
+        let mut pending = pending.lock().await;
+        let mine: Vec<String> = pending
+            .iter()
+            .filter(|(_, call)| call.conn == conn)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &mine {
+            pending.remove(id);
+        }
+        mine
+    };
+    for request_id in open {
+        let _ = events.send(BrokerEvent::Cancelled { request_id });
     }
 }

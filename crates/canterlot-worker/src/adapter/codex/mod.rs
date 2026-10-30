@@ -572,7 +572,7 @@ impl CodexAdapter {
     }
 
     async fn on_broker(&mut self, event: BrokerEvent) {
-        let BrokerEvent::LimitsQuery { rpc_id } = event else {
+        let BrokerEvent::LimitsQuery { call } = event else {
             return;
         };
         let snapshot = self.limits.snapshot();
@@ -603,7 +603,7 @@ impl CodexAdapter {
             .as_mut()
             .unwrap()
             .answer_limits(
-                rpc_id,
+                call,
                 &canterlot_proto::worker::v1::LimitsSnapshot {
                     provider: "codex".into(),
                     current,

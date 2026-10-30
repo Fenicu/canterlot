@@ -373,13 +373,15 @@ impl ClaudeCodeAdapter {
                 });
             }
             BrokerEvent::Cancelled { request_id } => {
-                self.requests.remove(&request_id);
-                self.events.push_back(AdapterEvent::RequestClosed {
-                    request_id,
-                    reason: "cancelled".into(),
-                });
+                // Запрос, уже закрытый прерыванием или перезапуском, второй раз не закрывается.
+                if self.requests.remove(&request_id).is_some() {
+                    self.events.push_back(AdapterEvent::RequestClosed {
+                        request_id,
+                        reason: "cancelled".into(),
+                    });
+                }
             }
-            BrokerEvent::LimitsQuery { rpc_id } => {
+            BrokerEvent::LimitsQuery { call } => {
                 let snap = self.limits.snapshot();
                 let current = [
                     (LimitWindow::FiveHour, snap.five_hour),
@@ -406,7 +408,7 @@ impl ClaudeCodeAdapter {
                     .as_mut()
                     .unwrap()
                     .answer_limits(
-                        rpc_id,
+                        call,
                         &LimitsSnapshot {
                             provider: "claude".into(),
                             current,
@@ -468,6 +470,9 @@ impl ClaudeCodeAdapter {
     ) -> Option<CliProcess> {
         if version::check(&self.cfg.executable).await.is_err() {
             return None;
+        }
+        if let Some(broker) = &self.broker {
+            broker.arm();
         }
         let mut cli = CliProcess::spawn(launch, &self.cfg, group).await.ok()?;
         if exited_early(&mut cli).await {
@@ -812,6 +817,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .unwrap_or(std::env::current_exe()?),
         )
         .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+        broker.arm();
         self.broker = Some(broker);
         self.queue = Some(InputQueue::new(LaunchSettings {
             model: spec.model.clone(),

@@ -84,6 +84,58 @@ impl RelayHarness {
     async fn reply(&mut self) -> Value {
         read_json(&mut self.socket).await
     }
+
+    fn socket_path(&self) -> PathBuf {
+        self._dir.path().join("mcp.sock")
+    }
+}
+
+type Peer = (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+);
+
+async fn peer(path: &std::path::Path) -> Peer {
+    let (read, sink) = UnixStream::connect(path)
+        .await
+        .expect("connect")
+        .into_split();
+    (BufReader::new(read), sink)
+}
+
+async fn approve_on(sink: &mut tokio::net::unix::OwnedWriteHalf, id: u64, tool_use_id: &str) {
+    write_line(
+        sink,
+        &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"approve",
+            "arguments":{"tool_name":"Bash","input":{"command":"touch x"},"tool_use_id":tool_use_id},
+            "_meta":{"claudecode/toolUseId":tool_use_id}}}),
+    )
+    .await;
+}
+
+/// Сервер закрыл соединение: чтение даёт EOF (или ошибку разрыва).
+async fn closed_by_server(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> bool {
+    let mut line = String::new();
+    matches!(
+        tokio::time::timeout(Duration::from_secs(5), reader.read_line(&mut line)).await,
+        Ok(Ok(0) | Err(_))
+    )
+}
+
+async fn opened(broker: &mut Broker) -> String {
+    match tokio::time::timeout(Duration::from_secs(5), broker.next())
+        .await
+        .expect("broker event")
+    {
+        BrokerEvent::Opened { request_id, .. } => request_id,
+        other => panic!("expected Opened, got {other:?}"),
+    }
+}
+
+async fn quiet(broker: &mut Broker) -> bool {
+    tokio::time::timeout(Duration::from_millis(200), broker.next())
+        .await
+        .is_err()
 }
 
 #[test]
@@ -553,6 +605,154 @@ async fn answers_go_back_keyed_by_question_text() {
 }
 
 #[tokio::test]
+async fn second_connection_while_the_relay_is_live_is_refused() {
+    let mut relay = RelayHarness::bind().await;
+    relay
+        .call(
+            json!(1),
+            "approve",
+            json!({"tool_name": "Bash", "input": {}, "tool_use_id": "toolu_live"}),
+        )
+        .await;
+    let live = opened(&mut relay.broker).await;
+    let (mut reader, mut sink) = peer(&relay.socket_path()).await;
+    approve_on(&mut sink, 2, "toolu_intruder").await;
+    assert!(
+        closed_by_server(&mut reader).await,
+        "intruder is disconnected"
+    );
+    assert!(
+        quiet(&mut relay.broker).await,
+        "intruder opens nothing and cancels nothing"
+    );
+    let outcome = relay
+        .broker
+        .answer(
+            &live,
+            &DecisionPayload::Permission {
+                behavior: PermissionBehavior::Allow,
+                message: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        canterlot_worker::adapter::DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(
+        relay.reply().await["id"],
+        1,
+        "answer reaches the live relay"
+    );
+}
+
+#[tokio::test]
+async fn armed_relay_supersedes_and_each_connection_keeps_its_own_calls() {
+    let mut relay = RelayHarness::bind().await;
+    relay
+        .call(
+            json!(1),
+            "approve",
+            json!({"tool_name": "Bash", "input": {}, "tool_use_id": "toolu_old"}),
+        )
+        .await;
+    let old = opened(&mut relay.broker).await;
+    // Перезапуск CLI: адаптер взводит допуск, новый relay вытесняет прежний.
+    relay.broker.arm();
+    let (mut reader, mut sink) = peer(&relay.socket_path()).await;
+    approve_on(&mut sink, 7, "toolu_new").await;
+    let new = opened(&mut relay.broker).await;
+    assert_eq!(new, "toolu_new");
+    // Вытесненный relay запросов владельцу больше не открывает.
+    relay
+        .call(
+            json!(2),
+            "approve",
+            json!({"tool_name": "Bash", "input": {}, "tool_use_id": "toolu_stale"}),
+        )
+        .await;
+    assert_eq!(relay.reply().await["error"]["code"], -32602);
+    assert!(quiet(&mut relay.broker).await);
+    // Разрыв прежнего соединения отменяет только его вызов.
+    let RelayHarness {
+        mut broker,
+        socket,
+        sink: old_sink,
+        _dir,
+    } = relay;
+    drop(old_sink);
+    drop(socket);
+    match tokio::time::timeout(Duration::from_secs(5), broker.next())
+        .await
+        .expect("cancel")
+    {
+        BrokerEvent::Cancelled { request_id } => assert_eq!(request_id, old),
+        other => panic!("expected Cancelled, got {other:?}"),
+    }
+    assert!(quiet(&mut broker).await, "the new call survives");
+    let outcome = broker
+        .answer(
+            &new,
+            &DecisionPayload::Permission {
+                behavior: PermissionBehavior::Deny,
+                message: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        canterlot_worker::adapter::DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(
+        read_json(&mut reader).await["id"],
+        7,
+        "answer goes to the asking relay"
+    );
+}
+
+#[tokio::test]
+async fn duplicate_tool_use_id_is_refused_and_keeps_the_first_call() {
+    let mut relay = RelayHarness::bind().await;
+    relay
+        .call(
+            json!(1),
+            "approve",
+            json!({"tool_name": "Bash", "input": {}, "tool_use_id": "toolu_dup"}),
+        )
+        .await;
+    let first = opened(&mut relay.broker).await;
+    relay.call(json!(2), "approve", json!({"tool_name": "Bash", "input": {"command": "rm -rf /"}, "tool_use_id": "toolu_dup"})).await;
+    let refused = relay.reply().await;
+    assert_eq!(refused["id"], 2);
+    assert_eq!(refused["error"]["code"], -32602);
+    assert!(quiet(&mut relay.broker).await);
+    relay
+        .broker
+        .answer(
+            &first,
+            &DecisionPayload::Permission {
+                behavior: PermissionBehavior::Allow,
+                message: None,
+            },
+        )
+        .await;
+    let reply = relay.reply().await;
+    assert_eq!(reply["id"], 1);
+    assert_eq!(
+        reply["result"]["content"][0]["text"],
+        "{\"behavior\":\"allow\",\"updatedInput\":{}}"
+    );
+}
+
+#[tokio::test]
+async fn oversized_line_closes_the_connection() {
+    let mut relay = RelayHarness::bind().await;
+    let big = vec![b'x'; canterlot_worker::adapter::canterlot_mcp::broker::MAX_MCP_LINE_BYTES + 16];
+    let _ = relay.sink.write_all(&big).await;
+    assert!(closed_by_server(&mut relay.socket).await);
+}
+
+#[tokio::test]
 async fn cancelled_notification_closes_request_and_late_decision_is_not_applied() {
     let mut relay = RelayHarness::bind().await;
     relay
@@ -683,14 +883,17 @@ fn observation(window: &str, used_permille: u32, resets_at_ms: u64) -> LimitObse
 async fn limits_tool_reports_latest_observation_or_no_data() {
     let mut relay = RelayHarness::bind().await;
     relay.call(json!(9), "canterlot_limits", json!({})).await;
-    match relay.broker.next().await {
-        BrokerEvent::LimitsQuery { rpc_id } => assert_eq!(rpc_id, json!(9)),
+    let call = match relay.broker.next().await {
+        BrokerEvent::LimitsQuery { call } => {
+            assert_eq!(call.rpc_id, json!(9));
+            call
+        }
         other => panic!("expected LimitsQuery, got {other:?}"),
-    }
+    };
     relay
         .broker
         .answer_limits(
-            json!(9),
+            call,
             &LimitsSnapshot {
                 provider: "claude".into(),
                 current: vec![
@@ -708,14 +911,17 @@ async fn limits_tool_reports_latest_observation_or_no_data() {
     assert!(text.contains("50"), "five-hour percent in {text}");
     assert!(text.contains("81"), "weekly percent in {text}");
     relay.call(json!(10), "canterlot_limits", json!({})).await;
-    match relay.broker.next().await {
-        BrokerEvent::LimitsQuery { rpc_id } => assert_eq!(rpc_id, json!(10)),
+    let call = match relay.broker.next().await {
+        BrokerEvent::LimitsQuery { call } => {
+            assert_eq!(call.rpc_id, json!(10));
+            call
+        }
         other => panic!("expected LimitsQuery, got {other:?}"),
-    }
+    };
     relay
         .broker
         .answer_limits(
-            json!(10),
+            call,
             &LimitsSnapshot {
                 provider: "claude".into(),
                 ..Default::default()

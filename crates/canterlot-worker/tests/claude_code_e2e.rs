@@ -807,6 +807,71 @@ async fn interrupt_while_streaming_is_acknowledged() {
 }
 
 #[tokio::test]
+async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![vec![
+        json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+        json!("@request:0"),
+    ]]);
+    std::fs::write(
+        f.dir.path().join("relay-exe"),
+        env!("CARGO_BIN_EXE_canterlot-worker"),
+    )
+    .unwrap();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"Bash","input":{"command":"touch held.txt"},"tool_use_id":"toolu_held"},
+        "_meta":{"claudecode/toolUseId":"toolu_held"}}});
+    std::fs::write(
+        f.dir.path().join("mcp-calls.json"),
+        serde_json::to_vec(&vec![call]).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        f.dir.path().join("interrupt.json"),
+        serde_json::to_vec(&vec![json!({"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_tools","user_message_uuids":[id]})]).unwrap(),
+    )
+    .unwrap();
+    f.start().await;
+    f.send(&tx(id)).await;
+    loop {
+        if let AdapterEvent::RequestOpened { request_id, .. } = f.event().await {
+            assert_eq!(request_id, "toolu_held");
+            break;
+        }
+    }
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.interrupt())
+            .await
+            .unwrap(),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    let mut closed = 0;
+    loop {
+        match f.event().await {
+            AdapterEvent::RequestClosed { request_id, .. } if request_id == "toolu_held" => {
+                closed += 1
+            }
+            AdapterEvent::ProcessExited { .. } => break,
+            _ => {}
+        }
+    }
+    // Разрыв relay после выхода CLI шлёт брокерское Cancelled: оно не дублирует закрытие.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(200), f.adapter.next_event()).await
+    {
+        if matches!(&event, AdapterEvent::RequestClosed { request_id, .. } if request_id == "toolu_held")
+        {
+            closed += 1;
+        }
+    }
+    assert_eq!(closed, 1);
+    f.close().await;
+}
+
+#[tokio::test]
 async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);
     f.start().await;
