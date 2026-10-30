@@ -178,6 +178,32 @@ test.describe('stack: input and queue', () => {
     void composer;
   });
 
+  test('reload_keeps_a_queued_input_in_the_strip_and_delivers_its_bubble', tag, async ({ page }) => {
+    test.setTimeout(120_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const id = await createSessionUI(page, stack);
+
+    await sendScript(page, synthetic.script([synthetic.delta('Z-идёт'), synthetic.hang()]));
+    await expect(page.locator('article.card [data-block]')).toContainText('Z-идёт', { timeout: 20_000 });
+    await sendScript(page, synthetic.script([synthetic.delta('Z-ответ')]));
+    const strip = page.locator('.strip');
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
+
+    await page.reload();
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(strip.locator('[data-state="queued"]')).toContainText('Z-ответ', { timeout: 15_000 });
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1);
+
+    await page.getByRole('button', { name: 'Прервать', exact: true }).click();
+    await page.getByRole('button', { name: 'Продолжить очередь', exact: true }).click({ timeout: 30_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-ответ' })).toBeVisible({ timeout: 40_000 });
+    await expect(page.locator('article.bubble').filter({ hasText: 'Z-ответ' })).toBeVisible();
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(0);
+    await hub.waitIdle(id);
+    expect(await hub.inputs(id)).toHaveLength(2);
+  });
+
   test('interrupt_on_a_harness_that_exits_resumes_the_queue_end_to_end', tag, async ({ page }) => {
     test.setTimeout(120_000);
     const stack = getStack();
