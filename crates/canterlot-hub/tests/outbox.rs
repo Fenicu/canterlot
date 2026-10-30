@@ -83,6 +83,7 @@ impl Worker {
             boot_id: Uuid::now_v7().to_string(),
             protocol_version: canterlot_hub::grpc::PROTOCOL_VERSION,
             stream_kind: StreamKind::Control as i32,
+            optional_capabilities: vec!["instructions_v1".into()],
             ..Hello::default()
         };
         let (control, rx) = mpsc::channel(8);
@@ -1165,4 +1166,23 @@ async fn decision_wakes_outbox_without_waiting_for_sweep(pool: PgPool) {
     };
     assert_eq!(command.command_id, command_id.to_string());
     stop(hub).await;
+}
+
+#[tokio::test]
+async fn start_with_instructions_is_withheld_from_a_session_without_instructions_v1() {
+    let machine = Uuid::now_v7();
+    let registry = canterlot_hub::session::Registry::new(Default::default());
+    let _lease = registry.connect_for_tests(machine, &["pilot_v1".to_owned()]);
+    let row = |mode: &str| canterlot_hub::outbox::CommandRow {
+        machine_id: machine,
+        ..command_row(
+            "start_execution",
+            json!({"harness":"synthetic", "workdir":"/tmp/w", "instructions": {"mode": mode}}),
+        )
+    };
+    assert!(matches!(
+        canterlot_hub::outbox::to_proto_for_session(&row("clean"), &registry),
+        Err(canterlot_hub::outbox::OutboxError::CapabilityMissing)
+    ));
+    assert!(canterlot_hub::outbox::to_proto_for_session(&row("owner"), &registry).is_ok());
 }

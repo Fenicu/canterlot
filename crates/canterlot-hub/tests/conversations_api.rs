@@ -1277,3 +1277,101 @@ async fn non_owner_preset_needs_instructions_v1(pool: PgPool) {
         String::from_utf8_lossy(&r.body)
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    // Машина без сеанса: это недоступность, а не старый воркер.
+    f._leases.clear();
+    let mut body = f.body();
+    body["start"] = json!(true);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(&Uuid::now_v7().to_string()),
+            Some(body),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(r.json::<Value>()["error"]["code"], "machine_unavailable");
+    // Сеанс без instructions_v1: запуск и возобновление сессии «Без инструкций» отклоняются.
+    f.caps(&["pilot_v1"]);
+    let id = f.create(json!({})).await;
+    for (path, body) in [("executions", None), ("resume", Some(json!({})))] {
+        let r = f
+            .client
+            .send(
+                Method::POST,
+                &format!("/api/v1/conversations/{id}/{path}"),
+                Some(&Uuid::now_v7().to_string()),
+                body,
+            )
+            .await;
+        assert_eq!(
+            r.status.as_u16(),
+            409,
+            "{path}: {}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert_eq!(r.json::<Value>()["error"]["code"], "capability_missing");
+    }
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/executions"),
+            Some(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        201,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn input_switching_preset_on_old_worker_shows_capability_hold(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&["pilot_v1"]);
+    let id = f.create(json!({"instruction_profile": "owner"})).await;
+    sqlx::query("update conversations set pending_settings='{\"instruction_profile\":\"clean\"}' where id=$1")
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let input = f
+        .request(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/inputs"),
+            Some(json!({"content":[{"type":"text","text":"дальше"}]})),
+            201,
+        )
+        .await;
+    let snapshot = f
+        .request(
+            Method::GET,
+            &format!("/api/v1/conversations/{id}/snapshot"),
+            None,
+            200,
+        )
+        .await;
+    assert!(
+        snapshot["data"]["queue"]["hold_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"reason":"capability_missing","input_id":input["input_id"]})),
+        "{}",
+        snapshot["data"]["queue"]
+    );
+}

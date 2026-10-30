@@ -445,6 +445,22 @@ pub(crate) async fn snapshot_items(
     q.build().fetch_all(conn).await?.iter().map(item).collect()
 }
 /// Голова очереди, команда которой несёт настройки или вложения: без `pilot_v1` в сеансе она не уйдёт.
+/// Первый ввод в очереди, который повезёт не-владельческий пресет: без `instructions_v1`
+/// он ждёт обновления воркера.
+pub async fn instructions_hold_input(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select i.id from inputs i join conversations c on c.id=i.conversation_id
+         where i.conversation_id=$1 and i.state='queued'
+           and c.pending_settings->>'instruction_profile' <> 'owner'
+         order by i.input_seq limit 1",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+}
 pub async fn capability_hold_input(
     conn: &mut PgConnection,
     id: Uuid,
@@ -498,9 +514,14 @@ pub async fn detail(
         .map(|v| v.0.into_iter().map(HoldView::from).collect())
         .unwrap_or_default();
     let caps: Vec<String> = row.try_get("capabilities")?;
-    if !caps.iter().any(|c| c == "pilot_v1")
-        && let Some(input_id) = capability_hold_input(conn, id).await?
-    {
+    let held = if !caps.iter().any(|c| c == "pilot_v1") {
+        capability_hold_input(conn, id).await?
+    } else if !caps.iter().any(|c| c == CAPABILITY_INSTRUCTIONS_V1) {
+        instructions_hold_input(conn, id).await?
+    } else {
+        None
+    };
+    if let Some(input_id) = held {
         holds.push(HoldView::CapabilityMissing { input_id });
         if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
             reasons.push(json!({"reason":"capability_missing","input_id":input_id}));
@@ -978,12 +999,15 @@ async fn create_in_tx(
             )
         }
     };
-    // Без instructions_v1 машина запустит только «Как у владельца».
-    if !matches!(reference, PresetRef::Owner)
-        && req.start
-        && !registry.has_capability(req.machine_id, CAPABILITY_INSTRUCTIONS_V1)
-    {
-        return Err(CreateError::CapabilityMissing);
+    // Без instructions_v1 машина запустит только «Как у владельца». Нет сеанса - машина
+    // недоступна: о версии воркера без него судить нельзя.
+    if !matches!(reference, PresetRef::Owner) && req.start {
+        if registry.session_info(req.machine_id).is_none() {
+            return Err(CreateError::MachineUnavailable);
+        }
+        if !registry.has_capability(req.machine_id, CAPABILITY_INSTRUCTIONS_V1) {
+            return Err(CreateError::CapabilityMissing);
+        }
     }
     if !workdir_allowed(&req.workdir, &m.try_get("allowed_roots")?) {
         return Err(CreateError::WorkdirNotAllowed);

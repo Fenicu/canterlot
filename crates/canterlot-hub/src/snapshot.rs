@@ -177,9 +177,19 @@ pub async fn conversation_with_registry(
     {
         holds.push(HoldView::MachineNotReconciled);
     }
-    if registry.as_ref().is_some_and(|r| {
-        r.session_info(machine).is_some() && !r.has_capability(machine, "pilot_v1")
-    }) && let Some(input_id) = conversations::capability_hold_input(&mut *conn, id).await?
+    let live = registry
+        .as_ref()
+        .filter(|r| r.session_info(machine).is_some());
+    let held = match live {
+        Some(r) if !r.has_capability(machine, "pilot_v1") => {
+            conversations::capability_hold_input(&mut *conn, id).await?
+        }
+        Some(r) if !r.has_capability(machine, crate::session::CAPABILITY_INSTRUCTIONS_V1) => {
+            conversations::instructions_hold_input(&mut *conn, id).await?
+        }
+        _ => None,
+    };
+    if let Some(input_id) = held
         && !holds
             .iter()
             .any(|h| matches!(h, HoldView::CapabilityMissing { .. }))

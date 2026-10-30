@@ -119,8 +119,7 @@ fn target(payload: &Value) -> Result<(String, u32), OutboxError> {
 }
 
 pub fn to_proto_for_session(row: &CommandRow, registry: &Registry) -> Result<Command, OutboxError> {
-    let pilot = registry.has_capability(row.machine_id, crate::session::CAPABILITY_PILOT_V1);
-    to_proto_with_capability(row, pilot)
+    to_proto_with_capability(row, &registry.capabilities(row.machine_id))
 }
 
 fn to_proto_for_connection(
@@ -131,13 +130,26 @@ fn to_proto_for_connection(
     let capabilities = registry
         .capabilities_for_connection(row.machine_id, connection)
         .ok_or(OutboxError::SessionChanged)?;
-    let pilot = capabilities
-        .iter()
-        .any(|capability| capability == crate::session::CAPABILITY_PILOT_V1);
-    to_proto_with_capability(row, pilot)
+    to_proto_with_capability(row, &capabilities)
 }
 
-fn to_proto_with_capability(row: &CommandRow, pilot: bool) -> Result<Command, OutboxError> {
+fn to_proto_with_capability(
+    row: &CommandRow,
+    capabilities: &[String],
+) -> Result<Command, OutboxError> {
+    let has = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
+    let pilot = has(crate::session::CAPABILITY_PILOT_V1);
+    // Старый воркер проигнорировал бы снимок и запустил конфигурацию владельца.
+    if row.kind == "start_execution"
+        && row
+            .payload
+            .pointer("/instructions/mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode != "owner")
+        && !has(crate::session::CAPABILITY_INSTRUCTIONS_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()

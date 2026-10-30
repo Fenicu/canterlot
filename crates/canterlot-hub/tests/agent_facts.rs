@@ -1095,6 +1095,11 @@ async fn start_execution_carries_pilot_v1_only_when_the_sending_session_negotiat
 ) -> TestResult {
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    // Снимок «Как у владельца»: проверяется только pilot_v1, instructions_v1 не нужен.
+    sqlx::query("update conversations set instruction_profile='owner' where id=$1")
+        .bind(s.conversation_id)
+        .execute(&pool)
+        .await?;
     let e = executions::start(&pool, s.owner_id, s.conversation_id, Uuid::now_v7()).await?;
     let row: canterlot_hub::outbox::CommandRow =
         sqlx::query_as("select * from commands where id=$1")

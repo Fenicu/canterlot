@@ -218,11 +218,11 @@ pub async fn dispatch_next(
             BlockReason::CapabilityMissing { input_id },
         ]));
     }
-    // Не-владельческий пресет понимает только сеанс с instructions_v1.
+    // Не-владельческий пресет, включая «Без инструкций», понимает только сеанс с instructions_v1.
     if pending
         .get("instruction_profile")
         .and_then(Value::as_str)
-        .is_some_and(|profile| profile != "clean" && profile != "owner")
+        .is_some_and(|profile| profile != "owner")
         && !gate
             .session_capabilities
             .iter()
