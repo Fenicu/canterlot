@@ -6,6 +6,11 @@
     field?.focus();
   });
 
+  function reset() {
+    onreset();
+    field?.focus();
+  }
+
   function keydown(event: KeyboardEvent) {
     if (event.key !== 'Escape') return;
     event.preventDefault();
@@ -14,25 +19,25 @@
   }
 </script>
 
-<div class="search">
+<div class="search" role="search">
   <label>
     <span class="sr-only">Поиск сессий</span>
-    <input bind:this={field} bind:value aria-label="Поиск сессий" onkeydown={keydown} />
+    <input bind:this={field} bind:value aria-label="Поиск сессий" placeholder="Поиск сессий" onkeydown={keydown} />
   </label>
-  <button type="button" onclick={onreset}>Сбросить</button>
+  {#if value}<button type="button" onclick={reset}>Сбросить</button>{/if}
 </div>
 
 <style>
-  .search { display: flex; gap: var(--s2); margin: var(--s3) var(--s6); }
-  label { flex: 1; }
+  .search { display: flex; align-items: center; gap: var(--s2); margin: var(--s3) var(--s6); border-radius: var(--radius-pill); background: var(--raised); }
+  label { flex: 1; min-width: 0; }
   input {
     width: 100%;
     min-height: var(--target);
     border: var(--s0);
     border-radius: var(--radius-pill);
-    background: var(--raised);
+    background: var(--transparent);
     color: var(--text);
     padding: var(--s4) var(--s6);
   }
-  button { min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--accent-link); }
+  button { flex-shrink: 0; min-height: var(--target); padding-inline: var(--s6); border: var(--s0); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-meta); }
 </style>

@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ControlDown, DeliverInput, Instructions, Interrupt, SettingsOverride,
-        StartExecution, StopExecution, WithdrawInput, command, control_down,
+        CancelInput, Command, ControlDown, DeliverDecision, DeliverInput, Instructions, Interrupt,
+        SettingsOverride, StartExecution, StopExecution, WithdrawInput, command, control_down,
     },
 };
 use prost::Message;
@@ -119,8 +119,7 @@ fn target(payload: &Value) -> Result<(String, u32), OutboxError> {
 }
 
 pub fn to_proto_for_session(row: &CommandRow, registry: &Registry) -> Result<Command, OutboxError> {
-    let pilot = registry.has_capability(row.machine_id, crate::session::CAPABILITY_PILOT_V1);
-    to_proto_with_capability(row, pilot)
+    to_proto_with_capability(row, &registry.capabilities(row.machine_id))
 }
 
 fn to_proto_for_connection(
@@ -131,13 +130,26 @@ fn to_proto_for_connection(
     let capabilities = registry
         .capabilities_for_connection(row.machine_id, connection)
         .ok_or(OutboxError::SessionChanged)?;
-    let pilot = capabilities
-        .iter()
-        .any(|capability| capability == crate::session::CAPABILITY_PILOT_V1);
-    to_proto_with_capability(row, pilot)
+    to_proto_with_capability(row, &capabilities)
 }
 
-fn to_proto_with_capability(row: &CommandRow, pilot: bool) -> Result<Command, OutboxError> {
+fn to_proto_with_capability(
+    row: &CommandRow,
+    capabilities: &[String],
+) -> Result<Command, OutboxError> {
+    let has = |wanted: &str| capabilities.iter().any(|capability| capability == wanted);
+    let pilot = has(crate::session::CAPABILITY_PILOT_V1);
+    // Старый воркер проигнорировал бы снимок и запустил конфигурацию владельца.
+    if row.kind == "start_execution"
+        && row
+            .payload
+            .pointer("/instructions/mode")
+            .and_then(Value::as_str)
+            .is_some_and(|mode| mode != "owner")
+        && !has(crate::session::CAPABILITY_INSTRUCTIONS_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -241,6 +253,35 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             command::Kind::WithdrawInput(WithdrawInput {
                 target_command_id,
                 target_dispatch_attempt,
+            })
+        }
+        "deliver_decision" => {
+            // Сопровождение ищет запрос по нативному идентификатору из своего SJ.
+            let request_id = match row.payload.get("native_request_id") {
+                Some(value) => value
+                    .as_str()
+                    .ok_or(OutboxError::InvalidCommand)?
+                    .to_owned(),
+                None => text(&row.payload, "request_id")?,
+            };
+            let decision_id = text(&row.payload, "decision_id")?;
+            Uuid::parse_str(&decision_id).map_err(|_| OutboxError::InvalidCommand)?;
+            let decision = row
+                .payload
+                .get("decision_payload")
+                .filter(|value| value.is_object())
+                .ok_or(OutboxError::InvalidCommand)?;
+            command::Kind::DeliverDecision(DeliverDecision {
+                request_id,
+                decision_id,
+                generation: row
+                    .payload
+                    .get("generation")
+                    .and_then(Value::as_u64)
+                    .ok_or(OutboxError::InvalidCommand)?,
+                kind: text(&row.payload, "kind")?,
+                decision_payload_json: serde_json::to_vec(decision)
+                    .map_err(|_| OutboxError::InvalidCommand)?,
             })
         }
         "interrupt" => command::Kind::Interrupt(Interrupt {}),
@@ -538,6 +579,16 @@ async fn reject(pool: &PgPool, row: &CommandRow, reason: &str) -> Result<(), sql
     let reason = reason.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
+            if kind == "deliver_decision" {
+                return crate::requests::fail_decision_command_in_tx(
+                    &mut *conn,
+                    id,
+                    attempt,
+                    &reason,
+                    Uuid::now_v7(),
+                )
+                .await;
+            }
             if kind == "deliver_input" {
                 let outcome = apply_input_receipt_in_tx(
                     &mut *conn,

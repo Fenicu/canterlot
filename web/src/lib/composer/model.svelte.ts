@@ -2,7 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
-import type { UploadManager } from "#lib/uploads/manager.js";
+import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
 import type { AttachmentRef } from "#lib/stores/inputs.js";
@@ -43,9 +43,8 @@ export class ComposerModel {
   errorMessage = $state<string | null>(null);
   interruptLabel = $state("Прервать");
   interruptRunning = $state(false);
-
-  #lastSendAt = 0;
-  #lastSendText = "";
+  /** Отправка идёт: повторное нажатие во время проверки сети не создаёт второе сообщение. */
+  sending = $state(false);
 
   constructor(deps: ComposerDeps) {
     this.deps = deps;
@@ -93,15 +92,20 @@ export class ComposerModel {
   }
 
   async send(): Promise<void> {
-    if (!this.gate.ok) return;
-
-    // Защита от двойного нажатия: идентичное нажатие в пределах 600 мс игнорируется
-    const now = Date.now();
-    if (now - this.#lastSendAt < 600 && this.text === this.#lastSendText) {
-      return;
+    if (this.sending || !this.gate.ok) return;
+    this.sending = true;
+    try {
+      await this.#send();
+    } finally {
+      this.sending = false;
     }
-    this.#lastSendAt = now;
-    this.#lastSendText = this.text;
+  }
+
+  async #send(): Promise<void> {
+    const sendText = this.text;
+    const readyUploads = this.deps.uploads
+      .list(this.deps.conversationId)
+      .filter((u) => u.phase === "ready");
 
     // Проверка доступности сети (HTTP-проверка, не зависит от WSS)
     const canSend = await this.deps.canSend();
@@ -111,11 +115,7 @@ export class ComposerModel {
       this.deps.drafts.set(this.deps.conversationId, { text: this.text });
       return;
     }
-
-    const sendText = this.text;
-    const readyUploads = this.deps.uploads
-      .list(this.deps.conversationId)
-      .filter((u) => u.phase === "ready");
+    if (!this.gate.ok) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -162,17 +162,19 @@ export class ComposerModel {
       throw err;
     }
 
-    // Шаг 3: черновик больше не нужен; запрос его удаления не задерживает отправку
-    void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    // Шаг 3: файлы уходят из лотка, запрос удаления черновика отправку не задерживает.
+    // Текст, набранный после нажатия, живёт в черновике, поэтому его не трогаем.
+    const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
+    if (!this.text) {
+      void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    }
 
     // Шаг 4: запуск операции
     try {
       await this.deps.ops.run(op);
     } catch (err) {
       if (op.state === "refused") {
-        this.text = sendText;
-        this.deps.drafts.set(this.deps.conversationId, { text: sendText });
-        this.deps.chat.inputs.delete(key);
+        this.#restore(key, sendText, detached);
         this.errorMessage =
           op.refusal?.message ??
           (err instanceof Error ? err.message : "Отклонено");
@@ -181,14 +183,29 @@ export class ComposerModel {
     }
 
     if (op.state === "refused") {
-      this.text = sendText;
-      this.deps.drafts.set(this.deps.conversationId, { text: sendText });
-      this.deps.chat.inputs.delete(key);
+      this.#restore(key, sendText, detached);
       this.errorMessage = op.refusal?.message ?? "Отклонено";
     }
   }
 
+  #restore(key: string, text: string, detached: Upload[]): void {
+    this.text = this.text ? `${text}\n${this.text}` : text;
+    this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    this.deps.chat.inputs.delete(key);
+    this.deps.uploads.reattach(detached);
+  }
+
   async sendLater(at: number): Promise<void> {
+    if (this.sending) return;
+    this.sending = true;
+    try {
+      await this.#sendLater(at);
+    } finally {
+      this.sending = false;
+    }
+  }
+
+  async #sendLater(at: number): Promise<void> {
     const now = this.deps.serverNow ? this.deps.serverNow() : Date.now();
     const valid = validateScheduleTime(at, now);
     if (valid !== "ok") {
@@ -201,6 +218,11 @@ export class ComposerModel {
 
     if (!this.gate.ok) return;
 
+    const sendText = this.text;
+    const readyUploads = this.deps.uploads
+      .list(this.deps.conversationId)
+      .filter((u) => u.phase === "ready");
+
     const canSend = await this.deps.canSend();
     if (canSend === "offline") {
       this.errorMessage =
@@ -208,11 +230,7 @@ export class ComposerModel {
       this.deps.drafts.set(this.deps.conversationId, { text: this.text });
       return;
     }
-
-    const sendText = this.text;
-    const readyUploads = this.deps.uploads
-      .list(this.deps.conversationId)
-      .filter((u) => u.phase === "ready");
+    if (!this.gate.ok) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -227,9 +245,12 @@ export class ComposerModel {
       { conversationId: this.deps.conversationId, persist: true },
     );
 
-    this.text = "";
+    this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.errorMessage = null;
-    await this.deps.drafts.clear(this.deps.conversationId);
+    if (this.text === sendText) {
+      this.text = "";
+      await this.deps.drafts.clear(this.deps.conversationId);
+    }
 
     void this.deps.ops.run(op);
   }

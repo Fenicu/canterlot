@@ -717,11 +717,45 @@ async fn sibling_with_common_prefix_is_not_under_the_root(pool: PgPool) {
     f.create(json!({"workdir":"/home/a/sub"})).await;
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn recent_workdirs_lists_last_20_per_machine(pool: PgPool) {
+async fn recent_workdirs_shows_last_three_from_remembered_table(pool: PgPool) {
     let f = Fixture::new(pool).await;
     for i in 0..23 {
         f.create(json!({"workdir":format!("/tmp/{i}")})).await;
     }
+    // Пересоздание освежает метку: /tmp/4 снова самый свежий.
+    let id = f.create(json!({"workdir":"/tmp/4"})).await;
+    let r = f
+        .request(
+            Method::GET,
+            &format!("/api/v1/machines/{}/workdirs/recent", f.machine),
+            None,
+            200,
+        )
+        .await;
+    // Экран новой сессии показывает последние 3, свежие первыми.
+    assert_eq!(r["workdirs"], json!(["/tmp/4", "/tmp/22", "/tmp/21"]));
+    // Хранится не больше 20: самые старые вытеснены.
+    let count: i64 = sqlx::query_scalar(
+        "select count(*) from machine_workdirs where owner_id=$1 and machine_id=$2",
+    )
+    .bind(f.owner)
+    .bind(f.machine)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(count, 20);
+    let pruned: i64 = sqlx::query_scalar(
+        "select count(*) from machine_workdirs where owner_id=$1 and machine_id=$2
+         and workdir in ('/tmp/0','/tmp/1','/tmp/2')",
+    )
+    .bind(f.owner)
+    .bind(f.machine)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(pruned, 0);
+
+    // Разговор чужой машины, записанный напрямую, не запоминается.
     let other_machine = Uuid::now_v7();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'Другая')")
         .bind(other_machine)
@@ -735,7 +769,8 @@ async fn recent_workdirs_lists_last_20_per_machine(pool: PgPool) {
         .execute(&f.pool)
         .await
         .unwrap();
-    let id = f.create(json!({"workdir":"/tmp/4"})).await;
+    // Удалённый каталог всё равно в списке: хаб файловую систему воркера не проверяет.
+    f.create(json!({"workdir":"/tmp/gone"})).await;
     let r = f
         .request(
             Method::GET,
@@ -744,8 +779,7 @@ async fn recent_workdirs_lists_last_20_per_machine(pool: PgPool) {
             200,
         )
         .await;
-    assert_eq!(r["workdirs"].as_array().unwrap().len(), 20);
-    assert_eq!(r["workdirs"][0], "/tmp/4");
+    assert_eq!(r["workdirs"], json!(["/tmp/gone", "/tmp/4", "/tmp/22"]));
     assert!(
         !r["workdirs"]
             .as_array()
@@ -1275,5 +1309,103 @@ async fn non_owner_preset_needs_instructions_v1(pool: PgPool) {
         201,
         "{}",
         String::from_utf8_lossy(&r.body)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_and_resume_check_instructions_v1_and_disconnect_is_unavailable(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    // Машина без сеанса: это недоступность, а не старый воркер.
+    f._leases.clear();
+    let mut body = f.body();
+    body["start"] = json!(true);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(&Uuid::now_v7().to_string()),
+            Some(body),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(r.json::<Value>()["error"]["code"], "machine_unavailable");
+    // Сеанс без instructions_v1: запуск и возобновление сессии «Без инструкций» отклоняются.
+    f.caps(&["pilot_v1"]);
+    let id = f.create(json!({})).await;
+    for (path, body) in [("executions", None), ("resume", Some(json!({})))] {
+        let r = f
+            .client
+            .send(
+                Method::POST,
+                &format!("/api/v1/conversations/{id}/{path}"),
+                Some(&Uuid::now_v7().to_string()),
+                body,
+            )
+            .await;
+        assert_eq!(
+            r.status.as_u16(),
+            409,
+            "{path}: {}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert_eq!(r.json::<Value>()["error"]["code"], "capability_missing");
+    }
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/executions"),
+            Some(&Uuid::now_v7().to_string()),
+            None,
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        201,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn input_switching_preset_on_old_worker_shows_capability_hold(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&["pilot_v1"]);
+    let id = f.create(json!({"instruction_profile": "owner"})).await;
+    sqlx::query("update conversations set pending_settings='{\"instruction_profile\":\"clean\"}' where id=$1")
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let input = f
+        .request(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/inputs"),
+            Some(json!({"content":[{"type":"text","text":"дальше"}]})),
+            201,
+        )
+        .await;
+    let snapshot = f
+        .request(
+            Method::GET,
+            &format!("/api/v1/conversations/{id}/snapshot"),
+            None,
+            200,
+        )
+        .await;
+    assert!(
+        snapshot["data"]["queue"]["hold_reasons"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"reason":"capability_missing","input_id":input["input_id"]})),
+        "{}",
+        snapshot["data"]["queue"]
     );
 }

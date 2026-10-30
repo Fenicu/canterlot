@@ -181,10 +181,15 @@ pub async fn apply_input_receipt_in_tx(
         }
         InputReceipt::ExplicitRejection { reason }
         | InputReceipt::RejectedBeforeTransmission { reason }
-            if reason == "settings_unavailable" =>
+            if crate::conversations::SETTINGS_REJECTION_REASONS.contains(&reason.as_str()) =>
         {
-            crate::conversations::drop_rejected_settings_in_tx(conn, command_id, correlation_id)
-                .await?
+            crate::conversations::drop_settings_rejected_for_in_tx(
+                conn,
+                command_id,
+                reason,
+                correlation_id,
+            )
+            .await?
         }
         _ => {}
     }

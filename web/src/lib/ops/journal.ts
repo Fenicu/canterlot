@@ -183,6 +183,10 @@ export class OpJournal {
     const pending = rows.filter(
       (op) => op?.key && (op.state === "saving" || op.state === "unknown"),
     );
+    // Завершённые строки повторять нечего: тела решений и сообщений на устройстве не копятся.
+    for (const row of rows)
+      if (row?.key && (row.state === "committed" || row.state === "refused"))
+        await this.db.delete("ops", row.key);
     for (const row of pending) {
       const op = reactiveOp(row);
       this.#persisted.add(op.key);
@@ -256,7 +260,6 @@ export class OpJournal {
         refusal: refusal
           ? { code: refusal.code, message: refusal.message }
           : undefined,
-        result: op.result,
       }),
     ) as Op;
     try {

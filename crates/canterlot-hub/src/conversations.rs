@@ -445,6 +445,22 @@ pub(crate) async fn snapshot_items(
     q.build().fetch_all(conn).await?.iter().map(item).collect()
 }
 /// Голова очереди, команда которой несёт настройки или вложения: без `pilot_v1` в сеансе она не уйдёт.
+/// Первый ввод в очереди, который повезёт не-владельческий пресет: без `instructions_v1`
+/// он ждёт обновления воркера.
+pub async fn instructions_hold_input(
+    conn: &mut PgConnection,
+    id: Uuid,
+) -> Result<Option<Uuid>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select i.id from inputs i join conversations c on c.id=i.conversation_id
+         where i.conversation_id=$1 and i.state='queued'
+           and c.pending_settings->>'instruction_profile' <> 'owner'
+         order by i.input_seq limit 1",
+    )
+    .bind(id)
+    .fetch_optional(conn)
+    .await
+}
 pub async fn capability_hold_input(
     conn: &mut PgConnection,
     id: Uuid,
@@ -498,9 +514,14 @@ pub async fn detail(
         .map(|v| v.0.into_iter().map(HoldView::from).collect())
         .unwrap_or_default();
     let caps: Vec<String> = row.try_get("capabilities")?;
-    if !caps.iter().any(|c| c == "pilot_v1")
-        && let Some(input_id) = capability_hold_input(conn, id).await?
-    {
+    let held = if !caps.iter().any(|c| c == "pilot_v1") {
+        capability_hold_input(conn, id).await?
+    } else if !caps.iter().any(|c| c == CAPABILITY_INSTRUCTIONS_V1) {
+        instructions_hold_input(conn, id).await?
+    } else {
+        None
+    };
+    if let Some(input_id) = held {
         holds.push(HoldView::CapabilityMissing { input_id });
         if let Some(reasons) = i.queue.hold_reasons.as_array_mut() {
             reasons.push(json!({"reason":"capability_missing","input_id":input_id}));
@@ -566,7 +587,40 @@ pub async fn recent_workdirs(
     machine_id: Uuid,
     limit: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("select workdir from conversations where owner_id=$1 and machine_id=$2 group by workdir order by max(created_at) desc,workdir limit $3").bind(owner_id).bind(machine_id).bind(limit.clamp(0,20)).fetch_all(conn).await
+    sqlx::query_scalar("select workdir from machine_workdirs where owner_id=$1 and machine_id=$2 order by last_used_at desc, workdir desc limit $3").bind(owner_id).bind(machine_id).bind(limit.clamp(0,20)).fetch_all(conn).await
+}
+
+/// Запомнить рабочий каталог машины: upsert метки использования, старше
+/// 20 самых свежих удаляются. Вызывать только с проверенным каталогом.
+pub async fn remember_workdir(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    workdir: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into machine_workdirs(owner_id, machine_id, workdir, last_used_at)
+         values ($1, $2, $3, clock_timestamp())
+         on conflict (owner_id, machine_id, workdir)
+         do update set last_used_at = clock_timestamp()",
+    )
+    .bind(owner_id)
+    .bind(machine_id)
+    .bind(workdir)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "delete from machine_workdirs
+         where owner_id = $1 and machine_id = $2 and workdir not in (
+           select workdir from machine_workdirs
+           where owner_id = $1 and machine_id = $2
+           order by last_used_at desc, workdir desc limit 20)",
+    )
+    .bind(owner_id)
+    .bind(machine_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn lock_owner(conn: &mut PgConnection, owner: Uuid) -> Result<(), sqlx::Error> {
@@ -978,12 +1032,15 @@ async fn create_in_tx(
             )
         }
     };
-    // Без instructions_v1 машина запустит только «Как у владельца».
-    if !matches!(reference, PresetRef::Owner)
-        && req.start
-        && !registry.has_capability(req.machine_id, CAPABILITY_INSTRUCTIONS_V1)
-    {
-        return Err(CreateError::CapabilityMissing);
+    // Без instructions_v1 машина запустит только «Как у владельца». Нет сеанса - машина
+    // недоступна: о версии воркера без него судить нельзя.
+    if !matches!(reference, PresetRef::Owner) && req.start {
+        if registry.session_info(req.machine_id).is_none() {
+            return Err(CreateError::MachineUnavailable);
+        }
+        if !registry.has_capability(req.machine_id, CAPABILITY_INSTRUCTIONS_V1) {
+            return Err(CreateError::CapabilityMissing);
+        }
     }
     if !workdir_allowed(&req.workdir, &m.try_get("allowed_roots")?) {
         return Err(CreateError::WorkdirNotAllowed);
@@ -1021,6 +1078,7 @@ async fn create_in_tx(
     };
     sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
             .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
+    remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;
     sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
         .bind(id)
         .bind(sqlx::types::Json(&holds))
@@ -1235,9 +1293,10 @@ pub async fn change_settings(
     let request = json!({"id": id, "settings": patch});
     Ok(idempotency::run_in_tx(pool, owner_id, key, "change_settings", &request, Some(id), move |conn| Box::pin(async move {
         sqlx::query("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
-                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for no key update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
+                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession, h.settings_midsession_effort from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for no key update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
                 if !row.try_get::<Vec<String>, _>("capabilities")?.iter().any(|v| v == "pilot_v1") { return Err(SettingsError::CapabilityMissing); }
         let mut pending: Value = row.try_get("pending_settings")?;
+        let effort_patched = patch.effort.is_some();
         for (k, v) in [("model", patch.model), ("effort", patch.effort), ("permission_mode", patch.permission_mode)] { if let Some(v) = v { pending[k] = json!(v); } }
         if let Some(profile) = patch.instruction_profile.as_deref() {
             let reference = PresetRef::parse(profile).map_err(|_| SettingsError::PresetUnknown)?;
@@ -1265,6 +1324,8 @@ pub async fn change_settings(
         if (pending.get("permission_mode").is_some() || !permission.is_empty()) && !modes.as_ref().and_then(Value::as_array).is_some_and(|v| v.iter().any(|v| v == &permission)) { return Err(SettingsError::PermissionModeUnknown); }
         let live = executions::live(conn, id).await?.is_some();
         if live && !row.try_get::<Option<bool>, _>("settings_midsession")?.unwrap_or(false) { return Err(SettingsError::MidsessionUnsupported); }
+        // Глубину размышлений часть харнессов меняет только перезапуском (Claude Code).
+        if live && effort_patched && effort != row.try_get::<String, _>("effort")? && !row.try_get::<Option<bool>, _>("settings_midsession_effort")?.unwrap_or(true) { return Err(SettingsError::MidsessionUnsupported); }
         sqlx::query("update conversations set pending_settings=$2,settings_rev=settings_rev+1 where id=$1").bind(id).bind(&pending).execute(&mut *conn).await?;
         let view = detail(conn, owner_id, id).await?.ok_or(SettingsError::NotFound)?.settings;
         append(conn, Scope::Conversation { id }, "conversation_settings_changed", Some(id), serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?, correlation_id).await?;
@@ -1277,21 +1338,49 @@ pub async fn promote_settings_in_tx(
     accepted_command_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    apply_sent_settings(conn, accepted_command_id, correlation_id, true).await
+    apply_sent_settings(conn, accepted_command_id, correlation_id, None).await
 }
 pub async fn drop_rejected_settings_in_tx(
     conn: &mut PgConnection,
     rejected_command_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    apply_sent_settings(conn, rejected_command_id, correlation_id, false).await
+    drop_settings_rejected_for_in_tx(
+        conn,
+        rejected_command_id,
+        SETTINGS_UNAVAILABLE,
+        correlation_id,
+    )
+    .await
 }
+
+const SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
+
+/// Причины отказа воркера, вызванные самими настройками ввода.
+pub const SETTINGS_REJECTION_REASONS: [&str; 3] = [
+    SETTINGS_UNAVAILABLE,
+    "effort_change_unsupported",
+    "permission_mode_needs_restart",
+];
+
+/// Отклонённые воркером настройки снимаются с ожидания, иначе каждый следующий ввод
+/// повёз бы их снова и получил тот же отказ.
+pub async fn drop_settings_rejected_for_in_tx(
+    conn: &mut PgConnection,
+    rejected_command_id: Uuid,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    apply_sent_settings(conn, rejected_command_id, correlation_id, Some(reason)).await
+}
+
 async fn apply_sent_settings(
     conn: &mut PgConnection,
     command: Uuid,
     correlation: Uuid,
-    promote: bool,
+    rejected: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    let promote = rejected.is_none();
     let Some((id, sent)): Option<(Uuid, Value)> = sqlx::query_as("select conversation_id,payload->'settings' from commands where id=$1 and payload ? 'settings'").bind(command).fetch_optional(&mut *conn).await? else { return Ok(()); };
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(id)
@@ -1351,8 +1440,8 @@ async fn apply_sent_settings(
         .ok_or(sqlx::Error::RowNotFound)?
         .settings;
     let mut payload = serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    if !promote {
-        payload["rejected"] = json!({"keys":sent_keys,"reason":"settings_unavailable"});
+    if let Some(reason) = rejected {
+        payload["rejected"] = json!({"keys":sent_keys,"reason":reason});
     }
     append(
         conn,

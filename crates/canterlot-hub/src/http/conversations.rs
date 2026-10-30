@@ -31,6 +31,32 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(start_execution))
         .routes(routes!(resume))
 }
+/// Живой сеанс без `instructions_v1` запустил бы не-владельческий пресет как «Как у
+/// владельца»; без сеанса проверку повторяет outbox перед отправкой старта.
+async fn require_instructions_capability(
+    s: &AppState,
+    owner: Uuid,
+    id: Uuid,
+) -> Result<(), ApiError> {
+    let row: Option<(Uuid, String)> = sqlx::query_as(
+        "select machine_id, instruction_profile from conversations where id=$1 and owner_id=$2",
+    )
+    .bind(id)
+    .bind(owner)
+    .fetch_optional(&s.pool)
+    .await?;
+    if let Some((machine, profile)) = row
+        && profile != "owner"
+        && s.registry.session_info(machine).is_some()
+        && !s
+            .registry
+            .has_capability(machine, crate::session::CAPABILITY_INSTRUCTIONS_V1)
+    {
+        return Err(ApiError::new(ErrorCode::CapabilityMissing));
+    }
+    Ok(())
+}
+
 #[derive(Default, Deserialize, ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ResumeBody {
@@ -46,6 +72,7 @@ async fn start_execution(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(c): Correlation,
 ) -> Result<(StatusCode, Json<crate::executions::StartedExecution>), ApiError> {
+    require_instructions_capability(&s, o.owner_id, id).await?;
     let value = crate::executions::start_with_key(
         &s.pool,
         o.owner_id,
@@ -69,6 +96,7 @@ async fn resume(
     Correlation(c): Correlation,
     ApiJson(body): ApiJson<ResumeBody>,
 ) -> Result<(StatusCode, Json<crate::executions::StartedExecution>), ApiError> {
+    require_instructions_capability(&s, o.owner_id, id).await?;
     let value = crate::executions::start_with_key(
         &s.pool,
         o.owner_id,
@@ -434,6 +462,7 @@ async fn decision(
                     // The request outlives the generic idempotency key's retention period.
                     let submitted = serde_json::to_value(&decision)
                         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                    let submitted = requests::redact_decision(&row.request_payload, &submitted);
                     if row.decision_payload.as_ref() != Some(&submitted) {
                         return Err(ApiError::new(ErrorCode::IdempotencyConflict));
                     }

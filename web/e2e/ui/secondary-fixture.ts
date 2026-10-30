@@ -13,13 +13,40 @@ export async function bootSecondary(page: Page, path = '/machines', logout: stri
   return { hub, api, ids, ...fixture };
 }
 
-export async function postShare(page: Page) {
+export interface SharePayload {
+  title?: string;
+  text?: string;
+  url?: string;
+  files?: { name: string; body: string; type?: string }[];
+}
+
+const SAMPLE: SharePayload = {
+  title: 'Описание',
+  text: 'Сверь с кодом',
+  url: 'https://example.org/',
+  files: [{ name: 'notes.txt', body: 'payload' }]
+};
+
+export async function postShare(page: Page, share: SharePayload = SAMPLE) {
   await page.evaluate(async () => { await navigator.serviceWorker.ready; });
   await page.waitForFunction(() => !!navigator.serviceWorker.controller);
-  return page.evaluate(async () => {
-    const form = new FormData();
-    form.set('title', 'Описание'); form.set('text', 'Сверь с кодом'); form.set('url', 'https://example.org/');
-    form.append('files', new File(['payload'], 'notes.txt', { type: 'text/plain' }));
-    return (await fetch('/_share', { method: 'POST', body: form })).url;
-  });
+  // Системное «Поделиться» открывает share target навигацией верхнего уровня: так и отправляем форму.
+  await page.evaluate((data) => {
+    const form = document.createElement('form');
+    form.method = 'post'; form.enctype = 'multipart/form-data'; form.action = '/_share';
+    for (const key of ['title', 'text', 'url'] as const) {
+      const value = data[key];
+      if (value === undefined) continue;
+      const field = document.createElement('input');
+      field.type = 'hidden'; field.name = key; field.value = value; form.append(field);
+    }
+    const picker = document.createElement('input');
+    picker.type = 'file'; picker.name = 'files'; picker.multiple = true;
+    const transfer = new DataTransfer();
+    for (const file of data.files ?? []) transfer.items.add(new File([file.body], file.name, { type: file.type ?? 'text/plain' }));
+    picker.files = transfer.files; form.append(picker);
+    document.body.append(form); form.submit();
+  }, share);
+  await page.waitForURL(/\/share\?/);
+  return page.url();
 }

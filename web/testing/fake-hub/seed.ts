@@ -3,7 +3,7 @@ import type { HistoryBlock, HistoryInput } from '../../src/lib/stores/chat.svelt
 import type { DelegationNode } from '../../src/lib/stores/delegation';
 import type { ListRow } from '../../src/lib/stores/list.svelte';
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
-import { FakeHubApi } from './api';
+import { FakeHubApi, type FakePreset } from './api';
 
 const idle = { state: 'idle' as const, evidence: {}, since: '2026-10-28T12:00:00.000Z' };
 
@@ -151,4 +151,63 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 
 export function rememberDelegation(api: FakeHubApi, conversationId: string, nodes: DelegationNode[]): void {
 	api.delegations.set(conversationId, nodes);
+}
+
+const SEED_EXECUTOR_TEXT = 'Communicate, reason and write reports in English. Artefacts whose language the task fixes (commit messages, UI strings, documentation) follow the task.';
+
+export function seedPresets(api: FakeHubApi): void {
+	if (api.presets.size > 0) return;
+	const clean: FakePreset = {
+		id: 'clean',
+		kind: 'clean',
+		title: 'Без инструкций',
+		description: 'Агент запускается без личных инструкций владельца: без его глобальных CLAUDE.md и AGENTS.md и без автопамяти. Инструкции самого репозитория, вход, MCP-серверы и плагины владельца остаются.',
+		revision: null,
+		text_bytes: null,
+		text: null,
+		created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+		last_edit: null,
+		used_by: 0
+	};
+	const owner: FakePreset = {
+		id: 'owner',
+		kind: 'owner',
+		title: 'Как у владельца',
+		description: 'Конфигурация агента владельца без изменений: его CLAUDE.md, AGENTS.md и автопамять.',
+		revision: null,
+		text_bytes: null,
+		text: null,
+		created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+		last_edit: null,
+		used_by: 0
+	};
+	const executor: FakePreset = {
+		id: 'seed-executor',
+		kind: 'custom',
+		title: 'Исполнитель (английский)',
+		description: 'Общение, рассуждения и отчёты на английском; язык коммитов, интерфейса и документации задаёт задача.',
+		revision: 1,
+		text_bytes: new TextEncoder().encode(SEED_EXECUTOR_TEXT).length,
+		text: SEED_EXECUTOR_TEXT,
+		created: { by: 'owner', conversation_id: null, conversation_title: null, at: '2026-10-28T12:00:00.000Z' },
+		last_edit: null,
+		used_by: 0
+	};
+	api.presets.set(clean.id, clean);
+	api.presets.set(owner.id, owner);
+	api.presets.set(executor.id, executor);
+	const draftText = 'Draft notes kept by the agent.';
+	const agentDraft: FakePreset = {
+		id: 'agent-draft',
+		kind: 'custom',
+		title: 'Агентский черновик',
+		description: 'Сохранено агентом из сессии.',
+		revision: 2,
+		text_bytes: new TextEncoder().encode(draftText).length,
+		text: draftText,
+		created: { by: 'agent', conversation_id: '33333333-3333-4333-8333-333333333333', conversation_title: 'Разбор ленты', at: '2026-10-29T10:00:00.000Z' },
+		last_edit: { by: 'agent', conversation_id: '33333333-3333-4333-8333-333333333333', conversation_title: 'Разбор ленты', at: '2026-10-29T11:00:00.000Z' },
+		used_by: 1
+	};
+	api.presets.set(agentDraft.id, agentDraft);
 }

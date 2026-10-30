@@ -35,9 +35,10 @@ pub struct ModelEntry {
     pub default: bool,
 }
 
+// Страница ответа model/list: `data` по схеме ModelListResponse.
 pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
     result
-        .get("models")
+        .get("data")
         .and_then(Value::as_array)
         .map(|models| {
             models
@@ -70,6 +71,27 @@ pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
         .unwrap_or_default()
 }
 
+// Курсор следующей страницы model/list; пустой или null — страниц больше нет.
+pub fn next_cursor(result: &Value) -> Option<String> {
+    result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_owned)
+}
+
+// Параметры model/list: страница по курсору.
+pub fn model_list_params(cursor: Option<&str>) -> Value {
+    let mut params = json!({"includeHidden": false, "limit": 100});
+    if let Some(cursor) = cursor {
+        params["cursor"] = cursor.into();
+    }
+    params
+}
+
+// Предел страниц model/list: защита от зацикленного курсора.
+pub const MODEL_LIST_MAX_PAGES: usize = 20;
+
 // `efforts` в краткой сводке или `supportedReasoningEfforts[].reasoningEffort` в схеме.
 fn model_efforts(model: &Value) -> Vec<String> {
     if let Some(efforts) = model.get("efforts").and_then(Value::as_array) {
@@ -100,6 +122,7 @@ fn model_efforts(model: &Value) -> Vec<String> {
 pub fn validate_settings(
     change: &SettingsChange,
     models: &[ModelEntry],
+    current_model: Option<&str>,
 ) -> Result<(), &'static str> {
     if let Some(mode) = change.permission_mode.as_deref()
         && PermissionMode::parse(mode).is_err()
@@ -117,10 +140,10 @@ pub fn validate_settings(
             return Err("settings_unavailable");
         }
     } else if let Some(effort) = change.effort.as_deref() {
-        // Усилие без смены модели относится к модели по умолчанию.
-        let entry = models
-            .iter()
-            .find(|entry| entry.default)
+        // Усилие без смены модели относится к текущей модели сессии.
+        let entry = current_model
+            .and_then(|current| models.iter().find(|entry| entry.id == current))
+            .or_else(|| models.iter().find(|entry| entry.default))
             .ok_or("settings_unavailable")?;
         if !entry.efforts.iter().any(|known| known == effort) {
             return Err("settings_unavailable");
@@ -258,6 +281,11 @@ pub fn history_lookup_params(thread_id: &str) -> Value {
 
 // Ход, где ввод с этим clientId уже принят.
 pub fn history_contains(result: &Value, client_id: &str) -> Option<String> {
+    history_turn(result, client_id).map(|(id, _)| id)
+}
+
+// Ход с этим clientId и его `status` (completed|interrupted|failed|inProgress).
+pub fn history_turn(result: &Value, client_id: &str) -> Option<(String, Option<String>)> {
     let turns = result.get("data")?.as_array()?;
     turns.iter().find_map(|turn| {
         let items = turn.get("items")?.as_array()?;
@@ -265,7 +293,12 @@ pub fn history_contains(result: &Value, client_id: &str) -> Option<String> {
             .iter()
             .any(|item| item.get("clientId").and_then(Value::as_str) == Some(client_id));
         if found {
-            turn.get("id")?.as_str().map(str::to_owned)
+            let id = turn.get("id")?.as_str()?.to_owned();
+            let status = turn
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some((id, status))
         } else {
             None
         }
@@ -330,6 +363,11 @@ impl Outbox {
             command_id,
         });
         None
+    }
+
+    // Ход, о котором этот процесс сообщал (ответ turn/start или turn/started).
+    pub fn knows(&self, turn_id: &str) -> bool {
+        self.known_turns.contains(turn_id)
     }
 
     pub fn on_turn_started(&mut self, turn_id: &str) {

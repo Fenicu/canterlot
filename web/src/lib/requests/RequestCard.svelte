@@ -37,8 +37,14 @@
       case 'cancelled':
       case 'canceled':
         return 'отменено';
+      case 'execution_ended':
+        return 'Исполнение завершилось';
+      case 'owner_lost':
+        return 'Потерян владелец исполнения';
+      case 'generation_advanced':
+        return 'Исполнение сменилось';
       default:
-        return reason;
+        return 'Запрос закрыт';
     }
   }
 
@@ -49,6 +55,7 @@
       case 'saved':
         return 1;
       case 'transmitting':
+      case 'unconfirmed':
         return 2;
       case 'applied':
       case 'closed':
@@ -74,6 +81,7 @@
 
   const trackStatus = $derived.by(() => {
     if (request.state === 'applied') return 'применено';
+    if (request.state === 'unconfirmed') return 'Передано агенту, подтверждения нет';
     return undefined;
   });
 
@@ -84,7 +92,7 @@
     if (request.kind === 'permission') {
       if (winner?.behavior === 'allow') return 'Разрешено';
       if (winner?.behavior === 'deny') return 'Отклонено';
-      return 'Разрешено';
+      return 'Решение применено';
     }
 
     const payload = (request.payload ?? {}) as Record<string, unknown>;
@@ -193,6 +201,10 @@
       <div class="conflict-notice" role="alert" data-conflict="true">
         Решение принято на другом устройстве
       </div>
+    {:else if request.error}
+      <div class="error-notice" role="alert" data-decision-error>
+        {request.error}
+      </div>
     {/if}
 
     {#if request.kind === 'permission'}
@@ -220,6 +232,14 @@
     padding: var(--s2) var(--s3);
     border-radius: var(--radius-sm);
     background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-meta);
+  }
+
+  .error-notice {
+    padding: var(--s2) var(--s3);
+    border-radius: var(--radius-sm);
+    background: var(--danger-soft);
     color: var(--text);
     font-size: var(--fs-meta);
   }

@@ -3470,7 +3470,7 @@ export interface operations {
         };
         requestBody?: never;
         responses: {
-            /** @description Недавние каталоги */
+            /** @description Последние каталоги для экрана новой сессии */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

@@ -1,14 +1,16 @@
 import { SvelteMap } from 'svelte/reactivity';
 import type { HubEvent } from '#lib/sync/wire.js';
-import type { OpJournal } from '#lib/ops/journal.js';
+import type { Op, OpJournal } from '#lib/ops/journal.js';
 import type { DecisionBody } from '#lib/api/client.js';
 import { ApiError } from '#lib/api/http.js';
+import { describeError } from '#lib/api/errors.js';
 
 export type RequestClientState =
   | 'open'
   | 'sending'
   | 'saved'
   | 'transmitting'
+  | 'unconfirmed'
   | 'applied'
   | 'not_applied'
   | 'closed';
@@ -42,6 +44,24 @@ export function createRequestItem(init: RequestItem): RequestItem {
   return item;
 }
 
+/** Секретный вопрос: ответ живёт только в памяти, на устройство не пишется. */
+export function hasSecretQuestion(payload: unknown): boolean {
+  const record = asRecord(payload);
+  const nested = asRecord(record.payload);
+  const list = Array.isArray(record.questions)
+    ? record.questions
+    : Array.isArray(nested.questions)
+      ? nested.questions
+      : [];
+  return (
+    Boolean(record.is_secret ?? record.isSecret) ||
+    list.some((q) => {
+      const question = asRecord(q);
+      return Boolean(question.is_secret ?? question.isSecret);
+    })
+  );
+}
+
 export class RequestsModel {
   readonly items = new SvelteMap<string, RequestItem>();
   readonly conversationId?: string;
@@ -66,6 +86,8 @@ export class RequestsModel {
         state = 'saved';
       } else if (rawState === 'decision_transmitting' || rawState === 'transmitting') {
         state = 'transmitting';
+      } else if (rawState === 'decision_unconfirmed' || rawState === 'unconfirmed') {
+        state = 'unconfirmed';
       } else if (rawState === 'decision_applied' || rawState === 'applied') {
         state = 'applied';
       } else if (rawState === 'decision_not_applied' || rawState === 'not_applied') {
@@ -178,6 +200,8 @@ export class RequestsModel {
         item.state = 'applied';
       } else if (reason === 'not_applied') {
         item.state = 'not_applied';
+      } else if (reason === 'unconfirmed') {
+        item.state = 'unconfirmed';
       } else {
         item.state = 'closed';
       }
@@ -206,13 +230,27 @@ export class RequestsModel {
     // It ONLY transitions to 'saved' when the hub commits (200 OK or request_decided).
     if (item) {
       item.state = 'sending';
+      item.error = undefined;
     }
 
-    const op = await journal.begin('other', { requestId, conversationId, decision }, { conversationId, persist: true });
+    let op: Op;
+    try {
+      op = await journal.begin(
+        'other',
+        { requestId, conversationId, decision },
+        { conversationId, persist: !hasSecretQuestion(item?.payload) }
+      );
+    } catch {
+      if (item && item.state === 'sending') {
+        item.state = 'open';
+        item.error = 'Не удалось сохранить решение на устройстве';
+      }
+      return;
+    }
 
     try {
       await journal.run(op);
-      if (item && item.state === 'sending') {
+      if (item && item.state === 'sending' && op.state === 'committed') {
         item.state = 'saved';
         if (op.result && typeof op.result === 'object') {
           const res = op.result as Record<string, unknown>;
@@ -249,7 +287,14 @@ export class RequestsModel {
           return;
         }
       }
-      throw err;
+      // Отказ хаба или сбой клиента: карточка снова доступна, причина видна, ответ можно исправить.
+      if (item && item.state === 'sending') {
+        item.state = 'open';
+        item.error = describeError(err).message;
+      }
+    } finally {
+      // Решение доставлено или отклонено: строка журнала с ответом больше не нужна.
+      journal.settle(op.key);
     }
   }
 }

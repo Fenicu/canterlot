@@ -193,6 +193,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         list.items.clear();
         list.groups = [];
         list.limits = [];
+        list.presets = [];
         list.counts = { all: 0, pinned: 0, archived: 0, groups: [] };
         machines.close();
         machines.items.clear();

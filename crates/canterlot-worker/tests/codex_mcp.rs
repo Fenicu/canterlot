@@ -5,7 +5,7 @@
 use canterlot_proto::worker::v1::{LimitObservation, LimitWindow, LimitsSnapshot};
 use canterlot_worker::adapter::codex::{
     mcp::{self, SERVER_INSTRUCTIONS, launch_overrides},
-    thread::{ChangeNote, OwnerDefaults, compose_developer_instructions},
+    thread::{ChangeNote, compose_developer_instructions, owner_defaults_from},
 };
 use canterlot_worker::adapter::{AdapterEvent, canterlot_mcp::ToolSet};
 use serde_json::{Value, json};
@@ -21,9 +21,16 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = list.as_reply().expect("tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 1);
+    assert_eq!(tools.len(), 4);
     assert_eq!(tools[0]["name"], "canterlot_limits");
     assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
+    let names: Vec<&str> = tools
+        .iter()
+        .map(|t| t["name"].as_str().expect("name"))
+        .collect();
+    assert!(names.contains(&"canterlot_presets_list"));
+    assert!(names.contains(&"canterlot_preset_save"));
+    assert!(names.contains(&"canterlot_preset_apply"));
 
     let claude = canterlot_worker::adapter::claude_code::mcp::handle_rpc(&json!({
         "jsonrpc": "2.0",
@@ -33,7 +40,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = claude.as_reply().expect("claude tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 5);
     let names: Vec<&str> = tools
         .iter()
         .map(|t| t["name"].as_str().expect("name"))
@@ -75,12 +82,9 @@ fn server_instructions_go_to_initialize_and_developer_instructions() {
     let lines: Vec<&str> = instructions.lines().collect();
     assert!((10..=15).contains(&lines.len()), "{instructions}");
 
-    let owner = OwnerDefaults {
-        approval_policy: None,
-        sandbox_mode: None,
-        sandbox_workspace_write: None,
-        developer_instructions: Some("Owner line.".into()),
-    };
+    let owner = owner_defaults_from(&serde_json::json!({
+        "config": {"developer_instructions": "Owner line."}, "origins": {},
+    }));
     let dev = compose_developer_instructions(
         &canterlot_worker::adapter::InstructionSpec {
             mode: canterlot_worker::adapter::InstructionMode::Owner,

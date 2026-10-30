@@ -8,7 +8,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { buildRows, type Row } from '#lib/timeline/rows.js';
+  import { buildRows, dayStart, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
@@ -47,7 +47,8 @@
   let queued: { key: string; height: number; node?: HTMLElement }[] = [];
   const PIN_PX = 48;
 
-  const rows = $derived(buildRows(chat.timeline.entries, { now, laneRoot }));
+  const today = $derived(dayStart(now));
+  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   let seenRows: string | null = null;
   $effect(() => {

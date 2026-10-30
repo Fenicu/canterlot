@@ -2,9 +2,11 @@
   import type { Option } from './types';
   let { name, label, options, value = $bindable('') }: { name: string; label: string; options: Option[]; value?: string } = $props();
 </script>
-<div role="radiogroup" aria-label={label} class="segmented">
-  {#each options as option (option.value)}<label><input type="radio" {name} value={option.value} bind:group={value} /><span>{option.label}</span></label>{/each}
-</div>
+{#if options.length > 0}
+  <div role="radiogroup" aria-label={label} class="segmented">
+    {#each options as option (option.value)}<label><input type="radio" {name} value={option.value} bind:group={value} /><span>{option.label}</span></label>{/each}
+  </div>
+{/if}
 <style>
   .segmented { display: flex; gap: var(--s2); padding: var(--s2); border-radius: var(--radius-pill); background: var(--raised); }
   label { flex: 1; min-width: 0; text-align: center; cursor: pointer; font-size: var(--fs-meta); position: relative; }

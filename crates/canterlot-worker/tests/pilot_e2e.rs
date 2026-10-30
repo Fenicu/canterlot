@@ -2052,3 +2052,159 @@ async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
     let (_cmd4, echo4) = echo_turn(&p, id, &turn4.to_string()).await;
     assert!(echo4.contains("mode=clean"), "{echo4}");
 }
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let id = p.create("synthetic", false).await;
+    let submitted = p
+        .submit(
+            id,
+            &script(json!([
+                {"request_permission": {"tool_name": "Bash", "command": "cargo test", "args": {}}},
+                {"delta": "после разрешения"}
+            ])),
+            &[],
+        )
+        .await;
+    let command = uuid(&submitted["command_id"]);
+    p.accepted(uuid(&submitted["input_id"])).await;
+    let mut request = Value::Null;
+    until("request opened", async || {
+        let snapshot = p.get(&format!("/api/v1/conversations/{id}/snapshot")).await;
+        match snapshot["data"]["open_requests"]
+            .as_array()
+            .and_then(|requests| requests.first())
+        {
+            Some(open) => {
+                request = open.clone();
+                true
+            }
+            None => false,
+        }
+    })
+    .await;
+    assert_eq!(request["state"], "open");
+    let request_id = uuid(&request["id"]);
+    let decided = p
+        .post(
+            &format!("/api/v1/conversations/{id}/requests/{request_id}/decision"),
+            Some(json!({"kind": "permission", "behavior": "allow", "message": null})),
+            200,
+        )
+        .await;
+    assert_eq!(decided["state"], "decision_saved");
+    let state = async || {
+        sqlx::query_scalar::<_, String>("select state from requests where id=$1")
+            .bind(request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    if timeout(Duration::from_secs(15), async {
+        while state().await != "decision_applied" {
+            sleep(ms(20)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        let command: Option<Value> = sqlx::query_scalar(
+            "select result from commands where conversation_id=$1 and kind='deliver_decision'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        panic!(
+            "decision not applied: request {}, command result {command:?}",
+            state().await
+        );
+    }
+    p.answered(id, command, "после разрешения").await;
+    let delivery: Vec<(String, Option<Value>)> = sqlx::query_as(
+        "select delivery_state, result from commands where conversation_id=$1 and kind='deliver_decision'",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(delivery.len(), 1);
+    assert_eq!(delivery[0].0, "completed");
+    assert!(
+        !delivery[0]
+            .1
+            .as_ref()
+            .is_some_and(|result| result.get("rejected").is_some()),
+        "decision command rejected: {:?}",
+        delivery[0].1
+    );
+}
+
+/// Агент через синтетический вызов применяет пресет к своей сессии:
+/// вызов `presets.apply` ставит подвешенную смену, следующий ход видит ревизию.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let preset = p
+        .post(
+            "/api/v1/presets",
+            Some(json!({"title": "Агентский", "text": "текст агента"})),
+            201,
+        )
+        .await;
+    let preset_id = preset["id"].as_str().unwrap();
+    let created = p
+        .post(
+            "/api/v1/conversations",
+            Some(json!({
+                "machine_id": p.machine,
+                "harness": "synthetic",
+                "workdir": p.work.to_str().unwrap(),
+                "model": "synthetic-large",
+                "effort": "high",
+                "start": true,
+            })),
+            201,
+        )
+        .await;
+    let id: Uuid = created["conversation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    until("execution running", async || {
+        p.detail(id).await["execution"]["state"] == "running"
+    })
+    .await;
+    // Ход 1: агент вызывает presets.apply к своей сессии.
+    let call = json!({"synthetic": [{"agent_call": {"tool": "presets.apply", "arguments": {"id": preset_id}}}]});
+    let submitted = p
+        .post(
+            &format!("/api/v1/conversations/{id}/inputs"),
+            Some(json!({"content":[{"type":"text","text":call.to_string()}]})),
+            201,
+        )
+        .await;
+    let input: Uuid = submitted["input_id"].as_str().unwrap().parse().unwrap();
+    p.accepted(input).await;
+    // Блок с итогом вызова не привязан к команде ввода.
+    until("agent call answered", async || {
+        p.history(id).await.iter().any(|item| {
+            item["kind"] == "block"
+                && item["block_kind"] == "text"
+                && item["state"] == "final"
+                && item["content"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("next_turn"))
+        })
+    })
+    .await;
+    // Ход 2: подвешенная смена применена, адаптер видит пресет.
+    let turn = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd, echo) = echo_turn(&p, id, &turn.to_string()).await;
+    assert!(echo.contains("mode=preset"), "{echo}");
+    assert!(echo.contains("revision=1"), "{echo}");
+}

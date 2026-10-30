@@ -1540,3 +1540,150 @@ async fn promoting_clean_snapshot_clears_pinned_revision(pool: PgPool) {
     .unwrap();
     assert_eq!(row, ("clean".to_owned(), None));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn midsession_effort_change_is_refused_when_the_harness_cannot_apply_it(pool: PgPool) {
+    let (client, id, machine, _dir) = settings_client(&pool).await;
+    sqlx::query(
+        "update machine_harnesses set settings_midsession_effort=false where machine_id=$1",
+    )
+    .bind(machine)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state) values($1,$2,1,'running')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let patch = |key: &'static str, body: Value| {
+        let client = &client;
+        async move {
+            client
+                .send(
+                    Method::PATCH,
+                    &format!("/api/v1/conversations/{id}/settings"),
+                    Some(key),
+                    Some(body),
+                )
+                .await
+        }
+    };
+    let r = patch("effort", json!({"effort":"low"})).await;
+    assert_eq!(r.status, 422, "{}", String::from_utf8_lossy(&r.body));
+    assert_eq!(
+        r.json::<Value>()["error"]["code"],
+        "settings_midsession_unsupported"
+    );
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, json!({}));
+    // Модель и та же самая глубина размышлений по-прежнему меняются на ходу.
+    let r = patch("model", json!({"model":"synthetic-large","effort":"high"})).await;
+    assert_eq!(r.status, 200, "{}", String::from_utf8_lossy(&r.body));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
+    use canterlot_hub::{
+        conversations::{self, SettingsPatch},
+        delivery::{
+            dispatch::{self, DispatchOutcome, GateInputs},
+            receipts::{self, InputReceipt},
+            submit::{self, ContentBlock, SubmitInput},
+        },
+        executions,
+        model::ExecutionState,
+    };
+    for reason in ["effort_change_unsupported", "permission_mode_needs_restart"] {
+        let seed = testkit::seed(&pool).await;
+        testkit::seed_catalog(&pool, seed.machine_id).await;
+        sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
+            .bind(seed.conversation_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let execution =
+            executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+                .await
+                .unwrap();
+        for state in [ExecutionState::Starting, ExecutionState::Running] {
+            executions::set_state(&pool, execution.execution_id, state, None, Uuid::now_v7())
+                .await
+                .unwrap();
+        }
+        conversations::change_settings(
+            &pool,
+            seed.owner_id,
+            seed.conversation_id,
+            "settings",
+            SettingsPatch {
+                effort: Some("low".into()),
+                ..Default::default()
+            },
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        let mk = |key: &str| SubmitInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            idempotency_key: key.into(),
+            content: vec![ContentBlock::Text {
+                text: "text".into(),
+            }],
+            received_at: chrono::Utc::now(),
+            correlation_id: Uuid::now_v7(),
+        };
+        let first = submit::submit_input(&pool, mk("first")).await.unwrap();
+        let second = submit::submit_input(&pool, mk("second")).await.unwrap();
+        let gate = GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        };
+        assert!(
+            matches!(dispatch::dispatch_next(&pool,seed.conversation_id,gate.clone(),Uuid::now_v7()).await.unwrap(),DispatchOutcome::Dispatched{input_id,..} if input_id==first.input_id)
+        );
+        receipts::apply_input_receipt(
+            &pool,
+            first.command_id,
+            1,
+            InputReceipt::ExplicitRejection {
+                reason: reason.into(),
+            },
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(dispatch::dispatch_next(&pool,seed.conversation_id,gate,Uuid::now_v7()).await.unwrap(),DispatchOutcome::Dispatched{input_id,..} if input_id==second.input_id)
+        );
+        let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+            .bind(second.command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(
+            payload.get("settings").is_none(),
+            "{reason}: rejected settings ride on the next input: {}",
+            payload["settings"]
+        );
+        let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' and payload ? 'rejected' order by scope_seq desc limit 1")
+            .bind(format!("conversation:{}", seed.conversation_id))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            event["rejected"],
+            json!({"keys":["effort"],"reason":reason})
+        );
+    }
+}

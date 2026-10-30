@@ -280,6 +280,15 @@ impl Translator {
         self.retry_count = 0;
     }
 
+    // Запрос разрешения по элементу пришёл серверным запросом: решал владелец, не CLI.
+    pub fn note_approval(&mut self, item_id: &str) {
+        self.approval_items.insert(item_id.to_owned());
+    }
+
+    pub fn approval_noted(&self, item_id: &str) -> bool {
+        self.approval_items.contains(item_id)
+    }
+
     // Смена модели ходом без уведомления от сервера (задача 7 правит оптимистично).
     pub fn set_model(&mut self, model: &str) {
         self.model = model.to_owned();
@@ -1406,6 +1415,9 @@ impl Translator {
     }
 
     fn on_settings_updated(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
         let settings = params.get("threadSettings").cloned().unwrap_or(Value::Null);
         if let Some(model) = settings.get("model").and_then(Value::as_str) {
             self.model = model.to_owned();

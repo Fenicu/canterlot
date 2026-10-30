@@ -47,19 +47,23 @@
     gap: var(--s2);
     min-width: 0;
     overflow-x: auto;
+    scrollbar-width: none;
     margin: var(--s3) var(--s6);
     padding: var(--s2);
     border-radius: var(--radius-pill);
     background: var(--raised);
   }
   button {
-    flex: 0 0 auto;
+    flex: 1 0 auto;
     min-height: var(--target);
     border: var(--s0);
     border-radius: var(--radius-pill);
     background: var(--transparent);
     color: var(--muted);
+    font-size: var(--fs-meta);
     padding: var(--s4) var(--s6);
   }
   button[aria-selected='true'] { background: var(--selected); color: var(--accent-link); }
+  :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; border-radius: var(--radius-card); }
+  :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 </style>

@@ -12,8 +12,8 @@ use canterlot_hub::{
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
-    DecisionApplied, DecisionTransmissionStarted, JournalOpened, JournalRecord, JournalRecords,
-    RecordBody, RequestOpened, record_body,
+    DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, JournalOpened, JournalRecord,
+    JournalRecords, RecordBody, RequestOpened, record_body,
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -385,32 +385,19 @@ async fn terminal_decision_applied_clears_queue_hold_and_emits_request_closed(
         )
         .await?;
 
-    let mut tx = pool.begin().await?;
-    canterlot_hub::requests::save_decision_in_tx(
-        &mut tx,
-        seed.conversation_id,
-        req_id,
-        execution.generation,
-        &canterlot_proto::requests::DecisionPayload::Permission {
-            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
-            message: None,
-        },
-        "idemp-1",
-    )
-    .await?;
-    tx.commit().await?;
+    let (winner, _) = decide(&pool, &seed, req_id, execution.generation).await;
 
     let mut sj2 = batch(
         journal,
         vec![
             record_body::Body::DecisionTransmissionStarted(DecisionTransmissionStarted {
                 request_id: req_id.to_string(),
-                decision_id: "dec-1".into(),
+                decision_id: winner.to_string(),
                 machine_time_ms: 100,
             }),
             record_body::Body::DecisionApplied(DecisionApplied {
                 request_id: req_id.to_string(),
-                decision_id: "dec-1".into(),
+                decision_id: winner.to_string(),
                 proof_kind: "tool_result".into(),
                 proof_payload_json: br#"{"ok":true}"#.to_vec(),
             }),
@@ -554,20 +541,7 @@ async fn decision_transmission_started_emits_request_transmitting_event(
         )
         .await?;
 
-    let mut tx = pool.begin().await?;
-    canterlot_hub::requests::save_decision_in_tx(
-        &mut tx,
-        seed.conversation_id,
-        req_id,
-        execution.generation,
-        &canterlot_proto::requests::DecisionPayload::Permission {
-            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
-            message: None,
-        },
-        "idemp-transmitting",
-    )
-    .await?;
-    tx.commit().await?;
+    let (winner, _) = decide(&pool, &seed, req_id, execution.generation).await;
 
     let count_transmitting = || async {
         sqlx::query_scalar::<_, i64>(
@@ -589,7 +563,7 @@ async fn decision_transmission_started_emits_request_transmitting_event(
             vec![record_body::Body::DecisionTransmissionStarted(
                 DecisionTransmissionStarted {
                     request_id: req_id.to_string(),
-                    decision_id: "dec-1".into(),
+                    decision_id: winner.to_string(),
                     machine_time_ms: 100,
                 },
             )],
@@ -884,4 +858,839 @@ async fn sj_poison_record_rolls_back_synchronously(pool: PgPool) -> TestResult {
             .await?;
     assert_eq!(committed, 1);
     Ok(())
+}
+
+async fn open_native_request(
+    pool: &PgPool,
+    ingest: &Ingest,
+    seed: &Seed,
+    execution: &executions::StartedExecution,
+    journal: Uuid,
+    seq: u64,
+    native: &str,
+) -> Uuid {
+    let mut records = vec![record_body::Body::RequestOpened(RequestOpened {
+        request_id: native.into(),
+        execution_id: execution.execution_id.to_string(),
+        generation: execution.generation as u64,
+        kind: "permission".into(),
+        payload_json: br#"{"tool_name":"Bash","command":"cargo test"}"#.to_vec(),
+    })];
+    if seq == 1 {
+        records.insert(0, opened(execution));
+    }
+    let mut records = batch(journal, records);
+    for (index, record) in records.records.iter_mut().enumerate() {
+        record.seq = if seq == 1 { index as u64 + 1 } else { seq };
+    }
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await
+        .unwrap();
+    sqlx::query_scalar("select id from requests where execution_id = $1 and native_request_id = $2")
+        .bind(execution.execution_id)
+        .bind(native)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn decide(pool: &PgPool, seed: &Seed, request: Uuid, generation: i64) -> (Uuid, Uuid) {
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = canterlot_hub::requests::save_decision_in_tx(
+        &mut tx,
+        seed.conversation_id,
+        request,
+        generation,
+        &canterlot_proto::requests::DecisionPayload::Permission {
+            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
+            message: None,
+        },
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let canterlot_hub::requests::DecisionResult::Committed { row, command_id } = outcome else {
+        panic!("decision must be committed");
+    };
+    (row.winner_decision_id.unwrap(), command_id)
+}
+
+fn cj(journal: Uuid, bodies: Vec<record_body::Body>) -> JournalRecords {
+    batch(journal, bodies)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_decision_not_applied_closes_request_and_keeps_control_journal_moving(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "item_7/3",
+    )
+    .await;
+    let (decision, command) = decide(&pool, &seed, request, execution.generation).await;
+    // Управляющая служба отвечает отказом в CJ: исполнение уже не принимает решений.
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![
+                    record_body::Body::DecisionNotApplied(DecisionNotApplied {
+                        request_id: "item_7/3".into(),
+                        decision_id: decision.to_string(),
+                        reason: "request_closed".into(),
+                    }),
+                    // Отказ по неизвестному решению не останавливает журнал.
+                    record_body::Body::DecisionNotApplied(DecisionNotApplied {
+                        request_id: "item_8/1".into(),
+                        decision_id: Uuid::now_v7().to_string(),
+                        reason: "stale_generation".into(),
+                    }),
+                ],
+            ),
+        )
+        .await;
+    assert_eq!(
+        outcome.map_err(|error| error.to_string()),
+        Ok(IngestOutcome::Committed { up_to_seq: 2 })
+    );
+    let state: String = sqlx::query_scalar("select state from requests where id = $1")
+        .bind(request)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "decision_not_applied");
+    let (delivery, result): (String, Value) =
+        sqlx::query_as("select delivery_state, result from commands where id = $1")
+            .bind(command)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(delivery, "completed");
+    assert_eq!(
+        result,
+        json!({"applied": false, "reason": "request_closed"})
+    );
+    let closed: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where conversation_id = $1 and kind = 'request_closed'",
+    )
+    .bind(seed.conversation_id)
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        closed,
+        vec![json!({"request_id": request, "reason": "request_closed"})]
+    );
+    Ok(())
+}
+
+async fn sj(
+    ingest: &Ingest,
+    seed: &Seed,
+    journal: Uuid,
+    seq: &mut u64,
+    bodies: Vec<record_body::Body>,
+) {
+    let mut records = batch(journal, bodies);
+    for record in &mut records.records {
+        *seq += 1;
+        record.seq = *seq;
+    }
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: *seq });
+}
+
+fn applied(native: &str, decision: Uuid) -> record_body::Body {
+    record_body::Body::DecisionApplied(DecisionApplied {
+        request_id: native.into(),
+        decision_id: decision.to_string(),
+        proof_kind: "tool_result".into(),
+        proof_payload_json: br#"{"ok":true}"#.to_vec(),
+    })
+}
+
+fn closed(native: &str, reason: &str) -> record_body::Body {
+    record_body::Body::RequestClosed(canterlot_proto::worker::v1::RequestClosed {
+        request_id: native.into(),
+        reason: reason.into(),
+    })
+}
+
+async fn request_state(pool: &PgPool, request: Uuid) -> String {
+    sqlx::query_scalar("select state from requests where id = $1")
+        .bind(request)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn command_state(pool: &PgPool, command: Uuid) -> String {
+    sqlx::query_scalar("select delivery_state from commands where id = $1")
+        .bind(command)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn closed_events(pool: &PgPool, request: Uuid) -> usize {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) from events where kind = 'request_closed' and payload->>'request_id' = $1",
+    )
+    .bind(request.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap() as usize
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_outcome_completes_only_the_command_of_its_request(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let first = open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_a").await;
+    let second =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_b").await;
+    let (first_decision, first_command) = decide(&pool, &seed, first, execution.generation).await;
+    let (_, second_command) = decide(&pool, &seed, second, execution.generation).await;
+    let mut seq = 3;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_a", first_decision)],
+    )
+    .await;
+    assert_eq!(request_state(&pool, first).await, "decision_applied");
+    assert_eq!(command_state(&pool, first_command).await, "completed");
+    assert_eq!(
+        command_state(&pool, second_command).await,
+        "pending",
+        "the other request's decision must still be delivered"
+    );
+    assert_eq!(request_state(&pool, second).await, "decision_saved");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_facts_respect_request_state_and_winner(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let closed_first =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_c").await;
+    let decided =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_d").await;
+    let cancelled =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 4, "toolu_e").await;
+    let mut seq = 4;
+    // Поздний факт применения не открывает заново закрытый запрос, повтор закрытия не шлёт событие.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![closed("toolu_c", "cancelled")],
+    )
+    .await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            applied("toolu_c", Uuid::now_v7()),
+            closed("toolu_c", "cancelled"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        request_state(&pool, closed_first).await,
+        "closed_without_decision"
+    );
+    assert_eq!(closed_events(&pool, closed_first).await, 1);
+    // Чужое решение игнорируется; после применения поздние факты ничего не меняют.
+    let (winner, command) = decide(&pool, &seed, decided, execution.generation).await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_d", Uuid::now_v7())],
+    )
+    .await;
+    assert_eq!(request_state(&pool, decided).await, "decision_saved");
+    assert_eq!(command_state(&pool, command).await, "pending");
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            applied("toolu_d", winner),
+            record_body::Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: "toolu_d".into(),
+                decision_id: winner.to_string(),
+                reason: "request_closed".into(),
+            }),
+            closed("toolu_d", "decided"),
+        ],
+    )
+    .await;
+    assert_eq!(request_state(&pool, decided).await, "decision_applied");
+    assert_eq!(closed_events(&pool, decided).await, 1);
+    // Закрытие на машине до передачи решения: решение не применено, команда погашена.
+    let (_, command) = decide(&pool, &seed, cancelled, execution.generation).await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![closed("toolu_e", "cancelled")],
+    )
+    .await;
+    assert_eq!(
+        request_state(&pool, cancelled).await,
+        "decision_not_applied"
+    );
+    assert_eq!(command_state(&pool, command).await, "completed");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let request =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_u").await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let mut seq = 2;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            record_body::Body::DecisionTransmissionStarted(DecisionTransmissionStarted {
+                request_id: "toolu_u".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            }),
+            record_body::Body::DecisionUnconfirmed(
+                canterlot_proto::worker::v1::DecisionUnconfirmed {
+                    request_id: "toolu_u".into(),
+                    decision_id: winner.to_string(),
+                    reason: "undetermined".into(),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_unconfirmed");
+    assert_eq!(command_state(&pool, command).await, "completed");
+    let reasons = || async {
+        sqlx::query_scalar::<_, String>(
+            "select payload->>'reason' from events where kind = 'request_closed' and payload->>'request_id' = $1 order by id",
+        )
+        .bind(request.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(reasons().await, ["unconfirmed"]);
+    let snapshot = snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.data.open_requests.is_empty());
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_u", winner)],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_applied");
+    assert_eq!(reasons().await, ["unconfirmed", "applied"]);
+}
+
+async fn holds(pool: &PgPool, conversation: Uuid) -> Vec<HoldReason> {
+    sqlx::query_scalar::<_, sqlx::types::Json<Vec<HoldReason>>>(
+        "select hold_reasons from queue_state where conversation_id = $1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .0
+}
+
+async fn closed_reason(pool: &PgPool, request: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select payload->>'reason' from events where kind = 'request_closed' and payload->>'request_id' = $1 order by id",
+    )
+    .bind(request.to_string())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ended_execution_closes_its_requests_and_releases_the_queue(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let open = open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_o").await;
+    let saved = open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_s").await;
+    let sent = open_native_request(&pool, &ingest, &seed, &execution, journal, 4, "toolu_t").await;
+    let (_, saved_command) = decide(&pool, &seed, saved, execution.generation).await;
+    let (winner, sent_command) = decide(&pool, &seed, sent, execution.generation).await;
+    let mut seq = 4;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::DecisionTransmissionStarted(
+            DecisionTransmissionStarted {
+                request_id: "toolu_t".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            },
+        )],
+    )
+    .await;
+    assert!(
+        holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    // Машина перезагрузилась: исполнение закончилось без RequestClosed от сопровождения.
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Stopped,
+        Some("machine_rebooted"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request_state(&pool, open).await, "closed_without_decision");
+    assert_eq!(request_state(&pool, saved).await, "decision_not_applied");
+    assert_eq!(request_state(&pool, sent).await, "decision_unconfirmed");
+    assert_eq!(command_state(&pool, saved_command).await, "completed");
+    assert_eq!(command_state(&pool, sent_command).await, "completed");
+    assert_eq!(closed_reason(&pool, open).await, ["execution_ended"]);
+    assert_eq!(closed_reason(&pool, saved).await, ["execution_ended"]);
+    assert_eq!(closed_reason(&pool, sent).await, ["unconfirmed"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    let snapshot = snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.data.open_requests.is_empty());
+    // Новое поколение не держится старыми запросами.
+    let next = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, next.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let gate = GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: vec!["pilot_v1".into()],
+    };
+    let outcome = dispatch::dispatch_next(&pool, seed.conversation_id, gate, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(
+        !matches!(&outcome, DispatchOutcome::Blocked(reasons) if reasons.iter().any(|r| matches!(r, BlockReason::Held(h) if h.contains(&HoldReason::AwaitingUserRequest)))),
+        "{outcome:?}"
+    );
+    // Поздний RequestOpened завершённого исполнения не открывает карточку заново.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::RequestOpened(RequestOpened {
+            request_id: "toolu_late".into(),
+            execution_id: execution.execution_id.to_string(),
+            generation: execution.generation as u64,
+            kind: "permission".into(),
+            payload_json: b"{}".to_vec(),
+        })],
+    )
+    .await;
+    let open_rows: i64 = sqlx::query_scalar(
+        "select count(*) from requests where conversation_id = $1 and state = 'open'",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(open_rows, 0);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_lost_execution_closes_its_open_requests(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_l",
+    )
+    .await;
+    // Сверка без этого исполнения: сопровождение потеряно.
+    ingest
+        .reconcile(seed.machine_id, &Default::default())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("select state from executions where id = $1")
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "owner_lost");
+    assert_eq!(
+        request_state(&pool, request).await,
+        "closed_without_decision"
+    );
+    assert_eq!(closed_reason(&pool, request).await, ["owner_lost"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+}
+
+fn not_applied(native: &str, decision: Uuid, reason: &str) -> record_body::Body {
+    record_body::Body::DecisionNotApplied(DecisionNotApplied {
+        request_id: native.into(),
+        decision_id: decision.to_string(),
+        reason: reason.into(),
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resent_decision_refused_as_already_transmitted_keeps_request_state(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let request =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_r").await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let mut seq = 2;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::DecisionTransmissionStarted(
+            DecisionTransmissionStarted {
+                request_id: "toolu_r".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            },
+        )],
+    )
+    .await;
+    // После переподключения повторно присланная команда отклоняется как уже переданная:
+    // исход первой передачи ещё впереди.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![not_applied("toolu_r", winner, "already_transmitted")],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_transmitting");
+    assert_eq!(command_state(&pool, command).await, "pending");
+    assert!(closed_reason(&pool, request).await.is_empty());
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_r", winner)],
+    )
+    .await;
+    // Тот же отказ после применения и из CJ не откатывает решение.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![not_applied("toolu_r", winner, "already_transmitted")],
+    )
+    .await;
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![not_applied("toolu_r", winner, "already_transmitted")],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+    assert_eq!(request_state(&pool, request).await, "decision_applied");
+    assert_eq!(closed_reason(&pool, request).await, ["applied"]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_request_payload_does_not_wedge_the_session_journal(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    opened(&execution),
+                    record_body::Body::RequestOpened(RequestOpened {
+                        request_id: "toolu_nul".into(),
+                        execution_id: execution.execution_id.to_string(),
+                        generation: execution.generation as u64,
+                        kind: "permission".into(),
+                        payload_json:
+                            br#"{"tool_name":"Write","input":{"content":"a\u0000b","n\u0000":1}}"#
+                                .to_vec(),
+                    }),
+                ],
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string());
+    assert_eq!(outcome, Ok(IngestOutcome::Committed { up_to_seq: 2 }));
+    let payload: Value = sqlx::query_scalar(
+        "select request_payload from requests where native_request_id = 'toolu_nul'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload,
+        json!({"tool_name":"Write","input":{"content":"ab","n":1}})
+    );
+}
+
+/// Ждёт, пока фоновая транзакция встанет на блокировке строки или завершится.
+async fn blocked_or_done<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) {
+    for _ in 0..300 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if task.is_finished() || waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("background transaction neither blocked nor finished");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    // Решение владельца: строка разговора, затем счётчик событий разговора.
+    let mut decision = pool.begin().await.unwrap();
+    sqlx::query("select id from conversations where id = $1 for no key update")
+        .bind(seed.conversation_id)
+        .execute(&mut *decision)
+        .await
+        .unwrap();
+    let batch_task = {
+        let ingest = Ingest::new(pool.clone());
+        let (machine, credential) = (seed.machine_id, seed.credential_digest());
+        let records = batch(
+            Uuid::now_v7(),
+            vec![
+                opened(&execution),
+                record_body::Body::PhaseChanged(canterlot_proto::worker::v1::PhaseChanged {
+                    execution_id: execution.execution_id.to_string(),
+                    phase: "awaiting_permission".into(),
+                    ..Default::default()
+                }),
+                record_body::Body::RequestOpened(RequestOpened {
+                    request_id: "toolu_lock".into(),
+                    execution_id: execution.execution_id.to_string(),
+                    generation: execution.generation as u64,
+                    kind: "permission".into(),
+                    payload_json: b"{}".to_vec(),
+                }),
+            ],
+        );
+        tokio::spawn(async move {
+            ingest
+                .apply_batch(machine, &credential, JournalKind::Sj, &records)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    };
+    blocked_or_done(&pool, &batch_task).await;
+    let appended = canterlot_hub::events::append(
+        &mut decision,
+        canterlot_hub::events::NewEvent {
+            scope: canterlot_hub::events::Scope::Conversation {
+                id: seed.conversation_id,
+            },
+            kind: "request_decided",
+            conversation_id: Some(seed.conversation_id),
+            execution_id: Some(execution.execution_id),
+            payload: json!({}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string());
+    let committed = decision.commit().await.map_err(|error| error.to_string());
+    let batch_result = batch_task.await.unwrap();
+    assert_eq!(
+        (appended, committed, batch_result),
+        (
+            Ok(()),
+            Ok(()),
+            Ok(IngestOutcome::Committed { up_to_seq: 3 })
+        )
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_decision_fact_of_another_machine_changes_nothing(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_f",
+    )
+    .await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let stranger = testkit::seed(&pool).await;
+    let outcome = ingest
+        .apply_batch(
+            stranger.machine_id,
+            &stranger.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![not_applied("toolu_f", winner, "request_closed")],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+    assert_eq!(request_state(&pool, request).await, "decision_saved");
+    assert_eq!(command_state(&pool, command).await, "pending");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_command_rejected_by_the_worker_closes_the_request(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_w",
+    )
+    .await;
+    let (_, command) = decide(&pool, &seed, request, execution.generation).await;
+    let attempt: i32 = sqlx::query_scalar("select dispatch_attempt from commands where id = $1")
+        .bind(command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![record_body::Body::CommandRejected(
+                    canterlot_proto::worker::v1::CommandRejected {
+                        command_id: command.to_string(),
+                        dispatch_attempt: attempt as u32,
+                        reason: "unsupported_command".into(),
+                    },
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(request_state(&pool, request).await, "decision_not_applied");
+    assert_eq!(closed_reason(&pool, request).await, ["unsupported_command"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    let (delivery, payload): (String, Value) =
+        sqlx::query_as("select delivery_state, payload from commands where id = $1")
+            .bind(command)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(delivery, "completed");
+    assert!(payload.get("decision_payload").is_none(), "{payload}");
 }

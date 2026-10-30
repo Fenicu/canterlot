@@ -28,11 +28,15 @@ impl PermissionMode {
 }
 
 // Действующие значения владельца из config/read; отладка показывает только наличие полей.
+// `thread_*` — политика, которую сервер показал при старте треда в режиме владельца:
+// запас, когда конфигурация владельца её не задаёт.
 pub struct OwnerDefaults {
     pub approval_policy: Option<Value>,
     pub sandbox_mode: Option<String>,
     pub sandbox_workspace_write: Option<Value>,
     pub developer_instructions: Option<String>,
+    thread_approval_policy: Option<Value>,
+    thread_sandbox: Option<Value>,
 }
 
 impl fmt::Debug for OwnerDefaults {
@@ -48,22 +52,49 @@ impl fmt::Debug for OwnerDefaults {
                 "developer_instructions",
                 &self.developer_instructions.is_some(),
             )
+            .field("thread_policy", &self.thread_approval_policy.is_some())
             .finish()
     }
 }
 
+impl OwnerDefaults {
+    /// Политика из ответа thread/start, запущенного без полей политики (режим владельца).
+    pub fn observe_thread(&mut self, approval: &Value, sandbox: &Value) {
+        self.thread_approval_policy = (!approval.is_null()).then(|| approval.clone());
+        self.thread_sandbox = (!sandbox.is_null()).then(|| sandbox.clone());
+    }
+
+    /// Новое чтение config/read сохраняет наблюдение старта треда.
+    pub fn reread(&mut self, result: &Value) {
+        let mut next = owner_defaults_from(result);
+        next.thread_approval_policy = self.thread_approval_policy.take();
+        next.thread_sandbox = self.thread_sandbox.take();
+        *self = next;
+    }
+}
+
+// Ответ config/read — `{config, origins, layers}` (схема ConfigReadResponse).
 pub fn owner_defaults_from(result: &Value) -> OwnerDefaults {
+    let config = result.get("config").unwrap_or(&Value::Null);
     OwnerDefaults {
-        approval_policy: result.get("approval_policy").cloned(),
-        sandbox_mode: result
+        approval_policy: config
+            .get("approval_policy")
+            .filter(|value| !value.is_null())
+            .cloned(),
+        sandbox_mode: config
             .get("sandbox_mode")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        sandbox_workspace_write: result.get("sandbox_workspace_write").cloned(),
-        developer_instructions: result
+        sandbox_workspace_write: config
+            .get("sandbox_workspace_write")
+            .filter(|value| value.is_object())
+            .cloned(),
+        developer_instructions: config
             .get("developer_instructions")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        thread_approval_policy: None,
+        thread_sandbox: None,
     }
 }
 
@@ -290,17 +321,34 @@ pub fn thread_resume_params(
     Value::Object(params)
 }
 
-// Имя типа песочницы в стиле схемы (readOnly) из значения конфигурации (read-only).
-fn sandbox_type_name(mode: &str) -> &str {
+// SandboxPolicy (схема turn/start) из sandbox_mode и [sandbox_workspace_write] конфигурации.
+fn sandbox_policy_from_config(mode: &str, write: Option<&Value>) -> Option<Value> {
     match mode {
-        "read-only" => "readOnly",
-        "danger-full-access" => "dangerFullAccess",
-        "workspace-write" => "workspaceWrite",
-        other => other,
+        "read-only" => Some(serde_json::json!({"type": "readOnly"})),
+        "danger-full-access" => Some(serde_json::json!({"type": "dangerFullAccess"})),
+        "workspace-write" => {
+            let mut policy = serde_json::Map::new();
+            policy.insert("type".to_owned(), "workspaceWrite".into());
+            for (toml, schema) in [
+                ("writable_roots", "writableRoots"),
+                ("network_access", "networkAccess"),
+                ("exclude_tmpdir_env_var", "excludeTmpdirEnvVar"),
+                ("exclude_slash_tmp", "excludeSlashTmp"),
+            ] {
+                if let Some(value) = write.and_then(|write| write.get(toml)) {
+                    policy.insert(schema.to_owned(), value.clone());
+                }
+            }
+            Some(Value::Object(policy))
+        }
+        _ => None,
     }
 }
 
-// Политика для turn/start: у владельца восстанавливаем его значения.
+// Политика для turn/start. Владелец: значения его конфигурации, иначе то, что
+// сервер показал при старте треда владельцем, иначе умолчания Codex для
+// недоверенного проекта (on-request, только чтение): возврат к «владельцу»
+// всегда снимает режим, выбранный раньше.
 pub fn turn_policy(mode: PermissionMode, owner: &OwnerDefaults) -> (Option<Value>, Option<Value>) {
     match mode {
         PermissionMode::Ask => (
@@ -316,21 +364,20 @@ pub fn turn_policy(mode: PermissionMode, owner: &OwnerDefaults) -> (Option<Value
             Some(serde_json::json!({"type": "readOnly", "networkAccess": false})),
         ),
         PermissionMode::Owner => {
-            let sandbox = match (&owner.sandbox_mode, &owner.sandbox_workspace_write) {
-                (None, None) => None,
-                (mode, write) => {
-                    let mut obj = write
-                        .as_ref()
-                        .and_then(Value::as_object)
-                        .cloned()
-                        .unwrap_or_default();
-                    if let Some(mode) = mode {
-                        obj.insert("type".to_owned(), sandbox_type_name(mode).into());
-                    }
-                    Some(Value::Object(obj))
-                }
-            };
-            (owner.approval_policy.clone(), sandbox)
+            let approval = owner
+                .approval_policy
+                .clone()
+                .or_else(|| owner.thread_approval_policy.clone())
+                .unwrap_or_else(|| "on-request".into());
+            let sandbox = owner
+                .sandbox_mode
+                .as_deref()
+                .and_then(|mode| {
+                    sandbox_policy_from_config(mode, owner.sandbox_workspace_write.as_ref())
+                })
+                .or_else(|| owner.thread_sandbox.clone())
+                .unwrap_or_else(|| serde_json::json!({"type": "readOnly", "networkAccess": false}));
+            (Some(approval), Some(sandbox))
         }
     }
 }

@@ -1,5 +1,7 @@
+use super::process::GroupKill;
 use super::rpc::{Incoming, RpcClient, RpcId};
 use super::thread::probe_initialize_params;
+use crate::adapter::spawn_with_retry_io;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -25,28 +27,40 @@ pub fn probe_launch_args() -> Vec<String> {
     vec!["app-server".into(), "--listen".into(), "stdio://".into()]
 }
 
+// Строка stdout не длиннее LINE_CAP: длинная пропускается до перевода строки,
+// не накапливаясь в памяти.
 async fn read_line(
     reader: &mut tokio::io::BufReader<tokio::process::ChildStdout>,
 ) -> Result<Option<String>, ProbeError> {
-    let mut line = String::new();
+    let mut line = Vec::new();
+    let mut oversized = false;
     loop {
-        line.clear();
-        let read = timeout(Duration::from_secs(15), reader.read_line(&mut line))
+        let available = timeout(Duration::from_secs(15), reader.fill_buf())
             .await
             .map_err(|_| ProbeError::Timeout)?
             .map_err(|_| ProbeError::ReadFailed)?;
-        if read == 0 {
+        if available.is_empty() {
             return Ok(None);
         }
-        if line.ends_with('\n') {
-            line.pop();
-            if line.ends_with('\r') {
-                line.pop();
+        let newline = available.iter().position(|&byte| byte == b'\n');
+        let chunk = newline.unwrap_or(available.len());
+        if !oversized {
+            if line.len() + chunk > LINE_CAP {
+                oversized = true;
+                line = Vec::new();
+            } else {
+                line.extend_from_slice(&available[..chunk]);
             }
-            if line.len() > LINE_CAP {
+        }
+        reader.consume(newline.map_or(chunk, |pos| pos + 1));
+        if newline.is_some() {
+            if std::mem::take(&mut oversized) {
                 continue;
             }
-            return Ok(Some(line));
+            if line.last() == Some(&b'\r') {
+                line.pop();
+            }
+            return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
         }
     }
 }
@@ -82,22 +96,53 @@ pub async fn probe(
     params: serde_json::Value,
     probe_timeout: Duration,
 ) -> Result<serde_json::Value, ProbeError> {
+    let mut pages = run(executable, method, params, probe_timeout, 1).await?;
+    pages.pop().ok_or(ProbeError::InvalidResponse)
+}
+
+/// То же для постраничного метода: запросы с `cursor` из `nextCursor`
+/// до последней страницы (не больше `max_pages`) в одном процессе.
+pub async fn probe_pages(
+    executable: &Path,
+    method: &'static str,
+    params: serde_json::Value,
+    probe_timeout: Duration,
+    max_pages: usize,
+) -> Result<Vec<serde_json::Value>, ProbeError> {
+    run(executable, method, params, probe_timeout, max_pages).await
+}
+
+async fn run(
+    executable: &Path,
+    method: &'static str,
+    mut params: serde_json::Value,
+    probe_timeout: Duration,
+    max_pages: usize,
+) -> Result<Vec<serde_json::Value>, ProbeError> {
     let work = async {
-        let mut cmd = Command::new(executable);
-        cmd.args(probe_launch_args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .process_group(0);
-        for (key, value) in super::process::build_env(
-            std::env::vars_os(),
-            crate::adapter::InstructionMode::Owner,
-            None,
-        ) {
-            cmd.env(key, value);
-        }
-        let mut child = cmd.spawn().map_err(|_| ProbeError::SpawnFailed)?;
+        // Повтор при ETXTBSY: зонд запускает свежезаписанного двойника тестов.
+        let mut child = spawn_with_retry_io(|| {
+            let mut cmd = Command::new(executable);
+            // Как у основного процесса: только отфильтрованное окружение, без ключей биллинга.
+            cmd.env_clear()
+                .args(probe_launch_args())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .process_group(0);
+            for (key, value) in super::process::build_env(
+                std::env::vars_os(),
+                crate::adapter::InstructionMode::Owner,
+                None,
+            ) {
+                cmd.env(key, value);
+            }
+            async move { cmd.spawn() }
+        })
+        .await
+        .map_err(|_| ProbeError::SpawnFailed)?;
+        let mut group = GroupKill::of(&child);
         let mut stdin = child.stdin.take().ok_or(ProbeError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ProbeError::SpawnFailed)?;
         let mut reader = tokio::io::BufReader::new(stdout);
@@ -115,27 +160,27 @@ pub async fn probe(
             .write_all(format!("{initialized}\n").as_bytes())
             .await
             .map_err(|_| ProbeError::WriteFailed)?;
-        let (req_id, req_msg) = rpc.request(method, params);
-        stdin
-            .write_all(format!("{req_msg}\n").as_bytes())
-            .await
-            .map_err(|_| ProbeError::WriteFailed)?;
-        let result = wait_response(&mut reader, req_id).await?;
-        drop(stdin);
-        let wait = timeout(SHUTDOWN_WAIT, child.wait()).await;
-        match wait {
-            Ok(Ok(_)) => {}
-            _ => {
-                if let Some(pid) = child
-                    .id()
-                    .and_then(|id| rustix::process::Pid::from_raw(id as i32))
-                {
-                    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
-                }
-                let _ = child.kill().await;
+        let mut pages = Vec::new();
+        loop {
+            let (req_id, req_msg) = rpc.request(method, params.clone());
+            stdin
+                .write_all(format!("{req_msg}\n").as_bytes())
+                .await
+                .map_err(|_| ProbeError::WriteFailed)?;
+            let page = wait_response(&mut reader, req_id).await?;
+            let cursor = super::input::next_cursor(&page);
+            pages.push(page);
+            match cursor {
+                Some(cursor) if pages.len() < max_pages => params["cursor"] = cursor.into(),
+                _ => break,
             }
         }
-        Ok(result)
+        drop(stdin);
+        // Чистый выход за SHUTDOWN_WAIT — группу не трогаем; иначе её убивает GroupKill.
+        if matches!(timeout(SHUTDOWN_WAIT, child.wait()).await, Ok(Ok(_))) {
+            group.disarm();
+        }
+        Ok(pages)
     };
     timeout(probe_timeout, work)
         .await

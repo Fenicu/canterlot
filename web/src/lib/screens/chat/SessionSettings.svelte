@@ -8,8 +8,20 @@
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
+	import { listPresets } from '#lib/api/client.js';
+	import type { components } from '#lib/api/generated/openapi.js';
 	import { ApiError } from '#lib/api/http.js';
+	import { shouldShowApplyNewVersion } from '../presets/presetsModel.js';
+	import Button from '#lib/ui/Button.svelte';
 	import Toggle from '#lib/ui/Toggle.svelte';
+
+	type AppliedPreset = components['schemas']['AppliedPreset'];
+	type PresetSummary = components['schemas']['PresetSummary'];
+
+	interface PresetSettings {
+		instruction_profile?: string | null;
+		instruction_preset?: AppliedPreset | null;
+	}
 
 	let {
 		chat,
@@ -29,7 +41,7 @@
 
 	// Effective settings
 	const effective = $derived(
-		(chat.settings?.effective as { model?: string; effort?: string; permission_mode?: string }) ?? {
+		(chat.settings?.effective as { model?: string; effort?: string; permission_mode?: string } & PresetSettings) ?? {
 			model: (chat.detail?.model as string) ?? 'opus',
 			effort: (chat.detail?.effort as string) ?? 'medium',
 			permission_mode: (chat.detail?.permission_mode as string) ?? 'default'
@@ -38,7 +50,43 @@
 
 	// Pending settings
 	const pending = $derived(
-		(chat.settings?.pending as { model?: string; effort?: string; permission_mode?: string } | null) ?? null
+		(chat.settings?.pending as { model?: string; effort?: string; permission_mode?: string } | null & PresetSettings) ?? null
+	);
+
+	// Пресеты инструкций для выбора: подгружаются при открытии листа.
+	let presets = $state<PresetSummary[]>([]);
+	let presetsError = $state<string | null>(null);
+	const BUILTIN_TITLES: Record<string, string> = { clean: 'Без инструкций', owner: 'Как у владельца' };
+	const presetTitle = $derived((ref: string | null | undefined): string => {
+		if (!ref) return 'Без инструкций';
+		const found = presets.find((item) => item.id === ref);
+		if (found) return found.title;
+		if (Object.hasOwn(BUILTIN_TITLES, ref)) return BUILTIN_TITLES[ref]!;
+		return ref;
+	});
+	const effectiveRef = $derived((effective.instruction_profile as string | undefined) ?? 'clean');
+	const applied = $derived((effective.instruction_preset as AppliedPreset | undefined) ?? null);
+	const showApplyNewVersion = $derived(
+		applied ? shouldShowApplyNewVersion({ revision: applied.revision, current_revision: applied.current_revision }) : false
+	);
+	const rejectedPresetDeleted = $derived(
+		chat.settings?.rejected?.reason === 'preset_deleted' && chat.settings.rejected.keys.includes('instruction_profile')
+	);
+	const presetPending = $derived((pending as PresetSettings | null)?.instruction_profile ?? null);
+	const presetOptions = $derived(
+		presets.length > 0
+			? presets
+			: (Object.entries(BUILTIN_TITLES) as [string, string][]).map(([id, title]) => ({
+					id,
+					kind: (id === 'clean' ? 'clean' : 'owner') as 'clean' | 'owner',
+					title,
+					description: '',
+					revision: null,
+					text_bytes: null,
+					created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+					last_edit: null,
+					used_by: 0
+				}))
 	);
 
 	// Whether midsession settings are supported by harness execution
@@ -50,6 +98,7 @@
 	let selectedModel = $state('opus');
 	let selectedEffort = $state('medium');
 	let selectedPermission = $state('default');
+	let selectedPreset = $state('clean');
 	let crunchEnabled = $state(false);
 	let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
 
@@ -57,6 +106,7 @@
 	let modelError = $state<string | null>(null);
 	let effortError = $state<string | null>(null);
 	let permissionError = $state<string | null>(null);
+	let presetError = $state<string | null>(null);
 	let generalError = $state<string | null>(null);
 	let saving = $state(false);
 
@@ -65,8 +115,24 @@
 		selectedModel = pending?.model ?? effective.model ?? 'opus';
 		selectedEffort = pending?.effort ?? effective.effort ?? 'medium';
 		selectedPermission = pending?.permission_mode ?? effective.permission_mode ?? 'default';
+		selectedPreset = (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef;
 		crunchEnabled = chat.crunch.enabled;
 		if (chat.crunch.resume_text) resumeText = chat.crunch.resume_text;
+	});
+
+	async function loadPresets(): Promise<void> {
+		presetsError = null;
+		try {
+			const response = await listPresets();
+			presets = response.data;
+		} catch {
+			presetsError = 'Не удалось загрузить пресеты';
+		}
+	}
+
+	$effect(() => {
+		void chat.settings?.rev;
+		void loadPresets();
 	});
 
 	// Available models from harness
@@ -104,6 +170,7 @@
 		modelError = null;
 		effortError = null;
 		permissionError = null;
+		presetError = null;
 		generalError = null;
 
 		try {
@@ -111,12 +178,14 @@
 			const shown = {
 				model: pending?.model ?? effective.model,
 				effort: pending?.effort ?? effective.effort,
-				permission_mode: pending?.permission_mode ?? effective.permission_mode
+				permission_mode: pending?.permission_mode ?? effective.permission_mode,
+				instruction_profile: (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef
 			};
 			const patch: SettingsPatch = {};
 			if (selectedModel !== shown.model) patch.model = selectedModel;
 			if (selectedEffort !== shown.effort) patch.effort = selectedEffort;
 			if (selectedPermission !== shown.permission_mode) patch.permission_mode = selectedPermission;
+			if (selectedPreset !== shown.instruction_profile) patch.instruction_profile = selectedPreset;
 			if (Object.keys(patch).length > 0) await updateSettings(chat.id, patch);
 
 			await updateCrunch(chat.id, {
@@ -134,11 +203,31 @@
 					effortError = err.message || 'Усилие не поддерживается для этой модели';
 				} else if (code === 'permission_mode_unknown') {
 					permissionError = err.message || 'Режим разрешений не поддерживается';
+				} else if (code === 'profile_unknown') {
+					presetError = 'Пресет не найден';
 				} else if (code === 'settings_midsession_unsupported') {
 					generalError = 'Настройка посреди сессии не поддерживается';
 				} else {
 					generalError = err.message || 'Ошибка валидации настроек';
 				}
+			} else if (err instanceof Error) {
+				generalError = err.message;
+			}
+		} finally {
+			saving = false;
+		}
+	}
+
+	async function applyNewVersion(): Promise<void> {
+		if (saving) return;
+		saving = true;
+		presetError = null;
+		generalError = null;
+		try {
+			await updateSettings(chat.id, { instruction_profile: effectiveRef });
+		} catch (err) {
+			if (err instanceof ApiError && err.code === 'profile_unknown') {
+				presetError = 'Пресет не найден';
 			} else if (err instanceof Error) {
 				generalError = err.message;
 			}
@@ -267,6 +356,49 @@
 					<p id="permission-error" class="field-error">{permissionError}</p>
 				{/if}
 			</div>
+		</div>
+
+		<div class="v3-mode">
+			<h3>Инструкции</h3>
+			<p class="v3-note">
+				{#if applied?.deleted}
+					{applied.title} (удалён): сессия работает со своей копией
+				{:else}
+					Сейчас: <strong class="secondary">{applied?.title ?? presetTitle(effectiveRef)}{applied?.revision != null ? ` · версия ${applied.revision}` : ''}</strong>
+				{/if}
+			</p>
+			{#if showApplyNewVersion}
+				<p class="hint">Пресет изменён после применения</p>
+				<Button onclick={() => void applyNewVersion()}>Применить новую версию</Button>
+			{/if}
+			<div class="field">
+				<label class="field-label" for="preset">Новые инструкции</label>
+				<select
+					id="preset"
+					name="preset"
+					bind:value={selectedPreset}
+					disabled={!midsessionSupported || saving}
+					aria-describedby={presetPending ? 'preset-pending' : presetError ? 'preset-error' : undefined}
+				>
+					{#each presetOptions as option (option.id)}
+						<option value={option.id}>{option.title}</option>
+					{/each}
+				</select>
+				{#if presetPending}
+					<p id="preset-pending" class="hint">
+						{presetTitle(effectiveRef)} → {presetTitle(presetPending)} со следующего хода
+					</p>
+				{/if}
+				{#if rejectedPresetDeleted}
+					<p class="field-error">Пресет удалён, смена отменена</p>
+				{/if}
+				{#if presetsError}
+					<p class="field-error">{presetsError}</p>
+				{:else if presetError}
+					<p id="preset-error" class="field-error">{presetError}</p>
+				{/if}
+			</div>
+			<p class="v3-note">Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.</p>
 		</div>
 
 		<p class="v3-caption">Текущий ход продолжится с прежними настройками.</p>

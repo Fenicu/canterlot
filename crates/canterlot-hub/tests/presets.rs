@@ -779,3 +779,211 @@ async fn delete_clears_pending_references_and_keeps_effective_snapshot(pool: PgP
     assert_eq!(applied.revision, Some(1));
     assert!(applied.current_revision.is_none());
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_description_or_text_is_invalid_not_internal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for (key, body, field) in [
+        (
+            "nul_description",
+            json!({"title": "Нуль", "description": "до\u{0}после", "text": "текст"}),
+            "description",
+        ),
+        (
+            "nul_text",
+            json!({"title": "Нуль", "text": "до\u{0}после"}),
+            "text",
+        ),
+    ] {
+        let response = f
+            .request(Method::POST, "/api/v1/presets", Some(key), Some(body))
+            .await;
+        assert_eq!(
+            response.status.as_u16(),
+            422,
+            "{field}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(Fx::error_code(&response), "preset_invalid");
+        assert_eq!(response.json::<Value>()["error"]["details"]["field"], field);
+    }
+    let created = f.create("nul_base", "Правка", "текст").await;
+    let id = created["id"].as_str().unwrap();
+    for (key, body, field) in [
+        (
+            "nul_patch_description",
+            json!({"description": "\u{0}", "base_revision": 1}),
+            "description",
+        ),
+        (
+            "nul_patch_text",
+            json!({"text": "a\u{0}b", "base_revision": 1}),
+            "text",
+        ),
+    ] {
+        let response = f
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/presets/{id}"),
+                Some(key),
+                Some(body),
+            )
+            .await;
+        assert_eq!(
+            response.status.as_u16(),
+            422,
+            "{field}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(response.json::<Value>()["error"]["details"]["field"], field);
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_with_pending_reference_takes_queue_before_list_counter(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f.create("lock-order", "Блокировки", "текст").await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let conversation = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(conversation)
+        .bind(json!({"instruction_profile": id}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Пересчёт активности: очередь, строка разговора, затем счётчики событий.
+    let mut refresh = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+        .bind(conversation)
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    sqlx::query("select id from conversations where id = $1 for no key update")
+        .bind(conversation)
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    let delete = {
+        let (pool, owner) = (f.pool.clone(), f.owner);
+        let preset: Uuid = id.parse().unwrap();
+        tokio::spawn(async move {
+            presets::delete(&pool, owner, preset, "delete-lock", Uuid::now_v7())
+                .await
+                .map_err(|error| error.to_string())
+        })
+    };
+    for _ in 0..300 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if delete.is_finished() || waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let appended = events::append(
+        &mut refresh,
+        events::NewEvent {
+            scope: events::Scope::Conversations { owner_id: f.owner },
+            kind: "derived_changed",
+            conversation_id: Some(conversation),
+            execution_id: None,
+            payload: json!({}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string());
+    let committed = refresh.commit().await.map_err(|error| error.to_string());
+    let deleted = delete.await.unwrap();
+    assert_eq!((appended, committed, deleted), (Ok(()), Ok(()), Ok(())));
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(conversation)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, json!({}));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idempotency_fingerprints_preset_text_and_stores_no_text(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f.create("text-key", "Отпечаток", "первый-секрет").await;
+    assert_eq!(created["text"], "первый-секрет");
+    // Тот же ключ и та же длина, другой текст: правка не должна потеряться молча.
+    let other = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("text-key"),
+            Some(json!({"title": "Отпечаток", "text": "второй-секрет"})),
+        )
+        .await;
+    assert_eq!(
+        other.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&other.body)
+    );
+    assert_eq!(Fx::error_code(&other), "idempotency_conflict");
+    let replay = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("text-key"),
+            Some(json!({"title": "Отпечаток", "text": "первый-секрет"})),
+        )
+        .await;
+    assert_eq!(replay.status.as_u16(), 201);
+    assert_eq!(replay.json::<Value>()["text"], "первый-секрет");
+    let id = created["id"].as_str().unwrap();
+    let path = format!("/api/v1/presets/{id}");
+    let patch = |text: &str| json!({"text": text, "base_revision": 1});
+    let updated = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-А")),
+        )
+        .await;
+    assert_eq!(updated.status.as_u16(), 200);
+    let other = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-Б")),
+        )
+        .await;
+    assert_eq!(other.status.as_u16(), 409);
+    assert_eq!(Fx::error_code(&other), "idempotency_conflict");
+    let replay = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-А")),
+        )
+        .await;
+    assert_eq!(replay.status.as_u16(), 200);
+    assert_eq!(replay.json::<Value>()["text"], "новый-текст-А");
+    let stored: Vec<String> = sqlx::query_scalar(
+        "select response::text from idempotency_keys where operation in ('create_preset', 'update_preset')",
+    )
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), 2);
+    for response in stored {
+        assert!(
+            !response.contains("секрет") && !response.contains("новый-текст"),
+            "preset text kept in idempotency storage: {response}"
+        );
+    }
+}

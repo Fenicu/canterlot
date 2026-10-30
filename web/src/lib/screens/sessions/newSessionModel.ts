@@ -44,17 +44,11 @@ const MESSAGE: Record<string, string> = {
   group_not_found: "Группа не найдена",
 };
 
-export function workdirProblem(path: string, roots: string[]): string | null {
+export function workdirProblem(path: string): string | null {
   if (!path.startsWith("/")) return "Укажите абсолютный путь";
   const parts = path.split("/");
   if (parts.includes("..")) return "Путь не должен содержать ..";
-  const clean = parts.filter((part) => part.length > 0);
-  const under = roots.some((root) => {
-    const rootParts = root.split("/").filter((part) => part.length > 0);
-    if (clean.length < rootParts.length) return false;
-    return rootParts.every((part, index) => part === clean[index]);
-  });
-  if (!under) return "Папка вне известных корней машины";
+  // Корни проверяет хаб: клиент принимает любой абсолютный путь.
   return null;
 }
 
@@ -100,7 +94,7 @@ export class NewSessionModel {
     const machineError = this.machineId ? machineProblem(machine) : null;
     if (machineError) out.machine = machineError;
     if (this.workdir) {
-      const work = workdirProblem(this.workdir, machine?.allowed_roots ?? []);
+      const work = workdirProblem(this.workdir);
       if (work) out.workdir = work;
     }
     return out;
@@ -133,7 +127,7 @@ export class NewSessionModel {
       return;
     }
     const response = await recentWorkdirs(this.machineId);
-    this.recent = response.data.workdirs.slice(0, 20);
+    this.recent = response.data.workdirs.slice(0, 3);
   }
 
   async submit(): Promise<{ conversationId: string }> {

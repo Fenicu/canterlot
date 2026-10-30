@@ -1,10 +1,40 @@
 use super::home::CodexHome;
 use crate::adapter::InstructionMode;
+use crate::adapter::spawn_with_retry_sync;
 use crate::containment::Containment;
 use std::ffi::OsString;
 use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
+
+/// SIGKILL всей группе короткого запуска CLI (`--version`, зонд) при любом
+/// выходе, кроме снятого после чистого завершения: kill_on_drop убивает только
+/// обёртку (node), родной процесс — её ребёнок в той же группе. Объявлять после
+/// `Child`, чтобы сторож сработал раньше, чем pid обёртки освободится.
+pub(super) struct GroupKill(Option<rustix::process::Pid>);
+
+impl GroupKill {
+    pub(super) fn of(child: &tokio::process::Child) -> Self {
+        Self(
+            child
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .and_then(rustix::process::Pid::from_raw),
+        )
+    }
+
+    pub(super) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum LaunchError {
@@ -119,6 +149,8 @@ pub struct AppServerProcess {
     // Недочитанная строка живёт здесь, а не в локальной переменной: отмена next_line ничего не теряет.
     partial: Vec<u8>,
     discarded: Option<usize>,
+    out: Vec<u8>,
+    out_pos: usize,
     stderr_ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
@@ -131,20 +163,25 @@ impl AppServerProcess {
     ) -> Result<Self, LaunchError> {
         let args = build_args(spec, mode)?;
         let envs = build_env(std::env::vars_os(), mode, home);
-        let mut cmd = TokioCommand::new(spec.executable);
-        cmd.env_clear()
-            .args(&args)
-            .current_dir(spec.workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (k, v) in &envs {
-            cmd.env(k, v);
-        }
-        group.prepare_command(&mut cmd);
-        // Процесс переживает адаптер: остановка идёт через EOF stdin и teardown сдерживания.
-        cmd.kill_on_drop(false);
-        let mut child = cmd.spawn().map_err(LaunchError::SpawnFailed)?;
+        // Повтор при ETXTBSY: тесты пишут двойника прямо перед запуском.
+        // Синхронный сон только в редкой ветви повтора, обычный путь без задержек.
+        let mut child = spawn_with_retry_sync(|| {
+            let mut cmd = TokioCommand::new(spec.executable);
+            cmd.env_clear()
+                .args(&args)
+                .current_dir(spec.workdir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in &envs {
+                cmd.env(k, v);
+            }
+            group.prepare_command(&mut cmd);
+            // Процесс переживает адаптер: остановка идёт через EOF stdin и teardown сдерживания.
+            cmd.kill_on_drop(false);
+            cmd.spawn()
+        })
+        .map_err(LaunchError::SpawnFailed)?;
         let child_pid = child
             .id()
             .ok_or(LaunchError::SpawnFailed(std::io::Error::other("no pid")))?;
@@ -189,20 +226,37 @@ impl AppServerProcess {
             stdout,
             partial: Vec::new(),
             discarded: None,
+            out: Vec::new(),
+            out_pos: 0,
             stderr_ring: ring,
         })
     }
 
+    /// Строка ставится в буфер до первой точки ожидания и дописывается
+    /// `flush_out`: отменённая запись продолжается следующим вызовом целиком.
     pub async fn write_message(&mut self, msg: &serde_json::Value) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        if let Some(stdin) = &mut self.stdin {
-            let line = format!("{msg}\n");
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok(())
-        } else {
-            Err(std::io::Error::other("no stdin"))
+        if self.stdin.is_none() {
+            return Err(std::io::Error::other("no stdin"));
         }
+        self.out.extend_from_slice(format!("{msg}\n").as_bytes());
+        self.flush_out().await
+    }
+
+    pub async fn flush_out(&mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let Some(stdin) = &mut self.stdin else {
+            return Err(std::io::Error::other("no stdin"));
+        };
+        while self.out_pos < self.out.len() {
+            let written = stdin.write(&self.out[self.out_pos..]).await?;
+            if written == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            self.out_pos += written;
+        }
+        self.out.clear();
+        self.out_pos = 0;
+        stdin.flush().await
     }
 
     /// Следующая строка stdout без `\n`; длиннее 64 МиБ пропускается до перевода строки.

@@ -6,9 +6,11 @@
 
 - `handshake_owner.jsonl` — сконструировано, подтвердить в live smoke. Две строки,
   сырые JSON без обёртки `{"t_ms","dir","data"}` (помощник повтора появится
-  в задаче 2). Источники формы: `config/read` — запись `ev/start_stream.jsonl:12`
-  (поля `approval_policy`, `sandbox_mode`, `sandbox_workspace_write` плюс поле
-  `developer_instructions` из схемы `Config`); `account/read` —
+  в задаче 2). Источники формы: `config/read` — схема 0.164
+  `ConfigReadResponse` (`{config, origins, layers}`), значения внутри `config`
+  по записи `ev/start_stream.jsonl:12` (поля `approval_policy`, `sandbox_mode`,
+  `sandbox_workspace_write` плюс поле `developer_instructions` из схемы
+  `Config`); `account/read` —
   `ev/diagnostics.jsonl:23` (`account` с `type`/`planType`, `requiresOpenaiAuth`).
   Строка 1 — ответ `config/read` владельца (`never` + `danger-full-access`,
   собственный текст инструкций). Строка 2 — ответ `account/read` без входа
@@ -52,12 +54,17 @@
 - `mcp_status.jsonl` — сконструировано, подтвердить в live smoke. Две строки
   уведомлений `mcpServer/startupStatus/updated` для сервера `canterlot`: статусы
   `ready` и `failed` (форма `McpServerStatusUpdatedNotification`).
-- `model_list.json` — сконструировано, подтвердить в live smoke. Источник формы:
-  запись `ev/diagnostics.jsonl:28` (поля моделей `id`, `description`, `efforts`,
-  `inputModalities`, `isDefault`); сырой ответ `model/list`, без обёртки.
-  Покрывает проверку настроек задачи 3 (`gpt-6-luna` без `ultra`).
+- `model_list.json` — сконструировано по схеме 0.164 `ModelListResponse`
+  (`data` + `nextCursor`; у модели `id`, `model`, `displayName`, `description`,
+  `hidden`, `isDefault`, `defaultReasoningEffort`,
+  `supportedReasoningEfforts[].reasoningEffort`, `inputModalities`), подтвердить
+  в live smoke. Сырой ответ в записях пропущен (`ev/diagnostics.jsonl:27`);
+  значения моделей и усилий взяты из сводки `ev/diagnostics.jsonl:28`. Покрывает
+  проверку настроек задачи 3 (`gpt-6-luna` без `ultra`).
 - `settings_updated.jsonl` — сконструировано, подтвердить в live smoke. Источник
-  формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`).
+  формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`; песочница —
+  ключ `sandboxPolicy`, как в записи и схеме `ThreadSettings`; обязательный по
+  схеме `collaborationMode` — режим `default`).
   Покрывает подтверждение смены модели и режима задачей 3.
 - `question_free_text.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `item/tool/requestUserInput` (`ev/question_default_mode.jsonl:28`) с
@@ -66,12 +73,17 @@
   формы: имя метода из схемы (`item/permissions/requestApproval`); поля повторяют
   остальные approval-запросы. Покрывает карточку разрешений задачей 4.
 - `elicitation.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
-  `mcpServer/elicitation/request` из схемы, режимы form и url. Покрывает
-  elicitation задачей 4.
+  `mcpServer/elicitation/request` из схемы 0.164 (`McpServerElicitationRequestParams`:
+  `serverName`, `threadId`, `turnId`, без `itemId`; form — `requestedSchema`,
+  url — `url` и `elicitationId`, `openai/userVerification` — `title`,
+  `description`, `challenge`). Строки: form с обязательным полем, url, form без
+  обязательных полей, `openai/userVerification`, `openai/form`. Покрывает
+  elicitation задачей 4 и сразу отклоняемые режимы.
 - `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
   Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
   Покрывает ответ-ошибку `-32601` задачей 4.
 - `config_read.json`, `account_read.json` — сконструированные сырые ответы (без
   обёртки) для повтора `codex-replay`: пропущенные (`<omitted>`) ответы
-  `config/read` и `account/read` и методы без записи. Форма по записям
-  `ev/start_stream.jsonl:12` и `ev/diagnostics.jsonl:23`.
+  `config/read` и `account/read` и методы без записи. Форма `config/read` — по
+  схеме `ConfigReadResponse` (`config`, `origins`, `layers`), значения — по
+  записи `ev/start_stream.jsonl:12`; `account/read` — по `ev/diagnostics.jsonl:23`.

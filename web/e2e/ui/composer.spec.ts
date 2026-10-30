@@ -488,3 +488,29 @@ test('composer_is_usable_at_360px_and_200_percent_text', async ({ page }) => {
   const composer = await page.locator('[data-composer]').boundingBox();
   expect((composer?.width ?? 999)).toBeLessThanOrEqual(360);
 });
+
+test('sent_attachment_leaves_the_tray_and_is_not_resent_or_deleted', async ({ page }) => {
+  await boot(page);
+  const hits = await watch(page, '**/api/v1/conversations/*/inputs');
+  const deletes: string[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'DELETE' && request.url().includes('/api/v1/attachments/')) deletes.push(request.url());
+  });
+  await page.setInputFiles('input[type=file]', { name: 'отчёт.txt', mimeType: 'text/plain', buffer: Buffer.from('данные') });
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  const send = page.getByRole('button', { name: 'Отправить', exact: true });
+  const tray = page.locator('[data-composer] .tray');
+  await expect(tray.getByText('отчёт.txt')).toBeVisible();
+  await area.fill('с файлом');
+  await expect(send).toHaveAttribute('aria-disabled', 'false');
+  await send.click();
+  await expect.poll(() => hits.length).toBe(1);
+  expect((hits[0]?.body as { attachment_ids?: string[] }).attachment_ids).toHaveLength(1);
+  await expect(tray).toHaveCount(0);
+  await expect(send).toHaveAttribute('aria-disabled', 'true');
+  await area.fill('без файла');
+  await send.click();
+  await expect.poll(() => hits.length).toBe(2);
+  expect((hits[1]?.body as { attachment_ids?: string[] }).attachment_ids).toBeUndefined();
+  expect(deletes).toEqual([]);
+});

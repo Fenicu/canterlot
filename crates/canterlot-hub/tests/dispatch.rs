@@ -670,3 +670,29 @@ async fn session_without_instructions_v1_blocks_preset_settings(pool: PgPool) ->
     );
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_without_instructions_v1_blocks_a_switch_to_clean(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    running(&pool, &seed).await;
+    set_pending_preset(&pool, seed.conversation_id, "clean").await;
+    let head = input(&pool, &seed).await;
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(
+        outcome,
+        DispatchOutcome::Blocked(vec![BlockReason::CapabilityMissing {
+            input_id: head.input_id
+        }])
+    );
+    Ok(())
+}

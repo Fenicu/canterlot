@@ -11,6 +11,11 @@ export type Row = {
   label?: string;
 };
 
+/** Начало местных суток: подписи дней меняются раз в сутки, а не с каждым тиком часов. */
+export function dayStart(ts: number): number {
+  return new Date(ts).setHours(0, 0, 0, 0);
+}
+
 export function buildRows(
   entries: TimelineEntry[],
   opts?: { laneRoot?: string; now?: number },

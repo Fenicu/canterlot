@@ -100,7 +100,7 @@ fn initialize_echoes_protocol_and_lists_approve_and_limits_tools() {
         .as_array()
         .expect("tools array")
         .clone();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 5);
     let names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
@@ -505,20 +505,17 @@ async fn limits_tool_reports_latest_observation_or_no_data() {
         BrokerEvent::LimitsQuery { rpc_id } => assert_eq!(rpc_id, json!(9)),
         other => panic!("expected LimitsQuery, got {other:?}"),
     }
-    relay
-        .broker
-        .answer_limits(
-            json!(9),
-            &LimitsSnapshot {
-                provider: "claude".into(),
-                current: vec![
-                    observation("five_hour", 500, 1792919400000),
-                    observation("weekly", 810, 1793062800000),
-                ],
-                weekly_reserve_active: false,
-            },
-        )
-        .await;
+    relay.broker.answer_limits(
+        json!(9),
+        &LimitsSnapshot {
+            provider: "claude".into(),
+            current: vec![
+                observation("five_hour", 500, 1792919400000),
+                observation("weekly", 810, 1793062800000),
+            ],
+            weekly_reserve_active: false,
+        },
+    );
     let text = relay.reply().await["result"]["content"][0]["text"]
         .as_str()
         .expect("text block")
@@ -530,16 +527,13 @@ async fn limits_tool_reports_latest_observation_or_no_data() {
         BrokerEvent::LimitsQuery { rpc_id } => assert_eq!(rpc_id, json!(10)),
         other => panic!("expected LimitsQuery, got {other:?}"),
     }
-    relay
-        .broker
-        .answer_limits(
-            json!(10),
-            &LimitsSnapshot {
-                provider: "claude".into(),
-                ..Default::default()
-            },
-        )
-        .await;
+    relay.broker.answer_limits(
+        json!(10),
+        &LimitsSnapshot {
+            provider: "claude".into(),
+            ..Default::default()
+        },
+    );
     let text = relay.reply().await["result"]["content"][0]["text"]
         .as_str()
         .expect("text block")

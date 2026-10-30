@@ -2,11 +2,12 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 
 use axum::{
     body::{Body, Bytes},
-    http::Method,
+    http::{Method, StatusCode},
 };
 use canterlot_hub::{
     attachments::{BlobStore, LocalBlobStore, PublishStep, PublishTrace},
@@ -224,11 +225,38 @@ impl Fixture {
         assert_eq!(response.status, 201, "{:?}", response.body);
         let id = id_of(&response);
         self.upload(id, bytes).await;
-        let done = self
-            .complete(id, &format!("complete_{}", Uuid::now_v7().simple()), None)
-            .await;
-        assert_eq!(done.status, 200, "{:?}", done.body);
-        id
+        // Завершение сразу после загрузки иногда застаёт ещё не снятую
+        // блокировку тома (крайне редко под нагрузкой): это не ошибка,
+        // а незавершённая загрузка, поэтому ждём настоящий сигнал готовности —
+        // успешный complete — ограниченное время, затем падаем громко.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let mut waits = 0u32;
+        loop {
+            let done = self
+                .complete(id, &format!("complete_{}", Uuid::now_v7().simple()), None)
+                .await;
+            if done.status == StatusCode::OK {
+                assert_eq!(done.json::<Value>()["state"], "ready");
+                if waits > 0 {
+                    eprintln!(
+                        "ready: complete для {id} дождался снятия блокировки после {waits} попыток"
+                    );
+                }
+                return id;
+            }
+            if done.status.as_u16() == 409
+                && error_code(&done) == "upload_in_progress"
+                && Instant::now() < deadline
+            {
+                waits += 1;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+            panic!(
+                "complete для {id} не дождался готовности за {waits} попыток: status={} body={:?}",
+                done.status, done.body
+            );
+        }
     }
 
     pub async fn ready(&self, name: &str, mime: &str, bytes: &[u8]) -> Uuid {

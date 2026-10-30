@@ -143,3 +143,24 @@ test('disconnect_during_range_retry_does_not_block_resubscription', async () => 
   expect(h.subscription.status).toBe('live'); expect(h.subscription.cursor).toBe('2');
   expect(h.accepted.map(e => e.event.kind === 'block_delta' ? e.event.payload.append : '').join('')).toBe('т1🙂т2🙂'); h.manager.dispose();
 });
+test('released_scopes_never_hit_the_subscription_limit', async () => {
+  const h = await connectionHarness();
+  const applier = { ...h.applier, loadSnapshot: async () => ({ cursor: '0', data: null }), fetchRange: async () => ({ events: [], head: '0' }) };
+  for (let n = 0; n < 40; n++) {
+    const scope = `conversation:00000000-0000-4000-8000-${n.toString(16).padStart(12, '0')}` as const;
+    const subscription = h.manager.subscribe(scope, { ...applier });
+    await h.clock.advanceAsync(0);
+    subscription.release();
+  }
+  const kept = h.manager.subscribe('machines', applier); await h.clock.advanceAsync(0);
+  expect(kept.status).toBe('live'); h.manager.dispose();
+});
+test('released_scope_taken_by_a_new_applier_starts_a_fresh_sync_for_it', async () => {
+  const h = await connectionHarness(); h.subscription.release(); await h.clock.advanceAsync(1000);
+  const fresh = { ...h.applier, loadSnapshot: vi.fn(async () => { const s = h.hub.snapshot(chat); return { cursor: s.cursor, data: s.data }; }), applySnapshot: vi.fn(), applyEvents: vi.fn() };
+  const again = h.manager.subscribe(chat, fresh); await h.clock.advanceAsync(2);
+  expect(fresh.loadSnapshot).toHaveBeenCalledTimes(1);
+  append(h.hub, 1); h.hub.flush(); await h.clock.advanceAsync(16);
+  expect(fresh.applyEvents).toHaveBeenCalled(); expect(h.accepted).toHaveLength(0);
+  again.release(); h.manager.dispose();
+});

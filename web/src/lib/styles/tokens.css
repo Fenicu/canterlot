@@ -267,3 +267,36 @@
 
 :root { --time: #adc7c8; }
 [data-theme=light] { --time: #3c6261; }
+
+/* Масштаб рабочего стола: один множитель на шрифт, геометрию и ширины колонок. Пороги ниже номинальных: окно при системном масштабе бывает на доли пикселя уже. */
+@property --icon-small { syntax: '<length>'; inherits: true; initial-value: 16px; }
+@property --s10 { syntax: '<length>'; inherits: true; initial-value: 24px; }
+:root {
+  --ui-scale: 1;
+  --sidebar-width: clamp(min(20rem, 50vw), 18vw, 28rem);
+}
+@media (min-width: 118rem) and (min-height: 56rem) { :root { --ui-scale: 1.0667; } }
+@media (min-width: 156rem) and (min-height: 70rem) { :root { --ui-scale: 1.2; } }
+@media (min-width: 230rem) and (min-height: 110rem) { :root { --ui-scale: 1.6; } }
+@media (min-width: 118rem) and (min-height: 56rem) {
+  :root {
+    --s1: calc(2px * var(--ui-scale)); --s2: calc(4px * var(--ui-scale)); --s3: calc(6px * var(--ui-scale));
+    --s4: calc(8px * var(--ui-scale)); --s5: calc(10px * var(--ui-scale)); --s6: calc(12px * var(--ui-scale));
+    --s7: calc(14px * var(--ui-scale)); --s8: calc(16px * var(--ui-scale)); --s9: calc(20px * var(--ui-scale));
+    --s10: calc(24px * var(--ui-scale)); --s11: calc(28px * var(--ui-scale)); --s12: calc(32px * var(--ui-scale));
+    --s13: calc(40px * var(--ui-scale)); --s14: calc(48px * var(--ui-scale)); --s15: calc(64px * var(--ui-scale));
+    --radius-sm: calc(18px * var(--ui-scale)); --radius: calc(20px * var(--ui-scale));
+    --radius-card: calc(22px * var(--ui-scale)); --radius-sheet: calc(28px * var(--ui-scale));
+    --radius-composer: calc(32px * var(--ui-scale));
+    --target: calc(44px * var(--ui-scale)); --mark: calc(8px * var(--ui-scale)); --mark-large: calc(10px * var(--ui-scale));
+    --caret-width: calc(2px * var(--ui-scale));
+    --icon: calc(20px * var(--ui-scale)); --icon-small: calc(16px * var(--ui-scale));
+    --handle-width: calc(32px * var(--ui-scale)); --handle-height: calc(4px * var(--ui-scale));
+    --toggle-width: calc(40px * var(--ui-scale)); --toggle-height: calc(24px * var(--ui-scale)); --toggle-knob: calc(16px * var(--ui-scale));
+    --composer-height: calc(42px * var(--ui-scale)); --fab-size: calc(52px * var(--ui-scale));
+    --phone-max: calc(480px * var(--ui-scale)); --reading-max: calc(720px * var(--ui-scale)); --index-max: calc(960px * var(--ui-scale));
+    --preview-height: calc(204px * var(--ui-scale)); --sheet-context: calc(64px * var(--ui-scale));
+    --chart-height: calc(104px * var(--ui-scale)); --gauge-width: calc(112px * var(--ui-scale));
+    --lane-width: calc(410px * var(--ui-scale));
+  }
+}

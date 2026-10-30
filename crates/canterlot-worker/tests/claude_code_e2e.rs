@@ -16,6 +16,9 @@ use tempfile::TempDir;
 use tokio::process::Command;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 static CLI_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 const WAIT: Duration = Duration::from_secs(15);
@@ -105,8 +108,7 @@ impl Fake {
     fn new(turns: Vec<Vec<Value>>) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-cli");
-        std::fs::write(&exe, FAKE).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, FAKE, 0o700);
         for (n, turn) in turns.iter().enumerate() {
             std::fs::write(
                 dir.path().join(format!("turn{}.json", n + 1)),
@@ -822,7 +824,13 @@ async fn required_diagnostic_kinds_stop_with_matching_reason() {
             "cli_too_old" => "print(json.dumps({'type':'system','subtype':'init','session_id':sid,'claude_code_version':'2.1.1','mcp_servers':[{'name':'canterlot','status':'connected'}]}),flush=True)".into(),
             _ => "print(json.dumps({'type':'system','subtype':'init','session_id':sid,'mcp_servers':[{'name':'canterlot','status':'connected'}]}),flush=True)\n print(json.dumps({'type':'required_test_frame','required':True}),flush=True)".into(),
         };
-        std::fs::write(&script,format!("#!/usr/bin/python3\nimport sys,json,time\nif '--version' in sys.argv: print('2.1.311');sys.exit(0)\nsid=sys.argv[sys.argv.index('--session-id')+1]\nfor line in sys.stdin:\n v=json.loads(line)\n {body}\n")).unwrap();
+        fake_exec::write_executable(
+            &script,
+            format!(
+                "#!/usr/bin/python3\nimport sys,json,time\nif '--version' in sys.argv: print('2.1.311');sys.exit(0)\nsid=sys.argv[sys.argv.index('--session-id')+1]\nfor line in sys.stdin:\n v=json.loads(line)\n {body}\n"
+            ),
+            0o700,
+        );
         let dir = f.dir.path().join("supervisor");
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();

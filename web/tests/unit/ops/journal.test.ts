@@ -607,6 +607,31 @@ describe("ops/journal", () => {
     expect(again).not.toHaveBeenCalled();
   });
 
+  it("recover_purges_finished_rows_and_rows_never_keep_the_response", async () => {
+    const ops = journal(async () => ({ id: "inp-1", echo: "ответ хаба" }));
+    const op = await ops.begin(
+      "input",
+      { text: "x" },
+      { conversationId: "c-1", persist: true },
+    );
+    await ops.run(op);
+    const stored = await db.get<Op>("ops", op.key);
+    expect(stored?.state).toBe("committed");
+    expect(stored?.result).toBeUndefined();
+    await db.put("ops", "old-refused", {
+      key: "old-refused",
+      kind: "input",
+      state: "refused",
+      body: {},
+      attempts: 1,
+      createdAt: 0,
+    });
+    const send = vi.fn(async () => ({}));
+    await new OpJournal(db, send, new ManualEnv()).recover();
+    expect(send).not.toHaveBeenCalled();
+    expect(await db.list("ops")).toEqual([]);
+  });
+
   it("discard_and_settle_stop_the_running_retry", async () => {
     let calls = 0;
     const send = vi.fn(async () => {

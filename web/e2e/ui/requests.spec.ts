@@ -212,6 +212,75 @@ test.describe('E2E Requests and Recovery', () => {
     await expect(page.getByText('Отклонено')).toBeVisible();
   });
 
+  test('e2e_mcp_elicitation_url_card_shows_address_and_allows_safely', async ({ page }) => {
+    const { hub, api, id } = await bootChat(page);
+
+    const url = 'https://notes.example.com/authorize?scope=read';
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: api.id(),
+        kind: 'permission',
+        payload: {
+          tool_name: 'mcp_elicitation',
+          server: 'notes',
+          message: 'Открыть доступ к заметкам?',
+          mode: 'url',
+          url,
+          tool_use_id: 'tu-1',
+          agent: 'codex'
+        }
+      }
+    });
+    hub.flush();
+
+    await expect(page.getByText('Запрос MCP-сервера')).toBeVisible();
+    await expect(page.getByText('Открыть доступ к заметкам?')).toBeVisible();
+    const link = page.getByRole('link', { name: url });
+    await expect(link).toBeVisible();
+    await expect(link).toHaveAttribute('href', url);
+    await expect(link).toHaveAttribute('target', '_blank');
+    await expect(link).toHaveAttribute('rel', /noopener/);
+
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: api.id(),
+        kind: 'permission',
+        payload: {
+          tool_name: 'mcp_elicitation',
+          server: 'notes',
+          message: 'Подтвердите действие',
+          mode: 'url',
+          url: 'javascript:alert(1)'
+        }
+      }
+    });
+    hub.flush();
+
+    await expect(page.getByText('javascript:alert(1)', { exact: true })).toBeVisible();
+    await expect(page.locator('a[href^="javascript:"]')).toHaveCount(0);
+
+    hub.append(`conversation:${id}`, {
+      kind: 'request_opened',
+      conversation_id: id,
+      payload: {
+        request_id: api.id(),
+        kind: 'permission',
+        payload: { tool_name: 'mcp_elicitation', server: 'notes', message: 'Доступ?', mode: 'url' }
+      }
+    });
+    hub.flush();
+
+    const missing = page.locator('div.permission-card', { hasText: 'Сервер не передал адрес' });
+    await expect(missing).toBeVisible();
+    await expect(missing.getByRole('button', { name: 'Разрешить' })).toBeDisabled();
+    await missing.getByRole('button', { name: 'Отклонить' }).click();
+    await expect(page.getByText('Отклонено')).toBeVisible();
+  });
+
   test('e2e_decision_conflict_from_second_device_shows_conflict_and_disables_first', async ({ page }) => {
     const { hub, api, id } = await bootChat(page);
 
@@ -378,7 +447,7 @@ test.describe('E2E Requests and Recovery', () => {
     await page.reload();
     await expect(page.locator('[data-ready]')).toBeVisible();
     await expect(page.getByText('Вопрос перед перезагрузкой страницы')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Ответить' })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: 'Да' })).toBeEnabled();
 
     // 2. Decided-but-not-applied survives reload in its stage (orchestrator note)
     api.decisionAutoProgress = false;
@@ -471,7 +540,7 @@ test.describe('E2E Requests and Recovery', () => {
         request_id: reqId,
         kind: 'question',
         payload: {
-          questions: [{ id: 'q1', text: 'Запрос до перезапуска хаба' }]
+          questions: [{ id: 'q1', text: 'Запрос до перезапуска хаба', options: [{ label: 'Продолжить' }] }]
         }
       }
     });
@@ -484,7 +553,7 @@ test.describe('E2E Requests and Recovery', () => {
 
     // After reconnect, open request and waiting_for_user activity are retained
     await expect(page.getByText('Запрос до перезапуска хаба')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('button', { name: 'Ответить' })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: 'Продолжить' })).toBeEnabled();
   });
 
   test('e2e_open_request_survives_worker_restart_via_sj_reannouncement', async ({ page }) => {

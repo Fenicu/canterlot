@@ -6,6 +6,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 #[tokio::test]
 async fn close_kills_detached_grandchild() {
     let td = TempDir::new().unwrap();
@@ -15,9 +18,7 @@ async fn close_kills_detached_grandchild() {
         "#!/bin/sh\nsetsid sleep 600 &\necho $! > {}\nsleep 60\n",
         pidfile.display()
     );
-    std::fs::write(&script, cmd).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake_exec::write_executable(&script, cmd, 0o755);
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let relay = PathBuf::from("/usr/bin/canterlot-worker");
     let spec = LaunchSpec {

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import BottomNav from '#lib/ui/BottomNav.svelte';
-  let { current, create = true }: { current: 'sessions' | 'machines' | 'limits'; create?: boolean } = $props();
+  let { current, create = true }: { current: 'sessions' | 'machines' | 'limits' | 'presets'; create?: boolean } = $props();
 </script>
 
 <div class="dock">
@@ -9,6 +9,7 @@
     label="Навигация"
     items={[
       { href: '/sessions', label: 'Сессии', current: current === 'sessions' },
+      { href: '/presets', label: 'Инструкции', current: current === 'presets' },
       { href: '/machines', label: 'Машины', current: current === 'machines' },
       { href: '/limits', label: 'Лимиты', current: current === 'limits' }
     ]}
@@ -19,6 +20,7 @@
 <style>
   .dock { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s2); min-width: 0; }
   .dock :global(nav) { flex: 1; min-width: 0; flex-wrap: wrap; }
+  .dock :global(nav a) { flex: 1 1 auto; padding-inline: var(--s3); }
   .fab {
     display: inline-flex;
     align-items: center;

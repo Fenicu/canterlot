@@ -10,7 +10,6 @@
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
-	import type { RequestItem } from '#lib/stores/requests.svelte.js';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
@@ -87,23 +86,12 @@
 		}
 	});
 
-	const activityRequest = $derived.by((): RequestItem | null => {
+	const waitingId = $props.id();
+	// Вопрос из активности без открытого запроса отвечать некуда: показываем его только для чтения.
+	const waitingQuestion = $derived.by((): string | null => {
 		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
 		if (chat.activity?.state === 'waiting_for_user' && typeof evidence?.question === 'string') {
-			return {
-				id: 'activity-request',
-				conversationId: chat.id,
-				kind: 'question',
-				state: 'open',
-				payload: {
-					questions: [
-						{
-							id: 'q0',
-							text: evidence.question
-						}
-					]
-				}
-			};
+			return evidence.question;
 		}
 		return null;
 	});
@@ -139,14 +127,12 @@
 				/>
 			{/each}
 		</div>
-	{:else if activityRequest}
+	{:else if waitingQuestion}
 		<div class="request-card-slot">
-			<RequestCard
-				request={activityRequest}
-				onDecision={async (decision) => {
-					await chat.requests.submitDecision(activityRequest.id, decision, chat.ops);
-				}}
-			/>
+			<section class="waiting-notice" aria-labelledby={waitingId}>
+				<h2 class="waiting-title" id={waitingId}>Агент ждёт ответа</h2>
+				<p class="waiting-question">{waitingQuestion}</p>
+			</section>
 		</div>
 	{/if}
 
@@ -191,6 +177,43 @@
 		min-width: 0;
 		min-height: 0;
 		position: relative;
+	}
+
+	.screen > :global(:not(dialog)) {
+		width: 100%;
+		max-width: var(--reading-max);
+		margin-inline: auto;
+	}
+
+	.screen > :global(.feed-wrap) {
+		max-width: none;
+	}
+
+	.screen :global(.feed) {
+		padding-inline: max(0%, calc((100% - var(--reading-max)) / 2));
+	}
+
+	.waiting-notice {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s2);
+		padding: var(--s4);
+		border-radius: var(--radius-card);
+		background: var(--surface);
+		color: var(--text);
+	}
+
+	.waiting-title {
+		margin: var(--s0);
+		font-size: var(--fs-meta);
+		font-weight: var(--weight-medium);
+		color: var(--muted);
+	}
+
+	.waiting-question {
+		margin: var(--s0);
+		font-size: var(--fs-body);
+		overflow-wrap: anywhere;
 	}
 
 	.request-cards-slot,

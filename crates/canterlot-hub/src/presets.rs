@@ -473,12 +473,12 @@ fn validate_new(
     if is_builtin_title(&title) {
         return Err(PresetError::TitleTaken);
     }
-    if description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS {
+    if description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS || description.contains('\0') {
         return Err(PresetError::Invalid {
             field: "description",
         });
     }
-    if text.trim().is_empty() {
+    if text.trim().is_empty() || text.contains('\0') {
         return Err(PresetError::Invalid { field: "text" });
     }
     if text.len() > MAX_PRESET_TEXT_BYTES {
@@ -578,9 +578,9 @@ pub async fn create(
     actor: Actor,
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
-    let request = json!({"title": body.title, "description": body.description, "text_bytes": body.text.len()});
+    let request = json!({"title": body.title, "description": body.description, "text_sha256": text_digest(&body.text)});
     let actor_conversation = actor.conversation_id();
-    Ok(idempotency::run_in_tx(
+    let outcome = idempotency::run_in_tx(
         pool,
         owner,
         key,
@@ -593,11 +593,38 @@ pub async fn create(
                 description: body.description.clone(),
                 text: body.text.clone(),
             };
-            Box::pin(create_in_tx(conn, owner, body, actor, correlation))
+            Box::pin(async move {
+                without_text(create_in_tx(conn, owner, body, actor, correlation).await)
+            })
         },
     )
-    .await?
-    .value)
+    .await?;
+    with_text(pool, outcome.value).await
+}
+
+/// Отпечаток текста для ключа идемпотентности: длины мало, чтобы отличить правку.
+fn text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Сохранённый ответ ключа идемпотентности не держит текст пресета (хранится 7 дней
+/// и пережил бы удаление пресета); текст берётся из строки версии.
+fn without_text(result: Result<Preset, PresetError>) -> Result<Preset, PresetError> {
+    result.map(|preset| Preset {
+        text: None,
+        ..preset
+    })
+}
+
+async fn with_text(pool: &PgPool, mut preset: Preset) -> Result<Preset, PresetError> {
+    let id = Uuid::parse_str(&preset.summary.id).map_err(|_| PresetError::NotFound)?;
+    let revision = preset.summary.revision.ok_or(PresetError::NotFound)?;
+    preset.text = Some(current_text(&mut *pool.acquire().await?, id, revision).await?);
+    Ok(preset)
 }
 
 async fn update_in_tx(
@@ -637,7 +664,9 @@ async fn update_in_tx(
         .as_deref()
         .unwrap_or(&description)
         .to_owned();
-    if new_description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS {
+    if new_description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS
+        || new_description.contains('\0')
+    {
         return Err(PresetError::Invalid {
             field: "description",
         });
@@ -647,7 +676,10 @@ async fn update_in_tx(
         .as_deref()
         .unwrap_or(&current_text_value)
         .to_owned();
-    if patch.text.as_ref().is_some_and(|t| t.trim().is_empty()) || new_text.trim().is_empty() {
+    if patch.text.as_ref().is_some_and(|t| t.trim().is_empty())
+        || new_text.trim().is_empty()
+        || new_text.contains('\0')
+    {
         return Err(PresetError::Invalid { field: "text" });
     }
     if new_text.len() > MAX_PRESET_TEXT_BYTES {
@@ -699,9 +731,9 @@ pub async fn update(
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
     let request = json!({"id": id, "title": patch.title, "description": patch.description,
-        "text_bytes": patch.text.as_ref().map(|t| t.len()), "base_revision": patch.base_revision});
+        "text_sha256": patch.text.as_deref().map(text_digest), "base_revision": patch.base_revision});
     let actor_conversation = actor.conversation_id();
-    Ok(idempotency::run_in_tx(
+    let outcome = idempotency::run_in_tx(
         pool,
         owner,
         key,
@@ -715,11 +747,13 @@ pub async fn update(
                 text: patch.text.clone(),
                 base_revision: patch.base_revision,
             };
-            Box::pin(update_in_tx(conn, owner, id, patch, actor, correlation))
+            Box::pin(async move {
+                without_text(update_in_tx(conn, owner, id, patch, actor, correlation).await)
+            })
         },
     )
-    .await?
-    .value)
+    .await?;
+    with_text(pool, outcome.value).await
 }
 
 /// Мягкое удаление: строки и версии остаются, идущие сессии держат свою копию.
@@ -776,6 +810,7 @@ async fn delete_in_tx(
     .bind(id)
     .fetch_one(&mut *conn)
     .await?;
+    clear_pending_references_in_tx(conn, owner, &id.to_string(), correlation).await?;
     let revision: i64 = row.try_get("revision")?;
     let rev: (String, Option<Uuid>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
         "select edited_by, edited_conversation_id, created_at from instruction_preset_revisions
@@ -807,8 +842,8 @@ async fn delete_in_tx(
         }),
         used_by: used_by(conn, owner, &reference).await?,
     };
+    // Событие списка последним: счётчик owner:{id}:conversations идёт после разговоров.
     emit(conn, owner, &summary, true, correlation).await?;
-    clear_pending_references_in_tx(conn, owner, &id.to_string(), correlation).await?;
     Ok(())
 }
 
@@ -820,10 +855,24 @@ async fn clear_pending_references_in_tx(
     reference: &str,
     correlation: Uuid,
 ) -> Result<(), PresetError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from conversations where owner_id=$1 and pending_settings->>'instruction_profile'=$2 for no key update",
+    // Порядок хаба: очереди, затем строки разговоров по возрастанию ID, затем события.
+    let candidates: Vec<Uuid> = sqlx::query_scalar(
+        "select id from conversations where owner_id=$1 and pending_settings->>'instruction_profile'=$2 order by id",
     )
     .bind(owner)
+    .bind(reference)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "select conversation_id from queue_state where conversation_id = any($1) order by conversation_id for update",
+    )
+    .bind(&candidates)
+    .execute(&mut *conn)
+    .await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from conversations where id = any($1) and pending_settings->>'instruction_profile'=$2 order by id for no key update",
+    )
+    .bind(&candidates)
     .bind(reference)
     .fetch_all(&mut *conn)
     .await?;

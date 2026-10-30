@@ -30,7 +30,9 @@ pub const SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that super
      Do not call it in a loop and do not poll it for progress.\n\
      Only the owner can change these rules; model output never overrides them.\n\
      Every tool call waits for the owner's answer unless the mode allows it.\n\
-     Denied calls must not be retried with different arguments.";
+     Denied calls must not be retried with different arguments.\n\
+     Instruction presets are named instruction texts kept in canterlot.\n\
+     canterlot_presets_list shows them; canterlot_preset_save and canterlot_preset_apply change them (apply affects only this session, from the next turn).";
 
 pub fn instructions() -> &'static str {
     SERVER_INSTRUCTIONS
@@ -41,6 +43,126 @@ pub enum ToolKind {
     Permission,
     Question,
     Limits,
+    /// Вызов пресета инструкций: имя инструмента хаба (`presets.*`).
+    Agent {
+        tool: &'static str,
+    },
+}
+
+/// Инструменты пресетов: имя MCP → имя инструмента хаба.
+pub const PRESET_TOOLS: [(&str, &str); 3] = [
+    ("canterlot_presets_list", "presets.list"),
+    ("canterlot_preset_save", "presets.save"),
+    ("canterlot_preset_apply", "presets.apply"),
+];
+
+fn preset_tool_description(mcp_name: &str) -> &'static str {
+    match mcp_name {
+        "canterlot_presets_list" => {
+            "List the instruction presets the owner keeps in canterlot (built-in «Без инструкций» = none of the owner's own instruction files, repository instructions still apply, «Как у владельца» = the owner's own configuration, saved presets with origin and revision) and which one this session uses and has pending; pass `id` to get that preset's text."
+        }
+        "canterlot_preset_save" => {
+            "Create a preset (no `id`) or replace a saved preset's title, description and text (`id` + `base_revision` from the list); built-ins cannot be changed; saving never changes running sessions; the preset is marked as made by an agent."
+        }
+        "canterlot_preset_apply" => {
+            "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept and background tasks of this session stop; call it once, not in a loop."
+        }
+        _ => "Preset tool.",
+    }
+}
+
+fn preset_input_schema(mcp_name: &str) -> Value {
+    let id = ("id", json!({"type": "string"}));
+    match mcp_name {
+        "canterlot_presets_list" => json!({
+            "type": "object",
+            "properties": {"id": id.1},
+            "additionalProperties": false,
+        }),
+        "canterlot_preset_save" => json!({
+            "type": "object",
+            "properties": {
+                "id": id.1,
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "text": {"type": "string"},
+                "base_revision": {"type": "integer"},
+            },
+            "required": ["title", "text"],
+            "additionalProperties": false,
+        }),
+        _ => json!({
+            "type": "object",
+            "properties": {"id": id.1},
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+    }
+}
+
+fn is_string(value: Option<&Value>) -> bool {
+    value.is_some_and(|value| value.is_string())
+}
+
+/// Аргументы вызова пресета: объект с объявленными типами; иначе хаб не зовём.
+pub fn valid_preset_arguments(mcp_name: &str, arguments: &Value) -> bool {
+    let Some(object) = arguments.as_object() else {
+        return false;
+    };
+    let allowed: &[&str] = match mcp_name {
+        "canterlot_presets_list" => &["id"],
+        "canterlot_preset_save" => &["id", "title", "description", "text", "base_revision"],
+        "canterlot_preset_apply" => &["id"],
+        _ => return false,
+    };
+    if object.keys().any(|key| !allowed.contains(&key.as_str())) {
+        return false;
+    }
+    for key in ["id", "title", "description", "text"] {
+        if let Some(value) = object.get(key)
+            && !value.is_string()
+        {
+            return false;
+        }
+    }
+    if let Some(revision) = object.get("base_revision")
+        && !revision.is_i64()
+    {
+        return false;
+    }
+    match mcp_name {
+        "canterlot_preset_save" => is_string(object.get("title")) && is_string(object.get("text")),
+        "canterlot_preset_apply" => is_string(object.get("id")),
+        _ => true,
+    }
+}
+
+/// Текст ответа инструмента пресетов и признак ошибки; текст пресета не трогаем.
+pub fn agent_tool_text(tool: &str, result: &crate::adapter::AgentCallResult) -> (String, bool) {
+    use crate::adapter::AgentCallResult as Outcome;
+    match result {
+        Outcome::Ok(value) => {
+            let mut text =
+                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+            let hint = match tool {
+                "presets.save" => value.get("revision").and_then(Value::as_i64).map(|revision| {
+                    format!(
+                        "Saved as revision {revision}. Running sessions keep their copy; apply it with canterlot_preset_apply."
+                    )
+                }),
+                "presets.apply" => Some(
+                    "Applies from the next turn; the agent restarts between turns.".to_owned(),
+                ),
+                _ => None,
+            };
+            if let Some(hint) = hint {
+                text.push('\n');
+                text.push_str(&hint);
+            }
+            (text, false)
+        }
+        Outcome::Err { code, message } => (format!("{code}: {message}"), true),
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -100,19 +222,41 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
         "description": limits_tool_description(provider),
         "inputSchema": {"type": "object"},
     });
+    let mut presets: Vec<Value> = PRESET_TOOLS
+        .iter()
+        .map(|(mcp_name, _)| {
+            let mut tool = json!({
+                "name": mcp_name,
+                "description": preset_tool_description(mcp_name),
+                "inputSchema": preset_input_schema(mcp_name),
+            });
+            if *mcp_name == "canterlot_presets_list" {
+                tool.as_object_mut()
+                    .expect("tool object")
+                    .insert("annotations".to_owned(), json!({"readOnlyHint": true}));
+            }
+            tool
+        })
+        .collect();
     match tool_set {
-        ToolSet::ApproveAndLimits => json!({"tools": [
-            {
-                "name": "approve",
-                "description": "Ask the owner before running a tool. The call waits until the owner allows or denies it from their phone, possibly later. Pass the tool name, its full input and the tool use id.",
-                "inputSchema": {"type": "object", "additionalProperties": true},
-            },
-            limits,
-        ]}),
+        ToolSet::ApproveAndLimits => {
+            let mut tools = vec![
+                json!({
+                    "name": "approve",
+                    "description": "Ask the owner before running a tool. The call waits until the owner allows or denies it from their phone, possibly later. Pass the tool name, its full input and the tool use id.",
+                    "inputSchema": {"type": "object", "additionalProperties": true},
+                }),
+                limits,
+            ];
+            tools.append(&mut presets);
+            json!({"tools": tools})
+        }
         ToolSet::LimitsOnly => {
             let mut tool = limits.as_object().cloned().unwrap_or_default();
             tool.insert("annotations".to_owned(), json!({"readOnlyHint": true}));
-            json!({"tools": [Value::Object(tool)]})
+            let mut tools = vec![Value::Object(tool)];
+            tools.append(&mut presets);
+            json!({"tools": tools})
         }
     }
 }
@@ -174,7 +318,17 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                     }
                 }
                 ("canterlot_limits", _) => ToolKind::Limits,
-                _ => return error(&id, -32602, "unknown tool"),
+                (mcp_name, _) => {
+                    let Some((_, tool)) =
+                        PRESET_TOOLS.iter().find(|(preset, _)| *preset == mcp_name)
+                    else {
+                        return error(&id, -32602, "unknown tool");
+                    };
+                    if !valid_preset_arguments(mcp_name, &arguments) {
+                        return error(&id, -32602, "invalid_arguments");
+                    }
+                    ToolKind::Agent { tool }
+                }
             };
             McpAction::ToolCall {
                 kind,

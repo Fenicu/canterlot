@@ -630,3 +630,51 @@ export function spendReserve(
     keyed(key, opts),
   );
 }
+
+export function listPresets(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_presets"]>>> {
+  return http("GET", "/api/v1/presets", undefined, opts);
+}
+
+export function getPreset(
+  presetId: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_presets__id_"]>>> {
+  return http("GET", `/api/v1/presets/${id(presetId)}`, undefined, opts);
+}
+
+export function createPreset(
+  body: Body<operations["post__api_v1_presets"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_presets"]>>> {
+  return http("POST", "/api/v1/presets", body, keyed(key, opts));
+}
+
+export function patchPreset(
+  presetId: string,
+  body: Body<operations["patch__api_v1_presets__id_"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["patch__api_v1_presets__id_"]>>> {
+  return http(
+    "PATCH",
+    `/api/v1/presets/${id(presetId)}`,
+    body,
+    keyed(key, opts),
+  );
+}
+
+export function deletePreset(
+  presetId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<void>> {
+  return http(
+    "DELETE",
+    `/api/v1/presets/${id(presetId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}

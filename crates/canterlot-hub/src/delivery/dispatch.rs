@@ -93,9 +93,7 @@ pub async fn dispatch_next(
     if !queue.pause_reasons.0.is_empty() {
         reasons.push(BlockReason::Paused(queue.pause_reasons.0.clone()));
     }
-    let open_requests_count: i64 = sqlx::query_scalar(
-        "select count(*) from requests where conversation_id = $1 and state = 'open'",
-    )
+    let open_requests_count: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
     .bind(conversation_id)
     .fetch_one(&mut *conn)
     .await?;
@@ -220,11 +218,11 @@ pub async fn dispatch_next(
             BlockReason::CapabilityMissing { input_id },
         ]));
     }
-    // Не-владельческий пресет понимает только сеанс с instructions_v1.
+    // Не-владельческий пресет, включая «Без инструкций», понимает только сеанс с instructions_v1.
     if pending
         .get("instruction_profile")
         .and_then(Value::as_str)
-        .is_some_and(|profile| profile != "clean" && profile != "owner")
+        .is_some_and(|profile| profile != "owner")
         && !gate
             .session_capabilities
             .iter()

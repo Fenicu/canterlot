@@ -1,1 +1,1 @@
-{"rateLimits":{"limitId":"codex","primary":{"resetsAt":1792927784,"usedPercent":95,"windowDurationMins":300},"secondary":{"resetsAt":1793514584,"usedPercent":10,"windowDurationMins":10080},"ordinaryUsageAllowed":false}}
+{"rateLimits":{"limitId":"codex","primary":{"resetsAt":1792927784,"usedPercent":95,"windowDurationMins":300},"secondary":{"resetsAt":1793514584,"usedPercent":10,"windowDurationMins":10080}},"ordinaryUsageAllowed":false}

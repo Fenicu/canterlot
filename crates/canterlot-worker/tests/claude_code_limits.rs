@@ -44,6 +44,9 @@ mod frozen_clock;
 #[allow(dead_code)]
 mod support;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 const FAKE_TOKEN: &str = "sk-ant-oat01-canterlot-fake-token-for-tests";
 const FAR_FUTURE_MS: u64 = 4_102_444_800_000;
 const HALF_HOUR: Duration = Duration::from_secs(1800);
@@ -763,9 +766,7 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         hub.config.machine.metrics_interval = quiet;
         let cli_dir = tempfile::tempdir().unwrap();
         let executable = cli_dir.path().join("fake-cli");
-        fs::write(&executable, "#!/bin/sh\nprintf '2.1.311\\n'\n").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&executable, "#!/bin/sh\nprintf '2.1.311\\n'\n", 0o700);
         hub.config.claude_code = Some(ClaudeCodeConfig {
             executable,
             oauth_poll_interval_s: 900,

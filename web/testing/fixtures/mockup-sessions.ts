@@ -1,7 +1,7 @@
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import type { ProviderLimits } from '../../src/lib/stores/limits';
 import type { FakeHubApi } from '../fake-hub/api';
-import { seedConversation } from '../fake-hub/seed';
+import { seedConversation, seedPresets as seedPresetList } from '../fake-hub/seed';
 
 const AT = '2026-10-28T12:00:00.000Z';
 
@@ -144,5 +144,6 @@ export function seedMockupSessions(api: FakeHubApi): MockupSessions {
 	api.machines.set(machine, record);
 	const degraded = api.id();
 	api.machines.set(degraded, { ...record, id: degraded, name: 'mini', availability: 'degraded', capabilities: [] });
+	seedPresetList(api);
 	return { canterlot, review, books, machine, pinned, plain };
 }

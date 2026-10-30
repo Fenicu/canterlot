@@ -19,6 +19,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn evidence(name: &str) -> Vec<serde_json::Value> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -47,9 +50,7 @@ fn fixture_lines() -> Vec<serde_json::Value> {
 
 fn fake_version_script(dir: &TempDir, output: &str) -> PathBuf {
     let script = dir.path().join("codex");
-    std::fs::write(&script, format!("#!/bin/sh\necho \"{output}\"\n")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake_exec::write_executable(&script, format!("#!/bin/sh\necho \"{output}\"\n"), 0o755);
     script
 }
 
@@ -77,6 +78,27 @@ async fn version_parsing_and_classification() {
     assert_eq!(
         check(&exe).await.unwrap(),
         CliVersion::UntestedNewer("0.165.2".into())
+    );
+    // Предварительные сборки: новее проверенной — запуск с отметкой; сборка
+    // до минимального выпуска (0.164.0-beta < 0.164.0) — ниже минимума.
+    assert_eq!(
+        parse_version("codex-cli 0.165.0-alpha.2").unwrap(),
+        (0, 165, 0)
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.165.0-alpha.2");
+    assert_eq!(
+        check(&exe).await.unwrap(),
+        CliVersion::UntestedNewer("0.165.0-alpha.2".into())
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.164.0-beta.1");
+    assert_eq!(
+        check(&exe).await.unwrap_err(),
+        VersionError::BelowMinimum("0.164.0-beta.1".into())
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.164.0+build.7");
+    assert_eq!(
+        check(&exe).await.unwrap(),
+        CliVersion::Verified("0.164.0".into())
     );
     let exe = fake_version_script(&td, "codex-cli 0.163.9");
     assert_eq!(
@@ -474,18 +496,68 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             Some(serde_json::json!({"type": "readOnly", "networkAccess": false}))
         )
     );
-    assert_eq!(turn_policy(PermissionMode::Owner, &empty), (None, None));
-    let owner = owner_defaults_from(&serde_json::json!({
+    // Владелец без политики в конфигурации и без наблюдения треда: умолчания
+    // Codex для недоверенного проекта, никогда не меньше вопросов.
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &empty),
+        (
+            Some(serde_json::json!("on-request")),
+            Some(serde_json::json!({"type": "readOnly", "networkAccess": false}))
+        )
+    );
+    // Значения config/read лежат в обёртке `config` (схема ConfigReadResponse).
+    let owner = owner_defaults_from(&serde_json::json!({"config": {
         "approval_policy": "on-request",
         "sandbox_mode": "read-only",
-        "sandbox_workspace_write": {"network_access": false, "writable_roots": []},
-    }));
-    let (approval, sandbox) = turn_policy(PermissionMode::Owner, &owner);
-    assert_eq!(approval.unwrap(), serde_json::json!("on-request"));
-    let sandbox = sandbox.unwrap();
-    assert_eq!(sandbox["type"], "readOnly");
-    assert_eq!(sandbox["network_access"], false);
-    assert_eq!(sandbox["writable_roots"], serde_json::json!([]));
+        "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"]},
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &owner),
+        (
+            Some(serde_json::json!("on-request")),
+            Some(serde_json::json!({"type": "readOnly"}))
+        )
+    );
+    // Песочница записи — в форме SandboxPolicy (camelCase), не ключами TOML.
+    let write = owner_defaults_from(&serde_json::json!({"config": {
+        "approval_policy": "untrusted",
+        "sandbox_mode": "workspace-write",
+        "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"],
+            "exclude_tmpdir_env_var": true, "exclude_slash_tmp": false},
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &write),
+        (
+            Some(serde_json::json!("untrusted")),
+            Some(
+                serde_json::json!({"type": "workspaceWrite", "networkAccess": true,
+                "writableRoots": ["/w"], "excludeTmpdirEnvVar": true, "excludeSlashTmp": false})
+            )
+        )
+    );
+    let full = owner_defaults_from(&serde_json::json!({"config": {
+        "approval_policy": "never", "sandbox_mode": "danger-full-access",
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &full).1,
+        Some(serde_json::json!({"type": "dangerFullAccess"}))
+    );
+    // Без политики в конфигурации — то, что сервер показал при старте треда владельцем.
+    let mut observed = owner_defaults_from(&serde_json::json!({"config": {}, "origins": {}}));
+    observed.observe_thread(
+        &serde_json::json!("untrusted"),
+        &serde_json::json!({"type": "workspaceWrite", "networkAccess": false}),
+    );
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &observed),
+        (
+            Some(serde_json::json!("untrusted")),
+            Some(serde_json::json!({"type": "workspaceWrite", "networkAccess": false}))
+        )
+    );
+    // Плоский ответ без обёртки — не конфигурация владельца.
+    let flat = owner_defaults_from(&serde_json::json!({"approval_policy": "never"}));
+    assert!(flat.approval_policy.is_none());
 }
 
 #[test]
@@ -556,13 +628,11 @@ fn resume_params_exclude_turns() {
 async fn oversized_stdout_line_is_skipped_and_reading_continues() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         "#!/bin/sh\nhead -c 68157440 /dev/zero | tr '\\0' a; echo\nprintf '%s\\n' '{}'\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let relay = PathBuf::from("/usr/bin/canterlot-worker");
     let spec = LaunchSpec {
@@ -592,4 +662,39 @@ async fn oversized_stdout_line_is_skipped_and_reading_continues() {
             .unwrap(),
         StdoutLine::Eof
     ));
+}
+
+#[test]
+fn worker_version_flag_prints_the_worker_version() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text.trim(),
+        format!("canterlot-worker {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[cfg(feature = "synthetic-adapter")]
+#[test]
+fn codex_replay_answers_version_only_inside_its_subcommand() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args([
+            "codex-replay",
+            "--evidence",
+            "/nonexistent/evidence.jsonl",
+            "--fixtures-dir",
+            "/nonexistent",
+            "--version",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "codex-cli 0.164.0"
+    );
 }

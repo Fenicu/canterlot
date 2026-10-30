@@ -21,7 +21,7 @@ import type {
 
 vi.mock("#lib/api/client.js", () => ({
   recentWorkdirs: vi.fn(async () => ({
-    data: { workdirs: ["/srv/canterlot", "/srv/notes"] },
+    data: { workdirs: ["/srv/canterlot", "/srv/notes", "/srv/third", "/srv/fourth"] },
   })),
 }));
 
@@ -89,25 +89,38 @@ function ready(model: NewSessionModel) {
 }
 
 describe("sessions/new", () => {
-  it("new_session_model_validates_workdir_under_reported_roots", () => {
+  it("new_session_model_accepts_any_absolute_workdir", () => {
     const model = new NewSessionModel(store([machine()]), config, ops());
     model.machineId = "m1";
     model.workdir = "relative";
     expect(model.errors.workdir).toBe("Укажите абсолютный путь");
     model.workdir = "/srv/../etc";
     expect(model.errors.workdir).toContain("..");
+    // Политика корней осталась на хабе: клиент принимает любой абсолютный путь.
     model.workdir = "/srv-evil/canterlot";
-    expect(model.errors.workdir).toBe("Папка вне известных корней машины");
+    expect(model.errors.workdir).toBeUndefined();
+    model.workdir = "/etc";
+    expect(model.errors.workdir).toBeUndefined();
     model.workdir = "/srv/canterlot";
     expect(model.errors.workdir).toBeUndefined();
   });
 
-  it("new_session_lists_recent_workdirs_from_the_hub", async () => {
+  it("new_session_lists_last_three_recent_workdirs_from_the_hub", async () => {
     const model = new NewSessionModel(store([machine()]), config, ops());
     model.machineId = "m1";
     await model.refreshRecent();
     expect(recentWorkdirs).toHaveBeenCalledWith("m1");
-    expect(model.recent).toEqual(["/srv/canterlot", "/srv/notes"]);
+    expect(model.recent).toEqual(["/srv/canterlot", "/srv/notes", "/srv/third"]);
+  });
+
+  it("new_session_submits_a_typed_path_outside_reported_roots", async () => {
+    const model = new NewSessionModel(store([machine()]), config, ops());
+    model.machineId = "m1";
+    model.workdir = "/tmp/typed-by-hand";
+    model.harness = "claude";
+    model.model = "opus";
+    model.effort = "medium";
+    expect(model.canSubmit).toEqual({ ok: true });
   });
 
   it("new_session_effort_list_follows_the_selected_model", () => {

@@ -31,6 +31,7 @@ pub enum RequestState {
     DecisionSaved,
     DecisionTransmitting,
     DecisionApplied,
+    DecisionUnconfirmed,
     DecisionNotApplied,
     ClosedWithoutDecision,
 }
@@ -42,6 +43,7 @@ impl RequestState {
             Self::DecisionSaved => "decision_saved",
             Self::DecisionTransmitting => "decision_transmitting",
             Self::DecisionApplied => "decision_applied",
+            Self::DecisionUnconfirmed => "decision_unconfirmed",
             Self::DecisionNotApplied => "decision_not_applied",
             Self::ClosedWithoutDecision => "closed_without_decision",
         }
@@ -57,6 +59,7 @@ impl FromStr for RequestState {
             "decision_saved" => Ok(Self::DecisionSaved),
             "decision_transmitting" => Ok(Self::DecisionTransmitting),
             "decision_applied" => Ok(Self::DecisionApplied),
+            "decision_unconfirmed" => Ok(Self::DecisionUnconfirmed),
             "decision_not_applied" => Ok(Self::DecisionNotApplied),
             "closed_without_decision" => Ok(Self::ClosedWithoutDecision),
             other => Err(format!("unknown request state: {other}")),
@@ -133,6 +136,43 @@ pub enum RequestDomainError {
     Database(#[from] sqlx::Error),
     #[error("serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
+}
+
+/// Значение ответа на секретный вопрос во всём, кроме команды доставки воркеру.
+pub const REDACTED_ANSWER: &str = "[redacted]";
+
+/// Копия решения без ответов на секретные вопросы (`is_secret`): её видят события,
+/// снимки, ответы HTTP и хранилище ключей идемпотентности.
+pub fn redact_decision(
+    request_payload: &serde_json::Value,
+    decision: &serde_json::Value,
+) -> serde_json::Value {
+    let secret = |value: &serde_json::Value| {
+        ["is_secret", "isSecret"]
+            .iter()
+            .any(|key| value.get(key) == Some(&serde_json::Value::Bool(true)))
+    };
+    let everything = secret(request_payload);
+    let secret_ids: std::collections::BTreeSet<&str> = request_payload
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|question| secret(question))
+        .filter_map(|question| question.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    let mut decision = decision.clone();
+    if let Some(answers) = decision
+        .get_mut("answers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (id, answer) in answers.iter_mut() {
+            if everything || secret_ids.contains(id.as_str()) {
+                *answer = json!(REDACTED_ANSWER);
+            }
+        }
+    }
+    decision
 }
 
 pub async fn create_request_in_tx(
@@ -236,6 +276,8 @@ pub async fn save_decision_in_tx(
     if row.state == RequestState::Open {
         let winner_decision_id = Uuid::now_v7();
         let decision_json = serde_json::to_value(decision)?;
+        // Полный ответ нужен только команде доставки; строка запроса хранит копию без секретов.
+        let visible = redact_decision(&row.request_payload, &decision_json);
 
         let updated_row: RequestRow = sqlx::query_as(
             r#"
@@ -257,7 +299,7 @@ pub async fn save_decision_in_tx(
         .bind(request_id)
         .bind(conversation_id)
         .bind(winner_decision_id)
-        .bind(&decision_json)
+        .bind(&visible)
         .bind(idempotency_key)
         .fetch_one(&mut *tx)
         .await?;
@@ -265,6 +307,7 @@ pub async fn save_decision_in_tx(
         let command_id = Uuid::now_v7();
         let command_payload = json!({
             "request_id": row.id.to_string(),
+            "native_request_id": row.native_request_id,
             "decision_id": winner_decision_id.to_string(),
             "generation": row.generation,
             "kind": row.kind.as_str(),
@@ -292,7 +335,7 @@ pub async fn save_decision_in_tx(
         .await?;
 
         // Уведомление outbox о появлении исходящей команды
-        sqlx::query("select pg_notify('outbox', $1)")
+        sqlx::query("select pg_notify('canterlot_outbox', $1)")
             .bind(machine_id.to_string())
             .execute(&mut *tx)
             .await?;
@@ -310,7 +353,7 @@ pub async fn save_decision_in_tx(
                 payload: json!({
                     "request_id": row.id,
                     "winner_decision_id": winner_decision_id,
-                    "decision": decision_json,
+                    "decision": visible,
                 }),
                 correlation_id: Uuid::now_v7(),
             },
@@ -333,3 +376,206 @@ pub async fn save_decision_in_tx(
         }
     }
 }
+
+/// Гасит команду доставки решения только этого запроса и решения. Погашенная команда
+/// на машину больше не уходит, поэтому ответ из неё убирается.
+pub(crate) async fn complete_decision_command_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    request_id: Uuid,
+    decision_id: Uuid,
+    result: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()),
+                result = $3, payload = payload - 'decision_payload'
+         where kind = 'deliver_decision' and delivery_state <> 'completed'
+           and conversation_id = $4 and payload->>'request_id' = $1 and payload->>'decision_id' = $2",
+    )
+    .bind(request_id.to_string())
+    .bind(decision_id.to_string())
+    .bind(result)
+    .bind(conversation_id)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Снимает удержание, когда у живых исполнений разговора не осталось открытых запросов.
+pub(crate) async fn clear_awaiting_hold_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let open: i64 = sqlx::query_scalar(LIVE_OPEN_REQUESTS)
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    if open > 0 {
+        return Ok(());
+    }
+    let queue: Option<crate::delivery::LockedQueue> =
+        sqlx::query_as("select * from queue_state where conversation_id = $1 for update")
+            .bind(conversation_id)
+            .fetch_optional(&mut *conn)
+            .await?;
+    let Some(mut queue) = queue else {
+        return Ok(());
+    };
+    if queue
+        .hold_reasons
+        .0
+        .contains(&crate::model::HoldReason::AwaitingUserRequest)
+    {
+        queue
+            .hold_reasons
+            .0
+            .retain(|reason| *reason != crate::model::HoldReason::AwaitingUserRequest);
+        let slot = queue.slot()?;
+        queue
+            .save(conn, &slot, Some(execution_id), correlation_id)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Команда решения отвергнута хабом или воркером до передачи агенту: решение уже не
+/// дойдёт, и запрос не должен навсегда остаться в `decision_saved`.
+pub(crate) async fn fail_decision_command_in_tx(
+    conn: &mut PgConnection,
+    command_id: Uuid,
+    attempt: i32,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let target: Option<(Uuid, Option<String>)> = sqlx::query_as(
+        "select conversation_id, payload->>'request_id' from commands
+         where id = $1 and kind = 'deliver_decision' and dispatch_attempt = $2
+           and delivery_state <> 'completed'",
+    )
+    .bind(command_id)
+    .bind(attempt)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((conversation_id, request_id)) = target else {
+        return Ok(());
+    };
+    // Порядок хаба: очередь раньше строки запроса.
+    sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+        .bind(conversation_id)
+        .execute(&mut *conn)
+        .await?;
+    let request_id = request_id.and_then(|id| Uuid::parse_str(&id).ok());
+    let request: Option<(Uuid, Uuid, String)> = sqlx::query_as(
+        "select id, execution_id, state from requests
+         where id = $1 and conversation_id = $2 for update",
+    )
+    .bind(request_id)
+    .bind(conversation_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let reason = crate::delivery::receipts::sanitize_reason(reason);
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()),
+                result = $2, payload = payload - 'decision_payload'
+         where id = $1",
+    )
+    .bind(command_id)
+    .bind(json!({"rejected": reason}))
+    .execute(&mut *conn)
+    .await?;
+    let Some((id, execution_id, state)) = request else {
+        return Ok(());
+    };
+    if state != RequestState::DecisionSaved.as_str() {
+        return Ok(());
+    }
+    sqlx::query("update requests set state = $2, updated_at = clock_timestamp() where id = $1")
+        .bind(id)
+        .bind(RequestState::DecisionNotApplied.as_str())
+        .execute(&mut *conn)
+        .await?;
+    crate::events::append(
+        conn,
+        crate::events::NewEvent {
+            scope: crate::events::Scope::Conversation {
+                id: conversation_id,
+            },
+            kind: "request_closed",
+            conversation_id: Some(conversation_id),
+            execution_id: Some(execution_id),
+            payload: json!({"request_id": id, "reason": reason}),
+            correlation_id,
+        },
+    )
+    .await?;
+    clear_awaiting_hold_in_tx(conn, conversation_id, execution_id, correlation_id).await
+}
+
+/// Исполнение закончилось без `RequestClosed`: незавершённые запросы закрываются,
+/// чтобы карточка и удержание очереди не жили вечно. Очередь разговора уже заблокирована.
+pub(crate) async fn close_for_ended_execution_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "select id, state, winner_decision_id from requests
+         where execution_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting')
+         order by id for update",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, state, winner) in rows {
+        // Решение, переданное агенту, могло быть применено: доказательства нет.
+        let (next, event_reason, applied) = match state.as_str() {
+            "open" => ("closed_without_decision", reason, json!(false)),
+            "decision_saved" => ("decision_not_applied", reason, json!(false)),
+            _ => (
+                "decision_unconfirmed",
+                "unconfirmed",
+                serde_json::Value::Null,
+            ),
+        };
+        sqlx::query("update requests set state = $2, updated_at = clock_timestamp() where id = $1")
+            .bind(id)
+            .bind(next)
+            .execute(&mut *conn)
+            .await?;
+        if let Some(winner) = winner {
+            complete_decision_command_in_tx(
+                conn,
+                conversation_id,
+                id,
+                winner,
+                json!({"applied": applied, "reason": reason}),
+            )
+            .await?;
+        }
+        crate::events::append(
+            conn,
+            crate::events::NewEvent {
+                scope: crate::events::Scope::Conversation {
+                    id: conversation_id,
+                },
+                kind: "request_closed",
+                conversation_id: Some(conversation_id),
+                execution_id: Some(execution_id),
+                payload: json!({"request_id": id, "reason": event_reason}),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Открытые запросы живых исполнений разговора; запросы завершённых исполнений очередь не держат.
+pub(crate) const LIVE_OPEN_REQUESTS: &str = "select count(*) from requests r
+     join executions e on e.id = r.execution_id
+     where r.conversation_id = $1 and r.state = 'open'
+       and e.state not in ('stopped', 'failed', 'owner_lost')";

@@ -372,21 +372,19 @@ fn permissions_and_elicitation_requests_open_permission_cards() {
     let (request_id, _, _) = open(&mut requests, &data, "orchestrator", None);
     let line = requests.answer(&request_id, &deny()).unwrap();
     assert_eq!(line["result"], json!({"permissions": {}, "scope": "turn"}));
-    // Elicitation: form несёт пустой content, url — null.
-    for (line_no, content) in [(1, json!({})), (2, Value::Null)] {
-        let data = fixture_data("elicitation", line_no);
-        let mut requests = Requests::new();
-        let (request_id, kind, payload) = open(&mut requests, &data, "orchestrator", None);
-        assert_eq!(kind, "permission");
-        assert_eq!(payload["tool_name"], "mcp_elicitation");
-        assert_eq!(payload["server"], "s");
-        let line = requests.answer(&request_id, &allow()).unwrap();
-        assert_eq!(
-            line["result"],
-            json!({"action": "accept", "content": content, "_meta": null})
-        );
-    }
-    let data = fixture_data("elicitation", 1);
+    // Elicitation url: согласие без содержимого.
+    let data = fixture_data("elicitation", 2);
+    let mut requests = Requests::new();
+    let (request_id, kind, payload) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(kind, "permission");
+    assert_eq!(payload["tool_name"], "mcp_elicitation");
+    assert_eq!(payload["server"], "s");
+    assert_eq!(payload["url"], data["params"]["url"].clone());
+    let line = requests.answer(&request_id, &allow()).unwrap();
+    assert_eq!(
+        line["result"],
+        json!({"action": "accept", "content": null, "_meta": null})
+    );
     let mut requests = Requests::new();
     let (request_id, _, _) = open(&mut requests, &data, "orchestrator", None);
     let line = requests.answer(&request_id, &deny()).unwrap();
@@ -394,6 +392,52 @@ fn permissions_and_elicitation_requests_open_permission_cards() {
         line["result"],
         json!({"action": "decline", "content": null, "_meta": null})
     );
+}
+
+#[test]
+fn form_and_verification_elicitations_are_declined_without_a_card() {
+    // PWA не показывает вопрос и не собирает поля: согласие было бы вслепую и
+    // без содержимого, поэтому любая форма и проверка пользователя — сразу отказ.
+    for (line_no, mode) in [
+        (1, "form"),
+        (3, "form"),
+        (4, "openai/userVerification"),
+        (5, "openai/form"),
+    ] {
+        let data = fixture_data("elicitation", line_no);
+        let mut requests = Requests::new();
+        match requests.on_server_request(
+            rpc_id(&data),
+            data["method"].as_str().unwrap(),
+            &data["params"],
+            &RouteCtx {
+                agent: "orchestrator",
+                item: None,
+            },
+        ) {
+            Intake::Reply(line) => {
+                assert_eq!(line["id"], data["id"], "line {line_no}");
+                assert_eq!(
+                    line["result"],
+                    json!({"action": "decline", "content": null, "_meta": null}),
+                    "line {line_no}"
+                );
+            }
+            other => panic!("line {line_no}: expected decline, got {other:?}"),
+        }
+        let diagnostics = requests.drain_diagnostics();
+        assert!(
+            matches!(
+                diagnostics.as_slice(),
+                [AdapterEvent::Diagnostic {
+                    kind: "unsupported_elicitation",
+                    event_type,
+                    required: false,
+                }] if event_type == mode
+            ),
+            "line {line_no}: {diagnostics:?}"
+        );
+    }
 }
 
 #[test]
@@ -502,4 +546,20 @@ fn payload_and_answers_never_appear_in_debug() {
         }
     );
     assert!(debug.contains("exec-1/0"));
+}
+
+#[test]
+fn elicitations_without_item_id_get_distinct_ids_after_an_app_server_restart() {
+    let data = fixture_data("elicitation", 2);
+    let mut requests = Requests::new();
+    let (first, _, _) = open(&mut requests, &data, "orchestrator", None);
+    // Новый app-server снова нумерует серверные запросы с нуля.
+    requests.next_generation();
+    let (second, _, _) = open(&mut requests, &data, "orchestrator", None);
+    assert_ne!(first, second);
+    assert!(requests.is_pending(&first) && requests.is_pending(&second));
+    // Запрос с itemId держит прежнюю форму `<itemId>/<rpc id>`.
+    let data = fixture_data("permissions_request", 1);
+    let (with_item, _, _) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(with_item, "perm-1/6");
 }

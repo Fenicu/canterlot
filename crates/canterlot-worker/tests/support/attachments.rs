@@ -1,4 +1,8 @@
 #![allow(dead_code)]
+
+#[path = "fake_exec.rs"]
+mod fake_exec;
+
 use canterlot_hub::{
     attachments::{BlobStore, LocalBlobStore, NoTrace, PublishTrace},
     config::{AttachmentsConfig, HubTimers},
@@ -120,15 +124,14 @@ impl Fixture {
         fs::create_dir(&work).unwrap();
         let executable = if hold_gate {
             let wrapper = root.path().join("supervisor");
-            fs::write(
+            fake_exec::write_executable(
                 &wrapper,
                 format!(
                     "#!/bin/sh\nexport CANTERLOT_FAULT_HOLD_AT=before_gate\nexec '{}' \"$@\"\n",
                     env!("CARGO_BIN_EXE_canterlot-worker")
                 ),
-            )
-            .unwrap();
-            fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+                0o700,
+            );
             wrapper
         } else {
             env!("CARGO_BIN_EXE_canterlot-worker").into()
