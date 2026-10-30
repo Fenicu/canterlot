@@ -1,5 +1,6 @@
 use crate::containment::{Containment, ContainmentError};
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
+use canterlot_proto::worker::v1::LimitWindow as ProtoLimitWindow;
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -193,9 +194,26 @@ pub struct ModelUsage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitWindow {
-    FiveHour,
-    Weekly,
+    // Значения берутся из proto: приведение `as i32` не может дать чужое окно.
+    FiveHour = ProtoLimitWindow::FiveHour as isize,
+    Weekly = ProtoLimitWindow::Weekly as isize,
 }
+
+impl From<LimitWindow> for ProtoLimitWindow {
+    fn from(window: LimitWindow) -> Self {
+        match window {
+            LimitWindow::FiveHour => Self::FiveHour,
+            LimitWindow::Weekly => Self::Weekly,
+        }
+    }
+}
+
+impl From<LimitWindow> for i32 {
+    fn from(window: LimitWindow) -> Self {
+        ProtoLimitWindow::from(window).into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LimitFact {
     Observed {

@@ -427,14 +427,7 @@ impl ClaudeCodeAdapter {
                 .into_iter()
                 .filter_map(|(window, observation)| {
                     observation.map(|(used, reset)| LimitObservation {
-                        window: match window {
-                            LimitWindow::FiveHour => {
-                                canterlot_proto::worker::v1::LimitWindow::FiveHour as i32
-                            }
-                            LimitWindow::Weekly => {
-                                canterlot_proto::worker::v1::LimitWindow::Weekly as i32
-                            }
-                        },
+                        window: window.into(),
                         used_permille: used.into(),
                         resets_at_ms: reset.unwrap_or_default(),
                         ..Default::default()
