@@ -574,17 +574,28 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
     }
 }
 
+/// Подписчик на весь процесс: при единственном `set_default` точка логирования, впервые
+/// сработавшая в параллельном тесте, выключается навсегда и журнал остаётся пустым.
+fn captured_logs() -> &'static LogBuffer {
+    static LOGS: std::sync::OnceLock<LogBuffer> = std::sync::OnceLock::new();
+    LOGS.get_or_init(|| {
+        let logs = LogBuffer::default();
+        tracing::subscriber::set_global_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(logs.clone())
+                .finish(),
+        )
+        .expect("one global subscriber");
+        logs
+    })
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
     const SECRET: &str = "hunter2-very-secret";
-    let logs = LogBuffer::default();
-    let _logs = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::TRACE)
-            .with_writer(logs.clone())
-            .finish(),
-    );
+    let logs = captured_logs();
     let f = Fixture::new(pool).await;
     let request = f
         .request(
