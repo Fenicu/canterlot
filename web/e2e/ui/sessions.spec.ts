@@ -158,7 +158,7 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
     }
   });
   hub.flush();
-  await expect(page.locator(`[data-session="${ids.plain}"]`)).toContainText('Есть непрочитанное');
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toContainText('Непрочитанных: 3');
   api.counts = { ...api.counts, all: 11 };
   hub.append('conversations', {
     kind: 'conversation_updated',
@@ -191,7 +191,7 @@ test('phone_navigation_list_chat_back_preserves_list_scroll', async ({ page }) =
   });
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(100);
   await page.getByRole('link', { name: /Глава/ }).click();
-  await page.getByRole('link', { name: 'Назад' }).click();
+  await page.getByRole('link', { name: 'Все сессии' }).click();
   await expect(page.locator('[data-list-ready]')).toBeVisible();
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(100);
 });

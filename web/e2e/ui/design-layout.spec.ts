@@ -120,3 +120,67 @@ test.describe('строки инструментов и сессий', () => {
     }
   });
 });
+
+test.describe('шапка и сообщения', () => {
+  test('phone_header_has_one_back_control_and_a_full_width_title_row', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { hub, id } = await boot(page);
+    await expect(page.getByRole('link', { name: 'Назад' })).toHaveCount(0);
+    await expect(page.getByRole('link', { name: 'Все сессии' })).toHaveCount(1);
+    hub.append(`conversation:${id}`, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'waiting_for_user', evidence: { question: 'Что делать, если курсор старше журнала событий и повтор уже невозможен?' }, since: new Date().toISOString() }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: new Date().toISOString(), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'default' }, crunch: { enabled: false } } });
+    hub.flush();
+    await expect(page.locator('.state-chip .state-text')).toHaveText('Ждёт ответа');
+    const sizes = await page.locator('.chat-header').evaluate((node) => ({
+      title: node.querySelector('.header-title')!.getBoundingClientRect().width,
+      chip: node.querySelector('.state-chip')!.getBoundingClientRect().height,
+      bar: node.querySelector('.topbar')!.getBoundingClientRect().height
+    }));
+    expect(sizes.title).toBeGreaterThan(190);
+    expect(sizes.chip).toBeLessThan(24);
+    expect(sizes.bar).toBeLessThan(70);
+    await expect(page.locator('.chat-header')).not.toContainText('курсор старше');
+  });
+
+  test('bubbles_keep_a_gutter_sit_right_and_only_the_last_input_shows_the_working_track', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { hub, api, id } = await boot(page);
+    const input = (text: string, seq: string) => ({ kind: 'input', id: api.id(), idempotency_key: `k-${seq}`, state: 'accepted', content: [{ type: 'text', text }], attachments: [], created_seq: seq, feed_seq: seq, created_at: new Date().toISOString() });
+    api.histories.set(id, [input('Первое', '1'), block(api, '2', { content: 'Ответ' }), input('Второе', '3'), block(api, '4', { content: 'Идёт', state: 'streaming' })] as never);
+    api.bindConversation(id);
+    await page.reload();
+    await expect(page.locator('article.bubble')).toHaveCount(2);
+    const boxes = await page.locator('article.bubble').evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect()).map(({ x, right }) => ({ x, right })));
+    for (const box of boxes) {
+      expect(box.x).toBeGreaterThan(8);
+      expect(box.right).toBeLessThanOrEqual(390 - 8);
+    }
+    await expect(page.locator('article.bubble').first()).toContainText('Принято агентом');
+    await expect(page.locator('article.bubble').first()).not.toContainText('Агент работает');
+    await expect(page.locator('article.bubble').nth(1).locator('.st-status')).toHaveText('Агент работает');
+    await expect(page.locator('[data-row]').nth(2)).toBeVisible();
+    await expect(page.getByText('Принято агентом', { exact: false })).toHaveCount(1);
+    void hub;
+  });
+
+  test('new_messages_pill_sits_at_the_bottom_centre_of_the_feed', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { hub, api, id } = await boot(page);
+    api.histories.set(id, Array.from({ length: 30 }, (_, index) => block(api, String(index - 30), { content: `Ответ ${index}\n\nЕщё абзац текста, чтобы лента прокручивалась.` })));
+    api.bindConversation(id);
+    await page.reload();
+    await expect(page.locator('[data-row]').first()).toBeVisible();
+    const feed = page.locator('.feed');
+    await expect.poll(() => feed.evaluate((node) => node.scrollHeight - node.clientHeight)).toBeGreaterThan(500);
+    await feed.evaluate((node) => { node.scrollTop -= 500; });
+    await page.waitForTimeout(200);
+    hub.append(`conversation:${id}`, { kind: 'block_started', conversation_id: id, payload: { block_id: api.id(), rev: 0, kind: 'text', input_command_id: null, parent_block_id: null, agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, approved_by: null } });
+    hub.flush();
+    const pill = page.getByRole('button', { name: 'К новым сообщениям' });
+    await expect(pill).toBeVisible();
+    const box = (await pill.boundingBox())!;
+    const wrap = (await page.locator('.feed-wrap').boundingBox())!;
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(Math.abs(box.x + box.width / 2 - (wrap.x + wrap.width / 2))).toBeLessThan(2);
+    expect(wrap.y + wrap.height - (box.y + box.height)).toBeLessThan(24);
+  });
+});

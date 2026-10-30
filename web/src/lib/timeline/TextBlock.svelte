@@ -30,20 +30,24 @@
     <Html html={chunk.html} />
   {/each}
   {#if rendered.tail.plain}
-    <div class="tail"><div use:appendText={rendered.tail.text ?? ''}></div></div>
+    <div class="tail"><div use:appendText={rendered.tail.text ?? ''}></div>{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
   {:else if rendered.tail.html}
-    <div class="tail"><Html html={rendered.tail.html} /></div>
+    <div class="tail"><Html html={rendered.tail.html} />{#if streaming}<span class="caret" aria-hidden="true"></span>{/if}</div>
+  {:else if streaming}
+    <span class="caret" aria-hidden="true"></span>
   {/if}
-  {#if streaming}<span class="caret" aria-hidden="true"></span>{/if}
 </div>
 
 <style>
   .text { min-width: 0; }
   .text :global(pre) { overflow-x: auto; max-width: 100%; }
+  .tail > :global(div), .tail > :global(div > p:last-child) { display: inline; }
   .caret {
     display: inline-block;
-    width: var(--hairline);
-    height: var(--s4);
+    width: var(--caret-width);
+    height: var(--caret-height);
+    margin-left: var(--s1);
+    vertical-align: text-bottom;
     background: var(--accent);
     animation-name: caret;
     animation-duration: var(--duration-caret);

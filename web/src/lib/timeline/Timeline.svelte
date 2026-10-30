@@ -50,6 +50,7 @@
   const today = $derived(dayStart(now));
   const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot }));
   const windowRows = $derived(rows.slice(range.start, range.end));
+  const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   let seenRows: string | null = null;
   $effect(() => {
     const next = rows.map((row) => row.key).join('\n');
@@ -316,11 +317,11 @@
     <div class="sentinel" use:sentinel></div>
     <div class="pad" style:height={`${range.padTop}px`}></div>
     {#each windowRows as row (row.key)}
-      <div class="row" data-row data-key={row.key} use:measure>
+      <div class="row" data-row data-kind={row.kind} data-key={row.key} use:measure>
         {#if row.kind === 'day'}
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
-          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming} />
+          <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
         {:else if row.kind === 'answer'}
           <AnswerCard entries={row.entries} all={chat.timeline.entries} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
@@ -337,8 +338,11 @@
 
 <style>
   .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
-  .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; }
+  .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--reading-max)) / 2 + var(--gutter))); padding-bottom: var(--s4); }
   .feed :global(*) { overflow-anchor: none; }
-  .day { margin: 0; }
-  .jump { position: absolute; }
+  .row { padding-top: var(--s3); }
+  .row[data-kind='input'] { padding-top: var(--s8); }
+  .row:first-of-type { padding-top: var(--s0); }
+  .day { margin: 0; padding-block: var(--s4) var(--s0); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+  .jump { position: absolute; bottom: var(--s4); left: 50%; translate: -50%; min-height: var(--target); padding-inline: var(--s8); border-radius: var(--radius-pill); background: var(--popover); color: var(--text); font-size: var(--fs-meta); white-space: nowrap; }
 </style>

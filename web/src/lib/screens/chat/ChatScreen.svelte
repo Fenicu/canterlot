@@ -189,10 +189,6 @@
 		max-width: none;
 	}
 
-	.screen :global(.feed) {
-		padding-inline: max(0%, calc((100% - var(--reading-max)) / 2));
-	}
-
 	.waiting-notice {
 		display: flex;
 		flex-direction: column;
@@ -218,7 +214,7 @@
 
 	.request-cards-slot,
 	.request-card-slot {
-		padding: var(--s3) var(--s4);
+		padding: var(--s3) var(--gutter);
 		box-sizing: border-box;
 		width: 100%;
 		display: flex;

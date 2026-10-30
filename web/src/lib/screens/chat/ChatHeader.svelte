@@ -3,6 +3,8 @@
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
+	import { chatStateLine } from './stateLine';
+	import Icon from '#lib/ui/Icon.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
 	import { stopSession, resumeSession, continueSessionQueue, startSessionExecution } from './controls';
@@ -47,6 +49,9 @@
 
 	const title = $derived(detail?.title || 'Сессия');
 	const color = $derived(colorVar(detail?.color ?? null));
+	const stateLine = $derived(chatStateLine(chat.activity as Activity | null, chat.phase, (chat.execution as { state?: string })?.state, now));
+	const TONE_MARK = { accent: '--accent', warning: '--warning', danger: '--danger' } as const;
+	const markColor = $derived(stateLine.tone === 'default' ? color : TONE_MARK[stateLine.tone]);
 	const harnessTitle = $derived(detail?.harness?.title || 'Claude Code');
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
@@ -126,20 +131,30 @@
 			class="icon-button back"
 			href={resolve('sessions')}
 			aria-label="Все сессии"
-		><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7"></path></svg></a>
+		><Icon name="back" /></a>
 
-		<div class="grow header-info">
-			<div class="row title-row">
-				<span class="mark" style:background="var({color})"></span>
-				<h1 class="header-title">{title}</h1>
-				<StateChip
-					activity={chat.activity as Activity | null}
-					phase={chat.phase}
-					executionState={(chat.execution as { state?: string })?.state}
-					now={now}
-				/>
+		<div class="header-info">
+			<div class="title-row">
+				{#if detail}
+					<span class="mark" style:background="var({markColor})"></span>
+					<h1 class="header-title">{title}</h1>
+				{:else}
+					<span class="skeleton" style:width="var(--bar-56)"></span>
+				{/if}
 			</div>
-			<div class="subtitle" title={subtitle}>{subtitle}</div>
+			<div class="sub-row">
+				{#if detail}
+					<StateChip
+						activity={chat.activity as Activity | null}
+						phase={chat.phase}
+						executionState={(chat.execution as { state?: string })?.state}
+						now={now}
+					/>
+					<div class="subtitle" title={subtitle}>{subtitle}</div>
+				{:else}
+					<span class="skeleton" style:width="var(--bar-74)"></span>
+				{/if}
+			</div>
 		</div>
 
 		<div class="header-actions">
@@ -152,11 +167,7 @@
 				aria-expanded={menuOpen}
 				onclick={() => { menuOpen = !menuOpen; confirmingForce = false; }}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true">
-					<circle cx="5" cy="12" r="1.5"></circle>
-					<circle cx="12" cy="12" r="1.5"></circle>
-					<circle cx="19" cy="12" r="1.5"></circle>
-				</svg>
+				<Icon name="more" />
 			</button>
 
 			<button
@@ -166,7 +177,7 @@
 				aria-label="Сменить тему"
 				onclick={() => theme.toggle()}
 			>
-				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 14A9 9 0 0 1 10 3a9 9 0 1 0 10 11Z"></path></svg>
+				<Icon name={theme.effective === 'dark' ? 'sun' : 'moon'} />
 			</button>
 		</div>
 	</div>
@@ -291,23 +302,29 @@
 		display: flex;
 		align-items: center;
 		gap: var(--s2);
-		padding: var(--s2) var(--s4);
-		margin: var(--s5) var(--s6) var(--s3);
+		min-width: 0;
+		padding: var(--s2) var(--s3);
+		margin: var(--s5) var(--gutter) var(--s3);
 		border-radius: var(--radius-pill);
 		background: var(--surface);
 		min-height: var(--target);
 	}
 	.header-info {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: var(--s1);
 		min-width: 0;
 	}
 	.title-row {
 		display: flex;
 		align-items: center;
-		gap: var(--s2);
+		gap: var(--s3);
 		min-width: 0;
 	}
 	.header-title {
 		margin: 0;
+		min-width: 0;
 		font-size: var(--fs-title);
 		font-weight: var(--weight-semibold);
 		white-space: nowrap;
@@ -321,8 +338,16 @@
 		border-radius: var(--radius-round);
 		flex-shrink: 0;
 	}
+	.sub-row {
+		display: flex;
+		align-items: center;
+		gap: var(--s3);
+		min-width: 0;
+	}
 	.subtitle {
-		font-size: var(--fs-meta);
+		flex: 1 1 0;
+		min-width: 0;
+		font-size: var(--fs-sm);
 		color: var(--muted);
 		white-space: nowrap;
 		overflow: hidden;
@@ -330,9 +355,9 @@
 	}
 	.header-actions {
 		display: flex;
+		flex: none;
 		align-items: center;
 		gap: var(--s1);
-		margin-left: auto;
 	}
 	.icon-button {
 		background: var(--transparent);
@@ -342,31 +367,20 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		flex: none;
 		width: var(--target);
 		height: var(--target);
-		border-radius: var(--radius-card);
-	}
-	.icon-button svg {
-		width: var(--icon);
-		height: var(--icon);
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 2;
-	}
-	.grow {
-		flex: 1;
+		border-radius: var(--radius-round);
 	}
 	.header-limits {
-		padding: 0 var(--s4) var(--s2);
+		padding: 0 var(--gutter) var(--s2);
 	}
 	.session-dropdown {
 		position: absolute;
 		right: var(--s4);
 		top: calc(100% + var(--s1));
-		background: var(--surface);
-		border: var(--hairline) solid var(--line);
+		background: var(--popover);
 		border-radius: var(--radius-card);
-		box-shadow: var(--shadow);
 		display: flex;
 		flex-direction: column;
 		min-width: var(--preview-height);

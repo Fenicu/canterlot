@@ -23,9 +23,9 @@ export function deliveryLabel(
     case "transmitting":
       return "Передаётся";
     case "acceptance_unconfirmed":
-      return "Принято";
+      return "Приём не подтверждён";
     case "accepted":
-      return agentWorking ? "агент работает" : "доставлено";
+      return agentWorking ? "Агент работает" : "Принято агентом";
     case "rejected":
       return "Отклонено";
     case "cancelled":
@@ -52,14 +52,22 @@ export function deliveryIndex(state: InputUiState): number {
   }
 }
 
-export function liveLineText(phase: string, elapsedMs: number): string {
+export function liveLineText(
+  phase: string,
+  elapsedMs: number,
+  tool = "",
+): string {
   const whole = Math.max(0, Math.floor(elapsedMs / 1000) * 1000);
   const label =
     phase === "error"
       ? "Ошибка в ответе"
       : phase === "done"
         ? "Ответ завершён"
-        : "Генерирует";
+        : phase === "tool"
+          ? `Выполняет ${tool || "инструмент"}`
+          : phase === "thinking"
+            ? "Рассуждает"
+            : "Генерирует";
   return `${label} · ${fmt.duration(whole)}`;
 }
 

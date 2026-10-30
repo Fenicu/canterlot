@@ -1,6 +1,7 @@
 <script lang="ts">
-	import { activityLine, type Activity } from '#lib/screens/sessions/activityText.js';
+	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import { announce } from '#lib/a11y/announce.js';
+	import { chatStateLine } from './stateLine';
 
 	let {
 		activity = null,
@@ -14,22 +15,7 @@
 		now?: number;
 	} = $props();
 
-	const effectiveActivity = $derived.by(() => {
-		if (executionState === 'stopping') {
-			return { state: 'working' as const, evidence: { phase: 'stopping' } };
-		}
-		if (!activity) return { state: 'idle' as const };
-		const p = phase?.phase;
-		if (p && (!activity.evidence || !activity.evidence.phase)) {
-			return {
-				...activity,
-				evidence: { ...(activity.evidence ?? {}), phase: p }
-			};
-		}
-		return activity;
-	});
-
-	const line = $derived(activityLine(effectiveActivity, { now }));
+	const line = $derived(chatStateLine(activity, phase, executionState, now));
 
 	let prevText: string | null = null;
 	$effect(() => {
@@ -41,7 +27,7 @@
 	});
 </script>
 
-<div class="state-chip tone-{line.tone}" class:live={line.live}>
+<div class="state-chip tone-{line.tone}" class:live={line.live} class:sr-only={line.quiet}>
 	{#if line.live}
 		<span class="live-dot" aria-hidden="true"></span>
 	{/if}
@@ -52,19 +38,26 @@
 	.state-chip {
 		display: inline-flex;
 		align-items: center;
+		flex: 0 1 auto;
 		gap: var(--s2);
-		font-size: var(--fs-meta);
+		min-width: 0;
+		font-size: var(--fs-sm);
 		line-height: var(--lh-tight);
 		color: var(--muted);
 	}
 	.state-chip.tone-accent {
-		color: var(--accent);
+		color: var(--accent-link);
 	}
 	.state-chip.tone-warning {
 		color: var(--warning);
 	}
 	.state-chip.tone-danger {
 		color: var(--danger);
+	}
+	.state-text {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.live-dot {
 		width: var(--mark);

@@ -313,7 +313,7 @@ test('user_bubble_marks_follow_input_state', async ({ page }) => {
   api.histories.set(id, states.map((state, index) => inputItem(api, state, state, String(index + 1), state)));
   api.bindConversation(id);
   await page.reload();
-  for (const text of ['В очереди', 'На машине', 'Передаётся', 'Принято', 'доставлено', 'Отклонено']) {
+  for (const text of ['В очереди', 'На машине', 'Передаётся', 'Приём не подтверждён', 'Принято агентом', 'Отклонено']) {
     await expect(page.getByText(text, { exact: false }).first()).toBeVisible();
   }
 });
@@ -345,10 +345,10 @@ test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) =>
   await expect(page.getByText('сбор оборвался')).toBeVisible();
 });
 
-test('answer_card_header_shows_agent_time_model_and_info_button', async ({ page }) => {
+test('answer_card_header_shows_agent_time_and_info_button_and_leaves_the_model_to_the_sheet', async ({ page }) => {
   await boot(page, 1);
-  await expect(page.locator('header')).toContainText('agent');
-  await expect(page.locator('header')).toContainText('opus');
+  await expect(page.locator('header')).toContainText('Agent');
+  await expect(page.locator('header')).not.toContainText('opus');
   await expect(page.getByRole('button', { name: 'Сведения о ходе' })).toBeVisible();
 });
 

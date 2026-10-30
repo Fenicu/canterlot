@@ -177,10 +177,6 @@
       <SessionList main={onSessions} />
     {/if}
 
-    {#if onChat}
-      <a class="back" href={resolve('sessions')}>Назад</a>
-    {/if}
-
     {#if !onSessions}
       <div class="page">{@render children()}</div>
     {/if}
@@ -233,14 +229,6 @@
     height: 100%;
     display: flex;
     flex-direction: column;
-  }
-
-  .back {
-    display: inline-flex;
-    align-items: center;
-    min-height: var(--target);
-    padding: var(--s4) var(--s6);
-    color: var(--accent-link);
   }
 
   .panes {
