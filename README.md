@@ -598,7 +598,7 @@ chat.example {
             path /_share
         }
         handle @share {
-            redir /share?error=sw_inactive 303
+            redir * /share?error=sw_inactive 303
         }
         handle {
             @fresh path /service-worker.js /manifest.webmanifest
@@ -613,7 +613,7 @@ chat.example {
 }
 ```
 
-WSS проходит через тот же reverse_proxy. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive`; объяснение и выбор сессии принадлежат Task 9b. Активный worker сохраняет файлы и текст в `share_inbox` текущего владельца на 24 часа и отвечает `303` на `/share?id=…`. Текст и URL остаются полями черновика, вложениями становятся только файлы. Для manifest используется `crossorigin="use-credentials"`. Worker запрашивает ресурсы с credentials, отклоняет auth redirect и приватные ответы. `service-worker.js` обслуживается как JavaScript, manifest как `application/manifest+json`; для обоих обязателен `Cache-Control: no-cache`, для worker `Service-Worker-Allowed: /`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
+WSS проходит через тот же reverse_proxy. В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода. `POST /_share` без активного service worker получает `303` на `/share?error=sw_inactive`; объяснение и выбор сессии принадлежат Task 9b. Активный worker сохраняет файлы и текст в `share_inbox` текущего владельца на 24 часа и отвечает `303` на `/share?id=…`. Текст и URL остаются полями черновика, вложениями становятся только файлы. Для manifest используется `crossorigin="use-credentials"`. Worker запрашивает ресурсы с credentials, отклоняет auth redirect и приватные ответы. `service-worker.js` обслуживается как JavaScript, manifest как `application/manifest+json`; для обоих обязателен `Cache-Control: no-cache`, для worker `Service-Worker-Allowed: /`. Приёмка настроенной публикации включает `scripts/check-proxy.sh` (параметры в разделе HTTP); хаб сохраняет проверку trusted_proxies, Origin и proxy_secret_file. Реальный деплой эта задача не выполняет.
 
 ### Установка и обновление
 

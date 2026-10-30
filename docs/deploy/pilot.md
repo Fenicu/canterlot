@@ -465,7 +465,7 @@ chat.example.com {
             path /_share
         }
         handle @share {
-            redir /share?error=sw_inactive 303
+            redir * /share?error=sw_inactive 303
         }
 
         # 6. Раздача статики PWA (service-worker и manifest без кэширования)
@@ -479,6 +479,8 @@ chat.example.com {
     }
 }
 ```
+
+В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода (`redir /share?error=sw_inactive 303` даёт `302` с заголовком `Location: 303`).
 
 ### 4.3. Приёмка прокси скриптом `check-proxy.sh`
 
