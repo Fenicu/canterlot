@@ -2,47 +2,26 @@
   import Html from '#lib/render/Html.svelte';
   import { createMarkdown } from '#lib/render/markdown.js';
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
-  import { prefersReducedMotion } from '#lib/motion.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
-  import { revealedText } from '#lib/timeline/present.js';
 
   let { block }: { block: BlockModel } = $props();
   const engine = new StreamingMarkdown(createMarkdown());
-  let shown = $state('');
-  let target = '';
-  let receivedAt = 0;
 
   const streaming = $derived(block.state === 'streaming' || block.state === 'stale');
-  const rendered = $derived(engine.update(shown, !streaming));
+  // Дельта рисуется в том же кадре, в котором её применил пакет событий.
+  const rendered = $derived(engine.update(block.text, !streaming));
 
-  $effect(() => {
-    const next = block.text;
-    const done = block.state === 'final' || block.state === 'incomplete';
-    const frame = requestAnimationFrame(() => {
-      if (next !== target) {
-        target = next;
-        receivedAt = performance.now();
+  /** Длинный простой хвост растёт дописыванием в тот же текстовый узел: браузер не пересобирает абзац заново. */
+  function appendText(node: HTMLElement, initial: string) {
+    const text = document.createTextNode(initial);
+    node.append(text);
+    return {
+      update(next: string) {
+        const shown = text.data;
+        if (next.length > shown.length && next.startsWith(shown)) text.appendData(next.slice(shown.length));
+        else if (next !== shown) text.data = next;
       }
-      const scale = prefersReducedMotion() ? 0 : motionScale();
-      const elapsed = performance.now() - receivedAt;
-      const value = done || scale === 0 ? next : revealedText(next, elapsed, scale);
-      if (value !== shown) shown = value;
-      if (value !== next) requestAnimationFrame(() => { shown = next; });
-    });
-    return () => cancelAnimationFrame(frame);
-  });
-
-  let scaleCache = 1;
-  let scaleAt = 0;
-
-  function motionScale(): number {
-    const now = performance.now();
-    if (now - scaleAt < 500) return scaleCache;
-    scaleAt = now;
-    const raw = getComputedStyle(document.documentElement).getPropertyValue('--motion-scale').trim();
-    const value = Number(raw);
-    scaleCache = Number.isFinite(value) ? value : 1;
-    return scaleCache;
+    };
   }
 </script>
 
@@ -50,7 +29,9 @@
   {#each rendered.chunks as chunk (chunk.id)}
     <Html html={chunk.html} />
   {/each}
-  {#if rendered.tail.html}
+  {#if rendered.tail.plain}
+    <div class="tail"><div use:appendText={rendered.tail.text ?? ''}></div></div>
+  {:else if rendered.tail.html}
     <div class="tail"><Html html={rendered.tail.html} /></div>
   {/if}
   {#if streaming}<span class="caret" aria-hidden="true"></span>{/if}

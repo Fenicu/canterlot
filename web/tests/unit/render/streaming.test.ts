@@ -271,4 +271,14 @@ describe('streaming markdown', () => {
     expect(resSpecial.tail.html).toContain('&lt;b&gt;dangerous&lt;/b&gt;');
     expect(resSpecial.tail.html).not.toContain('<b>dangerous</b>');
   });
+
+  test('plain_tail_carries_the_raw_text_for_a_text_node', () => {
+    const sm = new StreamingMarkdown(createMarkdown());
+    const raw = '<i>сырой</i> ' + 'Я'.repeat(5000);
+    const res = sm.update(raw, false);
+    expect(res.stats.tailBytes).toBe(new TextEncoder().encode(raw).length);
+    expect(res.tail.plain).toBe(true);
+    expect(res.tail.text).toBe(raw);
+    expect(sm.update('коротко', false).tail.text).toBeUndefined();
+  });
 });

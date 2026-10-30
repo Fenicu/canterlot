@@ -8,6 +8,8 @@ export interface Chunk {
 export interface Tail {
   html: string;
   plain: boolean;
+  /** Сырой текст простого хвоста: его можно дописывать в один текстовый узел без разбора HTML. */
+  text?: string;
 }
 
 export interface RenderStats {
@@ -20,6 +22,12 @@ export interface StreamingResult {
   chunks: Chunk[];
   tail: Tail;
   stats: RenderStats;
+}
+
+const encoder = new TextEncoder();
+
+function utf8Bytes(s: string): number {
+  return /[\u0080-\uffff]/.test(s) ? encoder.encode(s).length : s.length;
 }
 
 function escapeHtml(s: string): string {
@@ -283,13 +291,19 @@ export class StreamingMarkdown {
     }
 
     const tailText = text.slice(this.chunkEnd);
-    const tailBytes = new TextEncoder().encode(tailText).length;
+    const tailBytes = utf8Bytes(tailText);
 
     let tail: Tail;
     if (tailText.length === 0) {
       tail = { html: '', plain: false };
     } else if (tailBytes > 8192) {
-      tail = { html: escapeHtml(tailText), plain: true };
+      tail = {
+        plain: true,
+        text: tailText,
+        get html() {
+          return escapeHtml(tailText);
+        }
+      };
     } else {
       tail = { html: this.renderer.render(tailText), plain: false };
       this.totalRendered++;
