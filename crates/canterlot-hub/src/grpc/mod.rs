@@ -293,6 +293,16 @@ impl HubGrpc {
         self
     }
 
+    /// Приём заметил отзыв раньше слушателя: сессия помечается отозванной до закрытия потока,
+    /// иначе парный поток закончится без `Unauthenticated`.
+    fn revoked_by_ingest(&self, machine_id: Uuid, connection_id: Uuid, status: Status) -> Status {
+        if status.code() == tonic::Code::Unauthenticated && status.message() == "credential_revoked"
+        {
+            self.registry.revoke(machine_id, connection_id);
+        }
+        status
+    }
+
     async fn admit_control(
         &self,
         machine_id: Uuid,

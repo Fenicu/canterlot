@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use canterlot_hub::{
     config::HubTimers,
@@ -44,6 +44,14 @@ fn timers() -> HubTimers {
 
 impl Host {
     async fn start(pool: PgPool, timers: HubTimers) -> Self {
+        Self::start_with(pool, timers, None).await
+    }
+
+    async fn start_with(
+        pool: PgPool,
+        timers: HubTimers,
+        ingest: Option<Arc<dyn grpc::Ingest>>,
+    ) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let installation = installation::init(&pool, &dir.path().join("manifest"))
             .await
@@ -52,7 +60,10 @@ impl Host {
             .await
             .unwrap();
         let registry = Registry::new(timers.clone());
-        let state = HubGrpc::new(pool, registry.clone(), installation, timers);
+        let mut state = HubGrpc::new(pool, registry.clone(), installation, timers);
+        if let Some(ingest) = ingest {
+            state.ingest = ingest;
+        }
         let pki = test_pki();
         let cert = pki.server_cert_pem.clone();
         let key = pki.server_key_pem.clone();
@@ -1076,6 +1087,118 @@ async fn journal_ingestion_acks_both_streams(pool: PgPool) {
             (Uuid::parse_str(&sj_journal).unwrap(), "sj".into(), 1)
         ]
     );
+}
+
+/// Приём отказывает по отозванному ключу, хотя в базе ключ ещё действует: слушатель отзыва и
+/// секундный обход не видят отзыва и не могут опередить отказ, сессию помечает отозванной только хаб.
+struct RevokedIngest;
+
+#[tonic::async_trait]
+impl grpc::Ingest for RevokedIngest {
+    async fn reconcile(&self, _: Uuid, _: ReconcileReport) -> Result<(), tonic::Status> {
+        Ok(())
+    }
+
+    async fn cj_records(
+        &self,
+        _: Uuid,
+        _: &[u8],
+        _: JournalRecords,
+    ) -> Result<JournalRangeAck, tonic::Status> {
+        Err(tonic::Status::unauthenticated("credential_revoked"))
+    }
+
+    async fn sj_records(
+        &self,
+        _: Uuid,
+        _: &[u8],
+        _: JournalRecords,
+    ) -> Result<JournalRangeAck, tonic::Status> {
+        Err(tonic::Status::unauthenticated("credential_revoked"))
+    }
+}
+
+async fn ingest_refusal_ends_both_streams_as_revoked(pool: PgPool, on_data: bool) {
+    let host = Host::start_with(pool.clone(), timers(), Some(Arc::new(RevokedIngest))).await;
+    let connection = Uuid::now_v7();
+    let hello = host.hello(host.machine.machine_id, connection, StreamKind::Control);
+    let batch = JournalRecords {
+        journal_id: if on_data {
+            Uuid::now_v7().to_string()
+        } else {
+            hello.cj_journal_id.clone()
+        },
+        records: vec![JournalRecord {
+            seq: 1,
+            body: Some(RecordBody {
+                body: Some(record_body::Body::CommandStored(CommandStored {
+                    command_id: Uuid::now_v7().to_string(),
+                    dispatch_attempt: 0,
+                    machine_time_ms: 0,
+                })),
+            }),
+        }],
+    };
+    let (control_tx, mut control) = host.control(hello).await;
+    accepted(&mut control).await;
+    let (data_tx, mut data) = host
+        .data(
+            host.hello(host.machine.machine_id, connection, StreamKind::Data),
+            &host.machine.token,
+        )
+        .await;
+    data_accepted(&mut data).await;
+    let active: i64 = sqlx::query_scalar(
+        "select count(*) from machine_credentials where machine_id = $1 and revoked_at is null",
+    )
+    .bind(host.machine.machine_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+    if on_data {
+        send(
+            &data_tx,
+            DataUp {
+                msg: Some(data_up::Msg::SjRecords(batch)),
+            },
+        )
+        .await;
+    } else {
+        send(
+            &control_tx,
+            ControlUp {
+                msg: Some(control_up::Msg::CjRecords(batch)),
+            },
+        )
+        .await;
+    }
+    let (control, data) = timeout(WAIT, async {
+        tokio::join!(control.message(), data.message())
+    })
+    .await
+    .unwrap();
+    assert_eq!(control.unwrap_err().code(), Code::Unauthenticated);
+    assert_eq!(data.unwrap_err().code(), Code::Unauthenticated);
+    assert!(
+        host.registry
+            .session_info(host.machine.machine_id)
+            .is_none()
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn control_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated(
+    pool: PgPool,
+) {
+    ingest_refusal_ends_both_streams_as_revoked(pool, false).await;
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn data_ingest_refusal_for_revoked_credential_ends_both_streams_unauthenticated(
+    pool: PgPool,
+) {
+    ingest_refusal_ends_both_streams_as_revoked(pool, true).await;
 }
 
 #[sqlx::test(migrations = "./migrations")]

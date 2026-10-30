@@ -118,7 +118,7 @@ impl WorkerData for HubGrpc {
                 let message = match next {
                     Ok(ack) => {
                         let Some(ack) = ack else { break; };
-                        let Some(ack) = ack.map_err(|error| session_log.error(error))? else { continue; };
+                        let Some(ack) = ack.map_err(|error| session_log.error(state.revoked_by_ingest(machine_id, connection_id, error)))? else { continue; };
                         #[cfg(feature = "fault-injection")]
                         if state.faults.ack(&state.pool, machine_id, &ack).await { continue; }
                         yield checked(DataDown { msg: Some(data_down::Msg::SjAck(ack)) })?;

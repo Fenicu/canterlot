@@ -108,7 +108,7 @@ impl WorkerControl for HubGrpc {
                 match next {
                     Next::Ack(ack) => {
                         let Some(ack) = ack else { break; };
-                        let Some(ack) = ack.map_err(|error| session_log.error(error))? else {
+                        let Some(ack) = ack.map_err(|error| session_log.error(state.revoked_by_ingest(machine_id, connection_id, error)))? else {
                             state.registry.mark_reconciled(machine_id, connection_id);
                             continue;
                         };

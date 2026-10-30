@@ -716,6 +716,7 @@ async fn live_revocation_closes_both_streams_and_blocks_delivery_and_ingest(pool
         .await
         .unwrap_err();
     assert_eq!(error.code(), tonic::Code::Unauthenticated);
+    assert_eq!(error.message(), "credential_revoked");
     // Проверяем сетевой путь, даже если уведомление уже закрыло входную очередь.
     let _ = worker
         .control
