@@ -385,6 +385,19 @@ fn settings_become_turn_start_overrides() {
         t,
         Translated::SettingsUpdated(settings) if settings["model"] == "gpt-6-luna"
     )));
+    // Настройки субагента не трогают модель и политику основного потока.
+    let mut child = frames.clone();
+    child["params"]["threadId"] = json!("thread-child");
+    child["params"]["threadSettings"]["model"] = json!("gpt-6-other");
+    let out = translator.feed(
+        child["method"].as_str().unwrap(),
+        &child.get("params").cloned().unwrap_or(Value::Null),
+    );
+    assert!(
+        !out.iter()
+            .any(|t| matches!(t, Translated::SettingsUpdated(_))),
+        "child thread update ignored"
+    );
 }
 
 fn codex_settings_updated() -> Value {

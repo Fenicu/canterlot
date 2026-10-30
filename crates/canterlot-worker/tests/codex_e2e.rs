@@ -691,6 +691,30 @@ async fn settings_update_sandbox_policy_reaches_the_cli_mark() {
 }
 
 #[tokio::test]
+async fn child_thread_settings_update_keeps_the_main_thread_policy() {
+    let mut fake = Fake::new(tool_turn(vec![
+        note(
+            "thread/settings/updated",
+            json!({"threadId": "thread-child", "threadSettings": {
+                "approvalPolicy": "never",
+                "sandboxPolicy": {"type": "dangerFullAccess"}}}),
+        ),
+        started(command_item("exec-c", "inProgress", None)),
+        completed(command_item("exec-c", "completed", Some("ok"))),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    let starts = tool_starts(&events);
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    assert_eq!(
+        starts[0].1.as_deref(),
+        Some("cli_policy"),
+        "subagent settings do not replace the main thread policy"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn replay_question_end_to_end() {
     let mut fake = Fake::new(evidence_slice("question_default_mode", 1, 41));
     fake.start().await;
