@@ -105,7 +105,7 @@ async fn run(args: Args) -> Result<(), String> {
             db::MIGRATOR
                 .run(&pool)
                 .await
-                .map_err(|_| "migration_error".to_owned())?;
+                .map_err(|error| db::migration_error_code(&error))?;
             installation::init(&pool, &config.manifest)
                 .await
                 .map_err(|error| error.to_string())?;
@@ -126,7 +126,7 @@ async fn run(args: Args) -> Result<(), String> {
             db::MIGRATOR
                 .run(&pool)
                 .await
-                .map_err(|_| "migration_error".to_owned())?;
+                .map_err(|error| db::migration_error_code(&error))?;
             let version: i64 = sqlx::query_scalar(
                 "select coalesce(max(version), 0) from _sqlx_migrations where success",
             )
