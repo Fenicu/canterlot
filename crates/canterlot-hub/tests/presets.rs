@@ -909,3 +909,81 @@ async fn delete_with_pending_reference_takes_queue_before_list_counter(pool: PgP
             .unwrap();
     assert_eq!(pending, json!({}));
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idempotency_fingerprints_preset_text_and_stores_no_text(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f.create("text-key", "Отпечаток", "первый-секрет").await;
+    assert_eq!(created["text"], "первый-секрет");
+    // Тот же ключ и та же длина, другой текст: правка не должна потеряться молча.
+    let other = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("text-key"),
+            Some(json!({"title": "Отпечаток", "text": "второй-секрет"})),
+        )
+        .await;
+    assert_eq!(
+        other.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&other.body)
+    );
+    assert_eq!(Fx::error_code(&other), "idempotency_conflict");
+    let replay = f
+        .request(
+            Method::POST,
+            "/api/v1/presets",
+            Some("text-key"),
+            Some(json!({"title": "Отпечаток", "text": "первый-секрет"})),
+        )
+        .await;
+    assert_eq!(replay.status.as_u16(), 201);
+    assert_eq!(replay.json::<Value>()["text"], "первый-секрет");
+    let id = created["id"].as_str().unwrap();
+    let path = format!("/api/v1/presets/{id}");
+    let patch = |text: &str| json!({"text": text, "base_revision": 1});
+    let updated = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-А")),
+        )
+        .await;
+    assert_eq!(updated.status.as_u16(), 200);
+    let other = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-Б")),
+        )
+        .await;
+    assert_eq!(other.status.as_u16(), 409);
+    assert_eq!(Fx::error_code(&other), "idempotency_conflict");
+    let replay = f
+        .request(
+            Method::PATCH,
+            &path,
+            Some("patch-key"),
+            Some(patch("новый-текст-А")),
+        )
+        .await;
+    assert_eq!(replay.status.as_u16(), 200);
+    assert_eq!(replay.json::<Value>()["text"], "новый-текст-А");
+    let stored: Vec<String> = sqlx::query_scalar(
+        "select response::text from idempotency_keys where operation in ('create_preset', 'update_preset')",
+    )
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(stored.len(), 2);
+    for response in stored {
+        assert!(
+            !response.contains("секрет") && !response.contains("новый-текст"),
+            "preset text kept in idempotency storage: {response}"
+        );
+    }
+}

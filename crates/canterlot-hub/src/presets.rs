@@ -578,9 +578,9 @@ pub async fn create(
     actor: Actor,
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
-    let request = json!({"title": body.title, "description": body.description, "text_bytes": body.text.len()});
+    let request = json!({"title": body.title, "description": body.description, "text_sha256": text_digest(&body.text)});
     let actor_conversation = actor.conversation_id();
-    Ok(idempotency::run_in_tx(
+    let outcome = idempotency::run_in_tx(
         pool,
         owner,
         key,
@@ -593,11 +593,38 @@ pub async fn create(
                 description: body.description.clone(),
                 text: body.text.clone(),
             };
-            Box::pin(create_in_tx(conn, owner, body, actor, correlation))
+            Box::pin(async move {
+                without_text(create_in_tx(conn, owner, body, actor, correlation).await)
+            })
         },
     )
-    .await?
-    .value)
+    .await?;
+    with_text(pool, outcome.value).await
+}
+
+/// Отпечаток текста для ключа идемпотентности: длины мало, чтобы отличить правку.
+fn text_digest(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+/// Сохранённый ответ ключа идемпотентности не держит текст пресета (хранится 7 дней
+/// и пережил бы удаление пресета); текст берётся из строки версии.
+fn without_text(result: Result<Preset, PresetError>) -> Result<Preset, PresetError> {
+    result.map(|preset| Preset {
+        text: None,
+        ..preset
+    })
+}
+
+async fn with_text(pool: &PgPool, mut preset: Preset) -> Result<Preset, PresetError> {
+    let id = Uuid::parse_str(&preset.summary.id).map_err(|_| PresetError::NotFound)?;
+    let revision = preset.summary.revision.ok_or(PresetError::NotFound)?;
+    preset.text = Some(current_text(&mut *pool.acquire().await?, id, revision).await?);
+    Ok(preset)
 }
 
 async fn update_in_tx(
@@ -704,9 +731,9 @@ pub async fn update(
     correlation: Uuid,
 ) -> Result<Preset, PresetError> {
     let request = json!({"id": id, "title": patch.title, "description": patch.description,
-        "text_bytes": patch.text.as_ref().map(|t| t.len()), "base_revision": patch.base_revision});
+        "text_sha256": patch.text.as_deref().map(text_digest), "base_revision": patch.base_revision});
     let actor_conversation = actor.conversation_id();
-    Ok(idempotency::run_in_tx(
+    let outcome = idempotency::run_in_tx(
         pool,
         owner,
         key,
@@ -720,11 +747,13 @@ pub async fn update(
                 text: patch.text.clone(),
                 base_revision: patch.base_revision,
             };
-            Box::pin(update_in_tx(conn, owner, id, patch, actor, correlation))
+            Box::pin(async move {
+                without_text(update_in_tx(conn, owner, id, patch, actor, correlation).await)
+            })
         },
     )
-    .await?
-    .value)
+    .await?;
+    with_text(pool, outcome.value).await
 }
 
 /// Мягкое удаление: строки и версии остаются, идущие сессии держат свою копию.
