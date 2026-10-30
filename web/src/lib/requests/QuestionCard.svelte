@@ -95,6 +95,20 @@
   const questions = $derived(normalizeQuestions(request.payload));
   const isDisabled = $derived(disabled || request.state !== 'open');
 
+  function answerOf(q: QuestionDef): string | string[] {
+    const custom = customValues[q.id]?.trim() ?? '';
+    if (q.multi_select) {
+      const picked = selectedMulti[q.id] ?? [];
+      return custom && !picked.includes(custom) ? [...picked, custom] : [...picked];
+    }
+    return custom || selectedSingle[q.id] || '';
+  }
+
+  // Хаб отклоняет пустой ответ: «Ответить» доступна, только когда на каждый вопрос есть ответ.
+  const complete = $derived(
+    questions.length > 0 && questions.every((q) => answerOf(q).length > 0)
+  );
+
   function disableIf(node: HTMLButtonElement, val: boolean) {
     node.disabled = val;
     return {
@@ -162,17 +176,9 @@
       }
     }
 
+    if (!complete) return;
     const answers: Record<string, string | string[]> = {};
-    for (const q of questions) {
-      const customVal = customValues[q.id]?.trim();
-      if (q.multi_select) {
-        answers[q.id] = selectedMulti[q.id] ?? [];
-      } else if (customVal) {
-        answers[q.id] = customVal;
-      } else {
-        answers[q.id] = selectedSingle[q.id] ?? '';
-      }
-    }
+    for (const q of questions) answers[q.id] = answerOf(q);
     await onDecision({
       kind: 'question',
       answers
@@ -250,7 +256,7 @@
       <button
         type="submit"
         class="submit-btn"
-        use:disableIf={isDisabled}
+        use:disableIf={isDisabled || !complete}
         onclick={handleSubmit}
       >
         Ответить

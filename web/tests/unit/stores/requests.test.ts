@@ -260,6 +260,46 @@ describe('RequestsModel', () => {
     expect(item.winnerDecision).toEqual(winningDecision);
   });
 
+  it('decision_invalid_422_returns_the_card_to_open_with_an_error_and_allows_retry', async () => {
+    const db = await openDb('owner-1');
+    const env = new TestEnv();
+    let refuse = true;
+    const send = vi.fn().mockImplementation((op: Op) => {
+      if (refuse) {
+        throw new ApiError(422, 'decision_invalid' as ErrorCode, 'invalid answer', 'domain' as ErrorScope, 'never', 'c-422');
+      }
+      return Promise.resolve({ request_id: 'req-422', state: 'decision_saved', decision: (op.body as { decision: unknown }).decision });
+    });
+    const journal = new OpJournal(db, send, env);
+    const model = new RequestsModel('conv-1');
+    model.items.set('req-422', {
+      id: 'req-422',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: { questions: [{ id: 'q1', text: 'Какой профиль?', options: [{ label: 'быстрый' }] }] }
+    });
+    const decision: DecisionBody = { kind: 'question', answers: { q1: '' } };
+
+    await expect(model.submitDecision('req-422', decision, journal)).resolves.toBeUndefined();
+    expect(model.items.get('req-422')!.state).toBe('open');
+    expect(model.items.get('req-422')!.error).toBe('Ответ не подходит к вопросу');
+
+    refuse = false;
+    await model.submitDecision('req-422', { kind: 'question', answers: { q1: 'быстрый' } }, journal);
+    expect(model.items.get('req-422')!.state).toBe('saved');
+    expect(model.items.get('req-422')!.error).toBeUndefined();
+  });
+
+  it('journal_failure_before_sending_returns_the_card_to_open', async () => {
+    const model = new RequestsModel('conv-1');
+    model.items.set('req-idb', { id: 'req-idb', conversationId: 'conv-1', kind: 'permission', state: 'open', payload: {} });
+    const journal = { begin: vi.fn(async () => { throw new Error('quota'); }) } as unknown as OpJournal;
+    await expect(model.submitDecision('req-idb', { kind: 'permission', behavior: 'allow' }, journal)).resolves.toBeUndefined();
+    expect(model.items.get('req-idb')!.state).toBe('open');
+    expect(model.items.get('req-idb')!.error).toBe('Не удалось сохранить решение на устройстве');
+  });
+
   it('request_closed_updates_state_to_applied', () => {
     const model = new RequestsModel('conv-1');
     model.items.set('req-close', {

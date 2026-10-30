@@ -195,6 +195,71 @@ describe('PWA Request Cards', () => {
     unmount(instance);
   });
 
+  it('question_card_blocks_submit_until_answered_and_sends_custom_text_for_multi_select', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request: RequestItem = {
+      id: 'req-gate',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: {
+        questions: [
+          { id: 'q1', text: 'Профиль', options: ['быстрый', 'полный'] },
+          { id: 'q2', text: 'Что включить', multi_select: true, allow_custom: true, options: ['кэш', 'метрики'] }
+        ]
+      }
+    };
+    const instance = mount(QuestionCard, { target, props: { request, onDecision } });
+    flushSync();
+    const submit = target.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+    expect(submit.disabled).toBe(true);
+    submit.click();
+    flushSync();
+    expect(onDecision).not.toHaveBeenCalled();
+
+    target.querySelector<HTMLElement>('[data-question="q1"] [data-option="быстрый"]')!.click();
+    flushSync();
+    expect(submit.disabled).toBe(true);
+
+    const custom = target.querySelector<HTMLInputElement>('[data-question="q2"] input[data-custom="true"]')!;
+    custom.value = 'трассировка';
+    custom.dispatchEvent(new Event('input'));
+    flushSync();
+    expect(submit.disabled).toBe(false);
+    submit.click();
+    flushSync();
+    expect(onDecision).toHaveBeenCalledWith({
+      kind: 'question',
+      answers: { q1: 'быстрый', q2: ['трассировка'] }
+    });
+    unmount(instance);
+  });
+
+  it('refused_decision_shows_the_error_on_an_editable_card', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request = createRequestItem({
+      id: 'req-refused',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'open',
+      payload: { command: 'cargo test' },
+      error: 'Ответ не подходит к вопросу'
+    });
+    const instance = mount(RequestCard, { target, props: { request, onDecision } });
+    flushSync();
+    expect(target.querySelector('[role="alert"]')?.textContent).toContain('Ответ не подходит к вопросу');
+    const allow = target.querySelector<HTMLButtonElement>('[data-action="allow"]')!;
+    expect(allow.disabled).toBe(false);
+    allow.click();
+    flushSync();
+    expect(onDecision).toHaveBeenCalledWith({ kind: 'permission', behavior: 'allow' });
+    unmount(instance);
+  });
+
   it('request_card_renders_compact_stage_track_without_check_glyphs', async () => {
     const target = document.createElement('div');
     document.body.appendChild(target);
