@@ -351,11 +351,29 @@ impl Journal {
         result.map_err(JournalError::Io)
     }
 
+    /// Удаляет начальные сегменты, чьи записи подтверждены и лежат строго ниже
+    /// горизонта: записи открытого запроса (и его передачи решения) остаются
+    /// для восстановления после рестарта.
+    pub fn compact_up_to(&mut self, horizon: u64) -> Result<u64, JournalError> {
+        self.ensure_writable()?;
+        let result = self.compact_segments_up_to(horizon);
+        if result.is_err() {
+            self.failed = true;
+        }
+        result.map_err(JournalError::Io)
+    }
+
     fn compact_segments(&mut self) -> io::Result<u64> {
+        self.compact_segments_up_to(u64::MAX)
+    }
+
+    fn compact_segments_up_to(&mut self, horizon: u64) -> io::Result<u64> {
         let removable = self
             .segments
             .iter()
-            .take_while(|segment| segment.last_seq() <= self.acked_seq)
+            .take_while(|segment| {
+                segment.last_seq() <= self.acked_seq && segment.last_seq() < horizon
+            })
             .count();
         if removable == self.segments.len() {
             let active = self.segments.last().unwrap();
@@ -369,7 +387,10 @@ impl Journal {
             }
         }
         let mut freed = 0;
-        while self.segments.len() > 1 && self.segments[0].last_seq() <= self.acked_seq {
+        while self.segments.len() > 1
+            && self.segments[0].last_seq() <= self.acked_seq
+            && self.segments[0].last_seq() < horizon
+        {
             fs::remove_file(&self.segments[0].path)?;
             segment::sync_dir(&self.dir)?;
             freed += self.segments.remove(0).bytes;

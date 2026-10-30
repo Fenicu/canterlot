@@ -283,9 +283,9 @@ async fn at_most_one_decision_transmission_under_replayed_command() {
         1
     );
     assert_eq!(
-        h.sj()
+        h.bodies
             .iter()
-            .filter(|f| matches!(f, Body::DecisionTransmissionStarted(_)))
+            .filter(|b| matches!(b, Body::DecisionTransmissionStarted(_)))
             .count(),
         1
     );
@@ -542,7 +542,7 @@ async fn permission_deny_is_proven_as_applied() {
     assert_eq!(proof["decision"]["behavior"], "deny");
     h.wait(|b| matches!(b, Body::RunFinished(_))).await;
     assert!(
-        h.sj()
+        h.bodies
             .iter()
             .any(|b| matches!(b, Body::BlockFinal(f) if f.text == "denied"))
     );
