@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { fmt } from "#lib/format/ru.js";
 import {
   pauseHoldCards,
+  runLabel,
   type Card,
   type CardAction,
 } from "#lib/screens/chat/pauseCards.js";
@@ -39,20 +40,34 @@ describe("chat/pauseCards", () => {
         liveExecution: false,
         expectedTitle: "Очередь остановлена: вы прервали работу",
         expectedTone: "warning",
-        expectedActionIds: ["resume_and_continue"],
+        expectedActionIds: ["run"],
       },
       {
         reason: { reason: "fatal_error" },
         expectedTitle: "Очередь остановлена из-за ошибки агента",
         expectedTone: "danger",
-        expectedActionIds: [],
+        expectedActionIds: ["run"],
+      },
+      {
+        reason: { reason: "fatal_error" },
+        liveExecution: true,
+        expectedTitle: "Очередь остановлена из-за ошибки агента",
+        expectedTone: "danger",
+        expectedActionIds: ["continue_queue"],
       },
       {
         reason: { reason: "process_exited" },
         liveExecution: false,
         expectedTitle: "Процесс агента завершился",
         expectedTone: "warning",
-        expectedActionIds: ["resume"],
+        expectedActionIds: ["run"],
+      },
+      {
+        reason: { reason: "process_exited" },
+        liveExecution: true,
+        expectedTitle: "Процесс агента завершился",
+        expectedTone: "warning",
+        expectedActionIds: ["continue_queue"],
       },
       {
         reason: {
@@ -63,7 +78,7 @@ describe("chat/pauseCards", () => {
         },
         expectedTitle: `Остановлена: достигнут лимит Claude, сброс ${RESET_AT_FMT}; без «кранча» продолжение не отправляется`,
         expectedTone: "warning",
-        expectedActionIds: [],
+        expectedActionIds: ["run"],
       },
       {
         reason: {
@@ -72,13 +87,13 @@ describe("chat/pauseCards", () => {
         },
         expectedTitle: "Приём сообщения не подтверждён",
         expectedTone: "warning",
-        expectedActionIds: ["retry_as_new"],
+        expectedActionIds: ["retry_as_new", "run"],
       },
       {
         reason: { reason: "owner_lost" },
         expectedTitle: "Связь с исполнением потеряна",
         expectedTone: "danger",
-        expectedActionIds: ["resume"],
+        expectedActionIds: ["run"],
       },
       {
         reason: { reason: "restore_pending" },
@@ -132,14 +147,14 @@ describe("chat/pauseCards", () => {
         queued: 1,
         expectedTitle: "Сессия не запущена",
         expectedTone: "default",
-        expectedActionIds: ["resume"],
+        expectedActionIds: ["run"],
       },
       {
         hold: { reason: "no_live_execution" },
         queued: 0,
         expectedTitle: "Сессия не запущена",
         expectedTone: "default",
-        expectedActionIds: ["start"],
+        expectedActionIds: ["run"],
       },
       {
         hold: { reason: "execution_starting" },
@@ -463,10 +478,10 @@ describe("chat/pauseCards", () => {
       now: NOW,
     });
     expect(cards.length).toBeGreaterThan(0);
-    // Card for user_stop with no live execution offers resume_and_continue
+    // Карточка остановки без живого исполнения предлагает единое действие
     const stopCard = cards.find((c) => c.key === "pause:user_stop");
     expect(stopCard).toBeDefined();
-    expect(stopCard!.actions.map((a) => a.id)).toEqual(["resume_and_continue"]);
+    expect(stopCard!.actions.map((a) => a.id)).toEqual(["run"]);
     expect(stopCard!.actions.some((a) => a.id === "continue_queue")).toBe(
       false,
     );
@@ -489,5 +504,90 @@ describe("chat/pauseCards", () => {
     const liveStopCard = liveCards.find((c) => c.key === "pause:user_stop");
     expect(liveStopCard).toBeDefined();
     expect(liveStopCard!.actions.map((a) => a.id)).toEqual(["continue_queue"]);
+  });
+
+  const base = {
+    provider: "claude",
+    crunch: false,
+    resumeText: null,
+    liveExecution: false,
+    now: NOW,
+  };
+  const failedStart: QueueView = {
+    pause_reasons: [{ reason: "fatal_error" }],
+    hold_reasons: [{ reason: "no_live_execution" }],
+    queued: 0,
+  };
+
+  it("the_single_action_is_labelled_by_whether_a_turn_was_recorded", () => {
+    expect(runLabel(false)).toBe("Запустить");
+    expect(runLabel(true)).toBe("Возобновить");
+    const fresh = pauseHoldCards(
+      { pause_reasons: [], hold_reasons: [{ reason: "no_live_execution" }], queued: 0 },
+      { ...base, turnRecorded: false },
+    );
+    expect(fresh[0]!.actions).toEqual([{ id: "run", label: "Запустить" }]);
+    const used = pauseHoldCards(
+      { pause_reasons: [], hold_reasons: [{ reason: "no_live_execution" }], queued: 2 },
+      { ...base, turnRecorded: true },
+    );
+    expect(used[0]!.actions).toEqual([{ id: "run", label: "Возобновить" }]);
+  });
+
+  it("a_failed_start_is_not_a_dead_end_and_names_the_reason", () => {
+    const cards = pauseHoldCards(failedStart, {
+      ...base,
+      turnRecorded: false,
+      failureReason: "start_rejected",
+    });
+    expect(cards.map((card) => card.key)).toEqual(["pause:fatal_error"]);
+    expect(cards[0]!.actions).toEqual([{ id: "run", label: "Запустить" }]);
+    expect(cards[0]!.body).toEqual(["Причина: запуск отклонён машиной"]);
+  });
+
+  it("an_unknown_failure_reason_adds_no_line", () => {
+    const cards = pauseHoldCards(failedStart, { ...base, failureReason: null });
+    expect(cards[0]!.body).toEqual([]);
+  });
+
+  it("every_pause_but_restore_offers_a_way_forward", () => {
+    const reasons: QueueView["pause_reasons"] = [
+      { reason: "user_stop" },
+      { reason: "fatal_error" },
+      { reason: "process_exited" },
+      { reason: "owner_lost" },
+      { reason: "unconfirmed_delivery", input_id: "00000000-0000-4000-8000-000000000001" },
+      { reason: "limit_reached", provider: "claude", resets_at: RESET_AT_ISO, window: "five_hour" },
+    ];
+    for (const liveExecution of [false, true]) {
+      for (const reason of reasons) {
+        const cards = pauseHoldCards(
+          { pause_reasons: [reason], hold_reasons: [], queued: 1 },
+          { ...base, liveExecution },
+        );
+        expect(cards[0]!.actions.length, `${reason.reason} live=${liveExecution}`).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("an_execution_still_in_owner_lost_offers_nothing_the_hub_would_refuse", () => {
+    const cards = pauseHoldCards(
+      { pause_reasons: [{ reason: "owner_lost" }], hold_reasons: [], queued: 0 },
+      { ...base, executionOwnerLost: true },
+    );
+    expect(cards[0]!.actions).toEqual([]);
+    expect(cards[0]!.body).toEqual([
+      "Продолжить можно, когда машина вернётся на связь и сверит состояние.",
+    ]);
+  });
+
+  it("retry_as_new_names_the_input_it_repeats", () => {
+    const inputId = "00000000-0000-4000-8000-000000000001";
+    const cards = pauseHoldCards(
+      { pause_reasons: [{ reason: "unconfirmed_delivery", input_id: inputId }], hold_reasons: [], queued: 0 },
+      { ...base, liveExecution: true },
+    );
+    expect(cards[0]!.actions[0]).toMatchObject({ id: "retry_as_new", inputId });
+    expect(cards[0]!.actions[1]?.id).toBe("continue_queue");
   });
 });

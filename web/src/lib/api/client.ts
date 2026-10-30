@@ -568,21 +568,6 @@ export function setConversationGroups(
   );
 }
 
-export function startExecution(
-  conversationId: string,
-  key: string,
-  opts?: RequestOptions,
-): Promise<
-  HttpResponse<Ok<operations["post__api_v1_conversations__id__executions"]>>
-> {
-  return http(
-    "POST",
-    `/api/v1/conversations/${id(conversationId)}/executions`,
-    undefined,
-    keyed(key, opts),
-  );
-}
-
 export function patchScheduled(
   scheduledId: string,
   body: Body<operations["patch__api_v1_scheduled__id_"]>,

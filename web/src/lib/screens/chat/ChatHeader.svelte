@@ -11,7 +11,8 @@
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
-	import { stopSession, resumeSession, continueSessionQueue, startSessionExecution } from './controls';
+	import { stopSession, resumeSession, continueSessionQueue } from './controls';
+	import { runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 
@@ -77,7 +78,7 @@
 		: false);
 
 	const hasUserStop = $derived(chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop'));
-	const hasNoLiveExecution = $derived(chat.queue.hold_reasons.some((h) => (h as { reason?: string })?.reason === 'no_live_execution'));
+	const ownerLost = $derived((chat.execution as { state?: string } | null)?.state === 'owner_lost');
 
 	async function handleStop(force = false) {
 		actionError = null;
@@ -90,13 +91,13 @@
 		}
 	}
 
-	async function handleResume() {
+	async function handleRun() {
 		actionError = null;
 		try {
-			await resumeSession(chat.id);
+			await resumeSession(chat.id, { continue_queue: chat.queue.pause_reasons.length > 0 });
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = errorText(err, 'Не удалось возобновить сессию');
+			actionError = errorText(err, 'Не удалось запустить сессию');
 		}
 	}
 
@@ -117,16 +118,6 @@
 		menuOpen = false;
 		confirmingForce = false;
 		menuButton?.focus();
-	}
-
-	async function handleStart() {
-		actionError = null;
-		try {
-			await startSessionExecution(chat.id);
-			menuOpen = false;
-		} catch (err: unknown) {
-			actionError = errorText(err, 'Не удалось запустить сессию');
-		}
 	}
 </script>
 
@@ -244,11 +235,8 @@
 							</div>
 						</div>
 					{/if}
-				{:else}
-					<MenuItem onclick={() => void handleResume()}>Возобновить сессию</MenuItem>
-					{#if hasNoLiveExecution && chat.queue.queued === 0}
-						<MenuItem onclick={() => void handleStart()}>Запустить</MenuItem>
-					{/if}
+				{:else if !ownerLost}
+					<MenuItem onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
 				{/if}
 
 				{#if isLive && hasUserStop}

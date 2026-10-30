@@ -184,6 +184,8 @@ export class ChatStore {
     queued: 0,
   });
   detail = $state<Record<string, unknown> | null>(null);
+  /** Записан принятый ход: снимок даёт хаб, новый ход виден по событию. */
+  turnRecorded = $state(false);
   execution = $state<Record<string, unknown> | null>(null);
   activity = $state<Record<string, unknown> | null>(null);
   settings = $state<{
@@ -698,6 +700,7 @@ export class ChatStore {
     const state = asState(payload.state);
     input.state = state;
     input.marks = marksFor(state);
+    if (state === "accepted") this.turnRecorded = true;
     input.attempt = payload.attempt ?? input.attempt;
     if (payload.retry_of) input.retryOf = payload.retry_of;
     if (payload.reason) input.rejection = payload.reason;
@@ -754,6 +757,7 @@ export class ChatStore {
   #applySnapshot(data: SnapshotData): void {
     if (data.detail) {
       this.detail = data.detail;
+      this.turnRecorded = data.detail.turn_recorded === true;
       if (data.detail.execution)
         this.execution = data.detail.execution as Record<string, unknown>;
       if (data.detail.activity)

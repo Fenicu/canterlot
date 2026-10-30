@@ -73,8 +73,7 @@ pub async fn start_with_key(
         Some(id),
         move |conn| {
             Box::pin(async move {
-                let started =
-                    start_in_tx(conn, owner, id, &StartOptions { resume }, correlation).await?;
+                let started = start_in_tx(conn, owner, id, correlation).await?;
                 #[cfg(feature = "fault-injection")]
                 if resume {
                     faults
@@ -112,29 +111,27 @@ pub async fn start(
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
     crate::db::in_tx(pool, move |conn| {
-        Box::pin(async move {
-            start_in_tx(
-                &mut *conn,
-                owner_id,
-                conversation_id,
-                &StartOptions { resume: false },
-                correlation_id,
-            )
-            .await
-        })
+        Box::pin(
+            async move { start_in_tx(&mut *conn, owner_id, conversation_id, correlation_id).await },
+        )
     })
     .await
 }
 
-pub struct StartOptions {
-    pub resume: bool,
+/// Беседа, которую можно продолжить: CLI записывает её только после хода, без него `--resume`
+/// отказывает. Значение решает и запуск, и подпись действия, поэтому старт и возобновление едины.
+pub async fn resumable_native_id(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    Ok(sqlx::query_scalar("select e.native_conversation_id from executions e where e.conversation_id=$1 and e.native_conversation_id is not null and exists(select 1 from inputs i join commands c on c.id=i.command_id where c.execution_id=e.id and i.state='accepted') order by e.generation desc limit 1")
+        .bind(conversation_id).fetch_optional(conn).await?.flatten())
 }
 
 pub async fn start_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     conversation_id: Uuid,
-    options: &StartOptions,
     correlation_id: Uuid,
 ) -> Result<StartedExecution, ExecutionError> {
     let harness: Option<String> =
@@ -190,13 +187,7 @@ pub async fn start_in_tx(
         "title": resolved.title,
         "text": resolved.text.unwrap_or_default(),
     });
-    let native: Option<String> = if options.resume {
-        // Беседа записана только после хода: без него CLI отказывает в --resume.
-        sqlx::query_scalar("select e.native_conversation_id from executions e where e.conversation_id=$1 and e.native_conversation_id is not null and exists(select 1 from inputs i join commands c on c.id=i.command_id where c.execution_id=e.id and i.state='accepted') order by e.generation desc limit 1")
-            .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
-    } else {
-        None
-    };
+    let native = resumable_native_id(&mut *conn, conversation_id).await?;
     if queue.closed {
         return Err(ExecutionError::ConversationClosed);
     }

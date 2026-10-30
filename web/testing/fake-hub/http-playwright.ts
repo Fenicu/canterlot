@@ -546,7 +546,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
     const body = route.request().postDataJSON() as { continue_queue?: boolean } | null;
-    void body;
+    const held = hub.log(`conversation:${id}`).findLast((event) => event.kind === 'queue_state_changed')?.payload as { pause_reasons?: unknown[] } | undefined;
 
     hub.append(`conversation:${id}`, {
       kind: 'execution_state_changed',
@@ -557,7 +557,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       kind: 'queue_state_changed',
       conversation_id: id,
       payload: {
-        pause_reasons: [],
+        pause_reasons: body?.continue_queue ? [] : (held?.pause_reasons ?? []),
         hold_reasons: [],
         run_slot: 'free'
       }

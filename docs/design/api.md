@@ -255,9 +255,11 @@
 | `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome` |
 | `POST /api/v1/conversations/{id}/queue/continue` | - | `ContinueOutcome` |
 | `PATCH /api/v1/conversations/{id}/settings` | `model?`, `effort?`, `permission_mode?`, `instruction_profile?` | `{effective, pending, rev}` |
-| `POST /api/v1/conversations/{id}/executions` | - | 201, первый запуск |
-| `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение с последним `native_conversation_id`; с `continue_queue` снятие паузы в той же транзакции |
+| `POST /api/v1/conversations/{id}/executions` | - | 201, новое исполнение; остаётся для старых клиентов и ведёт себя как `resume` без `continue_queue` |
+| `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение; с `continue_queue` снятие паузы в той же транзакции |
 | `POST /api/v1/conversations/{id}/requests/{request_id}/decision` | `DecisionBody` | 200 `DecisionOutcomeView`, первый ответ побеждает |
+
+Запуск всегда решает сам: если записан принятый ход, исполнение продолжает беседу по последнему `native_conversation_id`, иначе начинает новую. То же значение отдаёт `turn_recorded` карточки разговора, поэтому PWA показывает одно действие: «Запустить» без записанного хода, «Возобновить» с ним. Устаревший клиент любым из двух запросов не запустит CLI без контекста.
 
 Доменные функции отмены, остановки, продолжения и ввода сами ведут ключ идемпотентности; `settings`, `executions` и `resume` оборачивает `idempotency::run_in_tx`. Чужой идентификатор даёт `404 not_found`. После фиксации транзакции маршрут будит диспетчер разговора.
 

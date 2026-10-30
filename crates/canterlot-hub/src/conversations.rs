@@ -224,6 +224,8 @@ pub struct ConversationDetail {
     #[schema(value_type=Option<LiveExecutionView>)]
     pub execution: Option<Value>,
     pub holds: Vec<HoldView>,
+    /// Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую.
+    pub turn_recorded: bool,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct GroupCount {
@@ -540,6 +542,9 @@ pub async fn detail(
     }
     let execution=sqlx::query("select id,generation,state,outcome,native_conversation_id,created_at from executions where conversation_id=$1 and state not in ('stopped','failed')").bind(id).fetch_optional(&mut *conn).await?.map(|r|->Result<Value,sqlx::Error>{Ok(json!({"execution_id":r.try_get::<Uuid,_>("id")?,"generation":r.try_get::<i64,_>("generation")?,"state":r.try_get::<String,_>("state")?,"outcome":r.try_get::<Option<String>,_>("outcome")?,"native_conversation_id":r.try_get::<Option<String>,_>("native_conversation_id")?,"created_at":time(r.try_get("created_at")?)}))}).transpose()?;
     let resume_pending: bool = row.try_get("resume_pending")?;
+    let turn_recorded = executions::resumable_native_id(&mut *conn, id)
+        .await?
+        .is_some();
     Ok(Some(ConversationDetail {
         attributes: i.attributes,
         model: i.model,
@@ -579,6 +584,7 @@ pub async fn detail(
         },
         execution,
         holds,
+        turn_recorded,
     }))
 }
 pub async fn recent_workdirs(
@@ -1097,18 +1103,12 @@ async fn create_in_tx(
     replace_groups(conn, id, &req.group_ids).await?;
     let execution = if req.start {
         Some(
-            executions::start_in_tx(
-                conn,
-                req.owner_id,
-                id,
-                &executions::StartOptions { resume: false },
-                correlation_id,
-            )
-            .await
-            .map_err(|e| match e {
-                executions::ExecutionError::Db(e) => CreateError::Db(e),
-                _ => CreateError::Invalid("start"),
-            })?,
+            executions::start_in_tx(conn, req.owner_id, id, correlation_id)
+                .await
+                .map_err(|e| match e {
+                    executions::ExecutionError::Db(e) => CreateError::Db(e),
+                    _ => CreateError::Invalid("start"),
+                })?,
         )
     } else {
         None

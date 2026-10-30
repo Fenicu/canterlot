@@ -1,4 +1,4 @@
-import { providerLabel } from "#lib/format/labels.js";
+import { failureLabel, providerLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -17,13 +17,13 @@ export interface Card {
 export type CardAction = {
   id:
     | "continue_queue"
-    | "resume"
-    | "resume_and_continue"
-    | "start"
+    | "run"
     | "spend_reserve"
     | "edit_resume_text"
     | "retry_as_new";
   label: string;
+  /** Ввод, который повторяет `retry_as_new`. */
+  inputId?: string;
 };
 
 export interface PauseCardsContext {
@@ -33,17 +33,25 @@ export interface PauseCardsContext {
   resumeText: string | null;
   liveExecution: boolean;
   now: number;
+  /** Записанный ход: единое действие продолжит беседу, а не начнёт новую. */
+  turnRecorded?: boolean;
+  /** Исполнение ещё в `owner_lost`: хаб отказал бы в запуске до сверки с машиной. */
+  executionOwnerLost?: boolean;
+  /** Причина сбоя из активности сессии. */
+  failureReason?: string | null;
 }
 
-const ACTION_LABELS: Record<CardAction["id"], string> = {
+const ACTION_LABELS: Record<Exclude<CardAction["id"], "run">, string> = {
   continue_queue: "Продолжить очередь",
-  resume: "Возобновить сессию",
-  resume_and_continue: "Возобновить сессию и очередь",
-  start: "Запустить",
   spend_reserve: "Продолжить, тратя резерв",
   edit_resume_text: "Изменить текст продолжения",
   retry_as_new: "Отправить повторно как новое",
 };
+
+/** Единое действие запуска: хаб сам решает, продолжить ли беседу. */
+export function runLabel(turnRecorded: boolean | undefined): string {
+  return turnRecorded ? "Возобновить" : "Запустить";
+}
 
 export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
   const cards: Card[] = [];
@@ -52,20 +60,25 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
   );
   const effectiveLive = ctx.liveExecution && !hasNoLiveExecutionHold;
   const hasPauses = q.pause_reasons.length > 0;
+  const run: CardAction = { id: "run", label: runLabel(ctx.turnRecorded) };
+  const forward: CardAction[] = ctx.executionOwnerLost
+    ? []
+    : [
+        effectiveLive
+          ? { id: "continue_queue", label: ACTION_LABELS.continue_queue }
+          : run,
+      ];
 
   // Process pause reasons
   for (const p of q.pause_reasons) {
     switch (p.reason) {
       case "user_stop": {
-        const actionId: CardAction["id"] = effectiveLive
-          ? "continue_queue"
-          : "resume_and_continue";
         cards.push({
           key: "pause:user_stop",
           tone: "warning",
           title: "Очередь остановлена: вы прервали работу",
           body: [],
-          actions: [{ id: actionId, label: ACTION_LABELS[actionId] }],
+          actions: forward,
         });
         break;
       }
@@ -74,8 +87,10 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           key: "pause:fatal_error",
           tone: "danger",
           title: "Очередь остановлена из-за ошибки агента",
-          body: [],
-          actions: [],
+          body: ctx.failureReason
+            ? [`Причина: ${failureLabel(ctx.failureReason)}`]
+            : [],
+          actions: forward,
         });
         break;
       }
@@ -85,7 +100,7 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "warning",
           title: "Процесс агента завершился",
           body: [],
-          actions: [{ id: "resume", label: ACTION_LABELS.resume }],
+          actions: forward,
         });
         break;
       }
@@ -100,7 +115,7 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "warning",
           title,
           body: [],
-          actions: [],
+          actions: forward,
         });
         break;
       }
@@ -110,7 +125,14 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "warning",
           title: "Приём сообщения не подтверждён",
           body: [],
-          actions: [{ id: "retry_as_new", label: ACTION_LABELS.retry_as_new }],
+          actions: [
+            {
+              id: "retry_as_new",
+              label: ACTION_LABELS.retry_as_new,
+              inputId: p.input_id,
+            },
+            ...forward,
+          ],
         });
         break;
       }
@@ -119,8 +141,10 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           key: "pause:owner_lost",
           tone: "danger",
           title: "Связь с исполнением потеряна",
-          body: [],
-          actions: [{ id: "resume", label: ACTION_LABELS.resume }],
+          body: ctx.executionOwnerLost
+            ? ["Продолжить можно, когда машина вернётся на связь и сверит состояние."]
+            : [],
+          actions: forward,
         });
         break;
       }
@@ -147,16 +171,15 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
 
       case "no_live_execution": {
         if (hasPauses) {
-          // When pauses are present, the pause card handles resume / resume_and_continue
+          // Пауза сама предлагает единое действие, а `restore_pending` ждёт процедуры восстановления.
           break;
         }
-        const actionId: CardAction["id"] = q.queued > 0 ? "resume" : "start";
         cards.push({
           key: "hold:no_live_execution",
           tone: "default",
           title: "Сессия не запущена",
           body: [],
-          actions: [{ id: actionId, label: ACTION_LABELS[actionId] }],
+          actions: [run],
         });
         break;
       }

@@ -353,11 +353,12 @@ async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_valu
     .await
     .unwrap();
     assert_eq!(payload["permission_mode"], "owner");
-    let stored: String = sqlx::query_scalar("select permission_mode from conversations where id=$1")
-        .bind(id)
-        .fetch_one(&f.pool)
-        .await
-        .unwrap();
+    let stored: String =
+        sqlx::query_scalar("select permission_mode from conversations where id=$1")
+            .bind(id)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
     assert_eq!(stored, "");
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -1172,10 +1173,7 @@ async fn missing_derived_rows_remain_listable_and_refresh_upserts(pool: PgPool) 
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool) {
-    use canterlot_hub::{
-        executions::{self, StartOptions},
-        outbox,
-    };
+    use canterlot_hub::{executions, outbox};
     use canterlot_proto::worker::v1::command;
     let f = Fixture::new(pool).await;
     let id = f
@@ -1204,15 +1202,9 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
     sqlx::query("update executions set state='stopped',native_conversation_id='native-test' where conversation_id=$1").bind(id).execute(&f.pool).await.unwrap();
     testkit::seed_recorded_turn(&f.pool, id).await;
     let mut tx = f.pool.begin().await.unwrap();
-    let started = executions::start_in_tx(
-        &mut tx,
-        f.owner,
-        id,
-        &StartOptions { resume: true },
-        Uuid::now_v7(),
-    )
-    .await
-    .unwrap();
+    let started = executions::start_in_tx(&mut tx, f.owner, id, Uuid::now_v7())
+        .await
+        .unwrap();
     let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
         .bind(started.command_id)
         .fetch_one(&mut *tx)

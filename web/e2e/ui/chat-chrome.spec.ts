@@ -178,7 +178,7 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 
 	// 3. Resume
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
-	await page.getByRole('menuitem', { name: 'Возобновить сессию' }).click();
+	await page.getByRole('menuitem', { name: 'Запустить' }).click();
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/resume'))).toBeDefined();
 
 	// 4. Continue queue when live + user_stop
@@ -201,6 +201,75 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Продолжить очередь' }).click();
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
+});
+
+test('failed_start_offers_one_action_everywhere_and_it_clears_the_pause', async ({ page }) => {
+	const resumes: { continue_queue?: boolean }[] = [];
+	page.on('request', (req) => {
+		if (req.method() === 'POST' && req.url().endsWith('/resume')) {
+			resumes.push(req.postDataJSON() as { continue_queue?: boolean });
+		}
+	});
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: 'start_rejected', state: 'failed' }
+	});
+	hub.append(`conversation:${id}`, {
+		kind: 'queue_state_changed',
+		conversation_id: id,
+		payload: {
+			pause_reasons: [{ reason: 'fatal_error' }],
+			hold_reasons: [{ reason: 'no_live_execution' }],
+			run_slot: 'free'
+		}
+	});
+	hub.flush();
+
+	const card = page.getByRole('region', { name: 'Уведомления о состоянии очереди' });
+	await expect(card.getByText('Очередь остановлена из-за ошибки агента')).toBeVisible();
+	await expect(card.getByText('Сессия не запущена')).toHaveCount(0);
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Запустить' })).toHaveCount(1);
+	await expect(page.getByRole('menuitem', { name: /Возобновить/ })).toHaveCount(0);
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+
+	await card.getByRole('button', { name: 'Запустить', exact: true }).click();
+	await expect.poll(() => resumes.at(-1)?.continue_queue).toBe(true);
+});
+
+test('a_session_with_a_recorded_turn_offers_resume_instead_of_start', async ({ page }) => {
+	const { hub, id } = await bootChat(page, {
+		seeder: (api) => {
+			const seeded = seedMockupChat(api);
+			const detail = api.details.get(seeded);
+			if (detail) detail.turn_recorded = true;
+			return seeded;
+		}
+	});
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 1, outcome: 'user_stop', state: 'stopped' }
+	});
+	hub.append(`conversation:${id}`, {
+		kind: 'queue_state_changed',
+		conversation_id: id,
+		payload: {
+			pause_reasons: [],
+			hold_reasons: [{ reason: 'no_live_execution' }],
+			run_slot: 'free'
+		}
+	});
+	hub.flush();
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await expect(page.getByRole('menuitem', { name: 'Возобновить' })).toHaveCount(1);
+	await expect(page.getByRole('menuitem', { name: 'Запустить' })).toHaveCount(0);
+	await expect(
+		page.getByRole('region', { name: 'Уведомления о состоянии очереди' }).getByRole('button', { name: 'Возобновить', exact: true })
+	).toBeVisible();
 });
 
 test('session_settings_show_permission_modes_by_label_never_raw', async ({ page }) => {
@@ -259,8 +328,8 @@ test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ pa
 	});
 	hub.flush();
 
-	// Card offers "Возобновить сессию и очередь"
-	const button = page.getByRole('button', { name: 'Возобновить сессию и очередь' });
+	// Карточка предлагает единое действие
+	const button = page.getByRole('button', { name: 'Запустить', exact: true });
 	await expect(button).toBeVisible();
 	await button.click();
 

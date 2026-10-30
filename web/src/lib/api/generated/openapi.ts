@@ -926,6 +926,8 @@ export interface components {
             permission_mode: string;
             queue: components["schemas"]["QueueView"];
             settings: components["schemas"]["SettingsView"];
+            /** @description Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую. */
+            turn_recorded: boolean;
             /** Format: int32 */
             unread_count: number;
         };

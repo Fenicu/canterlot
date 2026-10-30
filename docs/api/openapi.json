@@ -4779,7 +4779,8 @@
               "queue",
               "settings",
               "crunch",
-              "holds"
+              "holds",
+              "turn_recorded"
             ],
             "properties": {
               "activity": {
@@ -4824,6 +4825,10 @@
               },
               "settings": {
                 "$ref": "#/components/schemas/SettingsView"
+              },
+              "turn_recorded": {
+                "type": "boolean",
+                "description": "Принятый ход записан: следующий запуск продолжит беседу, а не начнёт новую."
               },
               "unread_count": {
                 "type": "integer",

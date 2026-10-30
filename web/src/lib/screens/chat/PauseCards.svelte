@@ -1,14 +1,16 @@
 <script lang="ts">
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
-	import { pauseHoldCards, type QueueView } from './pauseCards';
+	import { pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
 	import {
 		continueSessionQueue,
 		resumeSession,
-		startSessionExecution,
 		spendSessionReserve,
 		updateCrunch
 	} from './controls';
 	import { announce } from '#lib/a11y/announce.js';
+	import { errorText } from '#lib/api/errors.js';
+	import { retryAsNew } from '#lib/timeline/QueueActions.js';
+	import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
 
 	let {
 		chat,
@@ -28,6 +30,8 @@
 			: false
 	);
 
+	const failure = $derived(chat.activity as { state?: string; evidence?: { reason?: string } } | null);
+
 	const cards = $derived(
 		pauseHoldCards(chat.queue as unknown as QueueView, {
 			provider,
@@ -35,7 +39,10 @@
 			resumePending: chat.crunch.resume_pending,
 			resumeText: chat.crunch.resume_text ?? null,
 			liveExecution,
-			now
+			now,
+			turnRecorded: chat.turnRecorded,
+			executionOwnerLost: (chat.execution as { state?: string } | null)?.state === 'owner_lost',
+			failureReason: failure?.state === 'failed' ? (failure.evidence?.reason ?? null) : null
 		})
 	);
 
@@ -43,6 +50,23 @@
 	let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
 	let editingCrunch = $state(false);
 	let savingCrunch = $state(false);
+	let actionError = $state<string | null>(null);
+	let acting = $state(false);
+	let ask = $state<string | null>(null);
+	let decided = $state<((ok: boolean) => void) | null>(null);
+
+	function confirm(message: string): Promise<boolean> {
+		ask = message;
+		return new Promise((resolve) => {
+			decided = resolve;
+		});
+	}
+
+	function answer(ok: boolean) {
+		decided?.(ok);
+		decided = null;
+		ask = null;
+	}
 
 	$effect(() => {
 		if (chat.crunch.resume_text) {
@@ -60,34 +84,37 @@
 		prevKeys = currentKeys;
 	});
 
-	async function handleAction(actionId: string) {
+	async function handleAction(action: CardAction) {
+		if (acting) return;
 		spendMessage = null;
-		switch (actionId) {
-			case 'continue_queue':
-				await continueSessionQueue(chat.id);
-				break;
-			case 'resume':
-				await resumeSession(chat.id);
-				break;
-			case 'resume_and_continue':
-				await resumeSession(chat.id, { continue_queue: true });
-				break;
-			case 'start':
-				await startSessionExecution(chat.id);
-				break;
-			case 'spend_reserve': {
-				const res = await spendSessionReserve(chat.id);
-				if (res.message) {
-					spendMessage = res.message;
+		actionError = null;
+		acting = true;
+		try {
+			switch (action.id) {
+				case 'continue_queue':
+					await continueSessionQueue(chat.id);
+					break;
+				case 'run':
+					await resumeSession(chat.id, { continue_queue: chat.queue.pause_reasons.length > 0 });
+					break;
+				case 'spend_reserve': {
+					const res = await spendSessionReserve(chat.id);
+					if (res.message) spendMessage = res.message;
+					break;
 				}
-				break;
+				case 'edit_resume_text':
+					editingCrunch = !editingCrunch;
+					break;
+				case 'retry_as_new': {
+					const input = [...chat.inputs.values()].find((item) => item.id === action.inputId);
+					if (input) await retryAsNew(input, { ops: chat.ops, chat, conversationId: chat.id, confirm });
+					break;
+				}
 			}
-			case 'edit_resume_text':
-				editingCrunch = !editingCrunch;
-				break;
-			case 'retry_as_new':
-				// Can retry sending
-				break;
+		} catch (err) {
+			actionError = errorText(err, 'Не удалось выполнить действие');
+		} finally {
+			acting = false;
 		}
 	}
 
@@ -105,6 +132,10 @@
 		}
 	}
 </script>
+
+{#if ask}
+	<ConfirmDialog title="Повторная отправка" body={ask} confirmLabel="Отправить" onconfirm={() => answer(true)} onclose={() => answer(false)} />
+{/if}
 
 {#if cards.length > 0}
 	<div class="pause-cards-feed" role="region" aria-label="Уведомления о состоянии очереди">
@@ -125,6 +156,10 @@
 					<p class="card-note" role="status">{spendMessage}</p>
 				{/if}
 
+				{#if actionError && card.actions.length > 0}
+					<p class="card-error" role="alert">{actionError}</p>
+				{/if}
+
 				{#if card.actions.length > 0}
 					<div class="card-actions">
 						{#each card.actions as action (action.id)}
@@ -132,7 +167,7 @@
 								<button
 									type="button"
 									class="button secondary full"
-									onclick={() => handleAction('edit_resume_text')}
+									onclick={() => handleAction(action)}
 								>
 									{action.label}
 								</button>
@@ -158,7 +193,7 @@
 								<button
 									type="button"
 									class="button primary full"
-									onclick={() => handleAction(action.id)}
+									onclick={() => handleAction(action)}
 								>
 									{action.label}
 								</button>
@@ -208,6 +243,9 @@
 	.card-note {
 		color: var(--accent);
 		font-weight: var(--weight-medium);
+	}
+	.card-error {
+		color: var(--danger);
 	}
 	.card-actions {
 		display: flex;
