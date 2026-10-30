@@ -16,7 +16,6 @@
 	const view = $derived(shown ? todoView(shown) : null);
 	// Движение отражает настоящую работу: между ходами активная точка не пульсирует.
 	const working = $derived(chat.activity?.state === 'working');
-	const word = $derived(view?.current ? TODO_STATUS_LABEL[view.current.status] : TODO_STATUS_LABEL.completed);
 
 	function omittedNote(count: number): string {
 		return `Ещё ${count} ${fmt.plural(count, ['пункт', 'пункта', 'пунктов'])} не поместилось`;
@@ -44,8 +43,8 @@
 					aria-controls={listId}
 					onclick={() => (chosen = !expanded)}
 				>
-					<span class="word" data-status={view.current?.status ?? 'completed'}>{word}</span>
-					<span class="now">{view.current?.text ?? 'Все пункты выполнены'}</span>
+					<span class="word" data-status={view.headlineStatus}>{TODO_STATUS_LABEL[view.headlineStatus]}</span>
+					<span class="now">{view.headline}</span>
 					<span class="chevron" class:open={expanded}><Icon name="chevron" /></span>
 				</button>
 			</div>

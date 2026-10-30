@@ -16,6 +16,9 @@ export interface TodoView {
 	allDone: boolean;
 	/** Пункт в работе, иначе ближайший ожидающий. */
 	current: TodoItem | null;
+	/** Строка свёрнутой панели. */
+	headline: string;
+	headlineStatus: TodoStatus;
 	stages: Stage[];
 	index: number;
 }
@@ -29,6 +32,9 @@ export function todoView(list: TodoList): TodoView {
 		items.find((item) => item.status === 'in_progress') ??
 		items.find((item) => item.status === 'pending') ??
 		null;
+	// Показанные пункты могут кончиться раньше списка: про отрезанный хвост ничего не известно.
+	const headline = current?.text ?? (allDone ? 'Все пункты выполнены' : 'Остальные пункты не поместились');
+	const headlineStatus = current?.status ?? (allDone ? 'completed' : 'pending');
 	// Последняя точка — финиш: иначе дорожка считала бы последний пункт уже выполненным.
 	const points = [...items.map((item) => item.text), 'Готово'];
 	const start = Math.max(0, Math.min(done - 2, points.length - POINTS));
@@ -37,6 +43,8 @@ export function todoView(list: TodoList): TodoView {
 		total,
 		allDone,
 		current,
+		headline,
+		headlineStatus,
 		stages: points
 			.slice(start, start + POINTS)
 			.map((label, k) => ({ id: String(start + k), label })),

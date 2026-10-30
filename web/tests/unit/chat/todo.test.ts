@@ -72,6 +72,28 @@ describe("screens/chat/todo", () => {
     expect(finished.index).toBe(finished.stages.length - 1);
   });
 
+  it("headline_tells_what_is_going_on_in_every_state", () => {
+    expect(todoView(listOf(["in_progress"]))).toMatchObject({
+      headline: "пункт 1",
+      headlineStatus: "in_progress",
+    });
+    expect(todoView(listOf(["pending"]))).toMatchObject({
+      headline: "пункт 1",
+      headlineStatus: "pending",
+    });
+    expect(todoView(listOf(["completed"]))).toMatchObject({
+      headline: "Все пункты выполнены",
+      headlineStatus: "completed",
+    });
+  });
+
+  it("finished_shown_items_do_not_claim_the_cut_off_tail_is_done", () => {
+    const view = todoView(listOf(["completed", "completed"], 40));
+    expect(view).toMatchObject({ done: 2, total: 42, allDone: false });
+    expect(view.headline).toBe("Остальные пункты не поместились");
+    expect(view.headlineStatus).toBe("pending");
+  });
+
   it("dropped_items_count_towards_the_total", () => {
     expect(todoView(listOf(["completed", "pending"], 40)).total).toBe(42);
   });
