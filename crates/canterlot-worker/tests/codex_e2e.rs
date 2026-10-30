@@ -30,9 +30,9 @@ const WAIT: Duration = Duration::from_secs(15);
 // ответом: отдаёт накопленное до следующей входящей строки с методом.
 // Перезаписи: id ответов, clientId userMessage за ходом, omitted → фикстура,
 // err → stderr, неизвестный метод → `{}` (или фикстура), `@exit` → выход,
-// `__raw__` → сырая строка.
+// `__raw__` → сырая строка, `dir: sleep` → пауза на `data` мс.
 const REPLAY: &str = r#"#!/usr/bin/env python3
-import json, sys, pathlib
+import json, sys, pathlib, time
 d = pathlib.Path(__file__).parent
 if '--version' in sys.argv:
     print('codex-cli 0.164.0'); sys.exit(0)
@@ -52,6 +52,8 @@ def omitted(dd):
 idmap = {}; clients = {}; cur = ''; pos = 0
 def out(w):
     dd = data(w)
+    if w.get('dir')=='sleep':
+        time.sleep(dd/1000); return
     if isinstance(dd,str):
         if dd == '@exit': sys.exit(0)
         return
@@ -199,13 +201,17 @@ struct Fake {
 
 impl Fake {
     fn new(evidence: Vec<String>) -> Self {
+        Self::with_deadline(evidence, WAIT)
+    }
+
+    fn with_deadline(evidence: Vec<String>, transmit_deadline: Duration) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-codex");
         fake_exec::write_executable(&exe, REPLAY, 0o700);
         write_lines(&dir, "evidence.jsonl", &evidence);
         std::os::unix::fs::symlink(repo_fixtures(), dir.path().join("fixtures")).unwrap();
         let context = AdapterContext {
-            transmit_deadline: WAIT,
+            transmit_deadline,
             exec_dir: dir.path().join("exec"),
             claude_code: None,
             codex: Some(CodexConfig {
@@ -1044,6 +1050,83 @@ async fn interrupt_terminates_the_running_command_in_the_captured_order() {
         .find(|line| line["method"] == "thread/backgroundTerminals/terminate")
         .expect("the interrupted command is terminated");
     assert_eq!(terminate["params"]["processId"], "39207");
+    fake.close().await;
+}
+
+fn user_message(thread: &str, turn: &str) -> Vec<String> {
+    let item = json!({"id": "u-late", "type": "userMessage", "clientId": "late", "content": []});
+    vec![
+        note(
+            "item/started",
+            json!({"threadId": thread, "turnId": turn, "item": item}),
+        ),
+        note(
+            "item/completed",
+            json!({"threadId": thread, "turnId": turn, "completedAtMs": 1, "item": item}),
+        ),
+    ]
+}
+
+fn turn_response(request_id: i64, turn: &str) -> Vec<String> {
+    vec![
+        w_in(request_id, "turn/start", json!({})),
+        w_out(json!({"id": request_id, "result": {"turn": {"id": turn, "status": "inProgress"}}})),
+    ]
+}
+
+fn turn_end(thread: &str, turn: &str, status: &str) -> String {
+    note(
+        "turn/completed",
+        json!({"threadId": thread, "turn": {"id": turn, "status": status, "items": []}}),
+    )
+}
+
+async fn transmit(fake: &mut Fake, text: &str, limit: Duration) -> (Uuid, TransmitOutcome) {
+    let t = fake.tx(text);
+    let id = t.command_id;
+    let outcome = tokio::time::timeout(limit, fake.adapter.transmit(&t, &fake.group))
+        .await
+        .expect("transmit stays within its limit");
+    (id, outcome)
+}
+
+#[tokio::test]
+async fn late_user_message_confirms_an_unconfirmed_input() {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_response(10, "turn-1"));
+    lines.push(w("sleep", json!(600)));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(150));
+    fake.start().await;
+    let (id, outcome) = transmit(&mut fake, "late", WAIT).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == id)
+        ),
+        "{events:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn turn_ending_without_a_user_message_leaves_the_proof_wait_at_once() {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_response(10, "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "failed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let (id, outcome) = transmit(&mut fake, "blocked", Duration::from_secs(5)).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    fake.finish(id).await;
     fake.close().await;
 }
 

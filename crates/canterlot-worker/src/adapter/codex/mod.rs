@@ -141,6 +141,8 @@ pub struct CodexAdapter {
     resolved: VecDeque<Resolved>,
     proof_for: Option<Uuid>,
     proof_seen: bool,
+    /// Вводы с `Undetermined` по сроку: позднее доказательство уходит `InputAccepted`.
+    unconfirmed: HashSet<Uuid>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -224,6 +226,7 @@ impl CodexAdapter {
             resolved: VecDeque::new(),
             proof_for: None,
             proof_seen: false,
+            unconfirmed: HashSet::new(),
             eof: false,
             exited: false,
             start_attempted: false,
@@ -542,11 +545,15 @@ impl CodexAdapter {
                 }
             }
             Translated::UserMessage { client_id, .. } => {
-                if self.proof_for.is_some_and(|command| {
-                    client_id.as_deref() == Some(command.to_string().as_str())
-                }) {
+                let command = client_id.and_then(|id| Uuid::parse_str(&id).ok());
+                if command.is_some() && self.proof_for == command {
                     self.proof_for = None;
                     self.proof_seen = true;
+                } else if let Some(command_id) = command
+                    && self.unconfirmed.remove(&command_id)
+                {
+                    self.events
+                        .push_back(AdapterEvent::InputAccepted { command_id });
                 }
             }
             Translated::TurnStarted { turn_id } => self.outbox.on_turn_started(&turn_id),
@@ -596,6 +603,9 @@ impl CodexAdapter {
             .filter(|active| active.turn_id == turn_id)
             .map(|active| active.command_id);
         let was_active = self.outbox.on_turn_completed(&turn_id);
+        if let Some(command) = command {
+            self.unconfirmed.remove(&command);
+        }
         // Отложенные вызовы уходят без пометки: ход кончился без их завершения.
         self.release_all();
         // turn_items живут до следующего хода: при прерывании конец хода приходит
@@ -1150,6 +1160,7 @@ impl CodexAdapter {
         self.rpc = RpcClient::new();
         self.responses.clear();
         self.pending_writes.clear();
+        self.unconfirmed.clear();
     }
 
     async fn spawn_and_resume(
@@ -1413,12 +1424,14 @@ impl CodexAdapter {
                     kind: input::PROOF_KIND_MESSAGE,
                 });
             }
-            if self.eof || self.exited {
+            // Ход кончился без userMessage (например, блокирующий хук): ждать нечего.
+            if self.eof || self.exited || self.outbox.active().is_none() {
                 self.proof_for = None;
                 return TransmitOutcome::Undetermined;
             }
             if timeout_at(limit, self.pump_once()).await.is_err() {
                 self.proof_for = None;
+                self.unconfirmed.insert(input.command_id);
                 return TransmitOutcome::Undetermined;
             }
         }
