@@ -1025,6 +1025,67 @@ async fn subagent_file_change_approval_carries_the_diff() {
 }
 
 #[tokio::test]
+async fn effort_only_change_is_checked_against_the_current_model() {
+    let mut fake = Fake::new(handshake("thread-mini"));
+    fake.start().await;
+    let mut t = fake.tx("hi");
+    // Модель сессии gpt-6-luna: у неё нет ultra, у модели по умолчанию есть.
+    for (effort, ok) in [("ultra", false), ("max", true)] {
+        t.settings = Some(adapter::SettingsChange {
+            effort: Some(effort.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            fake.adapter.validate_transmission(&t).is_ok(),
+            ok,
+            "{effort}"
+        );
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn rejected_turn_keeps_the_previous_settings() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "error": {"code": -32600, "message": "effort not allowed"}}),
+    ));
+    lines.extend(turn_exchange(11, "thread-mini", "turn-1"));
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "completed", "items": []}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let mut t = fake.tx("hi");
+    t.settings = Some(adapter::SettingsChange {
+        effort: Some("high".into()),
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let out = tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
+        .await
+        .unwrap();
+    assert!(matches!(out, TransmitOutcome::Rejected(_)), "{out:?}");
+    fake.send("plain").await;
+    let starts: Vec<Value> = fake
+        .stdin_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["method"] == "turn/start")
+        .map(|message| message["params"].clone())
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts[1]["effort"], "low",
+        "rejected effort not kept: {}",
+        starts[1]
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));
     fake.spec.native_conversation_id = Some("01a171c3-4681-7b81-bd8b-be81cac722c8".into());

@@ -414,7 +414,7 @@ fn unknown_model_or_effort_is_rejected() {
         instructions: None,
     };
     assert_eq!(
-        validate_settings(&change, &models),
+        validate_settings(&change, &models, None),
         Err("settings_unavailable")
     );
     let change = SettingsChange {
@@ -424,7 +424,7 @@ fn unknown_model_or_effort_is_rejected() {
         instructions: None,
     };
     assert_eq!(
-        validate_settings(&change, &models),
+        validate_settings(&change, &models, None),
         Err("settings_unavailable")
     );
     let change = SettingsChange {
@@ -433,9 +433,9 @@ fn unknown_model_or_effort_is_rejected() {
         permission_mode: None,
         instructions: None,
     };
-    assert_eq!(validate_settings(&change, &models), Ok(()));
+    assert_eq!(validate_settings(&change, &models, None), Ok(()));
     assert_eq!(
-        validate_settings(&SettingsChange::default(), &models),
+        validate_settings(&SettingsChange::default(), &models, None),
         Ok(())
     );
 }

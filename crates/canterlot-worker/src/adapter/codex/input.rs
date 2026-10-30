@@ -122,6 +122,7 @@ fn model_efforts(model: &Value) -> Vec<String> {
 pub fn validate_settings(
     change: &SettingsChange,
     models: &[ModelEntry],
+    current_model: Option<&str>,
 ) -> Result<(), &'static str> {
     if let Some(mode) = change.permission_mode.as_deref()
         && PermissionMode::parse(mode).is_err()
@@ -139,10 +140,10 @@ pub fn validate_settings(
             return Err("settings_unavailable");
         }
     } else if let Some(effort) = change.effort.as_deref() {
-        // Усилие без смены модели относится к модели по умолчанию.
-        let entry = models
-            .iter()
-            .find(|entry| entry.default)
+        // Усилие без смены модели относится к текущей модели сессии.
+        let entry = current_model
+            .and_then(|current| models.iter().find(|entry| entry.id == current))
+            .or_else(|| models.iter().find(|entry| entry.default))
             .ok_or("settings_unavailable")?;
         if !entry.efforts.iter().any(|known| known == effort) {
             return Err("settings_unavailable");

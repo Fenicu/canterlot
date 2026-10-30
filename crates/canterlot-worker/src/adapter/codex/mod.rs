@@ -1284,6 +1284,9 @@ impl CodexAdapter {
                 .as_ref()
                 .unwrap_or(&crate::adapter::SettingsChange::default()),
             &self.models,
+            self.effective
+                .as_ref()
+                .map(|effective| effective.model.as_str()),
         ) {
             return TransmitOutcome::Rejected(reason.into());
         }
@@ -1357,9 +1360,12 @@ impl CodexAdapter {
         if !self.write_request(message).await {
             return TransmitOutcome::Undetermined;
         }
-        self.apply_settings_override(input);
         let limit = Instant::now() + self.deadline;
         let response = self.wait_response(id, limit).await;
+        // Отказ сервера оставляет прежние модель, усилие и режим.
+        if matches!(response, Some(Ok(_))) {
+            self.apply_settings_override(input);
+        }
         let turn_id = match response {
             Some(Ok(value)) => match value
                 .get("turn")
@@ -1620,6 +1626,9 @@ impl Adapter for CodexAdapter {
                 .as_ref()
                 .unwrap_or(&crate::adapter::SettingsChange::default()),
             &self.models,
+            self.effective
+                .as_ref()
+                .map(|effective| effective.model.as_str()),
         )
     }
 
