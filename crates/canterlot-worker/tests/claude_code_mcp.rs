@@ -67,10 +67,16 @@ impl RelayHarness {
         }
     }
 
+    /// Вызов, как его шлёт CLI: `_meta` несёт тот же `tool_use_id`.
     async fn call(&mut self, id: Value, name: &str, arguments: Value) {
+        let meta = json!({"claudecode/toolUseId": arguments["tool_use_id"], "progressToken": id});
+        self.call_raw(id, name, arguments, meta).await;
+    }
+
+    async fn call_raw(&mut self, id: Value, name: &str, arguments: Value, meta: Value) {
         write_line(
             &mut self.sink,
-            &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments}}),
+            &json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":arguments,"_meta":meta}}),
         )
         .await;
     }
@@ -227,6 +233,96 @@ async fn permission_call_opens_request_and_allow_returns_original_input() {
         text,
         "{\"behavior\":\"allow\",\"updatedInput\":{\"command\":\"touch probe.txt\",\"description\":\"Create probe.txt file\"}}",
         "byte-identical with the recorded allow reply"
+    );
+}
+
+#[test]
+fn approve_is_only_a_prompt_handler_not_invited_for_direct_use() {
+    let init = mcp::handle_rpc(&json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}}));
+    let instructions = init.as_reply().unwrap()["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        !instructions.contains("Use the approve tool"),
+        "{instructions}"
+    );
+    assert!(instructions.contains("Never call the approve tool yourself"));
+    let list = mcp::handle_rpc(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}));
+    let tools = list.as_reply().unwrap()["result"]["tools"].clone();
+    let approve = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "approve")
+        .unwrap()
+        .clone();
+    assert!(
+        approve["description"]
+            .as_str()
+            .unwrap()
+            .contains("Not for direct use")
+    );
+}
+
+#[test]
+fn approve_without_matching_meta_tool_use_id_is_an_error() {
+    let call = |arguments: Value, meta: Value| {
+        mcp::handle_rpc(
+            &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"approve","arguments":arguments,"_meta":meta}}),
+        )
+    };
+    // Как шлёт CLI (живой прогон 2.1.311): id в аргументах и в `_meta` совпадают.
+    let prompt = call(
+        json!({"tool_name":"Bash","input":{},"tool_use_id":"toolu_01SyDBAXoSw8THczHraCSUWG"}),
+        json!({"claudecode/toolUseId":"toolu_01SyDBAXoSw8THczHraCSUWG","progressToken":6}),
+    );
+    assert!(matches!(prompt, mcp::McpAction::ToolCall { .. }));
+    for (arguments, meta) in [
+        // Прямой вызов моделью: `_meta` несёт id самого вызова approve.
+        (
+            json!({"tool_name":"Bash","input":{},"tool_use_id":"made_up"}),
+            json!({"claudecode/toolUseId":"toolu_direct"}),
+        ),
+        (
+            json!({"tool_name":"Bash","input":{}}),
+            json!({"claudecode/toolUseId":"toolu_direct"}),
+        ),
+        (
+            json!({"tool_name":"Bash","input":{},"tool_use_id":"toolu_x"}),
+            json!({}),
+        ),
+        (
+            json!({"tool_name":"Bash","input":{},"tool_use_id":""}),
+            json!({"claudecode/toolUseId":""}),
+        ),
+    ] {
+        let reply = call(arguments.clone(), meta);
+        let error = reply.as_error().unwrap_or_else(|| panic!("{arguments}"));
+        assert_eq!(error["code"], -32602);
+        assert_eq!(reply.as_reply().unwrap()["id"], 7);
+    }
+}
+
+#[tokio::test]
+async fn direct_approve_call_gets_an_error_reply_and_opens_nothing() {
+    let mut relay = RelayHarness::bind().await;
+    relay
+        .call_raw(
+            json!(9),
+            "approve",
+            json!({"tool_name": "Bash", "input": {"command": "rm -rf /"}}),
+            json!({"claudecode/toolUseId": "toolu_direct"}),
+        )
+        .await;
+    let reply = relay.reply().await;
+    assert_eq!(reply["id"], 9);
+    assert_eq!(reply["error"]["code"], -32602);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), relay.broker.next())
+            .await
+            .is_err(),
+        "no request reaches the owner"
     );
 }
 

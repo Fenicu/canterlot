@@ -21,8 +21,8 @@ pub enum ToolSet {
 /// Текст инструкций сервера (10–15 строк, для MCP initialize и developerInstructions).
 pub const SERVER_INSTRUCTIONS: &str = "canterlot is the control plane that supervises this coding session.\n\
      The owner drives the session from their phone and answers here.\n\
-     Use the approve tool to ask the owner before running any tool.\n\
-     Questions to the owner go through approve as AskUserQuestion.\n\
+     Permission prompts and AskUserQuestion reach the owner automatically.\n\
+     Never call the approve tool yourself: it only answers permission prompts.\n\
      The owner may answer minutes later; keep working on what is safe.\n\
      Use canterlot_limits to see the remaining Claude API budget.\n\
      It reports the five-hour and weekly windows in percent with reset times.\n\
@@ -104,7 +104,7 @@ fn tools_list(tool_set: ToolSet, provider: &str) -> Value {
         ToolSet::ApproveAndLimits => json!({"tools": [
             {
                 "name": "approve",
-                "description": "Ask the owner before running a tool. The call waits until the owner allows or denies it from their phone, possibly later. Pass the tool name, its full input and the tool use id.",
+                "description": "Permission prompt handler of the canterlot supervisor. Not for direct use: the CLI calls it for permission prompts and AskUserQuestion.",
                 "inputSchema": {"type": "object", "additionalProperties": true},
             },
             limits,
@@ -166,6 +166,9 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
                 .unwrap_or_else(|| json!({}));
             let kind = match (name, tool_set) {
                 ("approve", ToolSet::ApproveAndLimits) => {
+                    if !is_permission_prompt(msg, &arguments) {
+                        return error(&id, -32602, "approve is not for direct use");
+                    }
                     if arguments.get("tool_name").and_then(Value::as_str) == Some("AskUserQuestion")
                     {
                         ToolKind::Question
@@ -184,6 +187,20 @@ pub fn handle_rpc_with_provider(msg: &Value, tool_set: ToolSet, provider: &str) 
         }
         _ => error(&id, -32601, "method not found"),
     }
+}
+
+/// Вызов `approve` от самого CLI: `tool_use_id` аргументов совпадает с
+/// `_meta["claudecode/toolUseId"]` (записано в 2.1.310 и 2.1.311). Прямой вызов
+/// моделью несёт в `_meta` id собственного вызова, а `tool_use_id` выдуман или пуст.
+fn is_permission_prompt(msg: &Value, arguments: &Value) -> bool {
+    let Some(tool_use_id) = arguments.get("tool_use_id").and_then(Value::as_str) else {
+        return false;
+    };
+    !tool_use_id.is_empty()
+        && msg
+            .pointer("/params/_meta/claudecode~1toolUseId")
+            .and_then(Value::as_str)
+            == Some(tool_use_id)
 }
 
 pub fn tool_call_reply(id: &Value, decision: &Value) -> Value {

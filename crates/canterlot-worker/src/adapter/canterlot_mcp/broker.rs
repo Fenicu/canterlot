@@ -261,6 +261,9 @@ async fn serve_conn(
                     .and_then(Value::as_str)
                     .map(str::to_owned)
                 else {
+                    // Без id ответа не будет никогда: CLI ждал бы вечно.
+                    let reply = json!({"jsonrpc": "2.0", "id": rpc_id, "error": {"code": -32602, "message": "tool_use_id is required"}});
+                    let _ = write_line(&writer, &reply).await;
                     continue;
                 };
                 rpc_to_request.insert(rpc_id.to_string(), request_id.clone());
