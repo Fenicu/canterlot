@@ -838,3 +838,74 @@ async fn nul_in_description_or_text_is_invalid_not_internal(pool: PgPool) {
         assert_eq!(response.json::<Value>()["error"]["details"]["field"], field);
     }
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_with_pending_reference_takes_queue_before_list_counter(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f.create("lock-order", "Блокировки", "текст").await;
+    let id = created["id"].as_str().unwrap().to_owned();
+    let conversation = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(conversation)
+        .bind(json!({"instruction_profile": id}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    // Пересчёт активности: очередь, строка разговора, затем счётчики событий.
+    let mut refresh = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id = $1 for update")
+        .bind(conversation)
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    sqlx::query("select id from conversations where id = $1 for no key update")
+        .bind(conversation)
+        .execute(&mut *refresh)
+        .await
+        .unwrap();
+    let delete = {
+        let (pool, owner) = (f.pool.clone(), f.owner);
+        let preset: Uuid = id.parse().unwrap();
+        tokio::spawn(async move {
+            presets::delete(&pool, owner, preset, "delete-lock", Uuid::now_v7())
+                .await
+                .map_err(|error| error.to_string())
+        })
+    };
+    for _ in 0..300 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        if delete.is_finished() || waiting > 0 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let appended = events::append(
+        &mut refresh,
+        events::NewEvent {
+            scope: events::Scope::Conversations { owner_id: f.owner },
+            kind: "derived_changed",
+            conversation_id: Some(conversation),
+            execution_id: None,
+            payload: json!({}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string());
+    let committed = refresh.commit().await.map_err(|error| error.to_string());
+    let deleted = delete.await.unwrap();
+    assert_eq!((appended, committed, deleted), (Ok(()), Ok(()), Ok(())));
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(conversation)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(pending, json!({}));
+}

@@ -2103,11 +2103,8 @@ async fn apply_request_opened(
     strip_nul(&mut payload_val);
     let generation = i64::try_from(fact.generation).map_err(|_| IngestError::InvalidRecord)?;
 
-    sqlx::query("select id from conversations where id = $1 for no key update")
-        .bind(run.conversation_id)
-        .fetch_one(&mut *conn)
-        .await?;
-
+    // Явной блокировки разговора нет: пакет SJ уже мог добавить события (шаг 12),
+    // а вставка с FK берёт совместимый FOR KEY SHARE.
     sqlx::query(
         "insert into requests (
             id, conversation_id, execution_id, generation,

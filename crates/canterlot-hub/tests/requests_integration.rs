@@ -1522,3 +1522,87 @@ async fn nul_in_request_payload_does_not_wedge_the_session_journal(pool: PgPool)
         json!({"tool_name":"Write","input":{"content":"ab","n":1}})
     );
 }
+
+/// Ждёт, пока фоновая транзакция встанет на блокировке строки или завершится.
+async fn blocked_or_done<T>(pool: &PgPool, task: &tokio::task::JoinHandle<T>) {
+    for _ in 0..300 {
+        let waiting: i64 = sqlx::query_scalar(
+            "select count(*) from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        if task.is_finished() || waiting > 0 {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("background transaction neither blocked nor finished");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    // Решение владельца: строка разговора, затем счётчик событий разговора.
+    let mut decision = pool.begin().await.unwrap();
+    sqlx::query("select id from conversations where id = $1 for no key update")
+        .bind(seed.conversation_id)
+        .execute(&mut *decision)
+        .await
+        .unwrap();
+    let batch_task = {
+        let ingest = Ingest::new(pool.clone());
+        let (machine, credential) = (seed.machine_id, seed.credential_digest());
+        let records = batch(
+            Uuid::now_v7(),
+            vec![
+                opened(&execution),
+                record_body::Body::PhaseChanged(canterlot_proto::worker::v1::PhaseChanged {
+                    execution_id: execution.execution_id.to_string(),
+                    phase: "awaiting_permission".into(),
+                    ..Default::default()
+                }),
+                record_body::Body::RequestOpened(RequestOpened {
+                    request_id: "toolu_lock".into(),
+                    execution_id: execution.execution_id.to_string(),
+                    generation: execution.generation as u64,
+                    kind: "permission".into(),
+                    payload_json: b"{}".to_vec(),
+                }),
+            ],
+        );
+        tokio::spawn(async move {
+            ingest
+                .apply_batch(machine, &credential, JournalKind::Sj, &records)
+                .await
+                .map_err(|error| error.to_string())
+        })
+    };
+    blocked_or_done(&pool, &batch_task).await;
+    let appended = canterlot_hub::events::append(
+        &mut decision,
+        canterlot_hub::events::NewEvent {
+            scope: canterlot_hub::events::Scope::Conversation {
+                id: seed.conversation_id,
+            },
+            kind: "request_decided",
+            conversation_id: Some(seed.conversation_id),
+            execution_id: Some(execution.execution_id),
+            payload: json!({}),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| error.to_string());
+    let committed = decision.commit().await.map_err(|error| error.to_string());
+    let batch_result = batch_task.await.unwrap();
+    assert_eq!(
+        (appended, committed, batch_result),
+        (
+            Ok(()),
+            Ok(()),
+            Ok(IngestOutcome::Committed { up_to_seq: 3 })
+        )
+    );
+}

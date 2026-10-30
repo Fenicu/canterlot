@@ -781,6 +781,7 @@ async fn delete_in_tx(
     .bind(id)
     .fetch_one(&mut *conn)
     .await?;
+    clear_pending_references_in_tx(conn, owner, &id.to_string(), correlation).await?;
     let revision: i64 = row.try_get("revision")?;
     let rev: (String, Option<Uuid>, chrono::DateTime<chrono::Utc>) = sqlx::query_as(
         "select edited_by, edited_conversation_id, created_at from instruction_preset_revisions
@@ -812,8 +813,8 @@ async fn delete_in_tx(
         }),
         used_by: used_by(conn, owner, &reference).await?,
     };
+    // Событие списка последним: счётчик owner:{id}:conversations идёт после разговоров.
     emit(conn, owner, &summary, true, correlation).await?;
-    clear_pending_references_in_tx(conn, owner, &id.to_string(), correlation).await?;
     Ok(())
 }
 
@@ -825,10 +826,24 @@ async fn clear_pending_references_in_tx(
     reference: &str,
     correlation: Uuid,
 ) -> Result<(), PresetError> {
-    let ids: Vec<Uuid> = sqlx::query_scalar(
-        "select id from conversations where owner_id=$1 and pending_settings->>'instruction_profile'=$2 for no key update",
+    // Порядок хаба: очереди, затем строки разговоров по возрастанию ID, затем события.
+    let candidates: Vec<Uuid> = sqlx::query_scalar(
+        "select id from conversations where owner_id=$1 and pending_settings->>'instruction_profile'=$2 order by id",
     )
     .bind(owner)
+    .bind(reference)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "select conversation_id from queue_state where conversation_id = any($1) order by conversation_id for update",
+    )
+    .bind(&candidates)
+    .execute(&mut *conn)
+    .await?;
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from conversations where id = any($1) and pending_settings->>'instruction_profile'=$2 order by id for no key update",
+    )
+    .bind(&candidates)
     .bind(reference)
     .fetch_all(&mut *conn)
     .await?;
