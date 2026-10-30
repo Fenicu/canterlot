@@ -56,7 +56,7 @@ test('share_picker_can_create_a_session_without_sending_the_draft @chromium', as
   const url = await postShare(page); await page.goto(url);
   await page.locator('main').getByRole('link', { name: 'Новая сессия' }).click();
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-  await page.getByRole('combobox', { name: 'Корень' }).selectOption('/srv');
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');

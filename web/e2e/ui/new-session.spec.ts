@@ -25,7 +25,7 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   await page.getByRole('link', { name: 'Новая сессия' }).click();
   await expect(page.getByRole('option', { name: /Машина недоступна: degraded/ })).toHaveAttribute('disabled', '');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-  await page.getByRole('combobox', { name: 'Корень' }).selectOption('/srv');
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
@@ -34,6 +34,29 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   expect(bodies[0]?.start).toBe(true);
   expect(bodies[0]?.instruction_profile).toBe('clean');
   expect(bodies[0]?.key).not.toBe('');
+});
+
+test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ page }) => {
+  await boot(page);
+  const bodies: { workdir?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
+      bodies.push({ ...(request.postDataJSON() as { workdir?: string }) });
+    }
+  });
+  await page.goto('/new');
+  await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await expect(page.getByRole('button', { name: '/srv/canterlot' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
+  await page.getByRole('button', { name: '/srv/canterlot' }).click();
+  await expect(page.getByRole('textbox', { name: 'Рабочая папка' })).toHaveValue('/srv/canterlot');
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/tmp/typed-by-hand');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]?.workdir).toBe('/tmp/typed-by-hand');
 });
 
 test('new_session_crunch_default_text_comes_from_config', async ({ page }) => {
