@@ -984,6 +984,10 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
             f.model = bounded_text(&f.model, 128);
             f.tool_name = bounded_text(&f.tool_name, 128);
             f.summary = bounded_text(&f.summary, 1024);
+            // Известна одна отметка; остальное не хранится и не рассылается.
+            if f.approved_by != "cli_policy" {
+                f.approved_by.clear();
+            }
         }
         Body::BlockFinal(f) => {
             f.summary = bounded_text(&f.summary, 1024);

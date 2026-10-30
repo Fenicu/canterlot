@@ -548,3 +548,37 @@ async fn cli_policy_mark_survives_ingest_to_block_json(pool: PgPool) -> TestResu
     assert_eq!(view.approved_by.as_deref(), Some("cli_policy"));
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unknown_approved_by_mark_is_not_stored_or_broadcast(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![Body::BlockStarted(BlockStarted {
+        block_id: id.to_string(),
+        rev: 0,
+        kind: "tool_call".into(),
+        tool_name: "Bash".into(),
+        approved_by: "x".repeat(100_000),
+        ..Default::default()
+    })])
+    .await;
+    let stored: Option<String> =
+        sqlx::query_scalar("select approved_by from blocks where block_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(stored, None);
+    let ev = events(&pool, id).await;
+    assert_eq!(ev[0].0, "block_started");
+    assert!(ev[0].2["approved_by"].is_null(), "{}", ev[0].2);
+    // Ограничение схемы: только известная отметка.
+    let rejected = sqlx::query("update blocks set approved_by='owner' where block_id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await;
+    assert!(
+        rejected.is_err(),
+        "blocks.approved_by accepts arbitrary text"
+    );
+    Ok(())
+}
