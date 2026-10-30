@@ -659,6 +659,35 @@ describe("composer/model", () => {
     expect(model.errorMessage).toBe("Не удалось сохранить на устройстве");
   });
 
+  it("refused_send_later_returns_the_text_the_draft_and_the_files", async () => {
+    const { deps, draftsMap, uploadsList } = createMockDeps({
+      serverNow: () => 1_000_000,
+    });
+    uploadsList.push({
+      id: "u1",
+      conversationId: "conv-1",
+      name: "a.txt",
+      size: 3,
+      phase: "ready",
+      sent: 3,
+      attachmentId: "att-u1",
+    });
+    deps.ops.run = vi.fn(async (op: Op) => {
+      op.state = "refused";
+      op.refusal = { code: "too_many_scheduled", message: "Слишком много" };
+      throw new Error("refused");
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Длинное сообщение на потом";
+
+    await model.sendLater(1_000_000 + 15 * 60_000);
+
+    expect(model.text).toBe("Длинное сообщение на потом");
+    expect(draftsMap.get("conv-1")?.text).toBe("Длинное сообщение на потом");
+    expect(uploadsList.map((item) => item.id)).toEqual(["u1"]);
+    expect(model.errorMessage).toBe("Слишком много");
+  });
+
   it("offline_press_keeps_a_draft_and_creates_no_operation", async () => {
     const { deps, inputs, draftsMap } = createMockDeps({
       canSend: vi.fn(async () => "offline" as const),

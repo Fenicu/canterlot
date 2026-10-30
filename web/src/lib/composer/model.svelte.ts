@@ -104,10 +104,14 @@ export class ComposerModel {
 
   async send(): Promise<void> {
     if (this.sending || !this.gate.ok) return;
+    await this.#press(() => this.#accept());
+  }
+
+  async #press(accept: () => Promise<Accepted | null>): Promise<void> {
     this.sending = true;
     let accepted: Accepted | null;
     try {
-      accepted = await this.#accept();
+      accepted = await accept();
     } finally {
       // Флаг держат только проверка сети и запись в журнал: доставка может идти сколько угодно.
       this.sending = false;
@@ -210,15 +214,10 @@ export class ComposerModel {
 
   async sendLater(at: number): Promise<void> {
     if (this.sending) return;
-    this.sending = true;
-    try {
-      await this.#sendLater(at);
-    } finally {
-      this.sending = false;
-    }
+    await this.#press(() => this.#acceptLater(at));
   }
 
-  async #sendLater(at: number): Promise<void> {
+  async #acceptLater(at: number): Promise<Accepted | null> {
     const now = this.deps.serverNow ? this.deps.serverNow() : Date.now();
     const valid = validateScheduleTime(at, now);
     if (valid !== "ok") {
@@ -226,10 +225,10 @@ export class ComposerModel {
         valid === "too_soon"
           ? "Слишком близкое время отправки"
           : "Слишком далёкое время отправки";
-      return;
+      return null;
     }
 
-    if (!this.gate.ok) return;
+    if (!this.gate.ok) return null;
 
     const sendText = this.text;
     const readyUploads = this.deps.uploads
@@ -237,11 +236,12 @@ export class ComposerModel {
       .filter((u) => u.phase === "ready");
 
     this.text = "";
-    if (!this.#mayGo(sendText, await this.deps.canSend())) return;
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return null;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
 
+    const key = crypto.randomUUID();
     let op: Op;
     try {
       op = await this.deps.ops.begin(
@@ -251,7 +251,7 @@ export class ComposerModel {
           attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
           run_at: new SvelteDate(at).toISOString(),
         },
-        { conversationId: this.deps.conversationId, persist: true },
+        { conversationId: this.deps.conversationId, persist: true, key },
       );
     } catch (err) {
       this.#giveBack(sendText);
@@ -259,13 +259,12 @@ export class ComposerModel {
       throw err;
     }
 
-    this.deps.uploads.detach(readyUploads.map((u) => u.id));
+    const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.errorMessage = null;
     if (!this.text) {
       void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
     }
-
-    void this.deps.ops.run(op);
+    return { op, key, text: sendText, detached };
   }
 
   attach(files: FileList | File[]): void {
