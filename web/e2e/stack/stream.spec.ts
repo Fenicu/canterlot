@@ -69,7 +69,8 @@ test.describe('stack: streaming', () => {
     await hub.waitIdle(id);
 
     expect(await hub.textOf(id)).toBe(expected);
-    await expect.poll(() => verifyLedger(page, hub, id), { timeout: 15_000 }).toMatchObject({ ok: true, holes: [], doubled: [] });
+    // Хвост, съеденный чёрной дырой, ничто не обнаружит раньше переподключения: max_connection_age на стенде 20 с.
+    await expect.poll(() => verifyLedger(page, hub, id), { timeout: 30_000 }).toMatchObject({ ok: true, holes: [], doubled: [] });
 
     const frames = await fetchFrames(stack.control);
     const subscribes = frames.filter((f) => f.direction === 'client_to_hub' && f.op === 'subscribe' && f.scope === `conversation:${id}`);
