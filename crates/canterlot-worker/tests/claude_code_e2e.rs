@@ -1045,7 +1045,7 @@ async fn smoke_turn_raw(
 #[tokio::test]
 async fn live_smoke() {
     if !live_smoke_enabled() {
-        eprintln!("SKIP: set CANTERLOT_CLAUDE_CODE_SMOKE=1 to run six live turns");
+        eprintln!("SKIP: set CANTERLOT_CLAUDE_CODE_SMOKE=1 to run the live turns");
         return;
     }
     let _sigint =
@@ -1099,9 +1099,21 @@ async fn live_smoke() {
     eprintln!(
         "CONFIRMED: init matches chosen native id, canterlot MCP connected, text streamed; model={model}"
     );
+    let five_hour = events.iter().find_map(|e| match e {
+        AdapterEvent::Limit(adapter::LimitFact::Observed {
+            window: adapter::LimitWindow::FiveHour,
+            used_permille,
+            resets_at_ms: Some(reset),
+        }) => Some((*used_permille, *reset)),
+        _ => None,
+    });
+    let (used, reset) = five_hour.expect("live rate_limit_event gives a five-hour observation");
+    eprintln!("CONFIRMED: rate_limit_event observed five-hour {used}‰, resets_at_ms={reset}");
 
+    // Только команда записи: чтение (printf, echo, ls, sleep) CLI разрешает сам,
+    // не спрашивая --permission-prompt-tool.
     let mut input = tx(Uuid::now_v7());
-    input.text="Use Bash to execute exactly: printf canterlot-permission-smoke. Wait for the owner's approval. Then reply OK.".into();
+    input.text="Use Bash to execute exactly: touch canterlot-permission-smoke.txt. Wait for the owner's approval. Then reply OK.".into();
     let events = smoke_turn(&mut f, input).await;
     assert!(
         events
@@ -1109,7 +1121,24 @@ async fn live_smoke() {
             .any(|e| matches!(e,AdapterEvent::RequestOpened {kind,..} if kind=="permission")),
         "manual Bash permission must reach canterlot"
     );
-    eprintln!("CONFIRMED: Bash permission opened and allow delivered");
+    assert!(
+        f.dir.path().join("canterlot-permission-smoke.txt").exists(),
+        "allowed Bash call must run"
+    );
+    eprintln!("CONFIRMED: Bash permission opened and allow delivered, the command ran");
+
+    let mut input = tx(Uuid::now_v7());
+    input.text =
+        "Call the mcp__canterlot__canterlot_limits tool once, then reply with its exact text."
+            .into();
+    let events = smoke_turn(&mut f, input).await;
+    assert!(
+        events.iter().any(
+            |e| matches!(e, AdapterEvent::BlockFinal {text, ..} if text.contains("five-hour window"))
+        ),
+        "canterlot_limits answers from the live observations"
+    );
+    eprintln!("CONFIRMED: canterlot_limits reports the observed windows");
 
     let mut input = tx(Uuid::now_v7());
     input.text="Call AskUserQuestion now, asking 'Smoke choice?' with two options 'Alpha' and 'Bravo'. After the answer, repeat the chosen label.".into();
@@ -1159,7 +1188,9 @@ async fn live_smoke() {
     );
 
     let mut input = tx(Uuid::now_v7());
-    input.text = "Use Bash to execute exactly: sleep 60. Do not run anything else.".into();
+    // CLI сам не пускает `sleep N` на переднем плане и уводит команду в фон;
+    // долгий python3 с записью следом спрашивает разрешение и идёт на переднем плане.
+    input.text = "Use one Bash call in the foreground (do not set run_in_background) to execute exactly: python3 -c 'import time; time.sleep(60)' && touch canterlot-interrupt-smoke.txt. Do not run anything else.".into();
     f.send(&input).await;
     tokio::time::timeout(Duration::from_secs(60), async {
         loop {
@@ -1207,6 +1238,10 @@ async fn live_smoke() {
         }
     }
     f.close().await;
+    assert!(
+        !f.dir.path().join("canterlot-interrupt-smoke.txt").exists(),
+        "interrupted command must not finish"
+    );
     eprintln!("CONFIRMED: SIGINT acknowledges aborted_tools and exits as user_stop");
 
     f.adapter = Box::new(
@@ -1234,7 +1269,7 @@ async fn live_smoke() {
             .any(|e| matches!(e,AdapterEvent::BlockFinal {text,..} if text.contains("RESUMED")))
     );
     f.close().await;
-    eprintln!("CONFIRMED: new process resumes same native conversation; six turns total");
+    eprintln!("CONFIRMED: new process resumes same native conversation");
 
     // План 2c, задача 6, live: пресеты в репозитории под $HOME (предки владельца
     // существуют), настоящее CLI только под флагом smoke.
