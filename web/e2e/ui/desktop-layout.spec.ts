@@ -169,11 +169,12 @@ test('search_field_explains_itself_and_keeps_reset_inside_the_pill', async ({ pa
   await page.getByRole('button', { name: 'Поиск', exact: true }).click();
   const field = page.getByRole('textbox', { name: 'Поиск сессий' });
   await expect(field).toHaveAttribute('placeholder', 'Поиск сессий');
-  const reset = list(page).getByRole('button', { name: 'Сбросить' });
+  // После задержки поиска такая же кнопка есть и в пустом состоянии результатов.
+  const pill = page.getByRole('search');
+  const reset = pill.getByRole('button', { name: 'Сбросить' });
   await expect(reset).toHaveCount(0);
   await field.fill('поток');
   await expect(reset).toBeVisible();
-  const pill = page.getByRole('search');
   await expect(pill.locator('input')).toHaveCount(1);
   expect((await offsets(reset, pill)).right).toBeGreaterThanOrEqual(-0.5);
   expect(await pill.evaluate((node) => getComputedStyle(node).backgroundColor)).not.toBe('rgba(0, 0, 0, 0)');
