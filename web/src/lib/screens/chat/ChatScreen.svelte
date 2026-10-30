@@ -9,6 +9,7 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import ChatHeader from './ChatHeader.svelte';
 	import PauseCards from './PauseCards.svelte';
+	import TodoPanel from './TodoPanel.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
@@ -123,6 +124,8 @@
 		}}
 		{now}
 	/>
+
+	<TodoPanel {chat} />
 
 	{#if chat.requests.items.size > 0}
 		<div class="request-cards-slot">

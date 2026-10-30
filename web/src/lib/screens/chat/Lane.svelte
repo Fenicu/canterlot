@@ -3,6 +3,7 @@
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
+	import TodoPanel from './TodoPanel.svelte';
 	import { theme } from '#lib/theme.js';
 	import Icon from '#lib/ui/Icon.svelte';
 
@@ -79,6 +80,8 @@
 			laneRoot={rootBlockId}
 		/>
 	</div>
+
+	<TodoPanel {chat} lane={rootBlockId} />
 
 	<footer class="lane-footer">
 		<p class="pending-line">Результат вернётся в основную сессию</p>

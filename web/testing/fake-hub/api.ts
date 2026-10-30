@@ -5,7 +5,9 @@ import type { Counts, ListRow, ListSnapshot } from '../../src/lib/stores/list.sv
 import type { ProviderLimits } from '../../src/lib/stores/limits';
 import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import type { RunInfo } from '../../src/lib/stores/run';
+import type { TodoList } from '../../src/lib/stores/todos.svelte';
 import type { RangeResult } from '../../src/lib/sync/scope';
+import type { HubEvent } from '../../src/lib/sync/wire';
 import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 
@@ -133,6 +135,12 @@ export class FakeHubApi {
 		const open_requests = [...requestsMap.values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
 		);
+		const todos = new Map<string | null, TodoList>();
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind !== 'todo_updated') continue;
+			const list = ev.payload as TodoList;
+			todos.set(list.lane_block_id ?? null, list);
+		}
 		const held = this.details.get(id)?.queue as Partial<Record<keyof QueueSnapshot, unknown>> | undefined;
 
 		return {
@@ -145,8 +153,21 @@ export class FakeHubApi {
 			},
 			history: this.page(id, {}),
 			scheduled: [],
-			open_requests
+			open_requests,
+			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null))
 		};
+	}
+
+	/** Как `todo_updated` хаба: список целиком, ревизия дорожки растёт с каждым обновлением. */
+	pushTodo(id: string, items: TodoList['items'], lane: string | null = null, omitted = 0): HubEvent {
+		const known = this.hub
+			.log(`conversation:${id}`)
+			.filter((ev) => ev.kind === 'todo_updated' && (ev.payload as TodoList).lane_block_id === lane).length;
+		return this.hub.append(`conversation:${id}`, {
+			kind: 'todo_updated',
+			conversation_id: id,
+			payload: { lane_block_id: lane, revision: known + 1, items, omitted }
+		});
 	}
 
 	/** Как `queued` снимка хаба: вводы без места в ленте целиком, а не их число. */

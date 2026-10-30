@@ -68,6 +68,56 @@ test.describe('stack: features and security', () => {
     }
   });
 
+  test('todo_list_runs_from_the_adapter_to_the_panel_and_returns_from_the_snapshot', tag, async ({ page }) => {
+    test.setTimeout(90_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const id = await createSessionUI(page, stack);
+    const panel = page.getByRole('region', { name: 'Список задач агента' });
+    await expect(panel).toHaveCount(0);
+
+    await sendScript(page, synthetic.script([
+      synthetic.todo([
+        { text: 'Собрать данные', status: 'in_progress' },
+        { text: 'Проверить итог', status: 'pending' }
+      ]),
+      synthetic.delta('Начало. '),
+      synthetic.delayMs(1500),
+      synthetic.subagent('Explore', 'synthetic-small', 'Найти дубликаты', [
+        synthetic.todo([{ text: 'Читать журнал', status: 'in_progress' }]),
+        synthetic.delta('нашёл три')
+      ]),
+      synthetic.todo([
+        { text: 'Собрать данные', status: 'completed' },
+        { text: 'Проверить итог', status: 'in_progress' }
+      ]),
+      synthetic.delta('Итог.')
+    ]));
+
+    // Первая ревизия видна посреди хода, вторая заменяет её на месте.
+    await expect(panel).toContainText('0 из 2', { timeout: 30_000 });
+    await expect(panel).toContainText('Собрать данные');
+    await expect(panel).toContainText('1 из 2', { timeout: 30_000 });
+    await expect(panel).toContainText('Проверить итог');
+    await hub.waitIdle(id);
+
+    const stored = await hub.json<{ data: { todos: { lane_block_id: string | null; revision: number; items: { text: string; status: string }[] }[] } }>(
+      `/api/v1/conversations/${id}/snapshot`
+    );
+    expect(stored.data.todos.map((list) => list.items.length)).toEqual([2, 1]);
+    expect(stored.data.todos[0]).toMatchObject({ lane_block_id: null, revision: 2 });
+    expect(stored.data.todos[1]!.lane_block_id).toMatch(/^[0-9a-f-]{36}$/);
+
+    await page.reload();
+    await expect(panel).toContainText('1 из 2', { timeout: 20_000 });
+    await expect(panel).toContainText('Проверить итог');
+
+    const lane = stored.data.todos[1]!.lane_block_id!;
+    await page.goto(`${stack.baseUrl}/c/${id}/lane/${lane}`);
+    await expect(page.locator('.lane-screen[data-ready]')).toContainText('нашёл три', { timeout: 20_000 });
+    await expect(panel).toContainText('Читать журнал');
+  });
+
   test('info_sheet_and_exports_on_real_data', tag, async ({ page }) => {
     test.setTimeout(90_000);
     await page.addInitScript(() => {

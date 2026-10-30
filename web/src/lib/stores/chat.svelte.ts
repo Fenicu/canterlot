@@ -32,6 +32,7 @@ import {
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { RequestsModel } from "./requests.svelte";
+import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
 
 export interface HistoryBlock {
@@ -116,6 +117,7 @@ export interface SnapshotData {
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
   open_requests?: unknown[];
+  todos?: TodoList[];
 }
 
 export type RunSlot =
@@ -176,6 +178,7 @@ export class ChatStore {
   readonly inputs = new InputMap();
   readonly timeline = new TimelineModel();
   readonly requests: RequestsModel;
+  readonly todos = new TodosModel();
   readonly diagnostics: unknown[] = [];
   readonly queue = $state({
     pause_reasons: [] as unknown[],
@@ -304,6 +307,7 @@ export class ChatStore {
     this.timeline.clear();
     this.attachments.clear();
     this.requests.items.clear();
+    this.todos.clear();
     this.diagnostics.length = 0;
     this.#held = [];
     this.detail = null;
@@ -393,6 +397,11 @@ export class ChatStore {
   #take(event: HubEvent): void {
     if (event.kind === "hidden") {
       this.hiddenCount += 1;
+      return;
+    }
+    // Лента держит события, пока читают старое; панели задач ждать нечего, порядок даёт ревизия.
+    if (event.kind === "todo_updated") {
+      this.todos.apply(event.payload);
       return;
     }
     if (this.#hold || this.timeline.tailDetached) {
@@ -793,6 +802,7 @@ export class ChatStore {
     }
     if (data.scheduled) this.scheduled = data.scheduled;
     if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
+    if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.history)
       this.timeline.hasOlder = Boolean(data.history.next_before);
     const items = data.history?.items ?? [];

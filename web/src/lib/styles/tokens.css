@@ -198,6 +198,7 @@
   --scale-press: .96;
 
   
+  --todo-list-max: 40dvh;
   --stage-box: var(--icon-small);
   --stage-dot: var(--mark);
   --stage-gap: var(--s4);

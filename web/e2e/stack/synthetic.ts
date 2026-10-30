@@ -15,6 +15,9 @@ export const synthetic = {
   model(name: string): SyntheticStep {
     return { model: name };
   },
+  todo(items: { text: string; status: 'pending' | 'in_progress' | 'completed' }[]): SyntheticStep {
+    return { todo: items };
+  },
   subagent(name: string, model: string, task: string, steps: SyntheticStep[]): SyntheticStep {
     return { subagent: { name, model, task, steps } };
   },

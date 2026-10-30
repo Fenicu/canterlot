@@ -4,6 +4,8 @@ import { seedConversation } from '../fake-hub/seed';
 
 const AT = '2026-10-28T12:00:00.000Z';
 
+const SUBAGENT_CALL = '00000000-0000-4000-8000-00000000e001';
+
 export function seedMockupChat(api: FakeHubApi): string {
   const id = seedConversation(api, { title: 'Разбор ленты' });
   const run = api.id();
@@ -264,7 +266,7 @@ export function seedMockup05(api: FakeHubApi): { id: string; rootBlockId: string
   detail.harness = { id: 'claude', title: 'Claude Code', provider: 'claude' };
   detail.machine = { id: 'workstation', name: 'workstation' };
 
-  const rootBlockId = 'tool-agent-explore';
+  const rootBlockId = SUBAGENT_CALL;
   const rootAgentBlock: HistoryBlock = {
     kind: 'block',
     id: rootBlockId,
@@ -338,7 +340,7 @@ export function seedMockup11(api: FakeHubApi): { id: string } {
   const { id } = seedMockup04(api);
   api.delegations.set(id, [
     {
-      block_id: 'tool-agent-explore',
+      block_id: SUBAGENT_CALL,
       parent_block_id: null,
       started_at: AT,
       finished_at: null,
