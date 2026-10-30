@@ -21,6 +21,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .skip_debug([
             ".canterlot.worker.v1.DeliverDecision",
             ".canterlot.worker.v1.RequestOpened",
+            ".canterlot.worker.v1.TodoItem",
+            ".canterlot.worker.v1.TodoUpdated",
             ".canterlot.worker.v1.DecisionApplied",
             ".canterlot.worker.v1.TextBlock",
             ".canterlot.worker.v1.DeliverInput",

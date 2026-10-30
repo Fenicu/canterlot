@@ -382,6 +382,27 @@ impl fmt::Debug for MediaSource {
         }
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+/// Пункт собственного списка задач харнесса; текст — данные сообщения.
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TodoItem {
+    pub text: String,
+    pub status: TodoStatus,
+}
+impl fmt::Debug for TodoItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TodoItem")
+            .field("text_bytes", &self.text.len())
+            .field("status", &self.status)
+            .finish()
+    }
+}
 #[derive(Clone)]
 pub enum AdapterEvent {
     RequestOpened {
@@ -456,6 +477,11 @@ pub enum AdapterEvent {
         call_id: Uuid,
         tool: String,
         arguments: serde_json::Value,
+    },
+    /// Полный список задач агента. `lane` — блок вызова субагента, у основного агента `None`.
+    TodoUpdated {
+        lane: Option<Uuid>,
+        items: Vec<TodoItem>,
     },
 }
 impl fmt::Debug for AdapterEvent {
@@ -538,6 +564,11 @@ impl fmt::Debug for AdapterEvent {
                 .field("call_id", call_id)
                 .field("tool", tool)
                 .finish_non_exhaustive(),
+            Self::TodoUpdated { lane, items } => f
+                .debug_struct("TodoUpdated")
+                .field("lane", lane)
+                .field("items", &items.len())
+                .finish(),
         }
     }
 }

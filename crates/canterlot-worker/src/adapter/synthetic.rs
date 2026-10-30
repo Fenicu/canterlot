@@ -60,6 +60,20 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             request_id: string("request_id")?,
             reason: string("reason")?,
         },
+        "todo_updated" => AdapterEvent::TodoUpdated {
+            lane: value
+                .get("lane")
+                .filter(|v| !v.is_null())
+                .map(|_| {
+                    blocks
+                        .get(&uuid("lane")?)
+                        .copied()
+                        .ok_or(AdapterError::Protocol)
+                })
+                .transpose()?,
+            items: serde_json::from_value(value["items"].clone())
+                .map_err(|_| AdapterError::Protocol)?,
+        },
         "phase" => AdapterEvent::Phase {
             phase: serde_json::from_value(value["phase"].clone())
                 .map_err(|_| AdapterError::Protocol)?,

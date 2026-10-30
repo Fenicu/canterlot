@@ -165,11 +165,16 @@ impl Sj {
         self.journal.acked_seq()
     }
 
+    /// Номер следующей записи: журнал переживает перезапуск сопровождения, и ревизия вместе с ним.
+    pub fn next_seq(&self) -> u64 {
+        self.journal.last_seq() + self.pending.len() as u64 + 1
+    }
+
     pub fn append(&mut self, body: Body) -> Result<u64, SupervisorError> {
         if self.closed_reason.is_some() {
             return Err(SupervisorError::Spec);
         }
-        let seq = self.journal.last_seq() + self.pending.len() as u64 + 1;
+        let seq = self.next_seq();
         self.observe(seq, &body);
         let payload = RecordBody { body: Some(body) }.encode_to_vec();
         self.pending.push(payload);
@@ -296,6 +301,19 @@ mod tests {
             decision_id: "d".into(),
             reason: "x".repeat(64 * 1024),
         })
+    }
+
+    #[test]
+    fn next_seq_keeps_growing_across_a_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sj = Sj::create(root.path()).unwrap();
+        assert_eq!(sj.next_seq(), sj.append(filler(0)).unwrap());
+        assert_eq!(sj.next_seq(), sj.append(filler(1)).unwrap());
+        sj.flush().unwrap();
+        let last = sj.last_seq();
+        drop(sj);
+        let reopened = Sj::create(root.path()).unwrap();
+        assert_eq!(reopened.next_seq(), last + 1);
     }
 
     #[test]

@@ -29,6 +29,9 @@
 //! {"read_attachment":0}, {"view_image":"<путь>"} или {"view_image":{"path":"…",
 //! "inline":true}}: блок `Read` с путём в summary, кадр `media {block_id, path | data}`
 //! (data - base64 байтов файла) и результат «<размер> bytes». Ввод также несёт files и settings.
+//! {"todo":[{"text":"…","status":"in_progress"}]} — полный список задач; внутри субагента
+//! идёт в его дорожку. {"large_todo":{"repeat":"щ","times":3000,"count":1000}} — такой же
+//! список сверх всех потолков.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
@@ -311,6 +314,20 @@ fn run_steps<'a>(
                 phase(Phase::AwaitingPermission).await?;
             } else if let Some(payload) = step.get("late_request") {
                 turn.late_request = Some(payload.clone());
+            } else if let Some(items) = step.get("todo") {
+                let items: Vec<super::TodoItem> = serde_json::from_value(items.clone())
+                    .map_err(|_| io::Error::other("invalid todo"))?;
+                emit(json!({"type":"todo_updated", "lane":lane.parent, "items":items})).await?;
+            } else if let Some(spec) = step.get("large_todo") {
+                let item = super::TodoItem {
+                    text: spec["repeat"]
+                        .as_str()
+                        .unwrap_or("x")
+                        .repeat(spec["times"].as_u64().unwrap_or(0) as usize),
+                    status: super::TodoStatus::Pending,
+                };
+                let items = vec![item; spec["count"].as_u64().unwrap_or(0) as usize];
+                emit(json!({"type":"todo_updated", "lane":lane.parent, "items":items})).await?;
             } else if let Some(spec) = step.get("large_summary") {
                 let summary = spec["repeat"]
                     .as_str()

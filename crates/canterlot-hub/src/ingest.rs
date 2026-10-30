@@ -1393,7 +1393,8 @@ async fn apply_body(
         | Body::BlockIncomplete(_)
         | Body::BlockMedia(_)
         | Body::PhaseChanged(_)
-        | Body::JournalOpened(_) => return Err(IngestError::InvalidRecord),
+        | Body::JournalOpened(_)
+        | Body::TodoUpdated(_) => return Err(IngestError::InvalidRecord),
     }
     Ok(false)
 }

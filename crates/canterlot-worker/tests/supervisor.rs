@@ -20,7 +20,7 @@ use canterlot_proto::worker::{
     },
     v1::{
         Command, ContentBlock, DeliverInput, Instructions, InterruptState, RecordBody, TextBlock,
-        command::Kind, content_block, record_body::Body,
+        TodoStatus, command::Kind, content_block, record_body::Body,
     },
 };
 use canterlot_worker::supervisor::ipc::{read_message, write_message};
@@ -1849,6 +1849,24 @@ fn png(width: u32, height: u32, tail: usize) -> Vec<u8> {
 }
 
 impl Harness {
+    async fn start_cli_todo(&mut self, todo_v1: bool) {
+        let workdir = self._root.path().to_string_lossy().into_owned();
+        self.send(down::Msg::StartCli(StartCli {
+            profile: "synthetic".into(),
+            workdir,
+            pilot_v1: true,
+            todo_v1,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+        self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+            .await;
+    }
+
     async fn start_cli_pilot(&mut self, pilot_v1: bool) {
         let workdir = self._root.path().to_string_lossy().into_owned();
         self.send(down::Msg::StartCli(StartCli {
@@ -2085,4 +2103,106 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
+}
+
+fn todos(bodies: &[Body]) -> Vec<&canterlot_proto::worker::v1::TodoUpdated> {
+    bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::TodoUpdated(fact) => Some(fact),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn todo_list_reaches_sj_whole_with_a_growing_revision_per_lane() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_todo(true).await;
+    let id = Uuid::now_v7();
+    let steps = script(
+        r#"{"todo":[{"text":"план","status":"in_progress"},{"text":"тесты","status":"pending"}]},
+           {"subagent":{"name":"Explore","model":"synthetic-small","task":"t","steps":[
+             {"todo":[{"text":"читать","status":"completed"}]}]}},
+           {"todo":[{"text":"план","status":"completed"},{"text":"тесты","status":"in_progress"}]}"#,
+    );
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    let facts = todos(&bodies);
+    assert_eq!(facts.len(), 3, "{facts:?}");
+    let revisions: Vec<u64> = facts.iter().map(|fact| fact.revision).collect();
+    assert!(
+        revisions.is_sorted() && revisions[0] < revisions[2],
+        "{revisions:?}"
+    );
+    assert_eq!(facts[0].generation, 1);
+    assert_eq!(facts[0].execution_id, harness.execution_id.to_string());
+    assert_eq!(facts[0].lane_block_id, "");
+    assert_eq!(facts[2].lane_block_id, "");
+    assert_eq!(facts[2].items.len(), 2);
+    assert_eq!(facts[2].items[1].text, "тесты");
+    assert_eq!(facts[2].items[1].status, TodoStatus::InProgress as i32);
+    let call = bodies
+        .iter()
+        .find_map(|body| match body {
+            Body::BlockStarted(fact) if fact.tool_name == "Agent" => Some(fact.block_id.clone()),
+            _ => None,
+        })
+        .expect("subagent call block");
+    assert_eq!(facts[1].lane_block_id, call);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn oversized_todo_list_is_cut_with_a_marker_and_the_stream_goes_on() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_todo(true).await;
+    let id = Uuid::now_v7();
+    let steps =
+        script(r#"{"large_todo":{"repeat":"щ","times":3000,"count":1000}},{"delta":"дальше"}"#);
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    let facts = todos(&bodies);
+    assert_eq!(facts.len(), 1, "{bodies:?}");
+    assert!(facts[0].omitted > 0);
+    assert_eq!(facts[0].items.len() + facts[0].omitted as usize, 1000);
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| matches!(b, Body::AdapterDiagnostic(f) if f.event_type == "record_too_large"))
+    );
+    assert!(
+        bodies
+            .iter()
+            .any(|b| matches!(b, Body::BlockFinal(f) if f.text == "дальше"))
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn todo_is_dropped_once_with_a_diagnostic_without_todo_v1() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_todo(false).await;
+    let id = Uuid::now_v7();
+    let steps = script(
+        r#"{"todo":[{"text":"а","status":"pending"}]},{"todo":[{"text":"б","status":"pending"}]}"#,
+    );
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert!(todos(&bodies).is_empty());
+    let drops = bodies
+        .iter()
+        .filter(|b| {
+            matches!(b, Body::AdapterDiagnostic(f)
+                if f.kind == "capability_missing" && f.event_type == "todo_dropped")
+        })
+        .count();
+    assert_eq!(drops, 1);
+    harness.shutdown().await;
 }

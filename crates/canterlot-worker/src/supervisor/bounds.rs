@@ -3,8 +3,9 @@
 
 use canterlot_proto::{
     limits::MAX_EVENT_BATCH_BYTES,
-    worker::v1::{AdapterDiagnostic, record_body::Body},
+    worker::v1::{AdapterDiagnostic, TodoItem, record_body::Body},
 };
+use prost::Message;
 use serde_json::Value;
 use uuid::Uuid;
 
@@ -12,6 +13,11 @@ use uuid::Uuid;
 pub(super) const MAX_REQUEST_PAYLOAD_BYTES: usize = 262_144;
 /// Потолок идентификатора: он приходит от CLI и хранится в индексируемой колонке.
 pub(super) const MAX_REQUEST_ID_BYTES: usize = 1024;
+
+/// Потолки списка задач: весь факт не больше карточки запроса.
+const MAX_TODO_BYTES: usize = MAX_REQUEST_PAYLOAD_BYTES;
+const MAX_TODO_ITEMS: usize = 256;
+const MAX_TODO_TEXT_BYTES: usize = 4_096;
 
 /// Потолок записи: остаток пакета уходит на его обвязку.
 const MAX_RECORD_BYTES: usize = MAX_EVENT_BATCH_BYTES - 1024;
@@ -58,6 +64,28 @@ pub(super) fn bounded_record(execution_id: Uuid, mut body: Body) -> Body {
         kind: "unknown_optional_event".into(),
         event_type: "record_too_large".into(),
     })
+}
+
+/// Список в пределах потолка. Длинный пункт подрезается с многоточием, лишние
+/// отбрасываются с хвоста; второе значение — сколько пунктов отброшено.
+pub(super) fn bounded_todo(mut items: Vec<TodoItem>) -> (Vec<TodoItem>, u32) {
+    let total = items.len();
+    items.truncate(MAX_TODO_ITEMS);
+    let mut bytes = 0;
+    let mut kept = 0;
+    for item in &mut items {
+        if item.text.len() > MAX_TODO_TEXT_BYTES {
+            clip(&mut item.text, MAX_TODO_TEXT_BYTES);
+            item.text.push('…');
+        }
+        bytes += item.encoded_len() + prost::length_delimiter_len(item.encoded_len()) + 1;
+        if bytes > MAX_TODO_BYTES {
+            break;
+        }
+        kept += 1;
+    }
+    items.truncate(kept);
+    (items, u32::try_from(total - kept).unwrap_or(u32::MAX))
 }
 
 /// JSON карточки в пределах потолка. Крупная карточка заменяется превью с меткой
@@ -128,6 +156,57 @@ mod tests {
         let json = bounded_json(kind, payload).expect("preview fits");
         assert!(json.len() <= MAX_REQUEST_PAYLOAD_BYTES, "{}", json.len());
         serde_json::from_slice(&json).unwrap()
+    }
+
+    fn todo(text: &str) -> TodoItem {
+        TodoItem {
+            text: text.to_owned(),
+            status: canterlot_proto::worker::v1::TodoStatus::Pending as i32,
+        }
+    }
+
+    #[test]
+    fn short_list_passes_untouched() {
+        let items = vec![todo("один"), todo("два")];
+        assert_eq!(bounded_todo(items.clone()), (items, 0));
+    }
+
+    #[test]
+    fn long_list_is_cut_with_a_count_of_what_was_dropped() {
+        let (items, omitted) = bounded_todo(vec![todo("пункт"); MAX_TODO_ITEMS + 44]);
+        assert_eq!(items.len(), MAX_TODO_ITEMS);
+        assert_eq!(omitted, 44);
+    }
+
+    #[test]
+    fn long_text_is_cut_on_a_character_boundary_with_an_ellipsis() {
+        let (items, omitted) = bounded_todo(vec![todo(&"щ".repeat(MAX_TODO_TEXT_BYTES))]);
+        assert_eq!(omitted, 0);
+        let text = &items[0].text;
+        assert!(text.ends_with('…'), "{text}");
+        assert!(text.len() <= MAX_TODO_TEXT_BYTES + '…'.len_utf8());
+    }
+
+    #[test]
+    fn huge_list_fits_the_ceiling_and_survives_the_record_bound() {
+        let id = Uuid::now_v7();
+        let (items, omitted) = bounded_todo(vec![todo(&"щ".repeat(100_000)); 1_000]);
+        assert!(!items.is_empty());
+        assert_eq!(items.len() + omitted as usize, 1_000);
+        let fact = canterlot_proto::worker::v1::TodoUpdated {
+            items,
+            omitted,
+            ..Default::default()
+        };
+        assert!(
+            fact.encoded_len() <= MAX_TODO_BYTES + 64,
+            "{}",
+            fact.encoded_len()
+        );
+        assert!(matches!(
+            bounded_record(id, Body::TodoUpdated(fact)),
+            Body::TodoUpdated(_)
+        ));
     }
 
     #[test]

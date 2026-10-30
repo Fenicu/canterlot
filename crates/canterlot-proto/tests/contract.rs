@@ -1195,6 +1195,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         permission_mode: "bypass".into(),
         instructions: None,
         pilot_v1: true,
+        todo_v1: true,
     });
     assert_roundtrip(PhaseChanged {
         execution_id: "execution".into(),
@@ -1461,4 +1462,36 @@ fn instructions_and_agent_call_messages_are_stable() {
     };
     assert_eq!(down.encode_to_vec()[0], 0x62);
     assert_roundtrip(down);
+}
+
+#[test]
+fn todo_updated_roundtrips_as_record_34_and_debug_hides_the_text() {
+    use canterlot_proto::worker::v1::{RecordBody, TodoItem, TodoStatus, TodoUpdated, record_body};
+    let marker = "PRIVATE_TODO_MARKER";
+    let fact = TodoUpdated {
+        execution_id: "e".into(),
+        generation: 3,
+        revision: 41,
+        lane_block_id: "b".into(),
+        items: vec![TodoItem {
+            text: marker.into(),
+            status: TodoStatus::InProgress as i32,
+        }],
+        omitted: 7,
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::TodoUpdated(fact.clone())),
+    };
+    let encoded = body.encode_to_vec();
+    // Поле 34 с длиной: варинт тега занимает два байта.
+    assert_eq!(&encoded[..2], &[0x92, 0x02]);
+    assert_eq!(RecordBody::decode(encoded.as_slice()).unwrap(), body);
+    for debug in [
+        format!("{fact:?}"),
+        format!("{body:?}"),
+        format!("{:?}", fact.items[0]),
+    ] {
+        assert!(!debug.contains(marker), "{debug}");
+    }
+    assert!(format!("{fact:?}").contains("items: 1"));
 }

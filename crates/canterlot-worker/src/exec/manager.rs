@@ -927,6 +927,7 @@ impl Actor {
                 permission_mode: start.permission_mode.clone(),
                 instructions: start.instructions.clone(),
                 pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
+                todo_v1: start.capabilities.iter().any(|c| c == "todo_v1"),
             }))
             .await;
         Ok(())

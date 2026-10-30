@@ -32,7 +32,7 @@ use crate::{
 
 mod data;
 
-pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1", "instructions_v1"];
+pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1", "instructions_v1", "todo_v1"];
 
 #[derive(Clone)]
 pub struct CachedLimits {

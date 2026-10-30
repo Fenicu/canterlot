@@ -250,6 +250,8 @@ message RecordBody {
     DecisionApplied decision_applied = 31;
     DecisionNotApplied decision_not_applied = 32;
     DecisionUnconfirmed decision_unconfirmed = 33;
+    // Только при согласованной возможности todo_v1.
+    TodoUpdated todo_updated = 34;
   }
 }
 
@@ -632,6 +634,31 @@ message RequestOpened {
 message RequestClosed {
   string request_id = 1;
   string reason = 2;
+}
+
+enum TodoStatus {
+  TODO_STATUS_UNSPECIFIED = 0;
+  TODO_STATUS_PENDING = 1;
+  TODO_STATUS_IN_PROGRESS = 2;
+  TODO_STATUS_COMPLETED = 3;
+}
+
+message TodoItem {
+  string text = 1;
+  TodoStatus status = 2;
+}
+
+// Полный список задач агента, не дельта: запись заменяет прежний список своей дорожки.
+message TodoUpdated {
+  string execution_id = 1;
+  uint64 generation = 2;
+  // Номер записи в SJ: растёт в пределах исполнения и переживает перезапуск сопровождения.
+  uint64 revision = 3;
+  // Блок вызова субагента; у основного агента пусто.
+  string lane_block_id = 4;
+  repeated TodoItem items = 5;
+  // Сколько пунктов не поместилось в запись.
+  uint32 omitted = 6;
 }
 
 // Намерение синхронизируется на диск до передачи решения адаптеру.

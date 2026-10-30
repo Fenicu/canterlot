@@ -21,8 +21,8 @@ use canterlot_proto::{
             DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost,
             InputCancelWon, InputDispatchDeferred, InputRejected, InputTransmissionStarted,
             InputWithdrawn, InterruptState, InterruptStatus, JournalClosed, JournalOpened,
-            PhaseChanged, RequestClosed, RequestOpened, RunFinished, content_block,
-            record_body::Body,
+            PhaseChanged, RequestClosed, RequestOpened, RunFinished, TodoItem as ProtoTodoItem,
+            TodoStatus as ProtoTodoStatus, TodoUpdated, content_block, record_body::Body,
         },
     },
 };
@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
-    bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record},
+    bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record, bounded_todo},
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
     sj::Sj,
 };
@@ -44,7 +44,7 @@ use crate::{
     adapter::{
         Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, DecisionOutcome,
         InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase,
-        SettingsChange, StartSpec, Transmission, TransmitOutcome, registry_with,
+        SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -159,6 +159,9 @@ struct Supervisor {
     active_turn: Option<Uuid>,
     turn_started: Option<Instant>,
     pilot_v1: bool,
+    todo_v1: bool,
+    /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
+    todo_drop_reported: bool,
     provider: String,
     open_blocks: BTreeMap<Uuid, u64>,
     known_interrupts: HashSet<(String, u32)>,
@@ -280,6 +283,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         active_turn: None,
         turn_started: None,
         pilot_v1: false,
+        todo_v1: false,
+        todo_drop_reported: false,
         provider: String::new(),
         open_blocks: BTreeMap::new(),
         known_interrupts: HashSet::new(),
@@ -896,6 +901,44 @@ impl Supervisor {
         Ok(())
     }
 
+    fn on_todo(
+        &mut self,
+        lane: Option<Uuid>,
+        items: Vec<crate::adapter::TodoItem>,
+    ) -> Result<(), SupervisorError> {
+        if !self.todo_v1 {
+            if !std::mem::replace(&mut self.todo_drop_reported, true) {
+                self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                    execution_id: self.spec.execution_id.to_string(),
+                    kind: "capability_missing".into(),
+                    event_type: "todo_dropped".into(),
+                }))?;
+            }
+            return Ok(());
+        }
+        let items = items
+            .into_iter()
+            .map(|item| ProtoTodoItem {
+                text: item.text,
+                status: match item.status {
+                    TodoStatus::Pending => ProtoTodoStatus::Pending,
+                    TodoStatus::InProgress => ProtoTodoStatus::InProgress,
+                    TodoStatus::Completed => ProtoTodoStatus::Completed,
+                } as i32,
+            })
+            .collect();
+        let (items, omitted) = bounded_todo(items);
+        self.record(Body::TodoUpdated(TodoUpdated {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            revision: self.sj.next_seq(),
+            lane_block_id: lane.map(|id| id.to_string()).unwrap_or_default(),
+            items,
+            omitted,
+        }))?;
+        Ok(())
+    }
+
     fn on_media(&mut self, block_id: Uuid, source: MediaSource) -> Result<(), SupervisorError> {
         if !self.pilot_v1 {
             self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
@@ -1051,6 +1094,7 @@ impl Supervisor {
         };
         adapter.set_stop_grace(timers.stop_grace);
         self.pilot_v1 = start.pilot_v1;
+        self.todo_v1 = start.todo_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
@@ -1685,6 +1729,7 @@ impl Supervisor {
                 }
             }
             AdapterEvent::Media { block_id, source } => self.on_media(block_id, source)?,
+            AdapterEvent::TodoUpdated { lane, items } => self.on_todo(lane, items)?,
             AdapterEvent::ContextExhausted => {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }

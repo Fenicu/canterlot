@@ -210,6 +210,28 @@ impl fmt::Debug for crate::worker::v1::RequestOpened {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::TodoItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TodoItem")
+            .field("text_bytes", &self.text.len())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::TodoUpdated {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TodoUpdated")
+            .field("execution_id", &self.execution_id)
+            .field("generation", &self.generation)
+            .field("revision", &self.revision)
+            .field("lane_block_id", &self.lane_block_id)
+            .field("items", &self.items.len())
+            .field("omitted", &self.omitted)
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::DecisionApplied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DecisionApplied")
