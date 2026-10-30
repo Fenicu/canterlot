@@ -47,6 +47,7 @@
 | Разговор | `block_conflicting_final` | Повторный финал блока с другим содержимым |
 | Разговор | `block_media_attached` | Картинка, на которую смотрел агент, опубликована и прикреплена к блоку |
 | Разговор, список | `conversation_updated` | Атрибуты разговора; в списке также `counts` |
+| Список | `conversation_deleted` | Разговор удалён: `id`, `counts` |
 | Разговор | `conversation_settings_changed` | Настройки следующего хода и их применение |
 | Разговор | `crunch_changed` | Настройки «кранча» и переопределение резерва |
 | Разговор | `crunch_held` | Удержание по лимиту |
@@ -131,6 +132,8 @@
 | `group_not_found` | 404 | `browser` | `never` | Группа не найдена |
 | `group_name_taken` | 409 | `browser` | `never` | Группа с таким именем уже существует |
 | `archive_active` | 409 | `browser` | `never` | В сессии есть активная работа |
+| `conversation_deleted` | 404 | `browser` | `never` | Сессия удалена |
+| `conversation_live` | 409 | `browser` | `after_condition` | Сначала остановите сессию |
 | `attachment_not_ready` | 409 | `browser` | `after_condition` | Вложение ещё не готово |
 | `attachment_not_uploadable` | 409 | `browser` | `never` | Загрузка вложения уже завершена или прекращена |
 | `attachment_unsupported` | 422 | `browser` | `never` | Харнесс не принимает такое вложение |
@@ -187,6 +190,7 @@
 | `GET /api/v1/conversations` | `items`, `next_cursor`, `counts` |
 | `GET /api/v1/conversations/{id}` | Атрибуты, проекция активности, настройки, кранч, живое исполнение и удержания |
 | `PATCH /api/v1/conversations/{id}` | Изменение `title`, `color`, `pinned`, `archived`; `force` допускается при архивировании |
+| `DELETE /api/v1/conversations/{id}` | 204; удаление остановленной сессии, см. «Удаление разговора» |
 | `PUT /api/v1/conversations/{id}/groups` | Замена набора `group_ids` |
 | `PUT /api/v1/conversations/{id}/crunch` | Сохранение `enabled` и `resume_text` |
 | `POST /api/v1/conversations/{id}/spend-reserve` | 200, `continued`, `already_continued` или `not_held`; продолжение этой сессии за счёт недельного резерва |
@@ -213,6 +217,16 @@
 `ListItem.machine` содержит только `id` и `name`. Атрибуты публикуются в `conversation_created` (полный элемент списка) и `conversation_updated` (атрибуты без проекции); оба события несут актуальные `counts`. Изменение атрибутов сначала публикуется в области разговора, затем в списке. Удаление группы публикует изменения всех её бывших участников (сначала все области разговоров по UUID), затем `group_changed` с новым списком групп и `counts`. В `derived_changed` приходят только изменяемые проектором поля. Доступность машины принадлежит области `machines`.
 
 Архивирование активной сессии возвращает `archive_active` с `details.reasons` из `crunch`, `scheduled`, `live_execution`. `force=true` выключает кранч, как `PUT …/crunch` с `enabled=false`, и отменяет ожидающие сообщения и пробуждения; если планировщик уже захватил задание, операция откатывается и возвращает `scheduled`. Само живое исполнение при принудительном архивировании продолжается.
+
+### Удаление разговора
+
+`DELETE /api/v1/conversations/{id}` требует `Idempotency-Key` и удаляет разговор одной транзакцией. Пока исполнение не перешло в `stopped` или `failed` (включая `owner_lost`), ответ `conversation_live`, и ничего не меняется. Чужой или неизвестный идентификатор даёт `not_found`, уже удалённый разговор `conversation_deleted`, повтор с тем же ключом снова 204. Ссылка из другого разговора останавливает транзакцию: `invalid_state`, данные не тронуты.
+
+Удаляются разговор, исполнения, вводы, команды, блоки, запросы, ходы и расход по ним, отложенные сообщения, вложения и картинки, членство в группах, производное состояние, очередь и ключи идемпотентности. Журнал области разговора исчезает вместе со счётчиком. В журналах владельца строки разговора остаются скрытыми заглушками без содержимого, чтобы нумерация шла без пропусков. Снимки лимитов теряют ссылку на исполнение, пресеты, созданные из разговора, ссылку на него; сами они остаются. Файлы вложений и картинок адресуются своим ID и удаляются сразу после commit; занятый файл подберёт сборщик.
+
+Остаётся только надгробие `conversation_tombstones`: идентификатор разговора, владелец, машина, максимальное поколение и идентификаторы исполнений, без текста и бессрочно (§14.1). Курсор журнала удалённого исполнения теряет ссылку на него и получает `discarded`: поздние записи подтверждаются без применения, а факт `JournalOpened` по надгробию не считается чужим, поэтому воркер отпускает повтор и не блокирует поток данных машины (AT-F-19). Событие `conversation_deleted` хранит идентификатор положенные 7 дней.
+
+На машине остаются каталог исполнения (журналы и копии вложений) и нативная история CLI: команда `delete_conversation_local` из [recovery.md](recovery.md) R6 пока не реализована, поэтому пилот не обещает AT-F-18 и AT-F-20.
 
 У машины `availability_since` соответствует `machines.availability_at`, `heartbeat_age_ms` берётся из Registry (при отсутствии соединения `null`). Предупреждения: `disk_usage_high` при использовании диска не ниже `[machines].disk_warn_pct`, `metrics_stale` при отсутствии или возрасте метрик не меньше `[machines].metrics_stale_after`, `limits_mismatch` при расхождении лимитов вложений.
 
@@ -370,7 +384,7 @@ Worker при подготовке исполнения синхронизиру
 
 Ответ диапазона показывает `head` из той же транзакции, что и события. Курсор ниже сохранённого журнала получает `cursor_too_old`, курсор выше головы `cursor_ahead`; `oldest_available_seq` является десятичной строкой (при пустом журнале это `head+1`). Клиент загружает новый снимок и начинает хвост после его `cursor`. До 256 исходных событий проходят через единую `events::project_for_client`; неизвестный вид становится `hidden` с `payload:{}`, `conversation_id:null`, `execution_id:null`. Соседние заглушки одной области с последовательными номерами объединяются: начальные `id`, `correlation_id`, `committed_at_from`, `scope_seq_from` сохраняются, конечные `scope_seq`, `committed_at` берутся из последнего события. Через разрыв, видимое событие или другую область объединение не проходит.
 
-Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
+Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_deleted`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
 
 ### Метаданные фактов агента
 
@@ -448,6 +462,7 @@ Pump читает журнал только при доступной ёмкос
 | 21 | Основания межсессионных инструментов (§12): вычисляемое состояние с доказательствами и контракт подписок | активность (строка 15) и области WSS (строка 20) | `derived_changed` | 5, 7b |
 | 22 | Лимиты, видимые модели (§7): только путь данных; инструмент MCP и пометка 80/90/95 % в планах 2a/2b | – (`ControlDown.limits_snapshot` для сеансов `pilot_v1`) | `limits_changed` | 1, 2, 3 |
 | 23 | Пресеты инструкций: список без текста, создание и правка с контролем версий, стартовый пресет исполнителя, мягкое удаление; выбор при создании и смена посреди сессии (план 2c, задачи 2, 3, 8) | `GET /api/v1/presets`, `POST /api/v1/presets`, `GET /api/v1/presets/{id}`, `PATCH /api/v1/presets/{id}`, `DELETE /api/v1/presets/{id}`; сводки в снимке списка | `instruction_preset_changed` | 2c-2 |
+| 24 | Удаление остановленной сессии с подтверждением, синхронно между устройствами (ТЗ §14.1) | `DELETE /api/v1/conversations/{id}` | `conversation_deleted` | пилот |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.
 

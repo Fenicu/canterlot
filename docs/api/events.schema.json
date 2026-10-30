@@ -61,6 +61,9 @@
       "$ref": "#/$defs/conversation_updated"
     },
     {
+      "$ref": "#/$defs/conversation_deleted"
+    },
+    {
       "$ref": "#/$defs/conversation_settings_changed"
     },
     {
@@ -2547,6 +2550,89 @@
       ],
       "additionalProperties": false
     },
+    "conversation_deleted": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "conversation_deleted"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "counts": {
+              "$ref": "#/$defs/Counts"
+            }
+          },
+          "required": [
+            "id",
+            "counts"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "conversation_settings_changed": {
       "type": "object",
       "properties": {
@@ -4533,6 +4619,9 @@
                 },
                 {
                   "$ref": "#/$defs/conversation_updated"
+                },
+                {
+                  "$ref": "#/$defs/conversation_deleted"
                 },
                 {
                   "$ref": "#/$defs/conversation_settings_changed"

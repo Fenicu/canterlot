@@ -48,9 +48,11 @@ async fn conversation(
     if !(1..=200).contains(&limit) {
         return Err(ApiError::new(ErrorCode::InvalidRequest));
     }
-    Ok(Json(
+    let snapshot =
         snapshot::conversation_with_registry(&s.pool, o.owner_id, id, limit, Some(&s.registry))
             .await?
-            .ok_or_else(|| ApiError::new(ErrorCode::NotFound))?,
+            .ok_or_else(|| ApiError::new(ErrorCode::NotFound));
+    Ok(Json(
+        super::conversations::deleted_or(&s, o.owner_id, id, snapshot).await?,
     ))
 }
