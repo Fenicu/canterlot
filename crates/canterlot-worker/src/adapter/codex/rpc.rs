@@ -133,7 +133,7 @@ pub fn classify(line: &str) -> Incoming {
     }
 }
 
-// Исходящие сообщения; id клиентов идут с нуля, соответствие ответов ждёт задача 7.
+// Исходящие сообщения; id клиентов идут с нуля, `pending` — ещё ожидаемые ответы.
 pub struct RpcClient {
     next: i64,
     pending: HashMap<i64, &'static str>,
@@ -173,6 +173,11 @@ impl RpcClient {
 
     pub fn error(id: &RpcId, code: i64, message: &str) -> Value {
         serde_json::json!({ "id": id.to_value(), "error": { "code": code, "message": message } })
+    }
+
+    // Срок вышел: поздний ответ уже некому забрать.
+    pub fn forget(&mut self, id: i64) {
+        self.pending.remove(&id);
     }
 
     pub fn resolve(&mut self, id: &RpcId) -> Option<&'static str> {

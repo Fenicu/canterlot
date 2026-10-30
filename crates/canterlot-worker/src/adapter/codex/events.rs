@@ -188,9 +188,7 @@ struct OpenBlock {
     parent: Option<Uuid>,
     command_id: Option<Uuid>,
     item_type: String,
-    text: String,
     result_block: Option<Uuid>,
-    result_text: String,
     reasoning: Option<ReasoningState>,
     pending_diff: String,
 }
@@ -578,9 +576,7 @@ impl Translator {
                     parent,
                     command_id,
                     item_type: item_type.to_owned(),
-                    text: String::new(),
                     result_block: None,
-                    result_text: String::new(),
                     reasoning: Some(ReasoningState {
                         parts: Vec::new(),
                         has_summary: false,
@@ -638,9 +634,7 @@ impl Translator {
                         parent,
                         command_id,
                         item_type: item_type.to_owned(),
-                        text: String::new(),
                         result_block: None,
-                        result_text: String::new(),
                         reasoning: None,
                         pending_diff: diff,
                     },
@@ -700,9 +694,7 @@ impl Translator {
                         parent,
                         command_id,
                         item_type: item_type.to_owned(),
-                        text: String::new(),
                         result_block: None,
-                        result_text: String::new(),
                         reasoning: None,
                         pending_diff: String::new(),
                     },
@@ -758,9 +750,7 @@ impl Translator {
                         parent,
                         command_id,
                         item_type: item_type.to_owned(),
-                        text: String::new(),
                         result_block: None,
-                        result_text: String::new(),
                         reasoning: None,
                         pending_diff: String::new(),
                     },
@@ -790,9 +780,7 @@ impl Translator {
                 parent,
                 command_id,
                 item_type: item_type.to_owned(),
-                text: String::new(),
                 result_block: None,
-                result_text: String::new(),
                 reasoning: None,
                 pending_diff: String::new(),
             },
@@ -1066,13 +1054,12 @@ impl Translator {
             .get("delta")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let Some(block) = self.open.get_mut(item_id) else {
+        let Some(block) = self.open.get(item_id) else {
             return vec![Translated::Ignored];
         };
         if block.reasoning.is_some() || block.item_type != "agentMessage" {
             return vec![Translated::Ignored];
         }
-        block.text.push_str(delta);
         vec![Translated::Event(AdapterEvent::BlockDelta {
             block_id: block.block_id,
             append: delta.to_owned(),
@@ -1197,8 +1184,7 @@ impl Translator {
             let block = self.open.get_mut(item_id).unwrap();
             block.result_block = Some(result_block);
         }
-        let block = self.open.get_mut(item_id).unwrap();
-        block.result_text.push_str(delta);
+        let block = self.open.get(item_id).unwrap();
         out.push(Translated::Event(AdapterEvent::BlockDelta {
             block_id: block.result_block.unwrap(),
             append: delta.to_owned(),

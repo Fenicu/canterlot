@@ -602,6 +602,17 @@ fn thread_result_without_instruction_sources_is_accepted() {
 }
 
 #[test]
+fn abandoned_request_does_not_accept_a_late_response() {
+    let mut rpc = RpcClient::new();
+    let (id, _) = rpc.request("thread/turns/list", serde_json::json!({}));
+    rpc.forget(id);
+    assert_eq!(rpc.resolve(&RpcId::Int(id)), None);
+    let (id, _) = rpc.request("turn/start", serde_json::json!({}));
+    assert_eq!(rpc.resolve(&RpcId::Int(id)), Some("turn/start"));
+    assert_eq!(rpc.resolve(&RpcId::Int(id)), None);
+}
+
+#[test]
 fn resume_params_exclude_turns() {
     let workdir = Path::new("/tmp/canterlot-stage0/codex/resume/run-1");
     let params = thread_resume_params(

@@ -326,7 +326,9 @@ impl CodexAdapter {
             StdoutLine::Oversized(_) => self.diagnostic("oversized_frame", false),
             StdoutLine::Line(line) => match rpc::classify(&line) {
                 Incoming::Response { id, result } => {
-                    if let RpcId::Int(number) = id {
+                    if self.rpc.resolve(&id).is_some()
+                        && let RpcId::Int(number) = id
+                    {
                         self.responses.insert(number, result);
                     }
                 }
@@ -845,6 +847,14 @@ impl CodexAdapter {
             if timeout_at(until, self.flush_writes()).await.is_err()
                 || timeout_at(until, self.pump_once()).await.is_err()
             {
+                // Опоздавший ответ turn/start ещё нужен settle_late_turn.
+                if self
+                    .pending_turn
+                    .as_ref()
+                    .is_none_or(|turn| turn.rpc_id != id)
+                {
+                    self.rpc.forget(id);
+                }
                 return self.responses.remove(&id);
             }
         }
@@ -1346,6 +1356,7 @@ impl CodexAdapter {
         };
         let Some(result) = self.responses.remove(&rpc_id) else {
             if self.outbox.adopted_turn_ended() {
+                self.rpc.forget(rpc_id);
                 self.pending_turn = None;
             }
             return;
