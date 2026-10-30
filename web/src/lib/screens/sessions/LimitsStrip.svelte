@@ -32,7 +32,11 @@
           <span>{view.crunchLabel}</span>
         {:else}
           {#each shown as row (row.label)}
-            <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span></span>
+            {#if row.empty}
+              <span class="row">{compact ? 'Лимиты' : row.label} · нет данных</span>
+            {:else}
+              <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span></span>
+            {/if}
           {/each}
         {/if}
         {#if view.tone === 'reserve'}<span class="reserve">резерв</span>{/if}

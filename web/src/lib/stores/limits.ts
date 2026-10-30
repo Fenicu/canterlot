@@ -29,12 +29,15 @@ export interface LimitView {
   stale: boolean;
 }
 
+export const NO_LIMIT_DATA = "нет данных";
+
 export function windowText(
   window: LimitWindow | null | undefined,
   now: number,
   options?: { staleAfterMs?: number; warnPct?: number },
 ): { pct: string; reset: string; stale: boolean; hot: boolean } {
-  if (!window) return { pct: "0%", reset: "", stale: false, hot: false };
+  if (!window)
+    return { pct: NO_LIMIT_DATA, reset: "", stale: false, hot: false };
   const observed = Date.parse(window.observed_at);
   const staleAfterMs = options?.staleAfterMs ?? 180_000;
   const warnPct = options?.warnPct ?? 80;
