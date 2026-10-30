@@ -87,6 +87,7 @@ message ControlUp {
     MachineReport machine_report = 5;
     MachineMetrics machine_metrics = 6;
     LimitsReport limits_report = 7;
+    WorkdirSuggestions workdir_suggestions = 8;
   }
 }
 
@@ -111,6 +112,7 @@ message ControlDown {
     HeartbeatAck heartbeat_ack = 4;
     PollLimits poll_limits = 5;
     LimitsSnapshot limits_snapshot = 6;
+    SuggestWorkdirs suggest_workdirs = 7;
   }
 }
 
@@ -502,6 +504,18 @@ message LimitReached {
   LimitWindow window = 3;
   uint64 resets_at_ms = 4;
   string input_command_id = 5;
+}
+
+// Необязательная возможность workdir_suggest_v1: подсказка рабочей папки во время
+// ввода. Пути не пишутся в журналы (см. redacted_debug.rs).
+message SuggestWorkdirs {
+  string request_id = 1;
+  string path = 2;
+}
+
+message WorkdirSuggestions {
+  string request_id = 1;
+  repeated string directories = 2;
 }
 
 message ModelUsage {

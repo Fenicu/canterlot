@@ -58,7 +58,12 @@ async fn worker_without_exec_capability_echo_rejects_start() {
     };
     assert_eq!(
         hello.optional_capabilities,
-        ["exec_v1", "pilot_v1", "instructions_v1"]
+        [
+            "exec_v1",
+            "pilot_v1",
+            "instructions_v1",
+            "workdir_suggest_v1"
+        ]
     );
     hub.send(ControlDown {
         msg: Some(control_down::Msg::Command(start_command(

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+use canterlot_proto::limits::{MAX_WORKDIR_BYTES, MAX_WORKDIR_SUGGESTIONS};
 use canterlot_worker::{
     adapter::catalog,
     config::WorkerConfig,
@@ -8,6 +9,7 @@ use canterlot_worker::{
         metrics::{
             ExecutionProbe, MetricsCollector, parse_loadavg, parse_meminfo, parse_proc_stat,
         },
+        workdirs::{WorkdirSuggester, list_directories},
     },
 };
 use prost::Message;
@@ -180,6 +182,163 @@ fn report_carries_the_home_of_the_user_the_worker_runs_as() {
     let home = std::env::home_dir().unwrap();
     assert!(home.is_absolute());
     assert_eq!(report.home_dir, home.to_str().unwrap());
+}
+fn roots_of(dir: &Path) -> Vec<std::path::PathBuf> {
+    vec![dir.to_path_buf()]
+}
+fn text(path: &Path) -> &str {
+    path.to_str().unwrap()
+}
+#[test]
+fn suggestions_list_only_directories_matching_the_prefix_in_order() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["zeta", "alpha", "alps", "beta"] {
+        fs::create_dir(dir.path().join(name)).unwrap();
+    }
+    fs::write(dir.path().join("almanac.txt"), "file").unwrap();
+    let parent = text(dir.path());
+    assert_eq!(
+        list_directories(&format!("{parent}/al"), &roots_of(dir.path())),
+        vec![format!("{parent}/alpha"), format!("{parent}/alps")]
+    );
+    assert_eq!(
+        list_directories(&format!("{parent}/"), &roots_of(dir.path())),
+        vec![
+            format!("{parent}/alpha"),
+            format!("{parent}/alps"),
+            format!("{parent}/beta"),
+            format!("{parent}/zeta"),
+        ]
+    );
+    assert!(list_directories(&format!("{parent}/missing/"), &roots_of(dir.path())).is_empty());
+}
+#[test]
+fn suggestions_show_hidden_directories_only_for_a_dot_prefix() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join(".cache")).unwrap();
+    fs::create_dir(dir.path().join("cache")).unwrap();
+    let parent = text(dir.path());
+    assert_eq!(
+        list_directories(&format!("{parent}/"), &roots_of(dir.path())),
+        vec![format!("{parent}/cache")]
+    );
+    assert_eq!(
+        list_directories(&format!("{parent}/."), &roots_of(dir.path())),
+        vec![format!("{parent}/.cache")]
+    );
+}
+#[test]
+fn suggestions_are_capped_after_sorting() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..(MAX_WORKDIR_SUGGESTIONS + 5) {
+        fs::create_dir(dir.path().join(format!("d{index:03}"))).unwrap();
+    }
+    let parent = text(dir.path());
+    let found = list_directories(&format!("{parent}/d"), &roots_of(dir.path()));
+    assert_eq!(found.len(), MAX_WORKDIR_SUGGESTIONS);
+    assert_eq!(found[0], format!("{parent}/d000"));
+    assert_eq!(found[29], format!("{parent}/d029"));
+}
+#[test]
+fn suggestions_refuse_relative_parent_nul_and_oversized_paths() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir(dir.path().join("work")).unwrap();
+    let parent = text(dir.path());
+    let roots = roots_of(dir.path());
+    let oversized = format!("{parent}/{}", "a".repeat(MAX_WORKDIR_BYTES));
+    for path in [
+        String::new(),
+        "work".to_owned(),
+        format!("{parent}/../"),
+        format!("{parent}/work/../"),
+        format!("{parent}/\0"),
+        oversized,
+    ] {
+        assert!(list_directories(&path, &roots).is_empty(), "{path:?}");
+    }
+}
+#[test]
+fn suggestions_obey_allowed_roots_by_canonical_path() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("root");
+    let outside = base.path().join("outside");
+    fs::create_dir_all(root.join("inner")).unwrap();
+    fs::create_dir_all(outside.join("secret")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("escape")).unwrap();
+    std::os::unix::fs::symlink(root.join("inner"), outside.join("back")).unwrap();
+    let roots = vec![root.clone()];
+    assert_eq!(
+        list_directories(&format!("{}/", text(&root)), &roots),
+        vec![format!("{}/inner", text(&root))],
+        "a link out of the root would be refused at start"
+    );
+    assert!(
+        list_directories(&format!("{}/se", text(&outside)), &roots).is_empty(),
+        "a directory outside the root is not listed"
+    );
+    assert_eq!(
+        list_directories(&format!("{}/back", text(&outside)), &roots),
+        Vec::<String>::new(),
+        "a directory unrelated to the roots is not read at all"
+    );
+    assert_eq!(
+        list_directories(&format!("{}/ro", text(base.path())), &roots),
+        vec![format!("{}/root", text(base.path()))],
+        "an ancestor of a root leads to the root and nowhere else"
+    );
+    assert_eq!(
+        list_directories(&format!("{}/", text(base.path())), &roots),
+        vec![format!("{}/root", text(base.path()))],
+    );
+    assert!(list_directories(&format!("{}/", text(&root)), &[]).is_empty());
+}
+#[test]
+fn suggestions_of_an_unreadable_directory_are_empty() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let locked = dir.path().join("locked");
+    fs::create_dir_all(locked.join("inner")).unwrap();
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+    let found = list_directories(&format!("{}/", text(&locked)), &roots_of(dir.path()));
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(found.is_empty());
+}
+#[tokio::test]
+async fn suggester_gives_up_at_the_time_limit_and_keeps_one_listing_at_a_time() {
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+        mpsc,
+    };
+    let (release, hold) = mpsc::channel::<()>();
+    let hold = Arc::new(Mutex::new(hold));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (held, counted) = (hold.clone(), calls.clone());
+    let suggester = WorkdirSuggester::with_lister(
+        std::time::Duration::from_millis(30),
+        Arc::new(move |_: &str| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            held.lock().unwrap().recv().unwrap();
+            vec!["/found".to_owned()]
+        }),
+    );
+    assert!(suggester.suggest("/slow".into()).await.is_empty());
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    assert!(
+        suggester.suggest("/slow".into()).await.is_empty(),
+        "a stuck listing is not joined by a second thread"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    let found = loop {
+        let found = suggester.suggest("/slow".into()).await;
+        if !found.is_empty() {
+            break found;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    };
+    assert_eq!(found, ["/found"]);
 }
 fn config(dir: &Path) -> WorkerConfig {
     toml::from_str(&format!("hub_url='https://localhost'\nca_cert='ca'\ntoken_file='token'\nmachine_id='{}'\ninstallation_id='{}'\nrestore_generation='{}'\ndata_dir='{}'\n[execution]\nallowed_workdir_roots=['{}']",Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7(),dir.display(),dir.join(".").display())).unwrap()

@@ -46,6 +46,24 @@ impl fmt::Debug for command::Kind {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::SuggestWorkdirs {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SuggestWorkdirs")
+            .field("request_id", &self.request_id)
+            .field("path_bytes", &self.path.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::WorkdirSuggestions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorkdirSuggestions")
+            .field("request_id", &self.request_id)
+            .field("directories", &self.directories.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::BlockDelta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockDelta")

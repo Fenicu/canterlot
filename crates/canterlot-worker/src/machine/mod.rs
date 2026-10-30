@@ -6,6 +6,7 @@ use canterlot_proto::{
 use std::time::{SystemTime, UNIX_EPOCH};
 pub mod limits;
 pub mod metrics;
+pub mod workdirs;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
