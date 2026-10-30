@@ -1,5 +1,6 @@
 use canterlot_worker::adapter::claude_code::process::{
-    CliProcess, LaunchSpec, SessionArg, Signal, StdoutLine, build_args, build_env, write_exec_files,
+    CliProcess, LaunchError, LaunchSpec, SessionArg, Signal, StdoutLine, build_args, build_env,
+    exit_cause, write_exec_files,
 };
 use canterlot_worker::adapter::claude_code::version::{check, parse_version};
 use canterlot_worker::adapter::{InstructionMode, InstructionSpec};
@@ -347,6 +348,48 @@ printf '%s\n' '{"type":"x"}'
         other => panic!("expected Line, got {:?}", other),
     }
     assert!(matches!(proc.next_line().await, StdoutLine::Eof));
+}
+
+#[test]
+fn stderr_names_only_the_known_exit_causes() {
+    assert_eq!(
+        exit_cause(
+            b"No conversation found with session ID: 00000000-0000-4000-8000-000000000000\n"
+        ),
+        Some("resume_transcript_missing")
+    );
+    assert_eq!(
+        exit_cause(b"Error: Session ID 01a1 is already in use.\n"),
+        Some("session_id_in_use")
+    );
+    assert_eq!(exit_cause(b"TypeError: boom\n"), None);
+    assert_eq!(exit_cause(b""), None);
+    assert_eq!(exit_cause(&[0xd0, 0xff, 0xfe]), None);
+}
+
+#[test]
+fn launch_errors_keep_their_cause() {
+    assert_eq!(LaunchError::WorkdirNotDir.reason(), "workdir_not_dir");
+    assert_eq!(
+        LaunchError::MissingInstructions.reason(),
+        "missing_instructions"
+    );
+    assert_eq!(
+        LaunchError::UnknownPermissionMode.reason(),
+        "unknown_permission_mode"
+    );
+    assert_eq!(
+        LaunchError::SpawnFailed(std::io::Error::other("x")).reason(),
+        "cli_spawn_failed"
+    );
+    assert_eq!(
+        LaunchError::CliNotFoundInContainment.reason(),
+        "cli_not_contained"
+    );
+    assert_eq!(
+        LaunchError::Io(std::io::Error::other("x")).reason(),
+        "cli_launch_io"
+    );
 }
 
 #[tokio::test]

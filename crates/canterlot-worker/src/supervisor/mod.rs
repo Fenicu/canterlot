@@ -13,6 +13,7 @@ use crate::containment::ContainmentError;
 
 pub use crate::config::SupervisorTimers;
 
+mod bounds;
 pub mod ipc;
 mod run;
 mod sj;

@@ -144,6 +144,10 @@ impl Sj {
             .collect()
     }
 
+    pub fn has_open_requests(&self) -> bool {
+        self.closed_reason.is_none() && self.requests.values().any(|r| !r.terminal)
+    }
+
     pub fn journal_id(&self) -> Uuid {
         self.journal_id
     }

@@ -9,7 +9,12 @@
 //! {"error":"..."},{"unknown":{"event_type":"...","required":false}},
 //! {"exit":0},{"detach_child":true},{"hang":true}]}.
 //! Запросы: {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
-//! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}}.
+//! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}},
+//! {"request_large":{"tool_name":"Write","repeat":"щ","times":400000}} (вход сверх предела
+//! ввода), с "bare":true — тот же текст вместо объекта,
+//! {"large_summary":{"repeat":"щ","times":600000}} (вызов инструмента с такой сводкой),
+//! {"open_request":{"tool_name":"Bash"}} (запрос без ожидания ответа, как у фонового
+//! субагента), {"late_request":{"tool_name":"Bash"}} (такой же запрос сразу после конца хода).
 //! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
 //! {"echo_instructions":true} пишет блок с режимом и версией инструкций ввода;
 //! {"agent_call":{"tool":"...","arguments":{...}}} отдаёт вызов инструмента агента
@@ -138,6 +143,7 @@ struct Lane {
 }
 struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
+    late_request: Option<Value>,
     command: Uuid,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
@@ -149,14 +155,14 @@ struct Turn {
 impl Turn {
     async fn request(&mut self, kind: &str, payload: &Value, lane: &Lane) -> io::Result<()> {
         let id = Uuid::now_v7().to_string();
+        emit(json!({"type":"request_opened", "request_id":id, "kind":kind, "payload":payload}))
+            .await?;
         phase(if kind == "permission" {
             Phase::AwaitingPermission
         } else {
             Phase::AwaitingAnswer
         })
         .await?;
-        emit(json!({"type":"request_opened", "request_id":id, "kind":kind, "payload":payload}))
-            .await?;
         while let Some((request_id, decision)) = self.decisions.recv().await {
             let reason = if request_id != id {
                 "request_closed"
@@ -298,6 +304,31 @@ fn run_steps<'a>(
                 turn.request("permission", payload, lane).await?;
             } else if let Some(payload) = step.get("ask_question") {
                 turn.request("question", payload, lane).await?;
+            } else if let Some(payload) = step.get("open_request") {
+                let id = Uuid::now_v7().to_string();
+                emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
+                    .await?;
+                phase(Phase::AwaitingPermission).await?;
+            } else if let Some(payload) = step.get("late_request") {
+                turn.late_request = Some(payload.clone());
+            } else if let Some(spec) = step.get("large_summary") {
+                let summary = spec["repeat"]
+                    .as_str()
+                    .unwrap_or("x")
+                    .repeat(spec["times"].as_u64().unwrap_or(0) as usize);
+                turn.block(BlockKind::ToolCall, "", lane, Some("Bash"), Some(&summary))
+                    .await?;
+            } else if let Some(spec) = step.get("request_large") {
+                let text = spec["repeat"]
+                    .as_str()
+                    .unwrap_or("x")
+                    .repeat(spec["times"].as_u64().unwrap_or(0) as usize);
+                let payload = if spec["bare"] == true {
+                    json!(text)
+                } else {
+                    json!({"tool_name":spec["tool_name"],"input":{"file_path":"/tmp/x","content":text},"tool_use_id":"toolu_large"})
+                };
+                turn.request("permission", &payload, lane).await?;
             } else if let Some(text) = step["delta"].as_str() {
                 text_delta(turn, lane, text).await?;
             } else if step["echo_instructions"].as_bool() == Some(true) {
@@ -563,6 +594,7 @@ async fn run_turn(
     };
     let mut turn = Turn {
         decisions,
+        late_request: None,
         command,
         files,
         instructions,
@@ -601,6 +633,7 @@ async fn run_turn(
             },
         );
     }
+    let late_request = turn.late_request.take();
     let usage: Vec<_> = turn.usage.into_values().collect();
     for row in &usage {
         *context = context
@@ -610,6 +643,12 @@ async fn run_turn(
             .saturating_add(row.cache_write_tokens);
     }
     completed(command, usage, *context).await?;
+    if let Some(payload) = late_request {
+        let id = Uuid::now_v7().to_string();
+        emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
+            .await?;
+        phase(Phase::AwaitingPermission).await?;
+    }
     Ok(None)
 }
 

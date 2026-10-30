@@ -54,6 +54,8 @@ cases!(
     unrelated_process_is_never_a_member_or_signalled,
     pid_reuse_guard_checks_start_ticks,
     terminate_reports_survivors_when_deadline_expires,
+    terminate_sends_one_sigterm_to_a_member,
+    orphan_zombie_is_reaped_but_the_cli_keeps_its_exit_status,
     zombies_are_not_members
 );
 
@@ -71,7 +73,67 @@ async fn containment_child() {
         .parse()
         .unwrap();
     assert!(!group.members().unwrap().iter().any(|m| m.pid == unrelated));
-    if case == "escaped_grandchild_is_tracked_and_terminated" {
+    if case == "orphan_zombie_is_reaped_but_the_cli_keeps_its_exit_status" {
+        let mut command = tokio::process::Command::new("sh");
+        command
+            .args(["-c", "read -r line; exit 7"])
+            .stdin(Stdio::piped());
+        group.prepare_command(&mut command);
+        let mut cli = command.spawn().unwrap();
+        let pid = cli.id().unwrap();
+        group.register_cli(&Member {
+            pid,
+            start_ticks: ticks(pid),
+        });
+        // Лидер группы выходит сразу, и его фоновый потомок усыновляется тестовым процессом.
+        let mut detached = tokio::process::Command::new("sh");
+        detached
+            .args(["-c", "sleep 0.05 >/dev/null 2>&1 & echo $!"])
+            .stdout(Stdio::piped());
+        group.prepare_command(&mut detached);
+        let output = detached.spawn().unwrap().wait_with_output().await.unwrap();
+        let orphan: u32 = String::from_utf8_lossy(&output.stdout)
+            .trim()
+            .parse()
+            .unwrap();
+        let mut stdin = cli.stdin.take().unwrap();
+        stdin.write_all(b"exit\n").await.unwrap();
+        stdin.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let stat = std::fs::read_to_string(format!("/proc/{orphan}/stat")).unwrap();
+        assert!(
+            stat.contains(") Z "),
+            "orphan must be a zombie by now: {stat}"
+        );
+        group.reap_orphans().unwrap();
+        assert!(
+            !std::path::Path::new(&format!("/proc/{orphan}")).exists(),
+            "orphan zombie stays until the execution ends"
+        );
+        assert_eq!(cli.wait().await.unwrap().code(), Some(7));
+    } else if case == "terminate_sends_one_sigterm_to_a_member" {
+        let script = "import signal, sys, time\n\
+            log = open(sys.argv[1], 'a', buffering=1)\n\
+            signal.signal(signal.SIGTERM, lambda *_: log.write('term\\n'))\n\
+            log.write('ready\\n')\n\
+            while True: time.sleep(0.01)\n";
+        let log = directory.path().join("signals");
+        let mut command = tokio::process::Command::new("/usr/bin/python3");
+        command.args(["-c", script]).arg(&log);
+        group.prepare_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("ready")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        group.terminate(Duration::from_millis(300)).await.unwrap();
+        child.wait().await.unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().filter(|line| *line == "term").count(), 1);
+    } else if case == "escaped_grandchild_is_tracked_and_terminated" {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"));
         command
             .current_dir(directory.path())

@@ -308,15 +308,12 @@ fn pack(journal: Uuid, records: Vec<JournalRecord>) -> Result<VecDeque<Batch>, W
         records: Vec::new(),
     };
     for record in records {
-        batch.records.push(record);
+        batch.records.push(shippable(journal, record));
         let bytes = batch.encoded_len();
         if prost::encoding::key_len(2) + prost::length_delimiter_len(bytes) + bytes
             > MAX_EVENT_BATCH_BYTES
         {
             let record = batch.records.pop().unwrap();
-            if batch.records.is_empty() {
-                return Err(WorkerError::Protocol);
-            }
             result.push_back(envelope(journal, batch)?);
             batch = JournalRecords {
                 journal_id: journal.to_string(),
@@ -328,6 +325,35 @@ fn pack(journal: Uuid, records: Vec<JournalRecord>) -> Result<VecDeque<Batch>, W
         result.push_back(envelope(journal, batch)?);
     }
     Ok(result)
+}
+
+/// Поток данных общий для всех сессий машины, поэтому запись, не влезающая в пакет,
+/// не должна его рвать: хаб получает с тем же seq отметку без ссылки на исполнение.
+fn shippable(journal: Uuid, record: JournalRecord) -> JournalRecord {
+    let alone = JournalRecords {
+        journal_id: journal.to_string(),
+        records: vec![record],
+    };
+    let bytes = alone.encoded_len();
+    let framed = prost::encoding::key_len(2) + prost::length_delimiter_len(bytes) + bytes;
+    let mut records = alone.records;
+    let record = records.pop().unwrap();
+    if framed <= MAX_EVENT_BATCH_BYTES {
+        return record;
+    }
+    tracing::warn!(kind = "record_too_large", %journal, seq = record.seq, "oversized record replaced");
+    JournalRecord {
+        seq: record.seq,
+        body: Some(RecordBody {
+            body: Some(record_body::Body::AdapterDiagnostic(
+                canterlot_proto::worker::v1::AdapterDiagnostic {
+                    execution_id: Uuid::nil().to_string(),
+                    kind: "unknown_optional_event".into(),
+                    event_type: "record_too_large".into(),
+                },
+            )),
+        }),
+    }
 }
 
 fn envelope(journal: Uuid, batch: JournalRecords) -> Result<Batch, WorkerError> {

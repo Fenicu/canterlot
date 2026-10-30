@@ -43,6 +43,12 @@ pub trait Containment: Send + Sync {
     fn populated(&self) -> Result<bool, ContainmentError>;
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError>;
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
+    /// Запомнить прямой CLI: его статус выхода читает `Child`, чужая уборка его отняла бы.
+    fn register_cli(&self, _member: &Member) {}
+    /// Убрать зомби усыновлённых процессов, не трогая детей самого супервизора.
+    fn reap_orphans(&self) -> Result<(), ContainmentError> {
+        Ok(())
+    }
 }
 
 /// Одно исполнение на процесс; первый members после spawn фиксирует прямой CLI.
@@ -59,8 +65,13 @@ struct Stat {
     zombie: bool,
 }
 
+/// Текст `stat` процесса. Имя в нём ядро режет по байтам, поэтому это не обязательно UTF-8.
+pub(crate) fn read_stat(path: impl AsRef<std::path::Path>) -> io::Result<String> {
+    Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
+}
+
 fn stat(pid: u32) -> Result<Stat, ContainmentError> {
-    let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let text = read_stat(format!("/proc/{pid}/stat"))?;
     parse_stat(pid, &text)
 }
 
@@ -131,6 +142,21 @@ impl TreeContainment {
             }
         }
         Ok(all)
+    }
+
+    /// Забрать статус зомби-ребёнка, если это всё ещё тот же процесс.
+    fn reap(&self, member: &Member) -> Result<(), ContainmentError> {
+        if let Some(pid) = i32::try_from(member.pid).ok().and_then(Pid::from_raw)
+            && stat(member.pid).is_ok_and(|current| {
+                current.member == *member && current.parent == self.supervisor.pid && current.zombie
+            })
+        {
+            match process::waitpid(Some(pid), WaitOptions::NOHANG) {
+                Ok(_) | Err(rustix::io::Errno::CHILD) | Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
     }
 
     fn belongs(&self, info: &Stat, all: &HashMap<u32, Stat>) -> bool {
@@ -213,19 +239,8 @@ impl Containment for TreeContainment {
                 continue;
             }
             // Прямой CLI (лидер группы) остаётся за tokio::process::Child.
-            if info.parent == self.supervisor.pid
-                && cli.as_ref() != Some(&info.member)
-                && let Some(pid) = i32::try_from(info.member.pid).ok().and_then(Pid::from_raw)
-                && stat(info.member.pid).is_ok_and(|current| {
-                    current.member == info.member
-                        && current.parent == self.supervisor.pid
-                        && current.zombie
-                })
-            {
-                match process::waitpid(Some(pid), WaitOptions::NOHANG) {
-                    Ok(_) | Err(rustix::io::Errno::CHILD) | Err(rustix::io::Errno::SRCH) => {}
-                    Err(error) => return Err(error.into()),
-                }
+            if info.parent == self.supervisor.pid && cli.as_ref() != Some(&info.member) {
+                self.reap(&info.member)?;
             }
         }
         members.sort_by_key(|m| m.pid);
@@ -240,7 +255,30 @@ impl Containment for TreeContainment {
         Ok(!self.members()?.is_empty())
     }
 
+    fn register_cli(&self, member: &Member) {
+        *self.cli.lock().expect("containment mutex poisoned") = Some(member.clone());
+    }
+
+    fn reap_orphans(&self) -> Result<(), ContainmentError> {
+        let all = self.snapshot()?;
+        let own_group = all.get(&self.supervisor.pid).map(|info| info.group);
+        let cli = self.cli.lock().expect("containment mutex poisoned").clone();
+        // Проверка версии CLI живёт в группе супервизора, её статус читает `Command`.
+        for info in all.values().filter(|info| {
+            info.zombie
+                && info.parent == self.supervisor.pid
+                && Some(info.group) != own_group
+                && cli.as_ref() != Some(&info.member)
+        }) {
+            self.reap(&info.member)?;
+        }
+        Ok(())
+    }
+
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError> {
+        // Сигнал один на процесс: повторный SIGTERM многие программы считают
+        // требованием выйти немедленно, а новые участники получают свой.
+        let mut signalled = HashSet::new();
         let deadline = tokio::time::Instant::now() + grace;
         loop {
             let members = self.members()?;
@@ -248,7 +286,9 @@ impl Containment for TreeContainment {
                 return Ok(Termination::Empty);
             }
             for member in &members {
-                self.signal_member(member, Signal::TERM)?;
+                if !signalled.contains(member) && self.signal_member(member, Signal::TERM)? {
+                    signalled.insert(member.clone());
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -259,6 +299,7 @@ impl Containment for TreeContainment {
             )
             .await;
         }
+        let mut signalled = HashSet::new();
         let kill_deadline = tokio::time::Instant::now() + grace;
         loop {
             let members = self.members()?;
@@ -266,7 +307,9 @@ impl Containment for TreeContainment {
                 return Ok(Termination::Empty);
             }
             for member in &members {
-                self.signal_member(member, Signal::KILL)?;
+                if !signalled.contains(member) && self.signal_member(member, Signal::KILL)? {
+                    signalled.insert(member.clone());
+                }
             }
             if tokio::time::Instant::now() >= kill_deadline {
                 return Ok(Termination::Survivors(members));
@@ -294,6 +337,19 @@ mod tests {
             parse_stat(42, "invalid"),
             Err(ContainmentError::InvalidStat)
         ));
+    }
+
+    #[test]
+    fn process_name_cut_inside_a_character_does_not_fail_inspection() {
+        // Ядро режет comm до 15 байт, здесь это середина кириллической буквы.
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("проверка-сборки");
+        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
+        let mut child = std::process::Command::new(&link).arg("30").spawn().unwrap();
+        let inspected = stat(child.id()).map(|info| info.member.pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(inspected.ok(), Some(child.id()));
     }
 
     #[test]

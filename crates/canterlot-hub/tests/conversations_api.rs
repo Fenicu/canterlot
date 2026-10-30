@@ -1159,6 +1159,7 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
     assert!(instructions.text.is_empty());
     assert!(start.capabilities.is_empty());
     sqlx::query("update executions set state='stopped',native_conversation_id='native-test' where conversation_id=$1").bind(id).execute(&f.pool).await.unwrap();
+    testkit::seed_recorded_turn(&f.pool, id).await;
     let mut tx = f.pool.begin().await.unwrap();
     let started = executions::start_in_tx(
         &mut tx,

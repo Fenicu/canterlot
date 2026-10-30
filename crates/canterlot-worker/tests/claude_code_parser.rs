@@ -448,3 +448,50 @@ fn debug_output_contains_no_text() {
     let rendered = format!("{parser:?}");
     assert!(!rendered.contains("secret-plans"), "{rendered}");
 }
+
+fn tool_call_frames(command: &str) -> Vec<String> {
+    let input = serde_json::to_string(&json!({ "command": command })).unwrap();
+    [
+        json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_1","name":"Bash","input":{}}},"parent_tool_use_id":null,"session_id":"s","uuid":"u1"}),
+        json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input}},"parent_tool_use_id":null,"session_id":"s","uuid":"u2"}),
+        json!({"type":"stream_event","event":{"type":"content_block_stop","index":0},"parent_tool_use_id":null,"session_id":"s","uuid":"u3"}),
+    ]
+    .iter()
+    .map(Value::to_string)
+    .collect()
+}
+
+fn final_summary(command: &str) -> String {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let parsed = feed_all(&mut parser, &tool_call_frames(command));
+    finals(&parsed)
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockFinal {
+                summary: Some(summary),
+                ..
+            } => Some(summary.clone()),
+            _ => None,
+        })
+        .expect("tool call has a summary")
+}
+
+#[test]
+fn tool_summary_cuts_cyrillic_on_a_char_boundary() {
+    // «Bash: a» занимает 7 байт, поэтому байт 120 приходится на середину буквы.
+    let command = format!("a{}", "я".repeat(100));
+    let summary = final_summary(&command);
+    assert_eq!(summary, format!("Bash: a{}", "я".repeat(56)));
+}
+
+#[test]
+fn tool_summary_cuts_a_four_byte_char_at_the_limit() {
+    for padding in 0..4 {
+        let command = format!("{}{}", "a".repeat(111 + padding), "😀".repeat(4));
+        let summary = final_summary(&command);
+        assert!(summary.len() <= 120, "{} bytes", summary.len());
+        assert!(summary.len() > 116, "{} bytes", summary.len());
+        assert!(summary.starts_with("Bash: a"));
+    }
+}

@@ -21,7 +21,7 @@ use crate::{
     containment::{Containment, Member},
 };
 use canterlot_proto::{
-    requests::DecisionPayload,
+    requests::{DecisionPayload, PermissionBehavior},
     worker::v1::{LimitObservation, LimitsSnapshot},
 };
 use serde_json::Value;
@@ -58,6 +58,8 @@ pub struct ClaudeCodeAdapter {
     /// доказательство уходит событием `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
     initialized: bool,
+    /// Запуск с `--resume`: беседа записана, хотя этот CLI ещё ни разу не ответил.
+    resumed: bool,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -95,6 +97,7 @@ impl ClaudeCodeAdapter {
             requests: HashMap::new(),
             unconfirmed: HashSet::new(),
             initialized: false,
+            resumed: false,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -341,6 +344,17 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Ответ на запрос вернул агента к работе, а кадров до конца инструмента не будет.
+    fn leave_request_phase(&mut self, phase: Phase) {
+        if self.requests.is_empty() {
+            self.events.push_back(AdapterEvent::Phase {
+                phase,
+                tool_name: None,
+                summary: None,
+            });
+        }
+    }
+
     fn flush_tool(&mut self, block_id: Uuid, mark: Option<&str>) {
         if let Some(mut event) = self.tools.remove(&block_id) {
             if let AdapterEvent::BlockStarted { approved_by, .. } = &mut event {
@@ -366,6 +380,11 @@ impl ClaudeCodeAdapter {
                 }
                 self.requests
                     .insert(request_id.clone(), (kind.into(), payload.clone()));
+                self.events.push_back(AdapterEvent::RequestOpened {
+                    request_id,
+                    kind: kind.into(),
+                    payload,
+                });
                 self.events.push_back(AdapterEvent::Phase {
                     phase: if kind == "question" {
                         Phase::AwaitingAnswer
@@ -375,11 +394,6 @@ impl ClaudeCodeAdapter {
                     tool_name: None,
                     summary: None,
                 });
-                self.events.push_back(AdapterEvent::RequestOpened {
-                    request_id,
-                    kind: kind.into(),
-                    payload,
-                });
             }
             BrokerEvent::Cancelled { request_id } => {
                 // Запрос, уже закрытый прерыванием или перезапуском, второй раз не закрывается.
@@ -388,6 +402,7 @@ impl ClaudeCodeAdapter {
                         request_id,
                         reason: "cancelled".into(),
                     });
+                    self.leave_request_phase(Phase::Generating);
                 }
             }
             BrokerEvent::AgentTool {
@@ -435,6 +450,16 @@ impl ClaudeCodeAdapter {
                     },
                 );
             }
+        }
+    }
+
+    /// Аргумент беседы для нового процесса: `--resume` отказывает без записанной
+    /// беседы («No conversation found»), повторный `--session-id` — при записанной
+    /// («already in use»). Запись появляется только с первым ходом.
+    fn relaunch_session(&self) -> SessionArg {
+        match Uuid::parse_str(&self.native_id) {
+            Ok(id) if !self.initialized && !self.resumed => SessionArg::New(id),
+            _ => SessionArg::Resume(self.native_id.clone()),
         }
     }
 
@@ -506,17 +531,30 @@ impl ClaudeCodeAdapter {
         if let Some(broker) = &self.broker {
             broker.arm();
         }
-        let mut cli = CliProcess::spawn(launch, &self.cfg, group).await.ok()?;
+        let mut cli = match CliProcess::spawn(launch, &self.cfg, group).await {
+            Ok(cli) => cli,
+            Err(error) => {
+                tracing::warn!(
+                    kind = "cli_restart_failed",
+                    reason = error.reason(),
+                    "cli restart failed"
+                );
+                return None;
+            }
+        };
         if exited_early(&mut cli).await {
+            if let Some(kind) = process::exit_cause(&cli.final_stderr().await) {
+                self.diagnostic(kind, false);
+            }
             return None;
         }
         Some(cli)
     }
 
     /// Перезапустить CLI между ходами с новыми инструкциями: новый процесс
-    /// поднимается с `--resume` и флагами из действующих настроек с применённой
-    /// сменой; ввод пишется только в новый процесс. Ошибка — запасной запуск
-    /// со старыми настройками; его успех — отказ входа, провал — остановка.
+    /// продолжает беседу и поднимается с флагами из действующих настроек с
+    /// применённой сменой; ввод пишется только в новый процесс. Ошибка — запасной
+    /// запуск со старыми настройками; его успех — отказ входа, провал — остановка.
     async fn restart_for_instructions(
         &mut self,
         change: &SettingsChange,
@@ -549,20 +587,19 @@ impl ClaudeCodeAdapter {
         let workdir = self.workdir.clone();
         let exec_dir = self.exec_dir.clone();
         let executable = self.cfg.executable.clone();
-        let native_id = self.native_id.clone();
         // 1. Файл инструкций нового запуска (или удаление устаревшего).
         if process::write_instructions_file(&exec_dir, &next).is_err() {
             return Err("instructions_change_failed");
         }
         // 2. Остановить старый CLI.
         self.stop_old_cli(group).await;
-        // 3. Сбросить состояние разбора, запустить новый CLI с --resume.
+        // 3. Сбросить состояние разбора, запустить новый CLI с той же беседой.
         self.parser.reset_process();
         let launch = process::LaunchSpec {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session: SessionArg::Resume(native_id),
+            session: self.relaunch_session(),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -586,10 +623,9 @@ impl ClaudeCodeAdapter {
     }
 
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
-    /// перезапуска. Беседа уже записана, поэтому всегда `--resume` (CLI
-    /// отказывает повторному `--session-id`: «Session ID … is already in use»).
-    /// Успех — отказ входа; провал, в том числе невозвращённый файл прежних
-    /// инструкций, — остановка исполнения с причиной `restart_failed`.
+    /// перезапуска, аргумент беседы тот же, что у перезапуска. Успех — отказ
+    /// входа; провал, в том числе невозвращённый файл прежних инструкций, —
+    /// остановка исполнения с причиной `restart_failed`.
     async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
         let previous = self.instructions.clone();
         let (model, effort, permission_mode) = match self.queue.as_ref() {
@@ -616,7 +652,7 @@ impl ClaudeCodeAdapter {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session: SessionArg::Resume(self.native_id.clone()),
+            session: self.relaunch_session(),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -713,6 +749,25 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Причина встаёт перед событием выхода: после него сопровождение событий не читает.
+    /// Событие уже в очереди, поэтому отмена этого ожидания его не теряет.
+    async fn name_exit_cause(&mut self) {
+        let Some(cli) = self.cli.as_mut() else {
+            return;
+        };
+        if let Some(kind) = process::exit_cause(&cli.final_stderr().await) {
+            let at = self.events.len().saturating_sub(1);
+            self.events.insert(
+                at,
+                AdapterEvent::Diagnostic {
+                    kind,
+                    event_type: kind.into(),
+                    required: false,
+                },
+            );
+        }
+    }
+
     // Every wait is cancellation-safe: the line reader retains partial bytes.
     async fn pump(&mut self) {
         if self.exited || self.cli.is_none() {
@@ -741,6 +796,9 @@ impl ClaudeCodeAdapter {
                     }
                 }
             }
+        }
+        if self.exited {
+            self.name_exit_cause().await;
         }
     }
 }
@@ -796,7 +854,8 @@ async fn drain_until_exit(
     loop {
         match cli.try_wait() {
             Ok(Some(_)) => {
-                drain_available(cli, parser, queue).await;
+                // Инструмент может держать чужой stdout и писать в него без конца.
+                let _ = timeout(KILL_DRAIN, drain_available(cli, parser, queue)).await;
                 return true;
             }
             // Убран чужой проверкой: процесса нет, остаток stdout уже не прочитать.
@@ -814,8 +873,9 @@ async fn drain_until_exit(
                     }
                 }
             }
-            Ok(_) => {}
-            Err(_) => {}
+            // Конец stdout отвечает мгновенно, а процесс ещё жив.
+            Ok(StdoutLine::Eof) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Ok(_) | Err(_) => {}
         }
     }
 }
@@ -891,6 +951,7 @@ impl Adapter for ClaudeCodeAdapter {
                 }));
             }
         }
+        self.resumed = spec.native_conversation_id.is_some();
         self.native_id = spec
             .native_conversation_id
             .clone()
@@ -922,7 +983,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .clone()
                 .unwrap_or(std::env::current_exe()?),
         )
-        .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+        .map_err(|error| AdapterError::StartFailed(error.reason()))?;
         broker.arm();
         self.broker = Some(broker);
         self.queue = Some(InputQueue::new(LaunchSettings {
@@ -932,7 +993,7 @@ impl Adapter for ClaudeCodeAdapter {
         }));
         let cli = CliProcess::spawn(&launch, &self.cfg, group)
             .await
-            .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+            .map_err(|error| AdapterError::StartFailed(error.reason()))?;
         let started = Started {
             native_conversation_id: self.native_id.clone(),
             cli_pid: cli.pid,
@@ -986,8 +1047,27 @@ impl Adapter for ClaudeCodeAdapter {
                 request_id: request_id.into(),
                 reason: "answered".into(),
             });
+            let allowed = matches!(
+                decision,
+                DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Allow,
+                    ..
+                }
+            );
+            self.leave_request_phase(if allowed {
+                Phase::RunningTool
+            } else {
+                Phase::Generating
+            });
         }
         outcome
+    }
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        if self.requests.remove(request_id).is_some()
+            && let Some(broker) = self.broker.as_mut()
+        {
+            broker.refuse(request_id, message).await;
+        }
     }
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
         // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
@@ -1059,13 +1139,15 @@ impl Adapter for ClaudeCodeAdapter {
         };
         if !self.exited {
             // Мягко: EOF, затем SIGTERM (CLI сам гасит деревья Bash и выходит
-            // с 143), затем срок stop_grace; SIGKILL — только после него.
+            // с 143), затем срок stop_grace; SIGKILL — только после него. Stdout
+            // читается и здесь: CLI на записи в полный pipe сигнал бы не обработал.
             let exited = match mode {
                 CloseMode::Force => false,
                 CloseMode::Graceful => {
-                    timeout(grace, cli.wait()).await.is_ok() || {
+                    drain_until_exit(cli, &mut self.parser, &mut self.queue, grace).await || {
                         group.signal_member(&member, rustix::process::Signal::TERM)?;
-                        timeout(self.stop_grace, cli.wait()).await.is_ok()
+                        drain_until_exit(cli, &mut self.parser, &mut self.queue, self.stop_grace)
+                            .await
                     }
                 }
             };
