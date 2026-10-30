@@ -740,6 +740,25 @@ impl LimitsSource for CountingSource {
     }
 }
 
+/// Claude отдаёт показание, Codex молчит: как опрос, отсечённый интервалом.
+struct ClaudeOnlySource;
+
+#[async_trait::async_trait]
+impl LimitsSource for ClaudeOnlySource {
+    async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
+        if provider != "claude" {
+            return Vec::new();
+        }
+        vec![LimitObservation {
+            provider: provider.to_owned(),
+            window: ProtoWindow::Weekly as i32,
+            used_permille: 260,
+            resets_at_ms: 0,
+            observed_machine_ms: 1,
+        }]
+    }
+}
+
 async fn next_limits_report(hub: &mut support::ProtocolHub) -> Vec<LimitObservation> {
     loop {
         if let support::Observed::Control(message) = hub.event().await
@@ -748,6 +767,40 @@ async fn next_limits_report(hub: &mut support::ProtocolHub) -> Vec<LimitObservat
             return report.observations;
         }
     }
+}
+
+// Хаб держит один необработанный отчёт: пустой, идущий следом, вытеснил бы настоящий.
+#[tokio::test(start_paused = true)]
+async fn empty_poll_sends_no_report() {
+    frozen_clock::run(async {
+        let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+            capabilities: vec!["pilot_v1".into()],
+            ..Default::default()
+        })
+        .await;
+        let worker =
+            Worker::new(hub.config.clone(), store).with_limits_source(Arc::new(ClaudeOnlySource));
+        let mut state = worker.state();
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(worker.run(shutdown));
+        state.wait_for(|s| *s == SessionState::Live).await.unwrap();
+
+        for provider in ["codex", "claude"] {
+            hub.send(ControlDown {
+                msg: Some(control_down::Msg::PollLimits(PollLimits {
+                    provider: provider.into(),
+                })),
+            })
+            .await;
+        }
+        let report = next_limits_report(&mut hub).await;
+        assert_eq!(report.len(), 1, "first report carries the reading");
+        assert_eq!(report[0].provider, "claude");
+
+        stop.send(true).unwrap();
+        join.await.unwrap().unwrap();
+    })
+    .await;
 }
 
 #[tokio::test(start_paused = true)]

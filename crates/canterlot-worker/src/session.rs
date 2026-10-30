@@ -1260,7 +1260,9 @@ impl Worker {
                     }
                 }
                 observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
-                    limits_operation=None;limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});
+                    limits_operation=None;
+                    // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
+                    if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});}
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {
