@@ -207,12 +207,6 @@ metrics_interval = "2s"
 
 [execution]
 allowed_workdir_roots = ["${workRoot}"]
-
-[[instruction_profiles]]
-name = "test"
-title = "Test"
-description = "Test profile"
-harnesses = ["synthetic", "synthetic-exit-on-interrupt"]
 `;
   writeFileSync(workerToml, workerConfigContent, 'utf8');
 
