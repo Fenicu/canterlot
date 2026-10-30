@@ -470,6 +470,30 @@ async fn payload_without_a_preview_is_denied_and_never_reaches_the_journal() {
 }
 
 #[tokio::test]
+async fn oversized_block_summary_does_not_stop_the_supervisor() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    h.launch(
+        json!([{"large_summary":{"repeat":"щ","times":600_000}},{"delta":"after"}]),
+        "synthetic",
+    )
+    .await;
+    let Body::BlockStarted(started) = h.wait(|b| matches!(b, Body::BlockStarted(_))).await else {
+        unreachable!()
+    };
+    assert!(started.summary.len() <= 4096, "{}", started.summary.len());
+    assert!(started.summary.chars().all(|c| c == 'щ'));
+    let Body::BlockFinal(finished) = h
+        .wait(|b| matches!(b, Body::BlockFinal(f) if f.block_id == started.block_id))
+        .await
+    else {
+        unreachable!()
+    };
+    assert!(finished.summary.len() <= 4096, "{}", finished.summary.len());
+    h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+}
+
+#[tokio::test]
 async fn synthetic_adapter_pauses_on_multi_question_and_resumes_on_answers() {
     let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;

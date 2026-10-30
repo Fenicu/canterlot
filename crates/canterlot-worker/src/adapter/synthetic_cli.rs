@@ -11,7 +11,8 @@
 //! Запросы: {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
 //! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}},
 //! {"request_large":{"tool_name":"Write","repeat":"щ","times":400000}} (вход сверх предела
-//! ввода), с "bare":true — тот же текст вместо объекта.
+//! ввода), с "bare":true — тот же текст вместо объекта,
+//! {"large_summary":{"repeat":"щ","times":600000}} (вызов инструмента с такой сводкой).
 //! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
 //! {"echo_instructions":true} пишет блок с режимом и версией инструкций ввода;
 //! {"agent_call":{"tool":"...","arguments":{...}}} отдаёт вызов инструмента агента
@@ -300,6 +301,13 @@ fn run_steps<'a>(
                 turn.request("permission", payload, lane).await?;
             } else if let Some(payload) = step.get("ask_question") {
                 turn.request("question", payload, lane).await?;
+            } else if let Some(spec) = step.get("large_summary") {
+                let summary = spec["repeat"]
+                    .as_str()
+                    .unwrap_or("x")
+                    .repeat(spec["times"].as_u64().unwrap_or(0) as usize);
+                turn.block(BlockKind::ToolCall, "", lane, Some("Bash"), Some(&summary))
+                    .await?;
             } else if let Some(spec) = step.get("request_large") {
                 let text = spec["repeat"]
                     .as_str()

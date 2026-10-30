@@ -1,14 +1,64 @@
-//! Карточка запроса в журнале: у неё есть потолок, а исходный вход остаётся в адаптере.
+//! Потолки того, что попадает в SJ. Запись больше пакета не доехала бы до хаба
+//! и остановила поток данных всей машины, больше мегабайта — сам журнал.
 
+use canterlot_proto::{
+    limits::MAX_EVENT_BATCH_BYTES,
+    worker::v1::{AdapterDiagnostic, record_body::Body},
+};
 use serde_json::Value;
+use uuid::Uuid;
 
 /// Потолок JSON карточки: запись вместе с обвязкой должна влезать в пакет SJ.
 pub(super) const MAX_REQUEST_PAYLOAD_BYTES: usize = 262_144;
 /// Потолок идентификатора: он приходит от CLI и хранится в индексируемой колонке.
 pub(super) const MAX_REQUEST_ID_BYTES: usize = 1024;
 
+/// Потолок записи: остаток пакета уходит на его обвязку.
+const MAX_RECORD_BYTES: usize = MAX_EVENT_BATCH_BYTES - 1024;
+/// Имена и сводки от адаптера. Хаб хранит 128 и 1024 символа, столько и остаётся.
+const NAME_BYTES: usize = 512;
+const SUMMARY_BYTES: usize = 4096;
+
 /// Шаги ужатия: длина строки в байтах и число элементов контейнера.
 const STEPS: [(usize, usize); 4] = [(32_768, usize::MAX), (4_096, 1_024), (512, 128), (128, 16)];
+
+fn clip(text: &mut String, limit: usize) {
+    text.truncate(text.floor_char_boundary(limit));
+}
+
+/// Запись, которую можно журналировать: длинные метаданные подрезаны, а всё,
+/// что не влезает и так, заменяется диагностикой.
+pub(super) fn bounded_record(execution_id: Uuid, mut body: Body) -> Body {
+    match &mut body {
+        Body::BlockStarted(f) => {
+            clip(&mut f.agent, NAME_BYTES);
+            clip(&mut f.model, NAME_BYTES);
+            clip(&mut f.tool_name, NAME_BYTES);
+            clip(&mut f.summary, SUMMARY_BYTES);
+        }
+        Body::BlockFinal(f) => clip(&mut f.summary, SUMMARY_BYTES),
+        Body::PhaseChanged(f) => {
+            clip(&mut f.tool_name, NAME_BYTES);
+            clip(&mut f.summary, SUMMARY_BYTES);
+        }
+        Body::RunFinished(f) => {
+            for usage in &mut f.usage {
+                clip(&mut usage.agent, NAME_BYTES);
+                clip(&mut usage.model, NAME_BYTES);
+            }
+        }
+        _ => {}
+    }
+    if body.encoded_len() <= MAX_RECORD_BYTES {
+        return body;
+    }
+    tracing::warn!(kind = "record_too_large", "oversized record replaced");
+    Body::AdapterDiagnostic(AdapterDiagnostic {
+        execution_id: execution_id.to_string(),
+        kind: "unknown_optional_event".into(),
+        event_type: "record_too_large".into(),
+    })
+}
 
 /// JSON карточки в пределах потолка. Крупная карточка заменяется превью с меткой
 /// `truncated: true`, решение владельца при этом относится к исходному входу.
@@ -67,7 +117,10 @@ fn shrink(value: &mut Value, question: bool, text: usize, items: usize) {
 mod tests {
     use super::*;
     use crate::adapter::valid_decision;
-    use canterlot_proto::requests::{AnswerValue, DecisionPayload};
+    use canterlot_proto::{
+        requests::{AnswerValue, DecisionPayload},
+        worker::v1::{BlockStarted, RequestClosed},
+    };
     use serde_json::json;
     use std::collections::BTreeMap;
 
@@ -75,6 +128,55 @@ mod tests {
         let json = bounded_json(kind, payload).expect("preview fits");
         assert!(json.len() <= MAX_REQUEST_PAYLOAD_BYTES, "{}", json.len());
         serde_json::from_slice(&json).unwrap()
+    }
+
+    #[test]
+    fn long_metadata_is_clipped_and_the_record_survives() {
+        let id = Uuid::now_v7();
+        let body = bounded_record(
+            id,
+            Body::BlockStarted(BlockStarted {
+                block_id: "b".into(),
+                agent: "щ".repeat(600_000),
+                model: "м".repeat(600_000),
+                tool_name: "😀".repeat(300_000),
+                summary: "aщ".repeat(600_000),
+                ..Default::default()
+            }),
+        );
+        let Body::BlockStarted(started) = body else {
+            panic!("metadata must not cost the block: {body:?}")
+        };
+        assert_eq!(started.agent, "щ".repeat(256));
+        assert_eq!(started.tool_name, "😀".repeat(128));
+        assert!(started.summary.len() <= SUMMARY_BYTES);
+    }
+
+    #[test]
+    fn record_that_cannot_be_clipped_becomes_a_diagnostic() {
+        let id = Uuid::now_v7();
+        let body = bounded_record(
+            id,
+            Body::RequestClosed(RequestClosed {
+                request_id: "r".into(),
+                reason: "щ".repeat(MAX_EVENT_BATCH_BYTES),
+            }),
+        );
+        let Body::AdapterDiagnostic(stub) = body else {
+            panic!("oversized record must be replaced: {body:?}")
+        };
+        assert_eq!(stub.event_type, "record_too_large");
+        assert_eq!(stub.execution_id, id.to_string());
+    }
+
+    #[test]
+    fn small_record_is_left_alone() {
+        let closed = RequestClosed {
+            request_id: "r".into(),
+            reason: "answered".into(),
+        };
+        let body = bounded_record(Uuid::now_v7(), Body::RequestClosed(closed.clone()));
+        assert!(matches!(body, Body::RequestClosed(f) if f == closed));
     }
 
     #[test]

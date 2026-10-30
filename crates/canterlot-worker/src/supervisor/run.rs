@@ -36,8 +36,8 @@ use uuid::Uuid;
 
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
+    bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record},
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
-    payload::{MAX_REQUEST_ID_BYTES, bounded_json},
     sj::Sj,
 };
 use crate::{
@@ -366,7 +366,7 @@ async fn terminate_result(
 
 impl Supervisor {
     fn record(&mut self, body: Body) -> Result<u64, SupervisorError> {
-        self.sj.append(body)
+        self.sj.append(bounded_record(self.spec.execution_id, body))
     }
 
     fn state_record(

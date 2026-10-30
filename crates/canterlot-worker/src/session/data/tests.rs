@@ -55,6 +55,37 @@ fn full_sj_batch_is_split_to_include_the_data_envelope() {
     assert_eq!(seqs, (1..=32).collect::<Vec<_>>());
 }
 
+#[test]
+fn record_over_the_batch_limit_does_not_fail_the_shared_stream() {
+    let id = Uuid::now_v7();
+    let records = vec![
+        record(1, 10),
+        record(2, MAX_EVENT_BATCH_BYTES),
+        record(3, 10),
+        record(4, MAX_EVENT_BATCH_BYTES * 2),
+    ];
+    let mut bodies = Vec::new();
+    for (message, journal, last) in pack(id, records).unwrap() {
+        assert_eq!(journal, id);
+        assert!(message.encoded_len() <= MAX_EVENT_BATCH_BYTES);
+        let Some(data_up::Msg::SjRecords(batch)) = message.msg else {
+            panic!("missing batch")
+        };
+        assert_eq!(batch.records.last().unwrap().seq, last);
+        bodies.extend(batch.records);
+    }
+    let seqs: Vec<_> = bodies.iter().map(|r| r.seq).collect();
+    assert_eq!(seqs, [1, 2, 3, 4]);
+    for record in [&bodies[1], &bodies[3]] {
+        let body = record.body.as_ref().and_then(|b| b.body.as_ref());
+        let Some(record_body::Body::AdapterDiagnostic(stub)) = body else {
+            panic!("oversized record must become a stub: {body:?}")
+        };
+        assert_eq!(stub.event_type, "record_too_large");
+        assert!(Uuid::parse_str(&stub.execution_id).is_ok());
+    }
+}
+
 async fn link(hub: &ProtocolHub) -> (mpsc::Sender<DataUp>, tonic::Streaming<DataDown>) {
     let endpoint = Endpoint::from_shared(hub.config.hub_url.clone())
         .unwrap()
