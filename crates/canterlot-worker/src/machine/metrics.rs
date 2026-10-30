@@ -294,7 +294,7 @@ impl MetricsCollector {
     }
 }
 fn read_process(path: &Path) -> Option<Process> {
-    let text = fs::read_to_string(path.join("stat")).ok()?;
+    let text = crate::containment::read_stat(path.join("stat")).ok()?;
     let fields: Vec<_> = text[text.rfind(')')? + 1..].split_whitespace().collect();
     if matches!(fields.first(), Some(&"Z") | Some(&"X")) {
         return None;

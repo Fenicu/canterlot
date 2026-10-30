@@ -59,8 +59,13 @@ struct Stat {
     zombie: bool,
 }
 
+/// Текст `stat` процесса. Имя в нём ядро режет по байтам, поэтому это не обязательно UTF-8.
+pub(crate) fn read_stat(path: impl AsRef<std::path::Path>) -> io::Result<String> {
+    Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
+}
+
 fn stat(pid: u32) -> Result<Stat, ContainmentError> {
-    let text = fs::read_to_string(format!("/proc/{pid}/stat"))?;
+    let text = read_stat(format!("/proc/{pid}/stat"))?;
     parse_stat(pid, &text)
 }
 
@@ -294,6 +299,19 @@ mod tests {
             parse_stat(42, "invalid"),
             Err(ContainmentError::InvalidStat)
         ));
+    }
+
+    #[test]
+    fn process_name_cut_inside_a_character_does_not_fail_inspection() {
+        // Ядро режет comm до 15 байт, здесь это середина кириллической буквы.
+        let directory = tempfile::tempdir().unwrap();
+        let link = directory.path().join("проверка-сборки");
+        std::os::unix::fs::symlink("/bin/sleep", &link).unwrap();
+        let mut child = std::process::Command::new(&link).arg("30").spawn().unwrap();
+        let inspected = stat(child.id()).map(|info| info.member.pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert_eq!(inspected.ok(), Some(child.id()));
     }
 
     #[test]
