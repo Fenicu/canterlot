@@ -191,6 +191,7 @@ impl AppServerProcess {
             .into_iter()
             .find(|m| m.pid == child_pid)
             .ok_or(LaunchError::CliNotFoundInContainment)?;
+        group.register_cli(&member);
         let pid = member.pid;
         let start_ticks = member.start_ticks;
         let stdin = child.stdin.take();

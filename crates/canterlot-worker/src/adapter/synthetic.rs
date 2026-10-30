@@ -307,6 +307,7 @@ impl SyntheticAdapter {
             .into_iter()
             .find(|m| m.pid == pid)
             .ok_or(AdapterError::Protocol)?;
+        group.register_cli(&member);
         self.cli = Some(member.clone());
         self.stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or(AdapterError::Protocol)?;

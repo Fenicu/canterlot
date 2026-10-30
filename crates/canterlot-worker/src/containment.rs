@@ -43,6 +43,12 @@ pub trait Containment: Send + Sync {
     fn populated(&self) -> Result<bool, ContainmentError>;
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError>;
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
+    /// Запомнить прямой CLI: его статус выхода читает `Child`, чужая уборка его отняла бы.
+    fn register_cli(&self, _member: &Member) {}
+    /// Убрать зомби усыновлённых процессов, не трогая детей самого супервизора.
+    fn reap_orphans(&self) -> Result<(), ContainmentError> {
+        Ok(())
+    }
 }
 
 /// Одно исполнение на процесс; первый members после spawn фиксирует прямой CLI.
@@ -138,6 +144,21 @@ impl TreeContainment {
         Ok(all)
     }
 
+    /// Забрать статус зомби-ребёнка, если это всё ещё тот же процесс.
+    fn reap(&self, member: &Member) -> Result<(), ContainmentError> {
+        if let Some(pid) = i32::try_from(member.pid).ok().and_then(Pid::from_raw)
+            && stat(member.pid).is_ok_and(|current| {
+                current.member == *member && current.parent == self.supervisor.pid && current.zombie
+            })
+        {
+            match process::waitpid(Some(pid), WaitOptions::NOHANG) {
+                Ok(_) | Err(rustix::io::Errno::CHILD) | Err(rustix::io::Errno::SRCH) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn belongs(&self, info: &Stat, all: &HashMap<u32, Stat>) -> bool {
         let mut current = info;
         let mut seen = HashSet::new();
@@ -218,19 +239,8 @@ impl Containment for TreeContainment {
                 continue;
             }
             // Прямой CLI (лидер группы) остаётся за tokio::process::Child.
-            if info.parent == self.supervisor.pid
-                && cli.as_ref() != Some(&info.member)
-                && let Some(pid) = i32::try_from(info.member.pid).ok().and_then(Pid::from_raw)
-                && stat(info.member.pid).is_ok_and(|current| {
-                    current.member == info.member
-                        && current.parent == self.supervisor.pid
-                        && current.zombie
-                })
-            {
-                match process::waitpid(Some(pid), WaitOptions::NOHANG) {
-                    Ok(_) | Err(rustix::io::Errno::CHILD) | Err(rustix::io::Errno::SRCH) => {}
-                    Err(error) => return Err(error.into()),
-                }
+            if info.parent == self.supervisor.pid && cli.as_ref() != Some(&info.member) {
+                self.reap(&info.member)?;
             }
         }
         members.sort_by_key(|m| m.pid);
@@ -243,6 +253,26 @@ impl Containment for TreeContainment {
 
     fn populated(&self) -> Result<bool, ContainmentError> {
         Ok(!self.members()?.is_empty())
+    }
+
+    fn register_cli(&self, member: &Member) {
+        *self.cli.lock().expect("containment mutex poisoned") = Some(member.clone());
+    }
+
+    fn reap_orphans(&self) -> Result<(), ContainmentError> {
+        let all = self.snapshot()?;
+        let own_group = all.get(&self.supervisor.pid).map(|info| info.group);
+        let cli = self.cli.lock().expect("containment mutex poisoned").clone();
+        // Проверка версии CLI живёт в группе супервизора, её статус читает `Command`.
+        for info in all.values().filter(|info| {
+            info.zombie
+                && info.parent == self.supervisor.pid
+                && Some(info.group) != own_group
+                && cli.as_ref() != Some(&info.member)
+        }) {
+            self.reap(&info.member)?;
+        }
+        Ok(())
     }
 
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError> {

@@ -54,6 +54,8 @@ use crate::{
 const MAX_PENDING_MEDIA: usize = 32;
 /// Ожидание ответа хаба на вызов инструмента агента.
 const AGENT_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Период уборки зомби усыновлённых процессов: они занимают лимит процессов владельца.
+const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 
 struct MediaJob {
     media_id: Uuid,
@@ -336,6 +338,18 @@ fn media_preparer(
     (jobs, prepared)
 }
 
+/// Просмотр /proc — вне цикла супервизора.
+async fn reap_orphans(containment: Arc<dyn Containment>) {
+    let mut tick =
+        tokio::time::interval_at(Instant::now() + ORPHAN_REAP_PERIOD, ORPHAN_REAP_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let containment = containment.clone();
+        let _ = tokio::task::spawn_blocking(move || containment.reap_orphans()).await;
+    }
+}
+
 async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> AdapterEvent {
     match adapter {
         Some(adapter) if !gone => adapter.next_event().await,
@@ -411,10 +425,12 @@ impl Supervisor {
                 }
             }
         });
+        let reaper = tokio::spawn(reap_orphans(self.containment.clone()));
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
             if let Some(code) = self.after_event().await? {
                 accept_task.abort();
+                reaper.abort();
                 return Ok(code);
             }
             let wake = self.next_wake();
