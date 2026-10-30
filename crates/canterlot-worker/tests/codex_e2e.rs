@@ -996,6 +996,35 @@ async fn refused_terminal_cleanup_after_interrupt_is_reported() {
 }
 
 #[tokio::test]
+async fn subagent_file_change_approval_carries_the_diff() {
+    let change = json!({"id": "patch-child", "type": "fileChange", "status": "inProgress",
+        "changes": [{"path": "/tmp/a.txt", "kind": {"type": "add"}, "diff": "hi\n"}]});
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(note(
+        "item/started",
+        json!({"threadId": "thread-child", "turnId": "turn-child", "item": change}),
+    ));
+    lines.push(w_out(
+        json!({"id": 0, "method": "item/fileChange/requestApproval",
+        "params": {"threadId": "thread-child", "turnId": "turn-child",
+            "itemId": "patch-child", "reason": null, "grantRoot": null}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("spawn").await;
+    let payload = loop {
+        match fake.event().await {
+            AdapterEvent::RequestOpened { payload, .. } => break payload,
+            AdapterEvent::RunFinished { .. } => panic!("request never opened"),
+            _ => {}
+        }
+    };
+    assert_eq!(payload["agent"], "subagent");
+    assert_eq!(payload["changes"][0]["diff"], "hi\n", "{payload}");
+}
+
+#[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));
     fake.spec.native_conversation_id = Some("01a171c3-4681-7b81-bd8b-be81cac722c8".into());

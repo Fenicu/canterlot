@@ -76,6 +76,7 @@ pub enum Resolved {
 }
 
 pub struct Requests {
+    generation: u64,
     pending: HashMap<String, Pending>,
     rpc_index: HashMap<RpcId, String>,
     diagnostics: Vec<AdapterEvent>,
@@ -141,8 +142,14 @@ fn request_id(item_id: &str, id: &RpcId) -> String {
 }
 
 impl Requests {
+    /// Новый app-server: его id серверных запросов снова с нуля.
+    pub fn next_generation(&mut self) {
+        self.generation += 1;
+    }
+
     pub fn new() -> Self {
         Self {
+            generation: 0,
             pending: HashMap::new(),
             rpc_index: HashMap::new(),
             diagnostics: Vec::new(),
@@ -291,10 +298,14 @@ impl Requests {
                 })
             }
             "mcpServer/elicitation/request" => {
+                // Без itemId (схема McpServerElicitationRequestParams) id запроса
+                // различает процессы поколением: id JSON-RPC повторяются.
                 let item_id = params
                     .get("itemId")
                     .and_then(Value::as_str)
-                    .unwrap_or(method);
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("{method}@{}", self.generation));
+                let item_id = item_id.as_str();
                 let request_id = request_id(item_id, &id);
                 let url_mode = params.get("mode").and_then(Value::as_str) == Some("url");
                 let payload = elicitation_payload(params, item_id, ctx.agent);
@@ -450,7 +461,11 @@ fn elicitation_payload(params: &Value, item_id: &str, agent: &str) -> Value {
         "message": params.get("message").cloned().unwrap_or(Value::Null),
         "mode": params.get("mode").cloned().unwrap_or(Value::Null),
         "url": params.get("url").cloned().unwrap_or(Value::Null),
-        "schema": params.get("schema").cloned().unwrap_or(Value::Null),
+        "schema": params
+            .get("requestedSchema")
+            .or_else(|| params.get("schema"))
+            .cloned()
+            .unwrap_or(Value::Null),
         "tool_use_id": item_id,
         "agent": agent,
     })

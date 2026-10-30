@@ -360,12 +360,15 @@ impl CodexAdapter {
             self.events.push_back(event);
         }
         if method == "item/started"
-            && let Some(active) = self.outbox.active()
-            && params.get("turnId").and_then(Value::as_str) == Some(active.turn_id.as_str())
             && let Some(item) = params.get("item")
             && let Some(id) = item.get("id").and_then(Value::as_str)
         {
-            self.turn_items.insert(id.to_owned());
+            if self.outbox.active().is_some_and(|active| {
+                params.get("turnId").and_then(Value::as_str) == Some(active.turn_id.as_str())
+            }) {
+                self.turn_items.insert(id.to_owned());
+            }
+            // Правка любого треда (и субагента): карточке разрешения нужен её diff.
             if item.get("type").and_then(Value::as_str) == Some("fileChange") {
                 self.started_items.insert(id.to_owned(), item.clone());
             }
@@ -1127,6 +1130,7 @@ impl CodexAdapter {
     /// Остановить текущий app-server и забыть состояние его соединения.
     async fn discard_server(&mut self) {
         self.stop_old_server().await;
+        self.requests.next_generation();
         self.rpc = RpcClient::new();
         self.responses.clear();
         self.pending_writes.clear();

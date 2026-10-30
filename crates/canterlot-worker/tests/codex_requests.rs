@@ -380,6 +380,12 @@ fn permissions_and_elicitation_requests_open_permission_cards() {
         assert_eq!(kind, "permission");
         assert_eq!(payload["tool_name"], "mcp_elicitation");
         assert_eq!(payload["server"], "s");
+        // Карточка показывает, что именно просит сервер (requestedSchema по схеме).
+        assert_eq!(
+            payload["schema"],
+            data["params"]["requestedSchema"].clone(),
+            "line {line_no}"
+        );
         let line = requests.answer(&request_id, &allow()).unwrap();
         assert_eq!(
             line["result"],
@@ -502,4 +508,20 @@ fn payload_and_answers_never_appear_in_debug() {
         }
     );
     assert!(debug.contains("exec-1/0"));
+}
+
+#[test]
+fn elicitations_without_item_id_get_distinct_ids_after_an_app_server_restart() {
+    let data = fixture_data("elicitation", 1);
+    let mut requests = Requests::new();
+    let (first, _, _) = open(&mut requests, &data, "orchestrator", None);
+    // Новый app-server снова нумерует серверные запросы с нуля.
+    requests.next_generation();
+    let (second, _, _) = open(&mut requests, &data, "orchestrator", None);
+    assert_ne!(first, second);
+    assert!(requests.is_pending(&first) && requests.is_pending(&second));
+    // Запрос с itemId держит прежнюю форму `<itemId>/<rpc id>`.
+    let data = fixture_data("permissions_request", 1);
+    let (with_item, _, _) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(with_item, "perm-1/6");
 }
