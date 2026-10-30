@@ -307,12 +307,14 @@ if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
     sys.exit(1)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
-usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
     (d / f'stdin-{pid}.log').open('a').write(line)
     v = json.loads(line)
+    # usage.json читается на каждый ход: файл пишется тестом между запусками,
+    # чтение при старте процесса гоняло бы со стартом интерпретатора.
+    usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
     if v.get('type') == 'control_request':
         emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': v['request_id'], 'response': {}}})
         continue
