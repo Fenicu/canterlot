@@ -7,6 +7,35 @@ use std::path::Path;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 
+/// SIGKILL всей группе короткого запуска CLI (`--version`, зонд) при любом
+/// выходе, кроме снятого после чистого завершения: kill_on_drop убивает только
+/// обёртку (node), родной процесс — её ребёнок в той же группе. Объявлять после
+/// `Child`, чтобы сторож сработал раньше, чем pid обёртки освободится.
+pub(super) struct GroupKill(Option<rustix::process::Pid>);
+
+impl GroupKill {
+    pub(super) fn of(child: &tokio::process::Child) -> Self {
+        Self(
+            child
+                .id()
+                .and_then(|id| i32::try_from(id).ok())
+                .and_then(rustix::process::Pid::from_raw),
+        )
+    }
+
+    pub(super) fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for GroupKill {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum LaunchError {
     UnknownPermissionMode,

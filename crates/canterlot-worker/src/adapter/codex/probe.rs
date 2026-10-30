@@ -1,3 +1,4 @@
+use super::process::GroupKill;
 use super::rpc::{Incoming, RpcClient, RpcId};
 use super::thread::probe_initialize_params;
 use crate::adapter::spawn_with_retry_io;
@@ -60,18 +61,6 @@ async fn read_line(
                 line.pop();
             }
             return Ok(Some(String::from_utf8_lossy(&line).into_owned()));
-        }
-    }
-}
-
-/// SIGKILL всей группе зонда при любом выходе, кроме чистого завершения:
-/// kill_on_drop убивает только обёртку (node), родной сервер — её ребёнок.
-struct GroupKill(Option<rustix::process::Pid>);
-
-impl Drop for GroupKill {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         }
     }
 }
@@ -153,11 +142,7 @@ async fn run(
         })
         .await
         .map_err(|_| ProbeError::SpawnFailed)?;
-        let mut group = GroupKill(
-            child
-                .id()
-                .and_then(|id| rustix::process::Pid::from_raw(id as i32)),
-        );
+        let mut group = GroupKill::of(&child);
         let mut stdin = child.stdin.take().ok_or(ProbeError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ProbeError::SpawnFailed)?;
         let mut reader = tokio::io::BufReader::new(stdout);
@@ -193,7 +178,7 @@ async fn run(
         drop(stdin);
         // Чистый выход за SHUTDOWN_WAIT — группу не трогаем; иначе её убивает GroupKill.
         if matches!(timeout(SHUTDOWN_WAIT, child.wait()).await, Ok(Ok(_))) {
-            group.0 = None;
+            group.disarm();
         }
         Ok(pages)
     };

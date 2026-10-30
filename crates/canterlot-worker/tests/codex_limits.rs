@@ -509,3 +509,41 @@ async fn probe_timeout_kills_the_whole_app_server_group() {
     }
     assert!(!alive, "native server {native} survived the probe timeout");
 }
+
+#[tokio::test]
+async fn version_timeout_kills_the_whole_cli_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    // Обёртка висит на --version, её ребёнок — в той же группе.
+    fs::write(
+        &exe,
+        "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/native.pid\"\nexec sleep 300\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let err =
+        canterlot_worker::adapter::codex::version::check_within(&exe, Duration::from_millis(800))
+            .await
+            .unwrap_err();
+    assert_eq!(
+        err,
+        canterlot_worker::adapter::codex::version::VersionError::Failed
+    );
+    let native: u32 = fs::read_to_string(dir.path().join("native.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_alive(native) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let alive = process_alive(native);
+    if alive {
+        let _ = std::process::Command::new("kill")
+            .arg(native.to_string())
+            .status();
+    }
+    assert!(!alive, "native child {native} survived the version timeout");
+}
