@@ -162,8 +162,15 @@ fn to_proto_with_capability(
         return Err(OutboxError::CapabilityMissing);
     }
     let mut command = to_proto(row)?;
-    if pilot && let Some(command::Kind::StartExecution(start)) = &mut command.kind {
-        start.capabilities = vec![crate::session::CAPABILITY_PILOT_V1.into()];
+    if let Some(command::Kind::StartExecution(start)) = &mut command.kind {
+        start.capabilities = [
+            crate::session::CAPABILITY_PILOT_V1,
+            crate::session::CAPABILITY_TODO_V1,
+        ]
+        .into_iter()
+        .filter(|capability| has(capability))
+        .map(str::to_owned)
+        .collect();
     }
     if command.encoded_len() > MAX_MESSAGE_BYTES {
         return Err(OutboxError::ResourceLimit);

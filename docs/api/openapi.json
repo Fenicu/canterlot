@@ -4840,7 +4840,8 @@
           "queue",
           "history",
           "scheduled",
-          "open_requests"
+          "open_requests",
+          "todos"
         ],
         "properties": {
           "detail": {
@@ -4864,6 +4865,13 @@
             "items": {
               "$ref": "#/components/schemas/ScheduledMessage"
             }
+          },
+          "todos": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TodoListView"
+            },
+            "description": "Списки задач агента по дорожкам, основной агент первым."
           }
         }
       },
@@ -7768,7 +7776,8 @@
               "queue",
               "history",
               "scheduled",
-              "open_requests"
+              "open_requests",
+              "todos"
             ],
             "properties": {
               "detail": {
@@ -7792,6 +7801,13 @@
                 "items": {
                   "$ref": "#/components/schemas/ScheduledMessage"
                 }
+              },
+              "todos": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/TodoListView"
+                },
+                "description": "Списки задач агента по дорожкам, основной агент первым."
               }
             }
           },
@@ -8127,6 +8143,63 @@
               }
             ]
           }
+        ]
+      },
+      "TodoItemView": {
+        "type": "object",
+        "required": [
+          "text",
+          "status"
+        ],
+        "properties": {
+          "status": {
+            "$ref": "#/components/schemas/TodoStatus"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TodoListView": {
+        "type": "object",
+        "required": [
+          "revision",
+          "items",
+          "omitted"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TodoItemView"
+            }
+          },
+          "lane_block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Блок вызова субагента; у основного агента `null`."
+          },
+          "omitted": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Сколько пунктов не поместилось в запись воркера."
+          },
+          "revision": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Растёт с каждым принятым обновлением дорожки."
+          }
+        }
+      },
+      "TodoStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "in_progress",
+          "completed"
         ]
       },
       "UploadOffer": {

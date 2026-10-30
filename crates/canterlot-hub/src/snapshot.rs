@@ -38,6 +38,8 @@ pub struct ConversationSnapshot {
     pub scheduled: Vec<ScheduledMessage>,
     /// Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением.
     pub open_requests: Vec<RequestView>,
+    /// Списки задач агента по дорожкам, основной агент первым.
+    pub todos: Vec<crate::todos::TodoListView>,
 }
 
 pub type ConversationSnapshotView = ConversationSnapshot;
@@ -213,6 +215,7 @@ pub async fn conversation_with_registry(
         .into_iter()
         .map(RequestView::from)
         .collect();
+    let todos = crate::todos::list(&mut *conn, id).await?;
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -224,6 +227,7 @@ pub async fn conversation_with_registry(
         history,
         scheduled,
         open_requests,
+        todos,
     };
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),

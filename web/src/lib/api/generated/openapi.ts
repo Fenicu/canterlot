@@ -936,6 +936,8 @@ export interface components {
             open_requests: components["schemas"]["RequestView"][];
             queue: components["schemas"]["SnapshotQueueView"];
             scheduled: components["schemas"]["ScheduledMessage"][];
+            /** @description Списки задач агента по дорожкам, основной агент первым. */
+            todos: components["schemas"]["TodoListView"][];
         };
         Counts: {
             /** Format: int64 */
@@ -1654,6 +1656,8 @@ export interface components {
                 open_requests: components["schemas"]["RequestView"][];
                 queue: components["schemas"]["SnapshotQueueView"];
                 scheduled: components["schemas"]["ScheduledMessage"][];
+                /** @description Списки задач агента по дорожкам, основной агент первым. */
+                todos: components["schemas"]["TodoListView"][];
             };
             scope: string;
         };
@@ -1735,6 +1739,30 @@ export interface components {
             /** @enum {string} */
             kind: "block";
         });
+        TodoItemView: {
+            status: components["schemas"]["TodoStatus"];
+            text: string;
+        };
+        TodoListView: {
+            items: components["schemas"]["TodoItemView"][];
+            /**
+             * Format: uuid
+             * @description Блок вызова субагента; у основного агента `null`.
+             */
+            lane_block_id?: string | null;
+            /**
+             * Format: int64
+             * @description Сколько пунктов не поместилось в запись воркера.
+             */
+            omitted: number;
+            /**
+             * Format: int64
+             * @description Растёт с каждым принятым обновлением дорожки.
+             */
+            revision: number;
+        };
+        /** @enum {string} */
+        TodoStatus: "pending" | "in_progress" | "completed";
         UploadOffer: {
             /** Format: int64 */
             offset: number;

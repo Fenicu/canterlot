@@ -103,6 +103,9 @@
       "$ref": "#/$defs/request_transmitting"
     },
     {
+      "$ref": "#/$defs/todo_updated"
+    },
+    {
       "$ref": "#/$defs/machine_availability_changed"
     },
     {
@@ -4004,6 +4007,126 @@
       ],
       "additionalProperties": false
     },
+    "todo_updated": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "todo_updated"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "lane_block_id": {
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "status": {
+                    "enum": [
+                      "pending",
+                      "in_progress",
+                      "completed"
+                    ]
+                  }
+                },
+                "required": [
+                  "text",
+                  "status"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "omitted": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "lane_block_id",
+            "revision",
+            "items",
+            "omitted"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "machine_availability_changed": {
       "type": "object",
       "properties": {
@@ -4575,6 +4698,9 @@
                 },
                 {
                   "$ref": "#/$defs/request_transmitting"
+                },
+                {
+                  "$ref": "#/$defs/todo_updated"
                 },
                 {
                   "$ref": "#/$defs/machine_availability_changed"

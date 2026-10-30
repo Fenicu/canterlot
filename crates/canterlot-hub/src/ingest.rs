@@ -1897,6 +1897,7 @@ async fn apply_journal_body(
             | Body::DecisionApplied(_)
             | Body::DecisionNotApplied(_)
             | Body::DecisionUnconfirmed(_)
+            | Body::TodoUpdated(_)
     ) {
         return Ok(None);
     }
@@ -1948,6 +1949,18 @@ async fn apply_journal_body(
         .ok_or(IngestError::ForeignExecution)?;
     if let Body::BlockMedia(fact) = body {
         return crate::media::attach_in_tx(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(|error| match error {
+                sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
+                _ => IngestError::Database,
+            });
+    }
+    if let Body::TodoUpdated(fact) = body {
+        if parse_id(&fact.execution_id)? != run.execution_id {
+            return Err(IngestError::ForeignExecution);
+        }
+        return crate::todos::apply(conn, &run, fact, correlation_id)
             .await
             .map(Some)
             .map_err(|error| match error {

@@ -16,6 +16,7 @@ use crate::config::HubTimers;
 
 pub const CAPABILITY_PILOT_V1: &str = "pilot_v1";
 pub const CAPABILITY_INSTRUCTIONS_V1: &str = "instructions_v1";
+pub const CAPABILITY_TODO_V1: &str = "todo_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 

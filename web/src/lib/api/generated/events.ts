@@ -32,6 +32,7 @@ export type WireEvent =
   | RequestClosed
   | RequestDecided
   | RequestTransmitting
+  | TodoUpdated
   | MachineAvailabilityChanged
   | MachineReportUpdated
   | MachineMetrics
@@ -796,6 +797,28 @@ export interface RequestTransmitting {
   kind: "request_transmitting";
   payload: {
     request_id: Uuid;
+  };
+}
+export interface TodoUpdated {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "todo_updated";
+  payload: {
+    lane_block_id: Uuid | null;
+    revision: number;
+    items: {
+      text: string;
+      status: "pending" | "in_progress" | "completed";
+    }[];
+    omitted: number;
   };
 }
 export interface MachineAvailabilityChanged {

@@ -20,7 +20,10 @@ use uuid::Uuid;
 use crate::{
     config::HubTimers,
     installation::Installation,
-    session::{CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, Registry},
+    session::{
+        CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, CAPABILITY_TODO_V1,
+        Registry,
+    },
 };
 
 mod agent;
@@ -37,6 +40,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_EXEC_V1,
     CAPABILITY_PILOT_V1,
     CAPABILITY_INSTRUCTIONS_V1,
+    CAPABILITY_TODO_V1,
 ];
 
 #[tonic::async_trait]

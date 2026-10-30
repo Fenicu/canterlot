@@ -40,6 +40,7 @@ pub mod session;
 pub mod singleton;
 pub mod snapshot;
 pub mod subscriptions;
+pub mod todos;
 
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
