@@ -40,6 +40,60 @@ describe('PWA Request Cards', () => {
     return text;
   }
 
+  it('not_applied_card_says_the_answer_did_not_reach_the_agent', () => {
+    const cases: Array<[string, string]> = [
+      ['unsupported_command', 'не применено'],
+      ['execution_ended', 'не применено: Исполнение завершилось']
+    ];
+    for (const [reason, label] of cases) {
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const request = createRequestItem({
+        id: 'req-not-applied',
+        conversationId: 'conv-1',
+        kind: 'permission',
+        state: 'not_applied',
+        payload: {},
+        closedReason: reason
+      });
+      const instance = mount(RequestCard, { target, props: { request, onDecision: vi.fn() } });
+      flushSync();
+      expect(target.textContent).toContain(label);
+      expect(target.textContent).not.toContain('Запрос закрыт');
+      void unmount(instance);
+    }
+  });
+
+  it('secret_custom_answer_keeps_its_spaces', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request: RequestItem = {
+      id: 'req-secret',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: { questions: [{ id: 'q1', text: 'Пароль', allow_custom: true, is_secret: true }] }
+    };
+    const instance = mount(QuestionCard, { target, props: { request, onDecision } });
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>('input[data-custom]')!;
+
+    input.value = '   ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled).toBe(true);
+
+    input.value = ' s3cret ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    target.querySelector<HTMLButtonElement>('button[type=submit]')!.click();
+    await vi.waitFor(() => expect(onDecision).toHaveBeenCalled());
+
+    expect(JSON.stringify(onDecision.mock.calls[0]![0])).toContain('" s3cret "');
+    void unmount(instance);
+  });
+
   it('permission_card_shows_what_claude_code_writes_or_edits', () => {
     const write = permissionText({
       tool_name: 'Write',
