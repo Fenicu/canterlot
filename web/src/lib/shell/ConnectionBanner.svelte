@@ -33,7 +33,7 @@
 
   const message = $derived.by(() => {
     if (phase === 'incompatible') return 'Доступна новая версия приложения';
-    if (scope === 'degraded') return 'Не удаётся синхронизироваться. Повтор через 30 с';
+    if (scope === 'degraded') return 'Не удаётся синхронизироваться. Повторяю попытки';
     if (phase === 'reconnecting' && now - since >= 3000) return 'Нет связи. Переподключаюсь…';
     if (phase === 'live' && now < until) return 'Связь восстановлена';
     return '';

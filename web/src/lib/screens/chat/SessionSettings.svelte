@@ -13,7 +13,11 @@
 	import { ApiError } from '#lib/api/http.js';
 	import { shouldShowApplyNewVersion } from '../presets/presetsModel.js';
 	import Button from '#lib/ui/Button.svelte';
+	import IconButton from '#lib/ui/IconButton.svelte';
+	import Select from '#lib/ui/Select.svelte';
+	import Textarea from '#lib/ui/Textarea.svelte';
 	import Toggle from '#lib/ui/Toggle.svelte';
+	import { effortLabel, permissionLabel } from './settingsLabels';
 
 	type AppliedPreset = components['schemas']['AppliedPreset'];
 	type PresetSummary = components['schemas']['PresetSummary'];
@@ -149,19 +153,11 @@
 		harness?.permission_modes ?? ['default', 'ask', 'auto_edit', 'full_access']
 	);
 
-	const EFFORT_LABELS: Record<string, string> = {
-		low: 'Низкое',
-		medium: 'Обычное',
-		high: 'Высокое',
-		xhigh: 'Максимальное'
-	};
-
-	const PERMISSION_LABELS: Record<string, string> = {
-		default: 'По умолчанию',
-		ask: 'Спрашивать',
-		auto_edit: 'Автоправки',
-		full_access: 'Полный доступ'
-	};
+	const modelOptions = $derived(availableModels.map((m) => ({ value: m.id, label: m.title || m.id })));
+	const effortOptions = $derived(availableEfforts.map((value) => ({ value, label: effortLabel(value) })));
+	const permissionOptions = $derived(availablePermissionModes.map((value) => ({ value, label: permissionLabel(value) })));
+	const presetSelectOptions = $derived(presetOptions.map((option) => ({ value: option.id, label: option.title })));
+	const locked = $derived(!midsessionSupported || saving);
 
 	async function saveSettings(event?: SubmitEvent) {
 		if (event) event.preventDefault();
@@ -237,40 +233,29 @@
 	}
 </script>
 
-<div class="session-settings-container" class:desktop>
-	<header class="settings-header">
-		<div>
-			<h2 id="settings-title">Настройки сессии</h2>
-			{#if desktop && chat.detail?.title}
-				<div class="subtitle">{(chat.detail as { title?: string }).title}</div>
-			{/if}
-		</div>
-		{#if onclose}
-			<button type="button" class="icon-button" aria-label="Закрыть" onclick={onclose}>
-				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m6 6 12 12M6 18 18 6" /></svg>
-			</button>
-		{/if}
-	</header>
-
-	<form id="session-settings-form" class="settings-body scroll" onsubmit={saveSettings}>
-		{#if chat.settings?.rejected}
-			<div class="rejected-banner" role="alert">
-				{formatRejectedSettings(chat.settings.rejected)}
+<div class="settings" class:desktop>
+	{#if desktop}
+		<header class="pane-bar">
+			<div class="titles">
+				<h2>Настройки сессии</h2>
+				{#if chat.detail?.title}<p>{(chat.detail as { title?: string }).title}</p>{/if}
 			</div>
+			{#if onclose}<IconButton icon="close" label="Закрыть" onclick={onclose} />{/if}
+		</header>
+	{/if}
+
+	<form id="session-settings-form" class="settings-body" onsubmit={saveSettings}>
+		{#if chat.settings?.rejected}
+			<div class="alert" role="alert">{formatRejectedSettings(chat.settings.rejected)}</div>
 		{/if}
 
 		{#if generalError}
-			<div class="error-banner" role="alert">
-				{generalError}
-			</div>
+			<div class="alert" role="alert">{generalError}</div>
 		{/if}
 
-		<div class="v3-well">
-			<div class="row">
-				<span class="live-dot" class:active={chat.execution?.live}></span>
-				<strong>{chat.execution?.live ? 'Сессия работает' : 'Сессия в ожидании'}</strong>
-			</div>
-			<p class="v3-note">
+		<div class="card">
+			<p class="state"><span class="live-dot" class:active={chat.execution?.live}></span><strong>{chat.execution?.live ? 'Сессия работает' : 'Сессия в ожидании'}</strong></p>
+			<p class="note">
 				{(chat.detail?.harness as { title?: string })?.title ?? 'Claude Code'} ·
 				{(chat.detail?.machine as { name?: string })?.name ?? 'workstation'}
 				{#if chat.detail?.workdir}
@@ -279,210 +264,161 @@
 			</p>
 		</div>
 
-		<div class="field-row">
-			<div class="field">
-				<label class="field-label" for="model">Модель</label>
-				<select
-					id="model"
-					name="model"
-					bind:value={selectedModel}
-					disabled={!midsessionSupported || saving}
-					aria-describedby={pending?.model ? 'model-pending' : modelError ? 'model-error' : undefined}
-				>
-					{#each availableModels as m (m.id)}
-						<option value={m.id}>{m.title || m.id}</option>
-					{/each}
-				</select>
-				{#if pending?.model}
-					<p id="model-pending" class="hint">
-						{effective.model} → {pending.model} со следующего хода
-					</p>
-				{/if}
-				{#if !midsessionSupported}
-					<p class="field-error">Настройка посреди сессии не поддерживается</p>
-				{:else if modelError}
-					<p id="model-error" class="field-error">{modelError}</p>
-				{/if}
-			</div>
-
-			<div class="field">
-				<label class="field-label" for="effort">Усилие</label>
-				<select
-					id="effort"
-					name="effort"
-					bind:value={selectedEffort}
-					disabled={!midsessionSupported || saving}
-					aria-describedby={pending?.effort ? 'effort-pending' : effortError ? 'effort-error' : undefined}
-				>
-					{#each availableEfforts as eff (eff)}
-						<option value={eff}>{EFFORT_LABELS[eff] || eff}</option>
-					{/each}
-				</select>
-				{#if pending?.effort}
-					<p id="effort-pending" class="hint">
-						Применится со следующего хода
-					</p>
-				{/if}
-				{#if effortError}
-					<p id="effort-error" class="field-error">{effortError}</p>
-				{/if}
-			</div>
+		<div class="pair">
+			<Select
+				id="model"
+				name="model"
+				label="Модель"
+				options={modelOptions}
+				bind:value={selectedModel}
+				disabled={locked}
+				hint={pending?.model ? `${effective.model} → ${pending.model} со следующего хода` : undefined}
+				error={!midsessionSupported ? 'Настройка посреди сессии не поддерживается' : (modelError ?? undefined)}
+			/>
+			<Select
+				id="effort"
+				name="effort"
+				label="Усилие"
+				options={effortOptions}
+				bind:value={selectedEffort}
+				disabled={locked}
+				hint={pending?.effort ? 'Применится со следующего хода' : undefined}
+				error={effortError ?? undefined}
+			/>
 		</div>
 
-		<div class="v3-mode">
+		<div class="card">
 			<h3>Режим разрешений</h3>
-			<p class="v3-note">
-				Сейчас: <strong class="secondary">{effective.permission_mode ? (PERMISSION_LABELS[effective.permission_mode] || effective.permission_mode) : 'По умолчанию'}</strong>
-			</p>
-			<div class="field">
-				<label class="field-label" for="permission">Новый режим</label>
-				<select
-					id="permission"
-					name="permission"
-					bind:value={selectedPermission}
-					disabled={!midsessionSupported || saving}
-					aria-describedby={pending?.permission_mode ? 'permission-pending' : permissionError ? 'permission-error' : undefined}
-				>
-					{#each availablePermissionModes as mode (mode)}
-						<option value={mode}>{PERMISSION_LABELS[mode] || mode}</option>
-					{/each}
-				</select>
-				{#if pending?.permission_mode}
-					<p id="permission-pending" class="hint">
-						Применится со следующего хода
-					</p>
-				{/if}
-				{#if permissionError}
-					<p id="permission-error" class="field-error">{permissionError}</p>
-				{/if}
-			</div>
+			<p class="note">Сейчас: <strong>{effective.permission_mode ? permissionLabel(effective.permission_mode) : 'По умолчанию'}</strong></p>
+			<Select
+				id="permission"
+				name="permission"
+				label="Новый режим"
+				options={permissionOptions}
+				bind:value={selectedPermission}
+				disabled={locked}
+				hint={pending?.permission_mode ? 'Применится со следующего хода' : undefined}
+				error={permissionError ?? undefined}
+			/>
 		</div>
 
-		<div class="v3-mode">
+		<div class="card">
 			<h3>Инструкции</h3>
-			<p class="v3-note">
+			<p class="note">
 				{#if applied?.deleted}
-					{applied.title} (удалён): сессия работает со своей копией
+					{applied.title} (удалены): сессия работает со своей копией
 				{:else}
-					Сейчас: <strong class="secondary">{applied?.title ?? presetTitle(effectiveRef)}{applied?.revision != null ? ` · версия ${applied.revision}` : ''}</strong>
+					Сейчас: <strong>{applied?.title ?? presetTitle(effectiveRef)}{applied?.revision != null ? ` · версия ${applied.revision}` : ''}</strong>
 				{/if}
 			</p>
 			{#if showApplyNewVersion}
-				<p class="hint">Пресет изменён после применения</p>
+				<p class="note">Инструкции изменены после применения</p>
 				<Button onclick={() => void applyNewVersion()}>Применить новую версию</Button>
 			{/if}
-			<div class="field">
-				<label class="field-label" for="preset">Новые инструкции</label>
-				<select
-					id="preset"
-					name="preset"
-					bind:value={selectedPreset}
-					disabled={!midsessionSupported || saving}
-					aria-describedby={presetPending ? 'preset-pending' : presetError ? 'preset-error' : undefined}
-				>
-					{#each presetOptions as option (option.id)}
-						<option value={option.id}>{option.title}</option>
-					{/each}
-				</select>
-				{#if presetPending}
-					<p id="preset-pending" class="hint">
-						{presetTitle(effectiveRef)} → {presetTitle(presetPending)} со следующего хода
-					</p>
-				{/if}
-				{#if rejectedPresetDeleted}
-					<p class="field-error">Пресет удалён, смена отменена</p>
-				{/if}
-				{#if presetsError}
-					<p class="field-error">{presetsError}</p>
-				{:else if presetError}
-					<p id="preset-error" class="field-error">{presetError}</p>
-				{/if}
-			</div>
-			<p class="v3-note">Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.</p>
+			<Select
+				id="preset"
+				name="preset"
+				label="Новые инструкции"
+				options={presetSelectOptions}
+				bind:value={selectedPreset}
+				disabled={locked}
+				hint={presetPending ? `${presetTitle(effectiveRef)} → ${presetTitle(presetPending)} со следующего хода` : undefined}
+				error={rejectedPresetDeleted ? 'Инструкции удалены, смена отменена' : (presetsError ?? presetError ?? undefined)}
+			/>
+			<p class="note">Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.</p>
 		</div>
 
-		<p class="v3-caption">Текущий ход продолжится с прежними настройками.</p>
+		<p class="note">Текущий ход продолжится с прежними настройками.</p>
 
 		<section class="crunch">
-			<div class="row between">
+			<div class="crunch-head">
 				<div class="grow">
 					<h3>Кранч</h3>
-					<p class="v3-note">Продолжать после восстановления лимитов</p>
+					<p class="note">Продолжать после восстановления лимитов</p>
 				</div>
-				<Toggle label="Кранч включён" bind:checked={crunchEnabled} />
+				<Toggle label="Кранч" hideLabel bind:checked={crunchEnabled} />
 			</div>
-			<div class="field">
-				<label class="field-label" for="resume">Текст продолжения</label>
-				<textarea
-					id="resume"
-					name="resume"
-					rows="3"
-					bind:value={resumeText}
-					disabled={saving}
-				></textarea>
-				<p class="hint">Отправится один раз после паузы по лимиту.</p>
-			</div>
+			<Textarea
+				id="resume"
+				name="resume"
+				label="Текст продолжения"
+				rows={3}
+				bind:value={resumeText}
+				disabled={saving}
+				hint="Отправится один раз после паузы по лимиту."
+			/>
 		</section>
 
 		<footer class="footer-action">
-			<button class="button primary full" type="submit">
-				{saving ? 'Сохранение…' : 'Сохранить настройки'}
-			</button>
-			<p class="v3-note">Модель и усилие тоже изменятся со следующего хода.</p>
+			<Button variant="primary" full type="submit">{saving ? 'Сохранение…' : 'Сохранить настройки'}</Button>
+			<p class="note">Модель и усилие тоже изменятся со следующего хода.</p>
 		</footer>
 	</form>
 </div>
 
 <style>
-	.session-settings-container {
+	.settings {
 		display: flex;
 		flex-direction: column;
+		min-width: 0;
+		min-height: 0;
 		height: 100%;
-		background: var(--surface);
 		color: var(--text);
-		padding: var(--s4);
-		box-sizing: border-box;
 	}
-	.settings-header {
+	.pane-bar {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
-		margin-bottom: var(--s4);
+		gap: var(--s4);
+		margin: var(--s5) var(--gutter) var(--s3);
+		padding: var(--s2) var(--s3) var(--s2) var(--s8);
+		border-radius: var(--radius-pill);
+		background: var(--surface);
 	}
-	.settings-header h2 {
-		margin: 0;
+	.titles {
+		min-width: 0;
+	}
+	.pane-bar h2 {
 		font-size: var(--fs-title);
-		font-weight: var(--weight-semibold);
 	}
-	.subtitle {
-		font-size: var(--fs-meta);
+	.pane-bar p {
+		overflow: hidden;
 		color: var(--muted);
+		font-size: var(--fs-sm);
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.settings-body {
 		flex: 1;
 		display: flex;
 		flex-direction: column;
-		gap: var(--s4);
-		overflow-y: auto;
+		gap: var(--s6);
+		min-height: 0;
 	}
-	.v3-well {
-		padding: var(--s3);
+	.desktop .settings-body {
+		overflow-y: auto;
+		padding: var(--s3) var(--gutter) var(--s6);
+	}
+	.card {
+		--field-bg: var(--selected);
+		display: flex;
+		flex-direction: column;
+		gap: var(--s3);
+		padding: var(--s6);
 		border-radius: var(--radius-card);
 		background: var(--raised);
-		border: var(--hairline) solid var(--line);
 	}
-	.row {
+	.state {
 		display: flex;
 		align-items: center;
-		gap: var(--s2);
+		gap: var(--s3);
+		margin: 0;
 	}
-	.row.between {
-		justify-content: space-between;
-	}
-	.grow {
-		flex: 1;
+	strong {
+		font-weight: var(--weight-semibold);
 	}
 	.live-dot {
+		flex: none;
 		width: var(--mark);
 		height: var(--mark);
 		border-radius: var(--radius-round);
@@ -491,105 +427,52 @@
 	.live-dot.active {
 		background: var(--accent);
 	}
-	.v3-note {
-		margin: var(--s1) 0 0;
+	.note {
+		margin: 0;
+		color: var(--secondary);
 		font-size: var(--fs-meta);
-		color: var(--muted);
+		overflow-wrap: anywhere;
 	}
-	.field-row {
-		display: flex;
-		gap: var(--s3);
-	}
-	.field {
-		flex: 1;
-		display: flex;
-		flex-direction: column;
-		gap: var(--s1);
-	}
-	.field-label {
-		font-size: var(--fs-meta);
-		color: var(--muted);
-	}
-	select, textarea {
-		padding: var(--s2);
-		border-radius: var(--radius-card);
-		border: var(--hairline) solid var(--line);
-		background: var(--surface);
+	.note strong {
 		color: var(--text);
-		font-size: var(--fs-body);
 	}
-	select:disabled, textarea:disabled {
-		opacity: 0.5;
-		cursor: not-allowed;
+	.pair {
+		display: grid;
+		grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr));
+		gap: var(--s4);
 	}
-	.hint {
-		margin: 0;
-		font-size: var(--fs-meta);
-		color: var(--accent);
-	}
-	.field-error {
-		margin: 0;
-		font-size: var(--fs-meta);
-		color: var(--danger);
-	}
-	.rejected-banner, .error-banner {
-		padding: var(--s2) var(--s3);
-		border-radius: var(--radius-card);
-		font-size: var(--fs-meta);
+	.alert {
+		padding: var(--s4) var(--s6);
+		border-radius: var(--radius-sm);
 		background: var(--danger-soft);
-		border: var(--hairline) solid var(--danger);
 		color: var(--danger);
+		font-size: var(--fs-meta);
 	}
-	.v3-mode h3, .crunch h3 {
-		margin: 0 0 var(--s1);
+	h3 {
+		margin: 0;
 		font-size: var(--fs-body);
 		font-weight: var(--weight-semibold);
-	}
-	.v3-caption {
-		margin: 0;
-		font-size: var(--fs-meta);
-		color: var(--muted);
 	}
 	.crunch {
-		padding: var(--s3);
-		border-radius: var(--radius-card);
-		border: var(--hairline) solid var(--line);
+		display: flex;
+		flex-direction: column;
+		gap: var(--s4);
+	}
+	.crunch-head {
+		display: flex;
+		align-items: center;
+		justify-content: space-between;
+		gap: var(--s4);
+	}
+	.grow {
+		flex: 1;
+		min-width: 0;
+	}
+	.footer-action {
 		display: flex;
 		flex-direction: column;
 		gap: var(--s3);
-	}
-	.footer-action {
 		margin-top: auto;
-		display: flex;
-		flex-direction: column;
-		gap: var(--s2);
 		padding-top: var(--s4);
-	}
-	.button.primary {
-		padding: var(--s3);
-		border-radius: var(--radius-card);
-		background: var(--accent);
-		color: var(--accent-ink);
-		border: none;
-		font-weight: var(--weight-semibold);
-		cursor: pointer;
-	}
-	.icon-button {
-		background: var(--transparent);
-		border: none;
-		color: var(--text);
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: var(--target);
-		height: var(--target);
-	}
-	.icon-button svg {
-		width: var(--icon);
-		height: var(--icon);
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 2;
 	}
 </style>

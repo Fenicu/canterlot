@@ -48,10 +48,10 @@ test.describe('stack: features and security', () => {
     expect(await answerText(page)).not.toContain('нашёл три');
 
     if (testInfo.project.name === 'desktop') {
-      await page.getByRole('button', { name: 'Поручения' }).click();
+      await page.getByRole('button', { name: 'Делегирование' }).click();
       const pane = page.locator('[data-pane="lane"]');
       await expect(pane).toBeVisible();
-      const panel = pane.getByRole('complementary', { name: 'Панель поручений' });
+      const panel = pane.getByRole('complementary', { name: 'Панель делегирования' });
       await expect(panel.getByText('Explore')).toBeVisible();
       await expect(panel.getByText('Найти дубликаты')).toBeVisible();
       await panel.getByRole('button', { name: /Explore/ }).click();

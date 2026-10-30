@@ -87,7 +87,7 @@ test('desktop_delegation_panel_lists_nodes_with_state_labels_and_selects_a_lane'
 	await expect(page.locator('[data-layout="desktop"]')).toBeVisible();
 
 	// Open delegation panel
-	await page.getByRole('button', { name: 'Поручения' }).click();
+	await page.getByRole('button', { name: 'Делегирование' }).click();
 	const panel = page.locator('[data-pane="lane"]');
 	await expect(panel).toBeVisible();
 
@@ -135,7 +135,7 @@ test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }
 	const initialScroll = await stream.evaluate((node) => node.scrollTop);
 
 	// Open lane pane
-	await page.getByRole('button', { name: 'Поручения' }).click();
+	await page.getByRole('button', { name: 'Делегирование' }).click();
 	const panel = page.locator('[data-pane="lane"]');
 	await expect(panel).toBeVisible();
 

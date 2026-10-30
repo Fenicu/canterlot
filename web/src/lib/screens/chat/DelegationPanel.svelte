@@ -1,4 +1,5 @@
 <script lang="ts">
+	import IconButton from '#lib/ui/IconButton.svelte';
 	import { onMount, type Component } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -15,7 +16,7 @@
 
 	let selectedBlockId = $state<string | null>(null);
 	let serverNodes = $state<DelegationNode[]>([]);
-	let LaneComponent = $state<Component<{ chat: ChatStore; rootBlockId: string }> | null>(null);
+	let LaneComponent = $state<Component<{ chat: ChatStore; rootBlockId: string; embedded?: boolean }> | null>(null);
 
 	$effect(() => {
 		if (selectedBlockId && !LaneComponent) {
@@ -64,18 +65,11 @@
 	}
 </script>
 
-<aside class="desktop-lane-panel" aria-label="Панель поручений">
+<aside class="desktop-lane-panel" aria-label="Панель делегирования">
 	<header class="topbar">
 		<h2 class="panel-title grow">Делегирование</h2>
 		{#if onclose}
-			<button
-				type="button"
-				class="icon-button symbol"
-				aria-label="Закрыть боковую панель"
-				onclick={onclose}
-			>
-				×
-			</button>
+			<IconButton icon="close" label="Закрыть боковую панель" onclick={onclose} />
 		{/if}
 	</header>
 
@@ -110,7 +104,7 @@
 
 	{#if selectedBlockId && LaneComponent}
 		<div class="selected-lane">
-			<LaneComponent {chat} rootBlockId={selectedBlockId} />
+			<LaneComponent {chat} rootBlockId={selectedBlockId} embedded />
 		</div>
 	{/if}
 </aside>
@@ -123,17 +117,16 @@
 		flex-direction: column;
 		min-width: 0;
 		min-height: 0;
-		background: var(--surface);
 		color: var(--text);
 	}
 	.topbar {
 		display: flex;
 		align-items: center;
-		padding: var(--s2) var(--s4);
-		margin: var(--s5) var(--s6) var(--s3);
-		border-radius: var(--radius-pill);
-		background: var(--raised);
 		min-height: var(--target);
+		margin: var(--s5) var(--gutter) var(--s3);
+		padding: var(--s2) var(--s3) var(--s2) var(--s8);
+		border-radius: var(--radius-pill);
+		background: var(--surface);
 	}
 	.panel-title {
 		margin: 0;
@@ -142,96 +135,75 @@
 	}
 	.grow {
 		flex: 1;
-	}
-	.icon-button {
-		background: var(--transparent);
-		border: none;
-		color: var(--text);
-		cursor: pointer;
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		width: var(--target);
-		height: var(--target);
-		font-size: var(--fs-title);
-		border-radius: var(--radius-card);
+		min-width: 0;
 	}
 	.tree {
-		padding: var(--s3);
 		display: flex;
 		flex-direction: column;
 		gap: var(--s2);
+		margin: var(--s0) var(--gutter) var(--s4);
+		padding: var(--s4) var(--s3);
+		border-radius: var(--radius-card);
+		background: var(--surface);
 	}
 	.tree-root {
-		font-size: var(--fs-body);
-		font-weight: var(--weight-semibold);
-		padding: var(--s1) var(--s2);
+		padding: var(--s1) var(--s3);
+		font-size: var(--fs-meta);
+		font-weight: var(--weight-medium);
 	}
 	.meta {
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 		color: var(--muted);
-		font-weight: normal;
+		font-weight: var(--weight-normal);
 	}
 	.tree-node {
 		display: flex;
 		align-items: center;
-		gap: var(--s2);
-		padding: var(--s2);
-		border-radius: var(--radius-card);
-		background: var(--surface);
-		border: var(--s0);
-		color: var(--text);
-		text-align: left;
-		cursor: pointer;
+		gap: var(--s3);
 		min-height: var(--target);
-	}
-	.tree-node:hover {
-		background: var(--raised);
+		padding: var(--s2) var(--s5);
+		border-radius: var(--radius-pill);
+		background: var(--transparent);
+		color: var(--text);
+		font-size: var(--fs-meta);
+		text-align: left;
 	}
 	.tree-node.active {
 		background: var(--selected);
 	}
 	.branch {
-		color: var(--muted);
+		color: var(--accent-link);
 		font-family: var(--font-mono);
 	}
 	.node-info {
-		min-width: 0;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
 	}
-	.subagent-name {
-		font-weight: var(--weight-semibold);
-	}
-	.subagent-model {
+	.subagent-model, .node-task {
 		color: var(--muted);
-		font-size: var(--fs-meta);
-	}
-	.node-task {
-		color: var(--muted);
+		font-size: var(--fs-sm);
 	}
 	.accent {
-		color: var(--accent);
-		font-size: var(--fs-meta);
+		color: var(--accent-link);
+		font-size: var(--fs-sm);
 	}
 	.warning {
 		color: var(--warning);
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 	}
 	.danger {
 		color: var(--danger);
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 	}
 	.muted {
 		color: var(--muted);
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 	}
 	.selected-lane {
 		flex: 1;
 		min-height: 0;
 		display: flex;
 		flex-direction: column;
-		background: var(--surface);
 	}
 </style>

@@ -14,6 +14,7 @@
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
+	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import Sheet from '#lib/ui/Sheet.svelte';
@@ -107,7 +108,10 @@
 		{thresholds}
 		{now}
 		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
-		onOpenSettings={() => (showSettings = true)}
+		onOpenSettings={() => {
+			if (pane.desktop) pane.open('settings');
+			else showSettings = true;
+		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 	/>
 

@@ -310,7 +310,7 @@ test('apply_new_version_after_edit', async ({ page }) => {
 
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
-	await expect(page.getByText('Пресет изменён после применения')).toBeVisible();
+	await expect(page.getByText('Инструкции изменены после применения')).toBeVisible();
 	await page.getByRole('button', { name: 'Применить новую версию' }).click();
 	await expect.poll(() => bodies.find((body) => body.instruction_profile === 'seed-executor')).toBeDefined();
 });

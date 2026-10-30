@@ -267,3 +267,76 @@ test.describe('текст ответа', () => {
     expect(box.x + box.width).toBeLessThanOrEqual(pane.x + pane.width);
   });
 });
+
+test.describe('листы и панели', () => {
+  async function openMenu(page: Page, item: string) {
+    await page.getByRole('button', { name: 'Меню сессии' }).click();
+    await page.getByRole('menuitem', { name: item }).click();
+  }
+
+  test('settings_and_diagnostics_show_a_single_title_and_a_single_close', async ({ page, isMobile }) => {
+    await boot(page);
+    await openMenu(page, 'Диагностика');
+    const dialog = page.getByRole('dialog', { name: 'Диагностика' });
+    await expect(dialog.getByRole('heading', { name: 'Диагностика' })).toHaveCount(1);
+    await expect(dialog.getByRole('button', { name: 'Закрыть' })).toHaveCount(1);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toHaveCount(0);
+    await openMenu(page, 'Настройки сессии');
+    const scope = isMobile ? page.getByRole('dialog', { name: 'Настройки сессии' }) : page.locator('[data-pane="lane"]');
+    await expect(scope.getByRole('heading', { name: 'Настройки сессии' })).toHaveCount(1);
+    await expect(scope.getByRole('button', { name: 'Закрыть' })).toHaveCount(1);
+  });
+
+  test('desktop_keeps_the_chat_visible_settings_open_in_the_pane_and_sheets_have_no_handle', async ({ page, isMobile }) => {
+    test.skip(isMobile, 'только рабочий стол');
+    await boot(page);
+    await page.getByRole('button', { name: 'Меню сессии' }).click();
+    await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+    await expect(page.locator('[data-pane="lane"] #model')).toBeVisible();
+    await expect(page.getByRole('dialog')).toHaveCount(0);
+    await expect(page.getByRole('textbox', { name: 'Сообщение' })).toBeEditable();
+    await openMenu(page, 'Диагностика');
+    const dialog = page.getByRole('dialog', { name: 'Диагностика' });
+    await expect(dialog.locator('.handle')).toBeHidden();
+    const backdrop = await dialog.evaluate((node) => getComputedStyle(node, '::backdrop').backgroundColor);
+    expect(backdrop).not.toMatch(/^rgb\(/);
+  });
+
+  test('delegation_action_lives_in_the_header_and_only_appears_with_delegations', async ({ page, isMobile }) => {
+    test.skip(isMobile, 'только рабочий стол');
+    const { api, id } = await boot(page);
+    await expect(page.getByRole('button', { name: 'Делегирование' })).toHaveCount(0);
+    api.histories.set(id, [block(api, '1', { block_kind: 'tool_call', tool_name: 'Agent', summary: 'поручение' })]);
+    api.bindConversation(id);
+    await page.reload();
+    const action = page.locator('.topbar').getByRole('button', { name: 'Делегирование' });
+    await expect(action).toBeVisible();
+    await action.click();
+    await expect(page.locator('[data-pane="lane"]')).toBeVisible();
+    await expect(action).toHaveAttribute('aria-pressed', 'true');
+    const edges = await page.evaluate(() => ['.topbar', 'article.card', '.capsule'].map((selector) => document.querySelector(selector)?.getBoundingClientRect().left));
+    expect(Math.max(...(edges as number[])) - Math.min(...(edges as number[]))).toBeLessThan(1);
+  });
+
+  test('session_popover_closes_on_escape_and_sits_under_its_row', async ({ page, isMobile }) => {
+    test.skip(isMobile, 'только рабочий стол');
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const ids = seedMockupSessions(api);
+    await installChatRoutes(page, hub, api, ids.pinned);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    const row = page.locator(`[data-session="${ids.pinned}"]`);
+    await row.hover();
+    await row.getByRole('button', { name: /^Действия/ }).click();
+    const popover = page.getByRole('dialog', { name: 'Сессия' });
+    const list = await page.locator('[data-list-scroll]').boundingBox();
+    const box = (await popover.boundingBox())!;
+    const rowBox = (await row.boundingBox())!;
+    expect(box.y).toBeGreaterThanOrEqual(rowBox.y + rowBox.height - 1);
+    expect(box.y + box.height).toBeLessThanOrEqual(list!.y + list!.height + 80);
+    await page.keyboard.press('Escape');
+    await expect(popover).toHaveCount(0);
+  });
+});

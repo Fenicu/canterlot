@@ -78,11 +78,17 @@
 
   let panel = $state<HTMLElement | null>(null);
   let top = $state(untrack(() => anchor));
+  let room = $state<number | null>(null);
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
   onMount(() => {
     const parent = panel?.offsetParent;
-    if (panel && parent instanceof HTMLElement) top = Math.max(0, Math.min(anchor, parent.clientHeight - panel.offsetHeight));
+    if (!panel || !(parent instanceof HTMLElement)) return;
+    const height = parent.clientHeight;
+    // Окно остаётся под своей строкой и прокручивается внутри; вверх уходит, только если снизу почти нет места.
+    const fits = height - anchor >= Math.min(panel.offsetHeight, height / 2);
+    top = fits ? anchor : Math.max(0, height - panel.offsetHeight);
+    room = height - top;
   });
 
   function dismiss() {
@@ -207,7 +213,7 @@
 {#if touch}
   <Sheet open title="Меню сессии" {onclose}>{@render fields()}</Sheet>
 {:else}
-  <div class="popover" role="dialog" aria-label="Сессия" bind:this={panel} style:top={`${top}px`}>
+  <div class="popover" role="dialog" aria-label="Сессия" bind:this={panel} style:top={`${top}px`} style:max-height={room === null ? undefined : `${room}px`}>
     <div class="close"><IconButton icon="close" label="Закрыть" onclick={dismiss} /></div>
     {@render fields()}
   </div>
@@ -219,7 +225,6 @@
     z-index: 3;
     left: var(--s3);
     right: var(--s3);
-    max-height: 100%;
     overflow-y: auto;
     padding: var(--s6);
     border-radius: var(--radius-card);

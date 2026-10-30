@@ -113,7 +113,7 @@ export const SCREENS: Screen[] = [
     await installChatRoutes(page, hub, api);
     await page.goto(`/c/${id}`);
     await expect(page.locator('[data-layout="desktop"]')).toBeVisible({ timeout: 15_000 });
-    await page.getByRole('button', { name: 'Поручения' }).click();
+    await page.getByRole('button', { name: 'Делегирование' }).click();
     await expect(page.locator('[data-pane="lane"]')).toBeVisible();
     await page.locator('[data-pane="lane"]').getByText('Explore').first().click();
     await expect(page.locator('[data-pane="lane"] .selected-lane')).toBeVisible();

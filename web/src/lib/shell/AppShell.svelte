@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { clock } from '#lib/clock.js';
   import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
@@ -9,6 +8,7 @@
   import { onMount } from 'svelte';
   import ConnectionBanner from './ConnectionBanner.svelte';
   import { layoutMode, type LayoutMode } from './layout';
+  import { pane } from './pane.svelte';
   import Nav from './Nav.svelte';
   import SessionExpired from './SessionExpired.svelte';
   import { applyMotion } from '#lib/screens/settings/preferences.js';
@@ -18,13 +18,13 @@
   import { announce } from '#lib/a11y/announce.js';
   import { followSignout, watchSignout } from '#lib/pwa/signout.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 
   let { children }: { children: Snippet } = $props();
   let runtime = $state<Runtime | null>(null);
   let width = $state(0);
   let laidOut = $state(false);
   let tick = $state(0);
-  let lane = $state(false);
   let update = $state<UpdateController | null>(null);
   let updateState = $state('idle');
   let offlineLabel = $state('');
@@ -37,11 +37,26 @@
   const chatId = $derived(onChat ? path.split('/')[2] : null);
   let currentChat = $state<ChatStore | null>(null);
   let DelegationPanelComponent = $state<Component<{ chat: ChatStore; onclose?: () => void }> | null>(null);
+  let SettingsPanelComponent = $state<Component<{ chat: ChatStore; machine?: MachineRecord | null; desktop?: boolean; onclose?: () => void }> | null>(null);
+  const paneMachine = $derived.by(() => {
+    const id = (currentChat?.detail?.machine as { id?: string } | undefined)?.id;
+    return id ? (runtime?.machines.items.get(id) ?? null) : null;
+  });
 
   $effect(() => {
-    if (mode === 'desktop' && lane && !DelegationPanelComponent) {
+    pane.mode = mode;
+  });
+
+  $effect(() => {
+    if (mode !== 'desktop') return;
+    if (pane.view === 'delegation' && !DelegationPanelComponent) {
       import('#lib/screens/chat/DelegationPanel.svelte').then((m) => {
         DelegationPanelComponent = m.default;
+      });
+    }
+    if (pane.view === 'settings' && !SettingsPanelComponent) {
+      import('#lib/screens/chat/SessionSettings.svelte').then((m) => {
+        SettingsPanelComponent = m.default;
       });
     }
   });
@@ -187,17 +202,14 @@
     <div class="panes">
       <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
       <div data-pane="chat">
-        {#if mode === 'desktop' && onChat}
-          <button type="button" class="lane-toggle" onclick={() => lane = !lane}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>
-        {/if}
         {@render children()}
       </div>
-      {#if mode === 'desktop' && lane}
+      {#if mode === 'desktop' && onChat && pane.view}
         <aside data-pane="lane">
-          {#if currentChat && DelegationPanelComponent}
-            <DelegationPanelComponent chat={currentChat} onclose={() => lane = false} />
-          {:else}
-            <p>Поручения</p>
+          {#if currentChat && pane.view === 'delegation' && DelegationPanelComponent}
+            <DelegationPanelComponent chat={currentChat} onclose={() => pane.close()} />
+          {:else if currentChat && pane.view === 'settings' && SettingsPanelComponent}
+            <SettingsPanelComponent chat={currentChat} machine={paneMachine} desktop onclose={() => pane.close()} />
           {/if}
         </aside>
       {/if}
@@ -263,7 +275,6 @@
   [data-pane="lane"] {
     width: var(--lane-width);
     flex: 0 0 var(--lane-width);
-    padding: var(--s6);
   }
 
   button {
@@ -271,15 +282,6 @@
     border: var(--s0);
     background: var(--transparent);
     color: var(--accent-link);
-  }
-
-  .lane-toggle {
-    align-self: flex-end;
-    margin: var(--s4) var(--s6) 0;
-    padding-inline: var(--s8);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    font-size: var(--fs-meta);
   }
 
   .platform-banner {

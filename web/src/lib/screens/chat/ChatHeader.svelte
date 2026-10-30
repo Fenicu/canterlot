@@ -5,6 +5,7 @@
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
 	import Icon from '#lib/ui/Icon.svelte';
+	import { pane } from '#lib/shell/pane.svelte.js';
 	import Menu from '#lib/ui/Menu.svelte';
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
@@ -45,6 +46,7 @@
 	} = $props();
 
 	let menuOpen = $state(false);
+	const delegated = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.toolName === 'Agent'));
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
 
@@ -162,6 +164,9 @@
 		</div>
 
 		<div class="header-actions">
+			{#if pane.desktop && delegated}
+				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>Делегирование</button>
+			{/if}
 			<button
 				bind:this={menuButton}
 				type="button"
@@ -332,6 +337,18 @@
 		width: var(--target);
 		height: var(--target);
 		border-radius: var(--radius-round);
+	}
+	.pane-action {
+		min-height: var(--target);
+		padding-inline: var(--s8);
+		border-radius: var(--radius-pill);
+		background: var(--transparent);
+		color: var(--secondary);
+		font-size: var(--fs-meta);
+	}
+	.pane-action[aria-pressed='true'] {
+		background: var(--selected);
+		color: var(--accent-link);
 	}
 	.header-limits {
 		padding: 0 var(--gutter) var(--s2);

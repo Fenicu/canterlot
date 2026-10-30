@@ -13,7 +13,7 @@
   p { margin: var(--s3) var(--s2) var(--s0); color: var(--muted); font-size: var(--fs-sm); }
   .error { color: var(--danger); }
   :global(.field input), :global(.field select), :global(.field textarea) {
-    display: block; width: 100%; min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--raised); font-size: var(--fs-input); color: inherit;
+    display: block; width: 100%; min-height: var(--target); padding: var(--s5) var(--s8); border: 0; border-radius: var(--radius-pill); background: var(--field-bg, var(--raised)); font-size: var(--fs-input); color: inherit;
   }
   :global(.field textarea) {
     border-radius: var(--radius);
