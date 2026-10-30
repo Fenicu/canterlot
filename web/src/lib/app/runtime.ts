@@ -4,18 +4,10 @@ import {
   snapshotConversations,
   snapshotMachines,
 } from "#lib/api/client.js";
-import {
-  ApiError,
-  NetworkError,
-  session,
-  type ErrorCode,
-  type ErrorDetails,
-  type ErrorScope,
-  type Retry,
-} from "#lib/api/http.js";
+import { NetworkError, session } from "#lib/api/http.js";
 import { DraftStore } from "#lib/drafts/store.js";
 import { OpJournal } from "#lib/ops/journal.js";
-import { opRequest } from "#lib/ops/request.js";
+import { sendOp } from "#lib/ops/request.js";
 import { openDb, type Idb } from "#lib/storage/idb.js";
 import { bindOwner, onOwnerRetired } from "#lib/storage/owner.js";
 import { staleness } from "#lib/pwa/offline.js";
@@ -80,16 +72,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
     staleness.lastSyncAt = (await db.get<number>("kv", "last_sync_at")) ?? null;
     const journal = new OpJournal(
       db,
-      async (op) => {
-        const request = opRequest(op);
-        // Обрыв соединения или потерянный ответ: операция остаётся «неизвестной» и повторяется с тем же ключом.
-        const response = await deps.fetch(request.url, request.init).catch((cause: unknown) => {
-          throw new NetworkError("send_failed", { cause });
-        });
-        const body = await response.json().catch(() => null);
-        if (!response.ok) throw httpFailure(response, body);
-        return body;
-      },
+      (op) => sendOp(deps.fetch, op),
       {
         now: deps.clock.now,
         schedule: deps.schedule,
@@ -221,37 +204,4 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
     singleton = runtime;
     return runtime;
   }
-}
-
-function httpFailure(response: Response, body: unknown): Error {
-  const error = (
-    body as {
-      error?: {
-        code?: string;
-        message?: string;
-        scope?: string;
-        retry?: string;
-        correlation_id?: string;
-        details?: ErrorDetails;
-      };
-    } | null
-  )?.error;
-  if (
-    error?.code &&
-    error.message &&
-    error.scope &&
-    error.retry &&
-    error.correlation_id
-  ) {
-    return new ApiError(
-      response.status,
-      error.code as ErrorCode,
-      error.message,
-      error.scope as ErrorScope,
-      error.retry as Retry,
-      error.correlation_id,
-      error.details,
-    );
-  }
-  return new NetworkError("send_failed");
 }
