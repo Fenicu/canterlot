@@ -12,6 +12,7 @@
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount } from 'svelte';
   import { machineProblem, NewSessionModel } from './newSessionModel';
+  import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
   let runtime = $state<Runtime | null>(null);
@@ -34,6 +35,32 @@
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
+  const BUILTIN_PRESETS: PresetSummaryLike[] = [
+    {
+      id: 'clean',
+      kind: 'clean',
+      title: 'Без инструкций',
+      description: 'Агент запускается без личных инструкций владельца: без его глобальных CLAUDE.md и AGENTS.md и без автопамяти. Инструкции самого репозитория, вход, MCP-серверы и плагины владельца остаются.',
+      revision: null,
+      text_bytes: null,
+      created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+      last_edit: null,
+      used_by: 0
+    },
+    {
+      id: 'owner',
+      kind: 'owner',
+      title: 'Как у владельца',
+      description: 'Конфигурация агента владельца без изменений: его CLAUDE.md, AGENTS.md и автопамять.',
+      revision: null,
+      text_bytes: null,
+      created: { by: 'builtin', conversation_id: null, conversation_title: null, at: null },
+      last_edit: null,
+      used_by: 0
+    }
+  ];
+  const presets = $derived(runtime && runtime.list.presets.length > 0 ? sortPresets([...runtime.list.presets]) : BUILTIN_PRESETS);
+  const selectedPreset = $derived(presets.find((item) => item.id === profile) ?? BUILTIN_PRESETS[0]);
   const workdir = $derived(join(root, sub));
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
@@ -126,11 +153,13 @@
       {#each efforts as item (item)}<option value={item}>{item}</option>{/each}
     </select>
   </label>
-  <label>Профиль инструкций
-    <select aria-label="Профиль инструкций" bind:value={profile}>
-      <option value="clean">Без инструкций</option>
-      <option value="owner">Как у владельца</option>
+  <label>Инструкции
+    <select aria-label="Инструкции" bind:value={profile}>
+      {#each presets as item (item.id)}
+        <option value={item.id}>{item.title}</option>
+      {/each}
     </select>
+    {#if selectedPreset}<p>{selectedPreset.description}</p>{/if}
   </label>
   <Toggle label="Кранч" bind:checked={crunch} />
   {#if crunch}<label>Текст продолжения <textarea aria-label="Текст продолжения" bind:value={resume}></textarea></label>{/if}

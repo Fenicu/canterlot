@@ -63,7 +63,7 @@
   });
   const onNew = $derived(path === '/new');
   const harness = $derived(path.startsWith('/__test'));
-  const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : 'sessions');
+  const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : path.startsWith('/presets') ? 'presets' : 'sessions');
   const now = $derived.by(() => {
     void tick;
     return clock.serverNow();

@@ -7,6 +7,9 @@ import type { MachineRecord } from '../../src/lib/stores/machines.svelte';
 import type { RunInfo } from '../../src/lib/stores/run';
 import type { RangeResult } from '../../src/lib/sync/scope';
 import type { FakeHub } from './hub';
+import type { components } from '../../src/lib/api/generated/openapi.js';
+
+type PresetSummary = components['schemas']['PresetSummary'];
 
 const PAGE = 256 * 1024;
 
@@ -14,6 +17,26 @@ export interface CanonicalBlock {
 	text: string;
 	rev: number;
 	state: string;
+}
+
+export interface FakePresetOrigin {
+	by: string;
+	conversation_id: string | null;
+	conversation_title: string | null;
+	at: string | null;
+}
+
+export interface FakePreset {
+	id: string;
+	kind: 'clean' | 'owner' | 'custom';
+	title: string;
+	description: string;
+	revision: number | null;
+	text_bytes: number | null;
+	text: string | null;
+	created: FakePresetOrigin;
+	last_edit: FakePresetOrigin | null;
+	used_by: number;
 }
 
 export class FakeHubApi {
@@ -30,6 +53,8 @@ export class FakeHubApi {
 	counts: Counts = { all: 0, pinned: 0, archived: 0, groups: [] };
 	limits: ProviderLimits[] = [];
 	truncated = false;
+	presets = new Map<string, FakePreset>();
+	deletedPresets = new Map<string, FakePreset>();
 	decisionAutoProgress: boolean | 'transmitting' | 'saved' = true;
 	#seq = 0;
 
@@ -116,8 +141,66 @@ export class FakeHubApi {
 			groups: this.groups,
 			items: [...this.list.values()],
 			limits: this.limits,
-			truncated: this.truncated
+			truncated: this.truncated,
+			presets: this.presetList()
 		};
+	}
+
+	presetSummary(preset: FakePreset): PresetSummary {
+		return {
+			id: preset.id,
+			kind: preset.kind,
+			title: preset.title,
+			description: preset.description,
+			revision: preset.revision,
+			text_bytes: preset.text_bytes,
+			created: preset.created,
+			last_edit: preset.last_edit,
+			used_by: preset.used_by
+		};
+	}
+
+	presetList(): PresetSummary[] {
+		const rank = (kind: string): number => kind === 'clean' ? 0 : kind === 'owner' ? 1 : 2;
+		return [...this.presets.values()]
+			.sort((a, b) => rank(a.kind) - rank(b.kind) || a.title.localeCompare(b.title, 'ru'))
+			.map((preset) => this.presetSummary(preset));
+	}
+
+	bumpPresetRevision(id: string, text: string): void {
+		const preset = this.presets.get(id);
+		if (!preset || preset.revision == null) return;
+		preset.revision += 1;
+		preset.text = text;
+		preset.text_bytes = new TextEncoder().encode(text).length;
+		this.hub.append('conversations', { kind: 'instruction_preset_changed', payload: { preset: this.presetSummary(preset), deleted: false } });
+		this.hub.flush();
+	}
+
+	applyPresetDeletion(id: string): boolean {
+		const preset = this.presets.get(id);
+		if (!preset) return false;
+		this.presets.delete(id);
+		this.deletedPresets.set(id, preset);
+		this.hub.append('conversations', { kind: 'instruction_preset_changed', payload: { preset: this.presetSummary(preset), deleted: true } });
+		for (const [conversationId, detail] of this.details) {
+			const settings = (detail as Record<string, unknown>).settings as {
+				effective?: unknown;
+				pending?: { instruction_profile?: string | null };
+				rev?: number;
+			} | undefined;
+			if (settings?.pending?.instruction_profile === id) {
+				const pending = { ...(settings.pending as Record<string, unknown>), instruction_profile: null };
+				(detail as Record<string, unknown>).settings = { ...settings, pending };
+				this.hub.append(`conversation:${conversationId}`, {
+					kind: 'conversation_settings_changed',
+					conversation_id: conversationId,
+					payload: { effective: settings.effective, pending, rev: (settings.rev ?? 0) + 1, rejected: { keys: ['instruction_profile'], reason: 'preset_deleted' } }
+				});
+			}
+		}
+		this.hub.flush();
+		return true;
 	}
 
 	async conversationSnapshot(id: string): Promise<{ cursor: string; data: SnapshotData }> {

@@ -2079,6 +2079,7 @@ function listOf(): ListStore {
           items: [],
           limits: [],
           truncated: false,
+          presets: [],
         },
       }),
       events: async () => ({ events: [], head: "0" }),
