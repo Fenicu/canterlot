@@ -304,7 +304,8 @@ if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
     sys.exit(1)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
-usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
+def usage():
+    return json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
@@ -318,7 +319,7 @@ for line in sys.stdin:
           'mcp_servers': [{'name': 'canterlot', 'status': 'connected'}]})
     uid = v.get('uuid')
     emit({'type': 'result', 'subtype': 'success', 'session_id': sid, 'is_error': False,
-          'user_message_uuids': [uid], 'modelUsage': usage, 'result': 'ok'})
+          'user_message_uuids': [uid], 'modelUsage': usage(), 'result': 'ok'})
 "#;
 
 struct RestartHarness {
