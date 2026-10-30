@@ -71,8 +71,9 @@ export function toolStatusText(opts: {
   now: number;
 }): string {
   if (opts.error) return "Ошибка";
-  const end =
-    opts.running || opts.finishedAt === null ? opts.now : opts.finishedAt;
+  // Завершённый инструмент без отметки конца считал бы время вечно.
+  if (!opts.running && opts.finishedAt === null) return "";
+  const end = opts.running ? opts.now : (opts.finishedAt as number);
   const elapsed = Math.max(0, end - opts.startedAt);
   const shown = opts.running ? Math.floor(elapsed / 1000) * 1000 : elapsed;
   return fmt.duration(shown);

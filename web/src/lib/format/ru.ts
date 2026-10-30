@@ -42,6 +42,13 @@ export const fmt = {
 		if (parts.length === 0) parts.push('0 с');
 		return sign + parts.join(' ');
 	},
+	durationCoarse(ms: number): string {
+		if (Math.abs(ms) < 60_000) return fmt.duration(ms);
+		const total = Math.floor(Math.abs(ms) / 60_000);
+		const hours = Math.floor(total / 60);
+		const minutes = total % 60;
+		return [hours ? `${hours} ч` : '', minutes ? `${minutes} мин` : ''].filter(Boolean).join(' ');
+	},
 	clock(ts: number): string {
 		return clockFmt.format(ts);
 	},

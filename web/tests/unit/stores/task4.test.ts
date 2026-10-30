@@ -1710,6 +1710,9 @@ describe("stores task 4", () => {
     );
     expect(fmt.duration(4 * 60 * 1000)).toBe("4 мин");
     expect(fmt.duration(2 * 60 * 1000 + 18 * 1000)).toBe("2 мин 18 с");
+    expect(fmt.durationCoarse(2 * 60 * 1000 + 18 * 1000)).toBe("2 мин");
+    expect(fmt.durationCoarse(61 * 60 * 1000 + 5000)).toBe("1 ч 1 мин");
+    expect(fmt.durationCoarse(41_000)).toBe("41 с");
     expect(fmt.duration(200)).toBe("0,2 с");
     expect(fmt.clock(new Date(2026, 9, 26, 22, 14, 0).getTime())).toBe("22:14");
     expect(fmt.tokens(18420)).toBe("18 420");
