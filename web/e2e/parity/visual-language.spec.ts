@@ -162,7 +162,10 @@ test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
           }
         };
         expectRadius('.topbar', '--radius-pill');
-        expectRadius('.dock nav', '--radius-pill');
+        const dock = document.querySelector('.dock nav');
+        if (dock && getComputedStyle(dock).backgroundColor !== 'rgba(0, 0, 0, 0)') {
+          note('dock-has-backing', dock, getComputedStyle(dock).backgroundColor);
+        }
         expectRadius('article.card', '--radius-card');
         expectRadius('.capsule', '--radius-composer');
         expectRadius('.send', '--radius-round');

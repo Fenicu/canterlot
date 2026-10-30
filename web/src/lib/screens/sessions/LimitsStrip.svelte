@@ -54,18 +54,15 @@
 <style>
   .limits {
     margin: var(--s0) var(--gutter) var(--s3);
-    border-radius: var(--radius-pill);
-    background: var(--surface);
     font-size: var(--fs-sm);
   }
-  .limits[open] { border-radius: var(--radius-card); }
   summary {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--s4);
     min-height: var(--target);
-    padding: var(--s2) var(--s6);
+    padding-block: var(--s2);
     border-radius: var(--radius-pill);
     color: var(--secondary);
     cursor: pointer;
@@ -81,7 +78,7 @@
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
-  .open { padding: var(--s0) var(--s6) var(--s4); }
+  .open { padding-bottom: var(--s4); }
   p { margin: 0 0 var(--s2); white-space: pre-line; color: var(--secondary); }
   a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>

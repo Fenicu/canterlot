@@ -49,9 +49,7 @@
     overflow-x: auto;
     scrollbar-width: none;
     margin: var(--s3) var(--gutter);
-    padding: var(--s2);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
+    padding-block: var(--s2);
   }
   .fade { mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9)); }
   :global([data-pane='list']) .tabs { mask-image: none; }
@@ -68,6 +66,6 @@
   }
   .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
   button[aria-selected='true'] { background: var(--tab-selected); color: var(--accent-link); font-weight: var(--weight-medium); }
-  :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; border-radius: var(--radius-card); }
+  :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; }
   :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 </style>
