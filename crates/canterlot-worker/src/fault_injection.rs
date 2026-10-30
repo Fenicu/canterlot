@@ -11,6 +11,7 @@ use canterlot_proto::worker::v1::{Command, JournalCursor};
 #[derive(Clone, Default)]
 pub struct SessionProbe {
     sent: Arc<Mutex<std::collections::HashMap<u64, Instant>>>,
+    sends: Arc<Mutex<Vec<Instant>>>,
     acks: Arc<Mutex<Vec<std::time::Duration>>>,
     data_attaches: Arc<AtomicU64>,
 }
@@ -23,10 +24,15 @@ impl SessionProbe {
         self.data_attaches.load(Ordering::Relaxed)
     }
     pub(crate) fn sent(&self, seq: u64) {
+        let at = Instant::now();
         self.sent
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .insert(seq, Instant::now());
+            .insert(seq, at);
+        push(
+            &mut self.sends.lock().unwrap_or_else(|e| e.into_inner()),
+            at,
+        );
     }
 
     pub(crate) fn ack(&self, seq: u64) {
@@ -45,6 +51,16 @@ impl SessionProbe {
 
     pub fn heartbeat_acks(&self) -> Vec<std::time::Duration> {
         self.acks.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Промежутки между отправками: стоп сеанса виден, даже если ни один heartbeat не был в полёте.
+    pub fn heartbeat_gaps(&self) -> Vec<std::time::Duration> {
+        self.sends
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .windows(2)
+            .map(|pair| pair[1] - pair[0])
+            .collect()
     }
 }
 
