@@ -155,8 +155,8 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Остановить', exact: true }).click();
 
+	await expect.poll(() => calls.find((c) => c.url.endsWith('/stop') && c.body?.force === false)).toBeDefined();
 	const stopCall = calls.find((c) => c.url.endsWith('/stop') && c.body?.force === false);
-	expect(stopCall).toBeDefined();
 	expect(stopCall!.key).not.toBe('');
 
 	// Re-set live for force stop test
@@ -173,14 +173,12 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await expect(page.getByText('Принудительно прервать выполнение?')).toBeVisible();
 
 	await page.getByRole('button', { name: 'Остановить принудительно' }).click();
-	const forceStopCall = calls.find((c) => c.url.endsWith('/stop') && c.body?.force === true);
-	expect(forceStopCall).toBeDefined();
+	await expect.poll(() => calls.find((c) => c.url.endsWith('/stop') && c.body?.force === true)).toBeDefined();
 
 	// 3. Resume
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Возобновить сессию' }).click();
-	const resumeCall = calls.find((c) => c.url.endsWith('/resume'));
-	expect(resumeCall).toBeDefined();
+	await expect.poll(() => calls.find((c) => c.url.endsWith('/resume'))).toBeDefined();
 
 	// 4. Continue queue when live + user_stop
 	hub.append(`conversation:${id}`, {
@@ -201,8 +199,7 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Продолжить очередь' }).click();
-	const continueCall = calls.find((c) => c.url.endsWith('/queue/continue'));
-	expect(continueCall).toBeDefined();
+	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
 });
 
 test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ page }) => {
@@ -241,8 +238,8 @@ test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ pa
 	await expect(button).toBeVisible();
 	await button.click();
 
+	await expect.poll(() => calls.find((c) => c.url.endsWith('/resume'))).toBeDefined();
 	const resumeCall = calls.find((c) => c.url.endsWith('/resume'));
-	expect(resumeCall).toBeDefined();
 	expect(resumeCall!.body).toEqual({ continue_queue: true });
 	expect(resumeCall!.key).not.toBe('');
 });
