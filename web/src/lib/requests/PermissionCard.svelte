@@ -2,6 +2,7 @@
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
   import { permissionView } from './permissionView';
+  import TruncatedNote from './TruncatedNote.svelte';
 
   let {
     request,
@@ -135,6 +136,8 @@
   {#if view.denyInterrupts}
     <p class="warning" role="note">Отказ также прервёт ход</p>
   {/if}
+
+  <TruncatedNote payload={request.payload} />
 
   <div class="actions">
     <button

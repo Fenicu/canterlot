@@ -28,6 +28,35 @@ afterEach(() => {
 });
 
 describe('PWA Request Cards', () => {
+  describe('truncated_payload_note', () => {
+    const NOTE = 'Показано начало: решение относится к полному тексту';
+    const QUESTION = { questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }] };
+    const PERMISSION = { tool_name: 'Bash', command: 'cargo test' };
+
+    function cardText(component: typeof PermissionCard | typeof QuestionCard, kind: 'permission' | 'question', payload: unknown): string {
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind, state: 'open', payload };
+      const instance = mount(component, { target, props: { request, onDecision: vi.fn() } });
+      flushSync();
+      const text = target.textContent ?? '';
+      void unmount(instance);
+      target.remove();
+      return text;
+    }
+
+    it.each([
+      ['permission', PermissionCard, PERMISSION],
+      ['question', QuestionCard, QUESTION]
+    ] as const)('shows_the_note_on_a_%s_card_only_for_literal_true', (kind, component, base) => {
+      expect(cardText(component, kind, { ...base, truncated: true })).toContain(NOTE);
+      expect(cardText(component, kind, base)).not.toContain(NOTE);
+      for (const value of [false, 'true', 1, null, {}, []]) {
+        expect(cardText(component, kind, { ...base, truncated: value })).not.toContain(NOTE);
+      }
+    });
+  });
+
   function permissionText(payload: unknown): string {
     const target = document.createElement('div');
     document.body.appendChild(target);

@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
+  import TruncatedNote from './TruncatedNote.svelte';
 
   type QuestionOption = {
     label: string;
@@ -255,6 +256,8 @@
         {/if}
       </section>
     {/each}
+
+    <TruncatedNote payload={request.payload} />
 
     <div class="actions">
       <button
