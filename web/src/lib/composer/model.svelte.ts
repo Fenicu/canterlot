@@ -131,10 +131,13 @@ export class ComposerModel {
     const key = crypto.randomUUID();
     const createdAt = this.deps.serverNow ? this.deps.serverNow() : Date.now();
 
-    // Шаг 1: локальный элемент в полосе (strip) в том же кадре
+    // Шаг 1: локальный элемент в полосе (strip) и свободное поле ввода в том же кадре.
+    // Текст остаётся в черновике, пока операция не легла в журнал.
     this.deps.probe?.mark("send_pressed");
     const localInput = freshInput(key, sendText, createdAt, attachmentRefs);
     this.deps.chat.inputs.set(key, localInput);
+    this.text = "";
+    this.errorMessage = null;
     this.deps.probe?.mark("input_painted");
 
     // Шаг 2: сохранение операции в журнал (IndexedDB)
@@ -154,15 +157,13 @@ export class ComposerModel {
       });
     } catch (err) {
       this.deps.chat.inputs.delete(key);
-      this.text = sendText;
+      this.text = this.text ? `${sendText}\n${this.text}` : sendText;
       this.errorMessage = "Не удалось сохранить на устройстве";
       throw err;
     }
 
-    // Шаг 3: очистка поля ввода и черновика
-    this.text = "";
-    this.errorMessage = null;
-    await this.deps.drafts.clear(this.deps.conversationId);
+    // Шаг 3: черновик больше не нужен; запрос его удаления не задерживает отправку
+    void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
 
     // Шаг 4: запуск операции
     try {

@@ -1550,7 +1550,9 @@ describe("stores task 4", () => {
     await vi.waitFor(() => {
       expect(posts.some((url) => url.includes(conversation))).toBe(true);
     });
-    expect(runtime.journal.ops.get(key)?.state).toBe("committed");
+    await vi.waitFor(() =>
+      expect(runtime.journal.ops.get(key)?.state).toBe("committed"),
+    );
     const before = sockets.length;
     hub.chaos.cut();
     await clock.advanceAsync(1000);

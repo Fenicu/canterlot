@@ -121,6 +121,36 @@ describe("ops/journal", () => {
     expect(send.mock.calls[0]?.[0].key).toBe(op.key);
   });
 
+  it("request_leaves_after_begin_without_waiting_for_the_attempt_mark", async () => {
+    const send = vi.fn(async () => ({ id: "inp-1" }));
+    const ops = journal(send);
+    const op = await ops.begin(
+      "input",
+      { text: "Сразу в сеть" },
+      { conversationId: "c-1", persist: true },
+    );
+    expect((await db.get<Op>("ops", op.key))?.state).toBe("saving");
+
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realPut = db.put.bind(db);
+    db.put = async (store, key, value) => {
+      if (store === "ops") await gate;
+      return realPut(store, key, value);
+    };
+
+    const running = ops.run(op);
+    await vi.waitFor(() => expect(send).toHaveBeenCalledTimes(1));
+    expect(op.attempts).toBe(1);
+
+    release?.();
+    await running;
+    expect(op.state).toBe("committed");
+    expect((await db.get<Op>("ops", op.key))?.state).toBe("committed");
+  });
+
   it("network_error_retries_with_the_same_key_and_creates_exactly_one_input", async () => {
     const keys: string[] = [];
     let attempts = 0;
@@ -342,6 +372,7 @@ describe("ops/journal", () => {
     );
     const running = ops.run(op);
     await vi.waitFor(() => expect(calls).toBe(1));
+    await vi.waitFor(() => expect(env.scheduled).toContain(1000));
     await env.advance(1000);
     await vi.waitFor(() => expect(calls).toBe(2));
     expect(op.state).toBe("unknown");

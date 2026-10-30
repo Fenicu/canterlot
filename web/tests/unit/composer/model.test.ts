@@ -260,6 +260,72 @@ describe("composer/model", () => {
     expect(model.text).toBe("");
   });
 
+  it("field_clears_with_the_local_item_before_the_journal_write_finishes", async () => {
+    const { deps, inputs } = createMockDeps();
+    let release: (() => void) | undefined;
+    const written = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const originalBegin = deps.ops.begin;
+    deps.ops.begin = vi.fn(async (kind, body, opts) => {
+      await written;
+      return originalBegin(kind, body, opts);
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Поле свободно сразу";
+
+    const sending = model.send();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(inputs.size).toBe(1);
+    expect([...inputs.values()][0]?.text).toBe("Поле свободно сразу");
+    expect(model.text).toBe("");
+    expect(deps.drafts.clear).not.toHaveBeenCalled();
+    expect(deps.ops.run).not.toHaveBeenCalled();
+
+    release?.();
+    await sending;
+    expect(deps.drafts.clear).toHaveBeenCalledWith("conv-1");
+    expect(deps.ops.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("run_starts_without_waiting_for_the_draft_deletion", async () => {
+    const { deps } = createMockDeps();
+    deps.drafts.clear = vi.fn(() => new Promise<void>(() => undefined));
+    const model = new ComposerModel(deps);
+    model.text = "Черновик удаляется параллельно";
+
+    await model.send();
+
+    expect(deps.drafts.clear).toHaveBeenCalledWith("conv-1");
+    expect(deps.ops.run).toHaveBeenCalledTimes(1);
+  });
+
+  it("persist_failure_keeps_text_typed_after_the_press", async () => {
+    const { deps, inputs } = createMockDeps();
+    let fail: ((error: Error) => void) | undefined;
+    deps.ops.begin = vi.fn(
+      () =>
+        new Promise<Op>((_, reject) => {
+          fail = reject;
+        }),
+    ) as unknown as OpJournal["begin"];
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+
+    const sending = model.send();
+    await Promise.resolve();
+    await Promise.resolve();
+    model.text = "Второе";
+    fail?.(new Error("IndexedDB disk full"));
+
+    await expect(sending).rejects.toThrow();
+    expect(model.text).toBe("Первое\nВторое");
+    expect(model.errorMessage).toBe("Не удалось сохранить на устройстве");
+    expect(inputs.size).toBe(0);
+  });
+
   it("persist_failure_returns_the_text_with_a_message", async () => {
     const { deps, inputs } = createMockDeps();
     deps.ops.begin = vi.fn(async () => {

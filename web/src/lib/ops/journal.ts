@@ -128,8 +128,9 @@ export class OpJournal {
         }
         op.attempts += 1;
         op.state = "unknown";
-        await this.#persist(op);
-        if (this.#stopped.has(op.key)) return;
+        // Запись уже лежит в журнале с begin, а recover одинаково повторяет saving и unknown:
+        // транзакция пометки создана до запроса, и IndexedDB выполнит её раньше следующих записей.
+        void this.#persist(op).catch(() => undefined);
         try {
           const result = await this.#send(op);
           if (this.#stopped.has(op.key)) return;
