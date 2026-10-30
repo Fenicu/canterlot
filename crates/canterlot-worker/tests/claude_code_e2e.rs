@@ -869,6 +869,81 @@ async fn approval_of_a_large_request_returns_the_original_input() {
     f.close().await;
 }
 
+async fn phase_after_decision(
+    tool_name: &str,
+    input: Value,
+    decision: DecisionPayload,
+) -> adapter::Phase {
+    let id = Uuid::now_v7();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":tool_name,"input":input,"tool_use_id":"toolu_phase"},
+        "_meta":{"claudecode/toolUseId":"toolu_phase"}}});
+    let mut f = with_mcp_call(
+        call,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!("@wait"),
+        ],
+    );
+    f.start().await;
+    f.send(&tx(id)).await;
+    loop {
+        if let AdapterEvent::RequestOpened { request_id, .. } = f.event().await {
+            assert!(matches!(
+                tokio::time::timeout(WAIT, f.adapter.deliver_decision(&request_id, &decision))
+                    .await
+                    .unwrap(),
+                adapter::DecisionOutcome::Applied(_)
+            ));
+            break;
+        }
+    }
+    let phase = loop {
+        match f.event().await {
+            AdapterEvent::Phase {
+                phase: adapter::Phase::AwaitingPermission | adapter::Phase::AwaitingAnswer,
+                ..
+            } => {}
+            AdapterEvent::Phase { phase, .. } => break phase,
+            AdapterEvent::RunFinished { .. } => panic!("phase never left the request"),
+            _ => {}
+        }
+    };
+    f.close().await;
+    phase
+}
+
+#[tokio::test]
+async fn phase_leaves_the_request_after_the_decision() {
+    let bash = json!({"command": "sleep 300"});
+    let allow = DecisionPayload::Permission {
+        behavior: PermissionBehavior::Allow,
+        message: None,
+    };
+    let deny = DecisionPayload::Permission {
+        behavior: PermissionBehavior::Deny,
+        message: None,
+    };
+    let answer = DecisionPayload::Question {
+        answers: BTreeMap::from([("q0".to_owned(), AnswerValue::Single("да".into()))]),
+    };
+    let question = json!({"questions":[{"question":"Какой?","header":"Выбор","multiSelect":false,
+        "options":[{"label":"да","description":""}]}]});
+    assert!(matches!(
+        phase_after_decision("Bash", bash.clone(), allow).await,
+        adapter::Phase::RunningTool
+    ));
+    assert!(matches!(
+        phase_after_decision("Bash", bash, deny).await,
+        adapter::Phase::Generating
+    ));
+    assert!(matches!(
+        phase_after_decision("AskUserQuestion", question, answer).await,
+        adapter::Phase::Generating
+    ));
+}
+
 #[tokio::test]
 async fn refused_question_gets_a_deny_and_stays_out_of_the_journal() {
     let id = Uuid::now_v7();

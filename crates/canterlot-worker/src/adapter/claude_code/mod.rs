@@ -21,7 +21,7 @@ use crate::{
     containment::{Containment, Member},
 };
 use canterlot_proto::{
-    requests::DecisionPayload,
+    requests::{DecisionPayload, PermissionBehavior},
     worker::v1::{LimitObservation, LimitsSnapshot},
 };
 use serde_json::Value;
@@ -344,6 +344,17 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Ответ на запрос вернул агента к работе, а кадров до конца инструмента не будет.
+    fn leave_request_phase(&mut self, phase: Phase) {
+        if self.requests.is_empty() {
+            self.events.push_back(AdapterEvent::Phase {
+                phase,
+                tool_name: None,
+                summary: None,
+            });
+        }
+    }
+
     fn flush_tool(&mut self, block_id: Uuid, mark: Option<&str>) {
         if let Some(mut event) = self.tools.remove(&block_id) {
             if let AdapterEvent::BlockStarted { approved_by, .. } = &mut event {
@@ -391,6 +402,7 @@ impl ClaudeCodeAdapter {
                         request_id,
                         reason: "cancelled".into(),
                     });
+                    self.leave_request_phase(Phase::Generating);
                 }
             }
             BrokerEvent::AgentTool {
@@ -997,6 +1009,18 @@ impl Adapter for ClaudeCodeAdapter {
             self.events.push_back(AdapterEvent::RequestClosed {
                 request_id: request_id.into(),
                 reason: "answered".into(),
+            });
+            let allowed = matches!(
+                decision,
+                DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Allow,
+                    ..
+                }
+            );
+            self.leave_request_phase(if allowed {
+                Phase::RunningTool
+            } else {
+                Phase::Generating
             });
         }
         outcome
