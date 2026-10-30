@@ -75,7 +75,10 @@
 - `elicitation.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
   `mcpServer/elicitation/request` из схемы 0.164 (`McpServerElicitationRequestParams`:
   `serverName`, `threadId`, `turnId`, без `itemId`; form — `requestedSchema`,
-  url — `url` и `elicitationId`). Покрывает elicitation задачей 4.
+  url — `url` и `elicitationId`, `openai/userVerification` — `title`,
+  `description`, `challenge`). Строки: form с обязательным полем, url, form без
+  обязательных полей, `openai/userVerification`, `openai/form`. Покрывает
+  elicitation задачей 4 и сразу отклоняемые режимы.
 - `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
   Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
   Покрывает ответ-ошибку `-32601` задачей 4.
