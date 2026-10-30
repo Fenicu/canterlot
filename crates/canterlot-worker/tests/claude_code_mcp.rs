@@ -465,6 +465,37 @@ async fn mismatched_decision_keeps_the_call_pending() {
 }
 
 #[tokio::test]
+async fn write_to_a_stalled_relay_is_bounded_and_keeps_the_call() {
+    use canterlot_worker::adapter::DecisionOutcome;
+    let mut h = RelayHarness::bind().await;
+    // Ответ больше буфера сокета, а relay его не читает: CLI занят своим stdout.
+    let input = json!({"content": "x".repeat(4 * 1024 * 1024)});
+    h.call(
+        json!(1),
+        "approve",
+        json!({"tool_name": "Write", "input": input, "tool_use_id": "toolu_stalled"}),
+    )
+    .await;
+    let request = opened(&mut h.broker).await;
+    let allow = DecisionPayload::Permission {
+        behavior: PermissionBehavior::Allow,
+        message: None,
+    };
+    let outcome = tokio::time::timeout(Duration::from_secs(15), h.broker.answer(&request, &allow))
+        .await
+        .expect("write to a stalled relay must not block the supervisor loop");
+    assert!(
+        matches!(outcome, DecisionOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    // Строка ушла частично: повторная запись обязана отказать, а не дописать за ней.
+    let again = tokio::time::timeout(Duration::from_secs(1), h.broker.answer(&request, &allow))
+        .await
+        .expect("connection with a partial line stays closed");
+    assert!(matches!(again, DecisionOutcome::Undetermined), "{again:?}");
+}
+
+#[tokio::test]
 async fn deny_returns_message() {
     let mut relay = RelayHarness::bind().await;
     relay

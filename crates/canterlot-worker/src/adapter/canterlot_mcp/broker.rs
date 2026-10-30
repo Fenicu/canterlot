@@ -5,6 +5,7 @@ use std::{
     os::unix::fs::DirBuilderExt as _,
     path::Path,
     sync::{Arc, Mutex as SyncMutex},
+    time::Duration,
 };
 
 use canterlot_proto::{
@@ -17,12 +18,17 @@ use tokio::{
     net::{UnixListener, UnixStream, unix::OwnedWriteHalf},
     sync::{Mutex, mpsc},
     task::JoinHandle,
+    time::{Instant, timeout_at},
 };
 
 use super::mcp::{self, ToolSet};
 
 /// Предел строки JSON-RPC от relay: как у stdout CLI; длиннее — соединение закрывается.
 pub const MAX_MCP_LINE_BYTES: usize = 64 * 1024 * 1024;
+
+/// Предел записи в relay. Ответы пишутся на цикле супервизора, который читает stdout
+/// CLI: CLI, застрявший на записи в stdout, relay не читает, и ждать здесь нельзя.
+const WRITE_DEADLINE: Duration = Duration::from_secs(5);
 
 /// Вид ожидающего вызова задаётся при открытии, а не ключами входа инструмента.
 enum PendingKind {
@@ -42,8 +48,9 @@ struct AgentCall {
 /// Ключ — соединение и rpc id: нумерация вызовов у каждого соединения своя.
 type AgentPending = Arc<Mutex<HashMap<(u64, String), AgentCall>>>;
 
-/// Ответ уходит в то соединение, откуда пришёл вызов.
-type ConnWriter = Arc<Mutex<OwnedWriteHalf>>;
+/// Ответ уходит в то соединение, откуда пришёл вызов. `None` — запись оборвалась
+/// посреди строки, и следующая склеилась бы с её началом.
+type ConnWriter = Arc<Mutex<Option<OwnedWriteHalf>>>;
 
 struct PendingCall {
     rpc_id: Value,
@@ -121,9 +128,23 @@ type Pending = Arc<Mutex<HashMap<String, PendingCall>>>;
 async fn write_line(writer: &ConnWriter, value: &Value) -> std::io::Result<()> {
     let mut line = value.to_string();
     line.push('\n');
-    let mut stream = writer.lock().await;
-    stream.write_all(line.as_bytes()).await?;
-    stream.flush().await
+    let deadline = Instant::now() + WRITE_DEADLINE;
+    let expired = || std::io::Error::from(std::io::ErrorKind::TimedOut);
+    let mut slot = timeout_at(deadline, writer.lock())
+        .await
+        .map_err(|_| expired())?;
+    let stream = slot
+        .as_mut()
+        .ok_or_else(|| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?;
+    let written = timeout_at(deadline, async {
+        stream.write_all(line.as_bytes()).await?;
+        stream.flush().await
+    })
+    .await;
+    if written.is_err() {
+        *slot = None;
+    }
+    written.map_err(|_| expired())?
 }
 
 fn rpc_error(id: &Value, message: &str) -> Value {
@@ -200,7 +221,7 @@ impl Broker {
                     tokio::spawn(serve_conn(
                         conn,
                         read,
-                        Arc::new(Mutex::new(write)),
+                        Arc::new(Mutex::new(Some(write))),
                         pending.clone(),
                         agent_pending.clone(),
                         gate.clone(),
