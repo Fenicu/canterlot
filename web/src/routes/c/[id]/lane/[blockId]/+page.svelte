@@ -1,8 +1,7 @@
 <script lang="ts">
 	import { page } from '$app/state';
-	import { onMount } from 'svelte';
 	import Lane from '#lib/screens/chat/Lane.svelte';
-	import { openChatSession } from '#lib/screens/chat/open.js';
+	import { leaseChatSession } from '#lib/screens/chat/open.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
 	let chat = $state<ChatStore | null>(null);
@@ -10,30 +9,38 @@
 	const id = $derived(page.params.id ?? '');
 	const blockId = $derived(page.params.blockId ?? '');
 
-	onMount(() => {
+	$effect(() => {
+		const current = id;
+		chat = null;
+		error = '';
+		if (!current) return;
+		const lease = leaseChatSession(current);
 		let alive = true;
-		openChatSession(id)
+		lease.chat
 			.then((store) => {
 				if (alive) chat = store;
 			})
 			.catch(() => {
-				error = 'Не удалось открыть сессию';
+				if (alive) error = 'Не удалось открыть сессию';
 			});
 		return () => {
 			alive = false;
+			lease.release();
 		};
 	});
 </script>
 
 <svelte:head><title>Субагент · canterlot</title></svelte:head>
 <main id="main" class="lane-route">
-	{#if chat}
-		<Lane {chat} rootBlockId={blockId} />
-	{:else if error}
-		<p>{error}</p>
-	{:else}
-		<p>Открываю поток субагента…</p>
-	{/if}
+	{#key id}
+		{#if chat && chat.id === id}
+			<Lane {chat} rootBlockId={blockId} />
+		{:else if error}
+			<p>{error}</p>
+		{:else}
+			<p>Открываю поток субагента…</p>
+		{/if}
+	{/key}
 </main>
 
 <style>

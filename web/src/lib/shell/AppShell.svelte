@@ -2,7 +2,7 @@
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { clock } from '#lib/clock.js';
-  import { browserRuntime, openChatSession } from '#lib/screens/chat/open.js';
+  import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '#lib/app/runtime.js';
   import type { Snippet, Component } from 'svelte';
@@ -47,15 +47,18 @@
 
   $effect(() => {
     const id = chatId;
+    currentChat = null;
     if (onChat && id) {
       let alive = true;
-      openChatSession(id)
+      const lease = leaseChatSession(id);
+      lease.chat
         .then((store) => {
           if (alive) currentChat = store;
         })
         .catch(() => {});
       return () => {
         alive = false;
+        lease.release();
       };
     } else {
       currentChat = null;

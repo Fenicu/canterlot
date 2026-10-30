@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { browserRuntime, openChatSession, sessionUploads } from '#lib/screens/chat/open.js';
+  import { browserRuntime, leaseChatSession, sessionUploads } from '#lib/screens/chat/open.js';
   import type { Runtime } from '#lib/app/runtime.js';
   import { takeShare, type ShareItem } from '#lib/pwa/share.js';
   import { leaveAttachmentNotice } from '#lib/composer/attachmentNotice.js';
@@ -38,15 +38,16 @@
   async function choose(conversationId: string) {
     if (!item || !runtime || busy) return;
     busy = true; error = ''; target = conversationId;
+    const lease = leaseChatSession(conversationId);
     try {
-      const config = await loadConfig(); const chat = await openChatSession(conversationId);
+      const config = await loadConfig(); const chat = await lease.chat;
       const model = new ComposerModel({ conversationId, chat, ops: runtime.journal, drafts: runtime.drafts, uploads: sessionUploads(), config: () => config.limits, canSend: canSendNow, connection: () => runtime!.connection.status });
       model.text = (await runtime.drafts.load(conversationId))?.text ?? '';
       await applyShare(item, model, async text => { runtime!.drafts.set(conversationId, { text }); await runtime!.drafts.flush(); }, async () => { await takeShare(runtime!.db, id); });
       if (model.errorMessage) leaveAttachmentNotice(conversationId, model.errorMessage);
       await goto(resolve('/c/[id]', { id: conversationId }));
     } catch { error = 'Не удалось сохранить данные в сессии. Повторите при восстановлении связи'; }
-    finally { busy = false; }
+    finally { lease.release(); busy = false; }
   }
 </script>
 <main id="main" tabindex="-1" data-secondary-ready={!loading ? '' : undefined}>
