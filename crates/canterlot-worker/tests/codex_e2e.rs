@@ -627,6 +627,33 @@ fn completed(item: Value) -> String {
 }
 
 #[tokio::test]
+async fn silent_command_shows_at_once_when_no_cli_mark_is_possible() {
+    let mut lines = handshake("thread-mini");
+    let policy = json!({"id": 3, "result": {
+        "approvalPolicy": "never", "model": "gpt-6-luna",
+        "sandbox": {"type": "dangerFullAccess"}, "instructionSources": [],
+        "thread": {"id": "thread-mini", "model": "gpt-6-luna", "cliVersion": "0.164.0"}}});
+    lines[8] = w_out(policy);
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(started(command_item("exec-1", "inProgress", None)));
+    // Команда ещё идёт: завершения нет, а блок уже должен быть виден.
+    lines.push(w_in(11, "turn/interrupt", json!({})));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("run").await;
+    let mut seen = vec![];
+    let shown = loop {
+        match tokio::time::timeout(Duration::from_secs(2), fake.adapter.next_event()).await {
+            Ok(event @ AdapterEvent::BlockStarted { .. }) => break Some(event),
+            Ok(event) => seen.push(event),
+            Err(_) => break None,
+        }
+    };
+    assert!(shown.is_some(), "the block is hidden: {seen:?}");
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn tool_blocks_stream_live_and_only_unrequested_commands_get_the_cli_mark() {
     let mcp = |status: &str| {
         json!({"id": "mcp-1", "type": "mcpToolCall", "server": "s", "tool": "t",

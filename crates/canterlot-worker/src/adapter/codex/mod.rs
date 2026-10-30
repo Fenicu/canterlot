@@ -404,11 +404,8 @@ impl CodexAdapter {
             return;
         };
         let block_id = *block_id;
-        if self
-            .translator
-            .as_ref()
-            .is_some_and(|translator| translator.approval_noted(&item_id))
-        {
+        // Без возможной пометки ждать нечего: тихая команда видна сразу.
+        if self.cli_mark_for(&item_id).is_none() {
             self.events.push_back(event);
             return;
         }
