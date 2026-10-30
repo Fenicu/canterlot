@@ -58,6 +58,8 @@ pub struct ClaudeCodeAdapter {
     /// доказательство уходит событием `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
     initialized: bool,
+    /// Запуск с `--resume`: беседа записана, хотя этот CLI ещё ни разу не ответил.
+    resumed: bool,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -95,6 +97,7 @@ impl ClaudeCodeAdapter {
             requests: HashMap::new(),
             unconfirmed: HashSet::new(),
             initialized: false,
+            resumed: false,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -438,6 +441,16 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Аргумент беседы для нового процесса: `--resume` отказывает без записанной
+    /// беседы («No conversation found»), повторный `--session-id` — при записанной
+    /// («already in use»). Запись появляется только с первым ходом.
+    fn relaunch_session(&self) -> SessionArg {
+        match Uuid::parse_str(&self.native_id) {
+            Ok(id) if !self.initialized && !self.resumed => SessionArg::New(id),
+            _ => SessionArg::Resume(self.native_id.clone()),
+        }
+    }
+
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
     /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
     /// и до 2 с, затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
@@ -514,9 +527,9 @@ impl ClaudeCodeAdapter {
     }
 
     /// Перезапустить CLI между ходами с новыми инструкциями: новый процесс
-    /// поднимается с `--resume` и флагами из действующих настроек с применённой
-    /// сменой; ввод пишется только в новый процесс. Ошибка — запасной запуск
-    /// со старыми настройками; его успех — отказ входа, провал — остановка.
+    /// продолжает беседу и поднимается с флагами из действующих настроек с
+    /// применённой сменой; ввод пишется только в новый процесс. Ошибка — запасной
+    /// запуск со старыми настройками; его успех — отказ входа, провал — остановка.
     async fn restart_for_instructions(
         &mut self,
         change: &SettingsChange,
@@ -549,20 +562,19 @@ impl ClaudeCodeAdapter {
         let workdir = self.workdir.clone();
         let exec_dir = self.exec_dir.clone();
         let executable = self.cfg.executable.clone();
-        let native_id = self.native_id.clone();
         // 1. Файл инструкций нового запуска (или удаление устаревшего).
         if process::write_instructions_file(&exec_dir, &next).is_err() {
             return Err("instructions_change_failed");
         }
         // 2. Остановить старый CLI.
         self.stop_old_cli(group).await;
-        // 3. Сбросить состояние разбора, запустить новый CLI с --resume.
+        // 3. Сбросить состояние разбора, запустить новый CLI с той же беседой.
         self.parser.reset_process();
         let launch = process::LaunchSpec {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session: SessionArg::Resume(native_id),
+            session: self.relaunch_session(),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -586,10 +598,9 @@ impl ClaudeCodeAdapter {
     }
 
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
-    /// перезапуска. Беседа уже записана, поэтому всегда `--resume` (CLI
-    /// отказывает повторному `--session-id`: «Session ID … is already in use»).
-    /// Успех — отказ входа; провал, в том числе невозвращённый файл прежних
-    /// инструкций, — остановка исполнения с причиной `restart_failed`.
+    /// перезапуска, аргумент беседы тот же, что у перезапуска. Успех — отказ
+    /// входа; провал, в том числе невозвращённый файл прежних инструкций, —
+    /// остановка исполнения с причиной `restart_failed`.
     async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
         let previous = self.instructions.clone();
         let (model, effort, permission_mode) = match self.queue.as_ref() {
@@ -616,7 +627,7 @@ impl ClaudeCodeAdapter {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session: SessionArg::Resume(self.native_id.clone()),
+            session: self.relaunch_session(),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -891,6 +902,7 @@ impl Adapter for ClaudeCodeAdapter {
                 }));
             }
         }
+        self.resumed = spec.native_conversation_id.is_some();
         self.native_id = spec
             .native_conversation_id
             .clone()

@@ -363,13 +363,26 @@ if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
 if (d / 'lock-exec-on-resume').exists() and '--resume' in sys.argv:
     os.chmod(pathlib.Path(sys.argv[sys.argv.index('--mcp-config') + 1]).parent, 0o500)
     sys.exit(1)
-(d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
+if (d / 'fail-session-once').exists() and '--session-id' in sys.argv:
+    (d / 'fail-session-once').unlink()
+    sys.exit(1)
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
+# Как настоящий CLI: --resume требует записанной беседы, повторный --session-id отвергается.
+transcript = d / f'transcript-{sid}'
+if '--resume' in sys.argv and not transcript.exists():
+    print(f'No conversation found with session ID: {sid}', file=sys.stderr)
+    sys.exit(1)
+if '--session-id' in sys.argv and transcript.exists():
+    print(f'Session ID {sid} is already in use.', file=sys.stderr)
+    sys.exit(1)
+(d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
     (d / f'stdin-{pid}.log').open('a').write(line)
     v = json.loads(line)
+    if v.get('type') != 'control_request':
+        transcript.write_text('1')
     # usage.json читается на каждый ход: файл пишется тестом между запусками,
     # чтение при старте процесса гоняло бы со стартом интерпретатора.
     usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
@@ -393,7 +406,14 @@ struct RestartHarness {
 
 impl RestartHarness {
     async fn new() -> Self {
+        Self::with_native(None).await
+    }
+
+    async fn with_native(native: Option<String>) -> Self {
         let dir = TempDir::new().unwrap();
+        if let Some(native) = &native {
+            std::fs::write(dir.path().join(format!("transcript-{native}")), "1").unwrap();
+        }
         let exe = dir.path().join("fake-cli");
         fake_exec::write_executable(&exe, RESTART_FAKE, 0o700);
         let workdir = dir.path().join("repo");
@@ -414,7 +434,7 @@ impl RestartHarness {
             execution_id: Uuid::now_v7(),
             generation: 1,
             workdir: workdir.clone(),
-            native_conversation_id: None,
+            native_conversation_id: native,
             profile: "claude_code".into(),
             model: "haiku".into(),
             effort: "low".into(),
@@ -675,6 +695,82 @@ async fn unrestored_previous_instructions_fail_the_fallback() {
     );
 }
 
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .map(|i| args[i + 1].clone())
+}
+
+#[tokio::test]
+async fn instructions_change_before_the_first_turn_keeps_the_session_id() {
+    let mut h = RestartHarness::new().await;
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
+    let (_, old_args) = spawns.iter().find(|(pid, _)| *pid == h.old_pid).unwrap();
+    let (new_pid, new_args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(!new_args.iter().any(|a| a == "--resume"), "{new_args:?}");
+    assert_eq!(
+        flag_value(new_args, "--session-id"),
+        flag_value(old_args, "--session-id")
+    );
+    assert_eq!(h.stdin_lines(*new_pid), 1, "input reached the new process");
+    h.until_finished().await;
+
+    // Беседа записана: дальше перезапуск уже продолжает её.
+    let out = h.transmit(Some(change(preset_spec("PRESET")))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 3, "second restart expected: {spawns:?}");
+    assert!(spawns[2].1.iter().any(|a| a == "--resume"), "{spawns:?}");
+}
+
+#[tokio::test]
+async fn failed_change_before_the_first_turn_falls_back_to_the_same_session_id() {
+    let mut h = RestartHarness::new().await;
+    // Метка должна достаться перезапуску, а не ещё стартующему первому процессу.
+    let started = |path: &std::path::Path| {
+        std::fs::read_dir(path).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("args-")
+        })
+    };
+    while !started(h.dir.path()) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(h.dir.path().join("fail-session-once"), "").unwrap();
+
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "fallback spawn expected: {spawns:?}");
+    let (_, fallback) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(fallback.iter().any(|a| a == "--session-id"), "{fallback:?}");
+
+    // Беседа жива: следующий ввод проходит в запасной процесс.
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+}
+
+#[tokio::test]
+async fn resumed_session_stays_resumed_on_a_change_before_its_first_input() {
+    let native = Uuid::now_v7().to_string();
+    let mut h = RestartHarness::with_native(Some(native.clone())).await;
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
+    let (_, new_args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert_eq!(flag_value(new_args, "--resume"), Some(native));
+}
+
 #[tokio::test]
 async fn same_revision_does_not_restart() {
     let mut h = RestartHarness::new().await;
@@ -691,8 +787,8 @@ async fn same_revision_does_not_restart() {
 #[tokio::test]
 async fn cli_ignoring_stdin_eof_is_terminated_then_killed() {
     // Двойник игнорирует EOF stdin и перехватывает SIGTERM: перезапуск идёт
-    // через SIGTERM группе и SIGKILL. Первый запуск без --resume висит,
-    // процесс после перезапуска отвечает как обычно.
+    // через SIGTERM группе и SIGKILL. Первый запуск висит, процесс после
+    // перезапуска отвечает как обычно.
     const STUBBORN: &str = r#"#!/usr/bin/python3
 import json, sys, os, pathlib, signal, time
 d = pathlib.Path(__file__).parent
@@ -700,11 +796,12 @@ pid = os.getpid()
 if '--version' in sys.argv:
     print('2.1.311'); sys.exit(0)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
-if '--resume' not in sys.argv:
+if not (d / 'restarted').exists():
+    (d / 'restarted').write_text('1')
     signal.signal(signal.SIGTERM, lambda *a: (d / 'got-term').write_text('x'))
     while True:
         time.sleep(0.2)
-sid = sys.argv[sys.argv.index('--resume') + 1]
+sid = sys.argv[sys.argv.index('--session-id') + 1]
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
