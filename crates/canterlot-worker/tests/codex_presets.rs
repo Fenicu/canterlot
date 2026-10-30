@@ -11,11 +11,13 @@ use canterlot_worker::adapter::{
 use canterlot_worker::config::CodexConfig;
 use canterlot_worker::containment::TreeContainment;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -144,8 +146,7 @@ impl PresetHarness {
     async fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-codex");
-        std::fs::write(&exe, PRESET_FAKE).unwrap();
-        std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
         let owner = dir.path().join("owner-home");
         std::fs::create_dir_all(&owner).unwrap();
         std::fs::write(owner.join("config.toml"), "model = \"x\"\n").unwrap();

@@ -26,6 +26,9 @@ use canterlot_worker::{
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn codex_evidence_line(file: &str, line: usize) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -208,7 +211,7 @@ impl FakeProbeServer {
         let methods_log = dir.path().join("methods.log");
         fs::write(&methods_log, "").unwrap();
         let handler = dir.path().join("handler.py");
-        fs::write(
+        fake_exec::write_executable(
             &handler,
             r#"#!/usr/bin/env python3
 import json, sys
@@ -230,12 +233,10 @@ for line in sys.stdin:
             time.sleep(3600)
         print(json.dumps({"id": rid, "result": response}), flush=True)
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&handler, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         let wrapper = dir.path().join("codex");
-        fs::write(
+        fake_exec::write_executable(
             &wrapper,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = app-server ]; then exec \"{}\" \"{}\" \"{}\" \"{}\"; fi\nexit 1\n",
@@ -244,9 +245,8 @@ for line in sys.stdin:
                 if hang_on_read { "hang" } else { "ok" },
                 methods_log.display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         Self {
             executable: wrapper,
             methods_log,

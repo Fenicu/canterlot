@@ -25,6 +25,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn evidence_data(name: &str, line: usize) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -79,16 +82,14 @@ struct Fake {
 impl Fake {
     fn start(dir: &TempDir, lines: &[String]) -> Self {
         let script = dir.path().join("fake-codex.sh");
-        std::fs::write(
+        fake_exec::write_executable(
             &script,
             "#!/bin/bash\ndir=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncat \"$dir/canned.out\" 2>/dev/null\nwhile IFS= read -r line; do :; done\n",
-        )
-        .unwrap();
+            0o755,
+        );
         if !lines.is_empty() {
             std::fs::write(dir.path().join("canned.out"), lines.join("\n") + "\n").unwrap();
         }
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let group = canterlot_worker::containment::TreeContainment::new().unwrap();
         let relay = PathBuf::from("/usr/bin/canterlot-worker");
         let spec = LaunchSpec {

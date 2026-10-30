@@ -10,6 +10,9 @@ use std::path::Path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn cfg() -> ClaudeCodeConfig {
     ClaudeCodeConfig::default()
 }
@@ -46,11 +49,9 @@ async fn version_parsing_and_classification() {
         ("2.1.310 (Claude Code)", true),
         ("2.1.311 (Claude Code)", false),
     ] {
-        use std::os::unix::fs::PermissionsExt;
         let td = TempDir::new().unwrap();
         let script = td.path().join("fake.sh");
-        std::fs::write(&script, format!("#!/bin/sh\necho '{text}'\n")).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake_exec::write_executable(&script, format!("#!/bin/sh\necho '{text}'\n"), 0o755);
         let verdict = check(&script).await;
         assert_eq!(verdict.is_err(), below, "{text}: {verdict:?}");
     }
@@ -311,16 +312,14 @@ fn mcp_json_points_relay_at_exec_socket() {
 async fn oversized_stdout_line_is_skipped_and_reading_continues() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         r#"#!/bin/sh
 head -c 68157440 /dev/zero | tr '\0' a; echo
 printf '%s\n' '{"type":"x"}'
 "#,
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let owner = owner_instructions();
     let spec = LaunchSpec {
@@ -354,15 +353,13 @@ printf '%s\n' '{"type":"x"}'
 async fn stderr_tail_keeps_the_last_64_kib() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         r#"#!/bin/sh
 head -c 102400 /dev/zero | tr '\0' b 1>&2
 "#,
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let owner = owner_instructions();
     let spec = LaunchSpec {
@@ -391,17 +388,15 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
 async fn sigint_reaches_the_cli() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         "#!/bin/sh
 trap 'echo got-int; exit 0' INT
 echo ready
 while :; do sleep 0.1; done
 ",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     // Как в main: свой обработчик SIGINT сбрасывает унаследованный SIG_IGN у потомка после exec.
     let _interrupt =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
@@ -453,15 +448,13 @@ while :; do sleep 0.1; done
 async fn spawn_registers_cli_member_with_start_ticks() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         "#!/bin/sh
 sleep 1
 ",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let owner = owner_instructions();
     let spec = LaunchSpec {

@@ -17,9 +17,12 @@ use canterlot_worker::{
 
 use canterlot_worker::adapter::codex::home::TempDirPolicy;
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -198,8 +201,7 @@ impl Fake {
     fn new(evidence: Vec<String>) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-codex");
-        std::fs::write(&exe, REPLAY).unwrap();
-        std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, REPLAY, 0o700);
         write_lines(&dir, "evidence.jsonl", &evidence);
         std::os::unix::fs::symlink(repo_fixtures(), dir.path().join("fixtures")).unwrap();
         let context = AdapterContext {
@@ -670,12 +672,10 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
         (dir.path().join("broken"), "cli_version_failed"),
     ] {
         if expected == "cli_too_old" {
-            std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 0.1.0'\n").unwrap();
-            std::fs::set_permissions(&executable, PermissionsExt::from_mode(0o700)).unwrap();
+            fake_exec::write_executable(&executable, "#!/bin/sh\necho 'codex-cli 0.1.0'\n", 0o700);
         }
         if expected == "cli_version_failed" {
-            std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
-            std::fs::set_permissions(&executable, PermissionsExt::from_mode(0o700)).unwrap();
+            fake_exec::write_executable(&executable, "#!/bin/sh\nexit 1\n", 0o700);
         }
         let context = AdapterContext {
             transmit_deadline: WAIT,
@@ -721,8 +721,11 @@ async fn start_fails_when_app_server_exits_at_once() {
     use canterlot_worker::adapter::AdapterError;
     let dir = TempDir::new().unwrap();
     let exe = dir.path().join("quitter");
-    std::fs::write(&exe, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.164.0'; exit 0; fi\nexit 1\n").unwrap();
-    std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+    fake_exec::write_executable(
+        &exe,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.164.0'; exit 0; fi\nexit 1\n",
+        0o700,
+    );
     let context = AdapterContext {
         transmit_deadline: WAIT,
         exec_dir: dir.path().join("exec"),

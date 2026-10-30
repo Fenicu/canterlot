@@ -24,6 +24,9 @@ use std::{
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 const WAIT: Duration = Duration::from_secs(20);
 
 fn owner_spec() -> InstructionSpec {
@@ -332,8 +335,7 @@ impl RestartHarness {
     async fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-cli");
-        std::fs::write(&exe, RESTART_FAKE).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, RESTART_FAKE, 0o700);
         let workdir = dir.path().join("repo");
         std::fs::create_dir_all(workdir.join(".git")).unwrap();
         let context = AdapterContext {
@@ -603,8 +605,7 @@ for line in sys.stdin:
 "#;
     let dir = TempDir::new().unwrap();
     let exe = dir.path().join("fake-cli");
-    std::fs::write(&exe, STUBBORN).unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fake_exec::write_executable(&exe, STUBBORN, 0o700);
     let workdir = dir.path().join("repo");
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {

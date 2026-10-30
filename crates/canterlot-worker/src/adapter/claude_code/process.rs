@@ -1,4 +1,4 @@
-use crate::adapter::{InstructionMode, InstructionSpec, SettingsChange};
+use crate::adapter::{InstructionMode, InstructionSpec, SettingsChange, spawn_with_retry_io};
 use crate::config::ClaudeCodeConfig;
 use crate::containment::Containment;
 use std::ffi::OsString;
@@ -305,19 +305,25 @@ impl CliProcess {
     ) -> Result<Self, LaunchError> {
         let args = build_args(spec, cfg)?;
         let envs = build_env(std::env::vars_os());
-        let mut cmd = TokioCommand::new(spec.executable);
-        cmd.env_clear()
-            .kill_on_drop(true)
-            .args(&args)
-            .current_dir(spec.workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (k, v) in &envs {
-            cmd.env(k, v);
-        }
-        group.prepare_command(&mut cmd);
-        let mut child = cmd.spawn().map_err(LaunchError::SpawnFailed)?;
+        // Команда собирается заново на каждую попытку: повтор нужен только
+        // для ETXTBSY при запуске свежезаписанного двойника в тестах.
+        let mut child = spawn_with_retry_io(|| {
+            let mut cmd = TokioCommand::new(spec.executable);
+            cmd.env_clear()
+                .kill_on_drop(true)
+                .args(&args)
+                .current_dir(spec.workdir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in &envs {
+                cmd.env(k, v);
+            }
+            group.prepare_command(&mut cmd);
+            async move { cmd.spawn() }
+        })
+        .await
+        .map_err(LaunchError::SpawnFailed)?;
         let child_pid = child
             .id()
             .ok_or(LaunchError::SpawnFailed(std::io::Error::other("no pid")))?;

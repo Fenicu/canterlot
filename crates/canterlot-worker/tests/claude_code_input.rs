@@ -22,6 +22,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 const WAIT: Duration = Duration::from_secs(10);
 
 fn owner_instructions() -> InstructionSpec {
@@ -186,9 +189,7 @@ impl Fake {
     async fn start(setup: impl FnOnce(&Path)) -> Self {
         let dir = TempDir::new().unwrap();
         let script = dir.path().join("claude");
-        std::fs::write(&script, FAKE_CLI).unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        fake_exec::write_executable(&script, FAKE_CLI, 0o755);
         setup(dir.path());
         let group = TreeContainment::new().unwrap();
         let spec = LaunchSpec {
@@ -930,13 +931,11 @@ async fn interrupt_exit_is_user_stop_not_a_crash() {
 async fn stdout_reading_survives_cancelled_waits() {
     let dir = TempDir::new().unwrap();
     let script = dir.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         "#!/bin/sh\nprintf '{\"type\":\"x\",'\nsleep 0.5\nprintf '\"a\":1}\\n'\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = TreeContainment::new().unwrap();
     let spec = LaunchSpec {
         executable: &script,

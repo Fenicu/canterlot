@@ -1,5 +1,6 @@
 use super::home::CodexHome;
 use crate::adapter::InstructionMode;
+use crate::adapter::spawn_with_retry_sync;
 use crate::containment::Containment;
 use std::ffi::OsString;
 use std::path::Path;
@@ -131,20 +132,25 @@ impl AppServerProcess {
     ) -> Result<Self, LaunchError> {
         let args = build_args(spec, mode)?;
         let envs = build_env(std::env::vars_os(), mode, home);
-        let mut cmd = TokioCommand::new(spec.executable);
-        cmd.env_clear()
-            .args(&args)
-            .current_dir(spec.workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        for (k, v) in &envs {
-            cmd.env(k, v);
-        }
-        group.prepare_command(&mut cmd);
-        // Процесс переживает адаптер: остановка идёт через EOF stdin и teardown сдерживания.
-        cmd.kill_on_drop(false);
-        let mut child = cmd.spawn().map_err(LaunchError::SpawnFailed)?;
+        // Повтор при ETXTBSY: тесты пишут двойника прямо перед запуском.
+        // Синхронный сон только в редкой ветви повтора, обычный путь без задержек.
+        let mut child = spawn_with_retry_sync(|| {
+            let mut cmd = TokioCommand::new(spec.executable);
+            cmd.env_clear()
+                .args(&args)
+                .current_dir(spec.workdir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            for (k, v) in &envs {
+                cmd.env(k, v);
+            }
+            group.prepare_command(&mut cmd);
+            // Процесс переживает адаптер: остановка идёт через EOF stdin и teardown сдерживания.
+            cmd.kill_on_drop(false);
+            cmd.spawn()
+        })
+        .map_err(LaunchError::SpawnFailed)?;
         let child_pid = child
             .id()
             .ok_or(LaunchError::SpawnFailed(std::io::Error::other("no pid")))?;

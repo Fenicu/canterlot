@@ -19,6 +19,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn evidence(name: &str) -> Vec<serde_json::Value> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -47,9 +50,7 @@ fn fixture_lines() -> Vec<serde_json::Value> {
 
 fn fake_version_script(dir: &TempDir, output: &str) -> PathBuf {
     let script = dir.path().join("codex");
-    std::fs::write(&script, format!("#!/bin/sh\necho \"{output}\"\n")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake_exec::write_executable(&script, format!("#!/bin/sh\necho \"{output}\"\n"), 0o755);
     script
 }
 
@@ -556,13 +557,11 @@ fn resume_params_exclude_turns() {
 async fn oversized_stdout_line_is_skipped_and_reading_continues() {
     let td = TempDir::new().unwrap();
     let script = td.path().join("fake.sh");
-    std::fs::write(
+    fake_exec::write_executable(
         &script,
         "#!/bin/sh\nhead -c 68157440 /dev/zero | tr '\\0' a; echo\nprintf '%s\\n' '{}'\n",
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        0o755,
+    );
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let relay = PathBuf::from("/usr/bin/canterlot-worker");
     let spec = LaunchSpec {
