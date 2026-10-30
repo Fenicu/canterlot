@@ -108,7 +108,7 @@ export class NewSessionModel {
     const machineError = this.machineId ? machineProblem(machine) : null;
     if (machineError) out.machine = machineError;
     if (this.workdir) {
-      const work = workdirProblem(this.workdir);
+      const work = workdirProblem(this.workdir.trim());
       if (work) out.workdir = work;
     }
     return out;
@@ -153,7 +153,8 @@ export class NewSessionModel {
       "create_conversation",
       {
         machine_id: this.machineId,
-        workdir: this.workdir,
+        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой.
+        workdir: this.workdir.trim(),
         harness: this.harness,
         model: this.model,
         effort: this.effort,

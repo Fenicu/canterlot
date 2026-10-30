@@ -234,6 +234,22 @@ describe("sessions/new", () => {
     expect(model.recent).toEqual([]);
   });
 
+  it("new_session_sends_the_path_without_surrounding_spaces", async () => {
+    const journal = ops();
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    model.workdir = " /srv/canterlot ";
+
+    expect(model.canSubmit).toEqual({ ok: true });
+    await model.submit();
+
+    expect(journal.begin).toHaveBeenCalledWith(
+      "create_conversation",
+      expect.objectContaining({ workdir: "/srv/canterlot" }),
+      expect.anything(),
+    );
+  });
+
   it("new_session_disables_unavailable_machine_with_a_reason", () => {
     const down = new NewSessionModel(
       store([machine({ availability: "degraded" })]),
