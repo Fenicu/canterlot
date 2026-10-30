@@ -10,6 +10,7 @@ export type RequestClientState =
   | 'sending'
   | 'saved'
   | 'transmitting'
+  | 'unconfirmed'
   | 'applied'
   | 'not_applied'
   | 'closed';
@@ -85,6 +86,8 @@ export class RequestsModel {
         state = 'saved';
       } else if (rawState === 'decision_transmitting' || rawState === 'transmitting') {
         state = 'transmitting';
+      } else if (rawState === 'decision_unconfirmed' || rawState === 'unconfirmed') {
+        state = 'unconfirmed';
       } else if (rawState === 'decision_applied' || rawState === 'applied') {
         state = 'applied';
       } else if (rawState === 'decision_not_applied' || rawState === 'not_applied') {
@@ -197,6 +200,8 @@ export class RequestsModel {
         item.state = 'applied';
       } else if (reason === 'not_applied') {
         item.state = 'not_applied';
+      } else if (reason === 'unconfirmed') {
+        item.state = 'unconfirmed';
       } else {
         item.state = 'closed';
       }

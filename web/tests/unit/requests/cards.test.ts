@@ -647,4 +647,192 @@ describe('PWA Request Cards', () => {
 
     unmount(instance);
   });
+
+  it('permission_card_shows_mcp_elicitation_message_server_and_safe_url', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request: RequestItem = {
+      id: 'req-elicit-1',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'open',
+      payload: {
+        tool_name: 'mcp_elicitation',
+        server: 'notes',
+        message: 'Открыть доступ к заметкам?',
+        mode: 'url',
+        url: 'https://notes.example.com/authorize?scope=read',
+        schema: { type: 'object' },
+        tool_use_id: 'tu-1',
+        agent: 'codex'
+      }
+    };
+
+    const instance = mount(PermissionCard, { target, props: { request, onDecision } });
+    flushSync();
+
+    expect(target.textContent).toContain('Запрос MCP-сервера');
+    expect(target.textContent).toContain('Открыть доступ к заметкам?');
+    expect(target.textContent).toContain('notes');
+    expect(target.textContent).toContain('https://notes.example.com/authorize?scope=read');
+
+    const link = target.querySelector<HTMLAnchorElement>('a[href="https://notes.example.com/authorize?scope=read"]');
+    expect(link).toBeTruthy();
+    expect(link!.target).toBe('_blank');
+    expect(link!.rel).toContain('noopener');
+
+    const allowBtn = target.querySelector<HTMLButtonElement>('button[data-action="allow"]');
+    expect(allowBtn!.disabled).toBe(false);
+
+    unmount(instance);
+  });
+
+  it('permission_card_never_links_unsafe_schemes_and_ignores_non_strings', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request: RequestItem = {
+      id: 'req-elicit-2',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'open',
+      payload: {
+        tool_name: 'mcp_elicitation',
+        server: 'notes',
+        message: 'Подтвердите действие',
+        mode: 'url',
+        url: 'javascript:alert(document.cookie)'
+      }
+    };
+
+    const instance = mount(PermissionCard, { target, props: { request, onDecision } });
+    flushSync();
+
+    expect(target.querySelector('a')).toBeNull();
+    expect(target.textContent).toContain('javascript:alert(document.cookie)');
+
+    unmount(instance);
+    document.body.textContent = '';
+
+    const target2 = document.createElement('div');
+    document.body.appendChild(target2);
+    const request2: RequestItem = {
+      id: 'req-elicit-3',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'open',
+      payload: {
+        tool_name: 'mcp_elicitation',
+        server: 42,
+        message: { text: 'не строка' },
+        mode: 'url',
+        url: { href: 'https://notes.example.com/' }
+      }
+    };
+    const instance2 = mount(PermissionCard, { target: target2, props: { request: request2, onDecision } });
+    flushSync();
+
+    expect(target2.querySelector('a')).toBeNull();
+    expect(target2.textContent).not.toContain('https://notes.example.com/');
+    expect(target2.textContent).not.toContain('не строка');
+
+    unmount(instance2);
+  });
+
+  it('permission_card_disables_allow_when_url_mode_has_no_address', async () => {
+    for (const url of [undefined, '']) {
+      document.body.textContent = '';
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+
+      const onDecision = vi.fn().mockResolvedValue(undefined);
+      const request: RequestItem = {
+        id: 'req-elicit-4',
+        conversationId: 'conv-1',
+        kind: 'permission',
+        state: 'open',
+        payload: { tool_name: 'mcp_elicitation', server: 'notes', message: 'Доступ?', mode: 'url', ...(url === undefined ? {} : { url }) }
+      };
+
+      const instance = mount(PermissionCard, { target, props: { request, onDecision } });
+      flushSync();
+
+      const allowBtn = target.querySelector<HTMLButtonElement>('button[data-action="allow"]');
+      const denyBtn = target.querySelector<HTMLButtonElement>('button[data-action="deny"]');
+      expect(allowBtn!.disabled).toBe(true);
+      expect(target.textContent).toContain('Сервер не передал адрес');
+
+      allowBtn!.click();
+      flushSync();
+      expect(onDecision).not.toHaveBeenCalled();
+
+      expect(denyBtn!.disabled).toBe(false);
+      denyBtn!.click();
+      flushSync();
+      expect(onDecision).toHaveBeenCalledWith({ kind: 'permission', behavior: 'deny' });
+
+      unmount(instance);
+    }
+  });
+
+  it('request_card_shows_unconfirmed_as_its_own_state', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request = createRequestItem({
+      id: 'req-unconfirmed-1',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'unconfirmed',
+      payload: { tool_name: 'mcp_elicitation' }
+    });
+
+    const instance = mount(RequestCard, { target, props: { request, onDecision } });
+    flushSync();
+
+    expect(target.textContent).toContain('Передано агенту, подтверждения нет');
+    expect(target.querySelector('[data-collapsed="true"]')).toBeNull();
+    const allowBtn = target.querySelector<HTMLButtonElement>('button[data-action="allow"]');
+    expect(allowBtn!.disabled).toBe(true);
+
+    unmount(instance);
+  });
+
+  it('request_card_translates_closed_reasons_to_human_labels', async () => {
+    const cases: Array<[string | undefined, string, string[]]> = [
+      ['execution_ended', 'Исполнение завершилось', []],
+      ['owner_lost', 'Потерян владелец исполнения', []],
+      ['generation_advanced', 'Исполнение сменилось', []],
+      ['frobnicated', 'Запрос закрыт', ['frobnicated']]
+    ];
+    for (const [reason, label, absent] of cases) {
+      document.body.textContent = '';
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+
+      const onDecision = vi.fn().mockResolvedValue(undefined);
+      const request = createRequestItem({
+        id: 'req-closed-1',
+        conversationId: 'conv-1',
+        kind: 'permission',
+        state: 'closed',
+        payload: {},
+        closedReason: reason
+      });
+
+      const instance = mount(RequestCard, { target, props: { request, onDecision } });
+      flushSync();
+
+      expect(target.textContent).toContain(label);
+      for (const raw of absent) {
+        expect(target.textContent).not.toContain(raw);
+      }
+
+      unmount(instance);
+    }
+  });
 });

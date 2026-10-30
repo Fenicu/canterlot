@@ -439,4 +439,46 @@ describe('RequestsModel', () => {
     // Applied request was already terminal, remains applied
     expect(model.items.get('req-applied')!.state).toBe('applied');
   });
+
+  it('request_closed_with_unconfirmed_reason_sets_its_own_state', () => {
+    const model = new RequestsModel('conv-1');
+    model.items.set('req-unconfirmed', {
+      id: 'req-unconfirmed',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'transmitting',
+      payload: {}
+    });
+
+    model.applyClosed({
+      kind: 'request_closed',
+      payload: { request_id: 'req-unconfirmed', reason: 'unconfirmed' }
+    } as unknown as HubEvent);
+
+    expect(model.items.get('req-unconfirmed')!.state).toBe('unconfirmed');
+    expect(model.items.get('req-unconfirmed')!.closedReason).toBe('unconfirmed');
+
+    // Позднее доказательство вторым событием переводит в applied.
+    model.applyClosed({
+      kind: 'request_closed',
+      payload: { request_id: 'req-unconfirmed', reason: 'applied' }
+    } as unknown as HubEvent);
+
+    expect(model.items.get('req-unconfirmed')!.state).toBe('applied');
+  });
+
+  it('snapshot_maps_decision_unconfirmed_to_its_own_state', () => {
+    const model = new RequestsModel('conv-1');
+    model.ingestSnapshot([
+      {
+        id: 'req-snap-unconfirmed',
+        conversation_id: 'conv-1',
+        kind: 'permission',
+        state: 'decision_unconfirmed',
+        request_payload: { tool_name: 'mcp_elicitation' }
+      }
+    ]);
+
+    expect(model.items.get('req-snap-unconfirmed')!.state).toBe('unconfirmed');
+  });
 });

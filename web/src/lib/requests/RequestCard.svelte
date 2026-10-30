@@ -37,8 +37,14 @@
       case 'cancelled':
       case 'canceled':
         return 'отменено';
+      case 'execution_ended':
+        return 'Исполнение завершилось';
+      case 'owner_lost':
+        return 'Потерян владелец исполнения';
+      case 'generation_advanced':
+        return 'Исполнение сменилось';
       default:
-        return reason;
+        return 'Запрос закрыт';
     }
   }
 
@@ -49,6 +55,7 @@
       case 'saved':
         return 1;
       case 'transmitting':
+      case 'unconfirmed':
         return 2;
       case 'applied':
       case 'closed':
@@ -74,6 +81,7 @@
 
   const trackStatus = $derived.by(() => {
     if (request.state === 'applied') return 'применено';
+    if (request.state === 'unconfirmed') return 'Передано агенту, подтверждения нет';
     return undefined;
   });
 

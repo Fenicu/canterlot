@@ -23,7 +23,36 @@
         : ''
   );
 
+  const isElicitation = $derived(toolName === 'mcp_elicitation');
+  const elicitationMessage = $derived(
+    isElicitation && typeof payload.message === 'string' ? payload.message : ''
+  );
+  const elicitationServer = $derived(
+    isElicitation && typeof payload.server === 'string' ? payload.server : ''
+  );
+  const elicitationMode = $derived(
+    isElicitation && typeof payload.mode === 'string' ? payload.mode : ''
+  );
+  const elicitationUrl = $derived(
+    isElicitation && typeof payload.url === 'string' ? payload.url : ''
+  );
+
+  // Безопасная ссылка только на http(s), остальное — plain text. URL-парсер, не regex.
+  function safeHttpUrl(value: string): string | null {
+    try {
+      const parsed = new URL(value);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') return value;
+    } catch {
+      // не URL — обычным текстом
+    }
+    return null;
+  }
+
+  const safeUrl = $derived(safeHttpUrl(elicitationUrl));
+  const missingUrl = $derived(elicitationMode === 'url' && elicitationUrl.trim().length === 0);
+
   const isDisabled = $derived(disabled || request.state !== 'open');
+  const isAllowDisabled = $derived(isDisabled || missingUrl);
 
   function disableIf(node: HTMLButtonElement, val: boolean) {
     node.disabled = val;
@@ -35,7 +64,7 @@
   }
 
   async function handleAllow() {
-    if (isDisabled) return;
+    if (isAllowDisabled) return;
     await onDecision({ kind: 'permission', behavior: 'allow' });
   }
 
@@ -49,12 +78,34 @@
   <div class="card-head">
     <span class="meta">Запрос разрешения</span>
     {#if toolName}
-      <span class="tool-tag">{toolName}</span>
+      <span class="tool-tag">{isElicitation ? 'Запрос MCP-сервера' : toolName}</span>
     {/if}
   </div>
 
+  {#if elicitationServer}
+    <p class="meta-line">Сервер: {elicitationServer}</p>
+  {/if}
+
+  {#if elicitationMessage}
+    <p class="description">{elicitationMessage}</p>
+  {/if}
+
   {#if description}
     <p class="description">{description}</p>
+  {/if}
+
+  {#if elicitationUrl}
+    {#if safeUrl}
+      <!-- Внешняя ссылка сервера: resolve() здесь не нужен -->
+      <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+      <a class="url" href={safeUrl} target="_blank" rel="noopener noreferrer">{elicitationUrl}</a>
+    {:else}
+      <p class="url-text">{elicitationUrl}</p>
+    {/if}
+  {/if}
+
+  {#if missingUrl}
+    <p class="missing-url">Сервер не передал адрес</p>
   {/if}
 
   {#if command}
@@ -66,7 +117,7 @@
       type="button"
       class="btn btn-allow"
       data-action="allow"
-      use:disableIf={isDisabled}
+      use:disableIf={isAllowDisabled}
       onclick={handleAllow}
     >
       Разрешить
@@ -99,6 +150,33 @@
   }
 
   .meta {
+    font-size: var(--fs-meta);
+    color: var(--muted);
+  }
+
+  .meta-line {
+    margin: var(--s0);
+    font-size: var(--fs-meta);
+    color: var(--muted);
+  }
+
+  .url,
+  .url-text {
+    margin: var(--s0);
+    font-size: var(--fs-body);
+    overflow-wrap: anywhere;
+  }
+
+  .url {
+    color: var(--accent-link);
+  }
+
+  .url:focus-visible {
+    outline: var(--focus-width) solid var(--accent);
+  }
+
+  .missing-url {
+    margin: var(--s0);
     font-size: var(--fs-meta);
     color: var(--muted);
   }
