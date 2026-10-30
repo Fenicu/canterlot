@@ -522,6 +522,174 @@ async fn replay_permissions_end_to_end() {
     fake.close().await;
 }
 
+fn tool_starts(events: &[AdapterEvent]) -> Vec<(Option<String>, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolCall,
+                tool_name,
+                approved_by,
+                ..
+            } => Some((tool_name.clone(), approved_by.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn owner_decided_commands_carry_no_cli_policy_mark() {
+    // Запись: команда и правка файла, обе через запрос владельцу.
+    let mut fake = Fake::new(evidence_slice("permissions", 1, 55));
+    fake.start().await;
+    let id = fake.start_turn("do it").await;
+    let mut events = vec![];
+    let request_id = loop {
+        let event = fake.event().await;
+        match &event {
+            AdapterEvent::RequestOpened {
+                request_id, kind, ..
+            } if kind == "permission" => break request_id.clone(),
+            _ => events.push(event),
+        }
+    };
+    fake.decide(&request_id, &allow()).await;
+    events.extend(fake.finish(id).await);
+    let starts = tool_starts(&events);
+    assert!(starts.len() >= 2, "{starts:?}");
+    assert!(
+        starts.iter().all(|(_, mark)| mark.is_none()),
+        "approved or declined by the owner, not by CLI policy: {starts:?}"
+    );
+    fake.close().await;
+}
+
+fn note(method: &str, params: Value) -> String {
+    w_out(json!({"method": method, "params": params}))
+}
+
+fn command_item(id: &str, status: &str, output: Option<&str>) -> Value {
+    json!({"id": id, "type": "commandExecution", "command": "/bin/bash -lc 'ls'",
+        "commandActions": [{"command": "ls", "type": "unknown"}], "cwd": "/tmp",
+        "status": status, "aggregatedOutput": output, "exitCode": output.map(|_| 0)})
+}
+
+fn tool_turn(body: Vec<String>) -> Vec<String> {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.extend(body);
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "completed", "items": []}}),
+    ));
+    lines
+}
+
+fn started(item: Value) -> String {
+    note(
+        "item/started",
+        json!({"threadId": "thread-mini", "turnId": "turn-1", "item": item}),
+    )
+}
+
+fn completed(item: Value) -> String {
+    note(
+        "item/completed",
+        json!({"threadId": "thread-mini", "turnId": "turn-1", "completedAtMs": 1, "item": item}),
+    )
+}
+
+#[tokio::test]
+async fn tool_blocks_stream_live_and_only_unrequested_commands_get_the_cli_mark() {
+    let mcp = |status: &str| {
+        json!({"id": "mcp-1", "type": "mcpToolCall", "server": "s", "tool": "t",
+            "arguments": {}, "status": status,
+            "result": {"content": [{"type": "text", "text": "r"}]}})
+    };
+    let image = json!({"id": "img-1", "type": "imageView", "path": "/tmp/pic.png"});
+    let message = |text: &str| json!({"id": "a-1", "type": "agentMessage", "text": text});
+    let mut fake = Fake::new(tool_turn(vec![
+        started(command_item("exec-y", "inProgress", None)),
+        started(mcp("inProgress")),
+        note(
+            "item/commandExecution/outputDelta",
+            json!({"threadId": "thread-mini", "turnId": "turn-1", "itemId": "exec-y", "delta": "tick "}),
+        ),
+        completed(command_item("exec-y", "completed", Some("tick "))),
+        completed(mcp("completed")),
+        started(image.clone()),
+        started(message("")),
+        completed(message("DONE")),
+        completed(image),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    // Каждое событие блока идёт после его BlockStarted: дельты и Media не теряются.
+    let mut seen = std::collections::HashSet::new();
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            AdapterEvent::BlockStarted { block_id, .. } => {
+                seen.insert(*block_id);
+            }
+            AdapterEvent::BlockDelta { block_id, .. }
+            | AdapterEvent::BlockFinal { block_id, .. }
+            | AdapterEvent::Media { block_id, .. } => assert!(
+                seen.contains(block_id),
+                "event {index} before its block start: {events:?}"
+            ),
+            _ => {}
+        }
+    }
+    let position = |name: &str| {
+        events.iter().position(|event| {
+            matches!(event, AdapterEvent::BlockStarted { tool_name: Some(tool), .. } if tool == name)
+        })
+    };
+    let image_at = position("view_image").expect("image block");
+    let message_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Text,
+                    ..
+                }
+            )
+        })
+        .expect("message block");
+    assert!(image_at < message_at, "image block not delayed: {events:?}");
+    let starts = tool_starts(&events);
+    for (tool, mark) in &starts {
+        let expected = (tool.as_deref() == Some("shell")).then(|| "cli_policy".to_owned());
+        assert_eq!(mark, &expected, "{tool:?}: {starts:?}");
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn settings_update_sandbox_policy_reaches_the_cli_mark() {
+    let mut fake = Fake::new(tool_turn(vec![
+        note(
+            "thread/settings/updated",
+            json!({"threadId": "thread-mini", "threadSettings": {
+                "approvalPolicy": "on-request",
+                "sandboxPolicy": {"type": "dangerFullAccess"}}}),
+        ),
+        started(command_item("exec-z", "inProgress", None)),
+        completed(command_item("exec-z", "completed", Some("ok"))),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    let starts = tool_starts(&events);
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    assert_eq!(
+        starts[0].1, None,
+        "full access is not a CLI-policy approval"
+    );
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn replay_question_end_to_end() {
     let mut fake = Fake::new(evidence_slice("question_default_mode", 1, 41));

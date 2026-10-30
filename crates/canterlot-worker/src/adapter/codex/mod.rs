@@ -123,7 +123,7 @@ pub struct CodexAdapter {
     limits: LimitTracker,
     broker: Option<Broker>,
     events: VecDeque<AdapterEvent>,
-    hold: Vec<AdapterEvent>,
+    hold: Vec<HeldTool>,
     pending_writes: VecDeque<Value>,
     effective: Option<Effective>,
     owner: OwnerDefaults,
@@ -165,6 +165,15 @@ async fn crunch_done(crunch: &mut Option<PendingCrunch>) -> CrunchResult {
         Some(pending) => (&mut pending.task).await,
         None => std::future::pending().await,
     }
+}
+
+/// Начало вызова команды или правки файла ждёт решения о пометке «Разрешено
+/// правилами CLI»: запрос владельцу (без пометки), начало вывода или
+/// завершение без запроса (пометка по политике). События этого блока ждут с ним.
+struct HeldTool {
+    item_id: String,
+    block_id: Uuid,
+    events: Vec<AdapterEvent>,
 }
 
 /// Параметры перезапуска app-server с возобновлением треда.
@@ -311,8 +320,30 @@ impl CodexAdapter {
                 }
                 Incoming::Notification { method, params } => {
                     let translated = self.feed_notification(&method, &params);
+                    let markable = (method == "item/started")
+                        .then(|| params.get("item"))
+                        .flatten()
+                        .filter(|item| {
+                            matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("commandExecution" | "fileChange")
+                            )
+                        })
+                        .and_then(|item| item.get("id").and_then(Value::as_str))
+                        .map(str::to_owned);
                     for item in translated {
-                        self.on_translated(item);
+                        match (&markable, item) {
+                            (
+                                Some(item_id),
+                                Translated::Event(
+                                    event @ AdapterEvent::BlockStarted {
+                                        kind: BlockKind::ToolCall,
+                                        ..
+                                    },
+                                ),
+                            ) => self.hold_tool(item_id.clone(), event),
+                            (_, item) => self.on_translated(item),
+                        }
                     }
                 }
                 Incoming::ServerRequest { id, method, params } => {
@@ -353,7 +384,72 @@ impl CodexAdapter {
         }
     }
 
+    fn hold_tool(&mut self, item_id: String, event: AdapterEvent) {
+        let AdapterEvent::BlockStarted { block_id, .. } = &event else {
+            return;
+        };
+        let block_id = *block_id;
+        if self
+            .translator
+            .as_ref()
+            .is_some_and(|translator| translator.approval_noted(&item_id))
+        {
+            self.events.push_back(event);
+            return;
+        }
+        self.hold.push(HeldTool {
+            item_id,
+            block_id,
+            events: vec![event],
+        });
+    }
+
+    /// Пометка по действующей политике, если по элементу не было запроса владельцу.
+    fn cli_mark_for(&self, item_id: &str) -> Option<&'static str> {
+        if self
+            .translator
+            .as_ref()
+            .is_some_and(|translator| translator.approval_noted(item_id))
+        {
+            return None;
+        }
+        self.effective.as_ref().and_then(|effective| {
+            requests::cli_policy_mark(&effective.approval_policy, &effective.sandbox)
+        })
+    }
+
+    fn release_tool(&mut self, position: usize, mark: Option<&'static str>) {
+        let held = self.hold.remove(position);
+        for mut event in held.events {
+            if let AdapterEvent::BlockStarted { approved_by, .. } = &mut event {
+                *approved_by = mark.map(str::to_owned);
+            }
+            self.events.push_back(event);
+        }
+    }
+
+    fn release_item(&mut self, item_id: &str, mark: Option<&'static str>) {
+        if let Some(position) = self.hold.iter().position(|held| held.item_id == item_id) {
+            self.release_tool(position, mark);
+        }
+    }
+
+    fn release_all(&mut self) {
+        while !self.hold.is_empty() {
+            self.release_tool(0, None);
+        }
+    }
+
     fn on_server_request(&mut self, id: RpcId, method: &str, params: &Value) {
+        // Запрос разрешения по элементу: решает владелец, пометки CLI не будет.
+        if method.ends_with("/requestApproval")
+            && let Some(item_id) = params.get("itemId").and_then(Value::as_str)
+        {
+            if let Some(translator) = self.translator.as_mut() {
+                translator.note_approval(item_id);
+            }
+            self.release_item(item_id, None);
+        }
         let main = params.get("threadId").and_then(Value::as_str)
             == self
                 .effective
@@ -409,9 +505,7 @@ impl CodexAdapter {
                     Some(Resolved::Ours { request_id }) => {
                         self.resolved.push_back(Resolved::Ours { request_id })
                     }
-                    Some(Resolved::Cleared { request_id })
-                        if self.outbox.active().is_some() =>
-                    {
+                    Some(Resolved::Cleared { request_id }) if self.outbox.active().is_some() => {
                         self.events.push_back(AdapterEvent::RequestClosed {
                             request_id,
                             reason: "cli_cancelled".into(),
@@ -421,42 +515,22 @@ impl CodexAdapter {
                 }
             }
             Translated::ItemCompleted {
-                item_id,
-                item_type,
-                status,
-                approved_by_cli,
+                item_id, status, ..
             } => {
-                self.completed_status.insert(item_id, status);
-                let mark = (matches!(item_type.as_str(), "commandExecution" | "fileChange")
-                    && approved_by_cli)
-                    .then(|| {
-                        self.effective.as_ref().and_then(|effective| {
-                            requests::cli_policy_mark(
-                                &effective.approval_policy,
-                                &effective.sandbox,
-                            )
-                        })
-                    })
-                    .flatten();
-                for held in &mut self.hold {
-                    if let AdapterEvent::BlockStarted {
-                        kind: BlockKind::ToolCall,
-                        approved_by,
-                        ..
-                    } = held
-                        && approved_by.is_none()
-                    {
-                        *approved_by = mark.map(str::to_owned);
-                    }
-                }
-                self.events.extend(self.hold.drain(..));
+                let mark = self.cli_mark_for(&item_id);
+                self.completed_status.insert(item_id.clone(), status);
+                self.release_item(&item_id, mark);
             }
             Translated::SettingsUpdated(settings) => {
                 if let Some(effective) = self.effective.as_mut() {
                     if let Some(policy) = settings.get("approvalPolicy") {
                         effective.approval_policy = policy.clone();
                     }
-                    if let Some(sandbox) = settings.get("sandbox") {
+                    // ThreadSettings называет песочницу sandboxPolicy (ev/question.jsonl).
+                    if let Some(sandbox) = settings
+                        .get("sandboxPolicy")
+                        .or_else(|| settings.get("sandbox"))
+                    {
                         effective.sandbox = sandbox.clone();
                     }
                     if let Some(model) = settings.get("model").and_then(Value::as_str) {
@@ -473,22 +547,38 @@ impl CodexAdapter {
                 }
             }
             Translated::TurnStarted { turn_id } => self.outbox.on_turn_started(&turn_id),
-            Translated::Event(event) => match &event {
-                AdapterEvent::BlockStarted {
-                    kind: BlockKind::ToolCall | BlockKind::ToolResult,
-                    ..
-                } => self.hold.push(event),
-                AdapterEvent::BlockFinal { block_id, .. }
-                    if self.hold.iter().any(|held| {
-                        matches!(held, AdapterEvent::BlockStarted { block_id: id, .. } if id == block_id)
-                    }) =>
-                {
-                    self.hold.push(event);
-                }
-                _ => self.events.push_back(event),
-            },
+            Translated::Event(event) => self.on_block_event(event),
             Translated::McpStatus { .. } | Translated::Ignored => {}
         }
+    }
+
+    // Начало результата у отложенного вызова — команда уже выполняется без
+    // запроса: вызов отпускается с пометкой, и вывод идёт вживую. Прочие события
+    // отложенного блока ждут вместе с ним.
+    fn on_block_event(&mut self, event: AdapterEvent) {
+        if let AdapterEvent::BlockStarted {
+            kind: BlockKind::ToolResult,
+            parent: Some(parent),
+            ..
+        } = &event
+            && let Some(position) = self.hold.iter().position(|held| held.block_id == *parent)
+        {
+            let mark = self.cli_mark_for(&self.hold[position].item_id.clone());
+            self.release_tool(position, mark);
+        }
+        let block = match &event {
+            AdapterEvent::BlockDelta { block_id, .. }
+            | AdapterEvent::BlockFinal { block_id, .. }
+            | AdapterEvent::Media { block_id, .. } => Some(*block_id),
+            _ => None,
+        };
+        if let Some(block) = block
+            && let Some(held) = self.hold.iter_mut().find(|held| held.block_id == block)
+        {
+            held.events.push(event);
+            return;
+        }
+        self.events.push_back(event);
     }
 
     fn on_turn_completed(
@@ -503,8 +593,8 @@ impl CodexAdapter {
             .filter(|active| active.turn_id == turn_id)
             .map(|active| active.command_id);
         let was_active = self.outbox.on_turn_completed(&turn_id);
-        // Отложенные вызовы уходят как есть: ход кончился без их завершения.
-        self.events.extend(self.hold.drain(..));
+        // Отложенные вызовы уходят без пометки: ход кончился без их завершения.
+        self.release_all();
         self.turn_items.clear();
         self.completed_status.clear();
         if !was_active {

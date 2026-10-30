@@ -62,7 +62,8 @@
   значения моделей и усилий взяты из сводки `ev/diagnostics.jsonl:28`. Покрывает
   проверку настроек задачи 3 (`gpt-6-luna` без `ultra`).
 - `settings_updated.jsonl` — сконструировано, подтвердить в live smoke. Источник
-  формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`).
+  формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`; песочница —
+  ключ `sandboxPolicy`, как в записи и схеме `ThreadSettings`).
   Покрывает подтверждение смены модели и режима задачей 3.
 - `question_free_text.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `item/tool/requestUserInput` (`ev/question_default_mode.jsonl:28`) с
