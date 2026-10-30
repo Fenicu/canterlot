@@ -101,7 +101,12 @@ pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersi
             .take(OUTPUT_CAP)
             .read_to_end(&mut text)
             .await?;
-        let status = child.wait().await?;
+        // Обход сдерживания мог забрать зомби: вывод уже прочитан, судит он.
+        let status = match child.wait().await {
+            Ok(status) => Some(status),
+            Err(error) if super::reaped(&error) => None,
+            Err(error) => return Err(error),
+        };
         Ok::<_, std::io::Error>((status, text))
     };
     let (status, output) = match timeout(limit, work).await {
@@ -109,7 +114,7 @@ pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersi
         _ => return Err(VersionError::Failed),
     };
     group.disarm();
-    if !status.success() {
+    if status.is_some_and(|status| !status.success()) {
         return Err(VersionError::Failed);
     }
     let text = String::from_utf8_lossy(&output);
