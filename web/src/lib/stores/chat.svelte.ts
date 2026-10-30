@@ -107,12 +107,13 @@ export interface ChatApi {
 
 type QueueSnapshot = components["schemas"]["SnapshotQueueView"];
 type QueuedInput = QueueSnapshot["queued"][number];
+export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
   queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
-  scheduled?: unknown[];
+  scheduled?: ScheduledMessage[];
   open_requests?: unknown[];
 }
 
@@ -204,7 +205,7 @@ export class ChatStore {
     enabled: false,
     resume_pending: false,
   });
-  scheduled = $state<unknown[]>([]);
+  scheduled = $state<ScheduledMessage[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   interrupt = $state<Record<string, unknown> | null>(null);
   attachments = new SvelteMap<string, Record<string, unknown>>();
@@ -502,9 +503,9 @@ export class ChatStore {
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
           const next = this.scheduled.filter(
-            (item) => (item as { id?: string }).id !== event.payload.id,
+            (item) => item.id !== event.payload.id,
           );
-          next.push(event.payload);
+          next.push(event.payload as ScheduledMessage);
           this.scheduled = next;
         }
         return;

@@ -204,6 +204,32 @@ test.describe('stack: input and queue', () => {
     expect(await hub.inputs(id)).toHaveLength(2);
   });
 
+  test('cancelled_and_fired_scheduled_messages_leave_the_strip', tag, async ({ page }) => {
+    test.setTimeout(90_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const id = await createSessionUI(page, stack);
+    const strip = page.locator('.strip');
+    const schedule = (run_at: string, text: string) =>
+      hub.json(`/api/v1/conversations/${id}/scheduled`, { method: 'POST', body: JSON.stringify({ run_at, content: [{ type: 'text', text }] }) });
+
+    await schedule(new Date(Date.now() + 3_600_000).toISOString(), 'Z-отменить');
+    await expect(strip).toContainText('Z-отменить', { timeout: 15_000 });
+    await strip.getByRole('button', { name: 'Отменить' }).click();
+    await expect(strip).not.toContainText('Z-отменить', { timeout: 15_000 });
+
+    await schedule(new Date(Date.now() + 3000).toISOString(), synthetic.script([synthetic.delta('Z-сработало')]));
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 30_000 });
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 15_000 });
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(strip).not.toContainText('Z-отменить');
+  });
+
   test('interrupt_on_a_harness_that_exits_resumes_the_queue_end_to_end', tag, async ({ page }) => {
     test.setTimeout(120_000);
     const stack = getStack();
