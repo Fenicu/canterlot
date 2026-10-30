@@ -2,6 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
+import type { Returned } from "#lib/composer/returned.js";
 import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
@@ -37,13 +38,20 @@ export interface ComposerDeps {
   interruptApi?(conversationId: string, key: string): Promise<unknown>;
 }
 
+interface Accepted {
+  op: Op;
+  key: string;
+  text: string;
+  detached: Upload[];
+}
+
 export class ComposerModel {
   readonly deps: ComposerDeps;
   text = $state("");
   errorMessage = $state<string | null>(null);
   interruptLabel = $state("Прервать");
   interruptRunning = $state(false);
-  /** Отправка идёт: повторное нажатие во время проверки сети не создаёт второе сообщение. */
+  /** Нажатие в работе: повторное во время проверки сети не создаёт второе сообщение. */
   sending = $state(false);
 
   constructor(deps: ComposerDeps) {
@@ -51,7 +59,11 @@ export class ComposerModel {
   }
 
   get gate(): SendGate {
-    const trimmed = this.text.trim();
+    return this.#gateFor(this.text);
+  }
+
+  #gateFor(text: string): SendGate {
+    const trimmed = text.trim();
     const uploadsList = this.deps.uploads.list(this.deps.conversationId);
     const activeUploads = uploadsList.filter(
       (u) => u.phase !== "cancelled" && u.phase !== "failed",
@@ -73,8 +85,8 @@ export class ComposerModel {
 
     // 3. Текст превышает лимит в 256 КиБ (проверяется UTF-8 только если длина * 3 может превысить лимит)
     const maxBytes = this.deps.config()?.max_input_text_bytes ?? 262_144;
-    if (this.text.length * 3 > maxBytes) {
-      if (utf8Length(this.text) > maxBytes) {
+    if (text.length * 3 > maxBytes) {
+      if (utf8Length(text) > maxBytes) {
         return { ok: false, reason: "Текст длиннее 256 КиБ" };
       }
     }
@@ -93,29 +105,30 @@ export class ComposerModel {
 
   async send(): Promise<void> {
     if (this.sending || !this.gate.ok) return;
-    this.sending = true;
-    try {
-      await this.#send();
-    } finally {
-      this.sending = false;
-    }
+    await this.#press(() => this.#accept());
   }
 
-  async #send(): Promise<void> {
+  async #press(accept: () => Promise<Accepted | null>): Promise<void> {
+    this.sending = true;
+    let accepted: Accepted | null;
+    try {
+      accepted = await accept();
+    } finally {
+      // Флаг держат только проверка сети и запись в журнал: доставка может идти сколько угодно.
+      this.sending = false;
+    }
+    if (accepted) await this.#deliver(accepted);
+  }
+
+  async #accept(): Promise<Accepted | null> {
     const sendText = this.text;
     const readyUploads = this.deps.uploads
       .list(this.deps.conversationId)
       .filter((u) => u.phase === "ready");
 
-    // Проверка доступности сети (HTTP-проверка, не зависит от WSS)
-    const canSend = await this.deps.canSend();
-    if (canSend === "offline") {
-      this.errorMessage =
-        "Нет связи: сообщение сохранено как черновик и не отправлено";
-      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
-      return;
-    }
-    if (!this.gate.ok) return;
+    // Поле свободно с нажатия: текст, набранный за время проверки сети, не прилипнет к этому сообщению.
+    this.text = "";
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return null;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -131,12 +144,10 @@ export class ComposerModel {
     const key = crypto.randomUUID();
     const createdAt = this.deps.serverNow ? this.deps.serverNow() : Date.now();
 
-    // Шаг 1: локальный элемент в полосе (strip) и свободное поле ввода в том же кадре.
-    // Текст остаётся в черновике, пока операция не легла в журнал.
+    // Шаг 1: локальный элемент в полосе (strip). Текст остаётся в черновике, пока операция не легла в журнал.
     this.deps.probe?.mark("send_pressed");
     const localInput = freshInput(key, sendText, createdAt, attachmentRefs);
     this.deps.chat.inputs.set(key, localInput);
-    if (this.text === sendText) this.text = "";
     this.errorMessage = null;
     this.deps.probe?.mark("input_painted");
 
@@ -157,7 +168,7 @@ export class ComposerModel {
       });
     } catch (err) {
       this.deps.chat.inputs.delete(key);
-      this.text = this.text ? `${sendText}\n${this.text}` : sendText;
+      this.#giveBack(sendText);
       this.errorMessage = "Не удалось сохранить на устройстве";
       throw err;
     }
@@ -168,44 +179,54 @@ export class ComposerModel {
     if (!this.text) {
       void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
     }
+    return { op, key, text: sendText, detached };
+  }
 
-    // Шаг 4: запуск операции
-    try {
-      await this.deps.ops.run(op);
-    } catch (err) {
-      if (op.state === "refused") {
-        this.#restore(key, sendText, detached);
-        this.errorMessage =
-          op.refusal?.message ??
-          (err instanceof Error ? err.message : "Отклонено");
-        return;
-      }
-    }
+  /** Шаг 4: доставка. Отказ хаба возвращает текст и файлы, остальное журнал повторяет сам. */
+  async #deliver({ op, key, text, detached }: Accepted): Promise<void> {
+    await this.deps.ops.run(op).catch(() => undefined);
+    if (op.state !== "refused") return;
+    this.#restore(key, text, detached);
+    this.errorMessage = op.refusal?.message ?? "Отклонено";
+  }
 
-    if (op.state === "refused") {
-      this.#restore(key, sendText, detached);
-      this.errorMessage = op.refusal?.message ?? "Отклонено";
+  /** После проверки сети: нажатие либо идёт дальше, либо текст возвращается в поле. */
+  #mayGo(text: string, reach: "ok" | "offline"): boolean {
+    if (reach === "ok" && this.#gateFor(text).ok) return true;
+    this.#giveBack(text);
+    if (reach === "offline") {
+      this.errorMessage =
+        "Нет связи: сообщение сохранено как черновик и не отправлено";
+      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
     }
+    return false;
+  }
+
+  #giveBack(text: string): void {
+    this.text = this.text ? `${text}\n${this.text}` : text;
   }
 
   #restore(key: string, text: string, detached: Upload[]): void {
-    this.text = this.text ? `${text}\n${this.text}` : text;
+    this.#giveBack(text);
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
     this.deps.chat.inputs.delete(key);
     this.deps.uploads.reattach(detached);
   }
 
-  async sendLater(at: number): Promise<void> {
-    if (this.sending) return;
-    this.sending = true;
-    try {
-      await this.#sendLater(at);
-    } finally {
-      this.sending = false;
-    }
+  /** Сообщение вернулось не из этого нажатия: например, хаб отказал после перезагрузки. */
+  takeBack({ text, attachments, notice }: Returned): void {
+    this.#giveBack(text);
+    this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    this.deps.uploads.restore(this.deps.conversationId, attachments);
+    if (notice) this.errorMessage = notice;
   }
 
-  async #sendLater(at: number): Promise<void> {
+  async sendLater(at: number): Promise<void> {
+    if (this.sending) return;
+    await this.#press(() => this.#acceptLater(at));
+  }
+
+  async #acceptLater(at: number): Promise<Accepted | null> {
     const now = this.deps.serverNow ? this.deps.serverNow() : Date.now();
     const valid = validateScheduleTime(at, now);
     if (valid !== "ok") {
@@ -213,46 +234,46 @@ export class ComposerModel {
         valid === "too_soon"
           ? "Слишком близкое время отправки"
           : "Слишком далёкое время отправки";
-      return;
+      return null;
     }
 
-    if (!this.gate.ok) return;
+    if (!this.gate.ok) return null;
 
     const sendText = this.text;
     const readyUploads = this.deps.uploads
       .list(this.deps.conversationId)
       .filter((u) => u.phase === "ready");
 
-    const canSend = await this.deps.canSend();
-    if (canSend === "offline") {
-      this.errorMessage =
-        "Нет связи: сообщение сохранено как черновик и не отправлено";
-      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
-      return;
-    }
-    if (!this.gate.ok) return;
+    this.text = "";
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return null;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
 
-    const op = await this.deps.ops.begin(
-      "scheduled",
-      {
-        content: [{ type: "text" as const, text: sendText }],
-        attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
-        run_at: new SvelteDate(at).toISOString(),
-      },
-      { conversationId: this.deps.conversationId, persist: true },
-    );
-
-    this.deps.uploads.detach(readyUploads.map((u) => u.id));
-    this.errorMessage = null;
-    if (this.text === sendText) {
-      this.text = "";
-      await this.deps.drafts.clear(this.deps.conversationId);
+    const key = crypto.randomUUID();
+    let op: Op;
+    try {
+      op = await this.deps.ops.begin(
+        "scheduled",
+        {
+          content: [{ type: "text" as const, text: sendText }],
+          attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
+          run_at: new SvelteDate(at).toISOString(),
+        },
+        { conversationId: this.deps.conversationId, persist: true, key },
+      );
+    } catch (err) {
+      this.#giveBack(sendText);
+      this.errorMessage = "Не удалось сохранить на устройстве";
+      throw err;
     }
 
-    void this.deps.ops.run(op);
+    const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
+    this.errorMessage = null;
+    if (!this.text) {
+      void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
+    }
+    return { op, key, text: sendText, detached };
   }
 
   attach(files: FileList | File[]): void {

@@ -1,10 +1,11 @@
-import type { DraftStore } from "#lib/drafts/store.js";
+import type { DraftAttachment, DraftStore } from "#lib/drafts/store.js";
 
 export interface DraftBindingOptions {
   drafts: DraftStore;
   conversationId: string;
   onRestore?: (text: string) => void;
   onChange?: (text: string) => void;
+  onAttachments?: (attachments: DraftAttachment[]) => void;
 }
 
 /**
@@ -21,6 +22,7 @@ export function bindDraft(
 
   void options.drafts.load(options.conversationId).then((draft) => {
     if (unmounted) return;
+    if (draft?.attachments?.length) options.onAttachments?.(draft.attachments);
     if (draft && draft.text && !node.value) {
       node.value = draft.text;
       options.onRestore?.(draft.text);

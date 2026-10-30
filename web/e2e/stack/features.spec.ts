@@ -4,6 +4,7 @@ import { PNG } from 'pngjs';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
 import { answerText, createHubClient, createSessionUI, fetchFrames, sendChaos, sendScript } from './hub';
+import { postShare } from '../ui/secondary-fixture';
 
 const tag = { tag: '@stack' };
 
@@ -254,6 +255,8 @@ test.describe('stack: features and security', () => {
     await page.locator('#model').selectOption('synthetic-small');
     await page.getByRole('button', { name: 'Сохранить настройки' }).click();
     await expect(page.locator('.subtitle').first()).toContainText('со следующего хода', { timeout: 15_000 });
+    // Лист закрывается только после записи кранча, а пока он открыт, поле ввода инертно и не примет текст.
+    await expect(page.getByRole('dialog')).toHaveCount(0, { timeout: 15_000 });
     let detail = await hub.json<{ model: string; settings: { effective: { model: string }; pending: { model?: string } } }>(`/api/v1/conversations/${id}`);
     expect(detail.settings.effective.model).toBe('synthetic-large');
     expect(detail.settings.pending.model).toBe('synthetic-small');
@@ -276,19 +279,13 @@ test.describe('stack: features and security', () => {
 
     await page.goto(`${stack.baseUrl}/sessions`);
     await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 20_000 });
-    await page.evaluate(async () => { await navigator.serviceWorker.ready; });
-    await page.waitForFunction(() => !!navigator.serviceWorker.controller, undefined, { timeout: 15_000 });
-    // Android «Поделиться» шлёт POST multipart на /_share; сервис-воркер кладёт его в приёмник и переводит на выбор сессии.
-    const landed = await page.evaluate(async () => {
-      const form = new FormData();
-      form.set('title', 'Из галереи');
-      form.set('text', 'Сверь с кодом');
-      form.set('url', 'https://example.org/');
-      form.append('files', new File(['содержимое файла'], 'notes.txt', { type: 'text/plain' }));
-      return (await fetch('/_share', { method: 'POST', body: form })).url;
+    // Android «Поделиться» открывает /_share навигацией верхнего уровня: сервис-воркер кладёт POST в приёмник и переводит на выбор сессии.
+    await postShare(page, {
+      title: 'Из галереи',
+      text: 'Сверь с кодом',
+      url: 'https://example.org/',
+      files: [{ name: 'notes.txt', body: 'содержимое файла' }]
     });
-    expect(landed).toContain('/share');
-    await page.goto(landed);
     await expect(page.getByText('notes.txt')).toBeVisible({ timeout: 15_000 });
     await page.getByRole('button', { name: new RegExp(`^${title}`) }).click();
     await expect(page).toHaveURL(new RegExp(`/c/${id}`), { timeout: 20_000 });

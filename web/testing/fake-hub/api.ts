@@ -10,6 +10,14 @@ import type { FakeHub } from './hub';
 import type { components } from '../../src/lib/api/generated/openapi.js';
 
 type PresetSummary = components['schemas']['PresetSummary'];
+type QueueSnapshot = components['schemas']['SnapshotQueueView'];
+
+const WAITING = new Set(['queued', 'dispatched', 'on_machine']);
+
+/** У хаба ввод без места в ленте лежит в очереди снимка, а не в истории. */
+function waiting(item: HistoryItem): boolean {
+	return item.kind === 'input' && WAITING.has(item.state);
+}
 
 const PAGE = 256 * 1024;
 
@@ -125,14 +133,50 @@ export class FakeHubApi {
 		const open_requests = [...requestsMap.values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
 		);
+		const held = this.details.get(id)?.queue as Partial<Record<keyof QueueSnapshot, unknown>> | undefined;
 
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
-			queue: (this.details.get(id)?.queue as SnapshotData['queue']) ?? { pause_reasons: [], hold_reasons: [], queued: 0, run_slot: 'free' },
+			queue: {
+				pause_reasons: (held?.pause_reasons ?? []) as QueueSnapshot['pause_reasons'],
+				hold_reasons: (held?.hold_reasons ?? []) as QueueSnapshot['hold_reasons'],
+				run_slot: (held?.run_slot ?? 'free') as QueueSnapshot['run_slot'],
+				queued: this.queuedInputs(id)
+			},
 			history: this.page(id, {}),
 			scheduled: [],
 			open_requests
 		};
+	}
+
+	/** Как `queued` снимка хаба: вводы без места в ленте целиком, а не их число. */
+	queuedInputs(id: string): QueueSnapshot['queued'] {
+		const held = new Map<string, QueueSnapshot['queued'][number]>();
+		for (const item of this.histories.get(id) ?? []) {
+			if (waiting(item)) held.set(item.id, { ...item, feed_seq: null } as QueueSnapshot['queued'][number]);
+		}
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			const p = ev.payload as Record<string, unknown>;
+			if (ev.kind === 'input_queued') {
+				held.set(String(p.input_id), {
+					id: String(p.input_id),
+					idempotency_key: String(p.idempotency_key),
+					state: String(p.state ?? 'queued'),
+					content: (p.content ?? []) as QueueSnapshot['queued'][number]['content'],
+					attachments: [],
+					created_seq: String(p.input_seq ?? ev.scope_seq),
+					feed_seq: null,
+					created_at: ev.committed_at,
+					retry_of: null
+				});
+			} else if (ev.kind === 'input_state_changed') {
+				const view = held.get(String(p.input_id));
+				if (!view) continue;
+				if (WAITING.has(String(p.state))) view.state = String(p.state);
+				else held.delete(String(p.input_id));
+			}
+		}
+		return [...held.values()];
 	}
 
 	listData(): ListSnapshot {
@@ -213,7 +257,7 @@ export class FakeHubApi {
 	}
 
 	page(id: string, query: { before?: string; after?: string; limit?: number }): HistoryPage {
-		const all = [...(this.histories.get(id) ?? [])].sort((a, b) => cmp(seqOf(a), seqOf(b)));
+		const all = (this.histories.get(id) ?? []).filter((item) => !waiting(item)).sort((a, b) => cmp(seqOf(a), seqOf(b)));
 		let filtered = all;
 		if (query.before) filtered = filtered.filter((item) => cmp(seqOf(item), query.before!) < 0);
 		if (query.after) filtered = filtered.filter((item) => cmp(seqOf(item), query.after!) > 0);

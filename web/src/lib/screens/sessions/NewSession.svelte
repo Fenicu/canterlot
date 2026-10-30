@@ -93,7 +93,7 @@
   $effect(() => {
     const current = model;
     const id = machineId;
-    if (!current || !id) return;
+    if (!current) return;
     current.machineId = id;
     void current.refreshRecent().then(() => {
       recent = current.recent;
@@ -102,6 +102,7 @@
 
   async function send() {
     if (!model || !gate.ok) return;
+    error = '';
     try {
       const created = await model.submit();
       const share = page.url.searchParams.get('share');

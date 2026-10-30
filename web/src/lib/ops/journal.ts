@@ -42,9 +42,11 @@ export class OpJournal {
   #send: (op: Op) => Promise<unknown>;
   #env: JournalEnv;
   #persisted = new Set<string>();
+  #beginning = new Set<string>();
   #running = new Set<string>();
   #stopped = new Set<string>();
   #wake = new Map<string, () => void>();
+  #orphanRefused = new Set<(op: Op) => void>();
   #onOnline = () => this.#resumeWaiting();
   #onPageShow = () => this.#resumeWaiting();
   #onVisible = () => {
@@ -80,6 +82,12 @@ export class OpJournal {
     this.close();
   }
 
+  /** Отказ операции без вызывающего, например восстановленной после перезагрузки: вернуть текст больше некому. */
+  onOrphanRefused(fn: (op: Op) => void): () => void {
+    this.#orphanRefused.add(fn);
+    return () => this.#orphanRefused.delete(fn);
+  }
+
   async begin<B>(
     kind: OpKind,
     body: B,
@@ -97,7 +105,17 @@ export class OpJournal {
     (this.ops as SvelteMap<string, Op>).set(op.key, op);
     if (kind !== "other" || opts.persist) {
       this.#persisted.add(op.key);
-      await this.#persist(op);
+      this.#beginning.add(op.key);
+      try {
+        await this.#persist(op);
+      } catch (err) {
+        // Вызывающий получит отказ и вернёт текст: живая запись ушла бы на хаб второй копией.
+        (this.ops as SvelteMap<string, Op>).delete(op.key);
+        this.#persisted.delete(op.key);
+        throw err;
+      } finally {
+        this.#beginning.delete(op.key);
+      }
     }
     return op;
   }
@@ -193,7 +211,7 @@ export class OpJournal {
       (this.ops as SvelteMap<string, Op>).set(op.key, op);
       pending[pending.indexOf(row)] = op;
     }
-    for (const op of pending) void this.run(op).catch(() => undefined);
+    for (const op of pending) this.#runOrphan(op);
     return pending;
   }
 
@@ -207,11 +225,18 @@ export class OpJournal {
     op.state = "unknown";
     const wake = this.#wake.get(key);
     if (wake) wake();
-    else void this.run(op);
+    else this.#runOrphan(op);
   }
 
   discard(key: string): void {
     this.#stop(key);
+  }
+
+  #runOrphan(op: Op): void {
+    void this.run(op).catch(() => {
+      if (op.state !== "refused") return;
+      for (const fn of this.#orphanRefused) fn(op);
+    });
   }
 
   #stop(key: string): void {
@@ -224,6 +249,8 @@ export class OpJournal {
 
   #resumeWaiting(): void {
     for (const op of this.ops.values()) {
+      // Операцию в записи begin запускает её вызывающий: только он вернёт текст при отказе.
+      if (this.#beginning.has(op.key)) continue;
       if (op.state === "saving" || op.state === "unknown")
         this.retryNow(op.key);
     }

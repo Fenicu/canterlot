@@ -1,3 +1,4 @@
+import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -20,7 +21,9 @@ import {
 import { utf8Length } from "./blocks";
 import {
   assignFeedSeq,
+  blankAttachment,
   freshInput,
+  inputOfBody,
   marksFor,
   placeInput,
   type AttachmentRef,
@@ -29,6 +32,7 @@ import {
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { RequestsModel } from "./requests.svelte";
+import type { components } from "#lib/api/generated/openapi.js";
 
 export interface HistoryBlock {
   kind: "block";
@@ -102,16 +106,15 @@ export interface ChatApi {
   markRead(id: string, seq: string): Promise<void>;
 }
 
+type QueueSnapshot = components["schemas"]["SnapshotQueueView"];
+type QueuedInput = QueueSnapshot["queued"][number];
+export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
+
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
-  queue?: {
-    pause_reasons?: unknown[];
-    hold_reasons?: unknown[];
-    queued?: number;
-    run_slot?: RunSlot;
-  };
+  queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
-  scheduled?: unknown[];
+  scheduled?: ScheduledMessage[];
   open_requests?: unknown[];
 }
 
@@ -203,7 +206,7 @@ export class ChatStore {
     enabled: false,
     resume_pending: false,
   });
-  scheduled = $state<unknown[]>([]);
+  scheduled = $state<ScheduledMessage[]>([]);
   phase = $state<Record<string, unknown> | null>(null);
   interrupt = $state<Record<string, unknown> | null>(null);
   attachments = new SvelteMap<string, Record<string, unknown>>();
@@ -227,6 +230,7 @@ export class ChatStore {
   #readAt = -10_000;
   #noteTimers = new SvelteMap<string, () => void>();
   #applier: ScopeApplier | null = null;
+  #stopRefused: (() => void) | null = null;
 
   constructor(
     readonly id: string,
@@ -271,7 +275,14 @@ export class ChatStore {
   }
 
   open(): void {
-    this.#adoptSaving();
+    // Тёплый чат открывается прямо из $effect маршрута: без untrack экран пересоздавался бы при каждой операции.
+    untrack(() => {
+      this.#adoptSaving();
+      this.#reviveNotes();
+    });
+    this.#stopRefused ??= this.deps.ops.onOrphanRefused((op) => {
+      this.inputs.delete(op.key);
+    });
     if (this.#sub) return;
     this.#sub = this.deps.connection.subscribe(scopeOf(this.id), this.applier);
   }
@@ -285,6 +296,8 @@ export class ChatStore {
 
   dispose(): void {
     this.close();
+    this.#stopRefused?.();
+    this.#stopRefused = null;
     this.#sync.stop();
     this.blocks.clear();
     this.inputs.clear();
@@ -366,7 +379,6 @@ export class ChatStore {
   }
 
   strip(): InputView[] {
-    this.#adoptSaving();
     return [...this.inputs.values()].filter(
       (input) =>
         input.placement === "strip" ||
@@ -496,9 +508,9 @@ export class ChatStore {
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
           const next = this.scheduled.filter(
-            (item) => (item as { id?: string }).id !== event.payload.id,
+            (item) => item.id !== event.payload.id,
           );
-          next.push(event.payload);
+          next.push(event.payload as ScheduledMessage);
           this.scheduled = next;
         }
         return;
@@ -663,15 +675,7 @@ export class ChatStore {
         const prior = existing.attachments.find(
           (a) => a.attachment_id === b.attachment_id,
         );
-        if (prior) return prior;
-        return {
-          attachment_id: b.attachment_id!,
-          name: "",
-          mime: "",
-          size: 0,
-          sha256: "",
-          image: false,
-        };
+        return prior ?? blankAttachment(b.attachment_id!);
       });
     }
     existing.state = "queued";
@@ -718,7 +722,17 @@ export class ChatStore {
     } else this.timeline.remove(`input:${input.key}`);
   }
 
-  #armNote(key: string): void {
+  /** close снимает таймеры заметок: при возврате просроченные убираются, остальные дожидаются срока. */
+  #reviveNotes(): void {
+    for (const input of [...this.inputs.values()]) {
+      if (input.state !== "cancelled" || input.stripUntil === null) continue;
+      const left = input.stripUntil - this.deps.clock.now();
+      if (left > 0) this.#armNote(input.key, left);
+      else this.inputs.delete(input.key);
+    }
+  }
+
+  #armNote(key: string, ms = 4000): void {
     this.#noteTimers.get(key)?.();
     const drop = (): void => {
       this.#noteTimers.delete(key);
@@ -729,9 +743,9 @@ export class ChatStore {
       this.inputs.delete(key);
     };
     if (this.deps.clock.schedule)
-      this.#noteTimers.set(key, this.deps.clock.schedule(drop, 4000));
+      this.#noteTimers.set(key, this.deps.clock.schedule(drop, ms));
     else {
-      const timer = setTimeout(drop, 4000);
+      const timer = setTimeout(drop, ms);
       this.#noteTimers.set(key, () => clearTimeout(timer));
     }
   }
@@ -775,7 +789,6 @@ export class ChatStore {
     if (data.queue) {
       this.queue.pause_reasons = data.queue.pause_reasons ?? [];
       this.queue.hold_reasons = data.queue.hold_reasons ?? [];
-      this.queue.queued = data.queue.queued ?? this.queue.queued;
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
@@ -804,6 +817,19 @@ export class ChatStore {
       for (const entry of older)
         if (!keptSeq.has(entry.key) && !terminalEntry(entry))
           this.timeline.remove(entry.key);
+    }
+    if (data.queue?.queued) this.#adoptQueued(data.queue.queued);
+  }
+
+  /** Вводы без места в ленте есть только в очереди снимка: полоса сходится с ней в обе стороны. */
+  #adoptQueued(queued: QueuedInput[]): void {
+    this.queue.queued = queued.length;
+    const held = new SvelteSet(
+      queued.map((view) => this.#inputFromHistory({ ...view, kind: "input" }).key),
+    );
+    for (const input of [...this.inputs.values()]) {
+      if (input.id && input.placement === "strip" && input.state !== "cancelled" && !held.has(input.key))
+        this.inputs.delete(input.key);
     }
   }
 
@@ -919,18 +945,15 @@ export class ChatStore {
       if (op.kind !== "input" || op.conversationId !== this.id) continue;
       if (op.state !== "saving" && op.state !== "unknown") continue;
       if (this.inputs.has(op.key)) continue;
-      const text =
-        typeof (op.body as { text?: string } | null)?.text === "string"
-          ? (op.body as { text: string }).text
-          : "";
-      const attachments = Array.isArray(
-        (op.body as { attachments?: AttachmentRef[] } | null)?.attachments,
-      )
-        ? (op.body as { attachments: AttachmentRef[] }).attachments
-        : [];
+      const { text, attachmentIds } = inputOfBody(op.body);
       this.inputs.set(
         op.key,
-        freshInput(op.key, text, op.createdAt, attachments),
+        freshInput(
+          op.key,
+          text,
+          op.createdAt,
+          attachmentIds.map(blankAttachment),
+        ),
       );
     }
   }

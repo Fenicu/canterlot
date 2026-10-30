@@ -26,7 +26,7 @@
     {#each items as item (item.id)}
       <li>
         <span class="name">{item.name}</span>
-        <span class="size">{sizeLabel(item.size)}</span>
+        {#if item.size > 0}<span class="size">{sizeLabel(item.size)}</span>{/if}
         <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' ? item.size : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}></span>
         {#if item.error}<p class="error">{item.error.message}</p>{/if}
         {#if item.phase === 'failed'}

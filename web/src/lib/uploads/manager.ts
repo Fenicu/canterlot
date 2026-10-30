@@ -1,4 +1,5 @@
 import type { CanterlotDb } from "#lib/storage/idb.js";
+import type { DraftAttachment } from "#lib/drafts/store.js";
 import { uploadLimits } from "#lib/api/config.js";
 import type { PatchSender } from "#lib/uploads/patch.js";
 import { ApiError } from "#lib/api/http.js";
@@ -165,6 +166,31 @@ export class UploadManager {
     if (this.#disposed) return;
     for (const view of views)
       if (!this.#views.has(view.id)) this.#views.set(view.id, view);
+  }
+
+  /** Файлы вернувшегося сообщения уже лежат на хабе: в лоток они встают готовыми. */
+  restore(
+    conversationId: string,
+    attachments: readonly DraftAttachment[],
+  ): void {
+    if (this.#disposed) return;
+    const known = new Set(
+      [...this.#views.values()].map((view) => view.attachmentId),
+    );
+    for (const { id, name, size = 0 } of attachments) {
+      if (known.has(id)) continue;
+      known.add(id);
+      const upload: Upload = {
+        id: crypto.randomUUID(),
+        conversationId,
+        name: name || "Вложение",
+        size,
+        phase: "ready",
+        sent: size,
+        attachmentId: id,
+      };
+      this.#views.set(upload.id, upload);
+    }
   }
 
   resumePending(): Promise<void> {

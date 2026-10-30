@@ -259,4 +259,23 @@ describe("drafts/store", () => {
     expect(store.lag.lastMs).toBeLessThan(130);
     store.destroy();
   });
+
+  it("prepend_puts_the_returned_text_before_a_draft_on_disk_and_writes_it_at_once", async () => {
+    const db = await openDb("prepend-owner");
+    const first = new DraftStore("prepend-owner", db, { debounceMs: 0 });
+    first.set("c-1", { text: "набранное" });
+    await first.flush();
+    first.retire();
+
+    const store = new DraftStore("prepend-owner", db, { debounceMs: 10_000 });
+    await store.prepend("c-1", "вернулось", [{ id: "att-1" }]);
+
+    const saved = await db.get<{
+      text: string;
+      attachments: { id: string }[];
+    }>("drafts", "c-1");
+    expect(saved?.text).toBe("вернулось\nнабранное");
+    expect(saved?.attachments).toEqual([{ id: "att-1" }]);
+    store.retire();
+  });
 });

@@ -386,4 +386,17 @@ describe("uploads/manager", () => {
     expect(upload.sent).toBe(file.size);
     expect(sizes.slice(0, -1).every((size) => size === 1000)).toBe(true);
   });
+
+  it("restored_attachments_are_ready_and_appear_once", () => {
+    manager.restore("c-1", [{ id: "att-1", name: "отчёт.pdf", size: 10 }]);
+    manager.restore("c-1", [{ id: "att-1" }, { id: "att-2" }]);
+
+    const items = manager.list("c-1");
+    expect(items.map((item) => [item.attachmentId, item.phase])).toEqual([
+      ["att-1", "ready"],
+      ["att-2", "ready"],
+    ]);
+    expect(items[0]?.name).toBe("отчёт.pdf");
+    expect(items[1]?.name).toBe("Вложение");
+  });
 });

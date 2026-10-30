@@ -265,6 +265,12 @@ async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
             .iter()
             .all(|d| *d < f.config.timers.heartbeat_ack)
     );
+    assert!(
+        f.probe
+            .heartbeat_gaps()
+            .iter()
+            .all(|d| *d < f.config.timers.heartbeat_ack / 2)
+    );
     assert_eq!(
         f.hub()
             .faults
