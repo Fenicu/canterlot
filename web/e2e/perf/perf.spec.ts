@@ -56,9 +56,11 @@ async function installSendRecorder(page: Page): Promise<void> {
 
 const sendScriptFor = (marker: string) => synthetic.script([synthetic.delta(`${marker}`)]);
 
-async function runSends(page: Page, prefix: string, count: number): Promise<void> {
+async function runSends(page: Page, hub: HubClient, id: string, prefix: string, count: number): Promise<void> {
   const composer = page.getByRole('textbox', { name: 'Сообщение' });
   for (let i = 0; i < count; i++) {
+    // Затвор отвергает нажатие при 100 вводах в очереди: на загруженном хосте воркер отстаёт от темпа нажатий.
+    if (i % 10 === 0) while ((await hub.detail(id)).queue.queued > 50) await page.waitForTimeout(250);
     await composer.fill(sendScriptFor(`${prefix}-${i}`));
     await tapSend(page);
     await page.waitForFunction((n) => (window as unknown as { __perf: { painted: unknown[] } }).__perf.painted.length >= n, i + 1, { timeout: 30_000 });
@@ -75,7 +77,7 @@ test.describe('perf: P-01…P-05', () => {
     await throttle(page);
     await installSendRecorder(page);
     const startedAt = Date.now();
-    await runSends(page, 'p01', N);
+    await runSends(page, createHubClient(stack), id, 'p01', N);
     const samples = await page.evaluate(() => (window as unknown as { __perf: { painted: number[] } }).__perf.painted);
 
     const dist = distribution(samples, {
@@ -83,7 +85,7 @@ test.describe('perf: P-01…P-05', () => {
       durationMs: Date.now() - startedAt,
       target: 'p95 ≤ 100 мс',
       limitMs: { p95: 100 },
-      conditions: standardConditions({ ...PHONE_CONDITIONS, sends: N, interval_between_sends_ms: '~120 + fill', definition: 'event.timeStamp щелчка до следующего rAF после появления элемента в полосе или ленте и очистки поля (проверка в rAF)' })
+      conditions: standardConditions({ ...PHONE_CONDITIONS, sends: N, interval_between_sends_ms: '~120 + fill, пауза при очереди больше 50', definition: 'event.timeStamp щелчка до следующего rAF после появления элемента в полосе или ленте и очистки поля (проверка в rAF)' })
     });
     saveDistribution(dist);
     expect(dist.n).toBe(N);
@@ -101,7 +103,7 @@ test.describe('perf: P-01…P-05', () => {
     await sendChaos(stack.control, { action: 'latency', ms: 40 });
     const startedAt = Date.now();
     try {
-      await runSends(page, 'p02', N);
+      await runSends(page, createHubClient(stack), id, 'p02', N);
       // Запрос последнего нажатия может уйти позже кадра с локальным элементом: ждём ответ на каждое нажатие.
       await page.waitForFunction((n) => performance.getEntriesByType('resource').filter((entry) => /\/conversations\/[^/]+\/inputs$/.test(entry.name)).length >= n, N, { timeout: 30_000 });
     } finally {
@@ -235,7 +237,7 @@ test.describe('perf: P-01…P-05', () => {
       durationMs: Date.now() - startedAt,
       target: 'p95 ≤ 250 мс, p99 ≤ 800 мс',
       limitMs: { p95: 250, p99: 800 },
-      conditions: standardConditions({ ...PHONE_CONDITIONS, source_deltas: TOTAL, stream_rate: '~100 дельт/с (по три каждые 30 мс)', delta_events_on_hub: deltaEvents.length, ledger: 'чисто (нет дыр и двойного учёта)', definition: 'committed_at_from старейшей склеенной дельты хаба против сырого Date.now() после двух rAF', samples_cap: 'пробы хранят не более 10 000 последних значений' })
+      conditions: standardConditions({ ...PHONE_CONDITIONS, source_deltas: TOTAL, stream_rate: '~100 дельт/с (по три каждые 30 мс)', delta_events_on_hub: deltaEvents.length, ledger: 'чисто (нет дыр и двойного учёта)', definition: 'committed_at_from старейшей склеенной дельты хаба против сырого Date.now() в первом rAF после кадра, в котором текст нарисован', samples_cap: 'пробы хранят не более 10 000 последних значений' })
     });
     saveDistribution(dist);
   });

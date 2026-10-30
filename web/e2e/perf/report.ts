@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Distribution } from './measure';
 
@@ -46,7 +46,8 @@ export function renderReport(distributions: Distribution[]): string {
 - Телефонный проект Playwright: Chromium 412×892, касание, дроссель процессора 4× через CDP (\`Emulation.setCPUThrottlingRate\`).
 - Сеть: loopback; для P-02 и второго ряда P-06 кромка добавляет по 40 мс в каждую сторону (RTT 80 мс, профиль §16.1).
 - Хаб, воркер, браузер и кромка работают на одном хосте, поэтому часы общие: пробы берут сырые \`Date.now()\` и временные метки самого хаба, а \`X-Server-Time-Ms\` в числа не входит.
-- Запуск: \`npm run stack:build && npm run test:perf\` из \`web/\`; отчёт пересобирается из файлов \`web/e2e/.stack/perf/*.json\`.
+- Трасса Playwright выключена: её снимки DOM идут на основном потоке страницы. В P-01 и P-02 перед каждым десятым нажатием замер ждёт, пока в очереди останется не больше 50 вводов: при 100 вводах затвор отвергает нажатие.
+- Запуск: \`npm run stack:build && npm run test:perf\` из \`web/\`; отчёт пересобирается из файлов \`web/e2e/.stack/perf/*.json\`, раздел «История изменений» сохраняется.
 
 ## Честные ограничения
 
@@ -72,5 +73,7 @@ export function writeReport(path = resolve(process.cwd(), '../docs/perf/pwa-firs
   const distributions = loadDistributions();
   if (distributions.length === 0) return;
   mkdirSync(resolve(path, '..'), { recursive: true });
-  writeFileSync(path, renderReport(distributions));
+  const previous = existsSync(path) ? readFileSync(path, 'utf8') : '';
+  const history = previous.indexOf('\n## История изменений');
+  writeFileSync(path, renderReport(distributions) + (history < 0 ? '' : previous.slice(history)));
 }

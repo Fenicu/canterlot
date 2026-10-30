@@ -176,8 +176,9 @@
   $effect(() => {
     void chat.deltaSerial;
     const marks = chat.deltaMarks.splice(0);
-    if (marks.length === 0) return;
-    requestAnimationFrame(() => requestAnimationFrame(() => {
+    if (marks.length === 0 || !probe.enabled) return;
+    // Эффект идёт в кадре применения пакета, и текст рисуется в этом же кадре: следующий кадр наступает уже после отрисовки.
+    requestAnimationFrame(() => {
       for (const at of marks) {
         const from = Date.parse(at);
         if (Number.isFinite(from)) {
@@ -185,7 +186,7 @@
           probe.record('delta_paint_raw_ms', Date.now() - from);
         }
       }
-    }));
+    });
   });
 
   function contentKey(rowsKeys: string[]): string | undefined {
