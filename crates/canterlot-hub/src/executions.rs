@@ -196,6 +196,13 @@ pub async fn start_in_tx(
     if let Some((execution_id, _, _)) = live(conn, conversation_id).await? {
         return Err(ExecutionError::AlreadyLive { execution_id });
     }
+    crate::conversations::promote_pending_for_launch_in_tx(conn, conversation_id, correlation_id)
+        .await?;
+    let (model, effort, permission_mode): (String, String, String) =
+        sqlx::query_as("select model, effort, permission_mode from conversations where id = $1")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let generation: i64 = sqlx::query_scalar(
         "select coalesce(max(generation), 0) + 1 from executions where conversation_id = $1",
     )
@@ -227,8 +234,7 @@ pub async fn start_in_tx(
     .bind(started.execution_id)
     .bind(generation)
     .bind(json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
-        "model":row.try_get::<String,_>("model")?,"effort":row.try_get::<String,_>("effort")?,
-        "permission_mode":row.try_get::<String,_>("permission_mode")?,"instructions":instructions,
+        "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
         "native_conversation_id":native}))
     .execute(&mut *conn)
     .await?;

@@ -1622,6 +1622,35 @@ pub(crate) async fn revalidate_pending_in_tx(
     Ok((pending, rev))
 }
 
+/// Новое исполнение стартует с ожидающими значениями, поэтому первому вводу нечего менять.
+/// Пресет остаётся ждать ввод: снимок и смену инструкций несёт диспетчер.
+pub(crate) async fn promote_pending_for_launch_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let (pending, _) = revalidate_pending_in_tx(conn, id, correlation).await?;
+    let value = |key: &str| pending.get(key).and_then(Value::as_str);
+    let (model, effort, permission) = (value("model"), value("effort"), value("permission_mode"));
+    if model.is_none() && effort.is_none() && permission.is_none() {
+        return Ok(());
+    }
+    let owner: Uuid = sqlx::query_scalar("update conversations set model=coalesce($2,model),effort=coalesce($3,effort),permission_mode=coalesce($4,permission_mode),pending_settings=pending_settings-'{model,effort,permission_mode}'::text[] where id=$1 returning owner_id").bind(id).bind(model).bind(effort).bind(permission).fetch_one(&mut *conn).await?;
+    let view = detail(conn, owner, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?
+        .settings;
+    append(
+        conn,
+        Scope::Conversation { id },
+        "conversation_settings_changed",
+        Some(id),
+        serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?,
+        correlation,
+    )
+    .await
+}
+
 #[derive(Clone)]
 pub struct SubmitMessage {
     pub owner_id: Uuid,

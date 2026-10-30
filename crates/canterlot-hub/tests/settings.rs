@@ -276,7 +276,11 @@ async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_ev
     };
     let seed = testkit::seed(&pool).await;
     testkit::seed_catalog(&pool, seed.machine_id).await;
-    sqlx::query("update conversations set model='synthetic-small',effort='high',pending_settings=$2 where id=$1").bind(seed.conversation_id).bind(json!({"effort":"unavailable"})).execute(&pool).await.unwrap();
+    sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let execution = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
         .unwrap();
@@ -285,6 +289,12 @@ async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_ev
             .await
             .unwrap();
     }
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(seed.conversation_id)
+        .bind(json!({"effort":"unavailable"}))
+        .execute(&pool)
+        .await
+        .unwrap();
     submit::submit_input(
         &pool,
         SubmitInput {
@@ -947,7 +957,11 @@ async fn pending_settings_are_dropped_when_effective_model_disappears(pool: PgPo
     };
     let seed = testkit::seed(&pool).await;
     testkit::seed_catalog(&pool, seed.machine_id).await;
-    sqlx::query("update conversations set model='synthetic-small',effort='high',pending_settings=$2 where id=$1").bind(seed.conversation_id).bind(json!({"permission_mode":"bypass"})).execute(&pool).await.unwrap();
+    sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
     let execution = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
         .await
         .unwrap();
@@ -956,6 +970,12 @@ async fn pending_settings_are_dropped_when_effective_model_disappears(pool: PgPo
             .await
             .unwrap();
     }
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(seed.conversation_id)
+        .bind(json!({"permission_mode":"bypass"}))
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("update machine_harnesses set models='[]' where machine_id=$1")
         .bind(seed.machine_id)
         .execute(&pool)
@@ -1686,4 +1706,399 @@ async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
             json!({"keys":["effort"],"reason":reason})
         );
     }
+}
+
+async fn resume_stopped_session(
+    client: &TestClient,
+    pool: &PgPool,
+    conversation: Uuid,
+) -> canterlot_hub::executions::StartedExecution {
+    use canterlot_hub::{executions, model::ExecutionState};
+    let started = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{conversation}/resume"),
+            Some("resume"),
+            Some(json!({})),
+        )
+        .await;
+    assert_eq!(started.status, 201);
+    let started: canterlot_hub::executions::StartedExecution = started.json();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(pool, started.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    started
+}
+
+async fn stop_live_execution(pool: &PgPool, conversation: Uuid) {
+    use canterlot_hub::{executions, model::ExecutionState};
+    let execution: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 order by generation desc limit 1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    executions::set_state(
+        pool,
+        execution,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    executions::set_state(
+        pool,
+        execution,
+        ExecutionState::Stopped,
+        Some("user_stop"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+
+async fn start_command(
+    pool: &PgPool,
+    command: Uuid,
+) -> canterlot_proto::worker::v1::StartExecution {
+    use canterlot_hub::outbox;
+    use canterlot_proto::worker::v1::command;
+    let row = sqlx::query_as::<_, outbox::CommandRow>("select * from commands where id=$1")
+        .bind(command)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+    let Some(command::Kind::StartExecution(start)) = outbox::to_proto(&row).unwrap().kind else {
+        panic!("start_execution expected");
+    };
+    start
+}
+
+async fn settings_columns(pool: &PgPool, conversation: Uuid) -> (String, String, String, Value) {
+    sqlx::query_as(
+        "select model,effort,permission_mode,pending_settings from conversations where id=$1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn effort_changed_on_a_stopped_session_is_used_at_launch_and_the_input_passes(pool: PgPool) {
+    use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
+    let (client, id, machine, _dir) = settings_client(&pool).await;
+    sqlx::query(
+        "update machine_harnesses set settings_midsession_effort=false where machine_id=$1",
+    )
+    .bind(machine)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    start_running(&pool, owner, id).await;
+    stop_live_execution(&pool, id).await;
+    let path = format!("/api/v1/conversations/{id}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"effort":"low"})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+    assert_eq!(changed.json::<Value>()["pending"]["effort"], "low");
+
+    let started = resume_stopped_session(&client, &pool, id).await;
+
+    let start = start_command(&pool, started.command_id).await;
+    assert_eq!(start.effort, "low");
+    assert_eq!(start.model, "synthetic-small");
+    let (model, effort, _, pending) = settings_columns(&pool, id).await;
+    assert_eq!(
+        (model.as_str(), effort.as_str()),
+        ("synthetic-small", "low")
+    );
+    assert_eq!(pending, json!({}));
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{id}")).fetch_one(&pool).await.unwrap();
+    assert_eq!(event["effective"]["effort"], "low");
+    assert_eq!(event["pending"], json!({}));
+    assert!(event.get("rejected").is_none());
+
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = dispatch::dispatch_next(&pool, id, gate(&["pilot_v1"]), Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
+    // Без ключа `settings` воркеру нечего отклонять: `validate` пропускает ввод.
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert!(payload.get("settings").is_none(), "{payload}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn all_three_launch_settings_are_promoted_together_at_start(pool: PgPool) {
+    let (client, id, machine, _dir) = settings_client(&pool).await;
+    sqlx::query(
+        "update machine_harnesses set settings_midsession=false,permission_modes=$2 where machine_id=$1",
+    )
+    .bind(machine)
+    .bind(json!(["ask", "bypass"]))
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query("update conversations set permission_mode='ask' where id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    start_running(&pool, owner, id).await;
+    stop_live_execution(&pool, id).await;
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/conversations/{id}/settings"),
+            Some("settings"),
+            Some(json!({"model":"synthetic-large","effort":"low","permission_mode":"bypass"})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+
+    let started = resume_stopped_session(&client, &pool, id).await;
+
+    let start = start_command(&pool, started.command_id).await;
+    assert_eq!(
+        (
+            start.model.as_str(),
+            start.effort.as_str(),
+            start.permission_mode.as_str()
+        ),
+        ("synthetic-large", "low", "bypass")
+    );
+    let (model, effort, permission, pending) = settings_columns(&pool, id).await;
+    assert_eq!(
+        (model.as_str(), effort.as_str(), permission.as_str()),
+        ("synthetic-large", "low", "bypass")
+    );
+    assert_eq!(pending, json!({}));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stale_pending_value_is_dropped_at_start_and_the_launch_keeps_the_effective_one(
+    pool: PgPool,
+) {
+    let (client, id, machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    start_running(&pool, owner, id).await;
+    stop_live_execution(&pool, id).await;
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("/api/v1/conversations/{id}/settings"),
+            Some("settings"),
+            Some(json!({"effort":"low"})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+    // Каталог машины сменился, пока сессия стояла: усилия `low` больше нет.
+    sqlx::query("update machine_harnesses set models=$2 where machine_id=$1")
+        .bind(machine)
+        .bind(json!([{"id":"synthetic-small","efforts":["high"]}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let started = resume_stopped_session(&client, &pool, id).await;
+
+    assert_eq!(
+        start_command(&pool, started.command_id).await.effort,
+        "high"
+    );
+    let (_, effort, _, pending) = settings_columns(&pool, id).await;
+    assert_eq!(effort, "high");
+    assert_eq!(pending, json!({}));
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{id}")).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        event["rejected"],
+        json!({"keys":["effort"],"reason":"settings_unavailable"})
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_refused_by_a_live_execution_does_not_promote_pending_settings(pool: PgPool) {
+    use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
+    let (client, id, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    start_running(&pool, owner, id).await;
+    let path = format!("/api/v1/conversations/{id}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"model":"synthetic-large"})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+
+    for route in ["resume", "executions"] {
+        let body = (route == "resume").then(|| json!({}));
+        let refused = client
+            .send(Method::POST, &format!("{path}/{route}"), Some(route), body)
+            .await;
+        assert_eq!(refused.status, 409, "{route}");
+    }
+
+    let (model, _, _, pending) = settings_columns(&pool, id).await;
+    assert_eq!(model, "synthetic-small");
+    assert_eq!(pending, json!({"model":"synthetic-large"}));
+    // Живое исполнение по-прежнему получает смену с вводом.
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = dispatch::dispatch_next(&pool, id, gate(&["pilot_v1"]), Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"], json!({"model":"synthetic-large"}));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn preset_changed_on_a_stopped_session_stays_pending_and_arrives_with_the_input(
+    pool: PgPool,
+) {
+    use canterlot_hub::delivery::dispatch::{self, DispatchOutcome};
+    let (client, id, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "текст A").await;
+    let preset_id = preset["id"].as_str().unwrap();
+    start_running(&pool, owner, id).await;
+    stop_live_execution(&pool, id).await;
+    let path = format!("/api/v1/conversations/{id}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"effort":"low","instruction_profile":preset_id})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+
+    let started = resume_stopped_session(&client, &pool, id).await;
+
+    let start = start_command(&pool, started.command_id).await;
+    assert_eq!(start.effort, "low");
+    assert_eq!(start.instructions.expect("snapshot").mode, "clean");
+    let (_, effort, _, pending) = settings_columns(&pool, id).await;
+    assert_eq!(effort, "low");
+    assert_eq!(pending, json!({"instruction_profile":preset_id}));
+
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = dispatch::dispatch_next(
+        &pool,
+        id,
+        gate(&["pilot_v1", "instructions_v1"]),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, DispatchOutcome::Dispatched { .. }));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"]["instruction_profile"], preset_id);
+    assert_eq!(payload["settings"]["instructions"]["revision"], 1);
+    assert!(payload["settings"].get("effort").is_none(), "{payload}");
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::conversations::promote_settings_in_tx(&mut tx, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let detail = client
+        .send(Method::GET, &path, None, None)
+        .await
+        .json::<Value>();
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_profile"],
+        preset_id
+    );
+    assert_eq!(detail["settings"]["effective"]["effort"], "low");
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_preset"]["revision"],
+        1
+    );
 }
