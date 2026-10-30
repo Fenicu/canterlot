@@ -50,6 +50,7 @@ mod fake_exec;
 const FAKE_TOKEN: &str = "sk-ant-oat01-canterlot-fake-token-for-tests";
 const FAR_FUTURE_MS: u64 = 4_102_444_800_000;
 const HALF_HOUR: Duration = Duration::from_secs(1800);
+const FIRST_TICK: Duration = Duration::from_secs(60);
 
 type Fact = (&'static str, LimitWindow, Option<u16>, Option<u64>);
 
@@ -835,13 +836,13 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         state.wait_for(|s| *s == SessionState::Live).await.unwrap();
         assert_eq!(started.elapsed(), Duration::ZERO);
 
-        tokio::time::advance(interval - Duration::from_secs(1)).await;
+        tokio::time::advance(FIRST_TICK - Duration::from_secs(1)).await;
         for _ in 0..50 {
             tokio::task::yield_now().await;
         }
         assert!(
             source.calls().is_empty(),
-            "first tick one interval after start"
+            "first tick one minute after start"
         );
 
         tokio::time::advance(Duration::from_secs(1)).await;

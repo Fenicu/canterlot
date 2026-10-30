@@ -12,6 +12,7 @@ use crate::adapter::codex::{limits::observations_from_read_response, probe};
 use crate::config::{ClaudeCodeConfig, CodexConfig};
 
 pub const CODEX_IDLE_TICK_INTERVAL: Duration = Duration::from_secs(60);
+const FIRST_TICK_MAX_DELAY: Duration = Duration::from_secs(60);
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
@@ -120,7 +121,8 @@ impl LiveLimits {
 }
 
 /// Общий тикер опроса лимитов без живых сессий: каждый провайдер со своим интервалом,
-/// первый тик через интервал после регистрации. Решение, опрашивать ли на самом деле,
+/// первый тик не позже чем через минуту после регистрации: при перезапусках чаще
+/// интервала иначе не дошло бы до первого опроса. Решение, опрашивать ли на самом деле,
 /// остаётся за источником провайдера.
 #[derive(Debug, Default)]
 pub struct IdleTicker {
@@ -129,8 +131,11 @@ pub struct IdleTicker {
 
 impl IdleTicker {
     pub fn register(&mut self, provider: &str, interval: Duration) {
-        self.entries
-            .push((provider.to_owned(), interval, Instant::now() + interval));
+        self.entries.push((
+            provider.to_owned(),
+            interval,
+            Instant::now() + interval.min(FIRST_TICK_MAX_DELAY),
+        ));
     }
 
     /// Ждёт ближайшего срока и возвращает провайдеров, чей срок наступил; без записей не завершается.
