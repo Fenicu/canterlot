@@ -198,7 +198,7 @@ pub struct ErrorDetails {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[schema(
         nullable = false,
-        pattern = "^(open|decision_saved|decision_transmitting|decision_applied|decision_not_applied|closed_without_decision)$"
+        pattern = "^(open|decision_saved|decision_transmitting|decision_applied|decision_unconfirmed|decision_not_applied|closed_without_decision)$"
     )]
     pub current_state: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

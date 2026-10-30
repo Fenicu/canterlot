@@ -2318,7 +2318,7 @@ async fn apply_decision_applied(
     };
     if !matches!(
         request.state.as_str(),
-        "decision_saved" | "decision_transmitting"
+        "decision_saved" | "decision_transmitting" | "decision_unconfirmed"
     ) || !request.won_by(&fact.decision_id)
     {
         return Ok(true);
@@ -2377,11 +2377,30 @@ async fn apply_request_closed(
 }
 
 async fn apply_decision_unconfirmed(
-    _conn: &mut PgConnection,
-    _run: &ExecutionRef,
-    _fact: &DecisionUnconfirmed,
-    _correlation_id: Uuid,
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &DecisionUnconfirmed,
+    correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
+    let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
+        return Ok(true);
+    };
+    if !matches!(
+        request.state.as_str(),
+        "decision_saved" | "decision_transmitting"
+    ) || !request.won_by(&fact.decision_id)
+    {
+        return Ok(true);
+    }
+    // Повтор запрещён: команда гасится, поздний факт применения ещё переведёт запрос.
+    set_request_state(conn, &request, "decision_unconfirmed").await?;
+    complete_decision_command(
+        conn,
+        &request,
+        json!({"applied": null, "reason": non_empty_reason(&fact.reason, "undetermined")}),
+    )
+    .await?;
+    request_closed_event(conn, run, &request, "unconfirmed", correlation_id).await?;
     Ok(false)
 }
 

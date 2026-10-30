@@ -31,6 +31,7 @@ pub enum RequestState {
     DecisionSaved,
     DecisionTransmitting,
     DecisionApplied,
+    DecisionUnconfirmed,
     DecisionNotApplied,
     ClosedWithoutDecision,
 }
@@ -42,6 +43,7 @@ impl RequestState {
             Self::DecisionSaved => "decision_saved",
             Self::DecisionTransmitting => "decision_transmitting",
             Self::DecisionApplied => "decision_applied",
+            Self::DecisionUnconfirmed => "decision_unconfirmed",
             Self::DecisionNotApplied => "decision_not_applied",
             Self::ClosedWithoutDecision => "closed_without_decision",
         }
@@ -57,6 +59,7 @@ impl FromStr for RequestState {
             "decision_saved" => Ok(Self::DecisionSaved),
             "decision_transmitting" => Ok(Self::DecisionTransmitting),
             "decision_applied" => Ok(Self::DecisionApplied),
+            "decision_unconfirmed" => Ok(Self::DecisionUnconfirmed),
             "decision_not_applied" => Ok(Self::DecisionNotApplied),
             "closed_without_decision" => Ok(Self::ClosedWithoutDecision),
             other => Err(format!("unknown request state: {other}")),

@@ -1177,3 +1177,62 @@ async fn decision_facts_respect_request_state_and_winner(pool: PgPool) {
     );
     assert_eq!(command_state(&pool, command).await, "completed");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let request =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_u").await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let mut seq = 2;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            record_body::Body::DecisionTransmissionStarted(DecisionTransmissionStarted {
+                request_id: "toolu_u".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            }),
+            record_body::Body::DecisionUnconfirmed(
+                canterlot_proto::worker::v1::DecisionUnconfirmed {
+                    request_id: "toolu_u".into(),
+                    decision_id: winner.to_string(),
+                    reason: "undetermined".into(),
+                },
+            ),
+        ],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_unconfirmed");
+    assert_eq!(command_state(&pool, command).await, "completed");
+    let reasons = || async {
+        sqlx::query_scalar::<_, String>(
+            "select payload->>'reason' from events where kind = 'request_closed' and payload->>'request_id' = $1 order by id",
+        )
+        .bind(request.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(reasons().await, ["unconfirmed"]);
+    let snapshot = snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.data.open_requests.is_empty());
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_u", winner)],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_applied");
+    assert_eq!(reasons().await, ["unconfirmed", "applied"]);
+}

@@ -37,7 +37,7 @@ Self-hosted хаб для coding agents: Rust-хаб, Rust-воркеры на �
 | `crates/canterlot-hub/src/{conversations,groups}.rs` | Создание сессий, атрибуты, группы, список и прочитанность |
 | `crates/canterlot-hub/src/{presets,http/presets}.rs` | Пресеты инструкций: версии текста, CRUD API, события, снимок и стартовый пресет исполнителя |
 | `crates/canterlot-hub/src/http/{conversations,groups,machines,limits}.rs` | HTTP сессий и групп, чтение машин, лимитов и недавних каталогов |
-| `crates/canterlot-hub/src/requests.rs`, `migrations/0018_requests.sql` | Запросы агента и разрешения: таблица requests, первый ответ побеждает, `POST /api/v1/conversations/{id}/requests/{id}/decision`, события `request_opened`, `request_decided`, `request_transmitting`, `request_closed`, удержание очереди и активность `WaitingForUser` |
+| `crates/canterlot-hub/src/requests.rs`, `migrations/0018_requests.sql`, `migrations/0023_decision_unconfirmed.sql` | Запросы агента и разрешения: таблица requests (с состоянием `decision_unconfirmed`), первый ответ побеждает, команда `deliver_decision` через outbox, `POST /api/v1/conversations/{id}/requests/{id}/decision`, события `request_opened`, `request_decided`, `request_transmitting`, `request_closed`, удержание очереди и активность `WaitingForUser` |
 | `crates/canterlot-hub/build.rs` | Пересборка встроенных миграций при добавлении SQL-файла |
 | `crates/canterlot-hub/src/{snapshot,history}.rs` | Транзакционные снимки с границей журнала, история по scope_seq, блоки, ходы и делегирование |
 | `crates/canterlot-hub/src/{subscriptions.rs,http/ws.rs}` | WSS canterlot.v1: подписки по курсору, pull-based pump, слияние дельт и отключение зависшего клиента |
