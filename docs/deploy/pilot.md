@@ -142,11 +142,14 @@ mkdir -p /etc/canterlot
   DB_PASS=$(openssl rand -hex 24)
   sudo -u postgres psql -c "CREATE ROLE canterlot LOGIN;"
   printf "ALTER ROLE canterlot PASSWORD '%s';\n" "$DB_PASS" | sudo -u postgres psql -q
-  sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot;"
+  sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot ENCODING 'UTF8' TEMPLATE template0;"
   printf 'postgres://canterlot:%s@127.0.0.1:5432/canterlot\n' "$DB_PASS" > /etc/canterlot/db.url
   chown canterlot:canterlot /etc/canterlot/db.url
 )
 ```
+
+> [!IMPORTANT]
+> База должна быть в кодировке UTF-8: `sudo -u postgres psql -d canterlot -Atc "SHOW server_encoding;"` печатает `UTF8`. Миграции используют ICU-сортировку `und-x-icu` (уникальный индекс имён групп, поиск сессий по названию), а в базе `SQL_ASCII` накат останавливается с ошибкой `collation "und-x-icu" for encoding "SQL_ASCII" does not exist`. Кластер, созданный пакетом PostgreSQL в минимальном контейнере без заданной локали, может получить кодировку `SQL_ASCII`, и `CREATE DATABASE` без `ENCODING` унаследует её из `template1`, поэтому кодировка и `template0` в команде выше заданы явно. Кодировку существующей базы не сменить: удалите пустую базу и создайте её заново с `ENCODING 'UTF8'`.
 
 ### 2.3. Межсетевой экран nftables на LXC хаба
 
@@ -465,7 +468,7 @@ chat.example.com {
             path /_share
         }
         handle @share {
-            redir /share?error=sw_inactive 303
+            redir * /share?error=sw_inactive 303
         }
 
         # 6. Раздача статики PWA (service-worker и manifest без кэширования)
@@ -479,6 +482,8 @@ chat.example.com {
     }
 }
 ```
+
+В `redir` матчер `*` обязателен: единственный аргумент, начинающийся с `/`, Caddy читает как матчер пути, а не как адрес перехода (`redir /share?error=sw_inactive 303` даёт `302` с заголовком `Location: 303`).
 
 ### 4.3. Приёмка прокси скриптом `check-proxy.sh`
 
@@ -590,8 +595,8 @@ backoff_max = "30s"                                 # crates/canterlot-worker/sr
 backoff_reset_after = "30s"                         # crates/canterlot-worker/src/config.rs:74
 
 [execution]                                         # crates/canterlot-worker/src/config.rs:35
-# Белый список путей, в которых разрешено запускать сессии агентов
-allowed_workdir_roots = ["/home/user/myprojects", "/home/user/work"] # crates/canterlot-worker/src/config.rs:36
+# Корни рабочих каталогов; ["/"] разрешает любой абсолютный путь, как решил владелец.
+allowed_workdir_roots = ["/"] # crates/canterlot-worker/src/config.rs:36
 supervisor_exe = "/usr/local/bin/canterlot-worker"  # crates/canterlot-worker/src/config.rs:37 (current_exe по умолчанию)
 spawn_timeout = "10s"                               # crates/canterlot-worker/src/config.rs:39
 
@@ -610,19 +615,16 @@ fetch_parallelism = 2                               # crates/canterlot-worker/sr
 fetch_retry = "2s"                                  # crates/canterlot-worker/src/config.rs:299
 fetch_attempts = 5                                  # crates/canterlot-worker/src/config.rs:300
 fetch_backoff_cap = "30s"                           # crates/canterlot-worker/src/config.rs:302
-
-[[instruction_profiles]]                            # crates/canterlot-worker/src/config.rs:287
-name = "executor"                                   # crates/canterlot-worker/src/config.rs:288
-title = "Исполнитель"                               # crates/canterlot-worker/src/config.rs:289
-description = "Профиль без персоны (нейтральный агент)" # crates/canterlot-worker/src/config.rs:290
-harnesses = ["claude_code", "codex"]                # crates/canterlot-worker/src/config.rs:291
 ```
+
+Таблицы адаптеров `[claude_code]` и `[codex]` (в том числе необязательный `[codex].home_dir`) показаны в примере `worker.toml` в [README.md](../../README.md). Раздел `[[instruction_profiles]]` из конфигурации воркера удалён: с ним воркер не запустится, потому что пресеты инструкций хранит хаб и редактируются они в PWA ([docs/design/pilot.md#4-создание-сессии-и-пресеты-инструкций](../design/pilot.md#4-создание-сессии-и-пресеты-инструкций)).
 
 ### 6.3. Права доступа к файлам и каталогам
 
 - `token_file`: обязательно права `0600` (`chmod 600 ~/.config/canterlot/token`).
 - `data_dir`: создаётся воркером автоматически с правами `0700`.
-- Все каталоги исполнений `data_dir/executions/<id>` имеют права `0700`, а сокеты IPC и `spec.toml` — `0600`.
+- Все каталоги исполнений `data_dir/executions/<id>` имеют права `0700`, а сокеты IPC и `spec.toml` — `0600`; файл `instructions.md` с текстом пресета внутри каталога исполнения — `0600`.
+- `CODEX_HOME` canterlot (`[codex].home_dir`, по умолчанию `data_dir/codex-home`) нужен пресетам, кроме «Как у владельца»: воркер сам создаёт его с правами `0700`, наполняет символическими ссылками на записи `~/.codex` и собственным `AGENTS.md`, а путь внутри `/tmp`, `/var/tmp` или домашнего каталога Codex владельца отвергает.
 
 ### 6.4. Пользовательский юнит systemd и выживание процессов
 

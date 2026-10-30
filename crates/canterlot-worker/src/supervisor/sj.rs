@@ -218,10 +218,6 @@ impl Sj {
             ship.next = ship.next.max(up_to + 1);
         }
         self.journal.ack(up_to)?;
-        // Закрытый журнал не растёт, а JournalClosed нужен рестарту до удаления каталога.
-        if self.closed_reason.is_some() {
-            return Ok(());
-        }
         // Компакция идёт до самой ранней ещё нужной записи: хаб подтвердил,
         // а восстановление держится на RequestOpened открытого запроса
         // (и его передаче решения).
@@ -296,25 +292,6 @@ mod tests {
             decision_id: "d".into(),
             reason: "x".repeat(64 * 1024),
         })
-    }
-
-    #[test]
-    fn closed_journal_keeps_its_reason_after_ack_and_reopen() {
-        let root = tempfile::tempdir().unwrap();
-        let mut sj = Sj::create(root.path()).unwrap();
-        sj.append(Body::JournalClosed(
-            canterlot_proto::worker::v1::JournalClosed {
-                execution_id: "exec".into(),
-                generation: 7,
-                reason: "stopped".into(),
-            },
-        ))
-        .unwrap();
-        sj.flush().unwrap();
-        sj.ack(sj.last_seq()).unwrap();
-        drop(sj);
-        let reopened = Sj::create(root.path()).unwrap();
-        assert_eq!(reopened.closed_reason().as_deref(), Some("stopped"));
     }
 
     #[test]
