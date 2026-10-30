@@ -2052,3 +2052,70 @@ async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
     let (_cmd4, echo4) = echo_turn(&p, id, &turn4.to_string()).await;
     assert!(echo4.contains("mode=clean"), "{echo4}");
 }
+
+/// Агент через синтетический вызов применяет пресет к своей сессии:
+/// вызов `presets.apply` ставит подвешенную смену, следующий ход видит ревизию.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let preset = p
+        .post(
+            "/api/v1/presets",
+            Some(json!({"title": "Агентский", "text": "текст агента"})),
+            201,
+        )
+        .await;
+    let preset_id = preset["id"].as_str().unwrap();
+    let created = p
+        .post(
+            "/api/v1/conversations",
+            Some(json!({
+                "machine_id": p.machine,
+                "harness": "synthetic",
+                "workdir": p.work.to_str().unwrap(),
+                "model": "synthetic-large",
+                "effort": "high",
+                "start": true,
+            })),
+            201,
+        )
+        .await;
+    let id: Uuid = created["conversation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    until("execution running", async || {
+        p.detail(id).await["execution"]["state"] == "running"
+    })
+    .await;
+    // Ход 1: агент вызывает presets.apply к своей сессии.
+    let call = json!({"synthetic": [{"agent_call": {"tool": "presets.apply", "arguments": {"id": preset_id}}}]});
+    let submitted = p
+        .post(
+            &format!("/api/v1/conversations/{id}/inputs"),
+            Some(json!({"content":[{"type":"text","text":call.to_string()}]})),
+            201,
+        )
+        .await;
+    let input: Uuid = submitted["input_id"].as_str().unwrap().parse().unwrap();
+    p.accepted(input).await;
+    // Блок с итогом вызова не привязан к команде ввода.
+    until("agent call answered", async || {
+        p.history(id).await.iter().any(|item| {
+            item["kind"] == "block"
+                && item["block_kind"] == "text"
+                && item["state"] == "final"
+                && item["content"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("next_turn"))
+        })
+    })
+    .await;
+    // Ход 2: подвешенная смена применена, адаптер видит пресет.
+    let turn = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd, echo) = echo_turn(&p, id, &turn.to_string()).await;
+    assert!(echo.contains("mode=preset"), "{echo}");
+    assert!(echo.contains("revision=1"), "{echo}");
+}

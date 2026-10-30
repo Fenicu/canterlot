@@ -29,10 +29,10 @@ impl WorkerData for HubGrpc {
 
     async fn agent_call(
         &self,
-        _request: Request<canterlot_proto::worker::v1::AgentCallRequest>,
+        request: Request<canterlot_proto::worker::v1::AgentCallRequest>,
     ) -> Result<Response<canterlot_proto::worker::v1::AgentCallResponse>, Status> {
-        // Вызовы инструментов агента — задача 4 плана 2c.
-        Err(Status::unimplemented("agent calls are not supported yet"))
+        // Вызовы инструментов агента: разговор и владелец — из живого исполнения.
+        super::agent::agent_call(self, request).await
     }
 
     async fn data(
