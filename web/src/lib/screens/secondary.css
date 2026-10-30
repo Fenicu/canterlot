@@ -4,7 +4,7 @@
 .secondary-content p { margin-block: var(--s4); }
 .secondary-content a { color: var(--accent-link); }
 .secondary-content button { min-height: var(--target); padding: var(--s4) var(--s8); color: var(--text); background: var(--raised); border: var(--s0); border-radius: var(--radius-pill); cursor: pointer; }
-.secondary-content button:hover { background: var(--hover); }
+@media (hover: hover) and (pointer: fine) { .secondary-content button:hover { background: var(--hover); } }
 .secondary-content button:active { background: var(--selected); }
 .secondary-content button:disabled { cursor: default; color: var(--muted); }
 .secondary-content .note { color: var(--muted); font-size: var(--fs-meta); }

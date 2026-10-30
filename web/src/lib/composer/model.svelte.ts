@@ -12,6 +12,8 @@ import { utf8Length } from "#lib/stores/blocks.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
 import { validateScheduleTime } from "#lib/composer/schedule.js";
 
+export const EMPTY_DRAFT_REASON = "Введите сообщение или прикрепите файл";
+
 export type SendGate = { ok: true } | { ok: false; reason: string };
 
 export type Limits =
@@ -71,7 +73,7 @@ export class ComposerModel {
 
     // 1. Пустой ввод без вложений
     if (trimmed.length === 0 && activeUploads.length === 0) {
-      return { ok: false, reason: "Введите сообщение или прикрепите файл" };
+      return { ok: false, reason: EMPTY_DRAFT_REASON };
     }
 
     // 2. Вложения ещё загружаются

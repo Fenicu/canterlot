@@ -4,16 +4,19 @@
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
 	import { theme } from '#lib/theme.js';
+	import Icon from '#lib/ui/Icon.svelte';
 
 	let {
 		chat,
 		rootBlockId,
 		now = Date.now(),
+		embedded = false,
 		onInfo
 	}: {
 		chat: ChatStore;
 		rootBlockId: string;
 		now?: number;
+		embedded?: boolean;
 		onInfo?: (runId: string) => void;
 	} = $props();
 
@@ -25,48 +28,45 @@
 	);
 </script>
 
-<div class="lane-screen" data-ready>
-	<header class="topbar lane-header">
-		<a
-			class="icon-button back"
-			href={resolve(`c/${chat.id}`)}
-			aria-label="К оркестратору"
-		><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m13 5-7 7 7 7"></path></svg></a>
+<div class="lane-screen" class:embedded data-ready>
+	{#if !embedded}
+		<header class="topbar">
+			<a
+				class="icon-button"
+				href={resolve(`c/${chat.id}`)}
+				aria-label="К оркестратору"
+			><Icon name="back" /></a>
 
-		<div class="grow header-info">
-			<div class="row title-row">
-				<span class="mark"></span>
-				<h1 class="header-title">{model.title}</h1>
+			<div class="header-info">
+				<div class="title-row">
+					<span class="mark"></span>
+					<h1 class="header-title">{model.title}</h1>
+				</div>
+				<div class="subtitle">{model.subtitle}</div>
 			</div>
-			<div class="subtitle">{model.subtitle}</div>
-		</div>
-		<button
-			type="button"
-			class="icon-button symbol"
-			data-theme-toggle
-			aria-label="Сменить тему"
-			onclick={() => theme.toggle()}
-		>
-			◐
-		</button>
-	</header>
+			<button
+				type="button"
+				class="icon-button"
+				data-theme-toggle
+				aria-label="Сменить тему"
+				onclick={() => theme.toggle()}
+			>
+				<Icon name={theme.effective === 'dark' ? 'sun' : 'moon'} />
+			</button>
+		</header>
+	{/if}
 
 	<nav class="breadcrumb" aria-label="Путь делегирования">
-		<a href={resolve(`c/${chat.id}`)}>{model.breadcrumb[0]}</a>
-		→ 
-		<span class="secondary">{model.breadcrumb[1]}</span>
-
-		<div class="live-line">
+		<p class="path"><a href={resolve(`c/${chat.id}`)}>{model.breadcrumb[0]}</a><span aria-hidden="true">→</span><span>{model.breadcrumb[1]}</span></p>
+		<p class="live-line">
 			<span class="live-dot" class:active={model.running}></span>
 			{model.status}
-		</div>
+		</p>
 	</nav>
 
 	{#if model.task}
 		<div class="lane-intro">
-			<div class="row between">
-				<strong>Задача от оркестратора</strong>
-			</div>
+			<strong>Задача от оркестратора</strong>
 			<p>{model.task}</p>
 		</div>
 	{/if}
@@ -81,17 +81,10 @@
 	</div>
 
 	<footer class="lane-footer">
-		<aside class="pending">
-			<div class="pending-line">
-				<span class="secondary">Результат вернётся в основную сессию</span>
-			</div>
-		</aside>
-		<div class="lane-nav-back">
-			<a
-				class="button return-link"
-				href={resolve(`c/${chat.id}`)}
-			>К основной сессии</a>
-		</div>
+		<p class="pending-line">Результат вернётся в основную сессию</p>
+		{#if !embedded}
+			<a class="return-link" href={resolve(`c/${chat.id}`)}>К основной сессии</a>
+		{/if}
 	</footer>
 </div>
 
@@ -104,26 +97,30 @@
 		min-width: 0;
 		min-height: 0;
 		position: relative;
-		background: var(--surface);
 		color: var(--text);
 	}
-	.lane-header {
+	.topbar {
 		display: flex;
 		align-items: center;
 		gap: var(--s2);
-		padding: var(--s2) var(--s4);
-		margin: var(--s5) var(--s6) var(--s3);
+		min-width: 0;
+		min-height: var(--target);
+		margin: var(--s5) var(--gutter) var(--s3);
+		padding: var(--s2) var(--s3);
 		border-radius: var(--radius-pill);
 		background: var(--surface);
-		min-height: var(--target);
 	}
 	.header-info {
+		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: var(--s1);
 		min-width: 0;
 	}
 	.title-row {
 		display: flex;
 		align-items: center;
-		gap: var(--s2);
+		gap: var(--s3);
 		min-width: 0;
 	}
 	.header-title {
@@ -142,7 +139,7 @@
 		flex-shrink: 0;
 	}
 	.subtitle {
-		font-size: var(--fs-meta);
+		font-size: var(--fs-sm);
 		color: var(--muted);
 		white-space: nowrap;
 		overflow: hidden;
@@ -150,37 +147,39 @@
 	}
 	.breadcrumb {
 		display: flex;
-		align-items: center;
-		gap: var(--s2);
-		padding: var(--s2) var(--s4);
-		background: var(--raised);
+		flex-direction: column;
+		gap: var(--s1);
+		margin: var(--s0) var(--gutter) var(--s4);
+		padding: var(--s2) var(--s6) var(--s4);
+		border-radius: var(--radius-card);
+		background: var(--surface);
 		font-size: var(--fs-meta);
-		color: var(--muted);
+		color: var(--secondary);
+	}
+	.path {
+		display: flex;
 		flex-wrap: wrap;
+		align-items: center;
+		gap: var(--s3);
+		margin: 0;
 	}
 	.breadcrumb a {
 		display: inline-flex;
 		align-items: center;
 		min-height: var(--target);
-		color: var(--text);
-		text-decoration: none;
-	}
-	.breadcrumb a:hover {
+		color: var(--secondary);
 		text-decoration: underline;
-	}
-	.secondary {
-		color: var(--accent);
-		font-weight: var(--weight-semibold);
+		text-underline-offset: var(--s1);
 	}
 	.live-line {
-		margin-left: auto;
 		display: flex;
 		align-items: center;
-		gap: var(--s2);
-		font-size: var(--fs-meta);
-		color: var(--muted);
+		gap: var(--s3);
+		margin: 0;
+		font-size: var(--fs-sm);
 	}
 	.live-dot {
+		flex: none;
 		width: var(--mark);
 		height: var(--mark);
 		border-radius: var(--radius-round);
@@ -190,15 +189,19 @@
 		background: var(--accent);
 	}
 	.lane-intro {
-		margin: var(--s3) var(--s4) 0;
-		padding: var(--s3);
+		margin: var(--s0) var(--gutter) var(--s3);
+		padding: var(--s5) var(--s6);
 		border-radius: var(--radius-card);
-		background: var(--raised);
-		font-size: var(--fs-body);
+		background: var(--accent-soft);
+	}
+	.lane-intro strong {
+		font-weight: var(--weight-semibold);
 	}
 	.lane-intro p {
-		margin: var(--s1) 0 0;
-		color: var(--text);
+		margin: var(--s2) 0 0;
+		color: var(--secondary);
+		font-size: var(--fs-meta);
+		overflow-wrap: anywhere;
 	}
 	.lane-timeline-container {
 		flex: 1;
@@ -209,31 +212,28 @@
 	.lane-footer {
 		display: flex;
 		flex-direction: column;
-		background: var(--surface);
-		padding: var(--s2) var(--s4);
-		gap: var(--s2);
+		align-items: stretch;
+		gap: var(--s3);
+		padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom));
 	}
 	.pending-line {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-		padding: var(--s2);
-		font-size: var(--fs-meta);
-	}
-	.lane-nav-back {
-		display: flex;
-		justify-content: center;
+		margin: 0;
+		padding: var(--s3) var(--s6);
+		border-radius: var(--radius-pill);
+		background: var(--surface);
+		color: var(--accent-link);
+		font-size: var(--fs-sm);
 	}
 	.return-link {
 		display: inline-flex;
 		align-items: center;
 		justify-content: center;
-		padding: var(--s2) var(--s4);
-		border-radius: var(--radius-card);
-		background: var(--raised);
-		color: var(--accent-link);
-		text-decoration: none;
 		min-height: var(--target);
+		padding-inline: var(--s8);
+		border-radius: var(--radius-pill);
+		background: var(--raised);
+		color: var(--text);
+		font-size: var(--fs-meta);
 	}
 	.icon-button {
 		background: var(--transparent);
@@ -243,26 +243,9 @@
 		display: flex;
 		align-items: center;
 		justify-content: center;
+		flex: none;
 		width: var(--target);
 		height: var(--target);
-		border-radius: var(--radius-card);
-	}
-	.icon-button svg {
-		width: var(--icon);
-		height: var(--icon);
-		fill: none;
-		stroke: currentColor;
-		stroke-width: 2;
-	}
-	.grow {
-		flex: 1;
-	}
-	.row {
-		display: flex;
-		align-items: center;
-		gap: var(--s2);
-	}
-	.row.between {
-		justify-content: space-between;
+		border-radius: var(--radius-round);
 	}
 </style>

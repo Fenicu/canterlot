@@ -7,6 +7,7 @@
   import { presets } from '#lib/composer/schedule.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import Button from '#lib/ui/Button.svelte';
+  import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
 
@@ -118,15 +119,15 @@
   <div class="presets" role="radiogroup" aria-label="Быстрый выбор">
     {#each options as option, index (option.label)}
       <label class:on={selected === index}>
-        <input type="radio" name="when-{panelId}" checked={selected === index} onchange={() => choose(index)} />
+        <input class="sr-only" type="radio" name="when-{panelId}" checked={selected === index} onchange={() => choose(index)} />
         <span>{option.label}</span>
         <time datetime={new Date(option.at).toISOString()}>{fmt.clock(option.at)}</time>
       </label>
     {/each}
   </div>
   <div class="when">
-    <label>Дата <input type="date" bind:value={date} oninput={editFields} /></label>
-    <label>Время <input type="time" bind:value={time} oninput={editFields} /></label>
+    <Field label="Дата">{#snippet children({ id })}<input {id} type="date" bind:value={date} oninput={editFields} />{/snippet}</Field>
+    <Field label="Время">{#snippet children({ id })}<input {id} type="time" bind:value={time} oninput={editFields} />{/snippet}</Field>
   </div>
   <p class="zone">{zoneLine(now)}</p>
   {#if blocked}
@@ -156,42 +157,41 @@
 
 <style>
   .popover {
+    --field-bg: var(--popover-hover);
     position: absolute;
-    right: var(--s4);
+    right: var(--gutter);
     bottom: 100%;
     z-index: 2;
-    width: min(100%, var(--phone-max));
+    width: min(calc(100% - 2 * var(--gutter)), var(--phone-max));
     margin-bottom: var(--s2);
     padding: var(--s6);
     border-radius: var(--radius-card);
-    background: var(--surface);
+    background: var(--popover);
     color: var(--text);
     display: flex;
     flex-direction: column;
-    gap: var(--s3);
+    gap: var(--s4);
+    animation: popover-enter var(--duration-fast) var(--ease);
   }
+  @keyframes popover-enter { from { opacity: 0; transform: translateY(var(--shift-label)); } to { opacity: 1; transform: none; } }
   header { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
-  h2 { margin: 0; font-size: var(--fs-title); font-weight: var(--weight-medium); }
-  .presets { display: flex; flex-direction: column; gap: var(--s2); }
-  label {
+  h2 { margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
+  .presets { display: flex; flex-direction: column; gap: var(--s1); margin-bottom: var(--s2); }
+  .presets label {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: var(--s4);
     min-height: var(--target);
+    padding: var(--s2) var(--s6);
+    border-radius: var(--radius-pill);
+    font-size: var(--fs-meta);
+    cursor: pointer;
   }
-  .presets label { padding: var(--s2) var(--s4); border-radius: var(--radius-pill); background: var(--raised); }
-  .presets label.on { background: var(--selected); }
-  input[type='radio'] { accent-color: var(--accent); }
-  .when { display: flex; flex-wrap: wrap; gap: var(--s4); }
-  .when label { flex: 1; flex-direction: column; align-items: stretch; }
-  input[type='date'], input[type='time'] {
-    min-height: var(--target);
-    border: var(--s0);
-    border-radius: var(--radius-sm);
-    background: var(--bg);
-    color: var(--text);
-  }
+  .presets label.on { background: var(--popover-hover); color: var(--accent-link); }
+  .presets label:has(input:focus-visible) { outline: var(--focus-width) solid var(--accent); }
+  .when { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); margin-bottom: var(--s2); }
   time { color: var(--secondary); font-variant-numeric: tabular-nums; }
+  .on time { color: inherit; }
   .zone { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
 </style>

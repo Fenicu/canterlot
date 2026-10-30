@@ -1,16 +1,4 @@
 /* Стили подсветки синтаксиса highlight.js, привязанные исключительно к дизайн-токенам */
-pre code.hljs {
-  display: block;
-  overflow-x: auto;
-  padding: var(--s3);
-  background: var(--code);
-  color: var(--text);
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  line-height: var(--lh-code);
-  border-radius: var(--radius-sm);
-}
-
 .hljs-keyword,
 .hljs-selector-tag,
 .hljs-built_in,

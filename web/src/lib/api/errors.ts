@@ -160,7 +160,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   profile_unknown: {
     action: "none",
-    message: "Пресет инструкций не найден",
+    message: "Инструкции не найдены",
   },
   workdir_not_allowed: {
     action: "none",
@@ -212,27 +212,27 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   preset_not_found: {
     action: "reload",
-    message: "Пресет не найден",
+    message: "Инструкции не найдены",
   },
   preset_builtin: {
     action: "none",
-    message: "Встроенный пресет нельзя изменить или удалить",
+    message: "Встроенные инструкции нельзя изменить или удалить",
   },
   preset_revision_conflict: {
     action: "reload",
-    message: "Пресет уже изменён",
+    message: "Инструкции уже изменены",
   },
   preset_title_taken: {
     action: "none",
-    message: "Пресет с таким названием уже есть",
+    message: "Инструкции с таким названием уже есть",
   },
   preset_limit_reached: {
     action: "none",
-    message: "Слишком много пресетов",
+    message: "Слишком много инструкций",
   },
   preset_invalid: {
     action: "none",
-    message: "Некорректный пресет",
+    message: "Некорректные инструкции",
   },
 };
 

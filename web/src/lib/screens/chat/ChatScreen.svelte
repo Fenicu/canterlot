@@ -13,6 +13,8 @@
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
+	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
+	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import Sheet from '#lib/ui/Sheet.svelte';
@@ -64,6 +66,8 @@
 
 	let showSettings = $state(false);
 	let showDiagnostics = $state(false);
+	let showSheet = $state(false);
+	const listRow = $derived(runtime?.list.items.get(chat.id) ?? null);
 	let infoRunId = $state<string | null>(null);
 
 	onMount(async () => {
@@ -103,7 +107,11 @@
 		{providers}
 		{thresholds}
 		{now}
-		onOpenSettings={() => (showSettings = true)}
+		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
+		onOpenSettings={() => {
+			if (pane.desktop) pane.open('settings');
+			else showSettings = true;
+		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 	/>
 
@@ -152,6 +160,16 @@
 		</Sheet>
 	{/if}
 
+	{#if showSheet && listRow}
+		<SessionSheet
+			item={listRow}
+			groups={runtime?.list.groups ?? []}
+			machine={resolvedMachine}
+			touch
+			onclose={() => (showSheet = false)}
+		/>
+	{/if}
+
 	{#if showDiagnostics}
 		<Diagnostics
 			{chat}
@@ -189,10 +207,6 @@
 		max-width: none;
 	}
 
-	.screen :global(.feed) {
-		padding-inline: max(0%, calc((100% - var(--reading-max)) / 2));
-	}
-
 	.waiting-notice {
 		display: flex;
 		flex-direction: column;
@@ -218,7 +232,7 @@
 
 	.request-cards-slot,
 	.request-card-slot {
-		padding: var(--s3) var(--s4);
+		padding: var(--s3) var(--gutter);
 		box-sizing: border-box;
 		width: 100%;
 		display: flex;

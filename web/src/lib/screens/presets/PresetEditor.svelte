@@ -56,7 +56,7 @@
       serverText = text;
       baseRevision = detail.revision ?? 0;
     } catch {
-      loadError = 'Не удалось загрузить пресет. Закройте и попробуйте снова';
+      loadError = 'Не удалось загрузить инструкцию. Закройте и попробуйте снова';
     } finally {
       loaded = true;
     }
@@ -88,18 +88,18 @@
       return;
     }
     if (err instanceof ApiError && err.code === 'preset_title_taken') {
-      titleError = 'Пресет с таким названием уже есть';
+      titleError = 'Инструкции с таким названием уже есть';
       return;
     }
     if (err instanceof ApiError && err.code === 'preset_invalid') {
       const field = err.details?.field as string | undefined;
-      const message = err.message || 'Некорректный пресет';
+      const message = err.message || 'Некорректные инструкции';
       if (field === 'description') descriptionError = message;
       else if (field === 'text') textError = message;
       else titleError = message;
       return;
     }
-    textError = err instanceof Error ? err.message : 'Не удалось сохранить пресет';
+    textError = err instanceof Error ? err.message : 'Не удалось сохранить инструкцию';
   }
 
   async function save(): Promise<void> {
@@ -136,14 +136,14 @@
       conflict = null;
       draft = null;
     } catch {
-      loadError = 'Не удалось обновить пресет. Попробуйте снова';
+      loadError = 'Не удалось обновить инструкцию. Попробуйте снова';
     }
   }
 </script>
 
-<Sheet open title={editing ? 'Изменить пресет' : 'Новый пресет'} {onclose}>
+<Sheet open title={editing ? 'Изменить инструкцию' : 'Новая инструкция'} {onclose}>
   {#if editing && !loaded}
-    <p>Загружаю пресет…</p>
+    <p>Загружаю инструкцию…</p>
   {:else if loadError}
     <p role="alert">{loadError}</p>
   {:else}
@@ -167,7 +167,7 @@
       <p>{counter.text}</p>
       {#if textError}<p role="alert">{textError}</p>{/if}
       {#if conflict}
-        <p role="alert">Пресет уже изменён (версия {conflict.current}). Обновите и повторите правку.</p>
+        <p role="alert">Инструкции уже изменены (версия {conflict.current}). Обновите и повторите правку.</p>
         {#if draft !== null && draft !== serverText}
           <Disclosure title="Ваш вариант" open><p>{draft}</p></Disclosure>
         {/if}
@@ -203,6 +203,8 @@
     padding: var(--s4) var(--s6);
   }
   textarea {
+    field-sizing: content;
+    max-height: calc(var(--fs-input) * var(--lh-body) * 16);
     border-radius: var(--radius);
   }
   .mono {

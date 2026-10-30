@@ -2,6 +2,7 @@
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
   import { permissionView } from './permissionView';
+  import TruncatedNote from './TruncatedNote.svelte';
 
   let {
     request,
@@ -49,6 +50,8 @@
   }
 
   const safeUrl = $derived(safeHttpUrl(elicitationUrl));
+  const urlHost = $derived(safeUrl ? new URL(safeUrl).host : '');
+  const opensLink = $derived(elicitationMode === 'url' && safeUrl !== null);
   const missingUrl = $derived(elicitationMode === 'url' && elicitationUrl.trim().length === 0);
 
   const isDisabled = $derived(disabled || request.state !== 'open');
@@ -65,6 +68,8 @@
 
   async function handleAllow() {
     if (isAllowDisabled) return;
+    // Для запроса со ссылкой «Открыть» обязана открыть её, иначе подпись обещает то, чего не делает.
+    if (opensLink && safeUrl) window.open(safeUrl, '_blank', 'noopener,noreferrer');
     await onDecision({ kind: 'permission', behavior: 'allow' });
   }
 
@@ -76,13 +81,17 @@
 
 <div class="permission-card" data-disabled={isDisabled ? '' : undefined}>
   <div class="card-head">
-    <span class="meta">Запрос разрешения</span>
-    {#if toolName}
-      <span class="tool-tag">{isElicitation ? 'Запрос MCP-сервера' : toolName}</span>
+    {#if isElicitation}
+      <span class="meta">Запрос MCP-сервера</span>
+    {:else}
+      <span class="meta">Запрос разрешения</span>
+      {#if toolName}<span class="tool-tag">{toolName}</span>{/if}
     {/if}
   </div>
 
-  {#if elicitationServer}
+  {#if opensLink && elicitationServer}
+    <h3 class="title">Сервер {elicitationServer} просит открыть ссылку</h3>
+  {:else if elicitationServer}
     <p class="meta-line">Сервер: {elicitationServer}</p>
   {/if}
 
@@ -102,7 +111,7 @@
     {#if safeUrl}
       <!-- Внешняя ссылка сервера: resolve() здесь не нужен -->
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
-      <a class="url" href={safeUrl} target="_blank" rel="noopener noreferrer">{elicitationUrl}</a>
+      <a class="url" href={safeUrl} target="_blank" rel="noopener noreferrer"><strong>{urlHost}</strong><span class="full">{elicitationUrl}</span></a>
     {:else}
       <p class="url-text">{elicitationUrl}</p>
     {/if}
@@ -136,6 +145,8 @@
     <p class="warning" role="note">Отказ также прервёт ход</p>
   {/if}
 
+  <TruncatedNote payload={request.payload} />
+
   <div class="actions">
     <button
       type="button"
@@ -144,7 +155,7 @@
       use:disableIf={isAllowDisabled}
       onclick={handleAllow}
     >
-      Разрешить
+      {opensLink ? 'Открыть' : 'Разрешить'}
     </button>
     <button
       type="button"
@@ -202,7 +213,30 @@
   }
 
   .url {
+    min-height: var(--target);
+    display: flex;
+    flex-direction: column;
+    gap: var(--s1);
     color: var(--accent-link);
+    font-weight: var(--weight-medium);
+  }
+
+  .full {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    font-weight: var(--weight-normal);
+  }
+
+  .title {
+    margin: var(--s0);
+    font-size: var(--fs-title);
+    font-weight: var(--weight-semibold);
+    line-height: var(--lh-tight);
   }
 
   .url:focus-visible {
@@ -254,19 +288,22 @@
 
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: var(--s3);
     margin-top: var(--s2);
   }
 
   .btn {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 0;
+    max-width: 100%;
     min-height: var(--target);
     padding: var(--s2) var(--s6);
     border-radius: var(--radius-pill);
     font-size: var(--fs-body);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
   }
 
   .btn:focus-visible {
@@ -275,7 +312,6 @@
   }
 
   .btn:disabled {
-    opacity: var(--opacity-low);
     cursor: not-allowed;
   }
 
@@ -287,6 +323,16 @@
   .btn-deny {
     background: var(--raised);
     color: var(--danger);
+  }
+
+  .btn-allow:disabled {
+    background: var(--accent-soft);
+    color: var(--muted);
+  }
+
+  .btn-deny:disabled {
+    background: var(--raised);
+    color: var(--muted);
   }
 
   .btn-deny:not(:disabled):hover {

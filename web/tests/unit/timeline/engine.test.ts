@@ -277,3 +277,8 @@ function input(
   view.feedSeq = seq;
   return { kind: "input", key: `input:${key}`, seq, input: view };
 }
+
+it("final_tool_without_an_end_mark_shows_no_duration", () => {
+  expect(toolStatusText({ running: false, error: false, startedAt: 1000, finishedAt: null, now: 90_000_000 })).toBe("");
+  expect(toolStatusText({ running: true, error: false, startedAt: 0, finishedAt: null, now: 2000 })).toBe("2 с");
+});

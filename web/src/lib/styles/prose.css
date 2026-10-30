@@ -1,0 +1,32 @@
+.prose { line-height: var(--lh-body); overflow-wrap: anywhere; }
+.prose :is(p, ul, ol, pre, blockquote, table) { margin-block: var(--s6); }
+.prose :is(h1, h2, h3, h4, h5, h6) { margin-block: var(--s8) var(--s4); font-weight: var(--weight-semibold); line-height: var(--lh-tight); letter-spacing: var(--tracking-normal); }
+.prose h1 { font-size: var(--fs-title); }
+.prose h2 { font-size: var(--fs-input); }
+.prose :is(h3, h4, h5, h6) { font-size: var(--fs-body); }
+.prose > :first-child > :first-child { margin-top: var(--s0); }
+.prose > :last-child > :last-child { margin-bottom: var(--s0); }
+.prose strong { font-weight: var(--weight-semibold); }
+.prose a { color: var(--accent-link); text-decoration: underline; text-underline-offset: var(--s1); }
+.prose :is(ul, ol) { padding-left: var(--s9); }
+.prose li + li { margin-top: var(--s2); }
+.prose li::marker { color: var(--muted); }
+.prose hr { height: var(--hairline); margin-block: var(--s8); border: var(--s0); background: var(--line); }
+.prose code { font-size: var(--fs-meta); }
+.prose :not(pre) > code { padding-inline: var(--s2); border-radius: var(--radius-sm); background: var(--raised); }
+.prose pre { max-width: 100%; padding: var(--s5) var(--s6); overflow-x: auto; overflow-wrap: normal; border-radius: var(--radius-sm); background: var(--code); }
+.prose pre code { font-size: inherit; overflow-wrap: normal; }
+.prose blockquote { margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }
+.prose blockquote > :first-child { margin-top: var(--s0); }
+.prose blockquote > :last-child { margin-bottom: var(--s0); }
+.prose table { display: block; width: max-content; max-width: 100%; overflow-x: auto; overflow-wrap: normal; border-collapse: separate; border-spacing: var(--s0); font-size: var(--fs-meta); }
+.prose :is(th, td) { padding: var(--s3) var(--s5); text-align: left; vertical-align: top; }
+.prose th { color: var(--secondary); font-weight: var(--weight-medium); }
+.prose tbody tr:nth-child(odd) { background: var(--raised); }
+.prose tbody tr:nth-child(odd) td:first-child { border-radius: var(--radius-sm) var(--s0) var(--s0) var(--radius-sm); }
+.prose tbody tr:nth-child(odd) td:last-child { border-radius: var(--s0) var(--radius-sm) var(--radius-sm) var(--s0); }
+
+/* На большом экране код и таблицы могут выйти за колонку чтения, но не за панель чата. */
+@container (min-width: 72rem) {
+  .prose :is(pre, table) { width: fit-content; min-width: 100%; max-width: min(var(--prose-wide), calc(50cqw + 50% - var(--gutter))); }
+}

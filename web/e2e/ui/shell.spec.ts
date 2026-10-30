@@ -11,17 +11,21 @@ async function boot(page: Page) {
   await installChatRoutes(page, hub, api, '00000000-0000-4000-8000-0000000000d1');
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  return { hub, ids };
+  return { hub, api, ids };
 }
 
 test('desktop_three_pane_layout_at_1440_and_two_pane_at_1024', async ({ page }) => {
-  const { ids } = await boot(page);
+  const { api, ids } = await boot(page);
+  const block = api.id();
+  api.blocks.set(block, { text: 'поручение', rev: 1, state: 'final' });
+  api.histories.set(ids.pinned, [{ kind: 'block', id: block, block_kind: 'tool_call', content: 'поручение', content_bytes: 20, content_truncated: false, created_seq: '1', created_at: new Date().toISOString(), rev: 1, state: 'final', agent: 'claude', model: 'opus-5.5', tool_name: 'Agent', summary: 'поручение', parent_block_id: null, input_command_id: null, line_count: 1, started_at: null, finished_at: null }] as never);
+  api.bindConversation(ids.pinned);
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/c/${ids.pinned}`);
   await expect(page.locator('[data-layout="desktop"]')).toBeVisible();
   await expect(page.locator('[data-pane="list"]')).toBeVisible();
   await expect(page.locator('[data-pane="chat"]')).toBeVisible();
-  await page.getByRole('button', { name: 'Поручения' }).click();
+  await page.getByRole('button', { name: 'Делегирование' }).click();
   await expect(page.locator('[data-pane="lane"]')).toBeVisible();
   await page.setViewportSize({ width: 1024, height: 800 });
   await expect(page.locator('[data-layout="tablet"]')).toBeVisible();
@@ -42,7 +46,7 @@ test('connection_banner_follows_transport_state_and_announces_politely', async (
     hub.chaos.forceResync('cursor_ahead');
     await page.waitForTimeout(1000);
   }
-  await expect(page.locator('[data-banner]')).toContainText('Не удаётся синхронизироваться. Повтор через 30 с', { timeout: 8_000 });
+  await expect(page.locator('[data-banner]')).toContainText('Не удаётся синхронизироваться. Повторяю попытки', { timeout: 8_000 });
   await expect(page.getByRole('button', { name: 'Обновить' })).toBeVisible();
 });
 

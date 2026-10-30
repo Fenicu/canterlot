@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
+  import TruncatedNote from './TruncatedNote.svelte';
 
   type QuestionOption = {
     label: string;
@@ -197,16 +198,19 @@
   <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form">
     {#each questions as q, qIndex (q.id)}
       <section class="question-section" data-question={q.id}>
-        {#if q.header}
-          <span class="q-header">{q.header}</span>
+        {#if q.header || questions.length > 1}
+          <span class="q-head">
+            {#if q.header}<span class="q-header">{q.header}</span>{/if}
+            {#if questions.length > 1}<span class="counter">{qIndex + 1} из {questions.length}</span>{/if}
+          </span>
         {/if}
         <h3 class="q-text" id={`${uid}-q${qIndex}`}>{q.text}</h3>
 
-        <span class="selection-mode">
-          {q.multi_select ? 'Выберите несколько вариантов' : 'Выберите один вариант'}
-        </span>
-
         {#if q.options && q.options.length > 0}
+          <span class="selection-mode">
+            {q.multi_select ? 'Выберите несколько вариантов' : 'Выберите один вариант'}
+          </span>
+
           <div
             class="options-group"
             role={q.multi_select ? 'group' : 'radiogroup'}
@@ -245,7 +249,7 @@
               type={q.is_secret ? 'password' : 'text'}
               class="custom-input"
               data-custom="true"
-              placeholder="Свой ответ"
+              placeholder={q.is_secret ? 'Токен не сохранится в истории' : 'Свой ответ'}
               aria-labelledby={`${uid}-q${qIndex}`}
               value={customValues[q.id] ?? ''}
               disabled={isDisabled}
@@ -255,6 +259,8 @@
         {/if}
       </section>
     {/each}
+
+    <TruncatedNote payload={request.payload} />
 
     <div class="actions">
       <button
@@ -298,6 +304,20 @@
     display: flex;
     flex-direction: column;
     gap: var(--s2);
+  }
+
+  .q-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: var(--s4);
+  }
+
+  .counter {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
   }
 
   .q-header {
@@ -362,6 +382,10 @@
     background: var(--hover);
   }
 
+  .option-item[role='checkbox']::before {
+    border-radius: var(--s1);
+  }
+
   .option-item[data-selected],
   .option-item[data-selected]:hover:not(:disabled) {
     background: var(--selected);
@@ -373,8 +397,11 @@
   }
 
   .option-item:disabled {
-    opacity: var(--opacity-low);
     cursor: not-allowed;
+  }
+
+  .option-item:disabled .opt-label {
+    color: var(--muted);
   }
 
   .opt-content {
@@ -425,7 +452,7 @@
   }
 
   .custom-input:disabled {
-    opacity: var(--opacity-low);
+    color: var(--muted);
     cursor: not-allowed;
   }
 
@@ -444,7 +471,7 @@
     font-size: var(--fs-body);
     font-weight: var(--weight-medium);
     cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), opacity var(--duration-fast) var(--ease);
+    transition: background var(--duration-fast) var(--ease);
   }
 
   .submit-btn:focus-visible {
@@ -453,7 +480,8 @@
   }
 
   .submit-btn:disabled {
-    opacity: var(--opacity-low);
+    background: var(--accent-soft);
+    color: var(--muted);
     cursor: not-allowed;
   }
 

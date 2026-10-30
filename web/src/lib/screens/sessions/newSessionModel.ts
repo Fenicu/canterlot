@@ -39,7 +39,7 @@ const MESSAGE: Record<string, string> = {
   model_unknown: "Модель неизвестна",
   effort_not_allowed: "Усилие недоступно",
   permission_mode_unknown: "Режим разрешений неизвестен",
-  profile_unknown: "Пресет инструкций не найден",
+  profile_unknown: "Инструкции не найдены",
   workdir_not_allowed: "Рабочая папка не разрешена",
   group_not_found: "Группа не найдена",
 };

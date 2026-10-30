@@ -48,10 +48,10 @@ test.describe('stack: features and security', () => {
     expect(await answerText(page)).not.toContain('нашёл три');
 
     if (testInfo.project.name === 'desktop') {
-      await page.getByRole('button', { name: 'Поручения' }).click();
+      await page.getByRole('button', { name: 'Делегирование' }).click();
       const pane = page.locator('[data-pane="lane"]');
       await expect(pane).toBeVisible();
-      const panel = pane.getByRole('complementary', { name: 'Панель поручений' });
+      const panel = pane.getByRole('complementary', { name: 'Панель делегирования' });
       await expect(panel.getByText('Explore')).toBeVisible();
       await expect(panel.getByText('Найти дубликаты')).toBeVisible();
       await panel.getByRole('button', { name: /Explore/ }).click();
@@ -226,7 +226,7 @@ test.describe('stack: features and security', () => {
 
     // Архив: сессия уходит из основного списка на второй странице.
     await one.getByRole('button', { name: `Действия: ${beta}` }).click();
-    await one.getByRole('button', { name: 'Архив', exact: true }).click();
+    await one.getByRole('button', { name: /В архив/ }).click();
     await expect(two.locator(`[data-session="${idB}"]`)).toHaveCount(0, { timeout: 20_000 });
     await expect.poll(async () => (await hub.json<{ archived: boolean }>(`/api/v1/conversations/${idB}`)).archived).toBe(true);
 

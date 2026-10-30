@@ -28,6 +28,66 @@ afterEach(() => {
 });
 
 describe('PWA Request Cards', () => {
+  describe('design_rules', () => {
+    function render(component: typeof PermissionCard | typeof QuestionCard, kind: 'permission' | 'question', payload: unknown) {
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind, state: 'open', payload };
+      mount(component, { target, props: { request, onDecision: vi.fn() } });
+      flushSync();
+      return target;
+    }
+
+    it('secret_prompt_has_no_selection_hint_and_says_the_value_stays_out_of_history', () => {
+      const target = render(QuestionCard, 'question', { questions: [{ id: 's', text: 'Токен', is_secret: true, allow_custom: true, options: [] }] });
+      expect(target.textContent).not.toContain('Выберите один вариант');
+      expect(target.querySelector('input')!.placeholder).toBe('Токен не сохранится в истории');
+    });
+
+    it('multi_question_card_counts_questions', () => {
+      const target = render(QuestionCard, 'question', { questions: [{ id: 'a', text: 'Раз', options: ['Да'] }, { id: 'b', text: 'Два', options: ['Нет'] }] });
+      expect(target.textContent).toContain('1 из 2');
+      expect(target.textContent).toContain('2 из 2');
+    });
+
+    it('url_elicitation_names_the_server_shows_the_host_and_labels_the_button_open', () => {
+      const target = render(PermissionCard, 'permission', { tool_name: 'mcp_elicitation', server: 'github', mode: 'url', url: 'https://github.com/login/device?code=1' });
+      expect(target.textContent).toContain('Сервер github просит открыть ссылку');
+      expect(target.querySelector('.url strong')!.textContent).toBe('github.com');
+      expect(target.querySelector('[data-action="allow"]')!.textContent).toContain('Открыть');
+      expect(target.textContent).not.toContain('Запрос разрешения');
+    });
+  });
+
+  describe('truncated_payload_note', () => {
+    const NOTE = 'Показано начало: решение относится к полному тексту';
+    const QUESTION = { questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }] };
+    const PERMISSION = { tool_name: 'Bash', command: 'cargo test' };
+
+    function cardText(component: typeof PermissionCard | typeof QuestionCard, kind: 'permission' | 'question', payload: unknown): string {
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind, state: 'open', payload };
+      const instance = mount(component, { target, props: { request, onDecision: vi.fn() } });
+      flushSync();
+      const text = target.textContent ?? '';
+      void unmount(instance);
+      target.remove();
+      return text;
+    }
+
+    it.each([
+      ['permission', PermissionCard, PERMISSION],
+      ['question', QuestionCard, QUESTION]
+    ] as const)('shows_the_note_on_a_%s_card_only_for_literal_true', (kind, component, base) => {
+      expect(cardText(component, kind, { ...base, truncated: true })).toContain(NOTE);
+      expect(cardText(component, kind, base)).not.toContain(NOTE);
+      for (const value of [false, 'true', 1, null, {}, []]) {
+        expect(cardText(component, kind, { ...base, truncated: value })).not.toContain(NOTE);
+      }
+    });
+  });
+
   function permissionText(payload: unknown): string {
     const target = document.createElement('div');
     document.body.appendChild(target);

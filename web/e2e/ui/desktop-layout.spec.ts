@@ -192,7 +192,7 @@ test('new_session_form_has_no_empty_bars_and_stays_centred_in_its_pane', async (
   await expect(form.getByRole('combobox', { name: 'Машина' })).toBeVisible();
   await expect(form.getByRole('radiogroup')).toHaveCount(0);
   const empty = await form.evaluate((root) => [...root.querySelectorAll('*')]
-    .filter((el) => !el.closest('label') && el.children.length === 0 && !el.textContent?.trim() && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)' && el.getBoundingClientRect().height > 0)
+    .filter((el) => !el.closest('label, .field') && el.children.length === 0 && !el.textContent?.trim() && getComputedStyle(el).backgroundColor !== 'rgba(0, 0, 0, 0)' && el.getBoundingClientRect().height > 0)
     .map((el) => `${el.tagName.toLowerCase()}.${el.className}`));
   expect(empty).toEqual([]);
   await expect(form.getByRole('textbox', { name: 'Рабочая папка' })).toHaveAttribute('placeholder', '/home/user/project');

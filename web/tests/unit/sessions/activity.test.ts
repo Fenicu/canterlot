@@ -145,7 +145,7 @@ describe("sessions/activity", () => {
     ).toContain("закрыто администратором");
     expect(
       line({ state: "failed", evidence: { reason: "mystery" } }).text,
-    ).toBe("Сбой: ошибка");
+    ).toBe("Сбой: причина неизвестна");
     expect(line({ state: "stopped" }).text).toBe("Завершена");
     expect(
       line({ state: "stopped", evidence: { outcome: "user_stop" } }).text,

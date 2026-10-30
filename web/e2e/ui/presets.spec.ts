@@ -34,7 +34,7 @@ test('presets_screen_lists_builtins_first_and_marks_agent_presets', async ({ pag
 
 test('create_edit_and_delete_preset_with_confirmation', async ({ page }) => {
   await bootPresets(page);
-  await page.getByRole('button', { name: 'Новый пресет' }).click();
+  await page.getByRole('button', { name: 'Новая инструкция' }).click();
   await page.getByLabel('Название').fill('Проверочный пресет');
   await page.getByLabel('Текст').fill('Отвечай кратко.');
   await page.getByRole('button', { name: 'Сохранить' }).click();
@@ -45,7 +45,7 @@ test('create_edit_and_delete_preset_with_confirmation', async ({ page }) => {
   await expect(page.locator('[data-preset]').filter({ hasText: 'Проверочный пресет' }).getByText('версия 2')).toBeVisible();
   await page.locator('[data-preset]').filter({ hasText: 'Проверочный пресет' }).getByRole('button', { name: 'Удалить' }).click();
   await expect(page.getByText('Сессии, где он применён')).toBeVisible();
-  await page.getByRole('button', { name: 'Удалить пресет' }).click();
+  await page.getByRole('button', { name: 'Удалить инструкцию' }).click();
   await expect(page.locator('[data-preset]').filter({ hasText: 'Проверочный пресет' })).toHaveCount(0);
 });
 
@@ -55,7 +55,7 @@ test('stale_revision_shows_conflict_and_keeps_the_draft', async ({ page }) => {
   await page.getByLabel('Текст').fill('Мой черновик правки.');
   api.bumpPresetRevision('seed-executor', 'Конкурентная правка.');
   await page.getByRole('button', { name: 'Сохранить' }).click();
-  await expect(page.getByText(/Пресет уже изменён/)).toBeVisible();
+  await expect(page.getByText(/Инструкции уже изменены/)).toBeVisible();
   await expect(page.getByText('Мой черновик правки.')).toBeVisible();
   await page.getByRole('button', { name: 'Обновить' }).click();
   await expect(page.getByLabel('Текст')).toHaveValue('Конкурентная правка.');

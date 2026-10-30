@@ -3,7 +3,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/state';
   import IconButton from './IconButton.svelte';
-  let { open, title, routeKey, onclose, children }: { open: boolean; title: string; routeKey?: string; onclose: () => void; children: Snippet } = $props();
+  let { open, title, subtitle, routeKey, onclose, children }: { open: boolean; title: string; subtitle?: string; routeKey?: string; onclose: () => void; children: Snippet } = $props();
   const id = $props.id();
   let dialog: HTMLDialogElement;
   let mounted = $state(false);
@@ -66,15 +66,21 @@
 </script>
 <dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
-  <header><h2 id={id}>{title}</h2><IconButton icon="close" label="Закрыть" onclick={close} /></header>
+  <header><div class="titles"><h2 id={id}>{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><IconButton icon="close" label="Закрыть" onclick={close} /></header>
   <div class="body">{@render children()}</div>
 </dialog>
 <style>
   dialog { position: fixed; inset: auto 0 0; width: min(100%, var(--reading-max)); max-width: 100%; max-height: var(--sheet-max); margin: auto auto 0; padding: var(--s4) var(--s8) calc(var(--s8) + env(safe-area-inset-bottom)); border: 0; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; background: var(--surface); color: var(--text); overflow-y: auto; }
-  dialog::backdrop { background: var(--scrim); }
+  dialog::backdrop { background: var(--scrim-soft); }
   dialog[open] { animation: sheet-enter var(--duration-expand) var(--ease-sheet); }
   .handle { width: var(--handle-width); height: var(--handle-height); border-radius: var(--radius-pill); background: var(--control-line); margin: var(--s4) auto; }
   header { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
-  .body { padding-block: var(--s6); }
-  @keyframes sheet-enter { from { opacity: 0; transform: translateY(var(--shift-enter)); } to { opacity: 1; transform: none; } }
+  .titles { min-width: 0; }
+  p { margin: var(--s1) var(--s0) var(--s0); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
+  .body { padding-block: var(--s6) var(--s0); }
+  :global([data-layout='desktop']) dialog { inset: 0; height: fit-content; margin: auto; padding: var(--s6) var(--s10) var(--s10); border-radius: var(--radius-sheet); }
+  :global([data-layout='desktop']) .handle { display: none; }
+  :global([data-layout='desktop']) dialog[open] { animation-name: sheet-rise; }
+  @keyframes sheet-enter { from { transform: translateY(100%); } to { transform: none; } }
+  @keyframes sheet-rise { from { opacity: 0; transform: translateY(var(--shift-enter)); } to { opacity: 1; transform: none; } }
 </style>

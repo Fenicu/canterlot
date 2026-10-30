@@ -24,6 +24,7 @@ export interface LimitView {
   fiveHour: string;
   weekly: string;
   tone: "default" | "warning" | "reserve";
+  hot: { fiveHour: boolean; weekly: boolean };
   resets: { fiveHour: string; weekly: string };
   stale: boolean;
 }
@@ -69,6 +70,7 @@ export function limitView(
     fiveHour: five.pct,
     weekly: week.pct,
     tone,
+    hot: { fiveHour: five.hot, weekly: week.hot },
     resets: { fiveHour: five.reset, weekly: week.reset },
     stale: five.stale || week.stale,
   };

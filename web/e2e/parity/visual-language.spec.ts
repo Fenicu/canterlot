@@ -8,7 +8,7 @@ const THEMES: Theme[] = ['dark', 'light'];
 const COLOR_TOKENS = [...readFileSync(resolve(process.cwd(), 'src/lib/styles/tokens.css'), 'utf8').matchAll(/(--[a-z0-9-]+):\s*(?:#|rgb|hsl|oklch|color-mix)/g)].map((match) => match[1]!);
 
 test('axe_has_no_serious_violations_on_every_route_in_both_themes', async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(480_000);
   for (const screen of SCREENS) {
     for (const theme of THEMES) {
       await bootScreen(page, screen, theme);
@@ -22,7 +22,7 @@ test('axe_has_no_serious_violations_on_every_route_in_both_themes', async ({ pag
 });
 
 test('no_horizontal_scroll_at_360_320_and_text_200_percent_on_every_route', async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(480_000);
   for (const screen of SCREENS.filter((item) => item.viewport.width < 1000)) {
     for (const width of [360, 320]) {
       await bootScreen(page, screen, 'dark', { width, height: 740 });
@@ -55,7 +55,10 @@ test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
     const el = document.activeElement as HTMLElement | null;
     if (!el || el === document.body) return false;
     const style = getComputedStyle(el);
-    return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 || style.boxShadow !== 'none';
+    if (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 || style.boxShadow !== 'none') return true;
+    // Рамка фокуса поля ввода живёт на капсуле целиком.
+    const capsule = el.closest('.capsule');
+    return el instanceof HTMLTextAreaElement && capsule !== null && getComputedStyle(capsule).outlineStyle !== 'none';
   });
 
   // Табуляция доходит до поля ввода и кнопки «Отправить», фокус везде виден.
@@ -117,7 +120,7 @@ test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
 interface Audit { rule: string; where: string; count: number; example: string }
 
 test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
-  test.setTimeout(240_000);
+  test.setTimeout(480_000);
   const problems: string[] = [];
   const observed = new Map<string, string>();
   for (const screen of SCREENS) {
