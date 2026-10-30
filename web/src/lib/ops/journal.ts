@@ -232,6 +232,13 @@ export class OpJournal {
     this.#stop(key);
   }
 
+  /** Сессии больше нет: её неотправленные операции не должны уйти и вернуться черновиком. */
+  discardConversation(conversationId: string): void {
+    for (const op of [...this.ops.values()]) {
+      if (op.conversationId === conversationId) this.#stop(op.key);
+    }
+  }
+
   #runOrphan(op: Op): void {
     void this.run(op).catch(() => {
       if (op.state !== "refused") return;

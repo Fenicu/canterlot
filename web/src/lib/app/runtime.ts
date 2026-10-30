@@ -146,6 +146,10 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         },
       },
     });
+    list.onDeleted((id) => {
+      journal.discardConversation(id);
+      void drafts.clear(id);
+    });
     list.open();
     const machines = new MachinesStore({
       connection,
@@ -193,6 +197,7 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         drafts.retire();
         list.close();
         list.items.clear();
+        list.deleted.clear();
         list.groups = [];
         list.limits = [];
         list.presets = [];

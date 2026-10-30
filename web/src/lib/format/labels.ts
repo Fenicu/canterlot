@@ -121,6 +121,7 @@ const SCOPE_STATUSES: Record<string, string> = {
   gap_recovery: "Восстанавливает пропуск",
   reconnecting: "Переподключается",
   forbidden: "Нет доступа",
+  deleted: "Сессия удалена",
   incompatible: "Нужно обновить приложение",
   degraded: "Синхронизация не удаётся",
 };

@@ -2378,6 +2378,58 @@ function chatOf(
   });
 }
 
+describe("stores/list deletion", () => {
+  const row = (id: string): ListRow =>
+    ({ id, title: id, archived: false, pinned: false, groups: [] }) as unknown as ListRow;
+  const snapshot = (items: ListRow[], truncated = false) => ({
+    counts: emptyCounts(),
+    groups: [],
+    items,
+    limits: [],
+    truncated,
+    presets: [],
+  });
+  const seeded = () => {
+    const list = listOf();
+    list.applier.applySnapshot(snapshot([row("a"), row("b")]), "1");
+    const gone: string[] = [];
+    list.onDeleted((id) => gone.push(id));
+    return { list, gone };
+  };
+
+  it("the_event_removes_the_row_updates_counts_and_tells_the_listeners", () => {
+    const { list, gone } = seeded();
+    const counts = { all: 1, pinned: 0, archived: 0, groups: [] };
+    list.applier.applyEvents([
+      {
+        overlap: false,
+        event: {
+          kind: "conversation_deleted",
+          payload: { id: "a", counts },
+        } as unknown as HubEvent,
+      },
+    ]);
+    expect([...list.items.keys()]).toEqual(["b"]);
+    expect(list.counts).toEqual(counts);
+    expect(list.deleted.has("a")).toBe(true);
+    expect(gone).toEqual(["a"]);
+    expect(list.unknownKinds).toBe(0);
+  });
+
+  it("a_client_offline_during_the_delete_learns_it_from_the_full_snapshot", () => {
+    const { list, gone } = seeded();
+    list.applier.applySnapshot(snapshot([row("b")]), "2");
+    expect(gone).toEqual(["a"]);
+  });
+
+  it("a_truncated_snapshot_proves_nothing_about_missing_rows", () => {
+    const { list, gone } = seeded();
+    list.applier.applySnapshot(snapshot([row("b")], true), "2");
+    expect(gone).toEqual([]);
+    expect(list.deleted.size).toBe(0);
+  });
+});
+
 function listOf(): ListStore {
   return new ListStore({
     connection: {} as ConnectionManager,

@@ -26,7 +26,7 @@
   import { theme } from '#lib/theme.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { LimitThresholds } from '#lib/stores/limits.js';
-  import { beforeNavigate } from '$app/navigation';
+  import { beforeNavigate, goto } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { onMount, untrack } from 'svelte';
@@ -115,9 +115,11 @@
   const rows = $derived(runtime ? [...runtime.list.items.values()] : []);
   const groups = $derived(runtime?.list.groups ?? []);
   const tabs = $derived(runtime ? tabCounts(runtime.list.counts, groups) : []);
+  // Ответ поиска живёт дольше строки списка: удалённая сессия не должна в нём оставаться.
+  const found = $derived(results?.filter((item) => !runtime?.list.deleted.has(item.id)) ?? null);
   const sections = $derived(
-    results
-      ? [{ id: 'search', title: 'Результаты', count: results.length, items: results, collapsed: false }]
+    found
+      ? [{ id: 'search', title: 'Результаты', count: found.length, items: found, collapsed: false }]
       : buildSections(rows, groups, tab, collapsedSet(collapsed))
   );
   const emptyTab = $derived.by(() => {
@@ -300,6 +302,7 @@
       anchor={sheetTop}
       ongroups={() => { sheetId = ''; groupsOpen = true; }}
       onclose={() => sheetId = ''}
+      ondeleted={(id) => { if (page.params.id === id) void goto(resolve('sessions')); }}
     />
   {/if}
   {#if groupsOpen}

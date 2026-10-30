@@ -145,6 +145,8 @@ const CODES = new Set<ErrorCode>([
   "group_not_found",
   "group_name_taken",
   "archive_active",
+  "conversation_deleted",
+  "conversation_live",
   "attachment_not_ready",
   "attachment_not_uploadable",
   "attachment_unsupported",

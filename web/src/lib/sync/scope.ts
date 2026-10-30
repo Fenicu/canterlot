@@ -4,7 +4,7 @@ import { PROTOCOL_VERSION, isSeq, seq, type ClientOp, type HubEvent, type ScopeN
 import { probe, type Probe } from '../perf/probe';
 import { scopeState } from './state.svelte';
 
-export type ScopeStatus = 'idle' | 'loading_snapshot' | 'subscribing' | 'live' | 'gap_recovery' | 'reconnecting' | 'forbidden' | 'incompatible' | 'degraded';
+export type ScopeStatus = 'idle' | 'loading_snapshot' | 'subscribing' | 'live' | 'gap_recovery' | 'reconnecting' | 'forbidden' | 'deleted' | 'incompatible' | 'degraded';
 export type RangeResult = { events: HubEvent[]; head: string } | { resync: true };
 export interface AppliedEvent { event: HubEvent; overlap: boolean }
 export interface ScopeApplier {
@@ -48,7 +48,7 @@ export class ScopeSync {
   }
   get cursor(): string { return this.state.cursor; }
   get status(): ScopeStatus { return this.state.status; }
-  private get terminal(): boolean { return this.status === 'forbidden' || this.status === 'incompatible'; }
+  private get terminal(): boolean { return this.status === 'forbidden' || this.status === 'deleted' || this.status === 'incompatible'; }
   start(): void { if (!this.started) { this.started = true; void this.snapshot(); } }
   stop(): void {
     this.unsubscribe(); this.started = false; this.epoch++; this.cancelRetry?.(); this.cancelRetry = undefined;
@@ -102,9 +102,13 @@ export class ScopeSync {
       this.state.cursor = result.cursor; this.hasSnapshot = true;
       this.loading = false;
       if (this.connected) this.subscribe(); else this.state.status = 'reconnecting';
-    } catch {
+    } catch (error) {
       if (!this.started || epoch !== this.epoch || this.terminal) return;
-      this.loading = false; this.resync();
+      this.loading = false;
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === 'conversation_deleted') { this.state.status = 'deleted'; return; }
+      if (code === 'not_found') { this.state.status = 'forbidden'; return; }
+      this.resync();
     }
   }
   private resync(): void {

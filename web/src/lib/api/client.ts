@@ -168,6 +168,19 @@ export function deleteGroup(
   );
 }
 
+export function deleteConversation(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_conversations__id_"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function listMachines(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_machines"]>>> {

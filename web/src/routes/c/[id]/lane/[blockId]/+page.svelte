@@ -2,6 +2,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { clock } from '#lib/clock.js';
+	import ChatGone from '#lib/screens/chat/ChatGone.svelte';
 	import Lane from '#lib/screens/chat/Lane.svelte';
 	import { leaseChatSession } from '#lib/screens/chat/open.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -41,7 +42,9 @@
 <svelte:head><title>Субагент · canterlot</title></svelte:head>
 <main id="main" class="lane-route">
 	{#key id}
-		{#if chat && chat.id === id}
+		{#if chat && chat.id === id && chat.gone}
+			<ChatGone reason={chat.gone} />
+		{:else if chat && chat.id === id}
 			<Lane {chat} rootBlockId={blockId} {now} />
 		{:else if error}
 			<p>{error}</p>

@@ -127,3 +127,26 @@ test('oversized_is_refetched_before_advancing_and_retention_resyncs', async () =
     h.dispose();
   }
 });
+
+test.each([
+  ['conversation_deleted', 'deleted'],
+  ['not_found', 'forbidden']
+])('snapshot_refusal_%s_is_terminal_and_never_retried', async (code, status) => {
+  const h = await harness();
+  vi.mocked(h.applier.loadSnapshot).mockClear();
+  vi.mocked(h.applier.loadSnapshot).mockRejectedValue(Object.assign(new Error('refused'), { code }));
+  h.sync.onFrame({ op: 'resync_required', id: h.id, reason: 'cursor_too_old', oldest_available_seq: '1' });
+  await h.clock.advanceAsync(120_000);
+  expect(h.sync.status).toBe(status);
+  expect(h.applier.loadSnapshot).toHaveBeenCalledTimes(1);
+  h.dispose();
+});
+test('a_transient_snapshot_failure_is_still_retried', async () => {
+  const h = await harness();
+  vi.mocked(h.applier.loadSnapshot).mockClear();
+  vi.mocked(h.applier.loadSnapshot).mockRejectedValueOnce(new Error('network'));
+  h.sync.onFrame({ op: 'resync_required', id: h.id, reason: 'cursor_too_old', oldest_available_seq: '1' });
+  await h.clock.advanceAsync(60_000);
+  expect(vi.mocked(h.applier.loadSnapshot).mock.calls.length).toBeGreaterThan(1);
+  h.dispose();
+});

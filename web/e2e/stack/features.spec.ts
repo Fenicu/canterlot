@@ -239,6 +239,42 @@ test.describe('stack: features and security', () => {
     await context.close();
   });
 
+  test('delete_is_refused_while_live_and_reaches_every_open_screen', tag, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const title = `Удаление-${randomUUID().slice(0, 6)}`;
+    const id = await hub.createConversation({ title, start: true });
+    await expect.poll(async () => (await hub.json<{ execution: { state: string } | null }>(`/api/v1/conversations/${id}`)).execution?.state, { timeout: 30_000 }).toBe('running');
+
+    const context = await browser.newContext();
+    const list = await context.newPage();
+    const chat = await context.newPage();
+    await list.goto(`${stack.baseUrl}/sessions`);
+    await expect(list.locator(`[data-session="${id}"]`)).toBeVisible({ timeout: 20_000 });
+    await chat.goto(`${stack.baseUrl}/c/${id}`);
+    await expect(chat.locator('[data-ready]')).toBeVisible({ timeout: 20_000 });
+
+    await list.getByRole('button', { name: `Действия: ${title}` }).click();
+    await list.getByRole('button', { name: /^Удалить/ }).click();
+    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+    await expect(list.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible({ timeout: 20_000 });
+    await expect(list.locator(`[data-session="${id}"]`)).toBeVisible();
+
+    await hub.json(`/api/v1/conversations/${id}/stop`, { method: 'POST', body: JSON.stringify({}) });
+    await expect.poll(async () => (await hub.json<{ execution: unknown }>(`/api/v1/conversations/${id}`)).execution, { timeout: 30_000 }).toBeNull();
+
+    await list.getByRole('button', { name: /^Удалить/ }).click();
+    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+    await expect(list.locator(`[data-session="${id}"]`)).toHaveCount(0, { timeout: 20_000 });
+    await expect(chat.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible({ timeout: 20_000 });
+
+    const gone = await hub.fetch(`/api/v1/conversations/${id}`);
+    expect(gone.status).toBe(404);
+    expect(((await gone.json()) as { error: { code: string } }).error.code).toBe('conversation_deleted');
+    await context.close();
+  });
+
   test('settings_change_midsession_applies_with_the_next_turn', tag, async ({ page }) => {
     test.setTimeout(90_000);
     const stack = getStack();

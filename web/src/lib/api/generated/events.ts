@@ -18,6 +18,7 @@ export type WireEvent =
   | BlockMediaAttached
   | ConversationCreated
   | ConversationUpdated
+  | ConversationDeleted
   | ConversationSettingsChanged
   | CrunchChanged
   | CrunchHeld
@@ -496,6 +497,23 @@ export interface ConversationUpdated {
     };
     workdir: string;
     created_at: Time;
+    counts: Counts;
+  };
+}
+export interface ConversationDeleted {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "conversation_deleted";
+  payload: {
+    id: Uuid;
     counts: Counts;
   };
 }

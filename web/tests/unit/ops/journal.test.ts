@@ -80,6 +80,19 @@ describe("ops/journal", () => {
     return new OpJournal(db, send, env);
   }
 
+  it("discarding_a_conversation_drops_only_its_operations", async () => {
+    const j = journal(async () => undefined);
+    const mine = await j.begin("input", {}, { conversationId: "gone", persist: true });
+    const other = await j.begin("input", {}, { conversationId: "kept", persist: true });
+    j.discardConversation("gone");
+    expect(j.ops.has(mine.key)).toBe(false);
+    expect(j.ops.has(other.key)).toBe(true);
+    await vi.waitFor(async () => {
+      expect(await db.get("ops", mine.key)).toBeUndefined();
+    });
+    expect(await db.get("ops", other.key)).toBeDefined();
+  });
+
   it("journal_persists_before_resolving_and_survives_reload", async () => {
     let releasePut: (() => void) | undefined;
     const gate = new Promise<void>((resolve) => {

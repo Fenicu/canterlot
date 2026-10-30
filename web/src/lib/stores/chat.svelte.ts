@@ -186,6 +186,8 @@ export class ChatStore {
   detail = $state<Record<string, unknown> | null>(null);
   /** Записан принятый ход: снимок даёт хаб, новый ход виден по событию. */
   turnRecorded = $state(false);
+  /** Сессию удалили, пока чат был открыт: подписка уже закрыта. */
+  deleted = $state(false);
   execution = $state<Record<string, unknown> | null>(null);
   activity = $state<Record<string, unknown> | null>(null);
   settings = $state<{
@@ -254,6 +256,17 @@ export class ChatStore {
 
   get status(): ScopeStatus {
     return this.#sub?.status ?? "idle";
+  }
+
+  /** Экран, который заменит чат, когда открывать больше нечего. */
+  get gone(): "deleted" | "unavailable" | null {
+    if (this.deleted || this.status === "deleted") return "deleted";
+    return this.status === "forbidden" ? "unavailable" : null;
+  }
+
+  markDeleted(): void {
+    this.deleted = true;
+    this.close();
   }
 
   get applier(): ScopeApplier {

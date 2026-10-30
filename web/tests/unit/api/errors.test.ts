@@ -45,6 +45,8 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "group_not_found",
   "group_name_taken",
   "archive_active",
+  "conversation_deleted",
+  "conversation_live",
   "attachment_not_ready",
   "attachment_not_uploadable",
   "attachment_unsupported",
@@ -98,7 +100,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(51);
+    expect(ALL_ERROR_CODES.length).toBe(53);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

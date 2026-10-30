@@ -57,6 +57,20 @@ describe("composer/returned", () => {
     expect(takeAttachmentNotice("conv-1")).toBeNull();
   });
 
+  it("a_refusal_for_a_deleted_session_keeps_nothing_on_the_device", async () => {
+    const drafts = {
+      prepend: vi.fn(async () => undefined),
+      clear: vi.fn(async () => undefined),
+    } as unknown as DraftStore;
+    const op = refused("input");
+    op.refusal = { code: "conversation_deleted", message: "Сессия удалена" };
+
+    await returnRefused(op, drafts);
+
+    expect(drafts.prepend).not.toHaveBeenCalled();
+    expect(drafts.clear).toHaveBeenCalledWith("conv-1");
+  });
+
   it("operations_without_a_message_return_nothing", async () => {
     const drafts = draftsMock();
 

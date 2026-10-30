@@ -22,6 +22,14 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const kind = parts[5] ?? '';
     const headers = { 'X-Server-Time-Ms': String(Date.now()) };
     if (route.request().method() === 'GET' && kind === 'snapshot') {
+      if (api.deleted.has(id)) {
+        await route.fulfill({
+          status: 404,
+          headers,
+          json: { error: { code: 'conversation_deleted', message: 'Сессия удалена', scope: 'browser', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e5' } }
+        });
+        return;
+      }
       await route.fulfill({ json: hub.snapshot(`conversation:${id}`), headers });
       return;
     }
@@ -265,7 +273,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fallback();
   });
 
+  const deletions = new Map<string, string>();
+  const refuse = (status: number, code: string, message: string) => ({
+    status,
+    headers: headers(),
+    json: { error: { code, message, scope: 'browser', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e4' } }
+  });
   await page.route('**/api/v1/conversations/*', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+      const key = route.request().headers()['idempotency-key'] ?? '';
+      if (deletions.get(key) === id) return route.fulfill({ status: 204, headers: headers() });
+      if (api.deleted.has(id)) return route.fulfill(refuse(404, 'conversation_deleted', 'Сессия удалена'));
+      if (!api.list.has(id)) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+      const execution = api.details.get(id)?.execution as { state?: string } | null | undefined;
+      if (execution && !['stopped', 'failed'].includes(execution.state ?? '')) {
+        return route.fulfill({ ...refuse(409, 'conversation_live', 'Сначала остановите сессию'), status: 409 });
+      }
+      deletions.set(key, id);
+      api.deleteConversation(id);
+      await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
     if (route.request().method() !== 'PATCH') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const body = route.request().postDataJSON() as { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean };

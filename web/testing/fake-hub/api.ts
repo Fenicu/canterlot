@@ -57,6 +57,7 @@ export class FakeHubApi {
 	readonly machines = new Map<string, MachineRecord>();
 	readonly reads: { id: string; seq: string }[] = [];
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
+	readonly deleted = new Set<string>();
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, groups: [] };
 	limits: ProviderLimits[] = [];
@@ -69,6 +70,32 @@ export class FakeHubApi {
 	constructor(readonly hub: FakeHub) {
 		this.hub.setSnapshot('conversations', () => this.listData());
 		this.hub.setSnapshot('machines', () => ({ items: [...this.machines.values()] }));
+	}
+
+	/** Как настоящий хаб: строки исчезают, список узнаёт из `conversation_deleted`. */
+	deleteConversation(id: string): void {
+		const row = this.list.get(id);
+		this.list.delete(id);
+		this.details.delete(id);
+		this.histories.delete(id);
+		this.deleted.add(id);
+		const rows = [...this.list.values()];
+		this.counts = {
+			all: rows.filter((item) => !item.archived).length,
+			pinned: rows.filter((item) => item.pinned && !item.archived).length,
+			archived: rows.filter((item) => item.archived).length,
+			groups: this.groups.map((group) => ({
+				id: group.id,
+				count: rows.filter((item) => item.groups.includes(group.id) && !item.archived).length
+			}))
+		};
+		if (!row) return;
+		this.hub.append('conversations', {
+			kind: 'conversation_deleted',
+			conversation_id: id,
+			payload: { id, counts: this.counts }
+		});
+		this.hub.flush();
 	}
 
 	id(): string {

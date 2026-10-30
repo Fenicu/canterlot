@@ -1,4 +1,4 @@
-import { SvelteMap } from "svelte/reactivity";
+import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { components } from "#lib/api/generated/openapi.js";
 import type {
   AppliedEvent,
@@ -85,6 +85,8 @@ const ATTRIBUTES = [
 
 export class ListStore {
   readonly items = new SvelteMap<string, ListRow>();
+  /** Сессии, удалённые на глазах у этого клиента: поиск и экраны держат их копии. */
+  readonly deleted = new SvelteSet<string>();
   groups = $state<ListSnapshot["groups"]>([]);
   counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
@@ -93,6 +95,7 @@ export class ListStore {
   unknownKinds = $state(0);
 
   #sub: { release(): void; readonly status: ScopeStatus } | null = null;
+  #onDeleted: ((id: string) => void)[] = [];
 
   constructor(
     private deps: {
@@ -127,6 +130,19 @@ export class ListStore {
       this.#sub = this.deps.connection.subscribe("conversations", this.applier);
   }
 
+  onDeleted(fn: (id: string) => void): () => void {
+    this.#onDeleted.push(fn);
+    return () => {
+      this.#onDeleted = this.#onDeleted.filter((item) => item !== fn);
+    };
+  }
+
+  #markDeleted(id: string): void {
+    this.items.delete(id);
+    this.deleted.add(id);
+    for (const fn of this.#onDeleted) fn(id);
+  }
+
   close(): void {
     this.#sub?.release();
     this.#sub = null;
@@ -145,8 +161,14 @@ export class ListStore {
   }
 
   #applySnapshot(data: ListSnapshot): void {
+    // Клиент без связи узнаёт об удалении при сверке: полный снимок больше не содержит строку.
+    const fresh = (data.items ?? []).map((item) => item.id);
+    const vanished = data.truncated
+      ? []
+      : [...this.items.keys()].filter((id) => !fresh.includes(id));
     this.items.clear();
     for (const item of data.items ?? []) this.items.set(item.id, item);
+    for (const id of vanished) this.#markDeleted(id);
     this.groups = data.groups ?? [];
     this.counts = data.counts ?? this.counts;
     this.limits = data.limits ?? [];
@@ -174,6 +196,11 @@ export class ListStore {
         copyAttributes(row, event.payload);
         this.items.set(row.id, { ...row });
       } else this.items.set(event.payload.id, rowFromUpdated(event.payload));
+      this.counts = event.payload.counts;
+      return;
+    }
+    if (kind === "conversation_deleted" && event.kind === "conversation_deleted") {
+      this.#markDeleted(event.payload.id);
       this.counts = event.payload.counts;
       return;
     }

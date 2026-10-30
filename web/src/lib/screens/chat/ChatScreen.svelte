@@ -1,4 +1,6 @@
 <script lang="ts">
+	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { browserRuntime } from './open';
 	import { getRuntime, type Runtime } from '#lib/app/runtime.js';
@@ -167,6 +169,7 @@
 			machine={resolvedMachine}
 			touch
 			onclose={() => (showSheet = false)}
+			ondeleted={() => void goto(resolve('sessions'))}
 		/>
 	{/if}
 

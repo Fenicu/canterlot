@@ -198,6 +198,12 @@ export class UploadManager {
     return this.#resumeAll();
   }
 
+  /** Вложения удалённой сессии: загрузка прекращается, локальная копия файла не остаётся. */
+  async cancelConversation(conversationId: string): Promise<void> {
+    const ids = this.list(conversationId).map((item) => item.id);
+    await Promise.all(ids.map((id) => this.cancel(id).catch(() => undefined)));
+  }
+
   async cancel(id: string): Promise<void> {
     const upload = this.#views.get(id);
     const record = this.#records.get(id);

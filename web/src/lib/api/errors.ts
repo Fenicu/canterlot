@@ -174,6 +174,14 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Группа с таким именем уже существует",
   },
+  conversation_deleted: {
+    action: "none",
+    message: "Сессия удалена",
+  },
+  conversation_live: {
+    action: "stop_process",
+    message: "Сначала остановите сессию",
+  },
   archive_active: {
     action: "stop_process",
     message: "В сессии есть активная работа",
