@@ -3,7 +3,6 @@ import { purgeAllStores, retireStorage } from "#lib/storage/idb.js";
 import { retireOwner } from "#lib/storage/owner.js";
 import { stopDraftWriters } from "#lib/drafts/store.js";
 import { closeOpenJournals } from "#lib/ops/journal.js";
-import { session } from "#lib/api/http.js";
 import { httpHealth } from "#lib/api/gate.js";
 import { resetConfig } from "#lib/api/config.js";
 import { restoreComposerText } from "#lib/composer/restore.js";
@@ -16,7 +15,6 @@ export async function purgeLocal(deps: {
   connection: { dispose(): void };
   runtime: { dispose(): void };
 }): Promise<void> {
-  session.state = "expired";
   restoreComposerText("");
   deps.connection.dispose();
   retireOwner();

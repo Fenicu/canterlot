@@ -84,3 +84,11 @@ test('clearing_data_in_one_window_reloads_the_other_without_restoring_its_draft'
   expect(await other.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith('canterlot.draft-tail.')))).toEqual([]);
   await other.close();
 });
+
+test('clearing_local_data_does_not_claim_the_session_expired', async ({ page }) => {
+  await bootSecondary(page, '/settings');
+  await page.locator('main').getByRole('button', { name: 'Очистить данные на устройстве', exact: true }).click();
+  await expect(page.getByText('Данные на устройстве удалены', { exact: true })).toBeVisible();
+  await page.waitForTimeout(1500);
+  await expect(page.getByRole('dialog', { name: 'Сессия истекла' })).toBeHidden();
+});
