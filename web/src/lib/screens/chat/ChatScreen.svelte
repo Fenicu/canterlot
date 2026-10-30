@@ -193,6 +193,20 @@
 		position: relative;
 	}
 
+	.screen > :global(:not(dialog)) {
+		width: 100%;
+		max-width: var(--reading-max);
+		margin-inline: auto;
+	}
+
+	.screen > :global(.feed-wrap) {
+		max-width: none;
+	}
+
+	.screen :global(.feed) {
+		padding-inline: max(0%, calc((100% - var(--reading-max)) / 2));
+	}
+
 	.request-cards-slot,
 	.request-card-slot {
 		padding: var(--s3) var(--s4);
