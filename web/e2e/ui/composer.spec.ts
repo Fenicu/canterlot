@@ -194,9 +194,10 @@ test('send_button_keeps_focus_in_the_textarea_so_the_keyboard_stays_open', async
   await expect(area).toBeFocused();
 });
 
-test('empty_draft_send_is_disabled_with_a_visible_reason', async ({ page }) => {
+test('empty_draft_send_is_disabled_and_the_reason_stays_out_of_sight', async ({ page }) => {
   await boot(page);
-  await expect(page.getByText('Введите сообщение или прикрепите файл')).toBeVisible();
+  await expect(page.getByRole('textbox', { name: 'Сообщение' })).toHaveAccessibleDescription('Введите сообщение или прикрепите файл');
+  await expect(page.locator('[data-composer] .reason')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Отправить', exact: true })).toHaveAttribute('aria-disabled', 'true');
 });
 

@@ -7,7 +7,7 @@
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
   import SendLater from '#lib/composer/SendLater.svelte';
   import { bindDraft } from '#lib/composer/draftBinding.js';
-  import { ComposerModel, type Limits } from '#lib/composer/model.svelte.js';
+  import { ComposerModel, EMPTY_DRAFT_REASON, type Limits } from '#lib/composer/model.svelte.js';
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
@@ -81,7 +81,15 @@
     void tick;
     if (model.errorMessage) return model.errorMessage;
     const gate = model.gate;
-    return gate.ok ? '' : gate.reason;
+    return gate.ok || gate.reason === EMPTY_DRAFT_REASON ? '' : gate.reason;
+  });
+  const fitsContent = typeof CSS !== 'undefined' && CSS.supports('field-sizing', 'content');
+
+  $effect(() => {
+    void model.text;
+    if (fitsContent || !node) return;
+    node.style.height = 'auto';
+    node.style.height = `${node.scrollHeight}px`;
   });
 
   $effect(() => {
@@ -187,10 +195,13 @@
 
 <section class="composer" data-composer role="group" aria-label="Поле ввода" ondragover={(event) => event.preventDefault()} ondrop={dropped}>
   <AttachmentTray {uploads} conversationId={chat.id} />
-  {#if notice}<p class="reason" id={reasonId}>{notice}</p>{/if}
+  {#if notice}
+    <p class="reason" id={reasonId}>{notice}</p>
+  {:else}
+    <p class="sr-only" id={reasonId}>{model.gate.ok ? '' : EMPTY_DRAFT_REASON}</p>
+  {/if}
   <div class="capsule">
     <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
-    <IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} />
     <textarea
       bind:this={node}
       bind:value={model.text}
@@ -208,15 +219,17 @@
           runtime.drafts.set(chat.id, { attachments: [] });
         }
       }}
-      rows="2"
+      rows="1"
       enterkeyhint="enter"
+      placeholder="Сообщение агенту…"
       aria-label="Сообщение"
       aria-describedby={reasonId}
       oncompositionstart={() => (composing = true)}
       oncompositionend={() => (composing = false)}
       onkeydown={onKey}
     ></textarea>
-    <InterruptButton show={showInterrupt} label={model.interruptLabel} onclick={() => model.interrupt()} />
+    <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
+    <span class="extras"><InterruptButton show={showInterrupt} label={model.interruptLabel} onclick={() => model.interrupt()} /></span>
     {#if !touch}
       <button
         type="button"
@@ -252,7 +265,7 @@
   </div>
   <p class="hint">
     {touch
-      ? 'Enter: новая строка · отправка в очередь'
+      ? 'Enter: новая строка. Отправка кнопкой'
       : 'Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже'}
   </p>
   <SendLater
@@ -266,30 +279,38 @@
 </section>
 
 <style>
-  .composer { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s4); min-width: 0; position: relative; }
+  .composer { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    grid-template-areas: 'input input input input' 'attach extras clock send';
+    align-items: center;
     gap: var(--s2);
     min-width: 0;
-    min-height: var(--composer-height);
-    padding: var(--s2) var(--s3);
+    padding: var(--s5) var(--s3) var(--s3);
     border-radius: var(--radius-composer);
     background: var(--surface);
   }
+  .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {
-    flex: 1 1 auto;
+    grid-area: input;
+    field-sizing: content;
     min-width: 0;
-    min-height: calc(var(--fs-input) * var(--lh-body) * 2);
+    width: 100%;
+    min-height: calc(var(--fs-input) * var(--lh-body));
     max-height: calc(var(--fs-input) * var(--lh-body) * 6);
+    padding: var(--s0) var(--s5);
     overflow: auto;
     resize: none;
     border: var(--s0);
     background: transparent;
     color: var(--text);
     font: inherit;
+    font-size: var(--fs-input);
   }
+  textarea:focus-visible { outline: none; }
+  .attach { grid-area: attach; display: inline-flex; }
+  .extras { grid-area: extras; display: inline-flex; min-width: 0; }
   .file { position: absolute; width: var(--s1); height: var(--s1); overflow: hidden; clip-path: inset(50%); }
   .clock, .send {
     width: var(--target);
@@ -304,8 +325,9 @@
     background: var(--accent);
     color: var(--accent-ink);
   }
-  .clock { background: var(--raised); color: var(--text); }
+  .clock { grid-area: clock; background: var(--transparent); color: var(--text); }
+  .send { grid-area: send; }
   .off { background: var(--raised); color: var(--muted); }
-  .reason, .hint { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+  .reason, .hint { margin: 0; padding-inline: var(--s5); color: var(--muted); font-size: var(--fs-sm); }
   .reason { color: var(--danger); }
 </style>

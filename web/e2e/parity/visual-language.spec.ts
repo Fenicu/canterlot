@@ -55,7 +55,10 @@ test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
     const el = document.activeElement as HTMLElement | null;
     if (!el || el === document.body) return false;
     const style = getComputedStyle(el);
-    return style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 || style.boxShadow !== 'none';
+    if (style.outlineStyle !== 'none' && parseFloat(style.outlineWidth) > 0 || style.boxShadow !== 'none') return true;
+    // Рамка фокуса поля ввода живёт на капсуле целиком.
+    const capsule = el.closest('.capsule');
+    return el instanceof HTMLTextAreaElement && capsule !== null && getComputedStyle(capsule).outlineStyle !== 'none';
   });
 
   // Табуляция доходит до поля ввода и кнопки «Отправить», фокус везде виден.
