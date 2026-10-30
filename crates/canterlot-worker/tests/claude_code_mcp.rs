@@ -100,7 +100,7 @@ fn initialize_echoes_protocol_and_lists_approve_and_limits_tools() {
         .as_array()
         .expect("tools array")
         .clone();
-    assert_eq!(tools.len(), 2);
+    assert_eq!(tools.len(), 5);
     let names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))

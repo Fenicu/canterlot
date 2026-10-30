@@ -376,6 +376,19 @@ impl ClaudeCodeAdapter {
                     reason: "cancelled".into(),
                 });
             }
+            BrokerEvent::AgentTool {
+                call_id,
+                tool,
+                arguments,
+                ..
+            } => {
+                // Вызов пресетов уходит в хаб; итог вернётся через agent_call_result.
+                self.events.push_back(AdapterEvent::AgentCall {
+                    call_id,
+                    tool: tool.to_owned(),
+                    arguments,
+                });
+            }
             BrokerEvent::LimitsQuery { rpc_id } => {
                 let snap = self.limits.snapshot();
                 let current = [
@@ -928,6 +941,13 @@ impl Adapter for ClaudeCodeAdapter {
         }
         outcome
     }
+    async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+        // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
+        if let Some(broker) = self.broker.as_mut() {
+            broker.answer_agent_tool(call_id, &result).await;
+        }
+    }
+
     async fn interrupt(&mut self) -> InterruptOutcome {
         if self.exited || self.eof {
             return InterruptOutcome::NotApplicable;

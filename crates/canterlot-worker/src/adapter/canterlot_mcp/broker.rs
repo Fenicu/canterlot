@@ -21,6 +21,9 @@ struct PendingCall {
     stored: Value,
 }
 
+/// Ожидающий вызов пресетов: строка rpc id → (call id, rpc id, инструмент хаба).
+type AgentPending = Arc<Mutex<HashMap<String, (uuid::Uuid, Value, &'static str)>>>;
+
 fn is_question(stored: &Value) -> bool {
     stored.get("normalized").is_some()
 }
@@ -37,6 +40,13 @@ pub enum BrokerEvent {
     },
     LimitsQuery {
         rpc_id: Value,
+    },
+    /// Вызов инструмента пресетов: уходит в хаб как `AdapterEvent::AgentCall`.
+    AgentTool {
+        rpc_id: Value,
+        call_id: uuid::Uuid,
+        tool: &'static str,
+        arguments: Value,
     },
 }
 
@@ -59,6 +69,8 @@ async fn write_line(writer: &SharedWriter, value: &Value) -> std::io::Result<()>
 pub struct Broker {
     events: mpsc::UnboundedReceiver<BrokerEvent>,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    /// Ожидающие вызовы пресетов: строка rpc id → (call id, rpc id, инструмент хаба).
+    agent_pending: AgentPending,
     writer: SharedWriter,
     task: JoinHandle<()>,
     limits_provider: String,
@@ -91,10 +103,12 @@ impl Broker {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
         let (tx, rx) = mpsc::unbounded_channel();
         let pending: Arc<Mutex<HashMap<String, PendingCall>>> = Arc::default();
+        let agent_pending: AgentPending = Arc::default();
         let writer: SharedWriter = Arc::default();
         let provider = limits_provider.to_owned();
         let task = {
             let pending = pending.clone();
+            let agent_pending = agent_pending.clone();
             let writer = writer.clone();
             let provider = provider.clone();
             tokio::spawn(async move {
@@ -108,6 +122,7 @@ impl Broker {
                         read,
                         writer.clone(),
                         pending.clone(),
+                        agent_pending.clone(),
                         tx.clone(),
                         tool_set,
                         provider.clone(),
@@ -118,6 +133,7 @@ impl Broker {
         Ok(Self {
             events: rx,
             pending,
+            agent_pending,
             writer,
             task,
             limits_provider: provider,
@@ -197,6 +213,33 @@ impl Broker {
         })
     }
 
+    /// Итог вызова пресетов от хаба: текст плюс подсказка или `isError` с кодом.
+    /// Неизвестный (отменённый или чужой) вызов молча отбрасывается.
+    pub async fn answer_agent_tool(
+        &mut self,
+        call_id: uuid::Uuid,
+        result: &crate::adapter::AgentCallResult,
+    ) {
+        let found = {
+            let mut pending = self.agent_pending.lock().await;
+            let key = pending
+                .iter()
+                .find(|(_, (id, _, _))| *id == call_id)
+                .map(|(key, _)| key.clone());
+            key.and_then(|key| pending.remove(&key))
+        };
+        let Some((_, rpc_id, tool)) = found else {
+            return;
+        };
+        let (text, is_error) = mcp::agent_tool_text(tool, result);
+        let mut tool_result = json!({"content": [{"type": "text", "text": text}]});
+        if is_error {
+            tool_result["isError"] = json!(true);
+        }
+        let reply = json!({"jsonrpc": "2.0", "id": rpc_id, "result": tool_result});
+        let _ = write_line(&self.writer, &reply).await;
+    }
+
     // Запись ответа — отдельной задачей: отмена next_event адаптера её не обрывает.
     pub fn answer_limits(&mut self, rpc_id: Value, snapshot: &LimitsSnapshot) {
         let provider = if snapshot.provider.is_empty() {
@@ -221,6 +264,8 @@ impl Broker {
             );
             let _ = write_line(&self.writer, &reply).await;
         }
+        // Ожидающие вызовы пресетов отбрасываются: поздний итог хаба проигнорируют.
+        self.agent_pending.lock().await.clear();
         self.task.abort();
     }
 }
@@ -233,6 +278,7 @@ async fn serve_conn(
     read: tokio::net::unix::OwnedReadHalf,
     writer: SharedWriter,
     pending: Arc<Mutex<HashMap<String, PendingCall>>>,
+    agent_pending: AgentPending,
     events: mpsc::UnboundedSender<BrokerEvent>,
     tool_set: ToolSet,
     provider: String,
@@ -258,6 +304,20 @@ async fn serve_conn(
             } => {
                 if kind == mcp::ToolKind::Limits {
                     let _ = events.send(BrokerEvent::LimitsQuery { rpc_id });
+                    continue;
+                }
+                if let mcp::ToolKind::Agent { tool } = kind {
+                    let call_id = uuid::Uuid::now_v7();
+                    agent_pending
+                        .lock()
+                        .await
+                        .insert(rpc_id.to_string(), (call_id, rpc_id.clone(), tool));
+                    let _ = events.send(BrokerEvent::AgentTool {
+                        rpc_id,
+                        call_id,
+                        tool,
+                        arguments,
+                    });
                     continue;
                 }
                 let Some(request_id) = arguments
@@ -313,9 +373,19 @@ async fn serve_conn(
                         });
                     }
                     mcp::ToolKind::Limits => {}
+                    mcp::ToolKind::Agent { .. } => {}
                 }
             }
             mcp::McpAction::Cancelled { request_id } => {
+                // Отмена вызова пресетов: тихо отбрасываем, поздний итог проигнорируют.
+                if agent_pending
+                    .lock()
+                    .await
+                    .remove(&request_id.to_string())
+                    .is_some()
+                {
+                    continue;
+                }
                 if let Some(mapped) = rpc_to_request.remove(&request_id.to_string())
                     && pending.lock().await.remove(&mapped).is_some()
                 {
