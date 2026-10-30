@@ -255,6 +255,8 @@ test.describe('stack: features and security', () => {
     await page.locator('#model').selectOption('synthetic-small');
     await page.getByRole('button', { name: 'Сохранить настройки' }).click();
     await expect(page.locator('.subtitle').first()).toContainText('со следующего хода', { timeout: 15_000 });
+    // Лист закрывается только после записи кранча, а пока он открыт, поле ввода инертно и не примет текст.
+    await expect(page.getByRole('dialog')).toHaveCount(0, { timeout: 15_000 });
     let detail = await hub.json<{ model: string; settings: { effective: { model: string }; pending: { model?: string } } }>(`/api/v1/conversations/${id}`);
     expect(detail.settings.effective.model).toBe('synthetic-large');
     expect(detail.settings.pending.model).toBe('synthetic-small');
