@@ -506,3 +506,16 @@ async fn start_command_offers_todo_v1_only_on_a_session_that_agreed_to_it(pool: 
         ["pilot_v1", "todo_v1"]
     );
 }
+
+#[test]
+fn debug_of_a_list_shows_no_item_text() {
+    let marker = "PRIVATE_TODO_MARKER";
+    let list = TodoListView {
+        lane_block_id: None,
+        revision: 1,
+        items: vec![view(marker, ViewStatus::Pending)],
+        omitted: 0,
+    };
+    let debug = format!("{list:?}");
+    assert!(!debug.contains(marker), "{debug}");
+}
