@@ -10,12 +10,12 @@ export const COLOR_KEYS = [
 ] as const satisfies readonly ColorKey[];
 
 export const COLOR_NAMES: Record<(typeof COLOR_KEYS)[number], string> = {
-  accent: "Акцент",
+  accent: "Бирюзовый",
   blue: "Синий",
   amber: "Янтарный",
-  success: "Успех",
-  danger: "Опасность",
-  neutral: "Нейтральный",
+  success: "Зелёный",
+  danger: "Красный",
+  neutral: "Серый",
 };
 
 const VARS: Record<string, string> = {

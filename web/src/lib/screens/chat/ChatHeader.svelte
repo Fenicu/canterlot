@@ -5,6 +5,8 @@
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
 	import Icon from '#lib/ui/Icon.svelte';
+	import Menu from '#lib/ui/Menu.svelte';
+	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
 	import { stopSession, resumeSession, continueSessionQueue, startSessionExecution } from './controls';
@@ -29,6 +31,7 @@
 		providers = [],
 		thresholds = { warn_pcts: [80, 90], weekly_reserve_pct: 95, stale_after_secs: 1800 },
 		now = Date.now(),
+		onOpenSheet,
 		onOpenSettings,
 		onOpenDiagnostics
 	}: {
@@ -36,6 +39,7 @@
 		providers?: ProviderLimits[];
 		thresholds?: LimitThresholds;
 		now?: number;
+		onOpenSheet?: () => void;
 		onOpenSettings?: () => void;
 		onOpenDiagnostics?: () => void;
 	} = $props();
@@ -195,98 +199,55 @@
 	{/if}
 
 	{#if menuOpen}
-		<div class="session-dropdown" role="menu" aria-label="Действия над сессией">
-			{#if actionError}
-				<div class="action-error" role="alert">{actionError}</div>
-			{/if}
+		<div class="session-dropdown">
+			<Menu label="Действия над сессией">
+				{#if actionError}
+					<div class="action-error" role="alert">{actionError}</div>
+				{/if}
 
-			{#if onOpenSettings}
-				<button
-					type="button"
-					role="menuitem"
-					class="menu-item"
-					onclick={() => { menuOpen = false; onOpenSettings(); }}
-				>
-					Настройки сессии
-				</button>
-			{/if}
+				{#if onOpenSheet}
+					<MenuItem icon="pin" onclick={() => { menuOpen = false; onOpenSheet(); }}>Название, цвет и группы</MenuItem>
+				{/if}
 
-			{#if onOpenDiagnostics}
-				<button
-					type="button"
-					role="menuitem"
-					class="menu-item"
-					onclick={() => { menuOpen = false; onOpenDiagnostics(); }}
-				>
-					Диагностика
-				</button>
-			{/if}
+				{#if onOpenSettings}
+					<MenuItem icon="sliders" onclick={() => { menuOpen = false; onOpenSettings(); }}>Настройки сессии</MenuItem>
+				{/if}
 
-			<div class="menu-divider" role="separator"></div>
+				{#if onOpenDiagnostics}
+					<MenuItem icon="info" onclick={() => { menuOpen = false; onOpenDiagnostics(); }}>Диагностика</MenuItem>
+				{/if}
 
-			{#if isLive}
-				<button
-					type="button"
-					role="menuitem"
-					class="menu-item"
-					onclick={() => void handleStop(false)}
-				>
-					Остановить
-				</button>
+				<div class="menu-divider" role="separator"></div>
 
-				{#if !confirmingForce}
-					<button
-						type="button"
-						role="menuitem"
-						class="menu-item danger"
-						onclick={() => { confirmingForce = true; }}
-					>
-						Принудительно остановить
-					</button>
-				{:else}
-					<div class="confirm-box" role="dialog" aria-label="Подтверждение остановки">
-						<p>Принудительно прервать выполнение?</p>
-						<div class="row">
-							<button type="button" class="btn-confirm-danger" onclick={() => void handleStop(true)}>
-								Остановить принудительно
-							</button>
-							<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
-								Отмена
-							</button>
+				{#if isLive}
+					<MenuItem icon="stop" onclick={() => void handleStop(false)}>Остановить</MenuItem>
+
+					{#if !confirmingForce}
+						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Принудительно остановить</MenuItem>
+					{:else}
+						<div class="confirm-box" role="dialog" aria-label="Подтверждение остановки">
+							<p>Принудительно прервать выполнение?</p>
+							<div class="confirm-actions">
+								<button type="button" class="btn-confirm-danger" onclick={() => void handleStop(true)}>
+									Остановить принудительно
+								</button>
+								<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
+									Отмена
+								</button>
+							</div>
 						</div>
-					</div>
+					{/if}
+				{:else}
+					<MenuItem onclick={() => void handleResume()}>Возобновить сессию</MenuItem>
+					{#if hasNoLiveExecution && chat.queue.queued === 0}
+						<MenuItem onclick={() => void handleStart()}>Запустить</MenuItem>
+					{/if}
 				{/if}
-			{:else}
-				<button
-					type="button"
-					role="menuitem"
-					class="menu-item"
-					onclick={() => void handleResume()}
-				>
-					Возобновить сессию
-				</button>
-				{#if hasNoLiveExecution && chat.queue.queued === 0}
-					<button
-						type="button"
-						role="menuitem"
-						class="menu-item"
-						onclick={() => void handleStart()}
-					>
-						Запустить
-					</button>
-				{/if}
-			{/if}
 
-			{#if isLive && hasUserStop}
-				<button
-					type="button"
-					role="menuitem"
-					class="menu-item"
-					onclick={() => void handleContinueQueue()}
-				>
-					Продолжить очередь
-				</button>
-			{/if}
+				{#if isLive && hasUserStop}
+					<MenuItem onclick={() => void handleContinueQueue()}>Продолжить очередь</MenuItem>
+				{/if}
+			</Menu>
 		</div>
 	{/if}
 </div>
@@ -377,67 +338,47 @@
 	}
 	.session-dropdown {
 		position: absolute;
-		right: var(--s4);
-		top: calc(100% + var(--s1));
-		background: var(--popover);
-		border-radius: var(--radius-card);
-		display: flex;
-		flex-direction: column;
-		min-width: var(--preview-height);
-		padding: var(--s2);
+		right: var(--gutter);
+		top: calc(100% - var(--s2));
 		z-index: 20;
-	}
-	.menu-item {
-		background: var(--transparent);
-		border: none;
-		text-align: left;
-		padding: var(--s2) var(--s3);
-		border-radius: var(--radius-card);
-		color: var(--text);
-		font-size: var(--fs-body);
-		cursor: pointer;
-	}
-	.menu-item:hover {
-		background: var(--raised);
-	}
-	.menu-item.danger {
-		color: var(--danger);
+		max-width: calc(100% - 2 * var(--gutter));
 	}
 	.menu-divider {
 		height: var(--hairline);
-		background: var(--line);
-		margin: var(--s1) 0;
+		background: var(--control-line);
+		margin: var(--s2) var(--s4);
 	}
 	.confirm-box {
-		padding: var(--s2);
-		background: var(--raised);
-		border-radius: var(--radius-card);
+		padding: var(--s4);
+		border-radius: var(--radius-sm);
+		background: var(--danger-soft);
 		font-size: var(--fs-meta);
 	}
 	.confirm-box p {
-		margin: 0 0 var(--s2);
+		margin: 0 0 var(--s4);
+	}
+	.confirm-actions {
+		display: flex;
+		flex-wrap: wrap;
+		gap: var(--s2);
+	}
+	.btn-confirm-danger, .btn-cancel {
+		min-height: var(--target);
+		padding: var(--s2) var(--s6);
+		border-radius: var(--radius-pill);
+		font-size: var(--fs-meta);
 	}
 	.btn-confirm-danger {
 		background: var(--danger);
-		color: var(--text);
-		border: none;
-		padding: var(--s1) var(--s2);
-		border-radius: var(--radius-card);
-		font-size: var(--fs-meta);
-		cursor: pointer;
+		color: var(--bg);
 	}
 	.btn-cancel {
 		background: var(--transparent);
-		color: var(--muted);
-		border: none;
-		padding: var(--s1) var(--s2);
-		font-size: var(--fs-meta);
-		cursor: pointer;
+		color: var(--text);
 	}
 	.action-error {
-		padding: var(--s1) var(--s2);
+		padding: var(--s2) var(--s5);
 		font-size: var(--fs-meta);
 		color: var(--danger);
-		margin-bottom: var(--s1);
 	}
 </style>

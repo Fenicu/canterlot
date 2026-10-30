@@ -133,7 +133,7 @@ test('archive_with_active_crunch_asks_for_confirmation_and_retries_with_force', 
     if (body.archived) bodies.push({ key: request.headers()['idempotency-key'] ?? '', force: body.force });
   });
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
-  await page.getByRole('button', { name: 'Архив', exact: true }).click();
+  await page.getByRole('button', { name: /В архив/ }).click();
   await expect(page.getByText('кранч')).toBeVisible();
   await page.getByRole('button', { name: 'Всё равно архивировать' }).click();
   await expect.poll(() => bodies.length).toBe(2);

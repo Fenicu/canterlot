@@ -1,21 +1,28 @@
 <script lang="ts">
   import { createGroup, deleteGroup, patchGroup } from '#lib/api/client.js';
-  import { isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { fmt } from '#lib/format/ru.js';
+  import Button from '#lib/ui/Button.svelte';
+  import Field from '#lib/ui/Field.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
 
   let {
     groups,
-    touch = isTouchPrimary(),
+    counts = {},
     onclose
   }: {
     groups: { id: string; name: string; position: number }[];
-    touch?: boolean;
+    counts?: Record<string, number>;
     onclose: () => void;
   } = $props();
 
   let name = $state('');
   let confirmId = $state('');
   const ordered = $derived([...groups].sort((a, b) => a.position - b.position));
+  const sessions = (id: string) => {
+    const count = counts[id] ?? 0;
+    return `${count} ${fmt.plural(count, ['сессия', 'сессии', 'сессий'])}`;
+  };
 
   async function add() {
     const next = name.trim();
@@ -24,9 +31,9 @@
     name = '';
   }
 
-  async function rename(id: string, value: string) {
+  async function rename(id: string, value: string, previous: string) {
     const next = value.trim();
-    if (!next) return;
+    if (!next || next === previous) return;
     await patchGroup(id, { name: next }, crypto.randomUUID());
   }
 
@@ -44,49 +51,51 @@
   }
 </script>
 
-{#snippet fields()}
-  <form onsubmit={(event) => { event.preventDefault(); void add(); }}>
-    <label>Новая группа <input bind:value={name} aria-label="Название группы" /></label>
-    <button type="submit">Создать</button>
-  </form>
-  {#each ordered as group, index (group.id)}
-    <div>
-      <input aria-label={`Название ${group.name}`} value={group.name} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void rename(group.id, event.currentTarget.value); } }} />
-      <button type="button" onclick={() => void move(index, -1)}>Выше</button>
-      <button type="button" onclick={() => void move(index, 1)}>Ниже</button>
-      <button type="button" onclick={() => (confirmId = group.id)}>Удалить</button>
-      {#if confirmId === group.id}
-        <p>Сессии останутся в списке</p>
-        <button type="button" onclick={() => void remove(group.id)}>Подтвердить удаление</button>
-      {/if}
-    </div>
-  {/each}
-{/snippet}
-
-{#if touch}
-  <Sheet open title="Группы" {onclose}>{@render fields()}</Sheet>
-{:else}
-  <dialog open aria-label="Группы">
-    <button type="button" onclick={onclose}>Закрыть</button>
-    {@render fields()}
-  </dialog>
-{/if}
+<Sheet open title="Группы" subtitle="Порядок здесь совпадает с порядком в списке сессий." {onclose}>
+  <div class="manager">
+    {#each ordered as group, index (group.id)}
+      <div class="group">
+        <input aria-label={`Название ${group.name}`} value={group.name} onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void rename(group.id, event.currentTarget.value, group.name); } }} onblur={(event) => void rename(group.id, event.currentTarget.value, group.name)} />
+        <div class="controls">
+          <span class="count">{sessions(group.id)}</span>
+          <IconButton filled icon="up" label="Выше" inert={index === 0} onclick={() => void move(index, -1)} />
+          <IconButton filled icon="down" label="Ниже" inert={index === ordered.length - 1} onclick={() => void move(index, 1)} />
+          <IconButton filled icon="trash" label="Удалить" onclick={() => (confirmId = group.id)} />
+        </div>
+        {#if confirmId === group.id}
+          <div class="confirm" role="alert">
+            <p>Удалить группу «{group.name}»? Сессии останутся в списке</p>
+            <div class="actions">
+              <span class="danger"><Button variant="primary" onclick={() => void remove(group.id)}>Подтвердить удаление</Button></span>
+              <Button onclick={() => (confirmId = '')}>Отмена</Button>
+            </div>
+          </div>
+        {/if}
+      </div>
+    {/each}
+    <p class="note">Название сохраняется по Enter или когда фокус уходит из поля.</p>
+    <form onsubmit={(event) => { event.preventDefault(); void add(); }}>
+      <Field label="Новая группа">
+        {#snippet children({ id })}<input {id} bind:value={name} aria-label="Название группы" placeholder="Название группы" />{/snippet}
+      </Field>
+      <Button type="submit">Создать</Button>
+    </form>
+    <div class="done"><Button variant="primary" onclick={onclose}>Готово</Button></div>
+  </div>
+</Sheet>
 
 <style>
-  dialog {
-    position: fixed;
-    inset: 0;
-    margin: auto;
-    width: min(100%, var(--phone-max));
-    height: fit-content;
-    border: var(--s0);
-    border-radius: var(--radius-card);
-    background: var(--surface);
-    color: var(--text);
-    padding: var(--s6);
-  }
-  label, div { display: flex; flex-wrap: wrap; gap: var(--s2); align-items: center; }
-  input { min-height: var(--target); border: var(--s0); border-radius: var(--radius-sm); background: var(--bg); color: var(--text); }
-  button { min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--accent-link); }
-  p { color: var(--secondary); }
+  .manager { display: flex; flex-direction: column; gap: var(--s4); }
+  .group { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s3); padding: var(--s3); border-radius: var(--radius-card); background: var(--raised); }
+  .group > input { flex: 1 1 calc(var(--gauge-width) * 2); min-width: 0; min-height: var(--target); padding: var(--s4) var(--s8); border: var(--s0); border-radius: var(--radius-pill); background: var(--chat-bg); color: var(--text); font-size: var(--fs-input); }
+  .controls { display: flex; flex: 1 1 auto; align-items: center; justify-content: flex-end; gap: var(--s2); }
+  .count { flex: 1; color: var(--muted); font-size: var(--fs-sm); white-space: nowrap; }
+  .confirm { display: flex; flex: 1 1 100%; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: var(--s4); padding: var(--s4) var(--s6); border-radius: var(--radius-card); background: var(--danger-soft); }
+  .confirm p { margin: 0; flex: 1 1 calc(var(--gauge-width) * 2); overflow-wrap: anywhere; font-size: var(--fs-meta); }
+  .actions { display: flex; flex-wrap: wrap; gap: var(--s3); }
+  .danger { --accent: var(--danger); --accent-ink: var(--bg); display: contents; }
+  .note { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
+  form { display: flex; align-items: flex-end; gap: var(--s3); }
+  form > :global(.field) { flex: 1; }
+  .done { display: flex; justify-content: flex-end; }
 </style>

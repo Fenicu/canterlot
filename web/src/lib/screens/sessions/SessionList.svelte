@@ -21,6 +21,8 @@
   import { browserRuntime } from '#lib/screens/chat/open.js';
   import Icon from '#lib/ui/Icon.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
+  import Menu from '#lib/ui/Menu.svelte';
+  import MenuItem from '#lib/ui/MenuItem.svelte';
   import { theme } from '#lib/theme.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { LimitThresholds } from '#lib/stores/limits.js';
@@ -48,6 +50,8 @@
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
   let sheetId = $state('');
+  let sheetTop = $state(0);
+  let listNode = $state<HTMLElement | null>(null);
   let groupsOpen = $state(false);
   let menu = $state(false);
   let canInstall = $state(false);
@@ -118,6 +122,11 @@
   );
   const openRow = $derived(rows.find((item) => item.id === (page.params.id ?? '')) ?? null);
   const sheetItem = $derived(rows.find((item) => item.id === sheetId) ?? null);
+  const groupCounts = $derived.by(() => {
+    const counts: Record<string, number> = {};
+    for (const item of rows) for (const id of item.groups) counts[id] = (counts[id] ?? 0) + 1;
+    return counts;
+  });
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
 
   $effect(() => {
@@ -147,6 +156,16 @@
     writeCollapsed(collapsed);
   }
 
+  function openSheet(id: string) {
+    const row = listNode?.querySelector(`[data-session="${CSS.escape(id)}"]`);
+    if (row && listNode) sheetTop = row.getBoundingClientRect().bottom - listNode.getBoundingClientRect().top;
+    sheetId = id;
+  }
+
+  function closeMenu(event: KeyboardEvent) {
+    if (event.key === 'Escape') menu = false;
+  }
+
   function resetSearch() {
     query = '';
     results = null;
@@ -164,17 +183,11 @@
   });
 </script>
 
-<svelte:element this={main ? 'main' : 'div'} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
+<svelte:window onkeydown={closeMenu} />
+
+<svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
   <div class="bar">
     <p class="brand">canterlot</p>
-
-    {#if create}
-      <a
-        class="create"
-        href={resolve('new')}
-        aria-label="Новая сессия"
-      ><span aria-hidden="true">+</span></a>
-    {/if}
 
     <IconButton
       icon="search"
@@ -188,19 +201,24 @@
       onclick={() => theme.toggle()}
     />
 
-    <button
-      type="button"
-      aria-label="Ещё"
-      aria-expanded={menu}
-      onclick={() => menu = !menu}
-    ><Icon name="more" /></button>
+    <IconButton icon="more" label="Ещё" expanded={menu} onclick={() => menu = !menu} />
+
+    {#if create}
+      <a
+        class="create"
+        href={resolve('new')}
+        aria-label="Новая сессия"
+      ><Icon name="plus" /></a>
+    {/if}
 
     {#if menu}
-      <div class="menu" role="menu">
-        <a role="menuitem" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</a>
-        <button type="button" role="menuitem" onclick={() => { groupsOpen = true; menu = false; }}>Группы</button>
-        <button type="button" role="menuitem" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</button>
-        {#if canInstall}<button type="button" role="menuitem" onclick={() => { menu = false; void installation().prompt(); }}>Установить</button>{/if}
+      <div class="menu-slot">
+        <Menu label="Ещё">
+          <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
+          <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
+          <MenuItem icon="archive" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</MenuItem>
+          {#if canInstall}<MenuItem icon="download" onclick={() => { menu = false; void installation().prompt(); }}>Установить</MenuItem>{/if}
+        </Menu>
       </div>
     {/if}
   </div>
@@ -238,7 +256,7 @@
           current={openRow?.id ?? ''}
           heading={tab.kind === 'all' && !results}
           ontoggle={toggle}
-          onopen={(id) => sheetId = id}
+          onopen={openSheet}
         />
       {/each}
     {/if}
@@ -247,20 +265,22 @@
     <SessionSheet
       item={sheetItem}
       groups={groups}
+      machine={runtime?.machines.items.get(sheetItem.machine.id) ?? null}
+      anchor={sheetTop}
+      ongroups={() => { sheetId = ''; groupsOpen = true; }}
       onclose={() => sheetId = ''}
     />
   {/if}
   {#if groupsOpen}
-    <GroupManager groups={groups} onclose={() => groupsOpen = false} />
+    <GroupManager groups={groups} counts={groupCounts} onclose={() => groupsOpen = false} />
   {/if}
 </svelte:element>
 
 <style>
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
-  .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; margin: var(--s5) var(--s6) var(--s3); padding: var(--s4); border-radius: var(--radius-pill); background: var(--surface); }
-  .brand { flex: 1 0 auto; margin: 0; padding-left: var(--s4); font-size: var(--fs-title); }
-  .create { display: inline-flex; align-items: center; justify-content: center; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-title); }
-  .menu { position: absolute; z-index: 2; right: var(--s6); top: var(--s14); display: flex; flex-direction: column; padding: var(--s4); border-radius: var(--radius-card); background: var(--surface); }
-  .menu button, .bar > button { min-width: var(--target); min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--text); }
+  .bar { position: relative; display: flex; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding: var(--s2) var(--s3); border-radius: var(--radius-pill); background: var(--surface); }
+  .brand { flex: 1 1 auto; min-width: 0; margin: 0; padding-left: var(--s6); overflow: hidden; font-size: var(--fs-title); font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
+  .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }
+  .menu-slot { position: absolute; z-index: 4; top: calc(100% + var(--s2)); right: var(--s3); }
   .scroll { overflow: auto; min-height: 0; flex: 1; }
 </style>

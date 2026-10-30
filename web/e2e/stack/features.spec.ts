@@ -226,7 +226,7 @@ test.describe('stack: features and security', () => {
 
     // Архив: сессия уходит из основного списка на второй странице.
     await one.getByRole('button', { name: `Действия: ${beta}` }).click();
-    await one.getByRole('button', { name: 'Архив', exact: true }).click();
+    await one.getByRole('button', { name: /В архив/ }).click();
     await expect(two.locator(`[data-session="${idB}"]`)).toHaveCount(0, { timeout: 20_000 });
     await expect.poll(async () => (await hub.json<{ archived: boolean }>(`/api/v1/conversations/${idB}`)).archived).toBe(true);
 
