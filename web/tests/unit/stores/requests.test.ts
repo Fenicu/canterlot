@@ -300,6 +300,38 @@ describe('RequestsModel', () => {
     expect(model.items.get('req-idb')!.error).toBe('Не удалось сохранить решение на устройстве');
   });
 
+  it('decided_requests_leave_no_journal_row_and_secret_answers_are_never_written', async () => {
+    const db = await openDb('owner-1');
+    const written: string[] = [];
+    const realPut = db.put.bind(db);
+    db.put = async (store, key, value) => {
+      if (store === 'ops') written.push(JSON.stringify(value));
+      return realPut(store, key, value);
+    };
+    const env = new TestEnv();
+    const send = vi.fn(async (op: Op) => ({ state: 'decision_saved', decision: (op.body as { decision: unknown }).decision }));
+    const journal = new OpJournal(db, send, env);
+    const model = new RequestsModel('conv-1');
+    model.items.set('req-plain', { id: 'req-plain', conversationId: 'conv-1', kind: 'permission', state: 'open', payload: {} });
+    model.items.set('req-secret', {
+      id: 'req-secret',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: { questions: [{ id: 'q1', text: 'Токен', is_secret: true, allow_custom: true }] }
+    });
+
+    await model.submitDecision('req-plain', { kind: 'permission', behavior: 'allow' }, journal);
+    await model.submitDecision('req-secret', { kind: 'question', answers: { q1: 'ghp_тайна' } }, journal);
+
+    expect(model.items.get('req-plain')!.state).toBe('saved');
+    expect(model.items.get('req-secret')!.state).toBe('saved');
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(journal.ops.size).toBe(0);
+    expect(await db.list('ops')).toEqual([]);
+    expect(written.join('\n')).not.toContain('ghp_тайна');
+  });
+
   it('request_closed_updates_state_to_applied', () => {
     const model = new RequestsModel('conv-1');
     model.items.set('req-close', {

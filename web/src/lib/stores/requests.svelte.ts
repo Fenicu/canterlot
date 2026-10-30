@@ -43,6 +43,24 @@ export function createRequestItem(init: RequestItem): RequestItem {
   return item;
 }
 
+/** Секретный вопрос: ответ живёт только в памяти, на устройство не пишется. */
+export function hasSecretQuestion(payload: unknown): boolean {
+  const record = asRecord(payload);
+  const nested = asRecord(record.payload);
+  const list = Array.isArray(record.questions)
+    ? record.questions
+    : Array.isArray(nested.questions)
+      ? nested.questions
+      : [];
+  return (
+    Boolean(record.is_secret ?? record.isSecret) ||
+    list.some((q) => {
+      const question = asRecord(q);
+      return Boolean(question.is_secret ?? question.isSecret);
+    })
+  );
+}
+
 export class RequestsModel {
   readonly items = new SvelteMap<string, RequestItem>();
   readonly conversationId?: string;
@@ -212,7 +230,11 @@ export class RequestsModel {
 
     let op: Op;
     try {
-      op = await journal.begin('other', { requestId, conversationId, decision }, { conversationId, persist: true });
+      op = await journal.begin(
+        'other',
+        { requestId, conversationId, decision },
+        { conversationId, persist: !hasSecretQuestion(item?.payload) }
+      );
     } catch {
       if (item && item.state === 'sending') {
         item.state = 'open';
@@ -265,6 +287,9 @@ export class RequestsModel {
         item.state = 'open';
         item.error = describeError(err).message;
       }
+    } finally {
+      // Решение доставлено или отклонено: строка журнала с ответом больше не нужна.
+      journal.settle(op.key);
     }
   }
 }
