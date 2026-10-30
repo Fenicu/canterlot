@@ -863,6 +863,7 @@ fn pilot_records_roundtrip() {
         max_attachments_per_input: 10,
         containment: "process_group".into(),
         os: "Debian 13 · 6.12".into(),
+        home_dir: "/home/owner".into(),
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -1168,6 +1169,12 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         ..Default::default()
     };
     assert_eq!(report.encode_to_vec()[0], 8 << 3 | 2);
+    assert_roundtrip(report);
+    let report = MachineReport {
+        home_dir: "/home/owner".into(),
+        ..Default::default()
+    };
+    assert_eq!(report.encode_to_vec()[0], 9 << 3 | 2);
     assert_roundtrip(report);
     let snapshot = LimitsSnapshot {
         provider: "claude".into(),

@@ -1189,6 +1189,43 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty(pool: PgPool) {
+    use canterlot_proto::worker::v1::MachineReport;
+    let f = Fixture::new(pool).await;
+    let path = format!("/api/v1/machines/{}", f.machine);
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await["home_dir"],
+        Value::Null
+    );
+    let mut report = MachineReport {
+        home_dir: "/home/owner".into(),
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_report(&f.pool, f.owner, f.machine, &report, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await["home_dir"],
+        "/home/owner"
+    );
+    let published: Value = sqlx::query_scalar(
+        "select payload from events where kind='machine_report_updated' order by scope_seq desc limit 1",
+    )
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(published["home_dir"], "/home/owner");
+    report.home_dir.clear();
+    canterlot_hub::machine_info::apply_report(&f.pool, f.owner, f.machine, &report, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await["home_dir"],
+        Value::Null
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_scopes(pool: PgPool) {
     use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
     let f = Fixture::new(pool).await;

@@ -6459,6 +6459,12 @@
             "format": "int64",
             "minimum": 0
           },
+          "home_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "id": {
             "type": "string",
             "format": "uuid"

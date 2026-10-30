@@ -173,6 +173,14 @@ fn metrics_message_has_only_whitelisted_labels_and_stays_small() {
     );
     assert!(!format!("{sample:?}").contains(dir.path().to_str().unwrap()));
 }
+#[test]
+fn report_carries_the_home_of_the_user_the_worker_runs_as() {
+    let dir = fixture();
+    let report = build_report(&config(dir.path()), &catalog());
+    let home = std::env::home_dir().unwrap();
+    assert!(home.is_absolute());
+    assert_eq!(report.home_dir, home.to_str().unwrap());
+}
 fn config(dir: &Path) -> WorkerConfig {
     toml::from_str(&format!("hub_url='https://localhost'\nca_cert='ca'\ntoken_file='token'\nmachine_id='{}'\ninstallation_id='{}'\nrestore_generation='{}'\ndata_dir='{}'\n[execution]\nallowed_workdir_roots=['{}']",Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7(),dir.display(),dir.join(".").display())).unwrap()
 }

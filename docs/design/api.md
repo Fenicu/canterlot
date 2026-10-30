@@ -200,7 +200,7 @@
 | `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
 | `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
 | `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
-| `GET /api/v1/machines` | Каталоги, ОС, доступность, метрики, сессии, предупреждения |
+| `GET /api/v1/machines` | Каталоги, ОС, домашний каталог `home_dir` (`null` у воркера без этого поля), доступность, метрики, сессии, предупреждения |
 | `GET /api/v1/machines/{id}` | Та же структура одной машины |
 | `GET /api/v1/machines/{id}/workdirs/recent` | `workdirs`, последние 3 каталога этой машины, свежие первыми |
 | `GET /api/v1/limits` | Лимиты провайдеров: пятичасовое и недельное окна, `weekly_reserve_active`, `weekly_reserve_resets_at` |

@@ -195,6 +195,7 @@ pub fn report() -> MachineReport {
         max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
         containment: "process_group".into(),
         os: "linux".into(),
+        home_dir: "/home/worker".into(),
     }
 }
 pub fn metrics(ms: u64) -> MachineMetrics {

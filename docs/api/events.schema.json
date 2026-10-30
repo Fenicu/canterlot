@@ -4158,6 +4158,12 @@
             },
             "limits_ok": {
               "type": "boolean"
+            },
+            "home_dir": {
+              "type": [
+                "string",
+                "null"
+              ]
             }
           },
           "required": [

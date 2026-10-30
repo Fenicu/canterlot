@@ -1308,6 +1308,7 @@ export interface components {
             harnesses: components["schemas"]["HarnessView"][];
             /** Format: int64 */
             heartbeat_age_ms?: number | null;
+            home_dir?: string | null;
             /** Format: uuid */
             id: string;
             limits_ok: boolean;

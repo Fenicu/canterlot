@@ -421,6 +421,8 @@ message MachineReport {
   uint32 max_attachments_per_input = 6;
   string containment = 7;
   string os = 8;
+  // Домашний каталог пользователя воркера; пусто, если воркер его не знает.
+  string home_dir = 9;
 }
 
 message HarnessInfo {
