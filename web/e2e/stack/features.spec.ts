@@ -170,13 +170,12 @@ test.describe('stack: features and security', () => {
     const stack = getStack();
     const hub = createHubClient(stack);
     const id = await hub.createConversation({ harness: 'synthetic' });
-    await hub.postInput(id, synthetic.script([
+    await hub.postAndFinish(id, synthetic.script([
       synthetic.limitObserved('five_hour', 120, 3 * 3_600_000),
       synthetic.limitObserved('weekly', 450, 3 * 86_400_000),
       synthetic.usage({ model: 'synthetic-large', agent: 'main', input: 4000, output: 600 }),
       synthetic.delta('снимок лимитов')
     ]));
-    await hub.waitIdle(id);
 
     await page.goto(`${stack.baseUrl}/limits`);
     const main = page.locator('main');
