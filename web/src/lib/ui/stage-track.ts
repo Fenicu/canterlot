@@ -12,8 +12,10 @@ export function swapLabel(node: HTMLElement, initial: string) {
   }
   function update(value: string) {
     target = value;
-    if (prefersReducedMotion() || !durationMs('--duration-label-out') || !node.animate) { finish(); return; }
-    if (leaving || node.textContent === target) return;
+    // Каждый durationMs пересчитывает стиль документа: идущая смена подписи сама подхватит новый target.
+    if (leaving) return;
+    if (!durationMs('--duration-label-out') || !node.animate) { finish(); return; }
+    if (node.textContent === target) return;
     entering?.cancel();
     const style = getComputedStyle(document.documentElement);
     const shift = style.getPropertyValue('--shift-label').trim();
