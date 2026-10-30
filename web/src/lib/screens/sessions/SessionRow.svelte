@@ -1,6 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import { fmt } from '#lib/format/ru.js';
+  import { modelLabel } from '#lib/screens/chat/settingsLabels.js';
   import Icon from '#lib/ui/Icon.svelte';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import { activityLine, type Activity } from './activityText';
@@ -53,7 +54,7 @@
         <time datetime={item.last_activity_at ?? undefined}>{stamp}</time>
       {/if}
     </span>
-    <span class="meta">{item.harness.title} · {item.model} · {item.machine.name}</span>
+    <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
     <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}</span>
   </a>
   <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={() => onopen(item.id)}>

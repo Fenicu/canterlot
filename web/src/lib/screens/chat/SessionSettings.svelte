@@ -17,7 +17,7 @@
 	import Select from '#lib/ui/Select.svelte';
 	import Textarea from '#lib/ui/Textarea.svelte';
 	import Toggle from '#lib/ui/Toggle.svelte';
-	import { effortLabel, permissionLabel } from './settingsLabels';
+	import { effortLabel, modelLabel, permissionLabel } from './settingsLabels';
 
 	type AppliedPreset = components['schemas']['AppliedPreset'];
 	type PresetSummary = components['schemas']['PresetSummary'];
@@ -272,7 +272,7 @@
 				options={modelOptions}
 				bind:value={selectedModel}
 				disabled={locked}
-				hint={pending?.model ? `${effective.model} → ${pending.model} со следующего хода` : undefined}
+				hint={pending?.model ? `${modelLabel(effective.model ?? '')} → ${modelLabel(pending.model)} со следующего хода` : undefined}
 				error={!midsessionSupported ? 'Настройка посреди сессии не поддерживается' : (modelError ?? undefined)}
 			/>
 			<Select

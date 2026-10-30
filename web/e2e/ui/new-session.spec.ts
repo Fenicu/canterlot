@@ -126,6 +126,12 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
   await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
   await field.selectOption('haiku');
   await expect(field).toHaveValue('haiku');
+  await field.selectOption('opus[1m]');
+  await pathField(page).fill('/srv/canterlot');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  await expect(page.getByText(/Claude Code · Opus 1M · workstation/).first()).toBeVisible();
 });
 
 test('new_session_crunch_default_text_comes_from_config', async ({ page }) => {
