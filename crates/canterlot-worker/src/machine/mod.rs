@@ -6,6 +6,7 @@ use canterlot_proto::{
 use std::time::{SystemTime, UNIX_EPOCH};
 pub mod limits;
 pub mod metrics;
+pub mod workdirs;
 
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -51,6 +52,10 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
         max_attachments_per_input: MAX_ATTACHMENTS_PER_INPUT as u32,
         containment: "tree".into(),
         os: os_line(),
+        home_dir: std::env::home_dir()
+            .filter(|home| home.is_absolute())
+            .and_then(|home| home.to_str().map(str::to_owned))
+            .unwrap_or_default(),
     }
 }
 fn os_line() -> String {

@@ -137,6 +137,10 @@ impl WorkerControl for HubGrpc {
                                 if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_PILOT_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
                                 lane.submit_limits(report);
                             }
+                            Some(control_up::Msg::WorkdirSuggestions(reply)) => {
+                                if !state.registry.has_capability(machine_id,crate::session::CAPABILITY_WORKDIR_SUGGEST_V1){Err(session_log.error(Status::invalid_argument("capability_missing")))?;}
+                                state.registry.finish_suggest(machine_id, reply);
+                            }
                             Some(control_up::Msg::CjRecords(records)) => {
                                 if Uuid::parse_str(&records.journal_id).ok() != cj_journal {
                                     Err(session_log.error(Status::invalid_argument("invalid_record")))?;

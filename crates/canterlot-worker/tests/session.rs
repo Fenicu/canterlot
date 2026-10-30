@@ -1689,6 +1689,37 @@ async fn poll_limits_request_is_answered_from_the_source() {
     assert_eq!(report.observations[1].used_permille, 960);
     stop_worker(stop, join).await;
 }
+#[tokio::test]
+async fn workdir_suggestions_are_answered_over_the_control_stream() {
+    use canterlot_proto::worker::v1::{SuggestWorkdirs, control_up::Msg};
+    assert!(canterlot_worker::session::OPTIONAL_CAPABILITIES.contains(&"workdir_suggest_v1"));
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        capabilities: vec!["pilot_v1".into(), "workdir_suggest_v1".into()],
+        ..Default::default()
+    })
+    .await;
+    let root = hub.config.data_dir.join("root");
+    fs::create_dir_all(root.join("project")).unwrap();
+    fs::create_dir_all(root.join("notes")).unwrap();
+    hub.config.execution.allowed_workdir_roots = vec![root.clone()];
+    let (stop, _, join) = start(hub.config.clone(), store);
+    next_pilot(&mut hub, |m| matches!(m, Msg::MachineReport(_))).await;
+    hub.send(ControlDown {
+        msg: Some(control_down::Msg::SuggestWorkdirs(SuggestWorkdirs {
+            request_id: "request".into(),
+            path: format!("{}/pro", root.display()),
+        })),
+    })
+    .await;
+    let Msg::WorkdirSuggestions(reply) =
+        next_pilot(&mut hub, |m| matches!(m, Msg::WorkdirSuggestions(_))).await
+    else {
+        panic!()
+    };
+    assert_eq!(reply.request_id, "request");
+    assert_eq!(reply.directories, [format!("{}/project", root.display())]);
+    stop_worker(stop, join).await;
+}
 #[tokio::test(start_paused = true)]
 async fn report_is_resent_after_reconnect_and_metrics_resume() {
     frozen_clock::run(async {

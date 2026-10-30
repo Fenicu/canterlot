@@ -32,7 +32,12 @@ use crate::{
 
 mod data;
 
-pub const OPTIONAL_CAPABILITIES: &[&str] = &["exec_v1", "pilot_v1", "instructions_v1"];
+pub const OPTIONAL_CAPABILITIES: &[&str] = &[
+    "exec_v1",
+    "pilot_v1",
+    "instructions_v1",
+    "workdir_suggest_v1",
+];
 
 #[derive(Clone)]
 pub struct CachedLimits {
@@ -361,6 +366,7 @@ pub struct Worker {
     idle_ticker: crate::machine::limits::IdleTicker,
     metrics: std::sync::Arc<dyn crate::machine::metrics::MetricsSource>,
     metrics_task: Option<MetricsFuture>,
+    workdirs: crate::machine::workdirs::WorkdirSuggester,
     claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
     codex_catalog: Option<crate::adapter::codex::CodexCatalog>,
 }
@@ -457,6 +463,9 @@ impl Worker {
                 "/proc".into(),
             ),
         );
+        let workdirs = crate::machine::workdirs::WorkdirSuggester::new(
+            config.execution.allowed_workdir_roots.clone(),
+        );
         Self {
             limits_cache,
             limits_source,
@@ -464,6 +473,7 @@ impl Worker {
             idle_ticker,
             metrics: std::sync::Arc::new(metrics),
             metrics_task: None,
+            workdirs,
             claude_version: None,
             codex_catalog: None,
             #[cfg(feature = "fault-injection")]
@@ -912,6 +922,10 @@ impl Worker {
             }
         }
         let exec_enabled = accepted.capabilities.iter().any(|cap| cap == "exec_v1");
+        let suggest_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == "workdir_suggest_v1");
         self.manager
             .as_ref()
             .unwrap()
@@ -1016,6 +1030,11 @@ impl Worker {
         let mut limits_outbound = None;
         type LimitsFuture = Pin<Box<dyn Future<Output = Vec<LimitObservation>> + Send>>;
         let mut limits_operation: Option<LimitsFuture> = None;
+        // Ждёт только последний запрос: пока идёт листинг, ввод уже ушёл дальше.
+        let mut suggest_next: Option<SuggestWorkdirs> = None;
+        let mut suggest_outbound = None;
+        type SuggestFuture = Pin<Box<dyn Future<Output = WorkdirSuggestions> + Send>>;
+        let mut suggest_operation: Option<SuggestFuture> = None;
         let session_state = self.state.clone();
         let manager = self.manager.as_ref().unwrap();
         let (data_state, mut data_attached) = watch::channel(true);
@@ -1062,6 +1081,18 @@ impl Worker {
                         source.poll_idle(&provider).await
                     } else {
                         source.poll(&provider).await
+                    }
+                }));
+            }
+            if suggest_operation.is_none()
+                && suggest_outbound.is_none()
+                && let Some(request) = suggest_next.take()
+            {
+                let workdirs = self.workdirs.clone();
+                suggest_operation = Some(Box::pin(async move {
+                    WorkdirSuggestions {
+                        directories: workdirs.suggest(request.path).await,
+                        request_id: request.request_id,
                     }
                 }));
             }
@@ -1147,6 +1178,7 @@ impl Worker {
             let can_send = heartbeat_outbound.is_some()
                 || machine_outbound.is_some()
                 || limits_outbound.is_some()
+                || suggest_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1156,6 +1188,7 @@ impl Worker {
                     match message.msg {
                         Some(control_down::Msg::PollLimits(request)) if pilot => {polls.push_back((request.provider, false));}
                         Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
+                        Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
@@ -1219,6 +1252,7 @@ impl Worker {
                     let mut message = if let Some(message) = heartbeat_outbound.take() { message }
                     else if let Some(message)=machine_outbound.take() {message}
                     else if let Some(message)=limits_outbound.take() {message}
+                    else if let Some(message)=suggest_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1263,6 +1297,9 @@ impl Worker {
                     limits_operation=None;
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
                     if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});}
+                }
+                reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
+                    suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {

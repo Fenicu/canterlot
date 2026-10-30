@@ -195,6 +195,7 @@ pub fn report() -> MachineReport {
         max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
         containment: "process_group".into(),
         os: "linux".into(),
+        home_dir: "/home/worker".into(),
     }
 }
 pub fn metrics(ms: u64) -> MachineMetrics {
@@ -228,6 +229,16 @@ pub async fn connect(
     pilot: bool,
     clock: u64,
 ) -> Client {
+    let capabilities: &[&str] = if pilot { &["pilot_v1"] } else { &[] };
+    connect_with(hub, seed, journal, capabilities, clock).await
+}
+pub async fn connect_with(
+    hub: &testkit::TestHub,
+    seed: &Seed,
+    journal: Uuid,
+    capabilities: &[&str],
+    clock: u64,
+) -> Client {
     use tokio_stream::wrappers::ReceiverStream;
     use tonic::transport::{Certificate, ClientTlsConfig, Endpoint};
     let channel = Endpoint::from_shared(format!("https://{}", hub.addr))
@@ -253,11 +264,7 @@ pub async fn connect(
             boot_id: Uuid::now_v7().to_string(),
             protocol_version: 1,
             stream_kind: StreamKind::Control as i32,
-            optional_capabilities: if pilot {
-                vec!["pilot_v1".into()]
-            } else {
-                vec![]
-            },
+            optional_capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
             machine_time_ms: clock,
             ..Default::default()
         })),
@@ -283,7 +290,7 @@ pub async fn connect(
     else {
         panic!("expected accepted")
     };
-    assert_eq!(a.capabilities.contains(&"pilot_v1".into()), pilot);
+    assert_eq!(a.capabilities, capabilities);
     Client {
         tx,
         stream,

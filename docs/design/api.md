@@ -200,9 +200,10 @@
 | `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
 | `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
 | `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
-| `GET /api/v1/machines` | Каталоги, ОС, доступность, метрики, сессии, предупреждения |
+| `GET /api/v1/machines` | Каталоги, ОС, домашний каталог `home_dir` (`null` у воркера без этого поля), доступность, метрики, сессии, предупреждения |
 | `GET /api/v1/machines/{id}` | Та же структура одной машины |
 | `GET /api/v1/machines/{id}/workdirs/recent` | `workdirs`, последние 3 каталога этой машины, свежие первыми |
+| `GET /api/v1/machines/{id}/workdirs/suggest?path=...` | `workdirs`, полные пути существующих каталогов по введённому пути, до 30, по имени; спрашивает живой воркер, ждёт не больше 3 с. Машина вне сети, воркер без `workdir_suggest_v1`, срок вышел, путь длиннее 2048 байт: `200` с пустым списком, а не ошибка. Подробности отбора в [streams.md](streams.md#1-сеанс-потоков-воркерхаб-84-86) |
 | `GET /api/v1/limits` | Лимиты провайдеров: пятичасовое и недельное окна, `weekly_reserve_active`, `weekly_reserve_resets_at` |
 | `GET /api/v1/limits/history` | `usage` по дню, сессии, модели и агенту; `series` с обоими окнами |
 
@@ -428,7 +429,7 @@ Pump читает журнал только при доступной ёмкос
 | 3 | Закрепление, цвет, название, архив, синхронно между устройствами (§3) | `PATCH /api/v1/conversations/{id}` | `conversation_updated` | 6a |
 | 4 | Поиск по названиям (§3, ТЗ §12.1) | `GET /api/v1/conversations` (`q`) | – | 6a |
 | 5 | Строка лимитов и история расхода по дням, сессиям, моделям и агентам (§3, §7) | `GET /api/v1/limits`, `GET /api/v1/limits/history` (`provider`, `from`, `to`, `tz`); лимиты в снимке списка | `limits_changed` | 3, 6a, 7a, 8 |
-| 6 | Создание сессии: машина, каталог под разрешёнными корнями и недавние папки, агент, модель, усилие, пресет инструкций, режим разрешений, «кранч» и текст продолжения (§4) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}/workdirs/recent`, `POST /api/v1/conversations`, `POST /api/v1/conversations/{id}/executions` | `conversation_created`, `execution_state_changed` | 2, 3, 6a, 6b |
+| 6 | Создание сессии: машина, каталог под разрешёнными корнями, домашний каталог по умолчанию, подсказки и недавние папки, агент, модель, усилие, пресет инструкций, режим разрешений, «кранч» и текст продолжения (§4) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}/workdirs/recent`, `GET /api/v1/machines/{id}/workdirs/suggest`, `POST /api/v1/conversations`, `POST /api/v1/conversations/{id}/executions` | `conversation_created`, `execution_state_changed` | 2, 3, 6a, 6b |
 | 7 | Лента: пузыри с отметками «сохранено» и «принято», карточки ответа, блоки инструментов с картинками, на которые смотрел агент, потоковый текст, полный вывод по запросу (§5.1, §5.7) | `GET /api/v1/conversations/{id}/snapshot`, `GET /api/v1/conversations/{id}/history` (`before`, `after`, `limit`), `GET /api/v1/conversations/{id}/blocks/{block_id}` (`offset`, `limit`), `GET /api/v1/media/{id}`, `GET /api/v1/events` (диапазон разрыва) | `input_queued`, `input_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `block_media_attached`, `run_finished`, `phase_changed`, `hidden` | 3, 7a, 7b, 10d |
 | 8 | Строки и ленты субагентов, дерево делегирования на десктопе (§6) | поля блока `agent`, `model`, `parent_block_id`; `GET /api/v1/conversations/{id}/delegation` | `block_started` | 2, 3, 7a |
 | 9 | Поле ввода: отправка, вложение, прерывание, «отправить позже» (§5.2) | `POST /api/v1/conversations/{id}/inputs`, `POST /api/v1/conversations/{id}/interrupt`, вложения (строка 16), `POST /api/v1/conversations/{id}/scheduled` | `input_queued`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `interrupt_state_changed` | 5, 6b, 9 |

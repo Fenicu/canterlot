@@ -6,6 +6,7 @@
   import { loadConfig } from '#lib/api/config.js';
   import { clock } from '#lib/clock.js';
   import { fmt } from '#lib/format/ru.js';
+  import { modelLabel } from '#lib/screens/chat/settingsLabels.js';
   import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
@@ -60,7 +61,7 @@
         {:else}<p>Метрики ещё не поступили. Ожидаю сигнал машины</p>{/if}
       </div>
       <h2>Сессии на машине</h2>
-      {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {session.detail.model}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
+      {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}
       <div class="heartbeat"><p>Последний сигнал {heartbeat === null ? 'ещё не получен' : fmt.ago(heartbeat, now)}</p>
       {#if machine.availability_since}<p class="note">Подключение с {fmt.clock(Date.parse(machine.availability_since))} · {fmt.dayLabel(Date.parse(machine.availability_since), now)}</p>{/if}</div>
     {/if}

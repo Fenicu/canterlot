@@ -232,8 +232,19 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
     assert!(!c.settings_midsession_effort);
     assert_eq!(c.permission_modes, ["owner", "ask", "bypass", "read_only"]);
     assert_eq!(
-        c.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(),
-        ["opus", "sonnet", "haiku"]
+        c.models
+            .iter()
+            .map(|m| (m.id.as_str(), m.title.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("opus[1m]", "Opus 1M"),
+            ("sonnet[1m]", "Sonnet 1M"),
+            ("fable[1m]", "Fable 1M"),
+            ("opus", "Opus"),
+            ("sonnet", "Sonnet"),
+            ("fable", "Fable"),
+            ("haiku", "Haiku"),
+        ]
     );
     for m in &c.models {
         assert_eq!(

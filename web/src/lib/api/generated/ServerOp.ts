@@ -871,6 +871,7 @@ export interface MachineReportUpdated {
     worker_version: string;
     capabilities: string[];
     limits_ok: boolean;
+    home_dir?: string | null;
   };
 }
 export interface MachineMetrics {

@@ -577,6 +577,7 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
                 })
                 .collect(),
         }],
+        home_dir: String::new(),
     };
     crate::machine_info::apply_report(pool, owner, machine_id, &report, Uuid::now_v7())
         .await

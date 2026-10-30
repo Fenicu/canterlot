@@ -8,14 +8,14 @@
   import { browserRuntime } from '#lib/screens/chat/open.js';
   import { effortLabel } from '#lib/screens/chat/settingsLabels.js';
   import Button from '#lib/ui/Button.svelte';
-  import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
-  import { onMount } from 'svelte';
-  import { machineProblem, NewSessionModel } from './newSessionModel';
+  import { onMount, untrack } from 'svelte';
+  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
+  import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
@@ -34,6 +34,7 @@
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
+  const home = $derived(machine?.home_dir ?? '');
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
@@ -114,6 +115,28 @@
     });
   });
 
+  // Каталог приходит позже формы: подбор живёт в эффектах и срабатывает, когда данные появятся.
+  $effect(() => {
+    const only = soleMachine(machines);
+    if (only && !machineId) machineId = only;
+  });
+
+  let prefilled = '';
+  $effect(() => {
+    const next = home;
+    untrack(() => {
+      path = prefillWorkdir(path, prefilled, next);
+    });
+    prefilled = next;
+  });
+
+  $effect(() => {
+    const list = models;
+    untrack(() => {
+      modelId = defaultModelId(list, modelId);
+    });
+  });
+
   async function send() {
     if (!model || !gate.ok) return;
     error = '';
@@ -139,9 +162,7 @@
         {/each}
       </div>
     {/if}
-    <Field label="Рабочая папка">
-      {#snippet children({ id })}<input {id} aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />{/snippet}
-    </Field>
+    <WorkdirField {machineId} bind:value={path} />
     <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
     <div class="pair">
       <Select label="Модель" options={modelOptions} bind:value={modelId} />

@@ -52,6 +52,33 @@ export function workdirProblem(path: string): string | null {
   return null;
 }
 
+export function soleMachine(machines: { id: string }[]): string | null {
+  return machines.length === 1 ? (machines[0]?.id ?? null) : null;
+}
+
+/** Путь, введённый владельцем, остаётся; подставленный ранее следует за машиной. */
+export function prefillWorkdir(
+  current: string,
+  prefilled: string,
+  home: string,
+): string {
+  return current === "" || current === prefilled ? home : current;
+}
+
+/** Каталог перечисляет модели от выбора по умолчанию, как и у Codex. */
+export function defaultModelId(
+  models: { id: string }[],
+  current: string,
+): string {
+  return models.some((item) => item.id === current)
+    ? current
+    : (models[0]?.id ?? "");
+}
+
+function submittedWorkdir(path: string): string {
+  return path.trim().replace(/(?<=.)\/+$/, "");
+}
+
 export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {
@@ -153,8 +180,9 @@ export class NewSessionModel {
       "create_conversation",
       {
         machine_id: this.machineId,
-        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой.
-        workdir: this.workdir.trim(),
+        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой, а косая
+        // черта после выбранной подсказки завела бы вторую запись в недавних папках.
+        workdir: submittedWorkdir(this.workdir),
         harness: this.harness,
         model: this.model,
         effort: this.effort,

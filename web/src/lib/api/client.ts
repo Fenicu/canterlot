@@ -181,6 +181,21 @@ export function getMachine(
   return http("GET", `/api/v1/machines/${id(machineId)}`, undefined, opts);
 }
 
+export function suggestWorkdirs(
+  machineId: string,
+  path: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_machines__id__workdirs_suggest"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/machines/${id(machineId)}/workdirs/suggest`, { path }),
+    undefined,
+    opts,
+  );
+}
+
 export function recentWorkdirs(
   machineId: string,
   opts?: RequestOptions,

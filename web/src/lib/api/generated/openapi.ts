@@ -545,6 +545,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/machines/{id}/workdirs/suggest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_machines__id__workdirs_suggest"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/me": {
         parameters: {
             query?: never;
@@ -1308,6 +1324,7 @@ export interface components {
             harnesses: components["schemas"]["HarnessView"][];
             /** Format: int64 */
             heartbeat_age_ms?: number | null;
+            home_dir?: string | null;
             /** Format: uuid */
             id: string;
             limits_ok: boolean;
@@ -3471,6 +3488,42 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Последние каталоги для экрана новой сессии */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Workdirs"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_machines__id__workdirs_suggest: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                path: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Существующие каталоги машины по введённому пути; пустой список, если машина не ответила */
             200: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */
