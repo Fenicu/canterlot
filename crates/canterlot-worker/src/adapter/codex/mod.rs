@@ -174,12 +174,7 @@ impl CodexAdapter {
             hold: Vec::new(),
             pending_writes: VecDeque::new(),
             effective: None,
-            owner: OwnerDefaults {
-                approval_policy: None,
-                sandbox_mode: None,
-                sandbox_workspace_write: None,
-                developer_instructions: None,
-            },
+            owner: thread::owner_defaults_from(&Value::Null),
             models: Vec::new(),
             mode: PermissionMode::Owner,
             effort: None,
@@ -707,7 +702,7 @@ impl CodexAdapter {
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("app_server_failed"))?;
-        self.owner = thread::owner_defaults_from(&config);
+        self.owner.reread(&config);
         Ok(())
     }
 
@@ -774,8 +769,14 @@ impl CodexAdapter {
                 .await
                 .ok_or(AdapterError::StartFailed("app_server_failed"))?
                 .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?;
-            thread::parse_thread_result(&result)
-                .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?
+            let effective = thread::parse_thread_result(&result)
+                .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?;
+            // Старт без полей политики показывает действующую политику владельца.
+            if self.mode == PermissionMode::Owner {
+                self.owner
+                    .observe_thread(&effective.approval_policy, &effective.sandbox);
+            }
+            effective
         };
         let mut translator = Translator::new(&effective.thread_id, &effective.model);
         translator.set_workdir(&spec.workdir);

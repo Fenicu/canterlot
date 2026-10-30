@@ -475,18 +475,66 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             Some(serde_json::json!({"type": "readOnly", "networkAccess": false}))
         )
     );
-    assert_eq!(turn_policy(PermissionMode::Owner, &empty), (None, None));
-    let owner = owner_defaults_from(&serde_json::json!({
+    // Владелец без политики в конфигурации и без наблюдения треда: умолчания
+    // Codex для недоверенного проекта, никогда не меньше вопросов.
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &empty),
+        (
+            Some(serde_json::json!("on-request")),
+            Some(serde_json::json!({"type": "readOnly", "networkAccess": false}))
+        )
+    );
+    // Значения config/read лежат в обёртке `config` (схема ConfigReadResponse).
+    let owner = owner_defaults_from(&serde_json::json!({"config": {
         "approval_policy": "on-request",
         "sandbox_mode": "read-only",
-        "sandbox_workspace_write": {"network_access": false, "writable_roots": []},
-    }));
-    let (approval, sandbox) = turn_policy(PermissionMode::Owner, &owner);
-    assert_eq!(approval.unwrap(), serde_json::json!("on-request"));
-    let sandbox = sandbox.unwrap();
-    assert_eq!(sandbox["type"], "readOnly");
-    assert_eq!(sandbox["network_access"], false);
-    assert_eq!(sandbox["writable_roots"], serde_json::json!([]));
+        "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"]},
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &owner),
+        (
+            Some(serde_json::json!("on-request")),
+            Some(serde_json::json!({"type": "readOnly"}))
+        )
+    );
+    // Песочница записи — в форме SandboxPolicy (camelCase), не ключами TOML.
+    let write = owner_defaults_from(&serde_json::json!({"config": {
+        "approval_policy": "untrusted",
+        "sandbox_mode": "workspace-write",
+        "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"],
+            "exclude_tmpdir_env_var": true, "exclude_slash_tmp": false},
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &write),
+        (
+            Some(serde_json::json!("untrusted")),
+            Some(serde_json::json!({"type": "workspaceWrite", "networkAccess": true,
+                "writableRoots": ["/w"], "excludeTmpdirEnvVar": true, "excludeSlashTmp": false}))
+        )
+    );
+    let full = owner_defaults_from(&serde_json::json!({"config": {
+        "approval_policy": "never", "sandbox_mode": "danger-full-access",
+    }, "origins": {}}));
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &full).1,
+        Some(serde_json::json!({"type": "dangerFullAccess"}))
+    );
+    // Без политики в конфигурации — то, что сервер показал при старте треда владельцем.
+    let mut observed = owner_defaults_from(&serde_json::json!({"config": {}, "origins": {}}));
+    observed.observe_thread(
+        &serde_json::json!("untrusted"),
+        &serde_json::json!({"type": "workspaceWrite", "networkAccess": false}),
+    );
+    assert_eq!(
+        turn_policy(PermissionMode::Owner, &observed),
+        (
+            Some(serde_json::json!("untrusted")),
+            Some(serde_json::json!({"type": "workspaceWrite", "networkAccess": false}))
+        )
+    );
+    // Плоский ответ без обёртки — не конфигурация владельца.
+    let flat = owner_defaults_from(&serde_json::json!({"approval_policy": "never"}));
+    assert!(flat.approval_policy.is_none());
 }
 
 #[test]

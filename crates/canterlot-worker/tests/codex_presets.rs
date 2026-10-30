@@ -155,6 +155,15 @@ impl PresetHarness {
         native: Option<&str>,
         setup: impl FnOnce(&std::path::Path),
     ) -> Self {
+        Self::start_full(instructions, native, "ask", setup).await
+    }
+
+    async fn start_full(
+        instructions: InstructionSpec,
+        native: Option<&str>,
+        permission: &str,
+        setup: impl FnOnce(&std::path::Path),
+    ) -> Self {
         let dir = TempDir::new().unwrap();
         setup(dir.path());
         let exe = dir.path().join("fake-codex");
@@ -185,7 +194,7 @@ impl PresetHarness {
             profile: "codex".into(),
             model: "gpt-6-luna".into(),
             effort: "low".into(),
-            permission_mode: "ask".into(),
+            permission_mode: permission.into(),
             instructions,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
@@ -445,7 +454,9 @@ async fn developer_instructions_by_mode() {
     use canterlot_worker::adapter::codex::thread::{
         ChangeNote, compose_developer_instructions, owner_defaults_from,
     };
-    let owner = owner_defaults_from(&json!({"developer_instructions": "Отвечай кратко."}));
+    let owner = owner_defaults_from(
+        &json!({"config": {"developer_instructions": "Отвечай кратко."}, "origins": {}}),
+    );
     let bare = owner_defaults_from(&json!({}));
     // Владелец: свой текст плюс блок.
     assert_eq!(
@@ -628,4 +639,92 @@ async fn failed_restart_respawns_previous_and_rejects_the_input() {
     // Ввод не записан ни в упавший, ни в запасной процесс.
     let turn_starts = h.method_params("turn/start");
     assert_eq!(turn_starts.len(), 1, "input not sent: {turn_starts:?}");
+}
+
+fn mode_change(mode: &str) -> SettingsChange {
+    SettingsChange {
+        permission_mode: Some(mode.into()),
+        ..Default::default()
+    }
+}
+
+fn write_json(dir: &std::path::Path, name: &str, value: Value) {
+    std::fs::write(dir.join(name), value.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn owner_preset_keeps_owner_developer_instructions_from_config_read() {
+    let h = PresetHarness::start_with(owner_spec(), None, |dir| {
+        write_json(
+            dir,
+            "config.json",
+            json!({"config": {"developer_instructions": "OWNER-DEV-CANARY"},
+                "origins": {}, "layers": null}),
+        );
+    })
+    .await;
+    let starts = h.method_params("thread/start");
+    let dev = starts[0]["developerInstructions"].as_str().unwrap();
+    assert!(
+        dev.starts_with("OWNER-DEV-CANARY\n\n"),
+        "owner text kept before the canterlot block: {dev}"
+    );
+}
+
+#[tokio::test]
+async fn switching_back_to_owner_restores_owner_policy_from_config() {
+    let mut h = PresetHarness::start_with(owner_spec(), None, |dir| {
+        write_json(
+            dir,
+            "config.json",
+            json!({"config": {
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"]},
+            }, "origins": {}}),
+        );
+    })
+    .await;
+    for mode in ["bypass", "owner"] {
+        let out = h.transmit(Some(mode_change(mode))).await;
+        assert!(matches!(out, TransmitOutcome::Accepted(_)), "{mode}: {out:?}");
+        h.until_finished().await;
+    }
+    let starts = h.method_params("turn/start");
+    assert_eq!(starts[0]["approvalPolicy"], "never");
+    assert_eq!(starts[1]["approvalPolicy"], "on-request", "{}", starts[1]);
+    assert_eq!(
+        starts[1]["sandboxPolicy"],
+        json!({"type": "workspaceWrite", "networkAccess": true, "writableRoots": ["/w"]}),
+        "{}",
+        starts[1]
+    );
+}
+
+#[tokio::test]
+async fn switching_back_to_owner_restores_policy_seen_at_owner_thread_start() {
+    let mut h = PresetHarness::start_full(owner_spec(), None, "owner", |dir| {
+        write_json(dir, "config.json", json!({"config": {}, "origins": {}}));
+        write_json(
+            dir,
+            "thread.json",
+            json!({"thread": {"id": "thread-1"}, "model": "gpt-6-luna",
+                "approvalPolicy": "untrusted",
+                "sandbox": {"type": "workspaceWrite", "networkAccess": false},
+                "instructionSources": []}),
+        );
+    })
+    .await;
+    assert!(h.method_params("thread/start")[0].get("approvalPolicy").is_none());
+    for mode in ["bypass", "owner"] {
+        let out = h.transmit(Some(mode_change(mode))).await;
+        assert!(matches!(out, TransmitOutcome::Accepted(_)), "{mode}: {out:?}");
+        h.until_finished().await;
+    }
+    let starts = h.method_params("turn/start");
+    assert_eq!(starts[1]["approvalPolicy"], "untrusted", "{}", starts[1]);
+    assert_eq!(
+        starts[1]["sandboxPolicy"],
+        json!({"type": "workspaceWrite", "networkAccess": false})
+    );
 }

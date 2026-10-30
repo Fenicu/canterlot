@@ -326,11 +326,11 @@ fn attachments_add_paths_and_local_images() {
 
 #[test]
 fn settings_become_turn_start_overrides() {
-    let owner = owner_defaults_from(&json!({
+    let owner = owner_defaults_from(&json!({"config": {
         "approval_policy": "on-request",
         "sandbox_mode": "read-only",
         "sandbox_workspace_write": {"network_access": false, "writable_roots": []},
-    }));
+    }, "origins": {}}));
     let change = |model: Option<&str>, effort: Option<&str>, mode: Option<&str>| {
         let mut t = tx(command_id(), 1, "Hi.");
         t.settings = Some(SettingsChange {
