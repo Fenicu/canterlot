@@ -10,5 +10,7 @@ fi
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+# Сборка без фич проверяется компиляцией: все её тесты, кроме одного, повторяет прогон ниже.
+cargo test --workspace --no-run
+cargo test -p canterlot-worker --lib synthetic_profiles_are_disabled_without_feature
 cargo test --workspace --all-features --no-fail-fast
