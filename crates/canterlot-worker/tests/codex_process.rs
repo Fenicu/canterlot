@@ -79,6 +79,27 @@ async fn version_parsing_and_classification() {
         check(&exe).await.unwrap(),
         CliVersion::UntestedNewer("0.165.2".into())
     );
+    // Предварительные сборки: новее проверенной — запуск с отметкой; сборка
+    // до минимального выпуска (0.164.0-beta < 0.164.0) — ниже минимума.
+    assert_eq!(
+        parse_version("codex-cli 0.165.0-alpha.2").unwrap(),
+        (0, 165, 0)
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.165.0-alpha.2");
+    assert_eq!(
+        check(&exe).await.unwrap(),
+        CliVersion::UntestedNewer("0.165.0-alpha.2".into())
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.164.0-beta.1");
+    assert_eq!(
+        check(&exe).await.unwrap_err(),
+        VersionError::BelowMinimum("0.164.0-beta.1".into())
+    );
+    let exe = fake_version_script(&td, "codex-cli 0.164.0+build.7");
+    assert_eq!(
+        check(&exe).await.unwrap(),
+        CliVersion::Verified("0.164.0".into())
+    );
     let exe = fake_version_script(&td, "codex-cli 0.163.9");
     assert_eq!(
         check(&exe).await.unwrap_err(),
