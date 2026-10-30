@@ -5,7 +5,7 @@ use canterlot_worker::adapter::{
     AdapterEvent, BlockKind, MediaSource, Phase,
     codex::events::{Translated, Translator, TurnStatus},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use uuid::Uuid;
 
 #[path = "support/fixtures.rs"]
@@ -816,6 +816,44 @@ fn mcp_tool_call_and_output_delta_blocks() {
         AdapterEvent::BlockFinal { text, summary, .. }
         if text.contains("sleep 1") && summary.as_deref().is_some_and(|s| s.contains("exit 0"))
     )));
+}
+
+#[test]
+fn child_thread_reroute_keeps_the_main_model() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    translator.feed(
+        "model/rerouted",
+        &json!({"threadId": "thread-child", "turnId": "turn-child",
+            "fromModel": "gpt-6-luna", "toModel": "gpt-6-terra", "reason": "highRiskCyberActivity"}),
+    );
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "item": {"id": "m-2", "type": "agentMessage", "text": ""}}),
+    );
+    assert!(
+        events_of(&out).into_iter().any(
+            |e| matches!(e, AdapterEvent::BlockStarted { model, .. } if model == "gpt-6-luna")
+        ),
+        "{out:?}"
+    );
+    translator.feed(
+        "model/rerouted",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "fromModel": "gpt-6-luna", "toModel": "gpt-6-terra", "reason": "highRiskCyberActivity"}),
+    );
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "item": {"id": "m-3", "type": "agentMessage", "text": ""}}),
+    );
+    assert!(
+        events_of(&out).into_iter().any(
+            |e| matches!(e, AdapterEvent::BlockStarted { model, .. } if model == "gpt-6-terra")
+        ),
+        "{out:?}"
+    );
 }
 
 #[test]

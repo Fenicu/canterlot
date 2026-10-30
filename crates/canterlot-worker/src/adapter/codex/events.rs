@@ -1437,6 +1437,9 @@ impl Translator {
     }
 
     fn on_model_rerouted(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
         if let Some(model) = params
             .get("toModel")
             .and_then(Value::as_str)
