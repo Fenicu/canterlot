@@ -861,6 +861,87 @@ fn compaction_end_returns_to_generating() {
     assert!(events_of(&out).is_empty(), "{out:?}");
 }
 
+fn spawn_item(status: &str, children: &[&str]) -> Value {
+    json!({"threadId": "thread-main", "turnId": "turn-main", "item": {
+        "id": "spawn-1", "type": "collabAgentToolCall", "tool": "spawnAgent",
+        "status": status, "receiverThreadIds": children, "prompt": "Check"}})
+}
+
+fn child_started() -> Value {
+    json!({"thread": {"id": "thread-child-1", "parentThreadId": "thread-main",
+        "agentRole": "helper", "model": "gpt-6-mini"}})
+}
+
+fn child_block_parent(translator: &mut Translator) -> Option<Uuid> {
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-child-1", "turnId": "turn-child", "item": {
+            "id": "msg-c1", "type": "agentMessage", "text": ""}}),
+    );
+    events_of(&out).into_iter().find_map(|e| match e {
+        AdapterEvent::BlockStarted { parent, .. } => *parent,
+        _ => None,
+    })
+}
+
+#[test]
+fn spawn_parent_comes_from_the_completed_item_in_either_order() {
+    for child_first in [true, false] {
+        let mut translator = Translator::new("thread-main", "gpt-6-luna");
+        translator.begin_turn("turn-main", command_id());
+        let out = translator.feed("item/started", &spawn_item("inProgress", &[]));
+        let spawn = events_of(&out)
+            .into_iter()
+            .find_map(|e| match e {
+                AdapterEvent::BlockStarted { block_id, .. } => Some(*block_id),
+                _ => None,
+            })
+            .expect("spawn block");
+        if child_first {
+            translator.feed("thread/started", &child_started());
+        }
+        translator.feed(
+            "item/completed",
+            &spawn_item("completed", &["thread-child-1"]),
+        );
+        if !child_first {
+            translator.feed("thread/started", &child_started());
+        }
+        assert_eq!(
+            child_block_parent(&mut translator),
+            Some(spawn),
+            "child first: {child_first}"
+        );
+    }
+}
+
+#[test]
+fn sub_agent_activity_item_is_a_phase_without_a_block() {
+    // В схеме 0.164 это элемент ThreadItem, а не уведомление.
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    translator.feed("thread/started", &child_started());
+    let item = json!({"threadId": "thread-main", "turnId": "turn-main", "item": {
+        "id": "act-1", "type": "subAgentActivity", "agentThreadId": "thread-child-1",
+        "agentPath": "/helper", "kind": "interacted"}});
+    let out = translator.feed("item/started", &item);
+    let events = events_of(&out);
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::BlockStarted { .. })),
+        "{out:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::Phase { summary: Some(s), .. } if s == "Субагент helper: interacted"
+        )),
+        "{out:?}"
+    );
+    assert!(events_of(&translator.feed("item/completed", &item)).is_empty());
+}
+
 #[test]
 fn child_thread_reroute_keeps_the_main_model() {
     let mut translator = Translator::new("thread-main", "gpt-6-luna");

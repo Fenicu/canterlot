@@ -594,6 +594,9 @@ impl Translator {
         if item_type == "contextCompaction" {
             return vec![self.context_maintenance()];
         }
+        if item_type == "subAgentActivity" {
+            return self.on_sub_agent_item(item);
+        }
         let block_id = Uuid::now_v7();
         let mut out = Vec::new();
         match item_type {
@@ -672,17 +675,7 @@ impl Translator {
             "collabAgentToolCall" => {
                 let (name, summary, model_override) = collab_summary(item);
                 let model = model_override.unwrap_or(model);
-                if item.get("tool").and_then(Value::as_str) == Some("spawnAgent") {
-                    for child_id in item
-                        .get("receiverThreadIds")
-                        .and_then(Value::as_array)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(Value::as_str)
-                    {
-                        self.spawn_parents.insert(child_id.to_owned(), block_id);
-                    }
-                }
+                self.note_spawned(item, block_id);
                 out.push(self.started(
                     block_id,
                     BlockKind::ToolCall,
@@ -1006,6 +999,9 @@ impl Translator {
                 }));
             }
             "collabAgentToolCall" | "webSearch" | "imageView" => {
+                if item_type == "collabAgentToolCall" {
+                    self.note_spawned(item, block.block_id);
+                }
                 out.push(Translated::Event(AdapterEvent::BlockFinal {
                     block_id: block.block_id,
                     text: String::new(),
@@ -1447,6 +1443,41 @@ impl Translator {
             self.model = model.to_owned();
         }
         vec![Translated::Ignored]
+    }
+
+    // Id потомка может появиться только к завершению вызова, и потомок к тому
+    // времени уже зарегистрирован: родитель ставится и ему.
+    fn note_spawned(&mut self, item: &Value, block_id: Uuid) {
+        if item.get("tool").and_then(Value::as_str) != Some("spawnAgent") {
+            return;
+        }
+        for child_id in item
+            .get("receiverThreadIds")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            self.spawn_parents.insert(child_id.to_owned(), block_id);
+            if let Some(child) = self.children.get_mut(child_id) {
+                child.parent = Some(block_id);
+            }
+        }
+    }
+
+    // Элемент ThreadItem схемы 0.164: статус субагента, а не вызов инструмента.
+    fn on_sub_agent_item(&mut self, item: &Value) -> Vec<Translated> {
+        let name = item
+            .get("agentThreadId")
+            .and_then(Value::as_str)
+            .and_then(|thread| self.children.get(thread))
+            .map_or("subagent", |child| child.agent.as_str());
+        let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+        vec![Translated::Event(AdapterEvent::Phase {
+            phase: Phase::Generating,
+            tool_name: None,
+            summary: Some(format!("Субагент {name}: {kind}")),
+        })]
     }
 
     fn on_sub_agent_activity(&mut self, params: &Value) -> Vec<Translated> {
