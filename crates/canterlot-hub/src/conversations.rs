@@ -1235,9 +1235,10 @@ pub async fn change_settings(
     let request = json!({"id": id, "settings": patch});
     Ok(idempotency::run_in_tx(pool, owner_id, key, "change_settings", &request, Some(id), move |conn| Box::pin(async move {
         sqlx::query("select q.conversation_id from queue_state q join conversations c on c.id=q.conversation_id where c.id=$1 and c.owner_id=$2 for update of q").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
-                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for no key update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
+                let row = sqlx::query("select c.*, m.capabilities, h.models, h.permission_modes, h.settings_midsession, h.settings_midsession_effort from conversations c join machines m on m.id=c.machine_id left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness where c.id=$1 and c.owner_id=$2 for no key update of c").bind(id).bind(owner_id).fetch_optional(&mut *conn).await?.ok_or(SettingsError::NotFound)?;
                 if !row.try_get::<Vec<String>, _>("capabilities")?.iter().any(|v| v == "pilot_v1") { return Err(SettingsError::CapabilityMissing); }
         let mut pending: Value = row.try_get("pending_settings")?;
+        let effort_patched = patch.effort.is_some();
         for (k, v) in [("model", patch.model), ("effort", patch.effort), ("permission_mode", patch.permission_mode)] { if let Some(v) = v { pending[k] = json!(v); } }
         if let Some(profile) = patch.instruction_profile.as_deref() {
             let reference = PresetRef::parse(profile).map_err(|_| SettingsError::PresetUnknown)?;
@@ -1265,6 +1266,8 @@ pub async fn change_settings(
         if (pending.get("permission_mode").is_some() || !permission.is_empty()) && !modes.as_ref().and_then(Value::as_array).is_some_and(|v| v.iter().any(|v| v == &permission)) { return Err(SettingsError::PermissionModeUnknown); }
         let live = executions::live(conn, id).await?.is_some();
         if live && !row.try_get::<Option<bool>, _>("settings_midsession")?.unwrap_or(false) { return Err(SettingsError::MidsessionUnsupported); }
+        // Глубину размышлений часть харнессов меняет только перезапуском (Claude Code).
+        if live && effort_patched && effort != row.try_get::<String, _>("effort")? && !row.try_get::<Option<bool>, _>("settings_midsession_effort")?.unwrap_or(true) { return Err(SettingsError::MidsessionUnsupported); }
         sqlx::query("update conversations set pending_settings=$2,settings_rev=settings_rev+1 where id=$1").bind(id).bind(&pending).execute(&mut *conn).await?;
         let view = detail(conn, owner_id, id).await?.ok_or(SettingsError::NotFound)?.settings;
         append(conn, Scope::Conversation { id }, "conversation_settings_changed", Some(id), serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?, correlation_id).await?;
@@ -1277,21 +1280,49 @@ pub async fn promote_settings_in_tx(
     accepted_command_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    apply_sent_settings(conn, accepted_command_id, correlation_id, true).await
+    apply_sent_settings(conn, accepted_command_id, correlation_id, None).await
 }
 pub async fn drop_rejected_settings_in_tx(
     conn: &mut PgConnection,
     rejected_command_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    apply_sent_settings(conn, rejected_command_id, correlation_id, false).await
+    drop_settings_rejected_for_in_tx(
+        conn,
+        rejected_command_id,
+        SETTINGS_UNAVAILABLE,
+        correlation_id,
+    )
+    .await
 }
+
+const SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
+
+/// Причины отказа воркера, вызванные самими настройками ввода.
+pub const SETTINGS_REJECTION_REASONS: [&str; 3] = [
+    SETTINGS_UNAVAILABLE,
+    "effort_change_unsupported",
+    "permission_mode_needs_restart",
+];
+
+/// Отклонённые воркером настройки снимаются с ожидания, иначе каждый следующий ввод
+/// повёз бы их снова и получил тот же отказ.
+pub async fn drop_settings_rejected_for_in_tx(
+    conn: &mut PgConnection,
+    rejected_command_id: Uuid,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    apply_sent_settings(conn, rejected_command_id, correlation_id, Some(reason)).await
+}
+
 async fn apply_sent_settings(
     conn: &mut PgConnection,
     command: Uuid,
     correlation: Uuid,
-    promote: bool,
+    rejected: Option<&str>,
 ) -> Result<(), sqlx::Error> {
+    let promote = rejected.is_none();
     let Some((id, sent)): Option<(Uuid, Value)> = sqlx::query_as("select conversation_id,payload->'settings' from commands where id=$1 and payload ? 'settings'").bind(command).fetch_optional(&mut *conn).await? else { return Ok(()); };
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(id)
@@ -1351,8 +1382,8 @@ async fn apply_sent_settings(
         .ok_or(sqlx::Error::RowNotFound)?
         .settings;
     let mut payload = serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
-    if !promote {
-        payload["rejected"] = json!({"keys":sent_keys,"reason":"settings_unavailable"});
+    if let Some(reason) = rejected {
+        payload["rejected"] = json!({"keys":sent_keys,"reason":reason});
     }
     append(
         conn,
