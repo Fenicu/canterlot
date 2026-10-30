@@ -642,3 +642,38 @@ async fn oversized_stdout_line_is_skipped_and_reading_continues() {
         StdoutLine::Eof
     ));
 }
+
+#[test]
+fn worker_version_flag_prints_the_worker_version() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        text.trim(),
+        format!("canterlot-worker {}", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[cfg(feature = "synthetic-adapter")]
+#[test]
+fn codex_replay_answers_version_only_inside_its_subcommand() {
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"))
+        .args([
+            "codex-replay",
+            "--evidence",
+            "/nonexistent/evidence.jsonl",
+            "--fixtures-dir",
+            "/nonexistent",
+            "--version",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "codex-cli 0.164.0"
+    );
+}

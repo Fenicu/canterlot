@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 use tokio::sync::watch;
 
 #[derive(Parser)]
+#[command(version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -37,6 +38,9 @@ enum Command {
         evidence: PathBuf,
         #[arg(long)]
         fixtures_dir: PathBuf,
+        /// Аргументы, с которыми адаптер запускает codex (`--version`, `app-server …`).
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        codex_args: Vec<String>,
     },
     #[command(hide = true)]
     McpRelay {
@@ -51,12 +55,6 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Проверка версии адаптера идёт тем же бинарником без подкоманды.
-    let raw: Vec<String> = std::env::args().collect();
-    if raw.len() == 2 && raw[1] == "--version" {
-        println!("codex-cli 0.164.0");
-        return ExitCode::SUCCESS;
-    }
     if let Some(code) = codex_replay().await {
         return code;
     }
@@ -80,10 +78,16 @@ async fn codex_replay() -> Option<ExitCode> {
     let Command::CodexReplay {
         evidence,
         fixtures_dir,
+        codex_args,
     } = Cli::try_parse().ok()?.command
     else {
         return None;
     };
+    // Проверка версии адаптера видит версию записи; своя версия воркера — у `--version` верхнего уровня.
+    if codex_args.iter().any(|arg| arg == "--version") {
+        println!("codex-cli 0.164.0");
+        return Some(ExitCode::SUCCESS);
+    }
     Some(
         match canterlot_worker::adapter::codex::replay::run(&evidence, &fixtures_dir).await {
             Ok(()) => ExitCode::SUCCESS,
