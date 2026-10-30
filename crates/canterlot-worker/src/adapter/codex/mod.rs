@@ -751,7 +751,7 @@ impl CodexAdapter {
             Ok(Ok(response)) => self
                 .limits
                 .on_fresh_read(&response, pending.ctx, limits::now_ms()),
-            _ => Vec::new(),
+            _ => self.limits.on_read_failed(pending.ctx, limits::now_ms()),
         };
         let reached = facts
             .iter()

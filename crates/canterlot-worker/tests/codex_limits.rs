@@ -158,6 +158,42 @@ fn window_past_its_reset_is_not_exhausted() {
 }
 
 #[test]
+fn failed_read_still_reports_the_usage_limit() {
+    let frames = fixture_turn("usage_limit_need_read.jsonl");
+    let mut tracker = LimitTracker::default();
+    tracker.on_snapshot(snapshot_from_notification(&frames[0]));
+    let facts = tracker.on_read_failed(CrunchContext::UsageLimitExceeded, NOW);
+    assert_eq!(
+        facts,
+        vec![LimitFact::Reached {
+            window: LimitWindow::FiveHour,
+            resets_at_ms: Some(1_792_927_784_000),
+        }]
+    );
+    // Прошедший сброс хабу не нужен: он разбудил бы очередь сразу.
+    let facts = tracker.on_read_failed(CrunchContext::UsageLimitExceeded, 1_792_927_784_001);
+    assert_eq!(
+        facts,
+        vec![LimitFact::Reached {
+            window: LimitWindow::FiveHour,
+            resets_at_ms: None,
+        }]
+    );
+    assert_eq!(
+        LimitTracker::default().on_read_failed(CrunchContext::UsageLimitExceeded, NOW),
+        vec![LimitFact::Reached {
+            window: LimitWindow::FiveHour,
+            resets_at_ms: None,
+        }]
+    );
+    assert!(
+        tracker
+            .on_read_failed(CrunchContext::RateLimitExceeded, NOW)
+            .is_empty()
+    );
+}
+
+#[test]
 fn window_without_reset_keeps_the_usage_reading() {
     // В схеме RateLimitWindow обязателен только usedPercent.
     let snapshot = json!({"limitId": "codex",

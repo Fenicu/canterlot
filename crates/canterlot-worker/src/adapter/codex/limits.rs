@@ -223,6 +223,24 @@ impl LimitTracker {
         facts
     }
 
+    // Свежего снимка нет, но упор в лимит уже случился: очередь должна встать, иначе
+    // следующий ввод упадёт так же и запустит ещё одно чтение.
+    pub fn on_read_failed(&mut self, ctx: CrunchContext, now_ms: u64) -> Vec<LimitFact> {
+        if ctx != CrunchContext::UsageLimitExceeded {
+            return Vec::new();
+        }
+        let window = self
+            .exhausted_window_prefer_weekly(now_ms)
+            .unwrap_or_else(|| self.highest_window());
+        let resets_at_ms = slot(self, window)
+            .resets_at_ms
+            .filter(|reset| *reset > now_ms);
+        vec![LimitFact::Reached {
+            window,
+            resets_at_ms,
+        }]
+    }
+
     pub fn snapshot(&self) -> LimitSnapshot {
         LimitSnapshot {
             five_hour: self

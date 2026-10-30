@@ -2052,6 +2052,28 @@ async fn rate_limit_without_exhausted_window_is_an_error_block_without_reached()
 }
 
 #[tokio::test]
+async fn usage_limit_with_a_failed_read_still_stops_the_queue() {
+    let mut lines = failed_turn(
+        "thread-mini",
+        "turn-1",
+        json!({"codexErrorInfo": "usageLimitExceeded", "message": "capped"}),
+    );
+    lines.push(w_in(1, "account/rateLimits/read", json!({})));
+    lines.push(w_out(
+        json!({"id": 1, "error": {"code": -32000, "message": "no route"}}),
+    ));
+    let events = run_failed_turn(lines, "hi").await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Limit(canterlot_worker::adapter::LimitFact::Reached { .. })
+        )),
+        "{events:?}"
+    );
+    assert!(error_text(&events).contains("Исчерпан лимит Codex"));
+}
+
+#[tokio::test]
 async fn limit_failure_turn_end_survives_dropped_event_polls() {
     let mut fake = Fake::new(rate_limited_turn(quiet_read()));
     fake.start().await;
