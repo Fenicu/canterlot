@@ -166,9 +166,9 @@ test.describe('E2E Requests and Recovery', () => {
         request_id: permId1,
         kind: 'permission',
         payload: {
-          command: 'cargo test --all',
-          description: 'Запуск тестового набора',
-          tool: 'bash'
+          tool_name: 'Bash',
+          input: { command: 'cargo test --all', description: 'Запуск тестового набора' },
+          tool_use_id: 'toolu_1'
         }
       }
     });

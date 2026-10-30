@@ -28,6 +28,94 @@ afterEach(() => {
 });
 
 describe('PWA Request Cards', () => {
+  function permissionText(payload: unknown): string {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind: 'permission', state: 'open', payload };
+    const instance = mount(PermissionCard, { target, props: { request, onDecision: vi.fn() } });
+    flushSync();
+    const text = target.textContent ?? '';
+    void unmount(instance);
+    target.remove();
+    return text;
+  }
+
+  it('permission_card_shows_what_claude_code_writes_or_edits', () => {
+    const write = permissionText({
+      tool_name: 'Write',
+      input: { file_path: '/srv/app/config.toml', content: 'строка 1\nстрока 2' },
+      tool_use_id: 'toolu_1'
+    });
+    expect(write).toContain('/srv/app/config.toml');
+    expect(write).toContain('строка 1\nстрока 2');
+
+    const edit = permissionText({
+      tool_name: 'Edit',
+      input: { file_path: '/srv/app/main.rs', old_string: 'было', new_string: 'стало' },
+      tool_use_id: 'toolu_2'
+    });
+    expect(edit).toContain('/srv/app/main.rs');
+    expect(edit).toContain('было');
+    expect(edit).toContain('стало');
+    const grep = permissionText({ tool_name: 'Grep', input: { pattern: 'TODO', limit: 5 } });
+    expect(grep).toContain('pattern');
+    expect(grep).toContain('TODO');
+  });
+
+  it('permission_card_shows_a_codex_shell_request_and_warns_about_the_deny', () => {
+    const text = permissionText({
+      tool_name: 'shell',
+      command: "/bin/bash -lc 'touch probe.txt'",
+      cwd: '/tmp/canterlot-stage0/codex/permissions',
+      reason: 'May I run `touch probe.txt` in the current directory as requested?',
+      command_actions: [{ command: 'touch probe.txt', type: 'unknown' }],
+      available_decisions: ['accept', 'cancel'],
+      network: { host: 'example.org', protocol: 'https' },
+      input: { command: "/bin/bash -lc 'touch probe.txt'", cwd: '/tmp/canterlot-stage0/codex/permissions' },
+      tool_use_id: 'exec-1',
+      agent: 'orchestrator',
+      deny_also_interrupts: true
+    });
+    expect(text).toContain("/bin/bash -lc 'touch probe.txt'");
+    expect(text).toContain('/tmp/canterlot-stage0/codex/permissions');
+    expect(text).toContain('May I run');
+    expect(text).toContain('example.org');
+    expect(text).toContain('Отказ также прервёт ход');
+    expect(text.split("/bin/bash -lc 'touch probe.txt'")).toHaveLength(2);
+  });
+
+  it('permission_card_lists_codex_file_changes_and_the_requested_root', () => {
+    const text = permissionText({
+      tool_name: 'apply_patch',
+      changes: [{ diff: 'hi\n', kind: { type: 'add' }, path: '/tmp/run-1/note.txt' }],
+      reason: null,
+      grant_root: '/tmp/run-1',
+      tool_use_id: 'exec-2',
+      agent: 'orchestrator',
+      deny_also_interrupts: false
+    });
+    expect(text).toContain('/tmp/run-1/note.txt');
+    expect(text).toContain('Новый файл');
+    expect(text).toContain('hi');
+    expect(text).toContain('Доступ к папке');
+    expect(text).not.toContain('Отказ также прервёт ход');
+  });
+
+  it('permission_card_shows_which_permissions_codex_requests', () => {
+    const text = permissionText({
+      tool_name: 'permissions',
+      permissions: { sandbox: 'read-only' },
+      reason: 'Need network?',
+      cwd: '/tmp/work',
+      tool_use_id: 'perm-1',
+      agent: 'orchestrator',
+      deny_also_interrupts: false
+    });
+    expect(text).toContain('"sandbox": "read-only"');
+    expect(text).toContain('Need network?');
+    expect(text).toContain('/tmp/work');
+  });
+
   it('permission_card_renders_command_and_allow_deny_buttons', async () => {
     const target = document.createElement('div');
     document.body.appendChild(target);
@@ -39,8 +127,9 @@ describe('PWA Request Cards', () => {
       kind: 'permission',
       state: 'open',
       payload: {
-        command: 'rm -rf /tmp/canterlot-test',
-        description: 'Очистка временных файлов'
+        tool_name: 'Bash',
+        input: { command: 'rm -rf /tmp/canterlot-test', description: 'Очистка временных файлов' },
+        tool_use_id: 'toolu_01GkVeqnQwNz9hnzGsJfE8yM'
       }
     };
 
