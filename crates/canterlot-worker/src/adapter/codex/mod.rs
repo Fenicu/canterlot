@@ -730,7 +730,7 @@ impl CodexAdapter {
             });
             return;
         }
-        let BrokerEvent::LimitsQuery { rpc_id } = event else {
+        let BrokerEvent::LimitsQuery { call } = event else {
             return;
         };
         let snapshot = self.limits.snapshot();
@@ -758,7 +758,7 @@ impl CodexAdapter {
         })
         .collect();
         self.broker.as_mut().unwrap().answer_limits(
-            rpc_id,
+            call,
             &canterlot_proto::worker::v1::LimitsSnapshot {
                 provider: "codex".into(),
                 current,

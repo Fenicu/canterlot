@@ -20,6 +20,18 @@ use uuid::Uuid;
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn input_is_not_transmitted_until_all_attachments_published(pool: PgPool) {
+    transmission_waits_for_attachments(pool).await;
+}
+
+// sqlx называет базу теста по его пути и перед созданием удаляет одноимённую:
+// дочерний процесс под strace с тем же именем теста сносил базу родителя.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+#[ignore = "запускается под strace из execution_directory_parents_are_synced_before_ownership_and_readiness"]
+async fn transmission_waits_for_attachments_under_strace(pool: PgPool) {
+    transmission_waits_for_attachments(pool).await;
+}
+
+async fn transmission_waits_for_attachments(pool: PgPool) {
     let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let first = f.ready(&vec![3; 1024 * 1024]).await;
@@ -523,8 +535,9 @@ fn execution_directory_parents_are_synced_before_ownership_and_readiness() {
         .arg(&trace)
         .arg(std::env::current_exe().unwrap())
         .args([
+            "--ignored",
             "--exact",
-            "input_is_not_transmitted_until_all_attachments_published",
+            "transmission_waits_for_attachments_under_strace",
         ])
         .status()
         .unwrap();

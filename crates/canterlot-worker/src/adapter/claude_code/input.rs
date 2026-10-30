@@ -405,7 +405,7 @@ impl InputQueue {
             Parsed::TurnError {
                 terminal_reason: Some(reason),
                 ..
-            } if reason == "aborted_tools" && self.interrupt == Interrupt::Sent => {
+            } if is_interrupt_reason(reason) && self.interrupt == Interrupt::Sent => {
                 self.interrupt = Interrupt::Acknowledged;
             }
             _ => {}
@@ -425,6 +425,12 @@ impl InputQueue {
     pub fn interrupt_acknowledged(&self) -> bool {
         self.interrupt == Interrupt::Acknowledged
     }
+}
+
+/// Конец хода после SIGINT: прерван вызов инструмента (`aborted_tools`)
+/// или поток ответа модели (`aborted_streaming`, записан CLI 2.1.311).
+pub fn is_interrupt_reason(reason: &str) -> bool {
+    matches!(reason, "aborted_tools" | "aborted_streaming")
 }
 
 /// Сообщение пользователя stream-json: строка, если есть только текст владельца;
@@ -649,7 +655,7 @@ impl InputDriver {
         }
     }
 
-    /// SIGINT процессу CLI и ничего больше: подтверждение = `result` с `aborted_tools`,
+    /// SIGINT процессу CLI и ничего больше: подтверждение = `result` с `aborted_tools` или `aborted_streaming`,
     /// после него CLI выходит с кодом 0 (исполнение заканчивается `stopped(user_stop)`).
     pub async fn interrupt(
         &mut self,

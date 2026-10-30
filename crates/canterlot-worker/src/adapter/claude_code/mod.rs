@@ -37,6 +37,7 @@ pub struct ClaudeCodeAdapter {
     cfg: ClaudeCodeConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    stop_grace: Duration,
     cli: Option<CliProcess>,
     broker: Option<Broker>,
     parser: Parser,
@@ -48,12 +49,14 @@ pub struct ClaudeCodeAdapter {
     permission_mode: String,
     workdir: PathBuf,
     instructions: InstructionSpec,
-    first_session: Option<SessionArg>,
     approved: HashSet<String>,
     tools: HashMap<Uuid, AdapterEvent>,
     tool_ids: HashMap<String, Uuid>,
     tool_finals: HashMap<Uuid, AdapterEvent>,
     requests: HashMap<String, (String, Value)>,
+    /// Вводы, о которых `transmit` вернул `Undetermined`: их позднее
+    /// доказательство уходит событием `InputAccepted`.
+    unconfirmed: HashSet<Uuid>,
     initialized: bool,
     eof: bool,
     exited: bool,
@@ -67,6 +70,7 @@ impl ClaudeCodeAdapter {
             cfg,
             exec_dir,
             deadline,
+            stop_grace: Duration::from_secs(5),
             cli: None,
             broker: None,
             parser: Parser::new(),
@@ -84,12 +88,12 @@ impl ClaudeCodeAdapter {
                 revision: 0,
                 title: String::new(),
             },
-            first_session: None,
             approved: HashSet::new(),
             tools: HashMap::new(),
             tool_ids: HashMap::new(),
             tool_finals: HashMap::new(),
             requests: HashMap::new(),
+            unconfirmed: HashSet::new(),
             initialized: false,
             eof: false,
             exited: false,
@@ -201,8 +205,13 @@ impl ClaudeCodeAdapter {
     }
 
     fn on_parsed(&mut self, parsed: Parsed) {
-        if let Some(queue) = &mut self.queue {
-            queue.on_parsed(&parsed);
+        if let Some(queue) = &mut self.queue
+            && let Some(proof) = queue.on_parsed(&parsed)
+            && self.unconfirmed.remove(&proof.command_id)
+        {
+            self.events.push_back(AdapterEvent::InputAccepted {
+                command_id: proof.command_id,
+            });
         }
         match parsed {
             Parsed::Init {
@@ -301,7 +310,10 @@ impl ClaudeCodeAdapter {
                 error,
                 terminal_reason,
             } => {
-                if terminal_reason.as_deref() == Some("aborted_tools") {
+                if terminal_reason
+                    .as_deref()
+                    .is_some_and(input::is_interrupt_reason)
+                {
                     return;
                 }
                 let error = error.unwrap_or_else(|| "API error".into());
@@ -370,11 +382,13 @@ impl ClaudeCodeAdapter {
                 });
             }
             BrokerEvent::Cancelled { request_id } => {
-                self.requests.remove(&request_id);
-                self.events.push_back(AdapterEvent::RequestClosed {
-                    request_id,
-                    reason: "cancelled".into(),
-                });
+                // Запрос, уже закрытый прерыванием или перезапуском, второй раз не закрывается.
+                if self.requests.remove(&request_id).is_some() {
+                    self.events.push_back(AdapterEvent::RequestClosed {
+                        request_id,
+                        reason: "cancelled".into(),
+                    });
+                }
             }
             BrokerEvent::AgentTool {
                 call_id,
@@ -389,7 +403,7 @@ impl ClaudeCodeAdapter {
                     arguments,
                 });
             }
-            BrokerEvent::LimitsQuery { rpc_id } => {
+            BrokerEvent::LimitsQuery { call } => {
                 let snap = self.limits.snapshot();
                 let current = [
                     (LimitWindow::FiveHour, snap.five_hour),
@@ -413,7 +427,7 @@ impl ClaudeCodeAdapter {
                 })
                 .collect();
                 self.broker.as_mut().unwrap().answer_limits(
-                    rpc_id,
+                    call,
                     &LimitsSnapshot {
                         provider: "claude".into(),
                         current,
@@ -426,8 +440,12 @@ impl ClaudeCodeAdapter {
 
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
     /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
-    /// и до 2 с, затем SIGKILL. Открытые запросы закрываются как прерванные.
-    async fn stop_old_cli(&mut self) {
+    /// и до 2 с, затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
+    /// выхода ограничены: вывод может держать процесс вне группы CLI (инструмент
+    /// ведёт свою группу), а сам CLI может застрять в непрерываемом сне; тогда
+    /// остатки дерева исполнения гасит контейнер. Открытые запросы закрываются
+    /// как прерванные.
+    async fn stop_old_cli(&mut self, group: &dyn Containment) {
         let Some(cli) = self.cli.as_mut() else {
             return;
         };
@@ -450,7 +468,17 @@ impl ClaudeCodeAdapter {
             .await
             {
                 signal_group(cli.pid, process::Signal::Kill);
-                drain_to_eof(cli, &mut self.parser, &mut self.queue).await;
+                let drained = timeout(
+                    KILL_DRAIN,
+                    drain_to_eof(cli, &mut self.parser, &mut self.queue),
+                )
+                .await
+                .is_ok();
+                if !drained || timeout(KILL_DRAIN, cli.wait()).await.is_err() {
+                    // Новый CLI ещё не запущен: всё в контейнере принадлежит старому.
+                    let _ = group.terminate(KILL_DRAIN).await;
+                    let _ = timeout(KILL_DRAIN, cli.wait()).await;
+                }
             }
         }
         self.cli = None;
@@ -474,6 +502,9 @@ impl ClaudeCodeAdapter {
     ) -> Option<CliProcess> {
         if version::check(&self.cfg.executable).await.is_err() {
             return None;
+        }
+        if let Some(broker) = &self.broker {
+            broker.arm();
         }
         let mut cli = CliProcess::spawn(launch, &self.cfg, group).await.ok()?;
         if exited_early(&mut cli).await {
@@ -521,11 +552,10 @@ impl ClaudeCodeAdapter {
         let native_id = self.native_id.clone();
         // 1. Файл инструкций нового запуска (или удаление устаревшего).
         if process::write_instructions_file(&exec_dir, &next).is_err() {
-            eprintln!("RESTART file fail");
             return Err("instructions_change_failed");
         }
         // 2. Остановить старый CLI.
-        self.stop_old_cli().await;
+        self.stop_old_cli(group).await;
         // 3. Сбросить состояние разбора, запустить новый CLI с --resume.
         self.parser.reset_process();
         let launch = process::LaunchSpec {
@@ -540,7 +570,6 @@ impl ClaudeCodeAdapter {
         };
         let spawned = self.spawn_for_restart(&launch, group).await;
         let Some(cli) = spawned else {
-            eprintln!("RESTART fallback");
             return self.respawn_previous(group).await;
         };
         let started = (cli.pid, cli.start_ticks);
@@ -557,7 +586,10 @@ impl ClaudeCodeAdapter {
     }
 
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
-    /// перезапуска. Успех — отказ входа, провал — остановка исполнения.
+    /// перезапуска. Беседа уже записана, поэтому всегда `--resume` (CLI
+    /// отказывает повторному `--session-id`: «Session ID … is already in use»).
+    /// Успех — отказ входа; провал, в том числе невозвращённый файл прежних
+    /// инструкций, — остановка исполнения с причиной `restart_failed`.
     async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
         let previous = self.instructions.clone();
         let (model, effort, permission_mode) = match self.queue.as_ref() {
@@ -571,20 +603,20 @@ impl ClaudeCodeAdapter {
             }
             None => return Err("instructions_change_failed"),
         };
-        // Вернуть файл прежних инструкций (перезапись из памяти, удаление для Owner/Clean).
-        let _ = process::write_instructions_file(&self.exec_dir, &previous);
+        // Без прежнего файла запасной CLI получил бы новый текст пресета,
+        // а адаптер и хаб считали бы действующим старый.
+        if process::write_instructions_file(&self.exec_dir, &previous).is_err() {
+            self.diagnostic("restart_failed", true);
+            return Err("instructions_change_failed");
+        }
         let workdir = self.workdir.clone();
         let exec_dir = self.exec_dir.clone();
         let executable = self.cfg.executable.clone();
-        let session = self
-            .first_session
-            .clone()
-            .unwrap_or_else(|| SessionArg::Resume(self.native_id.clone()));
         let launch = process::LaunchSpec {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session,
+            session: SessionArg::Resume(self.native_id.clone()),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -601,11 +633,82 @@ impl ClaudeCodeAdapter {
                 Err("instructions_change_failed")
             }
             None => {
-                self.events.push_back(AdapterEvent::ProcessExited {
-                    code: None,
-                    signal: None,
-                });
+                self.diagnostic("restart_failed", true);
                 Err("instructions_change_failed")
+            }
+        }
+    }
+
+    /// Один проход доставки; `Undetermined` запоминается вызывающим.
+    async fn transmit_once(
+        &mut self,
+        input: &Transmission,
+        group: &dyn Containment,
+    ) -> TransmitOutcome {
+        if self.cli.is_none() || self.exited || self.eof {
+            return TransmitOutcome::Undetermined;
+        }
+        if let Err(reason) = self.validate_transmission(input) {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
+        if let Some(change) = input.settings.clone()
+            && process::needs_restart(&self.instructions, &change)
+            && let Err(reason) = self.restart_for_instructions(&change, group).await
+        {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        self.queue.as_mut().unwrap().enqueue(input);
+        let mut limit = Instant::now() + self.deadline;
+        let mut written = false;
+        loop {
+            let queue = self.queue.as_mut().unwrap();
+            if queue.is_proven(input.command_id) {
+                if !self.initialized {
+                    self.diagnostic("cli_init_missing", true);
+                    return TransmitOutcome::Undetermined;
+                }
+                return TransmitOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind: input::PROOF_KIND,
+                });
+            }
+            if let Some(reason) = queue.take_rejection(input.command_id) {
+                return TransmitOutcome::Rejected(reason.into());
+            }
+            if self.eof || self.exited {
+                return TransmitOutcome::Undetermined;
+            }
+            if let Next::Write(line) = queue.next(self.limits.snapshot().weekly) {
+                if let Some(active) = queue.active() {
+                    self.parser.set_input_command(active.command_id);
+                    if active.command_id == input.command_id && !written {
+                        written = true;
+                        limit = Instant::now() + self.deadline;
+                    }
+                }
+                if !matches!(
+                    timeout_at(limit, self.cli.as_mut().unwrap().write_line(&line)).await,
+                    Ok(Ok(()))
+                ) {
+                    return TransmitOutcome::Undetermined;
+                }
+                continue;
+            }
+            let until = queue.control_deadline().unwrap_or(limit).min(limit);
+            if timeout_at(until, self.pump()).await.is_err() {
+                if self.queue.as_ref().unwrap().control_deadline().is_some() {
+                    self.queue.as_mut().unwrap().control_timed_out();
+                    continue;
+                }
+                if !self.initialized && written {
+                    self.diagnostic("cli_init_missing", true);
+                }
+                if written {
+                    return TransmitOutcome::Undetermined;
+                }
+                self.queue.as_mut().unwrap().withdraw(input.command_id);
+                return TransmitOutcome::Rejected("turn_active".into());
             }
         }
     }
@@ -641,6 +744,9 @@ impl ClaudeCodeAdapter {
         }
     }
 }
+
+/// Предел дочитывания stdout и ожидания выхода после SIGKILL при перезапуске.
+const KILL_DRAIN: Duration = Duration::from_secs(1);
 
 /// Ранний выход CLI сразу после запуска: процесс не прожил и секунды.
 /// Ребёнок уже убран другой проверкой `members` (общий супервизор тестового
@@ -806,7 +912,6 @@ impl Adapter for ClaudeCodeAdapter {
         };
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
-        self.first_session = Some(launch.session.clone());
         // The exec manager stages a named Task-1 profile before starting the supervisor.
         let broker = Broker::bind(&self.exec_dir).await?;
         process::write_exec_files(
@@ -818,6 +923,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .unwrap_or(std::env::current_exe()?),
         )
         .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+        broker.arm();
         self.broker = Some(broker);
         self.queue = Some(InputQueue::new(LaunchSettings {
             model: spec.model.clone(),
@@ -835,6 +941,9 @@ impl Adapter for ClaudeCodeAdapter {
         self.cli = Some(cli);
         Ok(started)
     }
+    fn set_stop_grace(&mut self, grace: Duration) {
+        self.stop_grace = grace;
+    }
     fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
         // Смена инструкций обрабатывается перезапуском CLI, а не управляющими запросами.
         if let Some(change) = input.settings.as_ref()
@@ -848,72 +957,11 @@ impl Adapter for ClaudeCodeAdapter {
             .validate(input.settings.as_ref())
     }
     async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
-        if self.cli.is_none() || self.exited || self.eof {
-            return TransmitOutcome::Undetermined;
+        let outcome = self.transmit_once(input, group).await;
+        if matches!(outcome, TransmitOutcome::Undetermined) {
+            self.unconfirmed.insert(input.command_id);
         }
-        if let Err(reason) = self.validate_transmission(input) {
-            return TransmitOutcome::Rejected(reason.into());
-        }
-        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
-        if let Some(change) = input.settings.clone()
-            && process::needs_restart(&self.instructions, &change)
-            && let Err(reason) = self.restart_for_instructions(&change, group).await
-        {
-            return TransmitOutcome::Rejected(reason.into());
-        }
-        self.queue.as_mut().unwrap().enqueue(input);
-        let mut limit = Instant::now() + self.deadline;
-        let mut written = false;
-        loop {
-            let queue = self.queue.as_mut().unwrap();
-            if queue.is_proven(input.command_id) {
-                if !self.initialized {
-                    self.diagnostic("cli_init_missing", true);
-                    return TransmitOutcome::Undetermined;
-                }
-                return TransmitOutcome::Accepted(Proof {
-                    command_id: input.command_id,
-                    kind: input::PROOF_KIND,
-                });
-            }
-            if let Some(reason) = queue.take_rejection(input.command_id) {
-                return TransmitOutcome::Rejected(reason.into());
-            }
-            if self.eof || self.exited {
-                return TransmitOutcome::Undetermined;
-            }
-            if let Next::Write(line) = queue.next(self.limits.snapshot().weekly) {
-                if let Some(active) = queue.active() {
-                    self.parser.set_input_command(active.command_id);
-                    if active.command_id == input.command_id && !written {
-                        written = true;
-                        limit = Instant::now() + self.deadline;
-                    }
-                }
-                if !matches!(
-                    timeout_at(limit, self.cli.as_mut().unwrap().write_line(&line)).await,
-                    Ok(Ok(()))
-                ) {
-                    return TransmitOutcome::Undetermined;
-                }
-                continue;
-            }
-            let until = queue.control_deadline().unwrap_or(limit).min(limit);
-            if timeout_at(until, self.pump()).await.is_err() {
-                if self.queue.as_ref().unwrap().control_deadline().is_some() {
-                    self.queue.as_mut().unwrap().control_timed_out();
-                    continue;
-                }
-                if !self.initialized && written {
-                    self.diagnostic("cli_init_missing", true);
-                }
-                if written {
-                    return TransmitOutcome::Undetermined;
-                }
-                self.queue.as_mut().unwrap().withdraw(input.command_id);
-                return TransmitOutcome::Rejected("turn_active".into());
-            }
-        }
+        outcome
     }
     async fn deliver_decision(
         &mut self,
@@ -1005,15 +1053,24 @@ impl Adapter for ClaudeCodeAdapter {
         };
         cli.close_stdin();
         let grace = Duration::from_secs(2);
+        let member = Member {
+            pid: cli.pid,
+            start_ticks: cli.start_ticks,
+        };
         if !self.exited {
-            if matches!(mode, CloseMode::Force) || timeout(grace, cli.wait()).await.is_err() {
-                group.signal_member(
-                    &Member {
-                        pid: cli.pid,
-                        start_ticks: cli.start_ticks,
-                    },
-                    rustix::process::Signal::KILL,
-                )?;
+            // Мягко: EOF, затем SIGTERM (CLI сам гасит деревья Bash и выходит
+            // с 143), затем срок stop_grace; SIGKILL — только после него.
+            let exited = match mode {
+                CloseMode::Force => false,
+                CloseMode::Graceful => {
+                    timeout(grace, cli.wait()).await.is_ok() || {
+                        group.signal_member(&member, rustix::process::Signal::TERM)?;
+                        timeout(self.stop_grace, cli.wait()).await.is_ok()
+                    }
+                }
+            };
+            if !exited {
+                group.signal_member(&member, rustix::process::Signal::KILL)?;
                 timeout(grace, cli.wait())
                     .await
                     .map_err(|_| AdapterError::Deadline)??;

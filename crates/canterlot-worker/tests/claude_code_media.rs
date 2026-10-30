@@ -1,8 +1,8 @@
 #![forbid(unsafe_code)]
 
 //! Картинки, которые агент открыл инструментом Read (план 2a, Task 5; pilot.md §5.7).
-//! Фикстура `read_image.jsonl` построена вручную: формат результата Read для картинок
-//! в записях этапа 0 отсутствует, подтверждается живым прогоном.
+//! Фикстура `read_image.jsonl` записана живым прогоном CLI 2.1.311: результат Read
+//! картинки — блок `image` с `base64` (форма, которой не было в записях этапа 0).
 
 use base64::Engine;
 use canterlot_proto::limits::MAX_MEDIA_BYTES;
@@ -126,9 +126,13 @@ fn read_png_with_image_result_publishes_received_bytes() {
     assert_eq!(tool_blocks[0].1, "Read");
     assert_eq!(block_id, tool_blocks[0].0, "media hangs on the Read block");
     let bytes = bytes_of(source);
-    assert_eq!(bytes, png_bytes());
+    // PNG 1×1 из живого прогона (тот, что открывал Read).
+    let recorded = base64::engine::general_purpose::STANDARD
+        .decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+        .unwrap();
+    assert_eq!(bytes, recorded);
     // Файла по пути из вызова нет: байты не могли прийти с диска.
-    assert!(!Path::new("/tmp/canterlot-fixture/shot.png").exists());
+    assert!(!Path::new("/tmp/canterlot-smoke/small.png").exists());
 
     // Байты результата сильнее содержимого файла, которое успело измениться.
     let root = tempfile::tempdir().unwrap();
@@ -145,7 +149,7 @@ fn read_png_with_image_result_publishes_received_bytes() {
     let exec = root.path().join("exec");
     fs::create_dir(&exec).unwrap();
     let (media_id, block) = (Uuid::now_v7(), Uuid::now_v7());
-    let prepared = media::prepare(&exec, media_id, block, MediaSource::Bytes(bytes)).unwrap();
+    let prepared = media::prepare(&exec, media_id, block, MediaSource::Bytes(png_bytes())).unwrap();
     assert_eq!(prepared.mime, "image/png");
     assert_eq!((prepared.width, prepared.height), (4, 3));
 }

@@ -1538,6 +1538,43 @@ async fn wave_w_acceptance_unconfirmed_and_cancel_lost_release_inbox() {
 }
 
 #[tokio::test]
+async fn late_delivery_proof_records_input_accepted_after_unconfirmed() {
+    let mut env = Env::new().await;
+    env.close_manager().await;
+    env.config.supervisor.transmit_deadline = Duration::from_millis(150);
+    env.reopen();
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let id = Uuid::now_v7();
+    let input = deliver_command(
+        id,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"delay_ms":700},{"delta":"late"}"#),
+    );
+    env.send(input.clone()).await;
+    env.wait("late acceptance", |b| {
+        let unconfirmed = b.iter().position(
+            |b| matches!(b, Body::AcceptanceUnconfirmed(f) if f.command_id == id.to_string()),
+        );
+        let accepted = b
+            .iter()
+            .position(|b| matches!(b, Body::InputAccepted(f) if f.command_id == id.to_string()));
+        matches!((unconfirmed, accepted), (Some(u), Some(a)) if u < a)
+    })
+    .await;
+    env.wait("turn finished", |b| {
+        b.iter()
+            .any(|b| matches!(b, Body::RunFinished(f) if f.input_command_id == id.to_string()))
+    })
+    .await;
+    env.stop().await;
+}
+
+#[tokio::test]
 async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending() {
     let mut env = Env::new().await;
     env.hub_session();

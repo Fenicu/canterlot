@@ -47,51 +47,87 @@ fn escape_glob_segment(segment: &str) -> String {
 
 /// Абсолютные пути файлов инструкций владельца строго выше корня репозитория
 /// плюс пользовательский уровень; файлы самого репозитория никогда не входят.
-/// Ничего не читает, кроме прохода `.git` вверх.
+/// Пользовательский каталог — `CLAUDE_CONFIG_DIR` окружения воркера или `~/.claude`.
 pub fn owner_instruction_excludes(workdir: &Path, home: &Path) -> Vec<String> {
-    let root = repository_root(workdir);
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |dir: &str| {
-        for suffix in [
-            "CLAUDE.md",
-            "CLAUDE.local.md",
-            ".claude/CLAUDE.md",
-            "AGENTS.md",
-            ".claude/AGENTS.md",
-            ".claude/rules/**",
-        ] {
-            // Корень `/` склеивается без двойного слеша.
-            let entry = if dir == "/" {
-                format!("/{suffix}")
-            } else {
-                format!("{dir}/{suffix}")
-            };
-            if !out.contains(&entry) {
-                out.push(entry);
-            }
+    let config_dir =
+        crate::config::claude_config_dir(home, std::env::var_os("CLAUDE_CONFIG_DIR").as_deref());
+    owner_instruction_excludes_in(workdir, home, &config_dir)
+}
+
+/// То же с явным пользовательским каталогом. CLI идёт от физического cwd
+/// (`getcwd` после `chdir`), поэтому цепочка предков берётся и от логического
+/// пути, и от пути с раскрытыми символическими ссылками; пользовательский
+/// каталог и дом — тоже в обоих видах. Ничего не читает, кроме `.git` и ссылок.
+pub fn owner_instruction_excludes_in(
+    workdir: &Path,
+    home: &Path,
+    config_dir: &Path,
+) -> Vec<String> {
+    fn both(path: &Path) -> Vec<PathBuf> {
+        let mut out = vec![path.to_path_buf()];
+        if let Ok(real) = std::fs::canonicalize(path)
+            && real != path
+        {
+            out.push(real);
         }
-    };
-    // Каталоги строго выше корня репозитория, вплоть до `/` включительно.
-    let mut above: Option<&Path> = root.parent();
-    while let Some(dir) = above {
-        let escaped = escape_glob_segment(&dir.display().to_string());
-        push(&escaped);
-        above = dir.parent();
+        out
     }
-    // Пользовательский уровень — для любого workdir.
-    let home_escaped = escape_glob_segment(&home.display().to_string());
-    for suffix in [".claude/CLAUDE.md", ".claude/rules/**"] {
-        let entry = format!("{home_escaped}/{suffix}");
+    let mut roots = vec![repository_root(workdir)];
+    if let Ok(real) = std::fs::canonicalize(workdir) {
+        let root = repository_root(&real);
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |entry: String| {
         if !out.contains(&entry) {
             out.push(entry);
         }
+    };
+    for root in &roots {
+        // Каталоги строго выше корня репозитория, вплоть до `/` включительно.
+        let mut above: Option<&Path> = root.parent();
+        while let Some(dir) = above {
+            let escaped = escape_glob_segment(&dir.display().to_string());
+            for suffix in [
+                "CLAUDE.md",
+                "CLAUDE.local.md",
+                ".claude/CLAUDE.md",
+                "AGENTS.md",
+                ".claude/AGENTS.md",
+                ".claude/rules/**",
+            ] {
+                // Корень `/` склеивается без двойного слеша.
+                add(if dir == Path::new("/") {
+                    format!("/{suffix}")
+                } else {
+                    format!("{escaped}/{suffix}")
+                });
+            }
+            above = dir.parent();
+        }
+    }
+    // Пользовательский уровень — для любого workdir.
+    let mut user_dirs = both(&home.join(".claude"));
+    for dir in both(config_dir) {
+        if !user_dirs.contains(&dir) {
+            user_dirs.push(dir);
+        }
+    }
+    for dir in &user_dirs {
+        let escaped = escape_glob_segment(&dir.display().to_string());
+        for suffix in ["CLAUDE.md", "rules/**"] {
+            add(format!("{escaped}/{suffix}"));
+        }
     }
     // Личные файлы владельца — даже если корень репозитория это сам $HOME.
-    if root == home {
-        for name in ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"] {
-            let entry = format!("{home_escaped}/{name}");
-            if !out.contains(&entry) {
-                out.push(entry);
+    let homes = both(home);
+    if roots.iter().any(|root| homes.contains(root)) {
+        for home in &homes {
+            let escaped = escape_glob_segment(&home.display().to_string());
+            for name in ["CLAUDE.md", "CLAUDE.local.md", "AGENTS.md"] {
+                add(format!("{escaped}/{name}"));
             }
         }
     }
