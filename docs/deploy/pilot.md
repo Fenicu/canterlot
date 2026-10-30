@@ -610,19 +610,16 @@ fetch_parallelism = 2                               # crates/canterlot-worker/sr
 fetch_retry = "2s"                                  # crates/canterlot-worker/src/config.rs:299
 fetch_attempts = 5                                  # crates/canterlot-worker/src/config.rs:300
 fetch_backoff_cap = "30s"                           # crates/canterlot-worker/src/config.rs:302
-
-[[instruction_profiles]]                            # crates/canterlot-worker/src/config.rs:287
-name = "executor"                                   # crates/canterlot-worker/src/config.rs:288
-title = "Исполнитель"                               # crates/canterlot-worker/src/config.rs:289
-description = "Профиль без персоны (нейтральный агент)" # crates/canterlot-worker/src/config.rs:290
-harnesses = ["claude_code", "codex"]                # crates/canterlot-worker/src/config.rs:291
 ```
+
+Таблицы адаптеров `[claude_code]` и `[codex]` (в том числе необязательный `[codex].home_dir`) показаны в примере `worker.toml` в [README.md](../../README.md). Раздел `[[instruction_profiles]]` из конфигурации воркера удалён: с ним воркер не запустится, потому что пресеты инструкций хранит хаб и редактируются они в PWA ([docs/design/pilot.md#4-создание-сессии-и-пресеты-инструкций](../design/pilot.md#4-создание-сессии-и-пресеты-инструкций)).
 
 ### 6.3. Права доступа к файлам и каталогам
 
 - `token_file`: обязательно права `0600` (`chmod 600 ~/.config/canterlot/token`).
 - `data_dir`: создаётся воркером автоматически с правами `0700`.
-- Все каталоги исполнений `data_dir/executions/<id>` имеют права `0700`, а сокеты IPC и `spec.toml` — `0600`.
+- Все каталоги исполнений `data_dir/executions/<id>` имеют права `0700`, а сокеты IPC и `spec.toml` — `0600`; файл `instructions.md` с текстом пресета внутри каталога исполнения — `0600`.
+- `CODEX_HOME` canterlot (`[codex].home_dir`, по умолчанию `data_dir/codex-home`) нужен пресетам, кроме «Как у владельца»: воркер сам создаёт его с правами `0700`, наполняет символическими ссылками на записи `~/.codex` и собственным `AGENTS.md`, а путь внутри `/tmp`, `/var/tmp` или домашнего каталога Codex владельца отвергает.
 
 ### 6.4. Пользовательский юнит systemd и выживание процессов
 
