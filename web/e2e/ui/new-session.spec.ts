@@ -4,7 +4,7 @@ import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, test } from './fixtures';
 
-async function boot(page: Page, options: { solo?: boolean; home?: string | null } = {}) {
+async function boot(page: Page, options: { solo?: boolean; home?: string | null; models?: { id: string; title: string; efforts: string[] }[] } = {}) {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
   const { machine } = seedMockupSessions(api);
@@ -13,6 +13,7 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null 
   }
   const record = api.machines.get(machine)!;
   if (options.home !== undefined) record.home_dir = options.home;
+  if (options.models) record.harnesses[0]!.models = options.models;
   seedPresets(api);
   await installChatRoutes(page, hub, api, '00000000-0000-4000-8000-0000000000d1');
   await page.goto('/sessions');
@@ -106,6 +107,25 @@ test('new_session_stays_empty_for_a_worker_without_a_home', async ({ page }) => 
   await page.goto('/new');
   await expect(page.getByRole('button', { name: '/srv/notes' })).toBeVisible();
   await expect(pathField(page)).toHaveValue('');
+});
+
+test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({ page }) => {
+  await boot(page, {
+    solo: true,
+    models: [
+      { id: 'opus[1m]', title: 'Opus 1M', efforts: ['medium'] },
+      { id: 'fable[1m]', title: 'Fable 1M', efforts: ['medium'] },
+      { id: 'opus', title: 'Opus', efforts: ['medium'] },
+      { id: 'haiku', title: 'Haiku', efforts: ['medium'] }
+    ]
+  });
+  await page.goto('/new');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  const field = page.getByRole('combobox', { name: 'Модель' });
+  await expect(field).toHaveValue('opus[1m]');
+  await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
+  await field.selectOption('haiku');
+  await expect(field).toHaveValue('haiku');
 });
 
 test('new_session_crunch_default_text_comes_from_config', async ({ page }) => {

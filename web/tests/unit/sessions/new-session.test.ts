@@ -10,6 +10,7 @@ import {
   type Op,
 } from "#lib/ops/journal.js";
 import {
+  defaultModelId,
   NewSessionModel,
   prefillWorkdir,
   soleMachine,
@@ -111,6 +112,14 @@ describe("sessions/new", () => {
     expect(prefillWorkdir("", "", "")).toBe("");
     expect(prefillWorkdir("/home/owner", "/home/owner", "")).toBe("");
     expect(prefillWorkdir("/srv/typed", "/home/owner", "")).toBe("/srv/typed");
+  });
+
+  it("new_session_defaults_to_the_first_catalog_model_and_keeps_a_valid_choice", () => {
+    const models = [{ id: "opus[1m]" }, { id: "opus" }];
+    expect(defaultModelId(models, "")).toBe("opus[1m]");
+    expect(defaultModelId(models, "opus")).toBe("opus");
+    expect(defaultModelId(models, "gpt-5")).toBe("opus[1m]");
+    expect(defaultModelId([], "opus")).toBe("");
   });
 
   it("new_session_model_accepts_any_absolute_workdir", () => {

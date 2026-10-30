@@ -15,7 +15,7 @@
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
-  import { machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
+  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
@@ -128,6 +128,13 @@
       path = prefillWorkdir(path, prefilled, next);
     });
     prefilled = next;
+  });
+
+  $effect(() => {
+    const list = models;
+    untrack(() => {
+      modelId = defaultModelId(list, modelId);
+    });
   });
 
   async function send() {

@@ -65,6 +65,16 @@ export function prefillWorkdir(
   return current === "" || current === prefilled ? home : current;
 }
 
+/** Каталог перечисляет модели от выбора по умолчанию, как и у Codex. */
+export function defaultModelId(
+  models: { id: string }[],
+  current: string,
+): string {
+  return models.some((item) => item.id === current)
+    ? current
+    : (models[0]?.id ?? "");
+}
+
 export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {
