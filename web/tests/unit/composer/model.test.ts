@@ -90,6 +90,14 @@ function createMockDeps(overrides?: Partial<ComposerDeps>): {
     list: vi.fn(() => uploadsList),
     add: vi.fn(),
     cancel: vi.fn(),
+    detach: vi.fn((ids: readonly string[]) => {
+      const taken = uploadsList.filter((item) => ids.includes(item.id));
+      for (const item of taken) uploadsList.splice(uploadsList.indexOf(item), 1);
+      return taken;
+    }),
+    reattach: vi.fn((views: readonly Upload[]) => {
+      uploadsList.push(...views);
+    }),
   } as unknown as UploadManager;
 
   const config = vi.fn(() => ({
@@ -296,6 +304,112 @@ describe("composer/model", () => {
     expect(draftsMap.get("conv-1")?.text).toBe("Сообщение, которое отклонят");
     // Key dropped from active inputs
     expect(inputs.size).toBe(0);
+  });
+
+  it("sent_uploads_leave_the_tray_without_a_server_delete_and_return_on_refusal", async () => {
+    const { deps, uploadsList } = createMockDeps();
+    const ready = (id: string): Upload => ({
+      id,
+      conversationId: "conv-1",
+      name: `${id}.txt`,
+      size: 3,
+      phase: "ready",
+      sent: 3,
+      attachmentId: `att-${id}`,
+    });
+    uploadsList.push(ready("u1"));
+    const model = new ComposerModel(deps);
+    model.text = "с файлом";
+    await model.send();
+    expect(deps.ops.begin).toHaveBeenLastCalledWith(
+      "input",
+      expect.objectContaining({ attachment_ids: ["att-u1"] }),
+      expect.anything(),
+    );
+    expect(uploadsList).toEqual([]);
+    expect(deps.uploads.cancel).not.toHaveBeenCalled();
+
+    model.text = "без файла";
+    await model.send();
+    expect(deps.ops.begin).toHaveBeenLastCalledWith(
+      "input",
+      expect.objectContaining({ attachment_ids: undefined }),
+      expect.anything(),
+    );
+
+    uploadsList.push(ready("u2"));
+    deps.ops.run = vi.fn(async (op: Op) => {
+      op.state = "refused";
+      op.refusal = { code: "resource_limit", message: "Лимит исчерпан" };
+      throw new Error("refused");
+    });
+    model.text = "отклонят";
+    await model.send();
+    expect(uploadsList.map((item) => item.id)).toEqual(["u2"]);
+  });
+
+  it("second_tap_during_the_network_check_creates_no_second_input", async () => {
+    const gates: ((value: "ok") => void)[] = [];
+    const { deps } = createMockDeps({
+      canSend: vi.fn(
+        () => new Promise<"ok">((resolve) => gates.push(resolve)),
+      ),
+    });
+    const clock = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    try {
+      const model = new ComposerModel(deps);
+      model.text = "один раз";
+      const first = model.send();
+      clock.mockReturnValue(1_000_700);
+      const second = model.send();
+      for (const open of gates.splice(0)) open("ok");
+      await Promise.all([first, second]);
+      expect(deps.ops.begin).toHaveBeenCalledTimes(1);
+
+      model.text = "позже";
+      const later = model.sendLater(1_000_700 + 15 * 60_000);
+      const again = model.sendLater(1_000_700 + 15 * 60_000);
+      for (const open of gates.splice(0)) open("ok");
+      await Promise.all([later, again]);
+      expect(deps.ops.begin).toHaveBeenCalledTimes(2);
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("send_reports_busy_until_the_network_check_and_persist_finish", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "занят";
+    const sending = model.send();
+    expect(model.sending).toBe(true);
+    open("ok");
+    await sending;
+    expect(model.sending).toBe(false);
+  });
+
+  it("text_typed_during_the_network_check_stays_in_the_composer", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "отправлено";
+    const sending = model.send();
+    model.text = "отправлено и дописано";
+    open("ok");
+    await sending;
+    expect(deps.ops.begin).toHaveBeenCalledWith(
+      "input",
+      expect.objectContaining({
+        content: [{ type: "text", text: "отправлено" }],
+      }),
+      expect.anything(),
+    );
+    expect(model.text).toBe("отправлено и дописано");
   });
 
   it("offline_press_keeps_a_draft_and_creates_no_operation", async () => {

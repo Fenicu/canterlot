@@ -4,7 +4,8 @@ interface RequestInfo { url: string; method: string; mode: string; destination: 
 export function classify(req: RequestInfo): SwRoute {
   const path = new URL(req.url).pathname;
   if (path === '/api' || path.startsWith('/api/') || ['/healthz', '/config'].includes(path)) return 'api';
-  if (path === '/_share' && req.method === 'POST') return 'share_target';
+  // Системное «Поделиться» открывает share target навигацией верхнего уровня; fetch, iframe и no-cors форма с чужого сайта сюда не попадают.
+  if (path === '/_share' && req.method === 'POST' && req.mode === 'navigate' && req.destination === 'document') return 'share_target';
   if (req.method !== 'GET') return 'passthrough';
   if (req.mode === 'navigate') return 'navigation';
   if (path.startsWith('/_app/immutable/') || path.startsWith('/icons/') || ['/theme-init.js', '/manifest.webmanifest', '/200.html'].includes(path)) return 'asset';

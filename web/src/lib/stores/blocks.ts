@@ -56,7 +56,10 @@ export type BlockEffect =
   | {
       type: "diag";
       kind:
-        "block_revision_gap" | "block_checksum_mismatch" | "delta_after_final";
+        | "block_revision_gap"
+        | "block_checksum_mismatch"
+        | "delta_after_final"
+        | "block_fetch_failed";
       blockId: string;
     };
 
@@ -337,30 +340,81 @@ export function installPage(
   publish(block);
 }
 
+type Schedule = (fn: () => void, ms: number) => () => void;
+
+const defaultSchedule: Schedule = (fn, ms) => {
+  const timer = setTimeout(fn, ms);
+  return () => clearTimeout(timer);
+};
+
 export class BlockSync {
   readonly diagnostics: BlockEffect[] = [];
   #chain: Promise<void> = Promise.resolve();
+  #schedule: Schedule;
+  #attempts = new Map<string, number>();
+  #timers = new Set<() => void>();
+  #stopped = false;
 
   constructor(
     private blocks: Map<string, BlockModel>,
     private io: BlockIO,
-  ) {}
+    opts: { schedule?: Schedule } = {},
+  ) {
+    this.#schedule = opts.schedule ?? defaultSchedule;
+  }
 
   handle(effects: BlockEffect[]): void {
-    if (effects.length === 0) return;
+    if (effects.length === 0 || this.#stopped) return;
     this.#chain = this.#chain.then(() => this.#handle(effects));
+  }
+
+  stop(): void {
+    this.#stopped = true;
+    for (const cancel of this.#timers) cancel();
+    this.#timers.clear();
+    this.#attempts.clear();
   }
 
   get settled(): Promise<void> {
     return this.#chain;
   }
 
+  #diag(effect: BlockEffect): void {
+    this.diagnostics.push(effect);
+    if (this.diagnostics.length > 200)
+      this.diagnostics.splice(0, this.diagnostics.length - 200);
+  }
+
   async #handle(effects: BlockEffect[]): Promise<void> {
     for (const effect of effects) {
-      if (effect.type === "diag") this.diagnostics.push(effect);
-      else if (effect.type === "verify") await this.#verify(effect.blockId);
-      else await this.#refetch(effect.blockId, effect.fromBytes);
+      if (effect.type === "diag") {
+        this.#diag(effect);
+        continue;
+      }
+      try {
+        if (effect.type === "verify") await this.#verify(effect.blockId);
+        else await this.#refetch(effect.blockId, effect.fromBytes);
+        this.#attempts.delete(effect.blockId);
+      } catch {
+        this.#retry(effect);
+      }
     }
+  }
+
+  /** Сбой загрузки не останавливает цепочку: блок повторяется позже, остальные идут своим ходом. */
+  #retry(effect: Exclude<BlockEffect, { type: "diag" }>): void {
+    if (this.#stopped || !this.blocks.has(effect.blockId)) return;
+    const attempt = (this.#attempts.get(effect.blockId) ?? 0) + 1;
+    this.#attempts.set(effect.blockId, attempt);
+    this.#diag({ type: "diag", kind: "block_fetch_failed", blockId: effect.blockId });
+    const cancel = this.#schedule(
+      () => {
+        this.#timers.delete(cancel);
+        this.handle([effect]);
+      },
+      Math.min(1000 * 2 ** (attempt - 1), 30_000),
+    );
+    this.#timers.add(cancel);
   }
 
   async #verify(blockId: string): Promise<void> {
@@ -372,7 +426,7 @@ export class BlockSync {
       publish(block);
       return;
     }
-    this.diagnostics.push({
+    this.#diag({
       type: "diag",
       kind: "block_checksum_mismatch",
       blockId,
@@ -407,7 +461,7 @@ export class BlockSync {
       const delta = pending[i];
       if (!delta || delta.rev <= block.rev) continue;
       if (block.state === "final") {
-        this.diagnostics.push({
+        this.#diag({
           type: "diag",
           kind: "delta_after_final",
           blockId: block.id,

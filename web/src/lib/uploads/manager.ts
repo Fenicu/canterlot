@@ -147,6 +147,26 @@ export class UploadManager {
     void this.#persist(record).then(() => this.#enqueue(record));
   }
 
+  /** Убирает загрузки из лотка без удаления на сервере: файл уже ушёл в сообщение. */
+  detach(ids: readonly string[]): Upload[] {
+    const taken: Upload[] = [];
+    for (const id of ids) {
+      const view = this.#views.get(id);
+      if (!view) continue;
+      this.#views.delete(id);
+      this.#records.delete(id);
+      taken.push(view);
+      void this.db.delete("uploads", id).catch(() => undefined);
+    }
+    return taken;
+  }
+
+  reattach(views: readonly Upload[]): void {
+    if (this.#disposed) return;
+    for (const view of views)
+      if (!this.#views.has(view.id)) this.#views.set(view.id, view);
+  }
+
   resumePending(): Promise<void> {
     return this.#resumeAll();
   }
