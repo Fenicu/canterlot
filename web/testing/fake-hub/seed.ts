@@ -144,7 +144,6 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 				permission_modes: ['default']
 			}
 		],
-		profiles: patch.profiles ?? [{ name: 'default', title: 'Обычный', description: '', harnesses: ['claude'] }]
 	};
 	api.machines.set(machine.id, machine);
 	return machine;

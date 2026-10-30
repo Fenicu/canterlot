@@ -575,6 +575,13 @@ impl Adapter for SyntheticAdapter {
         }
         let deadline = self.transmit_deadline;
         self.active = true;
+        // Двойник работает с инструкциями запуска: ход без своих настроек
+        // выполняется с действующими инструкциями CLI (как настоящий CLI
+        // с флагами запуска), иначе echo не увидел бы пресет между сменами.
+        let mut settings = input.settings.clone().unwrap_or_default();
+        if settings.instructions.is_none() {
+            settings.instructions = self.settings.instructions.clone();
+        }
         tokio::time::timeout(deadline, async {
             let sent = self
                 .send(&Request::Input {
@@ -582,7 +589,7 @@ impl Adapter for SyntheticAdapter {
                     attempt: input.attempt,
                     text: input.text.clone(),
                     files: input.files.clone(),
-                    settings: input.settings.clone(),
+                    settings: Some(settings),
                 })
                 .await;
             if sent.is_err() {

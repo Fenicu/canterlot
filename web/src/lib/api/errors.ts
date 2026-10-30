@@ -160,7 +160,7 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
   },
   profile_unknown: {
     action: "none",
-    message: "Профиль инструкций отсутствует в каталоге",
+    message: "Пресет инструкций не найден",
   },
   workdir_not_allowed: {
     action: "none",

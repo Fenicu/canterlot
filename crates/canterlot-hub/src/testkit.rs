@@ -535,12 +535,6 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
                 })
                 .collect(),
         }],
-        profiles: vec![canterlot_proto::worker::v1::InstructionProfile {
-            name: "owner".into(),
-            title: "Как у владельца".into(),
-            description: String::new(),
-            harnesses: vec!["synthetic".into()],
-        }],
     };
     crate::machine_info::apply_report(pool, owner, machine_id, &report, Uuid::now_v7())
         .await

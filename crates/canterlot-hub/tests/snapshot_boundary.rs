@@ -505,6 +505,7 @@ async fn list_snapshot_then_tail_folds_to_the_database_state(pool: PgPool) {
                                 model: Some(if n % 2 == 0 {"synthetic-small"} else {"synthetic-large"}.into()),
                                 effort: Some(if n % 2 == 0 { "high" } else { "low" }.into()),
                                 permission_mode: None,
+                                instruction_profile: None,
                             },
                             Uuid::now_v7(),
                         )

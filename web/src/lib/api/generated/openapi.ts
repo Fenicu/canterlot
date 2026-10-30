@@ -742,6 +742,20 @@ export interface components {
             since: string;
             state: components["schemas"]["ActivityState"];
         };
+        /**
+         * @description Применённый пресет в эффективных настройках: ссылка, название и версии.
+         *     Текста здесь нет — только снимок запуска везёт текст.
+         */
+        AppliedPreset: {
+            /** Format: int64 */
+            current_revision?: number | null;
+            deleted: boolean;
+            id: string;
+            kind: components["schemas"]["PresetKind"];
+            /** Format: int64 */
+            revision?: number | null;
+            title: string;
+        };
         /** @enum {string} */
         ArchiveReason: "crunch" | "scheduled" | "live_execution";
         AttachmentRecord: {
@@ -1017,6 +1031,7 @@ export interface components {
         };
         EffectiveSettings: {
             effort: string;
+            instruction_preset: components["schemas"]["AppliedPreset"];
             instruction_profile: string;
             model: string;
             permission_mode: string;
@@ -1299,7 +1314,6 @@ export interface components {
             metrics?: components["schemas"]["MetricsView"] | null;
             name: string;
             os?: string | null;
-            profiles: components["schemas"]["ProfileView"][];
             sessions: components["schemas"]["SessionView"][];
             warnings: components["schemas"]["MachineWarning"][];
             worker_version?: string | null;
@@ -1491,12 +1505,6 @@ export interface components {
             /** Format: int64 */
             rss_bytes: number;
         };
-        ProfileView: {
-            description: string;
-            harnesses: string[];
-            name: string;
-            title: string;
-        };
         ProviderSeries: {
             five_hour: components["schemas"]["Point"][];
             provider: string;
@@ -1621,6 +1629,7 @@ export interface components {
         };
         SettingsPatch: {
             effort?: string | null;
+            instruction_profile?: string | null;
             model?: string | null;
             permission_mode?: string | null;
         };

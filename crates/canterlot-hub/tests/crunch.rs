@@ -151,7 +151,7 @@ impl Env {
         let mut leases = Vec::new();
         for machine in [claude, codex] {
             let FakeSession { commands, lease } =
-                testkit::fake_session(&registry, machine, &["pilot_v1"], true);
+                testkit::fake_session(&registry, machine, &["pilot_v1", "instructions_v1"], true);
             receivers.insert(machine, commands);
             leases.push(lease);
         }
@@ -1594,6 +1594,7 @@ async fn new_conversation_created_during_reserve_starts_held(pool: PgPool) {
             new_conversation(&env, start_execution),
             &env.config,
             Uuid::now_v7(),
+            &env.registry,
         )
         .await
         .unwrap();
@@ -1670,6 +1671,7 @@ async fn create_racing_reserve_entry_always_ends_held(pool: PgPool) {
                 new_conversation(&env, false),
                 &env.config,
                 Uuid::now_v7(),
+                &env.registry,
             )
             .await
             .unwrap()

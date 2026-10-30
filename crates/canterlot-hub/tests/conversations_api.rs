@@ -13,24 +13,79 @@ struct Fixture {
     client: TestClient,
     owner: Uuid,
     machine: Uuid,
+    registry: canterlot_hub::session::Registry,
+    _leases: Vec<canterlot_hub::session::TestLease>,
     _dir: tempfile::TempDir,
 }
 impl Fixture {
     async fn new(pool: PgPool) -> Self {
         let (deps, dir) =
             testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+        let registry = deps.registry.clone();
         let owner = deps.installation.owner_id;
         let machine = Uuid::now_v7();
         sqlx::query("insert into machines(id,owner_id,name,availability) values($1,$2,'Машина','available')").bind(machine).bind(owner).execute(&pool).await.unwrap();
         testkit::seed_catalog(&pool, machine).await;
         let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
-        Self {
+        let mut this = Self {
             pool,
             client,
             owner,
             machine,
+            registry,
+            _leases: Vec::new(),
             _dir: dir,
-        }
+        };
+        // Машина пилота по умолчанию знает снимок инструкций (план 2c, задача 3).
+        this.caps(&["pilot_v1", "instructions_v1"]);
+        this
+    }
+
+    fn caps(&mut self, capabilities: &[&str]) {
+        self._leases.clear();
+        let lease = self.registry.connect_for_tests(
+            self.machine,
+            &capabilities
+                .iter()
+                .map(|c| (*c).to_owned())
+                .collect::<Vec<_>>(),
+        );
+        self._leases.push(lease);
+    }
+
+    fn body_with_profile(&self, profile: &str) -> Value {
+        let mut body = self.body();
+        body["instruction_profile"] = json!(profile);
+        body
+    }
+
+    async fn patch_settings(&self, id: Uuid, body: Value) -> Value {
+        self.request(
+            Method::PATCH,
+            &format!("/api/v1/conversations/{id}/settings"),
+            Some(body),
+            200,
+        )
+        .await
+    }
+
+    async fn create_preset(&mut self, title: &str, text: &str) -> Value {
+        let r = self
+            .client
+            .send(
+                Method::POST,
+                "/api/v1/presets",
+                Some(&Uuid::now_v7().to_string()),
+                Some(json!({"title": title, "text": text})),
+            )
+            .await;
+        assert_eq!(
+            r.status.as_u16(),
+            201,
+            "{}",
+            String::from_utf8_lossy(&r.body)
+        );
+        r.json()
     }
     fn body(&self) -> Value {
         json!({"machine_id":self.machine,"harness":"synthetic","workdir":"/tmp/w","model":"synthetic-small","effort":"high"})
@@ -235,10 +290,11 @@ async fn create_with_start_queues_start_execution_with_settings(pool: PgPool) {
         ("model", json!("synthetic-small")),
         ("effort", json!("high")),
         ("permission_mode", json!("bypass")),
-        ("instruction_profile", json!("owner")),
     ] {
         assert_eq!(payload[k], v);
     }
+    assert!(payload.get("instruction_profile").is_none());
+    assert_eq!(payload["instructions"]["mode"], "clean");
     assert!(payload.get("capabilities").is_none());
     assert!(!f.get(id).await["execution"].is_null());
     let created = f.events("conversation_created").await;
@@ -738,7 +794,7 @@ async fn machines_endpoint_lists_catalog_os_metrics_and_disk_warning(pool: PgPoo
         m["harnesses"][0]["models"][0]["efforts"],
         json!(["low", "high"])
     );
-    assert_eq!(m["profiles"][0]["name"], "owner");
+    assert!(m.get("profiles").is_none());
     assert_eq!(m["metrics"]["cpu_permille"], 123);
     assert_eq!(m["sessions"][0]["conversation_id"], id.to_string());
     assert_eq!(m["sessions"][0]["title"], "Сессия");
@@ -1025,7 +1081,11 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
     assert_eq!(start.model, "synthetic-small");
     assert_eq!(start.effort, "high");
     assert_eq!(start.permission_mode, "bypass");
-    assert_eq!(start.instruction_profile, "owner");
+    let instructions = start
+        .instructions
+        .expect("start carries instructions snapshot");
+    assert_eq!(instructions.mode, "clean");
+    assert!(instructions.text.is_empty());
     assert!(start.capabilities.is_empty());
     sqlx::query("update executions set state='stopped',native_conversation_id='native-test' where conversation_id=$1").bind(id).execute(&f.pool).await.unwrap();
     let mut tx = f.pool.begin().await.unwrap();
@@ -1096,5 +1156,124 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
         .await
         .unwrap(),
         1
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn create_defaults_to_clean_preset(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.create(json!({})).await;
+    let detail = f.get(id).await;
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_profile"],
+        "clean"
+    );
+    let preset = &detail["settings"]["effective"]["instruction_preset"];
+    assert_eq!(preset["id"], "clean");
+    assert_eq!(preset["kind"], "clean");
+    assert_eq!(preset["deleted"], false);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn create_with_custom_preset_pins_current_revision(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    let preset = f.create_preset("Исполнитель", "текст A").await;
+    let id = f.create(json!({"instruction_profile": preset["id"]})).await;
+    let detail = f.get(id).await;
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_profile"],
+        preset["id"]
+    );
+    let applied = &detail["settings"]["effective"]["instruction_preset"];
+    assert_eq!(applied["id"], preset["id"]);
+    assert_eq!(applied["kind"], "custom");
+    assert_eq!(applied["revision"], 1);
+    assert_eq!(applied["current_revision"], 1);
+    assert_eq!(applied["deleted"], false);
+    // Повторное применение того же пресета подтягивает новую версию только
+    // через явную смену; закреплённая версия не меняется сама.
+    f.patch_settings(id, json!({"instruction_profile": preset["id"]}))
+        .await;
+    let detail = f.get(id).await;
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_preset"]["revision"],
+        1
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn create_with_deleted_or_foreign_preset_is_profile_unknown(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    let preset = f.create_preset("Временный", "текст").await;
+    let id: String = preset["id"].as_str().unwrap().into();
+    let gone = f
+        .request(Method::DELETE, &format!("/api/v1/presets/{id}"), None, 204)
+        .await;
+    assert!(gone.is_null());
+    for reference in [id.as_str(), &Uuid::now_v7().to_string()] {
+        let r = f
+            .client
+            .send(
+                Method::POST,
+                "/api/v1/conversations",
+                Some(&Uuid::now_v7().to_string()),
+                Some(f.body_with_profile(reference)),
+            )
+            .await;
+        assert_eq!(
+            r.status.as_u16(),
+            422,
+            "{}",
+            String::from_utf8_lossy(&r.body)
+        );
+        assert_eq!(r.json::<Value>()["error"]["code"], "profile_unknown");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn non_owner_preset_needs_instructions_v1(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    let preset = f.create_preset("Исполнитель", "текст").await;
+    let id: String = preset["id"].as_str().unwrap().into();
+    // Без capability сессия со стартом отклоняется.
+    f.caps(&["pilot_v1"]);
+    let mut body = f.body_with_profile(&id);
+    body["start"] = json!(true);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(&Uuid::now_v7().to_string()),
+            Some(body),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        409,
+        "{}",
+        String::from_utf8_lossy(&r.body)
+    );
+    assert_eq!(r.json::<Value>()["error"]["code"], "capability_missing");
+    // С capability — создаётся и стартует.
+    f.caps(&["pilot_v1", "instructions_v1"]);
+    let mut body = f.body_with_profile(&id);
+    body["start"] = json!(true);
+    let r = f
+        .client
+        .send(
+            Method::POST,
+            "/api/v1/conversations",
+            Some(&Uuid::now_v7().to_string()),
+            Some(body),
+        )
+        .await;
+    assert_eq!(
+        r.status.as_u16(),
+        201,
+        "{}",
+        String::from_utf8_lossy(&r.body)
     );
 }

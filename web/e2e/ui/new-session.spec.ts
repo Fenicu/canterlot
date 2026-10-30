@@ -15,7 +15,7 @@ async function boot(page: Page) {
 
 test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async ({ page }) => {
   await boot(page);
-  const bodies: { start?: boolean; key: string }[] = [];
+  const bodies: { start?: boolean; instruction_profile?: string; key: string }[] = [];
   page.on('request', (request) => {
     if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
       bodies.push({ ...(request.postDataJSON() as { start?: boolean }), key: request.headers()['idempotency-key'] ?? '' });
@@ -31,6 +31,7 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   await page.getByRole('button', { name: 'Создать' }).click();
   await expect(page).toHaveURL(/\/c\//);
   expect(bodies[0]?.start).toBe(true);
+  expect(bodies[0]?.instruction_profile).toBe('clean');
   expect(bodies[0]?.key).not.toBe('');
 });
 

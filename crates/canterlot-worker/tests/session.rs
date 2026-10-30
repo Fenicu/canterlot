@@ -1349,6 +1349,10 @@ async fn accepted_commands_are_routed_to_execution_manager() {
                     harness: "synthetic".into(),
                     workdir: path.to_string_lossy().into_owned(),
                     native_conversation_id: String::new(),
+                    instructions: Some(canterlot_proto::worker::v1::Instructions {
+                        mode: "clean".into(),
+                        ..Default::default()
+                    }),
                     ..Default::default()
                 })
             }),
@@ -1808,6 +1812,10 @@ async fn journal_with_pilot_records_is_withheld_from_a_session_without_pilot_v1_
                 conversation_id: conversation.clone(),
                 harness: "synthetic".into(),
                 workdir: hub.config.data_dir.to_string_lossy().into_owned(),
+                instructions: Some(canterlot_proto::worker::v1::Instructions {
+                    mode: "clean".into(),
+                    ..Default::default()
+                }),
                 ..Default::default()
             }),
         ))),

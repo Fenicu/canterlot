@@ -212,12 +212,6 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),
-            instruction_profile: row
-                .payload
-                .get("instruction_profile")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_owned(),
             instructions: row
                 .payload
                 .get("instructions")

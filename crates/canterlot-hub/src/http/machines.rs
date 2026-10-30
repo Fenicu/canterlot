@@ -33,7 +33,6 @@ pub struct MachineView {
     pub containment: Option<String>,
     pub limits_ok: bool,
     pub harnesses: Vec<HarnessView>,
-    pub profiles: Vec<ProfileView>,
     #[schema(value_type=Option<MetricsView>)]
     pub metrics: Option<Value>,
     pub sessions: Vec<SessionView>,
@@ -51,14 +50,6 @@ pub struct HarnessView {
     pub permission_modes: Value,
     #[schema(value_type=Vec<ModelView>)]
     pub models: Value,
-}
-#[derive(Serialize, ToSchema)]
-pub struct ProfileView {
-    pub name: String,
-    pub title: String,
-    pub description: String,
-    #[schema(value_type=Vec<String>)]
-    pub harnesses: Value,
 }
 #[derive(Serialize, ToSchema)]
 pub struct SessionView {
@@ -108,20 +99,7 @@ pub(crate) async fn load_stored(
                 })
             })
             .collect::<Result<_, _>>()?;
-    let profiles = sqlx::query("select * from machine_profiles where machine_id=$1 order by name")
-        .bind(id)
-        .fetch_all(&mut *conn)
-        .await?
-        .into_iter()
-        .map(|p| -> Result<ProfileView, sqlx::Error> {
-            Ok(ProfileView {
-                name: p.try_get("name")?,
-                title: p.try_get("title")?,
-                description: p.try_get("description")?,
-                harnesses: p.try_get("harnesses")?,
-            })
-        })
-        .collect::<Result<_, _>>()?;
+
     let sessions=sqlx::query("select c.id,c.title,coalesce(d.activity_state,'idle') activity_state from conversations c left join conversation_derived d on d.conversation_id=c.id where c.machine_id=$1 and c.owner_id=$2 order by c.id").bind(id).bind(owner).fetch_all(&mut *conn).await?.into_iter().map(|p|->Result<SessionView,sqlx::Error>{Ok(SessionView{conversation_id:p.try_get("id")?,title:p.try_get("title")?,activity_state:p.try_get("activity_state")?})}).collect::<Result<_,_>>()?;
     let metrics=sqlx::query("select to_jsonb(mm)-'machine_id' value, observed_at from machine_metrics mm where machine_id=$1").bind(id).fetch_optional(&mut *conn).await?;
     let mut warnings = Vec::new();
@@ -172,7 +150,6 @@ pub(crate) async fn load_stored(
         containment: r.try_get("containment")?,
         limits_ok,
         harnesses,
-        profiles,
         metrics,
         sessions,
         warnings,

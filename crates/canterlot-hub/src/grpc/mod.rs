@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::{
     config::HubTimers,
     installation::Installation,
-    session::{CAPABILITY_EXEC_V1, CAPABILITY_PILOT_V1, Registry},
+    session::{CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, Registry},
 };
 
 mod attachments;
@@ -32,7 +32,11 @@ mod revocation;
 
 pub const PROTOCOL_VERSION: u32 = canterlot_proto::limits::PROTOCOL_VERSION;
 pub const KNOWN_CAPABILITIES: &[&str] = &[];
-pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[CAPABILITY_EXEC_V1, CAPABILITY_PILOT_V1];
+pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
+    CAPABILITY_EXEC_V1,
+    CAPABILITY_PILOT_V1,
+    CAPABILITY_INSTRUCTIONS_V1,
+];
 
 #[tonic::async_trait]
 /// ACK возвращается только после commit всех записей диапазона.

@@ -120,7 +120,10 @@ fn start_command(
             harness: harness.into(),
             workdir: workdir.to_string_lossy().into_owned(),
             native_conversation_id: String::new(),
-
+            instructions: Some(canterlot_proto::worker::v1::Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }),
     )

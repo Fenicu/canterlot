@@ -864,7 +864,10 @@ async fn required_diagnostic_kinds_stop_with_matching_reason() {
                 model: "haiku".into(),
                 effort: "low".into(),
                 permission_mode: "ask".into(),
-                instruction_profile: "owner".into(),
+                instructions: Some(canterlot_proto::worker::v1::Instructions {
+                    mode: "owner".into(),
+                    ..Default::default()
+                }),
                 pilot_v1: true,
                 ..Default::default()
             }),

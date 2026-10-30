@@ -19,8 +19,8 @@ use canterlot_proto::worker::{
         SupervisorToControl, control_to_supervisor as down, supervisor_to_control as up,
     },
     v1::{
-        Command, ContentBlock, DeliverInput, InterruptState, RecordBody, TextBlock, command::Kind,
-        content_block, record_body::Body,
+        Command, ContentBlock, DeliverInput, Instructions, InterruptState, RecordBody, TextBlock,
+        command::Kind, content_block, record_body::Body,
     },
 };
 use canterlot_worker::supervisor::ipc::{read_message, write_message};
@@ -279,6 +279,10 @@ impl Harness {
             profile: profile.into(),
             workdir,
             native_conversation_id: String::new(),
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }))
         .await;
@@ -1581,6 +1585,10 @@ async fn pilot_supervisor_case(case: &str) {
         workdir: h._root.path().to_string_lossy().into_owned(),
         model: "synthetic-large".into(),
         pilot_v1: case != "limit_facts_are_dropped_and_counted_without_pilot_v1",
+        instructions: Some(Instructions {
+            mode: "clean".into(),
+            ..Default::default()
+        }),
         ..Default::default()
     }))
     .await;
@@ -1771,6 +1779,10 @@ impl Harness {
             profile: "synthetic".into(),
             workdir,
             pilot_v1,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }))
         .await;

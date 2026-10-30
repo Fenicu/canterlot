@@ -1,5 +1,5 @@
 use super::*;
-use canterlot_proto::worker::v1::{StartExecution, control_up, record_body::Body};
+use canterlot_proto::worker::v1::{Instructions, StartExecution, control_up, record_body::Body};
 
 #[tokio::test]
 async fn unexpected_data_ack_reattaches_without_repeating_reconcile_report() {
@@ -88,6 +88,10 @@ fn start_command(execution: Uuid, conversation: Uuid, work: &Path) -> Command {
             harness: "synthetic".into(),
             workdir: work.to_string_lossy().into_owned(),
             native_conversation_id: String::new(),
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         })),
     }

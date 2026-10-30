@@ -370,6 +370,10 @@ async fn attachment_records_are_not_written_for_a_session_without_pilot_v1() {
             conversation_id: Uuid::now_v7().to_string(),
             harness: "synthetic".into(),
             workdir: root.path().to_str().unwrap().into(),
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         })),
     };

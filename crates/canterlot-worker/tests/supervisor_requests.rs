@@ -10,8 +10,8 @@ use canterlot_proto::{
             SupervisorToControl, control_to_supervisor as down, supervisor_to_control as up,
         },
         v1::{
-            Command, ContentBlock, DeliverDecision, DeliverInput, RecordBody, TextBlock,
-            command::Kind, content_block, record_body::Body,
+            Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, RecordBody,
+            TextBlock, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -148,6 +148,10 @@ impl Harness {
             profile: profile.into(),
             workdir: self.root.path().to_string_lossy().into_owned(),
             pilot_v1: true,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
             ..Default::default()
         }))
         .await;

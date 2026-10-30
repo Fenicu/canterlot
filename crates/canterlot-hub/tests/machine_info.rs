@@ -15,28 +15,24 @@ use support::*;
 use uuid::Uuid;
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn report_replaces_harnesses_and_profiles_and_stores_capabilities(
-    pool: PgPool,
-) -> TestResult {
+async fn machine_view_has_no_profiles(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     let mut r = report();
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
     r.harnesses[0].harness = "synthetic-codex".into();
     r.harnesses[0].provider = "codex".into();
-    r.profiles[0].name = "other".into();
     machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
     assert_eq!(
         count(&pool, "select count(*) from machine_harnesses").await,
         1
     );
-    assert_eq!(
-        count(
-            &pool,
-            "select count(*) from machine_profiles where name='other'"
-        )
-        .await,
-        1
-    );
+    // Таблица профилей инструкций удалена планом 2c: пресеты хранит хаб.
+    let tables: i64 = sqlx::query_scalar(
+        "select count(*) from information_schema.tables where table_name='machine_profiles'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(tables, 0);
     let row: (Vec<String>, Value, String, String, String) = sqlx::query_as(
         "select capabilities,allowed_roots,worker_version,containment,os from machines where id=$1",
     )

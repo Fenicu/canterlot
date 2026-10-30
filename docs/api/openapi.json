@@ -4154,6 +4154,44 @@
           }
         }
       },
+      "AppliedPreset": {
+        "type": "object",
+        "description": "Применённый пресет в эффективных настройках: ссылка, название и версии.\nТекста здесь нет — только снимок запуска везёт текст.",
+        "required": [
+          "id",
+          "kind",
+          "title",
+          "deleted"
+        ],
+        "properties": {
+          "current_revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "$ref": "#/components/schemas/PresetKind"
+          },
+          "revision": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
       "ArchiveReason": {
         "type": "string",
         "enum": [
@@ -5215,11 +5253,15 @@
           "model",
           "effort",
           "permission_mode",
-          "instruction_profile"
+          "instruction_profile",
+          "instruction_preset"
         ],
         "properties": {
           "effort": {
             "type": "string"
+          },
+          "instruction_preset": {
+            "$ref": "#/components/schemas/AppliedPreset"
           },
           "instruction_profile": {
             "type": "string"
@@ -6372,7 +6414,6 @@
           "allowed_roots",
           "limits_ok",
           "harnesses",
-          "profiles",
           "sessions",
           "warnings"
         ],
@@ -6443,12 +6484,6 @@
               "string",
               "null"
             ]
-          },
-          "profiles": {
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProfileView"
-            }
           },
           "sessions": {
             "type": "array",
@@ -7146,32 +7181,6 @@
           }
         }
       },
-      "ProfileView": {
-        "type": "object",
-        "required": [
-          "name",
-          "title",
-          "description",
-          "harnesses"
-        ],
-        "properties": {
-          "description": {
-            "type": "string"
-          },
-          "harnesses": {
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "name": {
-            "type": "string"
-          },
-          "title": {
-            "type": "string"
-          }
-        }
-      },
       "ProviderSeries": {
         "type": "object",
         "required": [
@@ -7665,6 +7674,12 @@
         "type": "object",
         "properties": {
           "effort": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "instruction_profile": {
             "type": [
               "string",
               "null"

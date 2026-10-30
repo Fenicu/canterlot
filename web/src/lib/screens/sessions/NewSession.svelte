@@ -22,7 +22,7 @@
   let harness = $state('');
   let modelId = $state('');
   let effort = $state('');
-  let profile = $state('');
+  let profile = $state('clean');
   let crunch = $state(false);
   let resume = $state('');
   let recent = $state<string[]>([]);
@@ -128,8 +128,8 @@
   </label>
   <label>Профиль инструкций
     <select aria-label="Профиль инструкций" bind:value={profile}>
-      <option value="">Как у владельца</option>
-      {#each machine?.profiles ?? [] as item (item.name)}<option value={item.name}>{item.title}</option>{/each}
+      <option value="clean">Без инструкций</option>
+      <option value="owner">Как у владельца</option>
     </select>
   </label>
   <Toggle label="Кранч" bind:checked={crunch} />

@@ -1,6 +1,7 @@
 use axum::http::Method;
 use canterlot_hub::{
     http::{self, AppState},
+    presets::{Actor, NewPreset, PresetPatch},
     testkit::{self, TestClient},
 };
 use serde_json::{Value, json};
@@ -1045,4 +1046,497 @@ async fn rejected_settings_report_sent_keys_and_preserve_newer_pending_values(po
     assert_eq!(pending, json!({"effort":"newer"}));
     let event: Value=sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{}",seed.conversation_id)).fetch_one(&pool).await.unwrap();
     assert_eq!(event["rejected"]["keys"], json!(["effort"]));
+}
+
+async fn create_preset(pool: &PgPool, owner: Uuid, key: &str, title: &str, text: &str) -> Value {
+    canterlot_hub::presets::create(
+        pool,
+        owner,
+        key,
+        NewPreset {
+            title: title.into(),
+            description: None,
+            text: text.into(),
+        },
+        Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    sqlx::query_scalar("select to_jsonb(t) from (select id::text as id, revision from instruction_presets where owner_id=$1 and title=$2 and deleted_at is null) t")
+        .bind(owner)
+        .bind(title)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn start_running(pool: &PgPool, owner: Uuid, conversation: Uuid) {
+    use canterlot_hub::{executions, model::ExecutionState};
+    let execution = executions::start(pool, owner, conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(pool, execution.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+}
+
+fn gate(capabilities: &[&str]) -> canterlot_hub::delivery::dispatch::GateInputs {
+    canterlot_hub::delivery::dispatch::GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: capabilities.iter().map(|c| (*c).to_owned()).collect(),
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn preset_change_is_pending_until_accepted_then_promoted_with_revision(pool: PgPool) {
+    let (client, conversation, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set model='synthetic-large',effort='high' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "текст A").await;
+    let id = preset["id"].as_str().unwrap();
+    let path = format!("/api/v1/conversations/{conversation}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+    let view = changed.json::<Value>();
+    assert_eq!(view["pending"]["instruction_profile"], id);
+    assert_eq!(view["effective"]["instruction_profile"], "clean");
+    assert_eq!(
+        view["effective"]["instruction_preset"]["revision"],
+        Value::Null
+    );
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{conversation}")).fetch_one(&pool).await.unwrap();
+    assert_eq!(event["pending"]["instruction_profile"], id);
+    start_running(&pool, owner, conversation).await;
+    // Отправка входа и диспетч: команда несёт снимок ревизии 1 с текстом.
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = canterlot_hub::delivery::dispatch::dispatch_next(
+        &pool,
+        conversation,
+        gate(&["pilot_v1", "instructions_v1"]),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { .. }
+    ));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"]["instruction_profile"], id);
+    assert_eq!(payload["settings"]["instructions"]["mode"], "preset");
+    assert_eq!(payload["settings"]["instructions"]["revision"], 1);
+    assert_eq!(payload["settings"]["instructions"]["text"], "текст A");
+    // Принятие входа продвигает ссылку и закрепляет версию.
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::conversations::promote_settings_in_tx(&mut tx, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let detail = client
+        .send(Method::GET, &path, None, None)
+        .await
+        .json::<Value>();
+    assert_eq!(detail["settings"]["effective"]["instruction_profile"], id);
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_preset"]["revision"],
+        1
+    );
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_preset"]["current_revision"],
+        1
+    );
+    assert!(
+        detail["settings"]["pending"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn rejected_input_drops_pending_preset(pool: PgPool) {
+    let (client, conversation, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set model='synthetic-large',effort='high' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "текст A").await;
+    let id = preset["id"].as_str().unwrap();
+    let path = format!("/api/v1/conversations/{conversation}");
+    let changed = client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    assert_eq!(changed.status, 200);
+    // Отклонение входа очищает висячую ссылку и помечает причину.
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query("update commands set payload=payload || $2 where id=$1")
+        .bind(command_id)
+        .bind(json!({"settings":{"instruction_profile":id}}))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::conversations::drop_rejected_settings_in_tx(&mut tx, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let detail = client
+        .send(Method::GET, &path, None, None)
+        .await
+        .json::<Value>();
+    assert!(
+        detail["settings"]["pending"]
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{conversation}")).fetch_one(&pool).await.unwrap();
+    assert_eq!(event["rejected"]["keys"], json!(["instruction_profile"]));
+    assert_eq!(event["rejected"]["reason"], "settings_unavailable");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reapplying_same_preset_takes_the_new_revision(pool: PgPool) {
+    let (client, conversation, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set model='synthetic-large',effort='high' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "текст A").await;
+    let id = preset["id"].as_str().unwrap().to_owned();
+    let path = format!("/api/v1/conversations/{conversation}");
+    client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    start_running(&pool, owner, conversation).await;
+    // Новую версию подхватывает только явное применение той же ссылки.
+    canterlot_hub::presets::update(
+        &pool,
+        owner,
+        id.parse().unwrap(),
+        "preset-replace",
+        PresetPatch {
+            title: None,
+            description: None,
+            text: Some("текст B".into()),
+            base_revision: 1,
+        },
+        Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings-2"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = canterlot_hub::delivery::dispatch::dispatch_next(
+        &pool,
+        conversation,
+        gate(&["pilot_v1", "instructions_v1"]),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { .. }
+    ));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"]["instructions"]["revision"], 2);
+    assert_eq!(payload["settings"]["instructions"]["text"], "текст B");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn views_and_events_never_contain_preset_text(pool: PgPool) {
+    let (client, conversation, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set model='synthetic-large',effort='high' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "СЕКРЕТ-ПРЕСЕТА").await;
+    let id = preset["id"].as_str().unwrap();
+    let path = format!("/api/v1/conversations/{conversation}");
+    client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    let detail = client
+        .send(Method::GET, &path, None, None)
+        .await
+        .json::<Value>();
+    let events: Vec<Value> =
+        sqlx::query_scalar("select payload from events where scope=$1 order by scope_seq")
+            .bind(format!("conversation:{conversation}"))
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    let snapshot = canterlot_hub::snapshot::conversations(&pool, owner)
+        .await
+        .unwrap();
+    let snapshot = serde_json::to_value(&snapshot).unwrap();
+    for (name, value) in [
+        ("detail", detail),
+        ("events", Value::Array(events)),
+        ("snapshot", snapshot),
+    ] {
+        let text = serde_json::to_string(&value).unwrap();
+        assert!(
+            !text.contains("СЕКРЕТ-ПРЕСЕТА"),
+            "preset text leaked into {name}"
+        );
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn promoting_clean_snapshot_clears_pinned_revision(pool: PgPool) {
+    // Регрессия зависания хода 4: снимок «Без инструкций» несёт revision 0,
+    // в строке закрепление должно стать NULL, иначе ограничение
+    // conversations_instruction_ref отклоняет продвижение и ввод висит.
+    let (client, conversation, _machine, _dir) = settings_client(&pool).await;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(conversation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set model='synthetic-large',effort='low' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let preset = create_preset(&pool, owner, "preset-1", "Исполнитель", "текст A").await;
+    let id = preset["id"].as_str().unwrap();
+    let path = format!("/api/v1/conversations/{conversation}");
+    client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings"),
+            Some(json!({"instruction_profile": id})),
+        )
+        .await;
+    start_running(&pool, owner, conversation).await;
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = canterlot_hub::delivery::dispatch::dispatch_next(
+        &pool,
+        conversation,
+        gate(&["pilot_v1", "instructions_v1"]),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { .. }
+    ));
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::conversations::promote_settings_in_tx(&mut tx, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // Завершаем первый ход, чтобы освободить слот для второго.
+    use canterlot_hub::delivery::receipts::{
+        InputReceipt, apply_input_receipt, apply_run_finished,
+    };
+    for receipt in [
+        InputReceipt::Stored,
+        InputReceipt::TransmissionStarted,
+        InputReceipt::Accepted,
+    ] {
+        apply_input_receipt(&pool, command_id, 1, receipt, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let execution: Uuid = sqlx::query_scalar(
+        "select id from executions where conversation_id=$1 and state='running'",
+    )
+    .bind(conversation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    apply_run_finished(&pool, execution, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    // Возврат на «Без инструкций» вторым ходом: закрепление очищается.
+    client
+        .send(
+            Method::PATCH,
+            &format!("{path}/settings"),
+            Some("settings-2"),
+            Some(json!({"instruction_profile": "clean"})),
+        )
+        .await;
+    let submitted = client
+        .send(
+            Method::POST,
+            &format!("{path}/inputs"),
+            Some("input-2"),
+            Some(json!({"content":[{"type":"text","text":"text"}]})),
+        )
+        .await;
+    assert_eq!(submitted.status, 201);
+    let command_id: Uuid = submitted.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let outcome = canterlot_hub::delivery::dispatch::dispatch_next(
+        &pool,
+        conversation,
+        gate(&["pilot_v1", "instructions_v1"]),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        outcome,
+        canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { .. }
+    ));
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["settings"]["instructions"]["mode"], "clean");
+    let mut tx = pool.begin().await.unwrap();
+    canterlot_hub::conversations::promote_settings_in_tx(&mut tx, command_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let detail = client
+        .send(Method::GET, &path, None, None)
+        .await
+        .json::<Value>();
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_profile"],
+        "clean"
+    );
+    assert_eq!(
+        detail["settings"]["effective"]["instruction_preset"]["revision"],
+        Value::Null
+    );
+    let row: (String, Option<i64>) = sqlx::query_as(
+        "select instruction_profile, instruction_preset_revision from conversations where id=$1",
+    )
+    .bind(conversation)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, ("clean".to_owned(), None));
 }

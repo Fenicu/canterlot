@@ -635,3 +635,59 @@ fn derived_holds_serialise_in_the_view_but_never_parse_as_stored_holds() {
         );
     }
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn migration_maps_existing_conversations_to_owner(pool: PgPool) -> Result<(), sqlx::Error> {
+    // Договор миграции 0022: новые строки чистые по умолчанию; старые значения,
+    // отличные от 'clean', стали 'owner'; ссылки UUID требуют закреплённую версию.
+    let owner = Uuid::now_v7();
+    sqlx::query("insert into owners(id) values($1)")
+        .bind(owner)
+        .execute(&pool)
+        .await?;
+    let machine = Uuid::now_v7();
+    sqlx::query(
+        "insert into machines(id,owner_id,name,availability) values($1,$2,'m','available')",
+    )
+    .bind(machine)
+    .bind(owner)
+    .execute(&pool)
+    .await?;
+    let id: Uuid = sqlx::query_scalar(
+        "insert into conversations(id,owner_id,machine_id,harness,workdir) values($1,$2,$3,'synthetic','/tmp/w') returning id",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner)
+    .bind(machine)
+    .fetch_one(&pool)
+    .await?;
+    let (profile, revision): (String, Option<i64>) = sqlx::query_as(
+        "select instruction_profile,instruction_preset_revision from conversations where id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(profile, "clean");
+    assert_eq!(revision, None);
+    // Устаревшее 'owner' проходит проверку; мусор и UUID без версии — нет.
+    sqlx::query("update conversations set instruction_profile='owner' where id=$1")
+        .bind(id)
+        .execute(&pool)
+        .await?;
+    let bad: Result<(), sqlx::Error> =
+        sqlx::query("update conversations set instruction_profile='old-profile' where id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .map(|_| ());
+    assert!(bad.is_err());
+    let bare: Result<(), sqlx::Error> =
+        sqlx::query("update conversations set instruction_profile=$2 where id=$1")
+            .bind(id)
+            .bind(Uuid::now_v7().to_string())
+            .execute(&pool)
+            .await
+            .map(|_| ());
+    assert!(bare.is_err());
+    Ok(())
+}

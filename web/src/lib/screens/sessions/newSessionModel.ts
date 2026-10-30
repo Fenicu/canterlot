@@ -39,7 +39,7 @@ const MESSAGE: Record<string, string> = {
   model_unknown: "Модель неизвестна",
   effort_not_allowed: "Усилие недоступно",
   permission_mode_unknown: "Режим разрешений неизвестен",
-  profile_unknown: "Профиль инструкций неизвестен",
+  profile_unknown: "Пресет инструкций не найден",
   workdir_not_allowed: "Рабочая папка не разрешена",
   group_not_found: "Группа не найдена",
 };
@@ -79,7 +79,7 @@ export class NewSessionModel {
   harness = "";
   model = "";
   effort = "";
-  profile = "";
+  profile = "clean";
   crunch = false;
   resumeText: string;
   recent: string[] = [];
@@ -147,7 +147,7 @@ export class NewSessionModel {
         harness: this.harness,
         model: this.model,
         effort: this.effort,
-        instruction_profile: this.profile || null,
+        instruction_profile: this.profile || "clean",
         crunch: {
           enabled: this.crunch,
           resume_text: this.crunch ? this.resumeText : null,

@@ -557,6 +557,7 @@ async fn create(
     Correlation(c): Correlation,
     ApiJson(b): ApiJson<CreateBody>,
 ) -> Result<(StatusCode, Json<Created>), ApiError> {
+    let registry = s.registry.clone();
     let result = conversations::create(
         &s.pool,
         &key,
@@ -577,6 +578,7 @@ async fn create(
         },
         &s.limits,
         c,
+        &registry,
     )
     .await?;
     Ok((StatusCode::CREATED, Json(result)))

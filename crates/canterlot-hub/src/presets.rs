@@ -162,6 +162,18 @@ impl Actor {
     }
 }
 
+/// Применённый пресет в эффективных настройках: ссылка, название и версии.
+/// Текста здесь нет — только снимок запуска везёт текст.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+pub struct AppliedPreset {
+    pub id: String,
+    pub kind: PresetKind,
+    pub title: String,
+    pub revision: Option<i64>,
+    pub current_revision: Option<i64>,
+    pub deleted: bool,
+}
+
 /// Разрешённая ссылка на пресет для снимка запуска (задача 3); текст — данные сообщения.
 pub struct Resolved {
     pub mode: &'static str,
@@ -796,6 +808,48 @@ async fn delete_in_tx(
         used_by: used_by(conn, owner, &reference).await?,
     };
     emit(conn, owner, &summary, true, correlation).await?;
+    clear_pending_references_in_tx(conn, owner, &id.to_string(), correlation).await?;
+    Ok(())
+}
+
+/// Удаление пресета снимает висячие ссылки в pending_settings сессий владельца;
+/// сами сессии продолжают работать со своей закреплённой копией.
+async fn clear_pending_references_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    reference: &str,
+    correlation: Uuid,
+) -> Result<(), PresetError> {
+    let ids: Vec<Uuid> = sqlx::query_scalar(
+        "select id from conversations where owner_id=$1 and pending_settings->>'instruction_profile'=$2 for no key update",
+    )
+    .bind(owner)
+    .bind(reference)
+    .fetch_all(&mut *conn)
+    .await?;
+    for id in ids {
+        sqlx::query("update conversations set pending_settings=pending_settings-'instruction_profile' where id=$1")
+            .bind(id)
+            .execute(&mut *conn)
+            .await?;
+        let view = crate::conversations::detail(conn, owner, id)
+            .await?
+            .ok_or(PresetError::NotFound)?
+            .settings;
+        let mut payload =
+            serde_json::to_value(&view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?;
+        payload["rejected"] =
+            serde_json::json!({"keys":["instruction_profile"],"reason":"preset_deleted"});
+        crate::conversations::append(
+            conn,
+            crate::events::Scope::Conversation { id },
+            "conversation_settings_changed",
+            Some(id),
+            payload,
+            correlation,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -847,6 +901,64 @@ pub async fn resolve_in_tx(
                 title: row.try_get("title")?,
                 text: Some(text),
             })
+        }
+    }
+}
+
+/// Применённый пресет для эффективных настроек: название и версии без текста.
+pub async fn applied_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    reference: &str,
+    pinned: Option<i64>,
+) -> Result<AppliedPreset, PresetError> {
+    let parsed = PresetRef::parse(reference)?;
+    match parsed {
+        PresetRef::Clean => Ok(AppliedPreset {
+            id: BUILTIN_CLEAN_ID.to_owned(),
+            kind: PresetKind::Clean,
+            title: BUILTIN_CLEAN_TITLE.to_owned(),
+            revision: None,
+            current_revision: None,
+            deleted: false,
+        }),
+        PresetRef::Owner => Ok(AppliedPreset {
+            id: BUILTIN_OWNER_ID.to_owned(),
+            kind: PresetKind::Owner,
+            title: BUILTIN_OWNER_TITLE.to_owned(),
+            revision: None,
+            current_revision: None,
+            deleted: false,
+        }),
+        PresetRef::Custom(id) => {
+            let row = sqlx::query(
+                "select title, revision, deleted_at is not null as gone from instruction_presets where owner_id=$1 and id=$2",
+            )
+            .bind(owner)
+            .bind(id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            match row {
+                None => Ok(AppliedPreset {
+                    id: reference.to_owned(),
+                    kind: PresetKind::Custom,
+                    title: reference.to_owned(),
+                    revision: pinned,
+                    current_revision: None,
+                    deleted: true,
+                }),
+                Some(row) => {
+                    let gone: bool = row.try_get("gone")?;
+                    Ok(AppliedPreset {
+                        id: reference.to_owned(),
+                        kind: PresetKind::Custom,
+                        title: row.try_get("title")?,
+                        revision: pinned,
+                        current_revision: (!gone).then(|| row.try_get("revision")).transpose()?,
+                        deleted: gone,
+                    })
+                }
+            }
         }
     }
 }

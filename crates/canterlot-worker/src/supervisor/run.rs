@@ -1019,7 +1019,17 @@ impl Supervisor {
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
             .into();
-        let instructions = match InstructionSpec::from_proto(start.instructions.as_ref()) {
+        let Some(instructions) = start.instructions.as_ref() else {
+            // Хаб всегда присылает инструкции (план 2c, задача 3): их отсутствие —
+            // старый хаб, молчаливый откат на конфигурацию владельца запрещён.
+            tracing::warn!(
+                kind = "start_failed",
+                reason = "instructions_missing",
+                "adapter start failed"
+            );
+            return self.begin_stop(StopCause::InvalidInstructions, false);
+        };
+        let instructions = match InstructionSpec::from_proto(Some(instructions)) {
             Ok(instructions) => instructions,
             Err(_) => {
                 tracing::warn!(

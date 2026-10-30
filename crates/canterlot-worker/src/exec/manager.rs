@@ -923,7 +923,6 @@ impl Actor {
                 model: start.model.clone(),
                 effort: start.effort.clone(),
                 permission_mode: start.permission_mode.clone(),
-                instruction_profile: start.instruction_profile.clone(),
                 instructions: start.instructions.clone(),
                 pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
             }))

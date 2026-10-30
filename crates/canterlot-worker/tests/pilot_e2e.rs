@@ -795,9 +795,9 @@ async fn pilot_flow_over_http_and_wss(pool: PgPool) {
         .collect();
     assert_eq!(harnesses["synthetic"], "claude");
     assert_eq!(harnesses["synthetic-codex"], "codex");
-    // Профили инструкций воркера убраны планом 2c: хаб хранит пресеты,
-    // поле `profiles` отправляется пустым до резервирования в задаче 3.
-    assert!(machine["profiles"].as_array().unwrap().is_empty());
+    // Профили инструкций воркера убраны планом 2c задачей 3: пресеты хранит хаб,
+    // поле `profiles` зарезервировано в proto и отсутствует в представлении.
+    assert!(machine.get("profiles").is_none());
 
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -1910,4 +1910,145 @@ async fn view_image_step_shows_media_on_the_tool_block_end_to_end(pool: PgPool) 
     })
     .await;
     check_streams(&pool, p.owner, &ws).await;
+}
+
+/// Натуральные PID synthetic-CLI в рабочем каталоге.
+fn synthetic_cli_pids(workdir: &std::path::Path) -> Vec<u32> {
+    let mut out = Vec::new();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+        if !cmdline
+            .split(|&b| b == 0)
+            .any(|arg| arg == b"synthetic-cli")
+        {
+            continue;
+        }
+        let Ok(cwd) = std::fs::read_link(format!("/proc/{pid}/cwd")) else {
+            continue;
+        };
+        if cwd.as_path() != workdir {
+            continue;
+        }
+        out.push(pid);
+    }
+    out.sort_unstable();
+    out
+}
+
+/// Ход с echo-инструкциями; возвращает текст финального блока.
+async fn echo_turn(pilot: &Pilot, conversation: Uuid, text: &str) -> (Uuid, String) {
+    let submitted = pilot
+        .post(
+            &format!("/api/v1/conversations/{conversation}/inputs"),
+            Some(json!({"content":[{"type":"text","text":text}]})),
+            201,
+        )
+        .await;
+    let input: Uuid = submitted["input_id"].as_str().unwrap().parse().unwrap();
+    let command: Uuid = submitted["command_id"].as_str().unwrap().parse().unwrap();
+    pilot.accepted(input).await;
+    let mut out = String::new();
+    until("echo final block", async || {
+        for block in pilot.answer(conversation, command).await {
+            if block["state"] == "final"
+                && block["content"]
+                    .as_str()
+                    .is_some_and(|t| t.contains("instructions "))
+            {
+                out = block["content"].as_str().unwrap().into();
+                return true;
+            }
+        }
+        false
+    })
+    .await;
+    (command, out)
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let preset = p
+        .post(
+            "/api/v1/presets",
+            Some(json!({"title": "Исполнитель", "text": "текст A"})),
+            201,
+        )
+        .await;
+    let preset_id = preset["id"].as_str().unwrap();
+    let created = p
+        .post(
+            "/api/v1/conversations",
+            Some(json!({
+                "machine_id": p.machine,
+                "harness": "synthetic",
+                "workdir": p.work.to_str().unwrap(),
+                "model": "synthetic-large",
+                "effort": "high",
+                "instruction_profile": preset_id,
+                "start": true,
+            })),
+            201,
+        )
+        .await;
+    assert!(created["execution"]["execution_id"].is_string());
+    let id: Uuid = created["conversation_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    until("execution running", async || {
+        p.detail(id).await["execution"]["state"] == "running"
+    })
+    .await;
+    // Ход 1: адаптер видит пресет, ревизия 1.
+    let turn1 = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd1, echo1) = echo_turn(&p, id, &turn1.to_string()).await;
+    assert!(echo1.contains("mode=preset"), "{echo1}");
+    assert!(echo1.contains("revision=1"), "{echo1}");
+    let pids_before = synthetic_cli_pids(&p.work);
+    assert!(!pids_before.is_empty(), "synthetic CLI runs");
+    // Правка пресета без повторного применения: следующий ход держит ревизию 1.
+    p.call(
+        Method::PATCH,
+        &format!("/api/v1/presets/{preset_id}"),
+        Some(json!({"text": "текст B", "base_revision": 1})),
+    )
+    .await;
+    let turn2 = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd2, echo2) = echo_turn(&p, id, &turn2.to_string()).await;
+    assert!(echo2.contains("revision=1"), "{echo2}");
+    // Повторное применение той же ссылки: перезапуск с ревизией 2 и новым pid.
+    p.call(
+        Method::PATCH,
+        &format!("/api/v1/conversations/{id}/settings"),
+        Some(json!({"instruction_profile": preset_id})),
+    )
+    .await;
+    let turn3 = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd3, echo3) = echo_turn(&p, id, &turn3.to_string()).await;
+    assert!(echo3.contains("revision=2"), "{echo3}");
+    let pids_after = synthetic_cli_pids(&p.work);
+    assert!(
+        !pids_after.iter().any(|pid| pids_before.contains(pid)),
+        "CLI restarted: before={pids_before:?} after={pids_after:?}"
+    );
+    assert!(!pids_after.is_empty());
+    // «Без инструкций»: чистый запуск без текста.
+    p.call(
+        Method::PATCH,
+        &format!("/api/v1/conversations/{id}/settings"),
+        Some(json!({"instruction_profile": "clean"})),
+    )
+    .await;
+    let turn4 = json!({"synthetic": [{"echo_instructions": true}]});
+    let (_cmd4, echo4) = echo_turn(&p, id, &turn4.to_string()).await;
+    assert!(echo4.contains("mode=clean"), "{echo4}");
 }

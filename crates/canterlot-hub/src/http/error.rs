@@ -113,7 +113,7 @@ error_codes! {
     EffortNotAllowed => "effort_not_allowed", 422, Browser, Never, "Усилие недоступно для модели";
     PermissionModeUnknown => "permission_mode_unknown", 422, Browser, Never, "Режим разрешений отсутствует в каталоге";
     SettingsMidsessionUnsupported => "settings_midsession_unsupported", 422, Browser, Never, "Смена настроек во время исполнения не поддерживается";
-    ProfileUnknown => "profile_unknown", 422, Browser, Never, "Профиль инструкций отсутствует в каталоге";
+    ProfileUnknown => "profile_unknown", 422, Browser, Never, "Пресет инструкций не найден";
     WorkdirNotAllowed => "workdir_not_allowed", 422, Browser, Never, "Рабочий каталог вне разрешённых корней";
     GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
     GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
@@ -143,6 +143,7 @@ impl From<crate::conversations::SettingsError> for ApiError {
             E::CapabilityMissing => ErrorCode::CapabilityMissing,
             E::EffortNotAllowed => ErrorCode::EffortNotAllowed,
             E::PermissionModeUnknown => ErrorCode::PermissionModeUnknown,
+            E::PresetUnknown => ErrorCode::ProfileUnknown,
             E::MidsessionUnsupported => ErrorCode::SettingsMidsessionUnsupported,
             E::IdempotencyConflict => ErrorCode::IdempotencyConflict,
             E::Db(error) => return error.into(),

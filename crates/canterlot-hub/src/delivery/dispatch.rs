@@ -1,4 +1,4 @@
-use serde_json::json;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -7,6 +7,7 @@ use crate::{
     events::{self, NewEvent, Scope},
     executions,
     model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+    session::CAPABILITY_INSTRUCTIONS_V1,
 };
 
 #[derive(Debug, Clone)]
@@ -178,9 +179,33 @@ pub async fn dispatch_next(
     let Some((input_id, command_id)) = head else {
         return Ok(DispatchOutcome::Empty);
     };
-    let (pending, rev) =
+    let (mut pending, rev) =
         crate::conversations::revalidate_pending_in_tx(&mut *conn, conversation_id, correlation_id)
             .await?;
+    // Снимок инструкций рядом со ссылкой: текст текущей версии пресета.
+    if let Some(profile) = pending
+        .get("instruction_profile")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+    {
+        let owner_id: uuid::Uuid =
+            sqlx::query_scalar("select owner_id from conversations where id=$1")
+                .bind(conversation_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        let reference = crate::presets::PresetRef::parse(&profile)
+            .map_err(|_| sqlx::Error::RowNotFound)?;
+        let resolved = crate::presets::resolve_in_tx(&mut *conn, owner_id, &reference, None)
+            .await
+            .map_err(|_| sqlx::Error::RowNotFound)?;
+        pending["instructions"] = serde_json::json!({
+            "mode": resolved.mode,
+            "preset_id": resolved.preset_id.map(|id| id.to_string()).unwrap_or_default(),
+            "revision": resolved.revision.unwrap_or(0),
+            "title": resolved.title,
+            "text": resolved.text.unwrap_or_default(),
+        });
+    }
     // Ссылки на вложения и настройки понимает только сеанс с `pilot_v1`.
     let carries_refs: bool = sqlx::query_scalar(
         "select jsonb_array_length(coalesce(payload->'attachment_ids','[]'::jsonb)) > 0 from commands where id = $1",
@@ -190,6 +215,20 @@ pub async fn dispatch_next(
     .await?;
     if (carries_refs || pending.as_object().is_some_and(|v| !v.is_empty()))
         && !gate.session_capabilities.iter().any(|v| v == "pilot_v1")
+    {
+        return Ok(DispatchOutcome::Blocked(vec![
+            BlockReason::CapabilityMissing { input_id },
+        ]));
+    }
+    // Не-владельческий пресет понимает только сеанс с instructions_v1.
+    if pending
+        .get("instruction_profile")
+        .and_then(Value::as_str)
+        .is_some_and(|profile| profile != "clean" && profile != "owner")
+        && !gate
+            .session_capabilities
+            .iter()
+            .any(|v| v == CAPABILITY_INSTRUCTIONS_V1)
     {
         return Ok(DispatchOutcome::Blocked(vec![
             BlockReason::CapabilityMissing { input_id },

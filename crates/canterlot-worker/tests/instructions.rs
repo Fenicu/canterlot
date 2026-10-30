@@ -541,7 +541,6 @@ mod manager_tests {
                 model: "synthetic-small".into(),
                 effort: "medium".into(),
                 permission_mode: "owner".into(),
-                instruction_profile: "owner".into(),
                 instructions,
                 capabilities: vec!["pilot_v1".into()],
             }),
@@ -992,5 +991,30 @@ mod manager_tests {
             logs.contains(&call_id.to_string()),
             "вызов в журнале: {logs}"
         );
+    }
+
+    #[tokio::test]
+    async fn start_without_instructions_fails_with_instructions_missing() {
+        use super::harness::*;
+        // Старший хаб без снимка инструкций: молчаливый откат на конфигурацию
+        // владельца запрещён, запуск отклоняется до выбора пресета в хабе.
+        let mut env = Env::new().await;
+        env.start(None).await;
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            for body in env.pump(Duration::from_millis(200)).await {
+                if let canterlot_proto::worker::v1::record_body::Body::ExecutionState(state) = body
+                    && state.state == "failed"
+                {
+                    assert_eq!(state.outcome, "invalid_instructions");
+                    return;
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "нет отказа запуска; supervisor: {}",
+                env.logs()
+            );
+        }
     }
 }

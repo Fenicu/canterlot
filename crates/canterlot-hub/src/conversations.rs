@@ -5,6 +5,8 @@ use crate::{
     executions::{self, StartedExecution},
     idempotency,
     model::{HoldReason, HoldView},
+    presets::{self, AppliedPreset, PresetRef},
+    session::{CAPABILITY_INSTRUCTIONS_V1, Registry},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -191,6 +193,7 @@ pub struct EffectiveSettings {
     pub effort: String,
     pub permission_mode: String,
     pub instruction_profile: String,
+    pub instruction_preset: AppliedPreset,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct SettingsView {
@@ -526,11 +529,23 @@ pub async fn detail(
         queue: i.queue,
         last_activity_at: i.last_activity_at,
         settings: SettingsView {
-            effective: EffectiveSettings {
-                model: row.try_get("model")?,
-                effort: row.try_get("effort")?,
-                permission_mode: row.try_get("permission_mode")?,
-                instruction_profile: row.try_get("instruction_profile")?,
+            effective: {
+                let profile: String = row.try_get("instruction_profile")?;
+                let revision: Option<i64> = row.try_get("instruction_preset_revision")?;
+                let instruction_preset =
+                    presets::applied_in_tx(&mut *conn, owner_id, &profile, revision)
+                        .await
+                        .map_err(|error| match error {
+                            presets::PresetError::Db(error) => error,
+                            _ => sqlx::Error::RowNotFound,
+                        })?;
+                EffectiveSettings {
+                    model: row.try_get("model")?,
+                    effort: row.try_get("effort")?,
+                    permission_mode: row.try_get("permission_mode")?,
+                    instruction_profile: profile,
+                    instruction_preset,
+                }
             },
             pending: row.try_get("pending_settings")?,
             rev: row.try_get("settings_rev")?,
@@ -642,9 +657,11 @@ pub async fn create(
     req: NewConversation,
     limits: &LimitsConfig,
     correlation_id: Uuid,
+    registry: &Registry,
 ) -> Result<Created, CreateError> {
     let request = serde_json::to_value(&req).expect("create request");
     let limits = limits.clone();
+    let registry = registry.clone();
     let outcome = idempotency::run_in_tx(
         pool,
         req.owner_id,
@@ -652,7 +669,12 @@ pub async fn create(
         "create_conversation",
         &request,
         None,
-        move |conn| Box::pin(create_in_tx(conn, req, limits, correlation_id)),
+        move |conn| {
+            let registry = registry.clone();
+            Box::pin(
+                async move { create_in_tx(conn, req, limits, correlation_id, &registry).await },
+            )
+        },
     )
     .await?;
     Ok(outcome.value)
@@ -889,6 +911,7 @@ async fn create_in_tx(
     req: NewConversation,
     limits: LimitsConfig,
     correlation_id: Uuid,
+    registry: &Registry,
 ) -> Result<Created, CreateError> {
     lock_owner(conn, req.owner_id).await?;
     let m = sqlx::query("select * from machines where id=$1 and owner_id=$2 for no key update")
@@ -930,12 +953,37 @@ async fn create_in_tx(
     {
         return Err(CreateError::PermissionModeUnknown);
     }
-    let profile = req.instruction_profile.as_deref().unwrap_or("owner");
-    if profile != "owner" {
-        let valid:bool=sqlx::query_scalar("select exists(select 1 from machine_profiles where machine_id=$1 and name=$2 and (harnesses='[]' or harnesses ? $3))").bind(req.machine_id).bind(profile).bind(&req.harness).fetch_one(&mut *conn).await?;
-        if !valid {
-            return Err(CreateError::ProfileUnknown);
+    let profile = req.instruction_profile.as_deref().unwrap_or("clean");
+    let reference = PresetRef::parse(profile).map_err(|_| CreateError::ProfileUnknown)?;
+    let revision = match &reference {
+        PresetRef::Clean | PresetRef::Owner => None,
+        PresetRef::Custom(id) => {
+            let alive: bool = sqlx::query_scalar(
+                "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null)",
+            )
+            .bind(req.owner_id)
+            .bind(id)
+            .fetch_one(&mut *conn)
+            .await?;
+            if !alive {
+                return Err(CreateError::ProfileUnknown);
+            }
+            let resolved = presets::resolve_in_tx(&mut *conn, req.owner_id, &reference, None)
+                .await
+                .map_err(|_| CreateError::ProfileUnknown)?;
+            Some(
+                resolved
+                    .revision
+                    .expect("custom preset resolves with revision"),
+            )
         }
+    };
+    // Без instructions_v1 машина запустит только «Как у владельца».
+    if !matches!(reference, PresetRef::Owner)
+        && req.start
+        && !registry.has_capability(req.machine_id, CAPABILITY_INSTRUCTIONS_V1)
+    {
+        return Err(CreateError::CapabilityMissing);
     }
     if !workdir_allowed(&req.workdir, &m.try_get("allowed_roots")?) {
         return Err(CreateError::WorkdirNotAllowed);
@@ -971,8 +1019,8 @@ async fn create_in_tx(
     } else {
         req.crunch.resume_text.as_deref()
     };
-    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)")
-            .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(profile).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
+    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
+            .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
     sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
         .bind(id)
         .bind(sqlx::types::Json(&holds))
@@ -1131,6 +1179,7 @@ pub struct SettingsPatch {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub permission_mode: Option<String>,
+    pub instruction_profile: Option<String>,
 }
 
 #[derive(thiserror::Error)]
@@ -1145,6 +1194,8 @@ pub enum SettingsError {
     EffortNotAllowed,
     #[error("permission mode unknown")]
     PermissionModeUnknown,
+    #[error("preset unknown")]
+    PresetUnknown,
     #[error("settings midsession unsupported")]
     MidsessionUnsupported,
     #[error("idempotency conflict")]
@@ -1188,6 +1239,22 @@ pub async fn change_settings(
                 if !row.try_get::<Vec<String>, _>("capabilities")?.iter().any(|v| v == "pilot_v1") { return Err(SettingsError::CapabilityMissing); }
         let mut pending: Value = row.try_get("pending_settings")?;
         for (k, v) in [("model", patch.model), ("effort", patch.effort), ("permission_mode", patch.permission_mode)] { if let Some(v) = v { pending[k] = json!(v); } }
+        if let Some(profile) = patch.instruction_profile.as_deref() {
+            let reference = PresetRef::parse(profile).map_err(|_| SettingsError::PresetUnknown)?;
+            if let PresetRef::Custom(id) = reference {
+                let alive: bool = sqlx::query_scalar(
+                    "select exists(select 1 from instruction_presets where owner_id=$1 and id=$2 and deleted_at is null)",
+                )
+                .bind(owner_id)
+                .bind(id)
+                .fetch_one(&mut *conn)
+                .await?;
+                if !alive {
+                    return Err(SettingsError::PresetUnknown);
+                }
+            }
+            pending["instruction_profile"] = json!(reference.as_str());
+        }
         let model: String = pending.get("model").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("model")?);
         let effort: String = pending.get("effort").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("effort")?);
         let permission: String = pending.get("permission_mode").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("permission_mode")?);
@@ -1230,12 +1297,14 @@ async fn apply_sent_settings(
         .bind(id)
         .fetch_one(&mut *conn)
         .await?;
-    let row = sqlx::query("select owner_id,model,effort,permission_mode,pending_settings from conversations where id=$1 for no key update").bind(id).fetch_one(&mut *conn).await?;
+    let row = sqlx::query("select owner_id,model,effort,permission_mode,instruction_profile,instruction_preset_revision,pending_settings from conversations where id=$1 for no key update").bind(id).fetch_one(&mut *conn).await?;
     let owner: Uuid = row.try_get("owner_id")?;
     let mut pending: Value = row.try_get("pending_settings")?;
     let mut model: String = row.try_get("model")?;
     let mut effort: String = row.try_get("effort")?;
     let mut permission: String = row.try_get("permission_mode")?;
+    let mut profile: String = row.try_get("instruction_profile")?;
+    let mut revision: Option<i64> = row.try_get("instruction_preset_revision")?;
     let mut sent_keys = Vec::new();
     for (key, effective) in [
         ("model", &mut model),
@@ -1255,7 +1324,28 @@ async fn apply_sent_settings(
             }
         }
     }
-    sqlx::query("update conversations set model=$2,effort=$3,permission_mode=$4,pending_settings=$5 where id=$1").bind(id).bind(model).bind(effort).bind(permission).bind(pending).execute(&mut *conn).await?;
+    if let Some(sent_ref) = sent.get("instruction_profile").and_then(Value::as_str) {
+        sent_keys.push("instruction_profile");
+        if promote {
+            profile = sent_ref.to_owned();
+            // Закреплённую версию несут только пользовательские пресеты; у встроенных
+            // («clean», «owner») снимок всегда с revision 0, в строке хранится NULL.
+            revision = match PresetRef::parse(sent_ref) {
+                Ok(PresetRef::Custom(_)) => sent
+                    .get("instructions")
+                    .and_then(|instructions| instructions.get("revision"))
+                    .and_then(Value::as_i64),
+                _ => None,
+            };
+        }
+        if pending.get("instruction_profile").and_then(Value::as_str) == Some(sent_ref) {
+            pending
+                .as_object_mut()
+                .expect("settings object")
+                .remove("instruction_profile");
+        }
+    }
+    sqlx::query("update conversations set model=$2,effort=$3,permission_mode=$4,instruction_profile=$6,instruction_preset_revision=$7,pending_settings=$5 where id=$1").bind(id).bind(model).bind(effort).bind(permission).bind(pending).bind(profile).bind(revision).execute(&mut *conn).await?;
     let view = detail(conn, owner, id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?
@@ -1357,6 +1447,29 @@ pub(crate) async fn revalidate_pending_in_tx(
             .expect("settings")
             .remove("permission_mode");
         rejected.push("permission_mode");
+    }
+    if let Some(profile) = pending.get("instruction_profile").and_then(Value::as_str) {
+        let stale = match PresetRef::parse(profile) {
+            Err(_) => true,
+            Ok(PresetRef::Custom(_)) => {
+                let alive: bool = sqlx::query_scalar(
+                    "select exists(select 1 from instruction_presets where owner_id=$1 and id::text=$2 and deleted_at is null)",
+                )
+                .bind(owner)
+                .bind(profile)
+                .fetch_one(&mut *conn)
+                .await?;
+                !alive
+            }
+            _ => false,
+        };
+        if stale {
+            pending
+                .as_object_mut()
+                .expect("settings")
+                .remove("instruction_profile");
+            rejected.push("instruction_profile");
+        }
     }
     let model = pending
         .get("model")

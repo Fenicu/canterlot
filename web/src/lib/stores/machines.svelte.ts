@@ -18,7 +18,6 @@ export interface MachineRecord {
 	warnings: string[];
 	metrics: MachineMetrics | null;
 	harnesses: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] }[];
-	profiles: { name: string; title: string; description: string; harnesses: string[] }[];
 	worker_version?: string | null;
 	capabilities?: string[];
 	limits_ok?: boolean;

@@ -494,3 +494,179 @@ async fn event_failure_rolls_back_dispatch(pool: PgPool) -> TestResult {
     assert_eq!(row, ("queued".into(), "held".into(), 0));
     Ok(())
 }
+
+async fn preset_seed(pool: &PgPool) -> (Seed, String) {
+    let seed = testkit::seed(pool).await;
+    let preset = canterlot_hub::presets::create(
+        pool,
+        seed.owner_id,
+        "dispatch-preset",
+        canterlot_hub::presets::NewPreset {
+            title: "Исполнитель".into(),
+            description: None,
+            text: "текст A".into(),
+        },
+        canterlot_hub::presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    (seed, preset.summary.id.clone())
+}
+
+async fn set_pending_preset(pool: &PgPool, conversation: Uuid, preset: &str) {
+    sqlx::query("update conversations set pending_settings=jsonb_build_object('instruction_profile',$2::text) where id=$1")
+        .bind(conversation)
+        .bind(preset)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn dispatch_snapshots_current_revision_into_command_settings(pool: PgPool) -> TestResult {
+    let (seed, preset) = preset_seed(&pool).await;
+    running(&pool, &seed).await;
+    set_pending_preset(&pool, seed.conversation_id, &preset).await;
+    // Правка пресета до диспетча: снимок берёт свежую версию.
+    canterlot_hub::presets::update(
+        &pool,
+        seed.owner_id,
+        preset.parse()?,
+        "dispatch-bump",
+        canterlot_hub::presets::PresetPatch {
+            title: None,
+            description: None,
+            text: Some("текст B".into()),
+            base_revision: 1,
+        },
+        canterlot_hub::presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let head = input(&pool, &seed).await;
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into(), "instructions_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { .. }),
+        "{outcome:?}"
+    );
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(head.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(payload["settings"]["instruction_profile"], preset);
+    assert_eq!(payload["settings"]["instructions"]["revision"], 2);
+    assert_eq!(payload["settings"]["instructions"]["text"], "текст B");
+    assert_eq!(payload["settings"]["instructions"]["mode"], "preset");
+    // Сама ссылка в pending без текста.
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(pending["instruction_profile"], preset);
+    assert!(pending.get("instructions").is_none());
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleted_pending_preset_is_rejected_at_dispatch(pool: PgPool) -> TestResult {
+    let (seed, preset) = preset_seed(&pool).await;
+    running(&pool, &seed).await;
+    canterlot_hub::presets::delete(
+        &pool,
+        seed.owner_id,
+        preset.parse()?,
+        "dispatch-del",
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    // Висячая ссылка (поставлена мимо валидации): повторная проверка её чистит.
+    set_pending_preset(&pool, seed.conversation_id, &preset).await;
+    let head = input(&pool, &seed).await;
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        GateInputs {
+            machine_available: true,
+            machine_reconciled: true,
+            session_capabilities: vec!["pilot_v1".into(), "instructions_v1".into()],
+        },
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { .. }),
+        "{outcome:?}"
+    );
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(head.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert!(payload.get("settings").is_none(), "{payload}");
+    let (settings, _, _): (Value, String, i64) =
+        sqlx::query_as("select pending_settings, 'x', settings_rev from conversations where id=$1")
+            .bind(seed.conversation_id)
+            .fetch_one(&pool)
+            .await?;
+    assert!(settings.as_object().is_none_or(|p| p.is_empty()));
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{}", seed.conversation_id)).fetch_one(&pool).await?;
+    assert_eq!(event["rejected"]["keys"], json!(["instruction_profile"]));
+    assert_eq!(event["rejected"]["reason"], "settings_unavailable");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_without_instructions_v1_blocks_preset_settings(pool: PgPool) -> TestResult {
+    let (seed, preset) = preset_seed(&pool).await;
+    running(&pool, &seed).await;
+    set_pending_preset(&pool, seed.conversation_id, &preset).await;
+    let head = input(&pool, &seed).await;
+    let gate = |caps: Vec<String>| GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: caps,
+    };
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        gate(vec!["pilot_v1".into()]),
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(
+        outcome,
+        DispatchOutcome::Blocked(vec![BlockReason::CapabilityMissing {
+            input_id: head.input_id
+        }])
+    );
+    let state: String = sqlx::query_scalar("select state from inputs where id=$1")
+        .bind(head.input_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(state, "queued");
+    let outcome = dispatch_next(
+        &pool,
+        seed.conversation_id,
+        gate(vec!["pilot_v1".into(), "instructions_v1".into()]),
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert!(
+        matches!(outcome, DispatchOutcome::Dispatched { .. }),
+        "{outcome:?}"
+    );
+    Ok(())
+}

@@ -663,3 +663,116 @@ async fn event_failure_rolls_back_all_mutations(pool: PgPool) -> TestResult {
     assert_eq!(counts(&pool).await?, counts_before);
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_payload_carries_pinned_revision_text_after_edit_and_delete(
+    pool: PgPool,
+) -> TestResult {
+    use canterlot_hub::{conversations, presets};
+    let seed = testkit::seed(&pool).await;
+    testkit::seed_catalog(&pool, seed.machine_id).await;
+    let registry =
+        canterlot_hub::session::Registry::new(canterlot_hub::config::HubTimers::default());
+    let created = presets::create(
+        &pool,
+        seed.owner_id,
+        "t3-exec",
+        presets::NewPreset {
+            title: "Исполнитель".into(),
+            description: None,
+            text: "текст A".into(),
+        },
+        presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let preset_id = created.summary.id.clone();
+    let conversation = conversations::create(
+        &pool,
+        "t3-exec-conv",
+        conversations::NewConversation {
+            owner_id: seed.owner_id,
+            machine_id: seed.machine_id,
+            harness: "synthetic".into(),
+            workdir: "/tmp/w".into(),
+            model: "synthetic-small".into(),
+            effort: "low".into(),
+            permission_mode: None,
+            instruction_profile: Some(preset_id.clone()),
+            title: None,
+            color: None,
+            group_ids: vec![],
+            crunch: Default::default(),
+            start: false,
+        },
+        &canterlot_hub::config::LimitsConfig::default(),
+        Uuid::now_v7(),
+        &registry,
+    )
+    .await?
+    .conversation_id;
+    async fn payload_of(pool: &PgPool, command_id: Uuid) -> Value {
+        sqlx::query_scalar("select payload from commands where id=$1")
+            .bind(command_id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+    let first = executions::start(&pool, seed.owner_id, conversation, Uuid::now_v7()).await?;
+    let payload = payload_of(&pool, first.command_id).await;
+    assert_eq!(payload["instructions"]["mode"], "preset");
+    assert_eq!(payload["instructions"]["preset_id"], preset_id);
+    assert_eq!(payload["instructions"]["revision"], 1);
+    assert_eq!(payload["instructions"]["text"], "текст A");
+    assert_eq!(payload["instructions"]["title"], created.summary.title);
+    executions::set_state(
+        &pool,
+        first.execution_id,
+        ExecutionState::Stopped,
+        Some("start_cancelled"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    // Правка пресета не меняет закреплённый снимок новых запусков.
+    presets::update(
+        &pool,
+        seed.owner_id,
+        preset_id.parse()?,
+        "t3-exec-bump",
+        presets::PresetPatch {
+            title: None,
+            description: None,
+            text: Some("текст B".into()),
+            base_revision: 1,
+        },
+        presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let second = executions::start(&pool, seed.owner_id, conversation, Uuid::now_v7()).await?;
+    let payload = payload_of(&pool, second.command_id).await;
+    assert_eq!(payload["instructions"]["revision"], 1);
+    assert_eq!(payload["instructions"]["text"], "текст A");
+    executions::set_state(
+        &pool,
+        second.execution_id,
+        ExecutionState::Stopped,
+        Some("start_cancelled"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    // Удалённый пресет: снимок работает со своей копией.
+    presets::delete(
+        &pool,
+        seed.owner_id,
+        preset_id.parse()?,
+        "t3-exec-del",
+        Uuid::now_v7(),
+    )
+    .await?;
+    let third = executions::start(&pool, seed.owner_id, conversation, Uuid::now_v7()).await?;
+    let payload = payload_of(&pool, third.command_id).await;
+    assert_eq!(payload["instructions"]["revision"], 1);
+    assert_eq!(payload["instructions"]["text"], "текст A");
+    Ok(())
+}

@@ -190,12 +190,7 @@ pub fn report() -> MachineReport {
             ],
             ..Default::default()
         }],
-        profiles: vec![InstructionProfile {
-            name: "owner".into(),
-            title: "Как у владельца".into(),
-            harnesses: vec!["synthetic".into()],
-            ..Default::default()
-        }],
+
         max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
         max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
         containment: "process_group".into(),

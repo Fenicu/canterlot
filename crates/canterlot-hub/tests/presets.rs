@@ -478,12 +478,14 @@ async fn used_by_counts_effective_and_pending_references(pool: PgPool) {
     let id = created["id"].as_str().unwrap();
     assert_eq!(created["used_by"], 0);
     let effective = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
-    sqlx::query("update conversations set instruction_profile=$1 where id=$2")
-        .bind(id)
-        .bind(effective)
-        .execute(&f.pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "update conversations set instruction_profile=$1,instruction_preset_revision=1 where id=$2",
+    )
+    .bind(id)
+    .bind(effective)
+    .execute(&f.pool)
+    .await
+    .unwrap();
     let pending = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
     sqlx::query("update conversations set pending_settings=jsonb_build_object('instruction_profile',$1) where id=$2")
         .bind(id)
@@ -492,7 +494,7 @@ async fn used_by_counts_effective_and_pending_references(pool: PgPool) {
         .await
         .unwrap();
     let archived = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
-    sqlx::query("update conversations set instruction_profile=$1, archived_at=clock_timestamp() where id=$2")
+    sqlx::query("update conversations set instruction_profile=$1,instruction_preset_revision=1, archived_at=clock_timestamp() where id=$2")
         .bind(id)
         .bind(archived)
         .execute(&f.pool)
@@ -713,4 +715,67 @@ async fn seed_preset_is_created_once_per_owner_and_not_recreated_after_delete(po
     .await
     .unwrap();
     assert_eq!(again, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_clears_pending_references_and_keeps_effective_snapshot(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let created = f.create("keep-copy", "Временный", "текст копии").await;
+    let id = created["id"].as_str().unwrap();
+    // Сессия применяет пресет: эффективная ссылка закреплена за ревизией 1.
+    let conv: Uuid = sqlx::query_scalar("insert into conversations(id,owner_id,machine_id,harness,workdir,model,effort,permission_mode,instruction_profile,instruction_preset_revision) values($1,$2,$3,'synthetic','/tmp/w','synthetic-small','low','ask',$4,1) returning id")
+        .bind(Uuid::now_v7())
+        .bind(f.owner)
+        .bind(f.machine)
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update conversations set pending_settings=$2 where id=$1")
+        .bind(conv)
+        .bind(json!({"instruction_profile": id}))
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let deleted = f
+        .request(
+            Method::DELETE,
+            &format!("/api/v1/presets/{id}"),
+            Some("clear-pending"),
+            None,
+        )
+        .await;
+    assert_eq!(deleted.status.as_u16(), 204);
+    // Висячая ссылка снята с видимой отменой, эффективная копия на месте.
+    let pending: Value =
+        sqlx::query_scalar("select pending_settings from conversations where id=$1")
+            .bind(conv)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert!(pending.as_object().unwrap().is_empty());
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{conv}")).fetch_one(&f.pool).await.unwrap();
+    assert_eq!(event["rejected"]["keys"], json!(["instruction_profile"]));
+    assert_eq!(event["rejected"]["reason"], "preset_deleted");
+    // Эффективная ссылка и закрепление не тронуты; в представлении — удалённый.
+    let row: (String, Option<i64>) = sqlx::query_as(
+        "select instruction_profile, instruction_preset_revision from conversations where id=$1",
+    )
+    .bind(conv)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(row.0, id);
+    assert_eq!(row.1, Some(1));
+    let applied = canterlot_hub::presets::applied_in_tx(
+        &mut f.pool.acquire().await.unwrap(),
+        f.owner,
+        id,
+        Some(1),
+    )
+    .await
+    .unwrap();
+    assert!(applied.deleted);
+    assert_eq!(applied.revision, Some(1));
+    assert!(applied.current_revision.is_none());
 }

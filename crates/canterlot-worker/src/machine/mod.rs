@@ -14,9 +14,6 @@ pub fn now_ms() -> u64 {
 }
 
 pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> MachineReport {
-    // Профили инструкций воркера убраны планом 2c: пресеты хранит хаб,
-    // поле `profiles` оставлено пустым до резервирования в задаче 3.
-    let profiles = Vec::new();
     let mut roots: Vec<_> = config
         .execution
         .allowed_workdir_roots
@@ -50,7 +47,6 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
                     .collect(),
             })
             .collect(),
-        profiles,
         max_attachment_bytes: MAX_ATTACHMENT_BYTES,
         max_attachments_per_input: MAX_ATTACHMENTS_PER_INPUT as u32,
         containment: "tree".into(),

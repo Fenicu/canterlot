@@ -177,12 +177,11 @@ fn config(dir: &Path) -> WorkerConfig {
     toml::from_str(&format!("hub_url='https://localhost'\nca_cert='ca'\ntoken_file='token'\nmachine_id='{}'\ninstallation_id='{}'\nrestore_generation='{}'\ndata_dir='{}'\n[execution]\nallowed_workdir_roots=['{}']",Uuid::now_v7(),Uuid::now_v7(),Uuid::now_v7(),dir.display(),dir.join(".").display())).unwrap()
 }
 #[test]
-fn report_carries_an_empty_profile_list_and_canonical_roots() {
-    // Профили инструкций воркера убраны планом 2c: хаб хранит пресеты, поле `profiles`
-    // отправляется пустым до резервирования в задаче 3.
+fn report_carries_canonical_roots_without_instruction_profiles() {
+    // Профили инструкций воркера убраны планом 2c задачей 3: пресеты хранит хаб,
+    // поле `profiles` зарезервировано в proto.
     let dir = fixture();
     let report = build_report(&config(dir.path()), &catalog());
-    assert!(report.profiles.is_empty());
     assert_eq!(
         report.allowed_roots,
         vec![dir.path().canonicalize().unwrap().to_string_lossy()]

@@ -126,7 +126,7 @@
 | `effort_not_allowed` | 422 | `browser` | `never` | Усилие недоступно для модели |
 | `permission_mode_unknown` | 422 | `browser` | `never` | Режим разрешений отсутствует в каталоге |
 | `settings_midsession_unsupported` | 422 | `browser` | `never` | Смена настроек во время исполнения не поддерживается |
-| `profile_unknown` | 422 | `browser` | `never` | Профиль инструкций отсутствует в каталоге |
+| `profile_unknown` | 422 | `browser` | `never` | Пресет инструкций не найден |
 | `workdir_not_allowed` | 422 | `browser` | `never` | Рабочий каталог вне разрешённых корней |
 | `group_not_found` | 404 | `browser` | `never` | Группа не найдена |
 | `group_name_taken` | 409 | `browser` | `never` | Группа с таким именем уже существует |

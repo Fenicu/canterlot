@@ -859,12 +859,6 @@ fn pilot_records_roundtrip() {
                 efforts: vec!["high".into()],
             }],
         }],
-        profiles: vec![InstructionProfile {
-            name: "owner".into(),
-            title: "Как у владельца".into(),
-            description: "Инструкции владельца".into(),
-            harnesses: vec!["claude_code".into()],
-        }],
         max_attachment_bytes: 104_857_600,
         max_attachments_per_input: 10,
         containment: "process_group".into(),
@@ -1134,7 +1128,6 @@ fn n_minus_one_decoders_skip_new_fields() {
         model: "model".into(),
         effort: "high".into(),
         permission_mode: "bypass".into(),
-        instruction_profile: "owner".into(),
         instructions: None,
         capabilities: vec!["pilot_v1".into()],
     };
@@ -1200,7 +1193,6 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         model: "model".into(),
         effort: "high".into(),
         permission_mode: "bypass".into(),
-        instruction_profile: "owner".into(),
         instructions: None,
         pilot_v1: true,
     });

@@ -139,8 +139,7 @@ export function seedMockupSessions(api: FakeHubApi): MockupSessions {
 				models: [{ id: 'opus', title: 'opus-5.5', efforts: ['medium', 'high'] }],
 				permission_modes: ['default']
 			}
-		],
-		profiles: [{ name: 'owner', title: 'Рабочий', description: '', harnesses: ['claude'] }]
+		]
 	};
 	api.machines.set(machine, record);
 	const degraded = api.id();

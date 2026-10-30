@@ -65,7 +65,7 @@ message StartCli {
   string model = 4;
   string effort = 5;
   string permission_mode = 6;
-  string instruction_profile = 7;
+  reserved 7;
   bool pilot_v1 = 8;
   canterlot.worker.v1.Instructions instructions = 9;
 }

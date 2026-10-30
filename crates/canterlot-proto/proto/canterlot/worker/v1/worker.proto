@@ -206,7 +206,7 @@ message StartExecution {
   string model = 5;
   string effort = 6;
   string permission_mode = 7;
-  string instruction_profile = 8;
+  reserved 8;
   repeated string capabilities = 9;
   Instructions instructions = 10;
 }
@@ -416,7 +416,7 @@ message MachineReport {
   string worker_version = 1;
   repeated string allowed_roots = 2;
   repeated HarnessInfo harnesses = 3;
-  repeated InstructionProfile profiles = 4;
+  reserved 4;
   uint64 max_attachment_bytes = 5;
   uint32 max_attachments_per_input = 6;
   string containment = 7;
@@ -438,13 +438,6 @@ message ModelInfo {
   string id = 1;
   string title = 2;
   repeated string efforts = 3;
-}
-
-message InstructionProfile {
-  string name = 1;
-  string title = 2;
-  string description = 3;
-  repeated string harnesses = 4;
 }
 
 message MachineMetrics {

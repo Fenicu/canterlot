@@ -166,6 +166,24 @@ pub async fn start_in_tx(
         .ok_or(ExecutionError::ConversationNotFound)?;
     use sqlx::Row;
     let machine_id: Uuid = row.try_get("machine_id")?;
+    let preset_ref: String = row.try_get("instruction_profile")?;
+    let preset_revision: Option<i64> = row.try_get("instruction_preset_revision")?;
+    let resolved = crate::presets::resolve_in_tx(
+        &mut *conn,
+        owner_id,
+        &crate::presets::PresetRef::parse(&preset_ref)
+            .map_err(|_| ExecutionError::ConversationNotFound)?,
+        preset_revision,
+    )
+    .await
+    .map_err(|_| ExecutionError::ConversationNotFound)?;
+    let instructions = serde_json::json!({
+        "mode": resolved.mode,
+        "preset_id": resolved.preset_id.map(|id| id.to_string()).unwrap_or_default(),
+        "revision": resolved.revision.unwrap_or(0),
+        "title": resolved.title,
+        "text": resolved.text.unwrap_or_default(),
+    });
     let native: Option<String> = if options.resume {
         sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 and native_conversation_id is not null order by generation desc limit 1")
             .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
@@ -210,7 +228,7 @@ pub async fn start_in_tx(
     .bind(generation)
     .bind(json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
         "model":row.try_get::<String,_>("model")?,"effort":row.try_get::<String,_>("effort")?,
-        "permission_mode":row.try_get::<String,_>("permission_mode")?,"instruction_profile":row.try_get::<String,_>("instruction_profile")?,
+        "permission_mode":row.try_get::<String,_>("permission_mode")?,"instructions":instructions,
         "native_conversation_id":native}))
     .execute(&mut *conn)
     .await?;

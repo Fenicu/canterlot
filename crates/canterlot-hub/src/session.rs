@@ -15,6 +15,7 @@ use uuid::Uuid;
 use crate::config::HubTimers;
 
 pub const CAPABILITY_PILOT_V1: &str = "pilot_v1";
+pub const CAPABILITY_INSTRUCTIONS_V1: &str = "instructions_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 
@@ -53,6 +54,13 @@ pub struct Registry {
     entries: Arc<Mutex<HashMap<Uuid, SessionEntry>>>,
     timers: HubTimers,
     changes: broadcast::Sender<(Uuid, Availability)>,
+}
+
+/// Тестовое подключение к реестру: держит слот, пока живёт guard.
+#[cfg(feature = "testkit")]
+pub struct TestLease {
+    _lease: ControlLease,
+    _commands: mpsc::Receiver<ControlDown>,
 }
 
 impl Registry {
@@ -179,6 +187,20 @@ impl Registry {
             .any(|capability| capability == CAPABILITY_EXEC_V1)
         {
             self.mark_reconciled(machine_id, connection_id);
+        }
+    }
+
+    /// Тестовый шов: зарегистрировать машину с capabilities без полного handshake.
+    #[cfg(feature = "testkit")]
+    pub fn connect_for_tests(&self, machine_id: Uuid, capabilities: &[String]) -> TestLease {
+        let connection = Uuid::now_v7();
+        let (lease, commands) = self
+            .register(machine_id, connection, Vec::new())
+            .expect("test slot free");
+        self.mark_accepted(machine_id, connection, capabilities);
+        TestLease {
+            _lease: lease,
+            _commands: commands,
         }
     }
 
