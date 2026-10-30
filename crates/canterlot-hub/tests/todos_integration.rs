@@ -519,3 +519,37 @@ fn debug_of_a_list_shows_no_item_text() {
     let debug = format!("{list:?}");
     assert!(!debug.contains(marker), "{debug}");
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn list_update_counts_as_a_sign_of_life_for_the_stalled_check(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    let last_event_at = || async {
+        sqlx::query_scalar::<_, Option<chrono::DateTime<Utc>>>(
+            "select last_event_at from executions where id = $1",
+        )
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let journal = Uuid::now_v7();
+    apply(&pool, &seed, &records(journal, 1, vec![opened(&execution)])).await;
+    assert_eq!(last_event_at().await, None);
+    apply(
+        &pool,
+        &seed,
+        &records(
+            journal,
+            2,
+            vec![fact(
+                &execution,
+                2,
+                None,
+                vec![item("а", TodoStatus::Pending)],
+            )],
+        ),
+    )
+    .await;
+    assert!(last_event_at().await.is_some());
+}

@@ -812,6 +812,7 @@ fn touches_activity(body: &Body) -> bool {
             | Body::RequestClosed(_)
             | Body::DecisionApplied(_)
             | Body::DecisionNotApplied(_)
+            | Body::TodoUpdated(_)
     )
 }
 
