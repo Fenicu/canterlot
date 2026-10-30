@@ -794,6 +794,7 @@ describe("stores task 4", () => {
       },
     };
     const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
     expect(chat.strip().map((item) => item.key)).toEqual([key]);
     chat.applier.applyEvents([
       {
@@ -941,6 +942,33 @@ describe("stores task 4", () => {
       "idem-kept",
       "idem-local",
     ]);
+  });
+
+  it("strip_reads_without_writing_so_a_derived_can_call_it", () => {
+    const key = "idem-orphan";
+    const ops = {
+      ops: new Map([
+        [
+          key,
+          {
+            key,
+            kind: "input",
+            conversationId: CONV,
+            state: "unknown",
+            body: { content: [{ type: "text", text: "из журнала" }] },
+            createdAt: 1,
+            attempts: 0,
+          },
+        ],
+      ]),
+      settle() {},
+      onOrphanRefused: () => () => undefined,
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    expect(chat.strip()).toEqual([]);
+    expect(chat.inputs.size).toBe(0);
+    chat.open();
+    expect(chat.strip().map((item) => item.key)).toEqual([key]);
   });
 
   it("cancelled_input_leaves_the_feed_and_notes_in_the_strip_for_four_seconds", () => {
@@ -2025,6 +2053,7 @@ describe("stores task 4", () => {
       settle() {},
     };
     const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
     const saving = chat.strip().find((i) => i.key === attKey);
     expect(saving).toBeDefined();
     expect(saving!.attachments).toEqual([attRef]);
@@ -2203,7 +2232,9 @@ function chatOf(
     api,
     ops: ops ?? ({ ops: new Map(), settle() {} } as unknown as OpJournal),
     drafts: {} as DraftStore,
-    connection: {} as ConnectionManager,
+    connection: {
+      subscribe: () => ({ release() {}, status: "idle", cursor: "0" }),
+    } as unknown as ConnectionManager,
     blockIO: {
       fetchContent: async () => ({
         content: "",

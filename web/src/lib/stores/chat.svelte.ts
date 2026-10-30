@@ -365,7 +365,6 @@ export class ChatStore {
   }
 
   strip(): InputView[] {
-    this.#adoptSaving();
     return [...this.inputs.values()].filter(
       (input) =>
         input.placement === "strip" ||

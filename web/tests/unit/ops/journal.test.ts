@@ -413,6 +413,57 @@ describe("ops/journal", () => {
     expect(calls).toBe(1);
   });
 
+  it("failed_begin_write_leaves_no_op_to_send_later", async () => {
+    const realPut = db.put.bind(db);
+    db.put = async () => {
+      throw new Error("QuotaExceededError");
+    };
+    const send = vi.fn(async () => ({ id: "inp" }));
+    const ops = journal(send);
+
+    await expect(
+      ops.begin("input", { text: "x" }, { conversationId: "c", persist: true }),
+    ).rejects.toThrow("QuotaExceededError");
+
+    db.put = realPut;
+    expect(ops.ops.size).toBe(0);
+    window.dispatchEvent(new Event("online"));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("resume_during_the_begin_write_leaves_the_refusal_to_the_caller", async () => {
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const realPut = db.put.bind(db);
+    db.put = async (store, key, value) => {
+      if (store === "ops") await gate;
+      return realPut(store, key, value);
+    };
+    const send = vi.fn(async () => {
+      throw new ApiError(409, "queue_full", "full", "delivery", "after_condition", "c");
+    });
+    const ops = journal(send);
+
+    const begun = ops.begin(
+      "input",
+      { text: "x" },
+      { conversationId: "c", persist: true },
+    );
+    await Promise.resolve();
+    window.dispatchEvent(new Event("online"));
+    await Promise.resolve();
+    expect(send).not.toHaveBeenCalled();
+    release?.();
+    db.put = realPut;
+    const op = await begun;
+
+    await expect(ops.run(op)).rejects.toThrow("full");
+    expect(op.state).toBe("refused");
+  });
+
   it("settle_removes_the_record_when_the_server_item_with_the_key_arrives", async () => {
     const ops = journal(async () => ({ id: "inp-1" }));
     const op = await ops.begin(
