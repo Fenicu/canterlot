@@ -1403,3 +1403,81 @@ async fn owner_lost_execution_closes_its_open_requests(pool: PgPool) {
             .contains(&HoldReason::AwaitingUserRequest)
     );
 }
+
+fn not_applied(native: &str, decision: Uuid, reason: &str) -> record_body::Body {
+    record_body::Body::DecisionNotApplied(DecisionNotApplied {
+        request_id: native.into(),
+        decision_id: decision.to_string(),
+        reason: reason.into(),
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resent_decision_refused_as_already_transmitted_keeps_request_state(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let request =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_r").await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let mut seq = 2;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::DecisionTransmissionStarted(
+            DecisionTransmissionStarted {
+                request_id: "toolu_r".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            },
+        )],
+    )
+    .await;
+    // После переподключения повторно присланная команда отклоняется как уже переданная:
+    // исход первой передачи ещё впереди.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![not_applied("toolu_r", winner, "already_transmitted")],
+    )
+    .await;
+    assert_eq!(request_state(&pool, request).await, "decision_transmitting");
+    assert_eq!(command_state(&pool, command).await, "pending");
+    assert!(closed_reason(&pool, request).await.is_empty());
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_r", winner)],
+    )
+    .await;
+    // Тот же отказ после применения и из CJ не откатывает решение.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![not_applied("toolu_r", winner, "already_transmitted")],
+    )
+    .await;
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![not_applied("toolu_r", winner, "already_transmitted")],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+    assert_eq!(request_state(&pool, request).await, "decision_applied");
+    assert_eq!(closed_reason(&pool, request).await, ["applied"]);
+}

@@ -2341,6 +2341,10 @@ async fn apply_decision_not_applied(
     fact: &DecisionNotApplied,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
+    // Отказ повторно присланной команды ничего не говорит об исходе первой передачи.
+    if fact.reason == "already_transmitted" {
+        return Ok(true);
+    }
     let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
         return Ok(true);
     };
