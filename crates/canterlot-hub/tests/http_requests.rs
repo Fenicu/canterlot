@@ -578,13 +578,16 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
 async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
     const SECRET: &str = "hunter2-very-secret";
     let logs = LogBuffer::default();
-    let _logs = tracing::subscriber::set_default(
+    // Подписчик потока теряет события: точку лога, первой встреченную соседним тестом,
+    // tracing кэширует как отключённую для всех.
+    tracing::subscriber::set_global_default(
         tracing_subscriber::fmt()
             .with_ansi(false)
             .with_max_level(tracing::Level::TRACE)
             .with_writer(logs.clone())
             .finish(),
-    );
+    )
+    .unwrap();
     let f = Fixture::new(pool).await;
     let request = f
         .request(
