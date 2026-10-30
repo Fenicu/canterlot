@@ -20,6 +20,7 @@ const WINDOW: usize = 4;
 
 pub(super) struct RequestState {
     pub opened: RequestOpened,
+    pub opened_seq: u64,
     pub transmission: Option<String>,
     pub terminal: bool,
 }
@@ -67,14 +68,14 @@ impl Sj {
             for record in sj.journal.read_from(from, MAX_EVENT_BATCH_BYTES)? {
                 from = record.seq + 1;
                 if let Some(body) = RecordBody::decode(record.payload.as_slice())?.body {
-                    sj.observe(&body);
+                    sj.observe(record.seq, &body);
                 }
             }
         }
         Ok(sj)
     }
 
-    fn observe(&mut self, body: &Body) {
+    fn observe(&mut self, seq: u64, body: &Body) {
         match body {
             Body::JournalClosed(f) => self.closed_reason = Some(f.reason.clone()),
             Body::RequestOpened(opened) => {
@@ -82,6 +83,7 @@ impl Sj {
                     .entry(opened.request_id.clone())
                     .or_insert_with(|| RequestState {
                         opened: opened.clone(),
+                        opened_seq: seq,
                         transmission: None,
                         terminal: false,
                     });
@@ -96,6 +98,8 @@ impl Sj {
                     && request.transmission.as_deref() == Some(&f.decision_id)
                 {
                     request.terminal = true;
+                    // Терминальный текст в памяти больше не нужен: решение уже у хаба.
+                    request.opened.payload_json = Vec::new();
                 }
             }
             Body::DecisionNotApplied(f) => {
@@ -108,11 +112,13 @@ impl Sj {
                     )
                 {
                     request.terminal = true;
+                    request.opened.payload_json = Vec::new();
                 }
             }
             Body::RequestClosed(f) => {
                 if let Some(request) = self.requests.get_mut(&f.request_id) {
                     request.terminal = true;
+                    request.opened.payload_json = Vec::new();
                 }
             }
             _ => {}
@@ -146,6 +152,11 @@ impl Sj {
         self.journal.last_seq()
     }
 
+    #[cfg(test)]
+    pub fn first_seq(&self) -> u64 {
+        self.journal.first_seq()
+    }
+
     pub fn acked_seq(&self) -> u64 {
         self.journal.acked_seq()
     }
@@ -154,10 +165,11 @@ impl Sj {
         if self.closed_reason.is_some() {
             return Err(SupervisorError::Spec);
         }
-        self.observe(&body);
+        let seq = self.journal.last_seq() + self.pending.len() as u64 + 1;
+        self.observe(seq, &body);
         let payload = RecordBody { body: Some(body) }.encode_to_vec();
         self.pending.push(payload);
-        Ok(self.journal.last_seq() + self.pending.len() as u64)
+        Ok(seq)
     }
 
     pub fn flush(&mut self) -> Result<(), SupervisorError> {
@@ -206,10 +218,21 @@ impl Sj {
             ship.next = ship.next.max(up_to + 1);
         }
         self.journal.ack(up_to)?;
-        // Состояние запросов и запрет повтора нужны до удаления каталога исполнения.
-        if self.requests.is_empty() {
-            self.journal.compact()?;
+        // Закрытый журнал не растёт, а JournalClosed нужен рестарту до удаления каталога.
+        if self.closed_reason.is_some() {
+            return Ok(());
         }
+        // Компакция идёт до самой ранней ещё нужной записи: хаб подтвердил,
+        // а восстановление держится на RequestOpened открытого запроса
+        // (и его передаче решения).
+        let horizon = self
+            .requests
+            .values()
+            .filter(|request| !request.terminal)
+            .map(|request| request.opened_seq)
+            .min()
+            .unwrap_or_else(|| self.journal.last_seq().saturating_add(1));
+        self.journal.compact_up_to(horizon)?;
         Ok(())
     }
 
@@ -256,6 +279,94 @@ impl Sj {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn opened(id: &str, payload_len: usize) -> Body {
+        Body::RequestOpened(RequestOpened {
+            request_id: id.into(),
+            execution_id: "exec".into(),
+            generation: 7,
+            kind: "permission".into(),
+            payload_json: vec![b'x'; payload_len],
+        })
+    }
+
+    fn filler(seq: usize) -> Body {
+        Body::DecisionUnconfirmed(canterlot_proto::worker::v1::DecisionUnconfirmed {
+            request_id: format!("filler-{seq}"),
+            decision_id: "d".into(),
+            reason: "x".repeat(64 * 1024),
+        })
+    }
+
+    #[test]
+    fn closed_journal_keeps_its_reason_after_ack_and_reopen() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sj = Sj::create(root.path()).unwrap();
+        sj.append(Body::JournalClosed(
+            canterlot_proto::worker::v1::JournalClosed {
+                execution_id: "exec".into(),
+                generation: 7,
+                reason: "stopped".into(),
+            },
+        ))
+        .unwrap();
+        sj.flush().unwrap();
+        sj.ack(sj.last_seq()).unwrap();
+        drop(sj);
+        let reopened = Sj::create(root.path()).unwrap();
+        assert_eq!(reopened.closed_reason().as_deref(), Some("stopped"));
+    }
+
+    #[test]
+    fn compaction_continues_after_requests_and_terminal_payloads_leave_memory() {
+        let root = tempfile::tempdir().unwrap();
+        let mut sj = Sj::create(root.path()).unwrap();
+        // Ранний запрос с тяжёлым текстом, затем закрыт: текст обязан покинуть память.
+        sj.append(opened("r1", 64 * 1024)).unwrap();
+        sj.flush().unwrap();
+        sj.append(Body::RequestClosed(
+            canterlot_proto::worker::v1::RequestClosed {
+                request_id: "r1".into(),
+                reason: "answered".into(),
+            },
+        ))
+        .unwrap();
+        sj.flush().unwrap();
+        let closed = sj.request("r1").expect("closed request stays known");
+        assert!(closed.terminal);
+        assert!(
+            closed.opened.payload_json.is_empty(),
+            "terminal payload must leave memory"
+        );
+        // Открытый запрос обязан пережить рестарт и повторное объявление.
+        // Наполнитель крутит сегменты: записи acknowledged уходят на диск пачками.
+        for chunk in 0..2 {
+            for index in 0..80 {
+                sj.append(filler(chunk * 80 + index)).unwrap();
+            }
+            sj.flush().unwrap();
+        }
+        sj.append(opened("r2", 64 * 1024)).unwrap();
+        sj.flush().unwrap();
+        let last = sj.last_seq();
+        assert!(last > 160);
+        sj.ack(last).unwrap();
+        // Компакция прошла несмотря на непустую карту запросов.
+        assert!(
+            sj.first_seq() > 2,
+            "acked segments below the open request must be compacted"
+        );
+        assert!(
+            sj.journal.bytes_on_disk() < 6 * 1024 * 1024,
+            "journal must stay bounded after the request is closed"
+        );
+        drop(sj);
+        let recovered = Sj::create(root.path()).unwrap();
+        let open = recovered.open_requests();
+        assert_eq!(open.len(), 1, "only the open request is re-announceable");
+        assert_eq!(open[0].request_id, "r2");
+        assert_eq!(open[0].payload_json.len(), 64 * 1024);
+    }
 
     #[test]
     fn burst_shares_commit_but_intent_has_its_own_commit() {
