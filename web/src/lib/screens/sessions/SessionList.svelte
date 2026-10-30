@@ -292,8 +292,8 @@
 
 <style>
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
-  .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding: var(--s2) var(--s3); border-radius: var(--radius-pill); background: var(--surface); }
-  .brand { flex: 1 0 auto; margin: 0; padding-left: var(--s6); font-size: var(--fs-title); font-weight: var(--weight-semibold); }
+  .bar { position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1); min-width: 0; margin: var(--s5) var(--gutter) var(--s3); padding-block: var(--s2); }
+  .brand { flex: 1 0 auto; margin: 0; font-size: var(--fs-title); font-weight: var(--weight-semibold); }
   .create { display: inline-flex; align-items: center; justify-content: center; flex: none; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); color: var(--accent-link); }
   .menu-slot { position: absolute; z-index: 4; top: calc(100% + var(--s2)); right: var(--s3); }
   .scroll { overflow: auto; min-height: 0; flex: 1; }
