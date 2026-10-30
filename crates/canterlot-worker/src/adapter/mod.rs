@@ -784,3 +784,114 @@ where
         }
     }
 }
+
+/// Синхронный вариант для мест запуска без асинхронного контекста
+/// (`AppServerProcess::spawn`, запуск супервизора): спящий поток блокируется
+/// только в редкой ветви ETXTBSY при старте процесса, обычный путь без задержек.
+pub fn spawn_with_retry_sync<T>(mut spawn: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    let mut attempts = 0u64;
+    loop {
+        match spawn() {
+            Ok(v) => return Ok(v),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::ExecutableFileBusy && attempts < 4 {
+                    attempts += 1;
+                    std::thread::sleep(Duration::from_millis(25 * attempts));
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod spawn_retry_tests {
+    use super::{spawn_with_retry_io, spawn_with_retry_sync};
+    use std::cell::Cell;
+    use std::io;
+
+    fn busy() -> io::Error {
+        io::Error::from(io::ErrorKind::ExecutableFileBusy)
+    }
+
+    #[test]
+    fn sync_retry_recovers_after_transient_busy() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_sync(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(busy())
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[test]
+    fn sync_retry_gives_up_and_keeps_the_error() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_sync(|| {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(busy())
+        });
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::ExecutableFileBusy
+        );
+        assert_eq!(attempts.get(), 5);
+    }
+
+    #[test]
+    fn sync_retry_passes_other_errors_through_at_once() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_sync(|| {
+            attempts.set(attempts.get() + 1);
+            Err::<(), _>(io::Error::from(io::ErrorKind::NotFound))
+        });
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn async_retry_recovers_after_transient_busy() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_io(|| {
+            attempts.set(attempts.get() + 1);
+            let attempt = attempts.get();
+            async move { if attempt < 3 { Err(busy()) } else { Ok(7) } }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 7);
+        assert_eq!(attempts.get(), 3);
+    }
+
+    #[tokio::test]
+    async fn async_retry_gives_up_and_keeps_the_error() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_io(|| {
+            attempts.set(attempts.get() + 1);
+            async { Err::<(), _>(busy()) }
+        })
+        .await;
+        assert_eq!(
+            result.unwrap_err().kind(),
+            io::ErrorKind::ExecutableFileBusy
+        );
+        assert_eq!(attempts.get(), 5);
+    }
+
+    #[tokio::test]
+    async fn async_retry_passes_other_errors_through_at_once() {
+        let attempts = Cell::new(0);
+        let result = spawn_with_retry_io(|| {
+            attempts.set(attempts.get() + 1);
+            async { Err::<(), _>(io::Error::from(io::ErrorKind::NotFound)) }
+        })
+        .await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::NotFound);
+        assert_eq!(attempts.get(), 1);
+    }
+}

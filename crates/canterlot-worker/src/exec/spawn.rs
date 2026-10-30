@@ -162,16 +162,20 @@ pub(super) fn spawn_supervisor(exe: &Path, dir: &Path) -> std::io::Result<Spawne
         .append(true)
         .mode(0o600)
         .open(dir.join("supervisor.log"))?;
-    tokio::process::Command::new(exe)
-        .arg("supervise")
-        .arg("--exec-dir")
-        .arg(dir)
-        .stdin(Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log)
-        .kill_on_drop(false)
-        .spawn()
-        .map(|child| Spawned(Some(child)))
+    // Повтор при ETXTBSY: обёртка супервизора пишется тестом прямо перед запуском.
+    let child = crate::adapter::spawn_with_retry_sync(|| {
+        let mut command = tokio::process::Command::new(exe);
+        command
+            .arg("supervise")
+            .arg("--exec-dir")
+            .arg(dir)
+            .stdin(Stdio::null())
+            .stdout(log.try_clone()?)
+            .stderr(log.try_clone()?)
+            .kill_on_drop(false);
+        command.spawn()
+    })?;
+    Ok(Spawned(Some(child)))
 }
 
 pub(super) async fn connect_attach(

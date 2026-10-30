@@ -273,27 +273,31 @@ impl SyntheticAdapter {
             Some(path) => path.clone(),
             None => std::env::current_exe()?,
         };
-        let mut command = tokio::process::Command::new(executable);
-        command
-            .args([
-                "synthetic-cli",
-                "--profile",
-                &self.profile,
-                "--model",
-                model,
-            ])
-            .current_dir(workdir)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Some(id) = &native_id {
-            command.arg("--native-conversation-id").arg(id);
-        }
-        if self.profile == "synthetic-codex" {
-            command.args(["--enable", "default_mode_request_user_input"]);
-        }
-        group.prepare_command(&mut command);
-        let mut child = command.spawn()?;
+        // Повтор при ETXTBSY: исполняемым может быть свежезаписанный двойник тестов.
+        let mut child = crate::adapter::spawn_with_retry_io(|| {
+            let mut command = tokio::process::Command::new(&executable);
+            command
+                .args([
+                    "synthetic-cli",
+                    "--profile",
+                    &self.profile,
+                    "--model",
+                    model,
+                ])
+                .current_dir(workdir)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null());
+            if let Some(id) = &native_id {
+                command.arg("--native-conversation-id").arg(id);
+            }
+            if self.profile == "synthetic-codex" {
+                command.args(["--enable", "default_mode_request_user_input"]);
+            }
+            group.prepare_command(&mut command);
+            async move { command.spawn() }
+        })
+        .await?;
         let pid = child.id().ok_or(AdapterError::Protocol)?;
         let member = group
             .members()?

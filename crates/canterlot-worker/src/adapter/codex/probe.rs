@@ -1,5 +1,6 @@
 use super::rpc::{Incoming, RpcClient, RpcId};
 use super::thread::probe_initialize_params;
+use crate::adapter::spawn_with_retry_io;
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
@@ -83,21 +84,26 @@ pub async fn probe(
     probe_timeout: Duration,
 ) -> Result<serde_json::Value, ProbeError> {
     let work = async {
-        let mut cmd = Command::new(executable);
-        cmd.args(probe_launch_args())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .kill_on_drop(true)
-            .process_group(0);
-        for (key, value) in super::process::build_env(
-            std::env::vars_os(),
-            crate::adapter::InstructionMode::Owner,
-            None,
-        ) {
-            cmd.env(key, value);
-        }
-        let mut child = cmd.spawn().map_err(|_| ProbeError::SpawnFailed)?;
+        // Повтор при ETXTBSY: зонд запускает свежезаписанного двойника тестов.
+        let mut child = spawn_with_retry_io(|| {
+            let mut cmd = Command::new(executable);
+            cmd.args(probe_launch_args())
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .kill_on_drop(true)
+                .process_group(0);
+            for (key, value) in super::process::build_env(
+                std::env::vars_os(),
+                crate::adapter::InstructionMode::Owner,
+                None,
+            ) {
+                cmd.env(key, value);
+            }
+            async move { cmd.spawn() }
+        })
+        .await
+        .map_err(|_| ProbeError::SpawnFailed)?;
         let mut stdin = child.stdin.take().ok_or(ProbeError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ProbeError::SpawnFailed)?;
         let mut reader = tokio::io::BufReader::new(stdout);
