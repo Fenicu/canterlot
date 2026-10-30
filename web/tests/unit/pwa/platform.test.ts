@@ -176,6 +176,37 @@ test('signout_purges_idb_caches_local_storage_and_subscriptions', async () => {
   expect(localStorage.getItem('canterlot.theme')).toBeNull(); expect(localStorage.getItem('canterlot.draft-tail.x')).toBeNull(); expect(localStorage.getItem('unrelated')).toBe('keep');
   const fresh = await openDb('alice'); for (const store of ['drafts', 'ops', 'uploads', 'share_inbox'] as const) expect(await fresh.list(store)).toEqual([]);
 });
+test('signout_in_another_window_stops_writers_purges_and_reloads_once', async () => {
+  storage(); const { announceSignout, watchSignout, followSignout } = await load('signout');
+  const { DraftStore } = await import('../../../src/lib/drafts/store');
+  const db = await openDb('alice'); const drafts = new DraftStore('alice', db, { debounceMs: 0 });
+  drafts.set('c', { text: 'Личный черновик' }); await drafts.flush();
+  localStorage.setItem('canterlot:current_owner', 'alice'); localStorage.setItem('canterlot.theme', 'light');
+  const reload = vi.fn();
+  const stop = watchSignout(() => { void followSignout({ ls: localStorage, reload }); });
+  try {
+    announceSignout();
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(reload).not.toHaveBeenCalled();
+    const foreign = new BroadcastChannel('canterlot'); foreign.postMessage({ type: 'signout', from: 'other-window' }); foreign.close();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce());
+    window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot:current_owner', oldValue: 'alice', newValue: null }));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(reload).toHaveBeenCalledOnce();
+    drafts.set('c', { text: 'Записано после выхода' }); drafts.flushSync();
+    expect(Object.keys(localStorage).filter(key => key.startsWith('canterlot'))).toEqual([]);
+    const fresh = await openDb('alice'); expect(await fresh.list('drafts')).toEqual([]);
+  } finally { stop(); drafts.retire(); }
+});
+test('removing_the_owner_key_in_another_window_counts_as_signout', async () => {
+  const { watchSignout } = await load('signout');
+  const fired = vi.fn(); const stop = watchSignout(fired);
+  window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot.theme', newValue: null }));
+  window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot:current_owner', newValue: 'bob' }));
+  expect(fired).not.toHaveBeenCalled();
+  window.dispatchEvent(new StorageEvent('storage', { key: 'canterlot:current_owner', oldValue: 'alice', newValue: null }));
+  expect(fired).toHaveBeenCalledOnce(); stop();
+});
 test('owner_change_starts_clean', async () => {
   storage(); await bindOwner('alice'); const db = await openDb('alice'); await db.put('share_inbox', 'x', { text: 'private' }); localStorage.setItem('canterlot.theme', 'light');
   await bindOwner('bob'); expect(await (await openDb('alice')).list('share_inbox')).toEqual([]); expect(localStorage.getItem('canterlot.theme')).toBeNull();
