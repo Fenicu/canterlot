@@ -78,7 +78,11 @@
   url — `url` и `elicitationId`, `openai/userVerification` — `title`,
   `description`, `challenge`). Строки: form с обязательным полем, url, form без
   обязательных полей, `openai/userVerification`, `openai/form`. Покрывает
-  elicitation задачей 4 и сразу отклоняемые режимы.
+  elicitation задачей 4 и сразу отклоняемые режимы. Строки 6-8: подтверждение
+  инструмента MCP самим Codex (`_meta.codex_approval_kind`, `persist`,
+  `tool_params`, `tool_params_display`, пустой `requestedSchema.properties`), та
+  же метка с полями формы и форма без метки. Имена ключей взяты из строк бинарника
+  0.164, значения выдуманы: живого кадра нет, подтвердить в live smoke.
 - `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
   Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
   Покрывает ответ-ошибку `-32601` задачей 4.

@@ -28,6 +28,7 @@ enum PermKind {
     FileChange,
     Permissions,
     Elicitation,
+    McpToolApproval,
 }
 
 struct Pending {
@@ -311,13 +312,18 @@ impl Requests {
                 let item_id = item_id.as_str();
                 let request_id = request_id(item_id, &id);
                 let payload = elicitation_payload(params, item_id, ctx.agent);
+                let perm = if mcp_tool_approval(params) {
+                    PermKind::McpToolApproval
+                } else {
+                    PermKind::Elicitation
+                };
                 self.track(
                     request_id.clone(),
                     Pending {
                         rpc_id: id,
                         kind: "permission".into(),
                         payload: payload.clone(),
-                        perm: Some(PermKind::Elicitation),
+                        perm: Some(perm),
                         item_id: item_id.to_owned(),
                         available_decisions: None,
                         question_map: Vec::new(),
@@ -490,6 +496,7 @@ fn elicitation_payload(params: &Value, item_id: &str, agent: &str) -> Value {
         "message": params.get("message").cloned().unwrap_or(Value::Null),
         "mode": params.get("mode").cloned().unwrap_or(Value::Null),
         "url": params.get("url").cloned().unwrap_or(Value::Null),
+        "command": tool_arguments(params),
         "schema": params
             .get("requestedSchema")
             .or_else(|| params.get("schema"))
@@ -498,6 +505,21 @@ fn elicitation_payload(params: &Value, item_id: &str, agent: &str) -> Value {
         "tool_use_id": item_id,
         "agent": agent,
     })
+}
+
+// Аргументы вызова инструмента MCP для карточки: владелец видит, что разрешает.
+fn tool_arguments(params: &Value) -> Value {
+    let meta = &params["_meta"];
+    match meta
+        .get("tool_params")
+        .or_else(|| meta.get("tool_params_display"))
+    {
+        None | Some(Value::Null) => Value::Null,
+        Some(Value::String(text)) => text.as_str().into(),
+        Some(other) => serde_json::to_string_pretty(other)
+            .map(Value::from)
+            .unwrap_or(Value::Null),
+    }
 }
 
 fn question_payload(params: &Value, item_id: &str, agent: &str) -> (Value, Vec<(String, String)>) {
@@ -587,7 +609,12 @@ fn permission_answer(perm: PermKind, pending: &Pending, behavior: PermissionBeha
         (PermKind::Elicitation, PermissionBehavior::Allow) => {
             serde_json::json!({"action": "accept", "content": null, "_meta": null})
         }
-        (PermKind::Elicitation, PermissionBehavior::Deny) => elicitation_decline(),
+        (PermKind::McpToolApproval, PermissionBehavior::Allow) => {
+            serde_json::json!({"action": "accept", "content": {}, "_meta": null})
+        }
+        (PermKind::Elicitation | PermKind::McpToolApproval, PermissionBehavior::Deny) => {
+            elicitation_decline()
+        }
     }
 }
 
@@ -611,11 +638,28 @@ fn elicitation_mode(params: &Value) -> &str {
         .unwrap_or("unknown")
 }
 
-// Карточкой идёт только url: ответ на него не несёт содержимого. Формы и
-// openai/userVerification требуют полей или доказательства, а PWA не собирает
-// их и не показывает вопрос, поэтому согласие было бы вслепую и без содержимого.
+// Подтверждение вызова инструмента MCP самим Codex: форма без полей с меткой
+// `_meta.codex_approval_kind` (имена из строк бинарника 0.164, живого кадра нет).
+fn mcp_tool_approval(params: &Value) -> bool {
+    let form = matches!(
+        params.get("mode").and_then(Value::as_str),
+        Some("form" | "openai/form" | "openaiForm")
+    );
+    let approval_kind = params["_meta"]["codex_approval_kind"]
+        .as_str()
+        .is_some_and(|kind| !kind.is_empty());
+    let no_fields = params["requestedSchema"]["properties"]
+        .as_object()
+        .is_some_and(|fields| fields.is_empty());
+    form && approval_kind && no_fields
+}
+
+// Карточкой идут url и подтверждения инструментов MCP: их ответ не несёт полей,
+// а решение принимает владелец по тексту и аргументам вызова. Настоящие формы и
+// openai/userVerification требуют полей или доказательства, которых PWA не
+// собирает, поэтому отклоняются сразу.
 fn elicitation_acceptable(params: &Value) -> bool {
-    params.get("mode").and_then(Value::as_str) == Some("url")
+    params.get("mode").and_then(Value::as_str) == Some("url") || mcp_tool_approval(params)
 }
 
 fn question_answer(pending: &Pending, answers: &BTreeMap<String, AnswerValue>) -> Value {

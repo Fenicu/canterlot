@@ -1445,6 +1445,61 @@ async fn interrupt_refuses_open_subagent_requests() {
 }
 
 #[tokio::test]
+async fn mcp_tool_approval_waits_for_the_owner_in_ask_mode() {
+    let request = serde_json::from_str::<Value>(
+        std::fs::read_to_string(repo_fixtures().join("elicitation.jsonl"))
+            .unwrap()
+            .lines()
+            .nth(5)
+            .unwrap(),
+    )
+    .unwrap()["data"]
+        .clone();
+    let mut request = request;
+    request["params"]["threadId"] = json!("thread-mini");
+    request["params"]["turnId"] = json!("turn-1");
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(w_out(request));
+    lines.push(note(
+        "serverRequest/resolved",
+        json!({"threadId": "thread-mini", "requestId": 12}),
+    ));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let id = fake.start_turn("save the preset").await;
+    let (request_id, payload) = loop {
+        match fake.event().await {
+            AdapterEvent::RequestOpened {
+                request_id,
+                kind,
+                payload,
+            } if kind == "permission" => break (request_id, payload),
+            AdapterEvent::RunFinished { .. } => panic!("the owner saw no card"),
+            _ => {}
+        }
+    };
+    assert_eq!(payload["server"], "canterlot");
+    assert!(matches!(
+        fake.event().await,
+        AdapterEvent::Phase {
+            phase: canterlot_worker::adapter::Phase::AwaitingPermission,
+            ..
+        }
+    ));
+    fake.decide(&request_id, &allow()).await;
+    // Сначала конец хода: ожидание ответа разбирает события и забрало бы его.
+    fake.finish(id).await;
+    let (reply, _) = fake.reply_to(12).await;
+    assert_eq!(
+        reply["result"],
+        json!({"action": "accept", "content": {}, "_meta": null})
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn subagent_file_change_approval_carries_the_diff() {
     let change = json!({"id": "patch-child", "type": "fileChange", "status": "inProgress",
         "changes": [{"path": "/tmp/a.txt", "kind": {"type": "add"}, "diff": "hi\n"}]});

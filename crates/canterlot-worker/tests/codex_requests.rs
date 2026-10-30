@@ -403,6 +403,8 @@ fn form_and_verification_elicitations_are_declined_without_a_card() {
         (3, "form"),
         (4, "openai/userVerification"),
         (5, "openai/form"),
+        (7, "form"),
+        (8, "form"),
     ] {
         let data = fixture_data("elicitation", line_no);
         let mut requests = Requests::new();
@@ -438,6 +440,40 @@ fn form_and_verification_elicitations_are_declined_without_a_card() {
             "line {line_no}: {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn mcp_tool_approval_opens_a_card_and_answers_only_the_owner_decision() {
+    let data = fixture_data("elicitation", 6);
+    let mut requests = Requests::new();
+    let (request_id, kind, payload) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(kind, "permission");
+    assert_eq!(payload["tool_name"], "mcp_elicitation");
+    assert_eq!(payload["server"], "canterlot");
+    assert_eq!(payload["mode"], "form");
+    assert_eq!(payload["message"], data["params"]["message"]);
+    let shown = payload["command"].as_str().expect("arguments on the card");
+    assert!(shown.contains("Отвечай по-английски."), "{shown}");
+    assert!(requests.drain_diagnostics().is_empty());
+    // Разрешение только на этот вызов: без `persist` на сессию или навсегда.
+    let line = requests.answer(&request_id, &allow()).unwrap();
+    assert_eq!(
+        line["result"],
+        json!({"action": "accept", "content": {}, "_meta": null})
+    );
+    let mut requests = Requests::new();
+    let (request_id, _, _) = open(&mut requests, &data, "orchestrator", None);
+    let line = requests.answer(&request_id, &deny()).unwrap();
+    assert_eq!(
+        line["result"],
+        json!({"action": "decline", "content": null, "_meta": null})
+    );
+    let mut requests = Requests::new();
+    let (request_id, _, _) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(
+        requests.refuse(&request_id).unwrap()["result"],
+        json!({"action": "decline", "content": null, "_meta": null})
+    );
 }
 
 #[test]
