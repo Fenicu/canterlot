@@ -854,7 +854,8 @@ async fn drain_until_exit(
     loop {
         match cli.try_wait() {
             Ok(Some(_)) => {
-                drain_available(cli, parser, queue).await;
+                // Инструмент может держать чужой stdout и писать в него без конца.
+                let _ = timeout(KILL_DRAIN, drain_available(cli, parser, queue)).await;
                 return true;
             }
             // Убран чужой проверкой: процесса нет, остаток stdout уже не прочитать.

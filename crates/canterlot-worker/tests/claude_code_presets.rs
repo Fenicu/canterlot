@@ -973,6 +973,77 @@ sys.stdout.flush()
 }
 
 #[tokio::test]
+async fn soft_close_ends_although_a_tool_keeps_printing_to_the_cli_stdout() {
+    // Сам CLI выходит по EOF, а потомок в своей сессии держит его stdout и пишет без конца.
+    const LEAKY: &str = r#"#!/usr/bin/python3
+import subprocess, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+tool = subprocess.Popen(['sh', '-c', 'while :; do echo x; done'], start_new_session=True)
+(d / 'tool').write_text(str(tool.pid))
+for line in sys.stdin:
+    pass
+"#;
+    struct Kill(u32);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            if let Some(pid) = rustix::process::Pid::from_raw(self.0 as i32) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-cli");
+    fake_exec::write_executable(&exe, LEAKY, 0o700);
+    let workdir = dir.path().join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    let context = AdapterContext {
+        transmit_deadline: WAIT,
+        exec_dir: dir.path().join("exec"),
+        claude_code: Some(ClaudeCodeConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+        codex: None,
+    };
+    let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir,
+        native_conversation_id: None,
+        profile: "claude_code".into(),
+        model: "haiku".into(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: owner_spec(),
+    };
+    tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+        .await
+        .expect("start deadline")
+        .expect("start ok");
+    let tool = loop {
+        if let Some(pid) = std::fs::read_to_string(dir.path().join("tool"))
+            .ok()
+            .and_then(|text| text.parse().ok())
+        {
+            break Kill(pid);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    tokio::time::timeout(
+        WAIT,
+        adapter.close(canterlot_worker::adapter::CloseMode::Graceful, &group),
+    )
+    .await
+    .expect("soft close must not wait for the end of stdout")
+    .expect("close ok");
+    drop(tool);
+}
+
+#[tokio::test]
 async fn usage_baseline_resets_after_restart() {
     let mut h = RestartHarness::new().await;
     std::fs::write(
