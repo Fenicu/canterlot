@@ -1236,3 +1236,170 @@ async fn unconfirmed_decision_leaves_transmitting_and_late_proof_applies_it(pool
     assert_eq!(request_state(&pool, request).await, "decision_applied");
     assert_eq!(reasons().await, ["unconfirmed", "applied"]);
 }
+
+async fn holds(pool: &PgPool, conversation: Uuid) -> Vec<HoldReason> {
+    sqlx::query_scalar::<_, sqlx::types::Json<Vec<HoldReason>>>(
+        "select hold_reasons from queue_state where conversation_id = $1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+    .0
+}
+
+async fn closed_reason(pool: &PgPool, request: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select payload->>'reason' from events where kind = 'request_closed' and payload->>'request_id' = $1 order by id",
+    )
+    .bind(request.to_string())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn ended_execution_closes_its_requests_and_releases_the_queue(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let open = open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_o").await;
+    let saved = open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_s").await;
+    let sent = open_native_request(&pool, &ingest, &seed, &execution, journal, 4, "toolu_t").await;
+    let (_, saved_command) = decide(&pool, &seed, saved, execution.generation).await;
+    let (winner, sent_command) = decide(&pool, &seed, sent, execution.generation).await;
+    let mut seq = 4;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::DecisionTransmissionStarted(
+            DecisionTransmissionStarted {
+                request_id: "toolu_t".into(),
+                decision_id: winner.to_string(),
+                machine_time_ms: 1,
+            },
+        )],
+    )
+    .await;
+    assert!(
+        holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    // Машина перезагрузилась: исполнение закончилось без RequestClosed от сопровождения.
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Stopped,
+        Some("machine_rebooted"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(request_state(&pool, open).await, "closed_without_decision");
+    assert_eq!(request_state(&pool, saved).await, "decision_not_applied");
+    assert_eq!(request_state(&pool, sent).await, "decision_unconfirmed");
+    assert_eq!(command_state(&pool, saved_command).await, "completed");
+    assert_eq!(command_state(&pool, sent_command).await, "completed");
+    assert_eq!(closed_reason(&pool, open).await, ["execution_ended"]);
+    assert_eq!(closed_reason(&pool, saved).await, ["execution_ended"]);
+    assert_eq!(closed_reason(&pool, sent).await, ["unconfirmed"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    let snapshot = snapshot::conversation(&pool, seed.owner_id, seed.conversation_id, 10)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(snapshot.data.open_requests.is_empty());
+    // Новое поколение не держится старыми запросами.
+    let next = executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7())
+        .await
+        .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, next.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let gate = GateInputs {
+        machine_available: true,
+        machine_reconciled: true,
+        session_capabilities: vec!["pilot_v1".into()],
+    };
+    let outcome = dispatch::dispatch_next(&pool, seed.conversation_id, gate, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert!(
+        !matches!(&outcome, DispatchOutcome::Blocked(reasons) if reasons.iter().any(|r| matches!(r, BlockReason::Held(h) if h.contains(&HoldReason::AwaitingUserRequest)))),
+        "{outcome:?}"
+    );
+    // Поздний RequestOpened завершённого исполнения не открывает карточку заново.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![record_body::Body::RequestOpened(RequestOpened {
+            request_id: "toolu_late".into(),
+            execution_id: execution.execution_id.to_string(),
+            generation: execution.generation as u64,
+            kind: "permission".into(),
+            payload_json: b"{}".to_vec(),
+        })],
+    )
+    .await;
+    let open_rows: i64 = sqlx::query_scalar(
+        "select count(*) from requests where conversation_id = $1 and state = 'open'",
+    )
+    .bind(seed.conversation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(open_rows, 0);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_lost_execution_closes_its_open_requests(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_l",
+    )
+    .await;
+    // Сверка без этого исполнения: сопровождение потеряно.
+    ingest
+        .reconcile(seed.machine_id, &Default::default())
+        .await
+        .unwrap();
+    let state: String = sqlx::query_scalar("select state from executions where id = $1")
+        .bind(execution.execution_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "owner_lost");
+    assert_eq!(
+        request_state(&pool, request).await,
+        "closed_without_decision"
+    );
+    assert_eq!(closed_reason(&pool, request).await, ["owner_lost"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+}

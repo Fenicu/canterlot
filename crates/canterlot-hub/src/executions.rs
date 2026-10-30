@@ -325,6 +325,33 @@ pub async fn set_state_in_tx(
         return Err(ExecutionError::InvalidTransition { from, to });
     }
     let mut slot = queue.slot()?;
+    if matches!(
+        to,
+        ExecutionState::Stopped | ExecutionState::Failed | ExecutionState::OwnerLost
+    ) {
+        crate::requests::close_for_ended_execution_in_tx(
+            conn,
+            queue.conversation_id,
+            execution_id,
+            if to == ExecutionState::OwnerLost {
+                "owner_lost"
+            } else {
+                "execution_ended"
+            },
+            correlation_id,
+        )
+        .await?;
+        let open: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
+            .bind(queue.conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        if open == 0 {
+            queue
+                .hold_reasons
+                .0
+                .retain(|reason| *reason != HoldReason::AwaitingUserRequest);
+        }
+    }
     match to {
         ExecutionState::Running => queue.hold_reasons.0.retain(|reason| {
             !matches!(

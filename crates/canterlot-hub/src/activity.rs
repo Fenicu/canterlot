@@ -483,7 +483,9 @@ pub async fn load_inputs(
         }
     };
     let open_requests_rows: Vec<(String, Value)> = sqlx::query_as(
-        "select kind, request_payload from requests where conversation_id = $1 and state = 'open' order by created_at asc",
+        "select r.kind, r.request_payload from requests r join executions e on e.id = r.execution_id
+         where r.conversation_id = $1 and r.state = 'open' and e.state not in ('stopped', 'failed', 'owner_lost')
+         order by r.created_at asc",
     )
     .bind(conversation_id)
     .fetch_all(&mut *conn)

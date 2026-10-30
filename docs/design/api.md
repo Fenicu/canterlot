@@ -55,7 +55,7 @@
 | Разговор | `scheduled_changed` | Отложенное сообщение |
 | Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
 | Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}` |
-| Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено; `unconfirmed` — передача агенту могла состояться, доказательства нет (запрос в `decision_unconfirmed`, повтор запрещён; позднее доказательство присылает второе событие с `applied`); остальные причины передаёт воркер (например, `request_closed`, `stale_generation`, `cancelled`, `interrupted`). Поздние факты после терминального состояния и факты чужого решения событий не порождают |
+| Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено; `unconfirmed` — передача агенту могла состояться, доказательства нет (запрос в `decision_unconfirmed`, повтор запрещён; позднее доказательство присылает второе событие с `applied`); `execution_ended` и `owner_lost` — исполнение закончилось или сопровождение потеряно без закрытия запроса на машине (открытый запрос становится `closed_without_decision`, сохранённое решение `decision_not_applied`, переданное `decision_unconfirmed`, удержание очереди снимается); остальные причины передаёт воркер (например, `request_closed`, `stale_generation`, `cancelled`, `interrupted`). Поздние факты после терминального состояния и факты чужого решения событий не порождают |
 | Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}` |
 | Разговор | `request_transmitting` | Решение передаётся агенту: `{request_id}`, один раз при переходе `decision_saved` в `decision_transmitting` |
 | Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
@@ -337,7 +337,7 @@ Worker при подготовке исполнения синхронизиру
 | --- | --- |
 | `GET /api/v1/snapshot/conversations` | `{scope:"conversations",cursor,data:{items,truncated,counts,groups,limits}}` |
 | `GET /api/v1/snapshot/machines` | `{scope:"machines",cursor,data:{items}}` с доступностью, каталогами, ОС, метриками и предупреждениями |
-| `GET /api/v1/conversations/{id}/snapshot` | `{scope:"conversation:<uuid>",cursor,data:{detail,queue,history,scheduled,open_requests}}`; параметр `history_limit` (по умолчанию 100); `open_requests` - незавершённые запросы (`open`, `decision_saved`, `decision_transmitting`) по времени создания |
+| `GET /api/v1/conversations/{id}/snapshot` | `{scope:"conversation:<uuid>",cursor,data:{detail,queue,history,scheduled,open_requests}}`; параметр `history_limit` (по умолчанию 100); `open_requests` - незавершённые запросы (`open`, `decision_saved`, `decision_transmitting`) живого исполнения по времени создания |
 | `GET /api/v1/conversations/{id}/history` | `{items,next_before,next_after}`; параметры `before` и `after` (взаимоисключающие), `limit` (по умолчанию 100) |
 | `GET /api/v1/conversations/{id}/blocks/{block_id}` | `{content,offset,next_offset,total_bytes,state,rev,checksum}`; параметры `offset` (по умолчанию 0), `limit` (до 262144) |
 | `GET /api/v1/conversations/{id}/runs/{run_id}` | Контекст, длительность, токены по моделям и агентам, оценка лимита, части ответа |

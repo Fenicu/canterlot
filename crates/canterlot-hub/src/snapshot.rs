@@ -191,7 +191,10 @@ pub async fn conversation_with_registry(
         .ok_or(sqlx::Error::RowNotFound)?;
     let scheduled = scheduler::list_messages(&mut *conn, owner_id, id).await?;
     let open_requests_rows: Vec<crate::requests::RequestRow> = sqlx::query_as(
-        "select * from requests where conversation_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting') order by created_at asc, id asc",
+        "select r.* from requests r join executions e on e.id = r.execution_id
+         where r.conversation_id = $1 and r.state in ('open', 'decision_saved', 'decision_transmitting')
+           and e.state not in ('stopped', 'failed', 'owner_lost')
+         order by r.created_at asc, r.id asc",
     )
     .bind(id)
     .fetch_all(&mut *conn)

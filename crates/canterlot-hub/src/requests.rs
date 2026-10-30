@@ -337,3 +337,92 @@ pub async fn save_decision_in_tx(
         }
     }
 }
+
+/// Гасит команду доставки решения только этого запроса и решения.
+pub(crate) async fn complete_decision_command_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    request_id: Uuid,
+    decision_id: Uuid,
+    result: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()), result = $3
+         where kind = 'deliver_decision' and delivery_state <> 'completed'
+           and conversation_id = $4 and payload->>'request_id' = $1 and payload->>'decision_id' = $2",
+    )
+    .bind(request_id.to_string())
+    .bind(decision_id.to_string())
+    .bind(result)
+    .bind(conversation_id)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Исполнение закончилось без `RequestClosed`: незавершённые запросы закрываются,
+/// чтобы карточка и удержание очереди не жили вечно. Очередь разговора уже заблокирована.
+pub(crate) async fn close_for_ended_execution_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "select id, state, winner_decision_id from requests
+         where execution_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting')
+         order by id for update",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, state, winner) in rows {
+        // Решение, переданное агенту, могло быть применено: доказательства нет.
+        let (next, event_reason, applied) = match state.as_str() {
+            "open" => ("closed_without_decision", reason, json!(false)),
+            "decision_saved" => ("decision_not_applied", reason, json!(false)),
+            _ => (
+                "decision_unconfirmed",
+                "unconfirmed",
+                serde_json::Value::Null,
+            ),
+        };
+        sqlx::query("update requests set state = $2, updated_at = clock_timestamp() where id = $1")
+            .bind(id)
+            .bind(next)
+            .execute(&mut *conn)
+            .await?;
+        if let Some(winner) = winner {
+            complete_decision_command_in_tx(
+                conn,
+                conversation_id,
+                id,
+                winner,
+                json!({"applied": applied, "reason": reason}),
+            )
+            .await?;
+        }
+        crate::events::append(
+            conn,
+            crate::events::NewEvent {
+                scope: crate::events::Scope::Conversation {
+                    id: conversation_id,
+                },
+                kind: "request_closed",
+                conversation_id: Some(conversation_id),
+                execution_id: Some(execution_id),
+                payload: json!({"request_id": id, "reason": event_reason}),
+                correlation_id,
+            },
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Открытые запросы живых исполнений разговора; запросы завершённых исполнений очередь не держат.
+pub(crate) const LIVE_OPEN_REQUESTS: &str = "select count(*) from requests r
+     join executions e on e.id = r.execution_id
+     where r.conversation_id = $1 and r.state = 'open'
+       and e.state not in ('stopped', 'failed', 'owner_lost')";

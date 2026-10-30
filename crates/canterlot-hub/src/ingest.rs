@@ -2047,6 +2047,16 @@ async fn apply_request_opened(
     if !fact.execution_id.is_empty() && parse_id(&fact.execution_id)? != run.execution_id {
         return Err(IngestError::ForeignExecution);
     }
+    // Запрос завершённого исполнения уже не получит решения: карточку не открываем.
+    let ended: bool = sqlx::query_scalar(
+        "select state in ('stopped', 'failed', 'owner_lost') from executions where id = $1",
+    )
+    .bind(run.execution_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if ended {
+        return Ok(true);
+    }
     let req_uuid = Uuid::parse_str(&fact.request_id).ok();
     let existing: Option<Uuid> = sqlx::query_scalar(
         "select id from requests where (execution_id = $1 and native_request_id = $2) or ($3 is not null and id = $3)",
@@ -2206,20 +2216,16 @@ async fn complete_decision_command(
     request: &LockedRequest,
     result: Value,
 ) -> Result<(), IngestError> {
-    let Some(winner) = request.winner else {
-        return Ok(());
-    };
-    sqlx::query(
-        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()), result = $3
-         where kind = 'deliver_decision' and delivery_state <> 'completed'
-           and conversation_id = $4 and payload->>'request_id' = $1 and payload->>'decision_id' = $2",
-    )
-    .bind(request.id.to_string())
-    .bind(winner.to_string())
-    .bind(result)
-    .bind(request.conversation_id)
-    .execute(&mut *conn)
-    .await?;
+    if let Some(winner) = request.winner {
+        crate::requests::complete_decision_command_in_tx(
+            conn,
+            request.conversation_id,
+            request.id,
+            winner,
+            result,
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -2410,12 +2416,10 @@ async fn clear_awaiting_hold_if_no_open_requests(
     execution_id: Uuid,
     correlation_id: Uuid,
 ) -> Result<(), IngestError> {
-    let open_count: i64 = sqlx::query_scalar(
-        "select count(*) from requests where conversation_id = $1 and state = 'open'",
-    )
-    .bind(conversation_id)
-    .fetch_one(&mut *conn)
-    .await?;
+    let open_count: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
+        .bind(conversation_id)
+        .fetch_one(&mut *conn)
+        .await?;
 
     if open_count == 0 {
         let queue_opt: Option<QueueRowTuple> = sqlx::query_as(
