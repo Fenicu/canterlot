@@ -400,11 +400,11 @@ pub fn parse_thread_result(result: &Value) -> Result<Effective, StartError> {
             .cloned()
             .ok_or(StartError::Protocol)?,
         sandbox: result.get("sandbox").cloned().ok_or(StartError::Protocol)?,
+        // По схеме поле необязательно (default: []).
         instruction_sources: result
             .get("instructionSources")
             .and_then(Value::as_array)
-            .ok_or(StartError::Protocol)?
-            .len(),
+            .map_or(0, Vec::len),
         cli_version: thread
             .get("cliVersion")
             .and_then(Value::as_str)

@@ -593,6 +593,15 @@ fn thread_start_params_and_effective_settings() {
 }
 
 #[test]
+fn thread_result_without_instruction_sources_is_accepted() {
+    // Поле не обязательно по схеме ThreadStartResponse и ThreadResumeResponse.
+    let mut result = data("start_stream.jsonl", 14)["result"].clone();
+    result.as_object_mut().unwrap().remove("instructionSources");
+    let effective = parse_thread_result(&result).unwrap();
+    assert_eq!(effective.instruction_sources, 0);
+}
+
+#[test]
 fn resume_params_exclude_turns() {
     let workdir = Path::new("/tmp/canterlot-stage0/codex/resume/run-1");
     let params = thread_resume_params(
