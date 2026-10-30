@@ -315,7 +315,50 @@ async fn new_conversation_has_queue_state_and_no_live_execution_hold(pool: PgPoo
     let d = f.get(id).await;
     assert_eq!(d["activity"]["state"], "idle");
     assert!(d["execution"].is_null());
-    assert_eq!(d["settings"]["effective"]["permission_mode"], "");
+    assert_eq!(d["settings"]["effective"]["permission_mode"], "bypass");
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn new_conversation_defaults_to_bypass_and_keeps_an_explicit_choice(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let default = f.create(json!({})).await;
+    assert_eq!(f.get(default).await["permission_mode"], "bypass");
+    sqlx::query("update machine_harnesses set permission_modes='[\"owner\",\"bypass\"]'")
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let chosen = f.create(json!({"permission_mode":"owner"})).await;
+    assert_eq!(f.get(chosen).await["permission_mode"], "owner");
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_without_a_chosen_mode_starts_as_owner_and_keeps_its_stored_value(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.create(json!({})).await;
+    sqlx::query("update conversations set permission_mode='' where id=$1")
+        .bind(id)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    f.request(
+        Method::POST,
+        &format!("/api/v1/conversations/{id}/executions"),
+        None,
+        201,
+    )
+    .await;
+    let payload: Value = sqlx::query_scalar(
+        "select payload from commands where conversation_id=$1 and kind='start_execution'",
+    )
+    .bind(id)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["permission_mode"], "owner");
+    let stored: String = sqlx::query_scalar("select permission_mode from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(stored, "");
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn pin_color_archive_title_roundtrip_and_emit_list_events(pool: PgPool) {
@@ -1091,7 +1134,7 @@ async fn projector_materialises_settings_and_crunch_without_attribute_event(pool
     let p = f.events("derived_changed").await.pop().unwrap();
     assert_eq!(
         p["settings"],
-        json!({"model":"synthetic-small","effort":"high","permission_mode":""})
+        json!({"model":"synthetic-small","effort":"high","permission_mode":"bypass"})
     );
     assert_eq!(p["crunch"]["enabled"], true);
     assert!(f.events("conversation_updated").await.is_empty());

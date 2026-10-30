@@ -219,6 +219,12 @@ pub async fn start_in_tx(
             .bind(conversation_id)
             .fetch_one(&mut *conn)
             .await?;
+    // Сессии до выбора режима в форме хранят пустоту: воркер принимает только явный режим.
+    let permission_mode = if permission_mode.is_empty() {
+        "owner".to_owned()
+    } else {
+        permission_mode
+    };
     let generation: i64 = sqlx::query_scalar(
         "select coalesce(max(generation), 0) + 1 from executions where conversation_id = $1",
     )

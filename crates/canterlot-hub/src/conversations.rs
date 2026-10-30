@@ -709,6 +709,9 @@ fn validate_crunch(setting: &CrunchSetting) -> bool {
         .as_ref()
         .is_none_or(|s| valid_text(s, 262144) && s.len() <= 262144)
 }
+/// Решение владельца: новая сессия запускается без подтверждений.
+pub const DEFAULT_PERMISSION_MODE: &str = "bypass";
+
 pub async fn create(
     pool: &PgPool,
     key: &str,
@@ -1002,12 +1005,15 @@ async fn create_in_tx(
     {
         return Err(CreateError::EffortNotAllowed);
     }
-    let permission = req.permission_mode.as_deref().unwrap_or("");
-    if !permission.is_empty()
-        && !h
-            .try_get::<Value, _>("permission_modes")?
-            .as_array()
-            .is_some_and(|ps| ps.iter().any(|p| p == permission))
+    let permission = req
+        .permission_mode
+        .as_deref()
+        .filter(|mode| !mode.is_empty())
+        .unwrap_or(DEFAULT_PERMISSION_MODE);
+    if !h
+        .try_get::<Value, _>("permission_modes")?
+        .as_array()
+        .is_some_and(|ps| ps.iter().any(|p| p == permission))
     {
         return Err(CreateError::PermissionModeUnknown);
     }

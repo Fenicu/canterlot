@@ -1,5 +1,5 @@
 import { recentWorkdirs } from "#lib/api/client.js";
-import { availabilityLabel } from "#lib/format/labels.js";
+import { DEFAULT_PERMISSION_MODE, availabilityLabel } from "#lib/format/labels.js";
 import { ApiError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 import type { OpJournal } from "#lib/ops/journal.js";
@@ -74,6 +74,7 @@ export class NewSessionModel {
   harness = "";
   model = "";
   effort = "";
+  permission = "";
   profile = "clean";
   crunch = false;
   resumeText: string;
@@ -98,6 +99,7 @@ export class NewSessionModel {
       this.harness,
       this.model,
       this.effort,
+      this.permission,
       this.profile,
     ]);
   }
@@ -121,6 +123,23 @@ export class NewSessionModel {
     return (
       harness?.models.find((item) => item.id === this.model)?.efforts ?? []
     );
+  }
+
+  get permissions(): string[] {
+    const machine = this.machines.items.get(this.machineId);
+    return (
+      machine?.harnesses.find((item) => item.id === this.harness)
+        ?.permission_modes ?? []
+    );
+  }
+
+  /** Выбор владельца, а пока его нет, режим по умолчанию из каталога машины. */
+  get permissionMode(): string {
+    const modes = this.permissions;
+    if (modes.includes(this.permission)) return this.permission;
+    return modes.includes(DEFAULT_PERMISSION_MODE)
+      ? DEFAULT_PERMISSION_MODE
+      : (modes[0] ?? "");
   }
 
   get canSubmit(): SendGate {
@@ -159,6 +178,7 @@ export class NewSessionModel {
         harness: this.harness,
         model: this.model,
         effort: this.effort,
+        ...(this.permissionMode ? { permission_mode: this.permissionMode } : {}),
         instruction_profile: this.profile || "clean",
         crunch: {
           enabled: this.crunch,

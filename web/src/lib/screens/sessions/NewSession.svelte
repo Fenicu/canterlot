@@ -7,7 +7,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
-  import { effortLabel } from '#lib/format/labels.js';
+  import { DEFAULT_PERMISSION_MODE, effortLabel, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
@@ -27,6 +27,7 @@
   let harness = $state('');
   let modelId = $state('');
   let effort = $state('');
+  let permission = $state('');
   let profile = $state('clean');
   let crunch = $state(false);
   let resume = $state('');
@@ -38,6 +39,7 @@
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
+  const permissions = $derived(harnesses.find((item) => item.id === harness)?.permission_modes ?? []);
   const BUILTIN_PRESETS: PresetSummaryLike[] = [
     {
       id: 'clean',
@@ -74,6 +76,8 @@
   const modelOptions = $derived([{ value: '', label: 'Выберите модель' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
   const effortOptions = $derived([{ value: '', label: 'Выберите усилие' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
+  const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
+  const provider = $derived(harnesses.find((item) => item.id === harness)?.provider ?? 'claude');
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
@@ -81,6 +85,7 @@
     model.harness = harness;
     model.model = modelId;
     model.effort = effort;
+    model.permission = permission;
     model.profile = profile;
     model.crunch = crunch;
     model.resumeText = resume;
@@ -103,6 +108,13 @@
     return () => {
       alive = false;
     };
+  });
+
+  // Другой агент может не знать выбранный режим: тогда снова действует значение по умолчанию.
+  $effect(() => {
+    const modes = permissions;
+    if (modes.length === 0 || modes.includes(permission)) return;
+    permission = modes.includes(DEFAULT_PERMISSION_MODE) ? DEFAULT_PERMISSION_MODE : (modes[0] ?? '');
   });
 
   $effect(() => {
@@ -148,6 +160,9 @@
       <Select label="Модель" options={modelOptions} bind:value={modelId} />
       <Select label="Усилие" options={effortOptions} bind:value={effort} />
     </div>
+    {#if permissionOptions.length > 0}
+      <Select label="Режим разрешений" options={permissionOptions} bind:value={permission} hint={permissionHint(permission, provider)} />
+    {/if}
     <Select label="Инструкции" options={presetOptions} bind:value={profile} hint={selectedPreset?.description} />
     <Toggle block label="Кранч" bind:checked={crunch} />
     {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}

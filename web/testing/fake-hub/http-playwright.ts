@@ -231,7 +231,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         await route.fulfill({ status: 201, headers: headers(), json: prior });
         return;
       }
-      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string };
+      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string; permission_mode?: string };
       const id = api.id();
       const created = { conversation_id: id };
       if (key) keys.set(key, created);
@@ -249,7 +249,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         created_at: new Date().toISOString(),
         model: body.model ?? '',
         effort: body.effort ?? '',
-        permission_mode: 'owner',
+        permission_mode: body.permission_mode ?? 'bypass',
         activity: { state: 'idle' as const, evidence: {}, since: new Date().toISOString() },
         unread_count: 0,
         queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
