@@ -1436,26 +1436,37 @@ impl Supervisor {
                 kind,
                 payload,
             } => {
-                if self.active_turn.is_some()
-                    && matches!(self.lifecycle, Lifecycle::Running)
-                    && self.sj.request(&request_id).is_none()
-                {
-                    let payload_json = (request_id.len() <= MAX_REQUEST_ID_BYTES)
-                        .then(|| bounded_json(&kind, payload))
-                        .flatten();
-                    let Some(payload_json) = payload_json else {
-                        return self.refuse_oversized(&request_id).await;
-                    };
-                    self.record(Body::RequestOpened(RequestOpened {
-                        request_id,
-                        execution_id: self.spec.execution_id.to_string(),
-                        generation: self.spec.generation,
-                        kind,
-                        payload_json,
-                    }))?;
-                    if self.aborting_turn {
-                        self.close_requests("interrupted")?;
-                    }
+                if self.sj.request(&request_id).is_some() {
+                    return Ok(());
+                }
+                if self.active_turn.is_none() || !matches!(self.lifecycle, Lifecycle::Running) {
+                    // Решения принимаются только в ходе: фоновому субагенту между ходами
+                    // ответить некому, а CLI ждал бы вечно.
+                    return self
+                        .refuse(&request_id, "request_outside_turn", "No active turn")
+                        .await;
+                }
+                let payload_json = (request_id.len() <= MAX_REQUEST_ID_BYTES)
+                    .then(|| bounded_json(&kind, payload))
+                    .flatten();
+                let Some(payload_json) = payload_json else {
+                    return self
+                        .refuse(
+                            &request_id,
+                            "request_too_large",
+                            "Request is too large to show to the owner",
+                        )
+                        .await;
+                };
+                self.record(Body::RequestOpened(RequestOpened {
+                    request_id,
+                    execution_id: self.spec.execution_id.to_string(),
+                    generation: self.spec.generation,
+                    kind,
+                    payload_json,
+                }))?;
+                if self.aborting_turn {
+                    self.close_requests("interrupted")?;
                 }
             }
             AdapterEvent::RequestClosed { request_id, reason } => {
@@ -1561,6 +1572,7 @@ impl Supervisor {
                 } else {
                     "interrupted"
                 };
+                let open = self.sj.open_requests();
                 self.close_blocks(reason)?;
                 self.close_requests(reason)?;
                 let duration_ms = self.turn_started.take().map_or(0, |at| {
@@ -1592,6 +1604,14 @@ impl Supervisor {
                     }
                 }
                 self.complete_interrupts()?;
+                // Карточка закрыта, ответить на неё уже нельзя: фоновому субагенту нужен отказ.
+                if let Some(adapter) = self.adapter.as_mut() {
+                    for request in open {
+                        adapter
+                            .refuse_request(&request.request_id, "The turn has ended")
+                            .await;
+                    }
+                }
             }
             AdapterEvent::Limit(fact) => {
                 if !self.pilot_v1 {
@@ -1752,16 +1772,19 @@ impl Supervisor {
 
     /// Запрос, который нельзя показать владельцу, получает явный отказ: иначе
     /// CLI ждал бы ответа вечно. В журнале остаётся только отметка.
-    async fn refuse_oversized(&mut self, request_id: &str) -> Result<(), SupervisorError> {
+    async fn refuse(
+        &mut self,
+        request_id: &str,
+        event_type: &str,
+        message: &str,
+    ) -> Result<(), SupervisorError> {
         self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
             execution_id: self.spec.execution_id.to_string(),
             kind: "unknown_optional_event".into(),
-            event_type: "request_too_large".into(),
+            event_type: event_type.into(),
         }))?;
         if let Some(adapter) = self.adapter.as_mut() {
-            adapter
-                .refuse_request(request_id, "Request is too large to show to the owner")
-                .await;
+            adapter.refuse_request(request_id, message).await;
         }
         Ok(())
     }

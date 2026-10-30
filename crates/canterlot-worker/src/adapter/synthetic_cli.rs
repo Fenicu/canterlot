@@ -12,7 +12,9 @@
 //! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}},
 //! {"request_large":{"tool_name":"Write","repeat":"щ","times":400000}} (вход сверх предела
 //! ввода), с "bare":true — тот же текст вместо объекта,
-//! {"large_summary":{"repeat":"щ","times":600000}} (вызов инструмента с такой сводкой).
+//! {"large_summary":{"repeat":"щ","times":600000}} (вызов инструмента с такой сводкой),
+//! {"open_request":{"tool_name":"Bash"}} (запрос без ожидания ответа, как у фонового
+//! субагента), {"late_request":{"tool_name":"Bash"}} (такой же запрос сразу после конца хода).
 //! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
 //! {"echo_instructions":true} пишет блок с режимом и версией инструкций ввода;
 //! {"agent_call":{"tool":"...","arguments":{...}}} отдаёт вызов инструмента агента
@@ -141,6 +143,7 @@ struct Lane {
 }
 struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
+    late_request: Option<Value>,
     command: Uuid,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
@@ -301,6 +304,13 @@ fn run_steps<'a>(
                 turn.request("permission", payload, lane).await?;
             } else if let Some(payload) = step.get("ask_question") {
                 turn.request("question", payload, lane).await?;
+            } else if let Some(payload) = step.get("open_request") {
+                let id = Uuid::now_v7().to_string();
+                emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
+                    .await?;
+                phase(Phase::AwaitingPermission).await?;
+            } else if let Some(payload) = step.get("late_request") {
+                turn.late_request = Some(payload.clone());
             } else if let Some(spec) = step.get("large_summary") {
                 let summary = spec["repeat"]
                     .as_str()
@@ -584,6 +594,7 @@ async fn run_turn(
     };
     let mut turn = Turn {
         decisions,
+        late_request: None,
         command,
         files,
         instructions,
@@ -622,6 +633,7 @@ async fn run_turn(
             },
         );
     }
+    let late_request = turn.late_request.take();
     let usage: Vec<_> = turn.usage.into_values().collect();
     for row in &usage {
         *context = context
@@ -631,6 +643,12 @@ async fn run_turn(
             .saturating_add(row.cache_write_tokens);
     }
     completed(command, usage, *context).await?;
+    if let Some(payload) = late_request {
+        let id = Uuid::now_v7().to_string();
+        emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
+            .await?;
+        phase(Phase::AwaitingPermission).await?;
+    }
     Ok(None)
 }
 

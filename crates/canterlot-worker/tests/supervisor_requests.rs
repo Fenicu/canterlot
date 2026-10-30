@@ -494,6 +494,52 @@ async fn oversized_block_summary_does_not_stop_the_supervisor() {
 }
 
 #[tokio::test]
+async fn request_outside_a_turn_is_denied_and_leaves_no_awaiting_phase() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    h.launch(json!([{"late_request":{"tool_name":"Bash"}}]), "synthetic")
+        .await;
+    h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+    timeout(WAIT, async {
+        while !h.stdin().iter().any(|f| f["type"] == "decision") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the agent must get an explicit deny");
+    h.wait(|b| matches!(b, Body::PhaseChanged(f) if f.phase == "awaiting_input"))
+        .await;
+    assert!(!h.bodies.iter().any(|b| matches!(b, Body::RequestOpened(_))));
+    assert!(
+        !h.bodies
+            .iter()
+            .any(|b| matches!(b, Body::PhaseChanged(f) if f.phase == "awaiting_permission")),
+        "the hub would hold the queue behind a phase without a request"
+    );
+}
+
+#[tokio::test]
+async fn request_spanning_the_end_of_a_turn_is_denied_when_the_turn_ends() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    let request = h
+        .start(json!([{"open_request":{"tool_name":"Bash"}},{"delta":"done"}]))
+        .await;
+    h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+    let closed = h
+        .wait(|b| matches!(b, Body::RequestClosed(f) if f.request_id == request))
+        .await;
+    assert!(matches!(closed, Body::RequestClosed(f) if f.reason == "turn_ended"));
+    timeout(WAIT, async {
+        while !h.stdin().iter().any(|f| f["type"] == "decision") {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the agent must get an explicit deny");
+}
+
+#[tokio::test]
 async fn synthetic_adapter_pauses_on_multi_question_and_resumes_on_answers() {
     let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
