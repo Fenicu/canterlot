@@ -327,6 +327,92 @@ async fn direct_approve_call_gets_an_error_reply_and_opens_nothing() {
 }
 
 #[tokio::test]
+async fn permission_with_a_normalized_input_key_stays_a_permission() {
+    let mut relay = RelayHarness::bind().await;
+    let input = json!({"normalized": {"questions": []}, "path": "/tmp/x"});
+    relay
+        .call(
+            json!(11),
+            "approve",
+            json!({"tool_name": "mcp__owner__tool", "input": input, "tool_use_id": "toolu_normalized"}),
+        )
+        .await;
+    let request_id = match relay.broker.next().await {
+        BrokerEvent::Opened {
+            request_id, kind, ..
+        } => {
+            assert_eq!(kind, "permission");
+            request_id
+        }
+        other => panic!("expected Opened, got {other:?}"),
+    };
+    let outcome = relay
+        .broker
+        .answer(
+            &request_id,
+            &DecisionPayload::Permission {
+                behavior: PermissionBehavior::Allow,
+                message: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        outcome,
+        canterlot_worker::adapter::DecisionOutcome::Applied(_)
+    ));
+    let text = relay.reply().await["result"]["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let answer: Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(answer, json!({"behavior": "allow", "updatedInput": input}));
+}
+
+#[tokio::test]
+async fn mismatched_decision_keeps_the_call_pending() {
+    let mut relay = RelayHarness::bind().await;
+    relay
+        .call(
+            json!(12),
+            "approve",
+            json!({"tool_name": "Bash", "input": {"command": "touch x"}, "tool_use_id": "toolu_mismatch"}),
+        )
+        .await;
+    let request_id = match relay.broker.next().await {
+        BrokerEvent::Opened { request_id, .. } => request_id,
+        other => panic!("expected Opened, got {other:?}"),
+    };
+    let wrong = relay
+        .broker
+        .answer(
+            &request_id,
+            &DecisionPayload::Question {
+                answers: BTreeMap::new(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(&wrong, canterlot_worker::adapter::DecisionOutcome::NotApplied(r) if r == "decision_mismatch"),
+        "{wrong:?}"
+    );
+    let right = relay
+        .broker
+        .answer(
+            &request_id,
+            &DecisionPayload::Permission {
+                behavior: PermissionBehavior::Deny,
+                message: None,
+            },
+        )
+        .await;
+    assert!(matches!(
+        right,
+        canterlot_worker::adapter::DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(relay.reply().await["id"], 12);
+}
+
+#[tokio::test]
 async fn deny_returns_message() {
     let mut relay = RelayHarness::bind().await;
     relay

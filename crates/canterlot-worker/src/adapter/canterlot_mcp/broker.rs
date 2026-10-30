@@ -16,13 +16,15 @@ use tokio::{
 
 use super::mcp::{self, ToolSet};
 
-struct PendingCall {
-    rpc_id: Value,
-    stored: Value,
+/// Вид ожидающего вызова задаётся при открытии, а не ключами входа инструмента.
+enum PendingKind {
+    Permission { input: Value },
+    Question { normalized: Value, original: Value },
 }
 
-fn is_question(stored: &Value) -> bool {
-    stored.get("normalized").is_some()
+struct PendingCall {
+    rpc_id: Value,
+    kind: PendingKind,
 }
 
 #[derive(Debug)]
@@ -139,21 +141,34 @@ impl Broker {
         decision: &DecisionPayload,
     ) -> crate::adapter::DecisionOutcome {
         use crate::adapter::{DecisionOutcome, DecisionProof};
-        let call = self.pending.lock().await.remove(request_id);
-        let Some(call) = call else {
+        let mut pending = self.pending.lock().await;
+        let Some(call) = pending.get(request_id) else {
             return DecisionOutcome::NotApplied("request_not_pending".into());
         };
-        let text = match decision {
-            DecisionPayload::Permission {
-                behavior: PermissionBehavior::Allow,
-                ..
-            } if !is_question(&call.stored) => mcp::allow_text(&call.stored),
-            DecisionPayload::Permission {
-                behavior: PermissionBehavior::Deny,
-                message,
-            } if !is_question(&call.stored) => mcp::deny_text(message.as_deref()),
-            DecisionPayload::Question { answers } if is_question(&call.stored) => {
-                let id_to_text: Vec<(String, String)> = call.stored["normalized"]["questions"]
+        // Несовпавшее решение оставляет вызов ожидающим: CLI ещё ждёт ответа.
+        let text = match (&call.kind, decision) {
+            (
+                PendingKind::Permission { input },
+                DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Allow,
+                    ..
+                },
+            ) => mcp::allow_text(input),
+            (
+                PendingKind::Permission { .. },
+                DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Deny,
+                    message,
+                },
+            ) => mcp::deny_text(message.as_deref()),
+            (
+                PendingKind::Question {
+                    normalized,
+                    original,
+                },
+                DecisionPayload::Question { answers },
+            ) => {
+                let id_to_text: Vec<(String, String)> = normalized["questions"]
                     .as_array()
                     .map(|questions| {
                         questions
@@ -167,11 +182,14 @@ impl Broker {
                             .collect()
                     })
                     .unwrap_or_default();
-                let original = call.stored.get("original").cloned().unwrap_or(Value::Null);
-                mcp::question_text(&original, &id_to_text, answers)
+                mcp::question_text(original, &id_to_text, answers)
             }
             _ => return DecisionOutcome::NotApplied("decision_mismatch".into()),
         };
+        let Some(call) = pending.remove(request_id) else {
+            return DecisionOutcome::NotApplied("request_not_pending".into());
+        };
+        drop(pending);
         let reply = mcp::tool_call_reply(&call.rpc_id, &text_value(&text));
         if write_line(&self.writer, &reply).await.is_err() {
             self.pending
@@ -278,7 +296,9 @@ async fn serve_conn(
                             request_id.clone(),
                             PendingCall {
                                 rpc_id,
-                                stored: arguments.get("input").cloned().unwrap_or(Value::Null),
+                                kind: PendingKind::Permission {
+                                    input: arguments.get("input").cloned().unwrap_or(Value::Null),
+                                },
                             },
                         );
                         let _ = events.send(BrokerEvent::Opened {
@@ -295,14 +315,14 @@ async fn serve_conn(
                             request_id.clone(),
                             PendingCall {
                                 rpc_id,
-                                stored: json!({
-                                    "normalized": payload,
-                                    "original": arguments
+                                kind: PendingKind::Question {
+                                    normalized: payload.clone(),
+                                    original: arguments
                                         .get("input")
                                         .and_then(|input| input.get("questions"))
                                         .cloned()
                                         .unwrap_or(Value::Null),
-                                }),
+                                },
                             },
                         );
                         let _ = events.send(BrokerEvent::Opened {
