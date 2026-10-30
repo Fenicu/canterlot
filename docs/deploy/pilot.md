@@ -142,11 +142,14 @@ mkdir -p /etc/canterlot
   DB_PASS=$(openssl rand -hex 24)
   sudo -u postgres psql -c "CREATE ROLE canterlot LOGIN;"
   printf "ALTER ROLE canterlot PASSWORD '%s';\n" "$DB_PASS" | sudo -u postgres psql -q
-  sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot;"
+  sudo -u postgres psql -c "CREATE DATABASE canterlot OWNER canterlot ENCODING 'UTF8' TEMPLATE template0;"
   printf 'postgres://canterlot:%s@127.0.0.1:5432/canterlot\n' "$DB_PASS" > /etc/canterlot/db.url
   chown canterlot:canterlot /etc/canterlot/db.url
 )
 ```
+
+> [!IMPORTANT]
+> База должна быть в кодировке UTF-8: `sudo -u postgres psql -d canterlot -Atc "SHOW server_encoding;"` печатает `UTF8`. Миграции используют ICU-сортировку `und-x-icu` (уникальный индекс имён групп, поиск сессий по названию), а в базе `SQL_ASCII` накат останавливается с ошибкой `collation "und-x-icu" for encoding "SQL_ASCII" does not exist`. Кластер, созданный пакетом PostgreSQL в минимальном контейнере без заданной локали, может получить кодировку `SQL_ASCII`, и `CREATE DATABASE` без `ENCODING` унаследует её из `template1`, поэтому кодировка и `template0` в команде выше заданы явно. Кодировку существующей базы не сменить: удалите пустую базу и создайте её заново с `ENCODING 'UTF8'`.
 
 ### 2.3. Межсетевой экран nftables на LXC хаба
 
