@@ -479,6 +479,15 @@ impl CodexAdapter {
                 .map(|item| item as &Value),
         };
         match self.requests.on_server_request(id, method, params, &ctx) {
+            // Вне хода супервизор карточку не откроет, а фаза ожидания держала бы
+            // очередь хаба: сервер сразу получает отказ.
+            Intake::Open(AdapterEvent::RequestOpened { request_id, .. })
+                if !self.turn_running() =>
+            {
+                self.pending_writes
+                    .extend(self.requests.refuse(&request_id));
+                self.diagnostic("request_outside_turn", false);
+            }
             Intake::Open(event) => {
                 let phase = match &event {
                     AdapterEvent::RequestOpened { kind, .. } if kind == "question" => {
@@ -641,6 +650,7 @@ impl CodexAdapter {
         if !was_active {
             return;
         }
+        self.pending_writes.extend(self.requests.refuse_subagents());
         let mut finish = Vec::new();
         if let Some(translator) = self.translator.as_mut() {
             finish.push(translator.finish_turn());
@@ -1894,6 +1904,7 @@ impl Adapter for CodexAdapter {
         } else {
             self.diagnostic("interrupt_cleanup_failed", false);
         }
+        self.pending_writes.extend(self.requests.refuse_subagents());
         self.requests.drop_all();
         InterruptOutcome::Acknowledged
     }

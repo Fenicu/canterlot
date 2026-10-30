@@ -1280,6 +1280,10 @@ impl Translator {
                 required: false,
             })];
         }
+        // Вне хода запрос сразу отклоняется: фаза ожидания держала бы очередь хаба.
+        if self.active_turn.is_none() {
+            return vec![Translated::Ignored];
+        }
         let flags: Vec<&str> = status
             .get("activeFlags")
             .and_then(Value::as_array)

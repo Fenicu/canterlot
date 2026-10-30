@@ -1,6 +1,6 @@
 //! Запросы сервера Codex: разрешения на команды и правки, структурированные
-//! вопросы, elicitation MCP и остальные методы. Ответ строится только из явного
-//! решения владельца: авто-allow нет, при сбросе очередь умирает без ответов.
+//! вопросы, elicitation MCP и остальные методы. Согласие строится только из явного
+//! решения владельца: авто-allow нет, запрос без карточки получает отказ.
 use super::super::{AdapterEvent, valid_decision};
 use super::rpc::{RpcClient, RpcId};
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
@@ -376,7 +376,35 @@ impl Requests {
         }
     }
 
-    // Прерывание и конец хода: хозяин уже закрыл запросы, серверу — ничего.
+    // Карточки нет и не будет: сервер получает отказ, запрос забывается.
+    pub fn refuse(&mut self, request_id: &str) -> Option<Value> {
+        let pending = self.pending.remove(request_id)?;
+        self.rpc_index.remove(&pending.rpc_id);
+        if pending.answered {
+            return None;
+        }
+        let result = match pending.perm {
+            Some(perm) => permission_answer(perm, &pending, PermissionBehavior::Deny),
+            None => serde_json::json!({"answers": {}}),
+        };
+        Some(RpcClient::result(&pending.rpc_id, result))
+    }
+
+    // Запросы субагентов к концу главного хода: их карточки закрыты, а ход
+    // ребёнка сервер сам не завершает, и без ответа он ждёт вечно.
+    pub fn refuse_subagents(&mut self) -> Vec<Value> {
+        let open: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(_, pending)| pending.payload["agent"] == "subagent")
+            .map(|(request_id, _)| request_id.clone())
+            .collect();
+        open.iter()
+            .filter_map(|request_id| self.refuse(request_id))
+            .collect()
+    }
+
+    // Прерывание: хозяин уже закрыл запросы, главные сервер снимает сам.
     pub fn drop_all(&mut self) {
         self.pending.clear();
         self.rpc_index.clear();

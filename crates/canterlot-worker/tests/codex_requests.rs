@@ -441,6 +441,47 @@ fn form_and_verification_elicitations_are_declined_without_a_card() {
 }
 
 #[test]
+fn refused_requests_never_answer_allow_and_are_forgotten() {
+    for (name, line_no, expected) in [
+        (
+            "elicitation",
+            2,
+            json!({"action": "decline", "content": null, "_meta": null}),
+        ),
+        (
+            "permissions_request",
+            1,
+            json!({"permissions": {}, "scope": "turn"}),
+        ),
+        ("question_free_text", 1, json!({"answers": {}})),
+    ] {
+        let data = fixture_data(name, line_no);
+        let mut requests = Requests::new();
+        let (request_id, _, _) = open(&mut requests, &data, "orchestrator", None);
+        let line = requests.refuse(&request_id).expect("reply");
+        assert_eq!(line["id"], data["id"], "{name}");
+        assert_eq!(line["result"], expected, "{name}");
+        assert!(!requests.is_pending(&request_id), "{name}");
+        assert!(requests.refuse(&request_id).is_none(), "{name}");
+    }
+}
+
+#[test]
+fn only_unanswered_subagent_requests_are_refused_at_the_turn_end() {
+    let data = fixture_data("elicitation", 2);
+    let mut requests = Requests::new();
+    let (main_id, _, _) = open(&mut requests, &data, "orchestrator", None);
+    let mut child = data.clone();
+    child["id"] = json!(70);
+    let (child_id, _, _) = open(&mut requests, &child, "subagent", None);
+    let lines = requests.refuse_subagents();
+    assert_eq!(lines.len(), 1);
+    assert_eq!(lines[0]["id"], 70);
+    assert!(!requests.is_pending(&child_id));
+    assert!(requests.is_pending(&main_id));
+}
+
+#[test]
 fn unsupported_server_requests_get_an_error_reply() {
     let mut requests = Requests::new();
     for line_no in [1, 2] {

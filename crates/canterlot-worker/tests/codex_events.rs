@@ -396,6 +396,7 @@ fn is_phase(event: &AdapterEvent, phase: &Phase) -> bool {
 #[test]
 fn phases_follow_status_flags_and_awaiting_input_waits_for_turn_end() {
     let mut translator = Translator::new("01a171c1-2578-7941-bc6d-d6ddc5b5ca1f", "gpt-6-luna");
+    translator.begin_turn("01a171c1-259e-7d31-a49c-500a44d9eed4", command_id());
     let out25 = feed_line(&mut translator, "permissions", 25, "thread/status/changed");
     assert!(
         events_of(&out25)
@@ -409,6 +410,7 @@ fn phases_follow_status_flags_and_awaiting_input_waits_for_turn_end() {
             .any(|e| is_phase(e, &Phase::Generating))
     );
     let mut translator = Translator::new("01a171cb-3faf-7f01-996d-a42835bb3524", "gpt-6-luna");
+    translator.begin_turn("01a171cb-4445-7d13-8e41-184bfa519a0b", command_id());
     let out27 = feed_line(
         &mut translator,
         "question_default_mode",

@@ -333,6 +333,27 @@ impl Fake {
         std::fs::read_to_string(self.dir.path().join("stdin.log")).unwrap_or_default()
     }
 
+    // Ответ адаптера на запрос сервера `id` и события, накопленные за ожиданием.
+    async fn reply_to(&mut self, id: i64) -> (Value, Vec<AdapterEvent>) {
+        let mut events = vec![];
+        for _ in 0..200 {
+            let reply = self
+                .stdin_log()
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find(|line| line["id"] == id && line.get("method").is_none());
+            if let Some(reply) = reply {
+                return (reply, events);
+            }
+            if let Ok(event) =
+                tokio::time::timeout(Duration::from_millis(25), self.adapter.next_event()).await
+            {
+                events.push(event);
+            }
+        }
+        panic!("no reply to {id}: {events:?}");
+    }
+
     fn stdin_methods(&self) -> Vec<String> {
         self.stdin_log()
             .lines()
@@ -1112,9 +1133,9 @@ async fn turn_started_before_the_response_keeps_the_session_running() {
     let id = fake.start_turn("reversed").await;
     let events = fake.finish(id).await;
     assert!(
-        !events
-            .iter()
-            .any(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "turn_merged")),
+        !events.iter().any(
+            |event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "turn_merged")
+        ),
         "{events:?}"
     );
     fake.close().await;
@@ -1306,6 +1327,120 @@ async fn turn_ending_without_a_user_message_leaves_the_proof_wait_at_once() {
         "{outcome:?}"
     );
     fake.finish(id).await;
+    fake.close().await;
+}
+
+fn awaits_owner(events: &[AdapterEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            AdapterEvent::RequestOpened { .. }
+                | AdapterEvent::Phase {
+                    phase: canterlot_worker::adapter::Phase::AwaitingPermission
+                        | canterlot_worker::adapter::Phase::AwaitingAnswer,
+                    ..
+                }
+        )
+    })
+}
+
+fn waiting_status(thread: &str) -> String {
+    note(
+        "thread/status/changed",
+        json!({"threadId": thread, "status": {"type": "active", "activeFlags": ["waitingOnApproval"]}}),
+    )
+}
+
+fn child_approval(id: i64) -> String {
+    w_out(
+        json!({"id": id, "method": "item/commandExecution/requestApproval",
+        "params": {"threadId": "thread-child", "turnId": "turn-child", "itemId": "exec-child",
+            "command": "cargo test", "cwd": "/tmp"}}),
+    )
+}
+
+#[tokio::test]
+async fn request_outside_a_turn_is_refused_without_a_card_or_a_phase() {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    lines.push(waiting_status("thread-mini"));
+    lines.push(w_out(
+        json!({"id": 30, "method": "mcpServer/elicitation/request",
+        "params": {"serverName": "s", "threadId": "thread-mini", "turnId": null, "mode": "url",
+            "message": "Open.", "url": "https://example.invalid/a", "elicitationId": "e-1"}}),
+    ));
+    lines.push(child_approval(31));
+    lines.push(w_out(
+        json!({"id": 32, "method": "item/tool/requestUserInput",
+        "params": {"threadId": "thread-child", "turnId": "turn-child", "itemId": "ask-child",
+            "questions": [{"id": "q", "question": "Which?", "header": "h"}]}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let (_, mut events) = fake.send("run").await;
+    let (url, more) = fake.reply_to(30).await;
+    events.extend(more);
+    let (command, more) = fake.reply_to(31).await;
+    events.extend(more);
+    let (question, more) = fake.reply_to(32).await;
+    events.extend(more);
+    assert_eq!(
+        url["result"],
+        json!({"action": "decline", "content": null, "_meta": null})
+    );
+    assert_eq!(command["result"], json!({"decision": "decline"}));
+    assert_eq!(question["result"], json!({"answers": {}}));
+    assert!(!awaits_owner(&events), "{events:?}");
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn open_subagent_request_is_refused_when_the_main_turn_ends() {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(child_approval(30));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let (_, events) = fake.send("run").await;
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RequestOpened { .. })),
+        "{events:?}"
+    );
+    let (reply, _) = fake.reply_to(30).await;
+    assert_eq!(reply["result"], json!({"decision": "decline"}));
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn interrupt_refuses_open_subagent_requests() {
+    use canterlot_worker::adapter::InterruptOutcome;
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(child_approval(30));
+    lines.push(w_in(11, "turn/interrupt", json!({})));
+    lines.push(w_out(json!({"id": 11, "result": {}})));
+    lines.push(turn_end("thread-mini", "turn-1", "interrupted"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("run").await;
+    loop {
+        if matches!(fake.event().await, AdapterEvent::RequestOpened { .. }) {
+            break;
+        }
+    }
+    match tokio::time::timeout(WAIT, fake.adapter.interrupt())
+        .await
+        .unwrap()
+    {
+        InterruptOutcome::Acknowledged => {}
+        other => panic!("interrupt: {other:?}"),
+    }
+    let (reply, _) = fake.reply_to(30).await;
+    assert_eq!(reply["result"], json!({"decision": "decline"}));
     fake.close().await;
 }
 
