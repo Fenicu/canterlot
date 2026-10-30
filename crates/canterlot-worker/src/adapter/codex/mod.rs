@@ -24,10 +24,10 @@ use self::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, BlockKind, Capabilities, CloseMode, DecisionOutcome,
-        DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome, ModelCatalog, Phase,
-        Proof, SettingsChange, StartSpec, Started, Support, Transmission, TransmitOutcome,
-        canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
+        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
+        DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome,
+        ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
+        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
     },
     config::CodexConfig,
     containment::Containment,
@@ -572,6 +572,21 @@ impl CodexAdapter {
     }
 
     async fn on_broker(&mut self, event: BrokerEvent) {
+        if let BrokerEvent::AgentTool {
+            call_id,
+            tool,
+            arguments,
+            ..
+        } = event
+        {
+            // Вызов пресетов уходит в хаб; итог вернётся через agent_call_result.
+            self.events.push_back(AdapterEvent::AgentCall {
+                call_id,
+                tool: tool.to_owned(),
+                arguments,
+            });
+            return;
+        }
         let BrokerEvent::LimitsQuery { rpc_id } = event else {
             return;
         };
@@ -1517,6 +1532,13 @@ impl Adapter for CodexAdapter {
             if timeout_at(limit, self.pump_once()).await.is_err() {
                 return DecisionOutcome::Undetermined;
             }
+        }
+    }
+
+    async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+        // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
+        if let Some(broker) = self.broker.as_mut() {
+            broker.answer_agent_tool(call_id, &result).await;
         }
     }
 
