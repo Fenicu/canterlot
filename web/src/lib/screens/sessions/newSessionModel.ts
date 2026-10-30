@@ -1,4 +1,5 @@
 import { recentWorkdirs } from "#lib/api/client.js";
+import { availabilityLabel } from "#lib/format/labels.js";
 import { ApiError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 import type { OpJournal } from "#lib/ops/journal.js";
@@ -60,7 +61,7 @@ export function machineProblem(
     machine.availability === "unavailable" ||
     machine.availability === "degraded"
   ) {
-    return `Машина недоступна: ${machine.availability}`;
+    return `Машина недоступна: ${availabilityLabel(machine.availability).toLocaleLowerCase("ru-RU")}`;
   }
   if (!(machine.capabilities ?? []).includes("pilot_v1"))
     return "Машина не готова к пилоту";

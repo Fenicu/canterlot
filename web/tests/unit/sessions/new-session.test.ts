@@ -48,7 +48,7 @@ function machine(patch: Partial<MachineRecord> = {}): MachineRecord {
           { id: "opus", title: "opus", efforts: ["low", "medium"] },
           { id: "haiku", title: "haiku", efforts: ["low"] },
         ],
-        permission_modes: ["default"],
+        permission_modes: ["owner"],
       },
     ],
     ...patch,
@@ -257,7 +257,7 @@ describe("sessions/new", () => {
       ops(),
     );
     down.machineId = "m1";
-    expect(down.errors.machine).toBe("Машина недоступна: degraded");
+    expect(down.errors.machine).toBe("Машина недоступна: связь нестабильна");
     const bare = new NewSessionModel(
       store([machine({ capabilities: [] })]),
       config,

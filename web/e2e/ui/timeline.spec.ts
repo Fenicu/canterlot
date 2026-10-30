@@ -321,13 +321,13 @@ test('user_bubble_marks_follow_input_state', async ({ page }) => {
 test('incomplete_block_is_marked_and_partial_text_stays', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const block = textBlock(api, 'частичный текст', '1', 'incomplete');
-  block.incomplete_reason = 'обрыв связи';
+  block.incomplete_reason = 'process_exited';
   api.histories.set(id, [block]);
   api.bindConversation(id);
   await page.reload();
   await expect(page.getByText('частичный текст')).toBeVisible();
   await expect(page.getByText('Неполный ответ')).toBeVisible();
-  await expect(page.getByText('обрыв связи')).toBeVisible();
+  await expect(page.getByText('Процесс агента завершился')).toBeVisible();
 });
 
 test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) => {

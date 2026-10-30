@@ -1,3 +1,4 @@
+import { providerLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -44,15 +45,6 @@ const ACTION_LABELS: Record<CardAction["id"], string> = {
   retry_as_new: "Отправить повторно как новое",
 };
 
-function providerLabel(provider?: string | null): string {
-  if (!provider) return "Claude";
-  if (provider === "claude" || provider.toLowerCase() === "claude")
-    return "Claude";
-  if (provider === "codex" || provider.toLowerCase() === "codex")
-    return "Codex";
-  return provider;
-}
-
 export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
   const cards: Card[] = [];
   const hasNoLiveExecutionHold = q.hold_reasons.some(
@@ -98,7 +90,7 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         break;
       }
       case "limit_reached": {
-        const name = providerLabel(p.provider ?? ctx.provider);
+        const name = providerLabel(p.provider ?? ctx.provider ?? "claude");
         const resetTime = p.resets_at
           ? fmt.resetAt(Date.parse(p.resets_at), ctx.now)
           : "";
@@ -245,7 +237,7 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
       }
 
       case "weekly_reserve": {
-        const name = providerLabel(h.provider ?? ctx.provider);
+        const name = providerLabel(h.provider ?? ctx.provider ?? "claude");
         const body: string[] = [];
         if (ctx.crunch && ctx.resumePending) {
           const resetStr = h.resets_at

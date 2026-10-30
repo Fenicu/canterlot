@@ -249,7 +249,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         created_at: new Date().toISOString(),
         model: body.model ?? '',
         effort: body.effort ?? '',
-        permission_mode: 'default',
+        permission_mode: 'owner',
         activity: { state: 'idle' as const, evidence: {}, since: new Date().toISOString() },
         unread_count: 0,
         queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
@@ -433,7 +433,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const effective = {
       model: row?.model ?? body.model ?? 'opus-5.5',
       effort: row?.effort ?? body.effort ?? 'medium',
-      permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default',
+      permission_mode: row?.permission_mode ?? body.permission_mode ?? 'owner',
       instruction_profile: effectiveRef,
       instruction_preset: appliedPreset(effectiveRef)
     };

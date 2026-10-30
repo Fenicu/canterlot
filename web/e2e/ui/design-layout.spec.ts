@@ -29,7 +29,7 @@ function block(api: FakeHubApi, seq: string, partial: Partial<HistoryBlock>): Hi
 
 function startTurn(hub: FakeHub, api: FakeHubApi, id: string): void {
   const scope = `conversation:${id}`;
-  hub.append(scope, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: new Date().toISOString(), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'default' }, crunch: { enabled: false } } });
+  hub.append(scope, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'working', evidence: { phase: 'generating' }, since: new Date().toISOString() }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: new Date().toISOString(), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'owner' }, crunch: { enabled: false } } });
   hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: api.id() } } } });
   hub.flush();
 }
@@ -129,7 +129,7 @@ test.describe('шапка и сообщения', () => {
     const { hub, id } = await boot(page);
     await expect(page.getByRole('link', { name: 'Назад' })).toHaveCount(0);
     await expect(page.getByRole('link', { name: 'Все сессии' })).toHaveCount(1);
-    hub.append(`conversation:${id}`, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'waiting_for_user', evidence: { question: 'Что делать, если курсор старше журнала событий и повтор уже невозможен?' }, since: new Date().toISOString() }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: new Date().toISOString(), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'default' }, crunch: { enabled: false } } });
+    hub.append(`conversation:${id}`, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'waiting_for_user', evidence: { question: 'Что делать, если курсор старше журнала событий и повтор уже невозможен?' }, since: new Date().toISOString() }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: new Date().toISOString(), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'owner' }, crunch: { enabled: false } } });
     hub.flush();
     await expect(page.locator('.state-chip .state-text')).toHaveText('Ждёт ответа');
     const sizes = await page.locator('.chat-header').evaluate((node) => ({

@@ -1,8 +1,6 @@
 import type { components } from '#lib/api/generated/openapi.js';
 
-export function machineStatus(value: string): string {
-  return ({ available: 'В сети', ready: 'В сети', degraded: 'Связь нестабильна', unavailable: 'Не в сети' })[value] ?? 'Не в сети';
-}
+export { availabilityLabel as machineStatus } from '#lib/format/labels.js';
 export function machineWarnings(values: string[]): string[] {
   const labels: Record<string, string> = { disk_usage_high: 'Мало свободного места на диске', metrics_stale: 'Данные устарели', limits_mismatch: 'Лимиты машины не совпадают с настройками хаба' };
   return values.flatMap(value => labels[value] ? [labels[value]!] : []);

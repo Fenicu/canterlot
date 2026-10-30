@@ -1,3 +1,4 @@
+import { providerLabel as label } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import {
   limitView,
@@ -97,12 +98,6 @@ function rank(provider: string, prefer?: string): number {
   if (provider === "claude") return 1;
   if (provider === "codex") return 2;
   return 3;
-}
-
-function label(provider: string): string {
-  if (provider === "claude") return "Claude";
-  if (provider === "codex") return "Codex";
-  return provider;
 }
 
 function weekday(ts: number): string {

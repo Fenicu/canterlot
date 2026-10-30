@@ -1,3 +1,4 @@
+import { providerLabel } from '#lib/format/labels.js';
 import type { components } from '#lib/api/generated/openapi.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
@@ -20,13 +21,13 @@ export function chartModel(series: Series[], days: string[], zone: string) {
     return { provider: item.provider, days: days.map(day => ({ day, five: five.get(day) ?? null, weekly: weekly.get(day) ?? null })) };
   });
 }
-export function providerName(value: string): string { return value === 'claude' ? 'Claude' : value === 'codex' ? 'Codex' : value; }
+export { providerLabel as providerName } from '#lib/format/labels.js';
 export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<string, { title: string }>) {
   return usage.filter(row => row.day === day).sort((a, b) => b.weekly_delta_permille - a.weekly_delta_permille).map(row => ({
     id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,
     conversationId: row.conversation_id,
     title: sessions.get(row.conversation_id)?.title ?? `Сессия ${row.conversation_id.slice(0, 8)}`,
-    detail: `${row.agent === 'main' ? providerName(row.provider) : 'Субагент'} · ${row.model}`,
+    detail: `${row.agent === 'main' ? providerLabel(row.provider) : 'Субагент'} · ${row.model}`,
     input: row.input_tokens + row.cache_read_tokens + row.cache_write_tokens,
     output: row.output_tokens, delta: row.weekly_delta_permille,
     // Квота измеряется за время работы, а не по каждому отдельному токену.

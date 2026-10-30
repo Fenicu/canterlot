@@ -1,6 +1,12 @@
 <script lang="ts">
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { buildDiagnosticsReport, type DiagnosticsData } from './diagnostics';
+	import {
+		diagnosticKindLabel,
+		executionOutcomeLabel,
+		executionStateLabel,
+		scopeStatusLabel
+	} from '#lib/format/labels.js';
 	import Button from '#lib/ui/Button.svelte';
 	import Sheet from '#lib/ui/Sheet.svelte';
 
@@ -106,10 +112,10 @@
 		<section>
 			<h3>Исполнение</h3>
 			<div class="rows">
-				<div class="key-value"><span>Состояние</span><code>{diagData.execution?.state ?? 'idle'}</code></div>
+				<div class="key-value"><span>Состояние</span><code>{executionStateLabel(diagData.execution?.state ?? 'idle')}</code></div>
 				<div class="key-value"><span>Поколение</span><code>{diagData.execution?.generation ?? 1}</code></div>
 				{#if diagData.execution?.outcome}
-					<div class="key-value"><span>Итог</span><code>{diagData.execution.outcome}</code></div>
+					<div class="key-value"><span>Итог</span><code>{executionOutcomeLabel(diagData.execution.outcome)}</code></div>
 				{/if}
 			</div>
 		</section>
@@ -118,7 +124,7 @@
 			<h3>Журнал и соединение</h3>
 			<div class="rows">
 				<div class="key-value"><span>Сессия</span><code>{diagData.conversationId}</code></div>
-				<div class="key-value"><span>Статус scope</span><code>{diagData.scope?.status ?? 'idle'}</code></div>
+				<div class="key-value"><span>Подписка</span><code>{scopeStatusLabel(diagData.scope?.status ?? 'idle')}</code></div>
 				<div class="key-value"><span>Курсор</span><code>{diagData.scope?.cursor ?? 'none'}</code></div>
 			</div>
 		</section>
@@ -131,7 +137,7 @@
 				<div class="rows">
 					{#each diagnosticEvents as ev, idx (idx)}
 						<div class="key-value">
-							<span class="event-kind">{ev.kind}</span>
+							<span class="event-kind">{diagnosticKindLabel(ev.kind)}</span>
 							{#if ev.correlation_id}<code>{ev.correlation_id}</code>{/if}
 						</div>
 					{/each}

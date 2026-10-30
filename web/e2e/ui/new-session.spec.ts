@@ -23,7 +23,7 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
     }
   });
   await page.getByRole('link', { name: 'Новая сессия' }).click();
-  await expect(page.getByRole('option', { name: /Машина недоступна: degraded/ })).toHaveAttribute('disabled', '');
+  await expect(page.getByRole('option', { name: /Машина недоступна: связь нестабильна/ })).toHaveAttribute('disabled', '');
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
   await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
   await page.getByRole('radio', { name: 'Claude Code' }).check();

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import { onMount } from 'svelte';
 	import type { BlockModel } from '#lib/stores/blocks.js';
 	import { answerToMarkdown } from '#lib/export/markdown.js';
@@ -112,7 +113,7 @@
 
 			handleDeliveryOutcome(outcome, pages);
 		} catch (err: unknown) {
-			imageStatus = err instanceof Error ? err.message : 'Не удалось экспортировать изображение';
+			imageStatus = errorText(err, 'Не удалось экспортировать изображение');
 		} finally {
 			exportingImage = false;
 		}

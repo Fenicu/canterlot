@@ -25,7 +25,7 @@ async function bootInfo(
 					{ id: 'opus-5.5', title: 'opus-5.5', efforts: ['low', 'medium', 'high'] },
 					{ id: 'haiku', title: 'haiku', efforts: ['low'] }
 				],
-				permission_modes: ['default', 'ask', 'auto_edit', 'full_access']
+				permission_modes: ['owner', 'ask', 'bypass', 'read_only']
 			}
 		]
 	});

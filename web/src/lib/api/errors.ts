@@ -243,6 +243,13 @@ export interface DescribedError {
   correlationId?: string;
 }
 
+/** Текст для экрана: сообщения хаба и клиента уже по-русски, а коды латиницей владельцу не показываем. */
+export function errorText(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error && /[А-Яа-яЁё]/.test(err.message)) return err.message;
+  return err instanceof NetworkError ? "Нет связи с хабом" : fallback;
+}
+
 export function describeError(err: ApiError | unknown): DescribedError {
   if (err instanceof AuthRequired) {
     return {

@@ -20,7 +20,7 @@ async function bootLane(page: Page) {
 					{ id: 'opus-5.5', title: 'opus-5.5', efforts: ['low', 'medium', 'high'] },
 					{ id: 'haiku', title: 'haiku', efforts: ['low'] }
 				],
-				permission_modes: ['default', 'ask', 'auto_edit', 'full_access']
+				permission_modes: ['owner', 'ask', 'bypass', 'read_only']
 			}
 		]
 	});
@@ -74,7 +74,7 @@ test('desktop_delegation_panel_lists_nodes_with_state_labels_and_selects_a_lane'
 					{ id: 'opus-5.5', title: 'opus-5.5', efforts: ['low', 'medium', 'high'] },
 					{ id: 'haiku', title: 'haiku', efforts: ['low'] }
 				],
-				permission_modes: ['default', 'ask', 'auto_edit', 'full_access']
+				permission_modes: ['owner', 'ask', 'bypass', 'read_only']
 			}
 		]
 	});
@@ -117,7 +117,7 @@ test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }
 				title: 'Claude Code',
 				provider: 'claude',
 				models: [{ id: 'opus-5.5', title: 'opus-5.5', efforts: ['low'] }],
-				permission_modes: ['default']
+				permission_modes: ['owner']
 			}
 		]
 	});

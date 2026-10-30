@@ -212,7 +212,7 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
       unread_count: 3,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: '2026-10-28T12:00:00.000Z',
-      settings: { model: row?.model ?? 'opus', effort: 'medium', permission_mode: 'default' },
+      settings: { model: row?.model ?? 'opus', effort: 'medium', permission_mode: 'owner' },
       crunch: { enabled: false }
     }
   });
@@ -272,7 +272,7 @@ test('limits_strip_warns_at_80_and_shows_the_reserve_variant', async ({ page }) 
       unread_count: row?.unread_count ?? 0,
       queue: row?.queue ?? { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: row?.last_activity_at ?? null,
-      settings: { model: row?.model ?? 'opus', effort: row?.effort ?? 'medium', permission_mode: row?.permission_mode ?? 'default' },
+      settings: { model: row?.model ?? 'opus', effort: row?.effort ?? 'medium', permission_mode: row?.permission_mode ?? 'owner' },
       crunch: { enabled: true }
     }
   });

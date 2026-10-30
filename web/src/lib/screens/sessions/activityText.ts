@@ -1,3 +1,4 @@
+import { failureLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 
 export type Tone = "accent" | "default" | "warning" | "danger";
@@ -29,20 +30,6 @@ export interface Activity {
   evidence?: ActivityEvidence;
   since?: string;
 }
-
-const FAILED: Record<string, string> = {
-  owner_lost: "потерян владелец исполнения",
-  context_exhausted: "исчерпан контекст",
-  crashed: "процесс завершился с ошибкой",
-  start_failed: "не удалось запустить",
-  protocol_incompatible: "несовместимый протокол агента",
-  start_rejected: "запуск отклонён машиной",
-  cli_incompatible: "несовместимая версия CLI",
-  auth_required: "агенту нужна авторизация",
-  storage_failure: "ошибка хранилища на машине",
-  supervisor_died: "процесс сопровождения завершился",
-  admin_resolved: "закрыто администратором",
-};
 
 export function activityLine(
   activity: Activity,
@@ -81,7 +68,7 @@ export function activityLine(
       return quota(evidence, ctx.now);
     case "failed":
       return {
-        text: `Сбой: ${FAILED[evidence.reason ?? ""] ?? "причина неизвестна"}`,
+        text: `Сбой: ${failureLabel(evidence.reason)}`,
         tone: "danger",
         live: false,
       };

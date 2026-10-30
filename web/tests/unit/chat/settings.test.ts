@@ -8,20 +8,20 @@ describe("chat/settings", () => {
         keys: ["model"],
         reason: "settings_unavailable",
       }),
-    ).toBe("Настройка недоступна и сброшена: model");
+    ).toBe("Настройка недоступна и сброшена: модель");
 
     expect(
       formatRejectedSettings({
         keys: ["model", "effort"],
         reason: "settings_unavailable",
       }),
-    ).toBe("Настройка недоступна и сброшена: model, effort");
+    ).toBe("Настройка недоступна и сброшена: модель, усилие");
 
     expect(
       formatRejectedSettings({
         keys: ["permission_mode"],
         reason: "settings_unavailable",
       }),
-    ).toBe("Настройка недоступна и сброшена: permission_mode");
+    ).toBe("Настройка недоступна и сброшена: режим разрешений");
   });
 });

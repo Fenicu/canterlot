@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
@@ -85,7 +86,7 @@
 			menuOpen = false;
 			confirmingForce = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось остановить сессию';
+			actionError = errorText(err, 'Не удалось остановить сессию');
 		}
 	}
 
@@ -95,7 +96,7 @@
 			await resumeSession(chat.id);
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось возобновить сессию';
+			actionError = errorText(err, 'Не удалось возобновить сессию');
 		}
 	}
 
@@ -105,7 +106,7 @@
 			await continueSessionQueue(chat.id);
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось продолжить очередь';
+			actionError = errorText(err, 'Не удалось продолжить очередь');
 		}
 	}
 
@@ -124,7 +125,7 @@
 			await startSessionExecution(chat.id);
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось запустить сессию';
+			actionError = errorText(err, 'Не удалось запустить сессию');
 		}
 	}
 </script>

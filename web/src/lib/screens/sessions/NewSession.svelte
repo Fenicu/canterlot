@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '#lib/api/errors.js';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -6,7 +7,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
-  import { effortLabel } from '#lib/screens/chat/settingsLabels.js';
+  import { effortLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
@@ -123,7 +124,7 @@
       if (share) await goto(resolve(`/share?id=${encodeURIComponent(share)}&conversation=${encodeURIComponent(created.conversationId)}` as '/share'));
       else await goto(resolve(`/c/${created.conversationId}` as '/'));
     } catch (err) {
-      error = err instanceof Error ? err.message : 'Не удалось создать сессию';
+      error = errorText(err, 'Не удалось создать сессию');
     }
   }
 </script>

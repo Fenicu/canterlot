@@ -2,7 +2,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
-  import { effortLabel, permissionLabel } from '#lib/screens/chat/settingsLabels.js';
+  import { PERMISSION_MODES, effortLabel, permissionHint, permissionLabel, permissionValue } from '#lib/format/labels.js';
   import { onMount, untrack } from 'svelte';
   import Button from '#lib/ui/Button.svelte';
   import ChipToggle from '#lib/ui/ChipToggle.svelte';
@@ -44,7 +44,7 @@
   let members = $state(seed.groups.slice());
   let model = $state(seed.model ?? 'opus');
   let effort = $state(seed.effort ?? 'medium');
-  let permission = $state(seed.permission_mode ?? 'default');
+  let permission = $state(permissionValue(seed.permission_mode));
   let crunch = $state(seed.crunch?.enabled ?? false);
   let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
   let reasons = $state<string[]>([]);
@@ -73,7 +73,7 @@
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
   const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => ({ value, label: harness?.models.find((entry) => entry.id === value)?.title || value })));
   const effortOptions = $derived(known(harness?.models.find((entry) => entry.id === model)?.efforts ?? ['low', 'medium', 'high'], effort).map((value) => ({ value, label: effortLabel(value) })));
-  const permissionOptions = $derived(known(harness?.permission_modes ?? ['default', 'ask', 'auto_edit', 'full_access'], permission).map((value) => ({ value, label: permissionLabel(value) })));
+  const permissionOptions = $derived(known(harness?.permission_modes ?? [...PERMISSION_MODES], permission).map((value) => ({ value, label: permissionLabel(value) })));
   const swatches = COLOR_KEYS.map((key) => ({ key, name: COLOR_NAMES[key] }));
 
   let panel = $state<HTMLElement | null>(null);
@@ -148,7 +148,7 @@
       if (force) onclose();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'archive_active') {
-        reasons = (err.details?.reasons ?? []).map((reason) => reasonText[reason] ?? reason);
+        reasons = (err.details?.reasons ?? []).map((reason) => reasonText[reason] ?? 'активная работа');
         return;
       }
       throw err;
@@ -190,7 +190,7 @@
             <Select id="sheet-model" label="Модель" options={modelOptions} bind:value={model} onchange={() => void saveModel(model)} />
             <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
           </div>
-          <Select id="sheet-permission" label="Режим разрешений" options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
+          <Select id="sheet-permission" label="Режим разрешений" hint={permissionHint(permission, harness?.provider ?? item.harness?.provider)} options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
           <Toggle block label="Автопродолжение после лимитов" bind:checked={crunch} />
           {#if crunch}
             <Textarea id="sheet-resume" label="Текст продолжения" rows={2} bind:value={resumeText} onblur={() => void saveCrunch()} />

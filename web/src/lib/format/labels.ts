@@ -1,0 +1,204 @@
+/** Подписи значений протокола: хранимые значения не меняются, сырая строка на экран не попадает. */
+
+type Value = string | null | undefined;
+
+function lookup(map: Record<string, string>, value: Value): string | undefined {
+  return value && Object.hasOwn(map, value) ? map[value] : undefined;
+}
+
+export const PERMISSION_MODES = ["owner", "ask", "bypass", "read_only"] as const;
+
+/** Новая сессия запускается без подтверждений: решение владельца. */
+export const DEFAULT_PERMISSION_MODE = "bypass";
+
+const PERMISSION_LABELS: Record<string, string> = {
+  owner: "Как в настройках CLI",
+  ask: "Спрашивать",
+  bypass: "Без подтверждений",
+  read_only: "Только чтение",
+};
+
+/** Пустой режим хранят сессии, созданные до выбора режима в форме: хаб запускает их как `owner`. */
+export function permissionValue(value: Value): string {
+  return value || "owner";
+}
+
+export function permissionLabel(value: Value): string {
+  return lookup(PERMISSION_LABELS, permissionValue(value)) ?? "Другой режим";
+}
+
+const PERMISSION_HINTS: Record<string, Record<string, string>> = {
+  claude: {
+    owner:
+      "Режим не передаётся: Claude Code берёт defaultMode из ~/.claude/settings.json. При dontAsk работает только список allow, остальное отклоняется молча, без карточки.",
+    ask: "Claude Code спрашивает о действиях вне списка разрешённых: решение приходит карточкой.",
+    bypass: "Claude Code выполняет всё без подтверждений, карточек разрешений не будет.",
+    read_only: "Режим plan: Claude Code читает и планирует, файлы не меняет.",
+  },
+  codex: {
+    owner:
+      "Режим не передаётся: Codex берёт approval_policy и sandbox_mode из своей конфигурации, ~/.codex/config.toml.",
+    ask: "Codex спрашивает перед действиями: решение приходит карточкой, песочницы нет.",
+    bypass: "Codex выполняет всё без подтверждений и без песочницы.",
+    read_only: "Codex работает в песочнице только для чтения и ни о чём не спрашивает.",
+  },
+};
+
+export function permissionHint(value: Value, provider: Value): string {
+  const family = provider === "codex" ? "codex" : "claude";
+  return lookup(PERMISSION_HINTS[family] ?? {}, permissionValue(value)) ?? "";
+}
+
+const EFFORT_LABELS: Record<string, string> = {
+  none: "Без рассуждений",
+  minimal: "Минимальное",
+  low: "Низкое",
+  medium: "Обычное",
+  high: "Высокое",
+  xhigh: "Очень высокое",
+  max: "Максимальное",
+};
+
+export function effortLabel(value: Value): string {
+  return lookup(EFFORT_LABELS, value) ?? "Другое усилие";
+}
+
+const EXECUTION_STATES: Record<string, string> = {
+  idle: "Не запущено",
+  live: "Работает",
+  created: "Создаётся",
+  starting: "Запускается",
+  running: "Работает",
+  stopping: "Останавливается",
+  stopped: "Остановлено",
+  failed: "Сбой",
+  owner_lost: "Связь с исполнением потеряна",
+};
+
+export function executionStateLabel(value: Value): string {
+  return lookup(EXECUTION_STATES, value) ?? "Состояние неизвестно";
+}
+
+const FAILURES: Record<string, string> = {
+  owner_lost: "потерян владелец исполнения",
+  context_exhausted: "исчерпан контекст",
+  crashed: "процесс завершился с ошибкой",
+  start_failed: "не удалось запустить",
+  protocol_incompatible: "несовместимый протокол агента",
+  start_rejected: "запуск отклонён машиной",
+  cli_incompatible: "несовместимая версия CLI",
+  auth_required: "агенту нужна авторизация",
+  storage_failure: "ошибка хранилища на машине",
+  supervisor_died: "процесс сопровождения завершился",
+  admin_resolved: "закрыто администратором",
+  invalid_instructions: "инструкции не подошли агенту",
+};
+
+/** Причина сбоя строчными: подставляется после «Сбой:» и в текст карточки. */
+export function failureLabel(value: Value): string {
+  return lookup(FAILURES, value) ?? "причина неизвестна";
+}
+
+const OUTCOMES: Record<string, string> = {
+  user_stop: "Остановлено вами",
+  force_stopped: "Остановлено принудительно",
+  normal_exit: "Завершено штатно",
+  start_cancelled: "Запуск отменён",
+};
+
+export function executionOutcomeLabel(value: Value): string {
+  const known = lookup(OUTCOMES, value);
+  if (known) return known;
+  const failure = lookup(FAILURES, value);
+  return failure ? capitalize(failure) : "Итог неизвестен";
+}
+
+const SCOPE_STATUSES: Record<string, string> = {
+  idle: "Не подключено",
+  loading_snapshot: "Загружается",
+  subscribing: "Подключается",
+  live: "На связи",
+  gap_recovery: "Восстанавливает пропуск",
+  reconnecting: "Переподключается",
+  forbidden: "Нет доступа",
+  incompatible: "Нужно обновить приложение",
+  degraded: "Синхронизация не удаётся",
+};
+
+export function scopeStatusLabel(value: Value): string {
+  return lookup(SCOPE_STATUSES, value) ?? "Состояние неизвестно";
+}
+
+const DIAGNOSTIC_KINDS: Record<string, string> = {
+  limit_reached: "Достигнут лимит",
+  block_conflicting_final: "Расхождение итогового текста",
+  adapter_diagnostic: "Сообщение адаптера",
+  state_divergence: "Расхождение состояния",
+  block_revision_gap: "Пропуск в потоке блока",
+  block_checksum_mismatch: "Контрольная сумма блока не совпала",
+};
+
+export function diagnosticKindLabel(value: Value): string {
+  return lookup(DIAGNOSTIC_KINDS, value) ?? "Служебное событие";
+}
+
+const BLOCK_ENDS: Record<string, string> = {
+  interrupted: "Прервано",
+  stopped: "Исполнение остановлено",
+  process_exited: "Процесс агента завершился",
+};
+
+export function blockEndLabel(value: Value): string {
+  const known = lookup(BLOCK_ENDS, value);
+  if (known) return known;
+  const failure = lookup(FAILURES, value);
+  return failure ? capitalize(failure) : "Ответ оборвался";
+}
+
+const REJECTIONS: Record<string, string> = {
+  generation_closed: "Исполнение уже завершено",
+  execution_stopped: "Исполнение остановлено",
+  execution_terminal: "Исполнение завершилось",
+  too_late: "Сообщение уже передано агенту",
+  transmission_started: "Сообщение уже передаётся агенту",
+  already_transmitted: "Сообщение уже передано агенту",
+  undetermined: "Приём не подтверждён",
+  unsupported_command: "Машина не поддерживает это действие",
+  request_closed: "Запрос уже закрыт",
+};
+
+export function rejectionLabel(value: Value): string {
+  return lookup(REJECTIONS, value) ?? "Сообщение не принято";
+}
+
+const SETTING_KEYS: Record<string, string> = {
+  model: "модель",
+  effort: "усилие",
+  permission_mode: "режим разрешений",
+  instruction_profile: "инструкции",
+};
+
+export function settingKeyLabel(value: Value): string {
+  return lookup(SETTING_KEYS, value) ?? "настройка";
+}
+
+const AVAILABILITY: Record<string, string> = {
+  available: "В сети",
+  ready: "В сети",
+  degraded: "Связь нестабильна",
+  unavailable: "Не в сети",
+};
+
+export function availabilityLabel(value: Value): string {
+  return lookup(AVAILABILITY, value) ?? "Не в сети";
+}
+
+const PROVIDERS: Record<string, string> = { claude: "Claude", codex: "Codex" };
+
+export function providerLabel(value: Value): string {
+  return lookup(PROVIDERS, value?.toLowerCase()) ?? "Другой провайдер";
+}
+
+function capitalize(text: string): string {
+  return text.charAt(0).toLocaleUpperCase("ru-RU") + text.slice(1);
+}

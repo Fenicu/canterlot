@@ -30,7 +30,7 @@ async function bootChat(
 					{ id: 'sonnet-5', title: 'sonnet-5', efforts: ['low', 'medium'] },
 					{ id: 'haiku', title: 'haiku', efforts: ['low'] }
 				],
-				permission_modes: ['default', 'ask', 'auto_edit', 'full_access']
+				permission_modes: ['owner', 'ask', 'bypass', 'read_only']
 			}
 		]
 	});
@@ -49,7 +49,7 @@ async function bootChat(
 			detail.model = 'opus-5.5';
 		}
 		detail.effort = detail.effort || 'medium';
-		detail.permission_mode = detail.permission_mode || 'default';
+		detail.permission_mode = detail.permission_mode || 'owner';
 	}
 
 	await installChatRoutes(page, hub, api, OWNER);
@@ -72,7 +72,7 @@ test('header_shows_subtitle_state_chip_and_pending_setting_indicator', async ({ 
 		kind: 'conversation_settings_changed',
 		conversation_id: id,
 		payload: {
-			effective: { model: 'opus-5.5', effort: 'medium', permission_mode: 'default' },
+			effective: { model: 'opus-5.5', effort: 'medium', permission_mode: 'owner' },
 			pending: { model: 'sonnet-5' },
 			rev: 2
 		}
@@ -203,6 +203,31 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
 });
 
+test('session_settings_show_permission_modes_by_label_never_raw', async ({ page }) => {
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'conversation_settings_changed',
+		conversation_id: id,
+		payload: {
+			effective: { model: 'opus-5.5', effort: 'medium', permission_mode: 'owner' },
+			pending: {},
+			rev: 2
+		}
+	});
+	hub.flush();
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	const select = page.locator('select#permission');
+	await expect(select).toBeVisible();
+	const options = (await select.locator('option').allTextContents()).map((text) => text.trim());
+	expect(options).toEqual(['Как в настройках CLI', 'Спрашивать', 'Без подтверждений', 'Только чтение']);
+	await expect(page.getByText('Сейчас:').filter({ hasText: 'Как в настройках CLI' })).toBeVisible();
+	await expect(page.getByText(/~\/\.claude\/settings\.json/)).toBeVisible();
+	await select.selectOption('bypass');
+	await expect(page.getByText(/выполняет всё без подтверждений/)).toBeVisible();
+	await expect(page.getByText(/^(owner|bypass|read_only)$/)).toHaveCount(0);
+});
+
 test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ page }) => {
 	const calls: { url: string; body: { continue_queue?: boolean } | null; key: string }[] = [];
 	page.on('request', (req) => {
@@ -260,7 +285,7 @@ test('settings_sheet_changes_preset_from_next_turn_and_warns_about_restart', asy
 			effective: {
 				model: 'opus-5.5',
 				effort: 'medium',
-				permission_mode: 'default',
+				permission_mode: 'owner',
 				instruction_profile: 'clean',
 				instruction_preset: { id: 'clean', kind: 'clean', title: 'Без инструкций', revision: null, current_revision: null, deleted: false }
 			},
@@ -298,7 +323,7 @@ test('apply_new_version_after_edit', async ({ page }) => {
 			effective: {
 				model: 'opus-5.5',
 				effort: 'medium',
-				permission_mode: 'default',
+				permission_mode: 'owner',
 				instruction_profile: 'seed-executor',
 				instruction_preset: { id: 'seed-executor', kind: 'custom', title: 'Исполнитель (английский)', revision: 1, current_revision: 2, deleted: false }
 			},
@@ -324,7 +349,7 @@ test('deleted_preset_is_shown_as_the_sessions_copy', async ({ page }) => {
 			effective: {
 				model: 'opus-5.5',
 				effort: 'medium',
-				permission_mode: 'default',
+				permission_mode: 'owner',
 				instruction_profile: 'seed-executor',
 				instruction_preset: { id: 'seed-executor', kind: 'custom', title: 'Исполнитель (английский)', revision: 1, current_revision: null, deleted: true }
 			},
@@ -423,9 +448,9 @@ test('diagnostics_sheet_lists_state_cursors_and_diagnostic_events', async ({ pag
 	await page.getByRole('menuitem', { name: 'Диагностика' }).click();
 
 	await expect(page.getByRole('dialog', { name: 'Диагностика' })).toBeVisible();
-	await expect(page.getByText('adapter_diagnostic')).toBeVisible();
+	await expect(page.getByText('Сообщение адаптера')).toBeVisible();
 	await expect(page.getByText(diagEv.correlation_id)).toBeVisible();
-	await expect(page.getByText('state_divergence')).toBeVisible();
+	await expect(page.getByText('Расхождение состояния')).toBeVisible();
 	await expect(page.getByText(divEv.correlation_id)).toBeVisible();
 
 	// Test copy report button
