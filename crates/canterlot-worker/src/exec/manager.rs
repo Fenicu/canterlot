@@ -793,13 +793,15 @@ impl Actor {
             let spec_path = prepared.dir.join("spec.toml");
             let mut spec: toml::Value = toml::from_str(&fs::read_to_string(&spec_path)?)
                 .map_err(|_| ExecError::Verify("spec"))?;
+            let table = spec.as_table_mut().ok_or(ExecError::Verify("spec"))?;
             if let Some(cfg) = adapters.claude_code {
-                spec["claude_code"] =
+                let cfg =
                     toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("claude_code"))?;
+                table.insert("claude_code".into(), cfg);
             }
             if let Some(cfg) = adapters.codex {
-                spec["codex"] =
-                    toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
+                let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
+                table.insert("codex".into(), cfg);
             }
             fs::write(
                 &spec_path,

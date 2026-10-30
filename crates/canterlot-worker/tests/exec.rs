@@ -514,6 +514,28 @@ async fn start_execution_spawns_supervisor_and_relays_running() {
 }
 
 #[tokio::test]
+async fn start_with_configured_adapters_reaches_running() {
+    let mut env = Env::new().await;
+    env.manager()
+        .configure_adapters(Some(Default::default()), Some(Default::default()));
+    env.hub_session();
+    let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
+    env.send(start).await;
+    env.wait_running().await;
+    let spec = fs::read_to_string(
+        env.root
+            .path()
+            .join("store/executions")
+            .join(env.execution.to_string())
+            .join("spec.toml"),
+    )
+    .unwrap();
+    assert!(spec.contains("[claude_code]"), "{spec}");
+    assert!(spec.contains("[codex]"), "{spec}");
+    env.stop().await;
+}
+
+#[tokio::test]
 async fn execution_probes_carry_supervisor_and_cli_identities() {
     let mut env = Env::new().await;
     env.hub_session();
