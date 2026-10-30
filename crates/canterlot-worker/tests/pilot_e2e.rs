@@ -877,8 +877,11 @@ async fn pilot_flow_over_http_and_wss(pool: PgPool) {
             .iter()
             .all(|b| b["input_command_id"] == command.to_string())
     );
+    // Области доставляются отдельно: простой в чате ещё не значит простой в списке.
     until("activity back to idle", async || {
-        states(&ws.payloads(&chat, "derived_changed"), id).last() == Some(&"idle".to_owned())
+        [chat.as_str(), "conversations"].iter().all(|scope| {
+            states(&ws.payloads(scope, "derived_changed"), id).last() == Some(&"idle".to_owned())
+        })
     })
     .await;
     for scope in [chat.as_str(), "conversations"] {

@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
+    bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record},
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
     sj::Sj,
 };
@@ -53,6 +54,8 @@ use crate::{
 const MAX_PENDING_MEDIA: usize = 32;
 /// Ожидание ответа хаба на вызов инструмента агента.
 const AGENT_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+/// Период уборки зомби усыновлённых процессов: они занимают лимит процессов владельца.
+const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 
 struct MediaJob {
     media_id: Uuid,
@@ -145,6 +148,8 @@ struct Supervisor {
     started: Option<CliStarted>,
     ready: bool,
     lifecycle: Lifecycle,
+    /// Адаптер на время `close`: цикл продолжает обслуживать поток и команды.
+    closing: Option<JoinHandle<Box<dyn Adapter>>>,
     terminate: Option<JoinHandle<Result<Termination, ContainmentError>>>,
     inputs: HashMap<(Uuid, u32), Input>,
     queue: VecDeque<(Uuid, u32)>,
@@ -265,6 +270,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         started: None,
         ready: false,
         lifecycle,
+        closing: None,
         terminate: None,
         inputs: HashMap::new(),
         queue: VecDeque::new(),
@@ -335,6 +341,18 @@ fn media_preparer(
     (jobs, prepared)
 }
 
+/// Просмотр /proc — вне цикла супервизора.
+async fn reap_orphans(containment: Arc<dyn Containment>) {
+    let mut tick =
+        tokio::time::interval_at(Instant::now() + ORPHAN_REAP_PERIOD, ORPHAN_REAP_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let containment = containment.clone();
+        let _ = tokio::task::spawn_blocking(move || containment.reap_orphans()).await;
+    }
+}
+
 async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> AdapterEvent {
     match adapter {
         Some(adapter) if !gone => adapter.next_event().await,
@@ -354,6 +372,15 @@ async fn ready_adapter_event(adapter: &mut Option<Box<dyn Adapter>>) -> Option<A
     .await
 }
 
+async fn close_result(
+    handle: &mut Option<JoinHandle<Box<dyn Adapter>>>,
+) -> Result<Box<dyn Adapter>, tokio::task::JoinError> {
+    match handle {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn terminate_result(
     handle: &mut Option<JoinHandle<Result<Termination, ContainmentError>>>,
 ) -> Result<Result<Termination, ContainmentError>, tokio::task::JoinError> {
@@ -365,7 +392,7 @@ async fn terminate_result(
 
 impl Supervisor {
     fn record(&mut self, body: Body) -> Result<u64, SupervisorError> {
-        self.sj.append(body)
+        self.sj.append(bounded_record(self.spec.execution_id, body))
     }
 
     fn state_record(
@@ -410,10 +437,12 @@ impl Supervisor {
                 }
             }
         });
+        let reaper = tokio::spawn(reap_orphans(self.containment.clone()));
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
             if let Some(code) = self.after_event().await? {
                 accept_task.abort();
+                reaper.abort();
                 return Ok(code);
             }
             let wake = self.next_wake();
@@ -429,6 +458,10 @@ impl Supervisor {
                         self.on_adapter_event(event).await?;
                     }
                 },
+                result = close_result(&mut self.closing) => {
+                    self.closing = None;
+                    self.adapter = result.ok();
+                }
                 result = terminate_result(&mut self.terminate) => self.on_terminate(result).await?,
                 () = async { match wake { Some(at) => sleep_until(at).await, None => std::future::pending().await } } => {
                     self.attach_deadline = None;
@@ -441,7 +474,9 @@ impl Supervisor {
         let mut wake: Option<Instant> = None;
         let mut consider = |at: Instant| wake = Some(wake.map_or(at, |current| current.min(at)));
         match &self.lifecycle {
-            Lifecycle::Stopping(state) if self.terminate.is_none() => consider(state.next_round),
+            Lifecycle::Stopping(state) if self.terminate.is_none() && self.closing.is_none() => {
+                consider(state.next_round)
+            }
             _ => {}
         }
         if !self.queue.is_empty() && self.faults.gate_held(&self.exec_dir) {
@@ -1435,21 +1470,37 @@ impl Supervisor {
                 kind,
                 payload,
             } => {
-                if self.active_turn.is_some()
-                    && matches!(self.lifecycle, Lifecycle::Running)
-                    && self.sj.request(&request_id).is_none()
-                {
-                    self.record(Body::RequestOpened(RequestOpened {
-                        request_id,
-                        execution_id: self.spec.execution_id.to_string(),
-                        generation: self.spec.generation,
-                        kind,
-                        payload_json: serde_json::to_vec(&payload)
-                            .map_err(|_| SupervisorError::Spec)?,
-                    }))?;
-                    if self.aborting_turn {
-                        self.close_requests("interrupted")?;
-                    }
+                if self.sj.request(&request_id).is_some() {
+                    return Ok(());
+                }
+                if self.active_turn.is_none() || !matches!(self.lifecycle, Lifecycle::Running) {
+                    // Решения принимаются только в ходе: фоновому субагенту между ходами
+                    // ответить некому, а CLI ждал бы вечно.
+                    return self
+                        .refuse(&request_id, "request_outside_turn", "No active turn")
+                        .await;
+                }
+                let payload_json = (request_id.len() <= MAX_REQUEST_ID_BYTES)
+                    .then(|| bounded_json(&kind, payload))
+                    .flatten();
+                let Some(payload_json) = payload_json else {
+                    return self
+                        .refuse(
+                            &request_id,
+                            "request_too_large",
+                            "Request is too large to show to the owner",
+                        )
+                        .await;
+                };
+                self.record(Body::RequestOpened(RequestOpened {
+                    request_id,
+                    execution_id: self.spec.execution_id.to_string(),
+                    generation: self.spec.generation,
+                    kind,
+                    payload_json,
+                }))?;
+                if self.aborting_turn {
+                    self.close_requests("interrupted")?;
                 }
             }
             AdapterEvent::RequestClosed { request_id, reason } => {
@@ -1460,6 +1511,12 @@ impl Supervisor {
                 tool_name,
                 summary,
             } => {
+                // Без открытого запроса фаза ожидания держала бы очередь разговора.
+                if matches!(phase, Phase::AwaitingPermission | Phase::AwaitingAnswer)
+                    && !self.sj.has_open_requests()
+                {
+                    return Ok(());
+                }
                 let ready = matches!(phase, Phase::AwaitingInput);
                 self.record(Body::PhaseChanged(PhaseChanged {
                     execution_id: self.spec.execution_id.to_string(),
@@ -1549,6 +1606,7 @@ impl Supervisor {
                 } else {
                     "interrupted"
                 };
+                let open = self.sj.open_requests();
                 self.close_blocks(reason)?;
                 self.close_requests(reason)?;
                 let duration_ms = self.turn_started.take().map_or(0, |at| {
@@ -1580,6 +1638,14 @@ impl Supervisor {
                     }
                 }
                 self.complete_interrupts()?;
+                // Карточка закрыта, ответить на неё уже нельзя: фоновому субагенту нужен отказ.
+                if let Some(adapter) = self.adapter.as_mut() {
+                    for request in open {
+                        adapter
+                            .refuse_request(&request.request_id, "The turn has ended")
+                            .await;
+                    }
+                }
             }
             AdapterEvent::Limit(fact) => {
                 if !self.pilot_v1 {
@@ -1738,6 +1804,25 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Запрос, который нельзя показать владельцу, получает явный отказ: иначе
+    /// CLI ждал бы ответа вечно. В журнале остаётся только отметка.
+    async fn refuse(
+        &mut self,
+        request_id: &str,
+        event_type: &str,
+        message: &str,
+    ) -> Result<(), SupervisorError> {
+        self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: self.spec.execution_id.to_string(),
+            kind: "unknown_optional_event".into(),
+            event_type: event_type.into(),
+        }))?;
+        if let Some(adapter) = self.adapter.as_mut() {
+            adapter.refuse_request(request_id, message).await;
+        }
+        Ok(())
+    }
+
     fn close_blocks(&mut self, reason: &str) -> Result<(), SupervisorError> {
         for (block_id, rev) in std::mem::take(&mut self.open_blocks) {
             self.record(Body::BlockIncomplete(BlockIncomplete {
@@ -1820,6 +1905,10 @@ impl Supervisor {
                         state.cause = StopCause::User { force: true };
                     }
                     state.next_round = Instant::now();
+                    // Адаптер уходит вместе с задачей, а CLI убивает kill_on_drop.
+                    if let Some(closing) = &self.closing {
+                        closing.abort();
+                    }
                 }
                 Ok(())
             }
@@ -1861,7 +1950,9 @@ impl Supervisor {
     async fn drive_stop(&mut self) -> Result<(), SupervisorError> {
         let (force, closed) = match &self.lifecycle {
             Lifecycle::Stopping(state)
-                if self.terminate.is_none() && Instant::now() >= state.next_round =>
+                if self.terminate.is_none()
+                    && self.closing.is_none()
+                    && Instant::now() >= state.next_round =>
             {
                 (state.force, state.closed)
             }
@@ -1872,13 +1963,18 @@ impl Supervisor {
                 state.closed = true;
             }
             self.fail_agent_calls().await;
-            if let Some(adapter) = self.adapter.as_mut() {
+            if let Some(mut adapter) = self.adapter.take() {
                 let mode = if force {
                     CloseMode::Force
                 } else {
                     CloseMode::Graceful
                 };
-                let _ = adapter.close(mode, &*self.containment).await;
+                let containment = self.containment.clone();
+                self.closing = Some(tokio::spawn(async move {
+                    let _ = adapter.close(mode, &*containment).await;
+                    adapter
+                }));
+                return Ok(());
             }
         }
         let grace = if force {

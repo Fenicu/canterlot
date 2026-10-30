@@ -168,12 +168,18 @@ pub async fn start_in_tx(
     let machine_id: Uuid = row.try_get("machine_id")?;
     let preset_ref: String = row.try_get("instruction_profile")?;
     let preset_revision: Option<i64> = row.try_get("instruction_preset_revision")?;
+    // Сессия, созданная без старта, закрепляет версию первым запуском, а не созданием.
+    let first_start: bool =
+        sqlx::query_scalar("select not exists(select 1 from executions where conversation_id=$1)")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let resolved = crate::presets::resolve_in_tx(
         &mut *conn,
         owner_id,
         &crate::presets::PresetRef::parse(&preset_ref)
             .map_err(|_| ExecutionError::ConversationNotFound)?,
-        preset_revision,
+        preset_revision.filter(|_| !first_start),
     )
     .await
     .map_err(|_| ExecutionError::ConversationNotFound)?;
@@ -185,7 +191,8 @@ pub async fn start_in_tx(
         "text": resolved.text.unwrap_or_default(),
     });
     let native: Option<String> = if options.resume {
-        sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 and native_conversation_id is not null order by generation desc limit 1")
+        // Беседа записана только после хода: без него CLI отказывает в --resume.
+        sqlx::query_scalar("select e.native_conversation_id from executions e where e.conversation_id=$1 and e.native_conversation_id is not null and exists(select 1 from inputs i join commands c on c.id=i.command_id where c.execution_id=e.id and i.state='accepted') order by e.generation desc limit 1")
             .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
     } else {
         None
@@ -196,6 +203,22 @@ pub async fn start_in_tx(
     if let Some((execution_id, _, _)) = live(conn, conversation_id).await? {
         return Err(ExecutionError::AlreadyLive { execution_id });
     }
+    if resolved.revision != preset_revision {
+        crate::conversations::pin_preset_revision_in_tx(
+            conn,
+            conversation_id,
+            resolved.revision,
+            correlation_id,
+        )
+        .await?;
+    }
+    crate::conversations::promote_pending_for_launch_in_tx(conn, conversation_id, correlation_id)
+        .await?;
+    let (model, effort, permission_mode): (String, String, String) =
+        sqlx::query_as("select model, effort, permission_mode from conversations where id = $1")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let generation: i64 = sqlx::query_scalar(
         "select coalesce(max(generation), 0) + 1 from executions where conversation_id = $1",
     )
@@ -227,8 +250,7 @@ pub async fn start_in_tx(
     .bind(started.execution_id)
     .bind(generation)
     .bind(json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
-        "model":row.try_get::<String,_>("model")?,"effort":row.try_get::<String,_>("effort")?,
-        "permission_mode":row.try_get::<String,_>("permission_mode")?,"instructions":instructions,
+        "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
         "native_conversation_id":native}))
     .execute(&mut *conn)
     .await?;

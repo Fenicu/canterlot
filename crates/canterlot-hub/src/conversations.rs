@@ -656,10 +656,14 @@ fn valid_color(color: &str) -> bool {
 fn valid_text(s: &str, max: usize) -> bool {
     !s.contains('\0') && s.chars().count() <= max
 }
+/// Путь входит в ключ `machine_workdirs`, а строка btree ограничена примерно 2700 байтами.
+pub const MAX_WORKDIR_BYTES: usize = 2048;
+
 fn workdir_allowed(workdir: &str, roots: &Value) -> bool {
     use std::path::{Component, Path};
     let path = Path::new(workdir);
-    path.is_absolute()
+    workdir.len() <= MAX_WORKDIR_BYTES
+        && path.is_absolute()
         && !workdir.contains('\0')
         && !path.components().any(|c| c == Component::ParentDir)
         && roots.as_array().is_some_and(|rs| {
@@ -1620,6 +1624,61 @@ pub(crate) async fn revalidate_pending_in_tx(
         .await?;
     }
     Ok((pending, rev))
+}
+
+/// Новое исполнение стартует с ожидающими значениями, поэтому первому вводу нечего менять.
+/// Пресет остаётся ждать ввод: снимок и смену инструкций несёт диспетчер.
+pub(crate) async fn promote_pending_for_launch_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let (pending, _) = revalidate_pending_in_tx(conn, id, correlation).await?;
+    let value = |key: &str| pending.get(key).and_then(Value::as_str);
+    let (model, effort, permission) = (value("model"), value("effort"), value("permission_mode"));
+    if model.is_none() && effort.is_none() && permission.is_none() {
+        return Ok(());
+    }
+    let owner: Uuid = sqlx::query_scalar("update conversations set model=coalesce($2,model),effort=coalesce($3,effort),permission_mode=coalesce($4,permission_mode),pending_settings=pending_settings-'{model,effort,permission_mode}'::text[] where id=$1 returning owner_id").bind(id).bind(model).bind(effort).bind(permission).fetch_one(&mut *conn).await?;
+    publish_settings_in_tx(conn, owner, id, correlation).await
+}
+
+/// Закрепляет версию пресета, выбранную при запуске сессии.
+pub(crate) async fn pin_preset_revision_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    revision: Option<i64>,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let owner: Uuid = sqlx::query_scalar(
+        "update conversations set instruction_preset_revision=$2 where id=$1 returning owner_id",
+    )
+    .bind(id)
+    .bind(revision)
+    .fetch_one(&mut *conn)
+    .await?;
+    publish_settings_in_tx(conn, owner, id, correlation).await
+}
+
+async fn publish_settings_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    id: Uuid,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let view = detail(conn, owner, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?
+        .settings;
+    append(
+        conn,
+        Scope::Conversation { id },
+        "conversation_settings_changed",
+        Some(id),
+        serde_json::to_value(view).map_err(|e| sqlx::Error::Encode(Box::new(e)))?,
+        correlation,
+    )
+    .await
 }
 
 #[derive(Clone)]

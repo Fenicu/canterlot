@@ -1404,6 +1404,59 @@ async fn owner_lost_execution_closes_its_open_requests(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_stored_on_the_machine_is_unconfirmed_when_the_owner_is_lost(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let stored =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_m").await;
+    let queued =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_q").await;
+    let (winner, stored_command) = decide(&pool, &seed, stored, execution.generation).await;
+    let (_, queued_command) = decide(&pool, &seed, queued, execution.generation).await;
+    sqlx::query("update commands set delivery_state = 'stored_on_machine' where id = $1")
+        .bind(stored_command)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    // Управляющий поток обогнал журнал сессии: факты передачи ещё не доехали.
+    ingest
+        .reconcile(seed.machine_id, &Default::default())
+        .await
+        .unwrap();
+
+    assert_eq!(request_state(&pool, stored).await, "decision_unconfirmed");
+    assert_eq!(closed_reason(&pool, stored).await, ["unconfirmed"]);
+    assert_eq!(command_state(&pool, stored_command).await, "completed");
+    let result: Value = sqlx::query_scalar("select result from commands where id = $1")
+        .bind(stored_command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(result["applied"], Value::Null);
+    assert_eq!(request_state(&pool, queued).await, "decision_not_applied");
+    assert_eq!(closed_reason(&pool, queued).await, ["owner_lost"]);
+    assert_eq!(command_state(&pool, queued_command).await, "completed");
+
+    // Опоздавший журнал доказывает применение.
+    let mut seq = 3;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_m", winner)],
+    )
+    .await;
+    assert_eq!(request_state(&pool, stored).await, "decision_applied");
+    assert_eq!(
+        closed_reason(&pool, stored).await,
+        ["unconfirmed", "applied"]
+    );
+}
+
 fn not_applied(native: &str, decision: Uuid, reason: &str) -> record_body::Body {
     record_body::Body::DecisionNotApplied(DecisionNotApplied {
         request_id: native.into(),

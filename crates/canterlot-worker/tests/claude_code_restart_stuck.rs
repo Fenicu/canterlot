@@ -27,13 +27,14 @@ pid = os.getpid()
 if '--version' in sys.argv:
     print('2.1.311'); sys.exit(0)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
-if '--resume' not in sys.argv:
+if not (d / 'restarted').exists():
+    (d / 'restarted').write_text('1')
     holder = subprocess.Popen(['sleep', '300'], start_new_session=True)
     (d / 'holder').write_text(str(holder.pid))
     signal.signal(signal.SIGTERM, lambda *a: None)
     while True:
         time.sleep(0.2)
-sid = sys.argv[sys.argv.index('--resume') + 1]
+sid = sys.argv[sys.argv.index('--session-id') + 1]
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:

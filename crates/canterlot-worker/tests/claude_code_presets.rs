@@ -363,13 +363,26 @@ if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
 if (d / 'lock-exec-on-resume').exists() and '--resume' in sys.argv:
     os.chmod(pathlib.Path(sys.argv[sys.argv.index('--mcp-config') + 1]).parent, 0o500)
     sys.exit(1)
-(d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
+if (d / 'fail-session-once').exists() and '--session-id' in sys.argv:
+    (d / 'fail-session-once').unlink()
+    sys.exit(1)
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
+# Как настоящий CLI: --resume требует записанной беседы, повторный --session-id отвергается.
+transcript = d / f'transcript-{sid}'
+if '--resume' in sys.argv and not transcript.exists():
+    print(f'No conversation found with session ID: {sid}', file=sys.stderr)
+    sys.exit(1)
+if '--session-id' in sys.argv and transcript.exists():
+    print(f'Session ID {sid} is already in use.', file=sys.stderr)
+    sys.exit(1)
+(d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
     (d / f'stdin-{pid}.log').open('a').write(line)
     v = json.loads(line)
+    if v.get('type') != 'control_request':
+        transcript.write_text('1')
     # usage.json читается на каждый ход: файл пишется тестом между запусками,
     # чтение при старте процесса гоняло бы со стартом интерпретатора.
     usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
@@ -393,7 +406,18 @@ struct RestartHarness {
 
 impl RestartHarness {
     async fn new() -> Self {
+        Self::launched(None, false).await
+    }
+
+    async fn with_native(native: Option<String>) -> Self {
+        Self::launched(native, true).await
+    }
+
+    async fn launched(native: Option<String>, transcript: bool) -> Self {
         let dir = TempDir::new().unwrap();
+        if let (Some(native), true) = (&native, transcript) {
+            std::fs::write(dir.path().join(format!("transcript-{native}")), "1").unwrap();
+        }
         let exe = dir.path().join("fake-cli");
         fake_exec::write_executable(&exe, RESTART_FAKE, 0o700);
         let workdir = dir.path().join("repo");
@@ -414,7 +438,7 @@ impl RestartHarness {
             execution_id: Uuid::now_v7(),
             generation: 1,
             workdir: workdir.clone(),
-            native_conversation_id: None,
+            native_conversation_id: native,
             profile: "claude_code".into(),
             model: "haiku".into(),
             effort: "low".into(),
@@ -675,6 +699,109 @@ async fn unrestored_previous_instructions_fail_the_fallback() {
     );
 }
 
+fn flag_value(args: &[String], name: &str) -> Option<String> {
+    args.iter()
+        .position(|a| a == name)
+        .map(|i| args[i + 1].clone())
+}
+
+#[tokio::test]
+async fn instructions_change_before_the_first_turn_keeps_the_session_id() {
+    let mut h = RestartHarness::new().await;
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
+    let (_, old_args) = spawns.iter().find(|(pid, _)| *pid == h.old_pid).unwrap();
+    let (new_pid, new_args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(!new_args.iter().any(|a| a == "--resume"), "{new_args:?}");
+    assert_eq!(
+        flag_value(new_args, "--session-id"),
+        flag_value(old_args, "--session-id")
+    );
+    assert_eq!(h.stdin_lines(*new_pid), 1, "input reached the new process");
+    h.until_finished().await;
+
+    // Беседа записана: дальше перезапуск уже продолжает её.
+    let out = h.transmit(Some(change(preset_spec("PRESET")))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 3, "second restart expected: {spawns:?}");
+    assert!(spawns[2].1.iter().any(|a| a == "--resume"), "{spawns:?}");
+}
+
+#[tokio::test]
+async fn failed_change_before_the_first_turn_falls_back_to_the_same_session_id() {
+    let mut h = RestartHarness::new().await;
+    // Метка должна достаться перезапуску, а не ещё стартующему первому процессу.
+    let started = |path: &std::path::Path| {
+        std::fs::read_dir(path).unwrap().any(|entry| {
+            entry
+                .unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with("args-")
+        })
+    };
+    while !started(h.dir.path()) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(h.dir.path().join("fail-session-once"), "").unwrap();
+
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "fallback spawn expected: {spawns:?}");
+    let (_, fallback) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(fallback.iter().any(|a| a == "--session-id"), "{fallback:?}");
+
+    // Беседа жива: следующий ввод проходит в запасной процесс.
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+}
+
+#[tokio::test]
+async fn resumed_session_stays_resumed_on_a_change_before_its_first_input() {
+    let native = Uuid::now_v7().to_string();
+    let mut h = RestartHarness::with_native(Some(native.clone())).await;
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
+    let (_, new_args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert_eq!(flag_value(new_args, "--resume"), Some(native));
+}
+
+#[tokio::test]
+async fn missing_transcript_is_named_before_the_process_exit() {
+    let native = Uuid::now_v7().to_string();
+    let mut h = RestartHarness::launched(Some(native), false).await;
+    let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+        .await
+        .expect("event deadline");
+    assert!(
+        matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "resume_transcript_missing",
+                required: false,
+                ..
+            }
+        ),
+        "{event:?}"
+    );
+    let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+        .await
+        .expect("event deadline");
+    assert!(
+        matches!(event, AdapterEvent::ProcessExited { code: Some(1), .. }),
+        "{event:?}"
+    );
+}
+
 #[tokio::test]
 async fn same_revision_does_not_restart() {
     let mut h = RestartHarness::new().await;
@@ -691,8 +818,8 @@ async fn same_revision_does_not_restart() {
 #[tokio::test]
 async fn cli_ignoring_stdin_eof_is_terminated_then_killed() {
     // Двойник игнорирует EOF stdin и перехватывает SIGTERM: перезапуск идёт
-    // через SIGTERM группе и SIGKILL. Первый запуск без --resume висит,
-    // процесс после перезапуска отвечает как обычно.
+    // через SIGTERM группе и SIGKILL. Первый запуск висит, процесс после
+    // перезапуска отвечает как обычно.
     const STUBBORN: &str = r#"#!/usr/bin/python3
 import json, sys, os, pathlib, signal, time
 d = pathlib.Path(__file__).parent
@@ -700,11 +827,12 @@ pid = os.getpid()
 if '--version' in sys.argv:
     print('2.1.311'); sys.exit(0)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
-if '--resume' not in sys.argv:
+if not (d / 'restarted').exists():
+    (d / 'restarted').write_text('1')
     signal.signal(signal.SIGTERM, lambda *a: (d / 'got-term').write_text('x'))
     while True:
         time.sleep(0.2)
-sid = sys.argv[sys.argv.index('--resume') + 1]
+sid = sys.argv[sys.argv.index('--session-id') + 1]
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
@@ -783,6 +911,136 @@ for line in sys.stdin:
     }
     assert_eq!(spawns.len(), 2);
     assert!(spawns.contains(&old_pid));
+}
+
+#[tokio::test]
+async fn soft_close_reads_stdout_so_the_cli_can_finish_writing() {
+    const NOISY: &str = r#"#!/usr/bin/python3
+import signal, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+for line in sys.stdin:
+    pass
+sys.stdout.write('x' * (1 << 20) + '\n')
+sys.stdout.flush()
+(d / 'flushed').write_text('1')
+"#;
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-cli");
+    fake_exec::write_executable(&exe, NOISY, 0o700);
+    let workdir = dir.path().join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    let context = AdapterContext {
+        transmit_deadline: WAIT,
+        exec_dir: dir.path().join("exec"),
+        claude_code: Some(ClaudeCodeConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+        codex: None,
+    };
+    let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
+    adapter.set_stop_grace(Duration::from_millis(200));
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir,
+        native_conversation_id: None,
+        profile: "claude_code".into(),
+        model: "haiku".into(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: owner_spec(),
+    };
+    tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+        .await
+        .expect("start deadline")
+        .expect("start ok");
+    tokio::time::timeout(
+        WAIT,
+        adapter.close(canterlot_worker::adapter::CloseMode::Graceful, &group),
+    )
+    .await
+    .expect("close deadline")
+    .expect("close ok");
+    assert!(
+        dir.path().join("flushed").exists(),
+        "the CLI was killed while blocked on a full stdout pipe"
+    );
+}
+
+#[tokio::test]
+async fn soft_close_ends_although_a_tool_keeps_printing_to_the_cli_stdout() {
+    // Сам CLI выходит по EOF, а потомок в своей сессии держит его stdout и пишет без конца.
+    const LEAKY: &str = r#"#!/usr/bin/python3
+import subprocess, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+tool = subprocess.Popen(['sh', '-c', 'while :; do echo x; done'], start_new_session=True)
+(d / 'tool').write_text(str(tool.pid))
+for line in sys.stdin:
+    pass
+"#;
+    struct Kill(u32);
+    impl Drop for Kill {
+        fn drop(&mut self) {
+            if let Some(pid) = rustix::process::Pid::from_raw(self.0 as i32) {
+                let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
+            }
+        }
+    }
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-cli");
+    fake_exec::write_executable(&exe, LEAKY, 0o700);
+    let workdir = dir.path().join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    let context = AdapterContext {
+        transmit_deadline: WAIT,
+        exec_dir: dir.path().join("exec"),
+        claude_code: Some(ClaudeCodeConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+        codex: None,
+    };
+    let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir,
+        native_conversation_id: None,
+        profile: "claude_code".into(),
+        model: "haiku".into(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: owner_spec(),
+    };
+    tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+        .await
+        .expect("start deadline")
+        .expect("start ok");
+    let tool = loop {
+        if let Some(pid) = std::fs::read_to_string(dir.path().join("tool"))
+            .ok()
+            .and_then(|text| text.parse().ok())
+        {
+            break Kill(pid);
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    tokio::time::timeout(
+        WAIT,
+        adapter.close(canterlot_worker::adapter::CloseMode::Graceful, &group),
+    )
+    .await
+    .expect("soft close must not wait for the end of stdout")
+    .expect("close ok");
+    drop(tool);
 }
 
 #[tokio::test]

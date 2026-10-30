@@ -1,6 +1,6 @@
 <script lang="ts">
   import { ApiError } from '#lib/api/http.js';
-  import { patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
+  import { getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { untrack } from 'svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
@@ -32,12 +32,25 @@
   let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
   let reasons = $state<string[]>([]);
   let sentPin = seed.pinned;
+  let sentCrunch = seed.crunch?.enabled ?? false;
+  // В строке списка текста продолжения нет, а хаб заменил бы сохранённый текст присланным.
+  const seeded = getConversation(seed.id)
+    .then((detail) => {
+      if (detail.data.crunch.resume_text) resumeText = detail.data.crunch.resume_text;
+    })
+    .catch(() => undefined);
 
   $effect(() => {
     const value = pinned;
     if (value === sentPin) return;
     sentPin = value;
     void patch({ pinned: value });
+  });
+  $effect(() => {
+    const value = crunch;
+    if (value === sentCrunch) return;
+    sentCrunch = value;
+    void saveCrunch();
   });
   const reasonText: Record<string, string> = {
     crunch: 'кранч',
@@ -75,6 +88,7 @@
   }
 
   async function saveCrunch() {
+    await seeded;
     await setCrunch(item.id, { enabled: crunch, resume_text: resumeText }, crypto.randomUUID());
   }
 

@@ -5,6 +5,7 @@ import {
   retryAsNew,
   returnToDraft,
 } from "#lib/timeline/QueueActions.js";
+import { bindReturned } from "#lib/composer/returned.js";
 import { freshInput, type InputView } from "#lib/stores/inputs.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
@@ -116,31 +117,59 @@ describe("timeline/QueueActions", () => {
     );
   });
 
-  it("return_to_draft_restores_text_to_draft_and_cleans_input", () => {
-    const rejectedInput: InputView = freshInput(
-      "rej-key",
-      "Отклонённый текст",
-      Date.now(),
-    );
-    const chatMock = {
-      inputs: new SvelteMap<string, InputView>(),
+  it("return_to_draft_keeps_the_typed_text_and_the_files_in_the_mounted_composer", async () => {
+    const attachment = {
+      attachment_id: "att-1",
+      name: "отчёт.pdf",
+      mime: "application/pdf",
+      size: 10,
+      sha256: "",
+      image: false,
     };
-    chatMock.inputs.set("rej-key", rejectedInput);
+    const rejected = freshInput("rej-key", "Отклонённый текст", 1, [attachment]);
+    const remove = vi.fn();
+    const chatMock = {
+      inputs: new SvelteMap<string, InputView>([["rej-key", rejected]]),
+      timeline: { remove },
+    };
+    const take = vi.fn();
+    const stop = bindReturned("conv-1", take);
 
-    let returnedDraftText = "";
-    const draftsMock = {
-      set: vi.fn((convId: string, patch: { text?: string }) => {
-        returnedDraftText = patch.text ?? "";
-      }),
+    await returnToDraft(rejected, {
+      drafts: {} as DraftStore,
+      conversationId: "conv-1",
+      chat: chatMock as unknown as ChatStore,
+    });
+    stop();
+
+    expect(take).toHaveBeenCalledWith({
+      text: "Отклонённый текст",
+      attachments: [{ id: "att-1", name: "отчёт.pdf", size: 10 }],
+    });
+    expect(chatMock.inputs.has("rej-key")).toBe(false);
+    expect(remove).toHaveBeenCalledWith("input:rej-key");
+  });
+
+  it("return_to_draft_without_a_composer_prepends_to_the_draft", async () => {
+    const rejected = freshInput("rej-key", "Отклонённый текст", 1);
+    const chatMock = {
+      inputs: new SvelteMap<string, InputView>([["rej-key", rejected]]),
+      timeline: { remove: vi.fn() },
+    };
+    const drafts = {
+      prepend: vi.fn(async () => undefined),
     } as unknown as DraftStore;
 
-    returnToDraft(rejectedInput, {
-      drafts: draftsMock,
+    await returnToDraft(rejected, {
+      drafts,
       conversationId: "conv-1",
       chat: chatMock as unknown as ChatStore,
     });
 
-    expect(returnedDraftText).toBe("Отклонённый текст");
-    expect(chatMock.inputs.has("rej-key")).toBe(false);
+    expect(drafts.prepend).toHaveBeenCalledWith(
+      "conv-1",
+      "Отклонённый текст",
+      [],
+    );
   });
 });

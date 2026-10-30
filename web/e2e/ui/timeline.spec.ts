@@ -251,7 +251,7 @@ test('pending_strip_shows_queue_and_scheduled_apart_from_the_live_line', async (
   ]);
   api.bindConversation(id);
   const snap = api.conversationData(id);
-  snap.scheduled = [{ id: api.id(), send_at: when.toISOString(), text: 'позже' }];
+  snap.scheduled = [{ id: api.id(), conversation_id: id, run_at: when.toISOString(), content: [{ type: 'text', text: 'позже' }], attachment_ids: [], state: 'pending', input_id: null, attempts: 0 }];
   api.hub.setSnapshot(`conversation:${id}`, () => snap);
   await page.reload();
   await expect(page.locator('.strip')).toContainText('В очереди');

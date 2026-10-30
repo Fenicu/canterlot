@@ -143,11 +143,12 @@ async function createChatSession(id: string): Promise<ChatStore> {
     api: {
       async conversationSnapshot(conversationId) {
         const response = await conversationSnapshot(conversationId);
-        const body = response.data as unknown as {
-          cursor: string;
-          data: SnapshotData;
+        const { cursor, data } = response.data;
+        const snapshot: SnapshotData = {
+          ...data,
+          history: data.history as HistoryPage,
         };
-        return { cursor: body.cursor, data: body.data };
+        return { cursor, data: snapshot };
       },
       async history(conversationId, query) {
         const response = await conversationHistory(conversationId, query);

@@ -1892,6 +1892,25 @@ impl Adapter for CodexAdapter {
         }
     }
 
+    async fn refuse_request(&mut self, request_id: &str, _message: &str) {
+        let Some((kind, ..)) = self.requests.pending_info(request_id) else {
+            return;
+        };
+        let decision = if kind == "question" {
+            DecisionPayload::Question {
+                answers: Default::default(),
+            }
+        } else {
+            DecisionPayload::Permission {
+                behavior: PermissionBehavior::Deny,
+                message: None,
+            }
+        };
+        if let Ok(line) = self.requests.answer(request_id, &decision) {
+            self.pending_writes.push_back(line);
+        }
+    }
+
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
         // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
         if let Some(broker) = self.broker.as_mut() {

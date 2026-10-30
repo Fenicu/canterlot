@@ -1587,6 +1587,42 @@ async fn subagent_file_change_approval_carries_the_diff() {
 }
 
 #[tokio::test]
+async fn refused_request_is_declined_without_the_owner() {
+    let change = json!({"id": "patch-child", "type": "fileChange", "status": "inProgress",
+        "changes": [{"path": "/tmp/a.txt", "kind": {"type": "add"}, "diff": "hi\n"}]});
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(note(
+        "item/started",
+        json!({"threadId": "thread-child", "turnId": "turn-child", "item": change}),
+    ));
+    lines.push(w_out(
+        json!({"id": 0, "method": "item/fileChange/requestApproval",
+        "params": {"threadId": "thread-child", "turnId": "turn-child",
+            "itemId": "patch-child", "reason": null, "grantRoot": null}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("spawn").await;
+    let request_id = loop {
+        match fake.event().await {
+            AdapterEvent::RequestOpened { request_id, .. } => break request_id,
+            AdapterEvent::RunFinished { .. } => panic!("request never opened"),
+            _ => {}
+        }
+    };
+    fake.adapter.refuse_request(&request_id, "too large").await;
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !fake.stdin_log().contains(r#""decision":"decline""#) {
+            let _ =
+                tokio::time::timeout(Duration::from_millis(50), fake.adapter.next_event()).await;
+        }
+    })
+    .await
+    .expect("the server must get an explicit decline");
+}
+
+#[tokio::test]
 async fn effort_only_change_is_checked_against_the_current_model() {
     let mut fake = Fake::new(handshake("thread-mini"));
     fake.start().await;

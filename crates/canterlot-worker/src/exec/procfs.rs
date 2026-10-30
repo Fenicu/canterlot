@@ -12,7 +12,7 @@ pub(super) fn boot_id() -> io::Result<String> {
 }
 
 pub(super) fn stat(pid: u32) -> Option<ProcStat> {
-    let text = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let text = crate::containment::read_stat(format!("/proc/{pid}/stat")).ok()?;
     let fields: Vec<_> = text[text.rfind(')')? + 1..].split_whitespace().collect();
     Some(ProcStat {
         start_ticks: fields.get(19)?.parse().ok()?,

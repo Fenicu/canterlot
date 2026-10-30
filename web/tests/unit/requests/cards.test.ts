@@ -28,6 +28,148 @@ afterEach(() => {
 });
 
 describe('PWA Request Cards', () => {
+  function permissionText(payload: unknown): string {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const request: RequestItem = { id: 'req', conversationId: 'conv-1', kind: 'permission', state: 'open', payload };
+    const instance = mount(PermissionCard, { target, props: { request, onDecision: vi.fn() } });
+    flushSync();
+    const text = target.textContent ?? '';
+    void unmount(instance);
+    target.remove();
+    return text;
+  }
+
+  it('not_applied_card_says_the_answer_did_not_reach_the_agent', () => {
+    const cases: Array<[string, string]> = [
+      ['unsupported_command', 'не применено'],
+      ['execution_ended', 'не применено: Исполнение завершилось']
+    ];
+    for (const [reason, label] of cases) {
+      const target = document.createElement('div');
+      document.body.appendChild(target);
+      const request = createRequestItem({
+        id: 'req-not-applied',
+        conversationId: 'conv-1',
+        kind: 'permission',
+        state: 'not_applied',
+        payload: {},
+        closedReason: reason
+      });
+      const instance = mount(RequestCard, { target, props: { request, onDecision: vi.fn() } });
+      flushSync();
+      expect(target.textContent).toContain(label);
+      expect(target.textContent).not.toContain('Запрос закрыт');
+      void unmount(instance);
+    }
+  });
+
+  it('secret_custom_answer_keeps_its_spaces', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const onDecision = vi.fn().mockResolvedValue(undefined);
+    const request: RequestItem = {
+      id: 'req-secret',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: { questions: [{ id: 'q1', text: 'Пароль', allow_custom: true, is_secret: true }] }
+    };
+    const instance = mount(QuestionCard, { target, props: { request, onDecision } });
+    flushSync();
+    const input = target.querySelector<HTMLInputElement>('input[data-custom]')!;
+
+    input.value = '   ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    expect(target.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled).toBe(true);
+
+    input.value = ' s3cret ';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+    flushSync();
+    target.querySelector<HTMLButtonElement>('button[type=submit]')!.click();
+    await vi.waitFor(() => expect(onDecision).toHaveBeenCalled());
+
+    expect(JSON.stringify(onDecision.mock.calls[0]![0])).toContain('" s3cret "');
+    void unmount(instance);
+  });
+
+  it('permission_card_shows_what_claude_code_writes_or_edits', () => {
+    const write = permissionText({
+      tool_name: 'Write',
+      input: { file_path: '/srv/app/config.toml', content: 'строка 1\nстрока 2' },
+      tool_use_id: 'toolu_1'
+    });
+    expect(write).toContain('/srv/app/config.toml');
+    expect(write).toContain('строка 1\nстрока 2');
+
+    const edit = permissionText({
+      tool_name: 'Edit',
+      input: { file_path: '/srv/app/main.rs', old_string: 'было', new_string: 'стало' },
+      tool_use_id: 'toolu_2'
+    });
+    expect(edit).toContain('/srv/app/main.rs');
+    expect(edit).toContain('было');
+    expect(edit).toContain('стало');
+    const grep = permissionText({ tool_name: 'Grep', input: { pattern: 'TODO', limit: 5 } });
+    expect(grep).toContain('pattern');
+    expect(grep).toContain('TODO');
+  });
+
+  it('permission_card_shows_a_codex_shell_request_and_warns_about_the_deny', () => {
+    const text = permissionText({
+      tool_name: 'shell',
+      command: "/bin/bash -lc 'touch probe.txt'",
+      cwd: '/tmp/canterlot-stage0/codex/permissions',
+      reason: 'May I run `touch probe.txt` in the current directory as requested?',
+      command_actions: [{ command: 'touch probe.txt', type: 'unknown' }],
+      available_decisions: ['accept', 'cancel'],
+      network: { host: 'example.org', protocol: 'https' },
+      input: { command: "/bin/bash -lc 'touch probe.txt'", cwd: '/tmp/canterlot-stage0/codex/permissions' },
+      tool_use_id: 'exec-1',
+      agent: 'orchestrator',
+      deny_also_interrupts: true
+    });
+    expect(text).toContain("/bin/bash -lc 'touch probe.txt'");
+    expect(text).toContain('/tmp/canterlot-stage0/codex/permissions');
+    expect(text).toContain('May I run');
+    expect(text).toContain('example.org');
+    expect(text).toContain('Отказ также прервёт ход');
+    expect(text.split("/bin/bash -lc 'touch probe.txt'")).toHaveLength(2);
+  });
+
+  it('permission_card_lists_codex_file_changes_and_the_requested_root', () => {
+    const text = permissionText({
+      tool_name: 'apply_patch',
+      changes: [{ diff: 'hi\n', kind: { type: 'add' }, path: '/tmp/run-1/note.txt' }],
+      reason: null,
+      grant_root: '/tmp/run-1',
+      tool_use_id: 'exec-2',
+      agent: 'orchestrator',
+      deny_also_interrupts: false
+    });
+    expect(text).toContain('/tmp/run-1/note.txt');
+    expect(text).toContain('Новый файл');
+    expect(text).toContain('hi');
+    expect(text).toContain('Доступ к папке');
+    expect(text).not.toContain('Отказ также прервёт ход');
+  });
+
+  it('permission_card_shows_which_permissions_codex_requests', () => {
+    const text = permissionText({
+      tool_name: 'permissions',
+      permissions: { sandbox: 'read-only' },
+      reason: 'Need network?',
+      cwd: '/tmp/work',
+      tool_use_id: 'perm-1',
+      agent: 'orchestrator',
+      deny_also_interrupts: false
+    });
+    expect(text).toContain('"sandbox": "read-only"');
+    expect(text).toContain('Need network?');
+    expect(text).toContain('/tmp/work');
+  });
+
   it('permission_card_renders_command_and_allow_deny_buttons', async () => {
     const target = document.createElement('div');
     document.body.appendChild(target);
@@ -39,8 +181,9 @@ describe('PWA Request Cards', () => {
       kind: 'permission',
       state: 'open',
       payload: {
-        command: 'rm -rf /tmp/canterlot-test',
-        description: 'Очистка временных файлов'
+        tool_name: 'Bash',
+        input: { command: 'rm -rf /tmp/canterlot-test', description: 'Очистка временных файлов' },
+        tool_use_id: 'toolu_01GkVeqnQwNz9hnzGsJfE8yM'
       }
     };
 

@@ -776,3 +776,103 @@ async fn start_payload_carries_pinned_revision_text_after_edit_and_delete(
     assert_eq!(payload["instructions"]["text"], "текст A");
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn first_start_pins_the_preset_revision_current_at_launch(pool: PgPool) -> TestResult {
+    use canterlot_hub::{conversations, presets};
+    let seed = testkit::seed(&pool).await;
+    testkit::seed_catalog(&pool, seed.machine_id).await;
+    let registry =
+        canterlot_hub::session::Registry::new(canterlot_hub::config::HubTimers::default());
+    let created = presets::create(
+        &pool,
+        seed.owner_id,
+        "first-start-preset",
+        presets::NewPreset {
+            title: "Исполнитель".into(),
+            description: None,
+            text: "текст A".into(),
+        },
+        presets::Actor::Owner,
+        Uuid::now_v7(),
+    )
+    .await?;
+    let preset_id = created.summary.id.clone();
+    let conversation = conversations::create(
+        &pool,
+        "first-start-conv",
+        conversations::NewConversation {
+            owner_id: seed.owner_id,
+            machine_id: seed.machine_id,
+            harness: "synthetic".into(),
+            workdir: "/tmp/w".into(),
+            model: "synthetic-small".into(),
+            effort: "low".into(),
+            permission_mode: None,
+            instruction_profile: Some(preset_id.clone()),
+            title: None,
+            color: None,
+            group_ids: vec![],
+            crunch: Default::default(),
+            start: false,
+        },
+        &canterlot_hub::config::LimitsConfig::default(),
+        Uuid::now_v7(),
+        &registry,
+    )
+    .await?
+    .conversation_id;
+    let edit = |key: &'static str, text: &'static str, base_revision: i64| {
+        presets::update(
+            &pool,
+            seed.owner_id,
+            preset_id.parse().unwrap(),
+            key,
+            presets::PresetPatch {
+                title: None,
+                description: None,
+                text: Some(text.into()),
+                base_revision,
+            },
+            presets::Actor::Owner,
+            Uuid::now_v7(),
+        )
+    };
+    edit("first-start-bump", "текст B", 1).await?;
+
+    let first = executions::start(&pool, seed.owner_id, conversation, Uuid::now_v7()).await?;
+
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(first.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(payload["instructions"]["revision"], 2);
+    assert_eq!(payload["instructions"]["text"], "текст B");
+    let pinned: Option<i64> =
+        sqlx::query_scalar("select instruction_preset_revision from conversations where id=$1")
+            .bind(conversation)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(pinned, Some(2));
+    let event: Value = sqlx::query_scalar("select payload from events where scope=$1 and kind='conversation_settings_changed' order by scope_seq desc limit 1").bind(format!("conversation:{conversation}")).fetch_one(&pool).await?;
+    assert_eq!(event["effective"]["instruction_preset"]["revision"], 2);
+
+    // Следующий запуск той же сессии уже держит закреплённую версию.
+    executions::set_state(
+        &pool,
+        first.execution_id,
+        ExecutionState::Stopped,
+        Some("start_cancelled"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    edit("second-start-bump", "текст C", 2).await?;
+    let second = executions::start(&pool, seed.owner_id, conversation, Uuid::now_v7()).await?;
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(second.command_id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(payload["instructions"]["revision"], 2);
+    assert_eq!(payload["instructions"]["text"], "текст B");
+    Ok(())
+}

@@ -510,6 +510,204 @@ describe("composer/model", () => {
     expect(model.text).toBe("отправлено и дописано");
   });
 
+  it("text_typed_after_the_press_stays_out_of_the_sent_message", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "foo";
+
+    const sending = model.send();
+    expect(model.text).toBe("");
+    model.text = " bar";
+    open("ok");
+    await sending;
+
+    expect(deps.ops.begin).toHaveBeenCalledWith(
+      "input",
+      expect.objectContaining({ content: [{ type: "text", text: "foo" }] }),
+      expect.anything(),
+    );
+    expect(model.text).toBe(" bar");
+    expect(deps.drafts.clear).not.toHaveBeenCalled();
+  });
+
+  it("offline_after_the_press_returns_the_text_before_what_was_typed", async () => {
+    let open!: (value: "offline") => void;
+    const { deps, draftsMap } = createMockDeps({
+      canSend: vi.fn(
+        () => new Promise<"offline">((resolve) => (open = resolve)),
+      ),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+
+    const sending = model.send();
+    model.text = "Второе";
+    open("offline");
+    await sending;
+
+    expect(model.text).toBe("Первое\nВторое");
+    expect(draftsMap.get("conv-1")?.text).toBe("Первое\nВторое");
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+  });
+
+  it("queue_filled_during_the_network_check_returns_the_text", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Очередь заполнится";
+
+    const sending = model.send();
+    deps.chat.queue.queued = 100;
+    open("ok");
+    await sending;
+
+    expect(model.text).toBe("Очередь заполнится");
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+  });
+
+  it("send_frees_the_button_once_journaled_while_the_post_hangs", async () => {
+    const { deps } = createMockDeps();
+    deps.ops.run = vi.fn(() => new Promise<void>(() => undefined));
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+
+    void model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(1));
+    expect(model.sending).toBe(false);
+
+    model.text = "Второе";
+    void model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(2));
+    const keys = vi
+      .mocked(deps.ops.begin)
+      .mock.calls.map((call) => call[2].key);
+    expect(new Set(keys).size).toBe(2);
+    expect(model.text).toBe("");
+  });
+
+  it("finished_delivery_does_not_unlock_the_next_press", async () => {
+    let finish!: () => void;
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps();
+    deps.ops.run = vi.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+    const first = model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(1));
+
+    deps.canSend = vi.fn(
+      () => new Promise<"ok">((resolve) => (open = resolve)),
+    );
+    model.text = "Второе";
+    const second = model.send();
+    finish();
+    await first;
+
+    expect(model.sending).toBe(true);
+    void model.send();
+    open("ok");
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(2));
+    finish();
+    await second;
+    expect(deps.ops.begin).toHaveBeenCalledTimes(2);
+  });
+
+  it("send_later_clears_the_field_on_press_and_keeps_what_was_typed", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+      serverNow: () => 1_000_000,
+    });
+    const model = new ComposerModel(deps);
+    model.text = "foo";
+
+    const sending = model.sendLater(1_000_000 + 15 * 60_000);
+    expect(model.text).toBe("");
+    model.text = "bar";
+    open("ok");
+    await sending;
+
+    expect(deps.ops.begin).toHaveBeenCalledWith(
+      "scheduled",
+      expect.objectContaining({ content: [{ type: "text", text: "foo" }] }),
+      expect.anything(),
+    );
+    expect(model.text).toBe("bar");
+    expect(deps.drafts.clear).not.toHaveBeenCalled();
+  });
+
+  it("send_later_keeps_the_text_when_the_journal_write_fails", async () => {
+    const { deps } = createMockDeps({ serverNow: () => 1_000_000 });
+    deps.ops.begin = vi.fn(async () => {
+      throw new Error("IndexedDB disk full");
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Позже";
+
+    await expect(
+      model.sendLater(1_000_000 + 15 * 60_000),
+    ).rejects.toThrow();
+
+    expect(model.text).toBe("Позже");
+    expect(model.errorMessage).toBe("Не удалось сохранить на устройстве");
+  });
+
+  it("refused_send_later_returns_the_text_the_draft_and_the_files", async () => {
+    const { deps, draftsMap, uploadsList } = createMockDeps({
+      serverNow: () => 1_000_000,
+    });
+    uploadsList.push({
+      id: "u1",
+      conversationId: "conv-1",
+      name: "a.txt",
+      size: 3,
+      phase: "ready",
+      sent: 3,
+      attachmentId: "att-u1",
+    });
+    deps.ops.run = vi.fn(async (op: Op) => {
+      op.state = "refused";
+      op.refusal = { code: "too_many_scheduled", message: "Слишком много" };
+      throw new Error("refused");
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Длинное сообщение на потом";
+
+    await model.sendLater(1_000_000 + 15 * 60_000);
+
+    expect(model.text).toBe("Длинное сообщение на потом");
+    expect(draftsMap.get("conv-1")?.text).toBe("Длинное сообщение на потом");
+    expect(uploadsList.map((item) => item.id)).toEqual(["u1"]);
+    expect(model.errorMessage).toBe("Слишком много");
+  });
+
+  it("taking_a_message_back_prepends_it_and_restores_the_files", () => {
+    const { deps, draftsMap } = createMockDeps();
+    deps.uploads.restore = vi.fn();
+    const model = new ComposerModel(deps);
+    model.text = "набираю";
+
+    model.takeBack({
+      text: "вернулось",
+      attachments: [{ id: "att-1" }],
+      notice: "Не доставлено",
+    });
+
+    expect(model.text).toBe("вернулось\nнабираю");
+    expect(draftsMap.get("conv-1")?.text).toBe("вернулось\nнабираю");
+    expect(deps.uploads.restore).toHaveBeenCalledWith("conv-1", [
+      { id: "att-1" },
+    ]);
+    expect(model.errorMessage).toBe("Не доставлено");
+  });
+
   it("offline_press_keeps_a_draft_and_creates_no_operation", async () => {
     const { deps, inputs, draftsMap } = createMockDeps({
       canSend: vi.fn(async () => "offline" as const),

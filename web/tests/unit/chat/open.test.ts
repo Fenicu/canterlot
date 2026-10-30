@@ -33,7 +33,7 @@ function fakeRuntime(failures = 0) {
   };
   const runtime = {
     db: {},
-    journal: { ops: new Map(), settle() {} },
+    journal: { ops: new Map(), settle() {}, onOrphanRefused: () => () => undefined },
     drafts: {},
     connection,
   };

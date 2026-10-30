@@ -1,5 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
+import { flushSync } from "svelte";
+import { SvelteMap } from "svelte/reactivity";
 import { DraftStore } from "#lib/drafts/store.js";
 import { OpJournal, type Op } from "#lib/ops/journal.js";
 import { openDb } from "#lib/storage/idb.js";
@@ -27,6 +29,7 @@ import {
 } from "#lib/stores/delegation.js";
 import { fmt } from "#lib/format/ru.js";
 import {
+  freshInput,
   placeInput,
   type AttachmentRef,
   type InputUiState,
@@ -46,6 +49,7 @@ import {
   seedMachine,
 } from "../../../testing/fake-hub";
 import { TestLifecycle } from "../sync/helpers";
+import { countEffectRuns } from "./effect-runs.svelte";
 
 const CONV = "00000000-0000-4000-8000-0000000000aa";
 const BLOCK = "00000000-0000-4000-8000-0000000000b1";
@@ -781,7 +785,7 @@ describe("stores task 4", () => {
             kind: "input",
             conversationId: CONV,
             state: "saving",
-            body: { text: "черновик" },
+            body: { content: [{ type: "text", text: "черновик" }] },
             createdAt: 1,
             attempts: 0,
           },
@@ -791,8 +795,10 @@ describe("stores task 4", () => {
         this.ops.delete(id);
         settled.push(id);
       },
+      onOrphanRefused: () => () => undefined,
     };
     const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
     expect(chat.strip().map((item) => item.key)).toEqual([key]);
     chat.applier.applyEvents([
       {
@@ -872,6 +878,139 @@ describe("stores task 4", () => {
     expect(chat.timeline.entries.map((item) => item.seq)).toEqual(["1", "10"]);
   });
 
+  it("snapshot_queue_restores_queued_inputs_and_their_count_after_a_reload", () => {
+    const chat = chatOf();
+    const first = queuedView("idem-q1", "00000000-0000-4000-8000-0000000000c1");
+    const second = queuedView("idem-q2", "00000000-0000-4000-8000-0000000000c2");
+    chat.applier.applySnapshot(
+      {
+        queue: {
+          queued: [first, second],
+          pause_reasons: [],
+          hold_reasons: [],
+          run_slot: "free",
+        },
+      },
+      "9",
+    );
+    expect(chat.queue.queued).toBe(2);
+    expect(chat.strip().map((item) => [item.id, item.state, item.text])).toEqual(
+      [
+        [first.id, "queued", "idem-q1"],
+        [second.id, "queued", "idem-q2"],
+      ],
+    );
+    chat.applier.applyEvents([
+      {
+        event: ev(
+          "input_state_changed",
+          { input_id: first.id, state: "transmitting" },
+          "10",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(chat.timeline.entries.map((item) => item.key)).toEqual([
+      "input:idem-q1",
+    ]);
+    expect(chat.strip().map((item) => item.key)).toEqual(["idem-q2"]);
+  });
+
+  it("snapshot_queue_settles_a_local_entry_the_post_already_committed", () => {
+    const key = "idem-commit";
+    const settled: string[] = [];
+    const ops = {
+      ops: new Map(),
+      settle: (id: string) => settled.push(id),
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    chat.inputs.set(key, freshInput(key, "ещё сохраняется", 1));
+    const view = queuedView(key, "00000000-0000-4000-8000-0000000000c3");
+    chat.applier.applySnapshot({ queue: { queued: [view] } }, "9");
+    expect(chat.inputs.get(key)?.id).toBe(view.id);
+    expect(chat.inputs.get(key)?.state).toBe("queued");
+    expect(settled).toEqual([key]);
+  });
+
+  it("snapshot_queue_drops_strip_rows_the_hub_no_longer_holds", () => {
+    const chat = chatOf();
+    const kept = queuedView("idem-kept", "00000000-0000-4000-8000-0000000000c4");
+    const gone = queuedView("idem-gone", "00000000-0000-4000-8000-0000000000c5");
+    chat.applier.applySnapshot({ queue: { queued: [kept, gone] } }, "9");
+    chat.inputs.set("idem-local", freshInput("idem-local", "ещё не на хабе", 1));
+
+    chat.applier.applySnapshot({ queue: { queued: [kept] } }, "10");
+
+    expect(chat.queue.queued).toBe(1);
+    expect(chat.strip().map((item) => item.key).sort()).toEqual([
+      "idem-kept",
+      "idem-local",
+    ]);
+  });
+
+  it("strip_reads_without_writing_so_a_derived_can_call_it", () => {
+    const key = "idem-orphan";
+    const ops = {
+      ops: new Map([
+        [
+          key,
+          {
+            key,
+            kind: "input",
+            conversationId: CONV,
+            state: "unknown",
+            body: { content: [{ type: "text", text: "из журнала" }] },
+            createdAt: 1,
+            attempts: 0,
+          },
+        ],
+      ]),
+      settle() {},
+      onOrphanRefused: () => () => undefined,
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    expect(chat.strip()).toEqual([]);
+    expect(chat.inputs.size).toBe(0);
+    chat.open();
+    expect(chat.strip().map((item) => item.text)).toEqual(["из журнала"]);
+  });
+
+  it("recovered_entry_keeps_its_text_and_leaves_when_the_hub_refuses_it", () => {
+    const key = "idem-recovered";
+    let refuse: (op: Op) => void = () => undefined;
+    const op = {
+      key,
+      kind: "input",
+      conversationId: CONV,
+      state: "unknown",
+      body: {
+        content: [{ type: "text", text: "после перезагрузки" }],
+        attachment_ids: ["att-1"],
+      },
+      createdAt: 1,
+      attempts: 1,
+    } as Op;
+    const ops = {
+      ops: new Map([[key, op]]),
+      settle() {},
+      onOrphanRefused(fn: (item: Op) => void) {
+        refuse = fn;
+        return () => undefined;
+      },
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
+    const [entry] = chat.strip();
+    expect(entry?.text).toBe("после перезагрузки");
+    expect(entry?.attachments.map((item) => item.attachment_id)).toEqual([
+      "att-1",
+    ]);
+
+    ops.ops.delete(key);
+    refuse(op);
+    expect(chat.strip()).toEqual([]);
+  });
+
   it("cancelled_input_leaves_the_feed_and_notes_in_the_strip_for_four_seconds", () => {
     const clock = new FakeClock(1);
     clock.advance(1_000);
@@ -918,6 +1057,74 @@ describe("stores task 4", () => {
     expect(chat.strip().some((item) => item.key === key)).toBe(true);
     clock.advance(1);
     expect(chat.inputs.has(key)).toBe(false);
+  });
+
+  it("cancel_note_does_not_stick_after_leaving_the_chat", () => {
+    const clock = new FakeClock(1);
+    clock.advance(1_000);
+    const chat = chatOf(undefined, clock);
+    const queued = (key: string, id: string, seq: string) => ({
+      event: ev(
+        "input_queued",
+        {
+          input_id: id,
+          input_seq: seq,
+          idempotency_key: key,
+          state: "queued",
+          content: [{ type: "text", text: key }],
+        },
+        seq,
+      ),
+      overlap: false,
+    });
+    const cancelled = (id: string, seq: string) => ({
+      event: ev("input_state_changed", { input_id: id, state: "cancelled" }, seq),
+      overlap: false,
+    });
+    const first = "00000000-0000-4000-8000-0000000000d1";
+    const second = "00000000-0000-4000-8000-0000000000d2";
+    chat.applier.applyEvents([
+      queued("early", first, "1"),
+      queued("late", second, "2"),
+      cancelled(first, "3"),
+    ]);
+    clock.advance(3000);
+    chat.applier.applyEvents([cancelled(second, "4")]);
+    chat.close();
+
+    clock.advance(2000);
+    chat.open();
+
+    expect(chat.strip().map((item) => item.key)).toEqual(["late"]);
+    clock.advance(2000);
+    expect(chat.strip()).toEqual([]);
+  });
+
+  it("reopening_a_warm_chat_from_an_effect_does_not_tie_it_to_the_store", () => {
+    const journal = new SvelteMap<string, Op>();
+    const chat = chatOf({
+      ops: journal,
+      settle() {},
+      onOrphanRefused: () => () => undefined,
+    } as unknown as OpJournal);
+    const effect = countEffectRuns(() => chat.open());
+    flushSync();
+    expect(effect.runs()).toBe(1);
+
+    journal.set("k", {
+      key: "k",
+      kind: "input",
+      conversationId: CONV,
+      body: {},
+      state: "saving",
+      attempts: 0,
+      createdAt: 1,
+    });
+    chat.inputs.set("k", freshInput("k", "текст", 1));
+    flushSync();
+
+    expect(effect.runs()).toBe(1);
+    effect.stop();
   });
 
   it("queue_state_changed_updates_pauses_holds_and_run_slot", () => {
@@ -1646,7 +1853,11 @@ describe("stores task 4", () => {
     });
     const chat = new ChatStore(id, {
       api: adapt(api),
-      ops: { ops: new Map(), settle() {} } as unknown as OpJournal,
+      ops: {
+        ops: new Map(),
+        settle() {},
+        onOrphanRefused: () => () => undefined,
+      } as unknown as OpJournal,
       drafts: {} as DraftStore,
       connection,
       blockIO: {
@@ -1945,18 +2156,26 @@ describe("stores task 4", () => {
             kind: "input",
             conversationId: CONV,
             state: "saving",
-            body: { text: "с файлом", attachments: [attRef] },
+            body: {
+              content: [{ type: "text", text: "с файлом" }],
+              attachment_ids: [attRef.attachment_id],
+            },
             createdAt: 100,
             attempts: 0,
           },
         ],
       ]),
       settle() {},
+      onOrphanRefused: () => () => undefined,
     };
     const chat = chatOf(ops as unknown as OpJournal);
+    chat.open();
     const saving = chat.strip().find((i) => i.key === attKey);
     expect(saving).toBeDefined();
-    expect(saving!.attachments).toEqual([attRef]);
+    expect(saving!.text).toBe("с файлом");
+    expect(saving!.attachments.map((item) => item.attachment_id)).toEqual([
+      attRef.attachment_id,
+    ]);
 
     chat.applier.applyEvents([
       {
@@ -2099,6 +2318,20 @@ function sampleRow(id: string): ListRow {
   };
 }
 
+function queuedView(key: string, id: string) {
+  return {
+    id,
+    idempotency_key: key,
+    state: "queued",
+    content: [{ type: "text" as const, text: key }],
+    attachments: [],
+    created_seq: "5",
+    feed_seq: null,
+    created_at: "2026-10-28T12:00:00.000Z",
+    retry_of: null,
+  };
+}
+
 function chatOf(
   ops?: OpJournal,
   clock: {
@@ -2116,9 +2349,17 @@ function chatOf(
   };
   return new ChatStore(CONV, {
     api,
-    ops: ops ?? ({ ops: new Map(), settle() {} } as unknown as OpJournal),
+    ops:
+      ops ??
+      ({
+        ops: new Map(),
+        settle() {},
+        onOrphanRefused: () => () => undefined,
+      } as unknown as OpJournal),
     drafts: {} as DraftStore,
-    connection: {} as ConnectionManager,
+    connection: {
+      subscribe: () => ({ release() {}, status: "idle", cursor: "0" }),
+    } as unknown as ConnectionManager,
     blockIO: {
       fetchContent: async () => ({
         content: "",

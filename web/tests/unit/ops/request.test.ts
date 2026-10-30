@@ -122,4 +122,42 @@ describe("sendOp", () => {
     await expect(sendOp(broken, op)).rejects.toBeInstanceOf(NetworkError);
     expect(httpHealth.lastOkAt).toBeNull();
   });
+
+  it("hung_post_times_out_as_a_retryable_network_error", async () => {
+    const fetchImpl = ((_url: string, init: RequestInit) =>
+      new Promise<Response>((_resolve, reject) => {
+        init.signal?.addEventListener("abort", () =>
+          reject(init.signal?.reason as Error),
+        );
+      })) as unknown as typeof fetch;
+
+    await expect(
+      sendOp(
+        fetchImpl,
+        { kind: "input", key: "k", conversationId: "c", body: {} },
+        5,
+      ),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
+
+  it("response_body_cut_by_the_timeout_stays_unknown", async () => {
+    const fetchImpl = ((_url: string, init: RequestInit) =>
+      Promise.resolve({
+        ok: true,
+        json: () =>
+          new Promise((_resolve, reject) => {
+            init.signal?.addEventListener("abort", () =>
+              reject(init.signal?.reason as Error),
+            );
+          }),
+      })) as unknown as typeof fetch;
+
+    await expect(
+      sendOp(
+        fetchImpl,
+        { kind: "input", key: "k", conversationId: "c", body: {} },
+        5,
+      ),
+    ).rejects.toBeInstanceOf(NetworkError);
+  });
 });

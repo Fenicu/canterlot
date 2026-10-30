@@ -307,6 +307,7 @@ impl SyntheticAdapter {
             .into_iter()
             .find(|m| m.pid == pid)
             .ok_or(AdapterError::Protocol)?;
+        group.register_cli(&member);
         self.cli = Some(member.clone());
         self.stdin = child.stdin.take();
         let stdout = child.stdout.take().ok_or(AdapterError::Protocol)?;
@@ -695,6 +696,24 @@ impl Adapter for SyntheticAdapter {
         })
         .await
         .unwrap_or(DecisionOutcome::Undetermined)
+    }
+
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        let decision = DecisionPayload::Permission {
+            behavior: canterlot_proto::requests::PermissionBehavior::Deny,
+            message: Some(message.to_owned()),
+        };
+        if self.active {
+            let _ = self.deliver_decision(request_id, &decision).await;
+        } else {
+            let request_id = request_id.to_owned();
+            let _ = self
+                .send(&Request::Decision {
+                    request_id,
+                    decision,
+                })
+                .await;
+        }
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {

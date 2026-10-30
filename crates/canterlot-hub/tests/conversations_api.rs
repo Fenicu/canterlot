@@ -716,6 +716,43 @@ async fn sibling_with_common_prefix_is_not_under_the_root(pool: PgPool) {
     }
     f.create(json!({"workdir":"/home/a/sub"})).await;
 }
+
+/// Путь из псевдослучайных символов: сжатие индекса его не уменьшает.
+fn incompressible_workdir(bytes: usize) -> String {
+    const ALPHABET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let mut state = 0x9e37_79b9_7f4a_7c15_u64;
+    let mut path = String::from("/tmp");
+    while path.len() < bytes {
+        let segment = path.len() % 200 == 4;
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        if segment && path.len() + 1 < bytes {
+            path.push('/');
+        } else {
+            path.push(ALPHABET[(state % ALPHABET.len() as u64) as usize] as char);
+        }
+    }
+    path
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn workdir_length_is_capped_with_a_validation_error(pool: PgPool) {
+    use canterlot_hub::conversations::MAX_WORKDIR_BYTES;
+    let f = Fixture::new(pool).await;
+    for bytes in [3000, MAX_WORKDIR_BYTES + 1, 4096] {
+        let mut b = f.body();
+        b["workdir"] = json!(incompressible_workdir(bytes));
+        let r = f
+            .request(Method::POST, "/api/v1/conversations", Some(b), 422)
+            .await;
+        assert_eq!(r["error"]["code"], "workdir_not_allowed");
+    }
+    let longest = incompressible_workdir(MAX_WORKDIR_BYTES);
+    assert_eq!(longest.len(), MAX_WORKDIR_BYTES);
+    let id = f.create(json!({"workdir":longest})).await;
+    assert_eq!(f.get(id).await["workdir"], longest);
+}
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn recent_workdirs_shows_last_three_from_remembered_table(pool: PgPool) {
     let f = Fixture::new(pool).await;
@@ -1122,6 +1159,7 @@ async fn start_in_tx_preserves_resume_native_id_and_outbox_settings(pool: PgPool
     assert!(instructions.text.is_empty());
     assert!(start.capabilities.is_empty());
     sqlx::query("update executions set state='stopped',native_conversation_id='native-test' where conversation_id=$1").bind(id).execute(&f.pool).await.unwrap();
+    testkit::seed_recorded_turn(&f.pool, id).await;
     let mut tx = f.pool.begin().await.unwrap();
     let started = executions::start_in_tx(
         &mut tx,

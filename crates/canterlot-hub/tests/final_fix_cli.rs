@@ -148,3 +148,34 @@ async fn serve_applies_pending_migrations_before_listening_and_logs_version(
     assert!(logs.contains(&format!("version={version}")));
     Ok(())
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_migration_reports_its_kind_and_version(pool: PgPool) -> TestResult {
+    let dir = tempfile::tempdir()?;
+    installation::init(&pool, &dir.path().join("installation.toml")).await?;
+    sqlx::query("update _sqlx_migrations set checksum = '\\x00' where version = 23")
+        .execute(&pool)
+        .await?;
+    fs::write(
+        dir.path().join("database-url"),
+        pool.connect_options().to_url_lossy().as_str().as_bytes(),
+    )?;
+    let config = dir.path().join("hub.toml");
+    fs::write(
+        &config,
+        "database_url_file = 'database-url'\ngrpc_listen = '127.0.0.1:7443'\ntls_cert = 'cert.pem'\ntls_key = 'key.pem'\nmanifest = 'installation.toml'\n",
+    )?;
+    for command in ["serve", "init"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_canterlot-hub"))
+            .args([command, "--config"])
+            .arg(&config)
+            .output()?;
+        assert!(!output.status.success(), "{command}");
+        assert_eq!(
+            String::from_utf8(output.stderr)?.trim(),
+            "migration_error kind=version_mismatch version=23",
+            "{command}"
+        );
+    }
+    Ok(())
+}

@@ -2,42 +2,40 @@
   import { ApiError } from '#lib/api/http.js';
   import { deleteScheduled, interrupt, patchScheduled } from '#lib/api/client.js';
   import { getRuntime } from '#lib/app/runtime.js';
+  import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
   import { CANCEL_REQUESTED_LABEL } from '#lib/stores/inputs.js';
-  import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { ChatStore, ScheduledMessage } from '#lib/stores/chat.svelte.js';
   import { deliveryLabel, scheduledLabel } from '#lib/timeline/present.js';
   import Sheet from '#lib/ui/Sheet.svelte';
 
   let { chat }: { chat: ChatStore } = $props();
   const items = $derived(chat.strip());
-  const scheduled = $derived(
-    chat.scheduled as {
-      id?: string;
-      run_at?: string;
-      send_at?: string;
-      text?: string;
-      state?: string;
-      content?: { type: string; text?: string }[];
-    }[]
-  );
+  // Хаб отдаёт и завершённые задания: снимок держит их до 30 дней.
+  const scheduled = $derived(chat.scheduled.filter((item) => item.state === 'pending'));
+  const failed = $derived(chat.scheduled.filter((item) => item.state === 'failed'));
   let lost = $state<Record<string, boolean>>({});
   let notes = $state<Record<string, string>>({});
   let editId = $state<string | null>(null);
   let editText = $state('');
   let editAt = $state('');
 
-  function textOf(item: (typeof scheduled)[number]): string {
-    if (item.text) return item.text;
-    return (item.content ?? [])
-      .filter((block) => block.type === 'text')
-      .map((block) => block.text ?? '')
-      .join('');
+  function textOf(item: ScheduledMessage): string {
+    return item.content.map((block) => (block.type === 'text' ? block.text : '')).join('');
   }
 
-  function atOf(item: (typeof scheduled)[number]): string {
-    const raw = item.run_at ?? item.send_at ?? '';
-    const parsed = Date.parse(raw);
+  function atOf(item: ScheduledMessage): string {
+    const parsed = Date.parse(item.run_at);
     return Number.isFinite(parsed) ? scheduledLabel(parsed) : 'Отправится позже';
+  }
+
+  function takeBackFailed(item: ScheduledMessage) {
+    chat.scheduled = chat.scheduled.filter((job) => job.id !== item.id);
+    void returnToComposer(
+      chat.id,
+      { text: textOf(item), attachments: item.attachment_ids.map((id) => ({ id })) },
+      getRuntime().drafts
+    );
   }
 
   async function cancel(key: string) {
@@ -111,15 +109,21 @@
       {/if}
     </div>
   {/each}
-  {#each scheduled as item, index (item.id ?? index)}
+  {#each scheduled as item (item.id)}
     <div>
       <p>{atOf(item)} {textOf(item)}</p>
-      {#if item.id && notes[item.id]}
+      {#if notes[item.id]}
         <p>{notes[item.id]}</p>
-      {:else if item.id}
-        <button type="button" onclick={() => openEdit(item.id ?? '', textOf(item), item.run_at ?? item.send_at ?? '')}>Изменить</button>
-        <button type="button" onclick={() => cancelScheduled(item.id ?? '')}>Отменить</button>
+      {:else}
+        <button type="button" onclick={() => openEdit(item.id, textOf(item), item.run_at)}>Изменить</button>
+        <button type="button" onclick={() => cancelScheduled(item.id)}>Отменить</button>
       {/if}
+    </div>
+  {/each}
+  {#each failed as item (item.id)}
+    <div>
+      <p>Не отправлено: {textOf(item)}</p>
+      <button type="button" onclick={() => takeBackFailed(item)}>Вернуть в черновик</button>
     </div>
   {/each}
 </div>

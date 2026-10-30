@@ -5,6 +5,7 @@ import {
   snapshotMachines,
 } from "#lib/api/client.js";
 import { NetworkError, session } from "#lib/api/http.js";
+import { returnRefused } from "#lib/composer/returned.js";
 import { DraftStore } from "#lib/drafts/store.js";
 import { OpJournal } from "#lib/ops/journal.js";
 import { sendOp } from "#lib/ops/request.js";
@@ -80,6 +81,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
         authExpired: () => session.state === "expired",
       },
     );
+    const drafts = new DraftStore(ownerId, db);
+    journal.onOrphanRefused((op) => void returnRefused(op, drafts));
     await journal.recover();
     const connection = new ConnectionManager({
       transport: new BrowserSocket(() => {
@@ -173,7 +176,6 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       },
     });
     machines.open();
-    const drafts = new DraftStore(ownerId, db);
     let disposed = false;
     const runtime: Runtime = {
       ownerId,

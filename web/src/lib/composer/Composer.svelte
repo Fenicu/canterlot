@@ -11,6 +11,7 @@
   import { takeAttachmentNotice } from '#lib/composer/attachmentNotice.js';
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
+  import { bindReturned } from '#lib/composer/returned.js';
   import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
@@ -101,6 +102,7 @@
       model.text = text;
       if (node) node.value = text;
     });
+    const stopReturned = bindReturned(chat.id, (returned) => model.takeBack(returned));
     void loadConfig()
       .then((cfg) => {
         limits = cfg.limits;
@@ -111,6 +113,7 @@
     }, 250);
     return () => {
       stop();
+      stopReturned();
       clearInterval(pulse);
       window.clearTimeout(timer);
     };
@@ -199,6 +202,10 @@
         },
         onChange: (text) => {
           model.text = text;
+        },
+        onAttachments: (list) => {
+          uploads.restore(chat.id, list);
+          runtime.drafts.set(chat.id, { attachments: [] });
         }
       }}
       rows="2"
