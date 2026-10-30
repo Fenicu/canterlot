@@ -961,6 +961,37 @@ async fn discover_reads_every_model_list_page() {
 }
 
 #[tokio::test]
+async fn failed_history_lookup_never_sends_the_input_again() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "thread/turns/list", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "error": {"code": -32000, "message": "busy"}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let mut t = fake.tx("retry");
+    t.attempt = 2;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
+        .await
+        .unwrap();
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    assert!(!fake.stdin_methods().contains(&"turn/start".to_owned()));
+    // Хода нет и не будет: исполнение не остаётся занятым.
+    fake.finish(t.command_id).await;
+    assert!(matches!(
+        fake.event().await,
+        AdapterEvent::Phase {
+            phase: canterlot_worker::adapter::Phase::AwaitingInput,
+            ..
+        }
+    ));
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn retried_input_found_in_a_finished_turn_finishes_at_once_and_queue_moves_on() {
     // Форма хода после возобновления: убитый ход — `interrupted` (ev/resume.jsonl:107);
     // `inProgress` от убитого процесса этот процесс тоже не ведёт.

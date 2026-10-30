@@ -1324,19 +1324,24 @@ impl CodexAdapter {
             }
             _ => {
                 self.unconfirmed.remove(&pending.command_id);
-                self.events.push_back(AdapterEvent::RunFinished {
-                    input_command_id: pending.command_id,
-                    usage: Vec::new(),
-                    context_tokens: 0,
-                    context_window_tokens: 0,
-                });
-                self.events.push_back(AdapterEvent::Phase {
-                    phase: Phase::AwaitingInput,
-                    tool_name: None,
-                    summary: None,
-                });
+                self.finish_without_turn(pending.command_id);
             }
         }
+    }
+
+    // Ввод закрыт без хода: конца хода от сервера не будет.
+    fn finish_without_turn(&mut self, command_id: Uuid) {
+        self.events.push_back(AdapterEvent::RunFinished {
+            input_command_id: command_id,
+            usage: Vec::new(),
+            context_tokens: 0,
+            context_window_tokens: 0,
+        });
+        self.events.push_back(AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            tool_name: None,
+            summary: None,
+        });
     }
 
     // Смена настроек едет оверрайдами; действующие правим сразу.
@@ -1371,20 +1376,25 @@ impl CodexAdapter {
         }
     }
 
-    async fn history_lookup(&mut self, command_id: &str) -> Option<(String, Option<String>)> {
+    // `Err` — истории нет: это не значит, что ввода в ней нет.
+    async fn history_lookup(
+        &mut self,
+        command_id: &str,
+    ) -> Result<Option<(String, Option<String>)>, ()> {
         let thread_id = self.thread_id();
         let (id, message) = self.rpc.request(
             "thread/turns/list",
             input::history_lookup_params(&thread_id),
         );
         if !self.write_request(message).await {
-            return None;
+            return Err(());
         }
         let result = self
             .wait_response(id, Instant::now() + self.deadline)
-            .await?;
-        let result = result.ok()?;
-        input::history_turn(&result, command_id)
+            .await
+            .ok_or(())?
+            .map_err(|_| ())?;
+        Ok(input::history_turn(&result, command_id))
     }
 
     async fn transmit_inner(
@@ -1424,32 +1434,28 @@ impl CodexAdapter {
         if self.turn_running() {
             return TransmitOutcome::Rejected("turn_active".into());
         }
-        if input.attempt > 1
-            && let Some((turn, status)) = self.history_lookup(&input.command_id.to_string()).await
-        {
-            // Ввод уже принят: второй раз не шлём. Цепляемся, только если ход
-            // идёт в этом процессе; иначе (ход завершён или остался от убитого
-            // процесса) turn/completed не придёт, и ход закрывается сразу.
-            if status.as_deref() == Some("inProgress") && self.outbox.knows(&turn) {
-                self.outbox.attach(&turn, input.command_id);
-                self.begin_turn(&turn, input.command_id);
-            } else {
-                self.events.push_back(AdapterEvent::RunFinished {
-                    input_command_id: input.command_id,
-                    usage: Vec::new(),
-                    context_tokens: 0,
-                    context_window_tokens: 0,
-                });
-                self.events.push_back(AdapterEvent::Phase {
-                    phase: Phase::AwaitingInput,
-                    tool_name: None,
-                    summary: None,
+        if input.attempt > 1 {
+            let Ok(found) = self.history_lookup(&input.command_id.to_string()).await else {
+                // Codex не дедуплицирует clientUserMessageId: повтор вслепую дал бы
+                // второй ход. Исход решает владелец.
+                self.finish_without_turn(input.command_id);
+                return TransmitOutcome::Undetermined;
+            };
+            if let Some((turn, status)) = found {
+                // Ввод уже принят: второй раз не шлём. Цепляемся, только если ход
+                // идёт в этом процессе; иначе (ход завершён или остался от убитого
+                // процесса) turn/completed не придёт, и ход закрывается сразу.
+                if status.as_deref() == Some("inProgress") && self.outbox.knows(&turn) {
+                    self.outbox.attach(&turn, input.command_id);
+                    self.begin_turn(&turn, input.command_id);
+                } else {
+                    self.finish_without_turn(input.command_id);
+                }
+                return TransmitOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind: input::PROOF_KIND_HISTORY,
                 });
             }
-            return TransmitOutcome::Accepted(Proof {
-                command_id: input.command_id,
-                kind: input::PROOF_KIND_HISTORY,
-            });
         }
         let note = input::threshold_note(self.limits.snapshot().weekly, &mut self.last_noted);
         let request = match input::build_turn_request(
