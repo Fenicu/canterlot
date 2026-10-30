@@ -210,6 +210,8 @@ pub struct SyntheticAdapter {
     workdir: PathBuf,
     native_id: Option<String>,
     pending_calls: std::collections::HashSet<Uuid>,
+    /// Вводы с `Undetermined`: позднее `accepted` становится `InputAccepted`.
+    unconfirmed: std::collections::HashSet<Uuid>,
     /// Поколение процесса CLI: кадры заменённого процесса отбрасываются,
     /// иначе его выход завершил бы исполнение после перезапуска.
     generation: u64,
@@ -238,6 +240,7 @@ impl SyntheticAdapter {
             workdir: PathBuf::new(),
             native_id: None,
             pending_calls: std::collections::HashSet::new(),
+            unconfirmed: std::collections::HashSet::new(),
             generation: 0,
         }
     }
@@ -404,6 +407,13 @@ impl SyntheticAdapter {
         }
     }
     fn queue(&mut self, frame: Frame) {
+        if let Frame::Accepted(command_id) = frame
+            && self.unconfirmed.remove(&command_id)
+        {
+            self.pending
+                .push_back(AdapterEvent::InputAccepted { command_id });
+            return;
+        }
         if let Frame::Event(event) = frame {
             if let AdapterEvent::AgentCall { call_id, .. } = &event {
                 self.pending_calls.insert(*call_id);
@@ -586,7 +596,7 @@ impl Adapter for SyntheticAdapter {
         if settings.instructions.is_none() {
             settings.instructions = self.settings.instructions.clone();
         }
-        tokio::time::timeout(deadline, async {
+        let outcome = tokio::time::timeout(deadline, async {
             let sent = self
                 .send(&Request::Input {
                     command_id: input.command_id,
@@ -617,7 +627,11 @@ impl Adapter for SyntheticAdapter {
             TransmitOutcome::Undetermined
         })
         .await
-        .unwrap_or(TransmitOutcome::Undetermined)
+        .unwrap_or(TransmitOutcome::Undetermined);
+        if matches!(outcome, TransmitOutcome::Undetermined) {
+            self.unconfirmed.insert(input.command_id);
+        }
+        outcome
     }
 
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {

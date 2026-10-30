@@ -54,6 +54,9 @@ pub struct ClaudeCodeAdapter {
     tool_ids: HashMap<String, Uuid>,
     tool_finals: HashMap<Uuid, AdapterEvent>,
     requests: HashMap<String, (String, Value)>,
+    /// Вводы, о которых `transmit` вернул `Undetermined`: их позднее
+    /// доказательство уходит событием `InputAccepted`.
+    unconfirmed: HashSet<Uuid>,
     initialized: bool,
     eof: bool,
     exited: bool,
@@ -90,6 +93,7 @@ impl ClaudeCodeAdapter {
             tool_ids: HashMap::new(),
             tool_finals: HashMap::new(),
             requests: HashMap::new(),
+            unconfirmed: HashSet::new(),
             initialized: false,
             eof: false,
             exited: false,
@@ -201,8 +205,13 @@ impl ClaudeCodeAdapter {
     }
 
     fn on_parsed(&mut self, parsed: Parsed) {
-        if let Some(queue) = &mut self.queue {
-            queue.on_parsed(&parsed);
+        if let Some(queue) = &mut self.queue
+            && let Some(proof) = queue.on_parsed(&parsed)
+            && self.unconfirmed.remove(&proof.command_id)
+        {
+            self.events.push_back(AdapterEvent::InputAccepted {
+                command_id: proof.command_id,
+            });
         }
         match parsed {
             Parsed::Init {
@@ -609,6 +618,80 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Один проход доставки; `Undetermined` запоминается вызывающим.
+    async fn transmit_once(
+        &mut self,
+        input: &Transmission,
+        group: &dyn Containment,
+    ) -> TransmitOutcome {
+        if self.cli.is_none() || self.exited || self.eof {
+            return TransmitOutcome::Undetermined;
+        }
+        if let Err(reason) = self.validate_transmission(input) {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
+        if let Some(change) = input.settings.clone()
+            && process::needs_restart(&self.instructions, &change)
+            && let Err(reason) = self.restart_for_instructions(&change, group).await
+        {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        self.queue.as_mut().unwrap().enqueue(input);
+        let mut limit = Instant::now() + self.deadline;
+        let mut written = false;
+        loop {
+            let queue = self.queue.as_mut().unwrap();
+            if queue.is_proven(input.command_id) {
+                if !self.initialized {
+                    self.diagnostic("cli_init_missing", true);
+                    return TransmitOutcome::Undetermined;
+                }
+                return TransmitOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind: input::PROOF_KIND,
+                });
+            }
+            if let Some(reason) = queue.take_rejection(input.command_id) {
+                return TransmitOutcome::Rejected(reason.into());
+            }
+            if self.eof || self.exited {
+                return TransmitOutcome::Undetermined;
+            }
+            if let Next::Write(line) = queue.next(self.limits.snapshot().weekly) {
+                if let Some(active) = queue.active() {
+                    self.parser.set_input_command(active.command_id);
+                    if active.command_id == input.command_id && !written {
+                        written = true;
+                        limit = Instant::now() + self.deadline;
+                    }
+                }
+                if !matches!(
+                    timeout_at(limit, self.cli.as_mut().unwrap().write_line(&line)).await,
+                    Ok(Ok(()))
+                ) {
+                    return TransmitOutcome::Undetermined;
+                }
+                continue;
+            }
+            let until = queue.control_deadline().unwrap_or(limit).min(limit);
+            if timeout_at(until, self.pump()).await.is_err() {
+                if self.queue.as_ref().unwrap().control_deadline().is_some() {
+                    self.queue.as_mut().unwrap().control_timed_out();
+                    continue;
+                }
+                if !self.initialized && written {
+                    self.diagnostic("cli_init_missing", true);
+                }
+                if written {
+                    return TransmitOutcome::Undetermined;
+                }
+                self.queue.as_mut().unwrap().withdraw(input.command_id);
+                return TransmitOutcome::Rejected("turn_active".into());
+            }
+        }
+    }
+
     // Every wait is cancellation-safe: the line reader retains partial bytes.
     async fn pump(&mut self) {
         if self.exited || self.cli.is_none() {
@@ -848,72 +931,11 @@ impl Adapter for ClaudeCodeAdapter {
             .validate(input.settings.as_ref())
     }
     async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
-        if self.cli.is_none() || self.exited || self.eof {
-            return TransmitOutcome::Undetermined;
+        let outcome = self.transmit_once(input, group).await;
+        if matches!(outcome, TransmitOutcome::Undetermined) {
+            self.unconfirmed.insert(input.command_id);
         }
-        if let Err(reason) = self.validate_transmission(input) {
-            return TransmitOutcome::Rejected(reason.into());
-        }
-        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
-        if let Some(change) = input.settings.clone()
-            && process::needs_restart(&self.instructions, &change)
-            && let Err(reason) = self.restart_for_instructions(&change, group).await
-        {
-            return TransmitOutcome::Rejected(reason.into());
-        }
-        self.queue.as_mut().unwrap().enqueue(input);
-        let mut limit = Instant::now() + self.deadline;
-        let mut written = false;
-        loop {
-            let queue = self.queue.as_mut().unwrap();
-            if queue.is_proven(input.command_id) {
-                if !self.initialized {
-                    self.diagnostic("cli_init_missing", true);
-                    return TransmitOutcome::Undetermined;
-                }
-                return TransmitOutcome::Accepted(Proof {
-                    command_id: input.command_id,
-                    kind: input::PROOF_KIND,
-                });
-            }
-            if let Some(reason) = queue.take_rejection(input.command_id) {
-                return TransmitOutcome::Rejected(reason.into());
-            }
-            if self.eof || self.exited {
-                return TransmitOutcome::Undetermined;
-            }
-            if let Next::Write(line) = queue.next(self.limits.snapshot().weekly) {
-                if let Some(active) = queue.active() {
-                    self.parser.set_input_command(active.command_id);
-                    if active.command_id == input.command_id && !written {
-                        written = true;
-                        limit = Instant::now() + self.deadline;
-                    }
-                }
-                if !matches!(
-                    timeout_at(limit, self.cli.as_mut().unwrap().write_line(&line)).await,
-                    Ok(Ok(()))
-                ) {
-                    return TransmitOutcome::Undetermined;
-                }
-                continue;
-            }
-            let until = queue.control_deadline().unwrap_or(limit).min(limit);
-            if timeout_at(until, self.pump()).await.is_err() {
-                if self.queue.as_ref().unwrap().control_deadline().is_some() {
-                    self.queue.as_mut().unwrap().control_timed_out();
-                    continue;
-                }
-                if !self.initialized && written {
-                    self.diagnostic("cli_init_missing", true);
-                }
-                if written {
-                    return TransmitOutcome::Undetermined;
-                }
-                self.queue.as_mut().unwrap().withdraw(input.command_id);
-                return TransmitOutcome::Rejected("turn_active".into());
-            }
-        }
+        outcome
     }
     async fn deliver_decision(
         &mut self,

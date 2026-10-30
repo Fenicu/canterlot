@@ -1666,6 +1666,30 @@ impl Supervisor {
                 self.active_turn = None;
                 self.begin_stop(StopCause::Exited { code, signal }, false)?;
             }
+            AdapterEvent::InputAccepted { command_id } => {
+                // Позднее доказательство: ввод ещё передаётся и о нём уже сказано
+                // «не подтверждён»; хаб снимает паузу unconfirmed_delivery.
+                let key = self
+                    .inputs
+                    .iter()
+                    .find(|(key, input)| {
+                        key.0 == command_id
+                            && input.state == InputState::Transmitting
+                            && !input.accepted
+                    })
+                    .map(|(key, _)| *key)
+                    .filter(|key| self.reported.contains(&(key.0, key.1, "unconfirmed")));
+                if let Some(key) = key {
+                    if let Some(input) = self.inputs.get_mut(&key) {
+                        input.accepted = true;
+                    }
+                    self.record(Body::InputAccepted(InputAccepted {
+                        command_id: key.0.to_string(),
+                        dispatch_attempt: key.1,
+                        machine_time_ms: now_ms(),
+                    }))?;
+                }
+            }
             AdapterEvent::CliRestarted {
                 cli_pid,
                 cli_start_ticks,

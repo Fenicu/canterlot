@@ -62,6 +62,7 @@ for n,line in enumerate(sys.stdin,1):
         elif frame=='@wait':
             (d/'waiting').write_text('1')
             while True: time.sleep(1)
+        elif isinstance(frame,str) and frame.startswith('@sleep:'): time.sleep(int(frame.split(':')[1])/1000)
         elif frame=='@exit': sys.exit(7)
         else: emit(frame)
 if relay is not None:
@@ -868,6 +869,50 @@ async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
         }
     }
     assert_eq!(closed, 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn late_delivery_proof_after_undetermined_is_reported() {
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![vec![
+        json!("@sleep:900"),
+        json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+        json!({"type":"result","subtype":"success","is_error":false,"result":"ok","user_message_uuids":[id]}),
+    ]]);
+    // Срок доставки короче паузы двойника перед первым кадром ответа.
+    f.adapter = Box::new(adapter::claude_code::ClaudeCodeAdapter::new(
+        ClaudeCodeConfig {
+            executable: f.dir.path().join("fake-cli"),
+            ..Default::default()
+        },
+        f.dir.path().join("exec"),
+        Duration::from_millis(300),
+    ));
+    f.start().await;
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.transmit(&tx(id), &f.group))
+            .await
+            .unwrap(),
+        TransmitOutcome::Undetermined
+    ));
+    let events = f.finish().await;
+    let accepted = events
+        .iter()
+        .position(|e| matches!(e, AdapterEvent::InputAccepted { command_id } if *command_id == id))
+        .expect("late proof becomes InputAccepted");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AdapterEvent::InputAccepted { .. }))
+            .count(),
+        1
+    );
+    let finished = events
+        .iter()
+        .position(|e| matches!(e, AdapterEvent::RunFinished { .. }))
+        .unwrap();
+    assert!(accepted < finished);
     f.close().await;
 }
 
