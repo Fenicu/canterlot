@@ -1,4 +1,5 @@
 import { SvelteMap } from "svelte/reactivity";
+import type { components } from "#lib/api/generated/openapi.js";
 import type {
   AppliedEvent,
   RangeResult,
@@ -58,12 +59,15 @@ export interface Counts {
 
 export type ListFilter = "all" | "pinned" | "archived" | { group: string };
 
+export type PresetSummary = components["schemas"]["PresetSummary"];
+
 export interface ListSnapshot {
   counts: Counts;
   groups: { id: string; name: string; position: number; created_at: string }[];
   items: ListRow[];
   limits: ProviderLimits[];
   truncated: boolean;
+  presets: PresetSummary[];
 }
 
 const ATTRIBUTES = [
@@ -84,6 +88,7 @@ export class ListStore {
   groups = $state<ListSnapshot["groups"]>([]);
   counts = $state<Counts>({ all: 0, pinned: 0, archived: 0, groups: [] });
   limits = $state<ProviderLimits[]>([]);
+  presets = $state<PresetSummary[]>([]);
   truncated = $state(false);
   unknownKinds = $state(0);
 
@@ -145,6 +150,7 @@ export class ListStore {
     this.groups = data.groups ?? [];
     this.counts = data.counts ?? this.counts;
     this.limits = data.limits ?? [];
+    this.presets = data.presets ?? [];
     this.truncated = Boolean(data.truncated);
   }
 
@@ -188,6 +194,15 @@ export class ListStore {
     if (kind === "group_changed" && event.kind === "group_changed") {
       this.groups = event.payload.groups;
       this.counts = event.payload.counts;
+      return;
+    }
+    if (kind === "instruction_preset_changed" && event.kind === "instruction_preset_changed") {
+      const preset = event.payload.preset as PresetSummary;
+      const next = this.presets.filter((item) => item.id !== preset.id);
+      if (!event.payload.deleted) next.push(preset);
+      const rank = (item: PresetSummary): number => item.kind === "clean" ? 0 : item.kind === "owner" ? 1 : 2;
+      next.sort((a, b) => rank(a) - rank(b) || a.title.localeCompare(b.title, "ru"));
+      this.presets = next;
       return;
     }
     if (kind === "limits_changed" && event.kind === "limits_changed") {

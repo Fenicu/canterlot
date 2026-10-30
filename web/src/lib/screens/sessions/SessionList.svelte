@@ -256,8 +256,8 @@
 <style>
   .list { position: relative; display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0; height: 100%; }
   .bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; margin: var(--s5) var(--s6) var(--s3); padding: var(--s4); border-radius: var(--radius-pill); background: var(--surface); }
-  .brand { flex: 1; min-width: 0; margin: 0; padding-left: var(--s4); font-size: var(--fs-title); }
-  .create { display: inline-flex; align-items: center; justify-content: center; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); background: var(--accent); color: var(--accent-ink); }
+  .brand { flex: 1 0 auto; margin: 0; padding-left: var(--s4); font-size: var(--fs-title); }
+  .create { display: inline-flex; align-items: center; justify-content: center; min-width: var(--target); min-height: var(--target); border-radius: var(--radius-round); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-title); }
   .menu { position: absolute; z-index: 2; right: var(--s6); top: var(--s14); display: flex; flex-direction: column; padding: var(--s4); border-radius: var(--radius-card); background: var(--surface); }
   .menu button, .bar > button { min-width: var(--target); min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--text); }
   .scroll { overflow: auto; min-height: 0; flex: 1; }

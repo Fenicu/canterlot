@@ -45,6 +45,8 @@ use uuid::Uuid;
 
 #[path = "support/e2e_gate.rs"]
 mod e2e_gate;
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -282,8 +284,7 @@ impl Fixture {
             "exec '{}' \"$@\"\n",
             env!("CARGO_BIN_EXE_canterlot-worker")
         ));
-        fs::write(&wrapper, script).unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&wrapper, script, 0o700);
         let config = WorkerConfig {
             machine: Default::default(),
             attachments: Default::default(),

@@ -321,7 +321,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
   await page.route('**/api/v1/conversations/*/settings', async (route) => {
     if (route.request().method() !== 'PATCH') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
-    const body = route.request().postDataJSON() as { model?: string; effort?: string; permission_mode?: string };
+    const body = route.request().postDataJSON() as { model?: string; effort?: string; permission_mode?: string; instruction_profile?: string };
     const row = api.list.get(id);
     const detail = api.details.get(id) as (Record<string, unknown> & { settings_midsession?: boolean }) | undefined;
 
@@ -389,6 +389,25 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       });
       return;
     }
+    if (body.instruction_profile !== undefined) {
+      const known = body.instruction_profile === 'clean' || body.instruction_profile === 'owner' || api.presets.has(body.instruction_profile);
+      if (!known) {
+        await route.fulfill({
+          status: 422,
+          headers: headers(),
+          json: {
+            error: {
+              code: 'profile_unknown',
+              message: 'Пресет не найден',
+              scope: 'delivery',
+              retry: 'explicit_new_operation',
+              correlation_id: '00000000-0000-4000-8000-0000000000e9'
+            }
+          }
+        });
+        return;
+      }
+    }
 
     if (row) {
       if (body.model) row.model = body.model;
@@ -400,42 +419,45 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       if (body.effort) detail.effort = body.effort;
       if (body.permission_mode) detail.permission_mode = body.permission_mode;
     }
+    const appliedPreset = (ref: string | undefined): Record<string, unknown> | undefined => {
+      if (ref === undefined) return undefined;
+      if (ref === 'clean') return { id: 'clean', kind: 'clean', title: 'Без инструкций', revision: null, current_revision: null, deleted: false };
+      if (ref === 'owner') return { id: 'owner', kind: 'owner', title: 'Как у владельца', revision: null, current_revision: null, deleted: false };
+      const preset = api.presets.get(ref);
+      if (!preset) return { id: ref, kind: 'custom', title: ref, revision: null, current_revision: null, deleted: true };
+      return { id: preset.id, kind: 'custom', title: preset.title, revision: preset.revision, current_revision: preset.revision, deleted: false };
+    };
+    const previous = detail?.settings as { effective?: { instruction_profile?: string; instruction_preset?: unknown }; pending?: { instruction_profile?: string | null } } | undefined;
+    const effectiveRef = previous?.effective?.instruction_profile ?? 'clean';
+    const pendingRef = body.instruction_profile !== undefined ? body.instruction_profile : (previous?.pending?.instruction_profile ?? null);
+    const effective = {
+      model: row?.model ?? body.model ?? 'opus-5.5',
+      effort: row?.effort ?? body.effort ?? 'medium',
+      permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default',
+      instruction_profile: effectiveRef,
+      instruction_preset: appliedPreset(effectiveRef)
+    };
+    const pending = {
+      model: body.model ?? null,
+      effort: body.effort ?? null,
+      permission_mode: body.permission_mode ?? null,
+      instruction_profile: pendingRef
+    };
+    if (detail) {
+      detail.settings = { effective, pending, rev: 1 };
+    }
 
     hub.append(`conversation:${id}`, {
       kind: 'conversation_settings_changed',
       conversation_id: id,
-      payload: {
-        effective: {
-          model: row?.model ?? body.model ?? 'opus-5.5',
-          effort: row?.effort ?? body.effort ?? 'medium',
-          permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default'
-        },
-        pending: {
-          model: body.model ?? null,
-          effort: body.effort ?? null,
-          permission_mode: body.permission_mode ?? null
-        },
-        rev: 1
-      }
+      payload: { effective, pending, rev: 1 }
     });
     hub.flush();
 
     await route.fulfill({
       status: 200,
       headers: headers(),
-      json: {
-        effective: {
-          model: row?.model ?? body.model ?? 'opus-5.5',
-          effort: row?.effort ?? body.effort ?? 'medium',
-          permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default'
-        },
-        pending: {
-          model: body.model ?? null,
-          effort: body.effort ?? null,
-          permission_mode: body.permission_mode ?? null
-        },
-        rev: 1
-      }
+      json: { effective, pending, rev: 1 }
     });
   });
 
@@ -646,8 +668,94 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { id } });
   });
 
-  await page.route('**/api/v1/conversations/*/runs/*', async (route) => {
-    if (route.request().method() !== 'GET') return route.fallback();
+  await page.route('**/api/v1/presets', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: api.presetList() });
+      return;
+    }
+    if (method === 'POST') {
+      const body = route.request().postDataJSON() as { title?: string; description?: string | null; text?: string };
+      const error = validatePresetBody(body, api, null);
+      if (error) {
+        await route.fulfill({ status: error.status, headers: headers(), json: errorBody(error.code, error.message, error.details) });
+        return;
+      }
+      const id = api.id();
+      const text = body.text!.trim();
+      const record = {
+        id,
+        kind: 'custom' as const,
+        title: body.title!.trim(),
+        description: (body.description ?? '').trim(),
+        revision: 1,
+        text_bytes: new TextEncoder().encode(text).length,
+        text,
+        created: { by: 'owner', conversation_id: null, conversation_title: null, at: new Date().toISOString() },
+        last_edit: null,
+        used_by: 0
+      };
+      api.presets.set(id, record);
+      hub.append('conversations', { kind: 'instruction_preset_changed', payload: { preset: api.presetSummary(record), deleted: false } });
+      hub.flush();
+      await route.fulfill({ status: 201, headers: headers(), json: { ...api.presetSummary(record), text } });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.route(/\/api\/v1\/presets\/[^/]+$/, async (route) => {
+    const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+    const method = route.request().method();
+    const stored = api.presets.get(id) ?? (id === 'clean' || id === 'owner' ? builtinPreset(api, id) : undefined);
+    if (method === 'GET') {
+      if (!stored) {
+        await route.fulfill({ status: 404, headers: headers(), json: errorBody('preset_not_found', 'Пресет не найден') });
+        return;
+      }
+      await route.fulfill({ headers: headers(), json: { ...api.presetSummary(stored), text: stored.text } });
+      return;
+    }
+    if (!stored || stored.kind !== 'custom') {
+      await route.fulfill({ status: stored ? 409 : 404, headers: headers(), json: stored ? errorBody('preset_builtin', 'Встроенный пресет нельзя изменить или удалить') : errorBody('preset_not_found', 'Пресет не найден') });
+      return;
+    }
+    if (method === 'DELETE') {
+      api.applyPresetDeletion(id);
+      await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
+    if (method === 'PATCH') {
+      const body = route.request().postDataJSON() as { title?: string; description?: string | null; text?: string; base_revision?: number };
+      if (body.base_revision !== stored.revision) {
+        await route.fulfill({ status: 409, headers: headers(), json: errorBody('preset_revision_conflict', 'Пресет уже изменён', { current_revision: stored.revision }) });
+        return;
+      }
+      const merged = {
+        title: body.title !== undefined ? body.title : stored.title,
+        description: body.description !== undefined ? (body.description ?? '') : stored.description,
+        text: body.text !== undefined ? body.text : stored.text ?? ''
+      };
+      const error = validatePresetBody(merged, api, id);
+      if (error) {
+        await route.fulfill({ status: error.status, headers: headers(), json: errorBody(error.code, error.message, error.details) });
+        return;
+      }
+      const text = merged.text.trim();
+      stored.title = merged.title.trim();
+      stored.description = (merged.description ?? '').trim();
+      stored.text = text;
+      stored.text_bytes = new TextEncoder().encode(text).length;
+      stored.revision = (stored.revision ?? 0) + 1;
+      hub.append('conversations', { kind: 'instruction_preset_changed', payload: { preset: api.presetSummary(stored), deleted: false } });
+      hub.flush();
+      await route.fulfill({ headers: headers(), json: { ...api.presetSummary(stored), text } });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.route('**/api/v1/conversations/*/runs/*', async (route) => {    if (route.request().method() !== 'GET') return route.fallback();
     const runId = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const info = api.runs.get(runId);
     if (!info) {
@@ -815,6 +923,57 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       }
     });
   });
+}
+
+function errorBody(code: string, message: string, details?: Record<string, unknown>): unknown {
+  return {
+    error: {
+      code,
+      message,
+      scope: 'delivery',
+      retry: 'explicit_new_operation',
+      correlation_id: '00000000-0000-4000-8000-0000000000e8',
+      ...(details ? { details } : {})
+    }
+  };
+}
+
+function builtinPreset(api: FakeHubApi, id: string) {
+  return api.presets.get(id);
+}
+
+function validatePresetBody(
+  body: { title?: string; description?: string | null; text?: string },
+  api: FakeHubApi,
+  selfId: string | null
+): { status: number; code: string; message: string; details?: Record<string, unknown> } | null {
+  const title = (body.title ?? '').trim();
+  if (!title || title.length > 80 || /[\u0000-\u001f\u007f]/.test(title)) {
+    return { status: 422, code: 'preset_invalid', message: 'Некорректный пресет', details: { field: 'title' } };
+  }
+  if ((body.description ?? '').length > 500) {
+    return { status: 422, code: 'preset_invalid', message: 'Некорректный пресет', details: { field: 'description' } };
+  }
+  const text = (body.text ?? '').trim();
+  if (!text) {
+    return { status: 422, code: 'preset_invalid', message: 'Некорректный пресет', details: { field: 'text' } };
+  }
+  if (new TextEncoder().encode(text).length > 65_536) {
+    return { status: 422, code: 'preset_invalid', message: 'Некорректный пресет', details: { field: 'text' } };
+  }
+  const clash = [...api.presets.values()].some(
+    (preset) => preset.id !== selfId && preset.title.toLowerCase() === title.toLowerCase()
+  );
+  if (clash) {
+    return { status: 409, code: 'preset_title_taken', message: 'Пресет с таким названием уже есть' };
+  }
+  if (selfId === null) {
+    const customs = [...api.presets.values()].filter((preset) => preset.kind === 'custom').length;
+    if (customs >= 100) {
+      return { status: 409, code: 'preset_limit_reached', message: 'Слишком много пресетов' };
+    }
+  }
+  return null;
 }
 
 function recount(api: FakeHubApi) {

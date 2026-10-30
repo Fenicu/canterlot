@@ -378,7 +378,7 @@ test.describe('E2E Requests and Recovery', () => {
     await page.reload();
     await expect(page.locator('[data-ready]')).toBeVisible();
     await expect(page.getByText('Вопрос перед перезагрузкой страницы')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Ответить' })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: 'Да' })).toBeEnabled();
 
     // 2. Decided-but-not-applied survives reload in its stage (orchestrator note)
     api.decisionAutoProgress = false;
@@ -471,7 +471,7 @@ test.describe('E2E Requests and Recovery', () => {
         request_id: reqId,
         kind: 'question',
         payload: {
-          questions: [{ id: 'q1', text: 'Запрос до перезапуска хаба' }]
+          questions: [{ id: 'q1', text: 'Запрос до перезапуска хаба', options: [{ label: 'Продолжить' }] }]
         }
       }
     });
@@ -484,7 +484,7 @@ test.describe('E2E Requests and Recovery', () => {
 
     // After reconnect, open request and waiting_for_user activity are retained
     await expect(page.getByText('Запрос до перезапуска хаба')).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByRole('button', { name: 'Ответить' })).toBeEnabled();
+    await expect(page.getByRole('radio', { name: 'Продолжить' })).toBeEnabled();
   });
 
   test('e2e_open_request_survives_worker_restart_via_sj_reannouncement', async ({ page }) => {

@@ -26,6 +26,9 @@ use canterlot_worker::{
 use serde_json::{Value, json};
 use tokio::time::Instant;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn codex_evidence_line(file: &str, line: usize) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -194,6 +197,35 @@ fn rate_limit_exceeded_without_exhausted_window_is_not_reached() {
     assert!(!facts.iter().any(|f| f.0 == "reached"), "{facts:?}");
 }
 
+#[test]
+fn ordinary_usage_blocked_is_read_from_the_response_top_level() {
+    let window = |percent: f64| {
+        json!({"limitId": "codex",
+            "primary": {"windowDurationMins": 300, "usedPercent": percent, "resetsAt": 1792927784},
+            "secondary": {"windowDurationMins": 10080, "usedPercent": 10.0, "resetsAt": 1793514584}})
+    };
+    let reached = |read: Value| {
+        let mut tracker = LimitTracker::default();
+        tracker
+            .on_fresh_read(&read, CrunchContext::RateLimitExceeded)
+            .iter()
+            .any(|fact| matches!(fact, LimitFact::Reached { .. }))
+    };
+    // Схема GetAccountRateLimitsResponse: ordinaryUsageAllowed — поле ответа.
+    assert!(reached(
+        json!({"rateLimits": window(40.0), "ordinaryUsageAllowed": false})
+    ));
+    assert!(!reached(
+        json!({"rateLimits": window(40.0), "ordinaryUsageAllowed": true})
+    ));
+    let mut nested = window(40.0);
+    nested["ordinaryUsageAllowed"] = false.into();
+    assert!(
+        !reached(json!({"rateLimits": nested})),
+        "not a snapshot field"
+    );
+}
+
 struct FakeProbeServer {
     executable: PathBuf,
     methods_log: PathBuf,
@@ -208,7 +240,7 @@ impl FakeProbeServer {
         let methods_log = dir.path().join("methods.log");
         fs::write(&methods_log, "").unwrap();
         let handler = dir.path().join("handler.py");
-        fs::write(
+        fake_exec::write_executable(
             &handler,
             r#"#!/usr/bin/env python3
 import json, sys
@@ -230,12 +262,10 @@ for line in sys.stdin:
             time.sleep(3600)
         print(json.dumps({"id": rid, "result": response}), flush=True)
 "#,
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&handler, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         let wrapper = dir.path().join("codex");
-        fs::write(
+        fake_exec::write_executable(
             &wrapper,
             format!(
                 "#!/bin/sh\nif [ \"$1\" = app-server ]; then exec \"{}\" \"{}\" \"{}\" \"{}\"; fi\nexit 1\n",
@@ -244,9 +274,8 @@ for line in sys.stdin:
                 if hang_on_read { "hang" } else { "ok" },
                 methods_log.display(),
             ),
-        )
-        .unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o755)).unwrap();
+            0o755,
+        );
         Self {
             executable: wrapper,
             methods_log,
@@ -358,4 +387,125 @@ async fn idle_ticker_polls_only_without_a_recent_observation() {
     );
     clock.advance(Duration::from_secs(301));
     assert_eq!(source.poll_idle("codex").await.len(), 4);
+}
+
+const ENV_DUMP_CODEX: &str = r#"#!/usr/bin/env python3
+import json, os, sys, pathlib
+d = pathlib.Path(__file__).parent
+name = 'version' if '--version' in sys.argv else 'probe'
+(d / f'{name}-env.json').write_text(json.dumps(dict(os.environ)))
+if name == 'version':
+    print('codex-cli 0.164.0'); sys.exit(0)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if 'id' in msg:
+        print(json.dumps({'id': msg['id'], 'result': {}}), flush=True)
+"#;
+
+const LEAKED: [&str; 6] = [
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "OPENAI_BASE_URL",
+    "RUST_LOG",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDECODE",
+];
+
+// Тест перезапускает сам себя с отравленным окружением: так родительское
+// окружение проверки содержит ключи биллинга без изменения env процесса тестов.
+#[tokio::test]
+async fn probes_drop_billing_and_leaked_environment() {
+    if std::env::var_os("CANTERLOT_PROBE_ENV_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "probes_drop_billing_and_leaked_environment",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("CANTERLOT_PROBE_ENV_CHILD", "1");
+        for key in LEAKED {
+            child.env(key, "canary-value");
+        }
+        let status = child.status().unwrap();
+        assert!(status.success(), "child run failed: {status}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    fs::write(&exe, ENV_DUMP_CODEX).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    probe::probe(
+        &exe,
+        "account/rateLimits/read",
+        json!({}),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    canterlot_worker::adapter::codex::version::check(&exe)
+        .await
+        .unwrap();
+    for name in ["probe-env.json", "version-env.json"] {
+        let env: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(name)).unwrap()).unwrap();
+        for key in LEAKED {
+            assert!(env.get(key).is_none(), "{name}: {key} leaked");
+        }
+        assert!(
+            env.get("CANTERLOT_PROBE_ENV_CHILD").is_none(),
+            "{name}: CANTERLOT_* leaked"
+        );
+        assert!(env.get("PATH").is_some(), "{name}: PATH kept");
+    }
+}
+
+fn process_alive(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn probe_timeout_kills_the_whole_app_server_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    // Обёртка как node /usr/bin/codex: родной сервер — её ребёнок в той же группе.
+    fs::write(
+        &exe,
+        "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/native.pid\"\nexec sleep 300\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = probe::probe(
+        &exe,
+        "account/rateLimits/read",
+        json!({}),
+        Duration::from_millis(800),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, ProbeError::Timeout);
+    let native: u32 = fs::read_to_string(dir.path().join("native.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_alive(native) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let alive = process_alive(native);
+    if alive {
+        let _ = std::process::Command::new("kill")
+            .arg(native.to_string())
+            .status();
+    }
+    assert!(!alive, "native server {native} survived the probe timeout");
 }

@@ -1,5 +1,5 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
+import { FakeHub, FakeHubApi, seedMachine, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupChat, seedMockup08 } from '../../testing/fixtures/mockup-chat';
 import { expect, test } from './fixtures';
@@ -36,6 +36,7 @@ async function bootChat(
 	});
 
 	if (opts?.setupApi) opts.setupApi(api);
+	seedPresets(api);
 
 	const id = opts?.seeder ? opts.seeder(api) : seedMockupChat(api);
 
@@ -242,6 +243,100 @@ test('interrupt_on_a_harness_that_exits_offers_resume_and_continue', async ({ pa
 	const resumeCall = calls.find((c) => c.url.endsWith('/resume'));
 	expect(resumeCall!.body).toEqual({ continue_queue: true });
 	expect(resumeCall!.key).not.toBe('');
+});
+
+test('settings_sheet_changes_preset_from_next_turn_and_warns_about_restart', async ({ page }) => {
+	const bodies: { instruction_profile?: string; key: string }[] = [];
+	page.on('request', (request) => {
+		if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/settings')) {
+			bodies.push({ ...(request.postDataJSON() as { instruction_profile?: string }), key: request.headers()['idempotency-key'] ?? '' });
+		}
+	});
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'conversation_settings_changed',
+		conversation_id: id,
+		payload: {
+			effective: {
+				model: 'opus-5.5',
+				effort: 'medium',
+				permission_mode: 'default',
+				instruction_profile: 'clean',
+				instruction_preset: { id: 'clean', kind: 'clean', title: 'Без инструкций', revision: null, current_revision: null, deleted: false }
+			},
+			pending: {},
+			rev: 2
+		}
+	});
+	hub.flush();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	await expect(page.getByText('Сейчас: Без инструкций')).toBeVisible();
+	await expect(page.getByText('Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.')).toBeVisible();
+	await page.getByRole('combobox', { name: 'Новые инструкции' }).selectOption('seed-executor');
+	await page.getByRole('button', { name: 'Сохранить настройки' }).click();
+	await expect.poll(() => bodies.find((body) => body.instruction_profile === 'seed-executor')).toBeDefined();
+	expect(bodies.at(-1)?.key).not.toBe('');
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	await expect(page.getByText('Без инструкций → Исполнитель (английский) со следующего хода')).toBeVisible();
+});
+
+test('apply_new_version_after_edit', async ({ page }) => {
+	const bodies: { instruction_profile?: string; key: string }[] = [];
+	page.on('request', (request) => {
+		if (request.method() === 'PATCH' && new URL(request.url()).pathname.endsWith('/settings')) {
+			bodies.push({ ...(request.postDataJSON() as { instruction_profile?: string }), key: request.headers()['idempotency-key'] ?? '' });
+		}
+	});
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'conversation_settings_changed',
+		conversation_id: id,
+		payload: {
+			effective: {
+				model: 'opus-5.5',
+				effort: 'medium',
+				permission_mode: 'default',
+				instruction_profile: 'seed-executor',
+				instruction_preset: { id: 'seed-executor', kind: 'custom', title: 'Исполнитель (английский)', revision: 1, current_revision: 2, deleted: false }
+			},
+			pending: {},
+			rev: 2
+		}
+	});
+	hub.flush();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	await expect(page.getByText('Пресет изменён после применения')).toBeVisible();
+	await page.getByRole('button', { name: 'Применить новую версию' }).click();
+	await expect.poll(() => bodies.find((body) => body.instruction_profile === 'seed-executor')).toBeDefined();
+});
+
+test('deleted_preset_is_shown_as_the_sessions_copy', async ({ page }) => {
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'conversation_settings_changed',
+		conversation_id: id,
+		payload: {
+			effective: {
+				model: 'opus-5.5',
+				effort: 'medium',
+				permission_mode: 'default',
+				instruction_profile: 'seed-executor',
+				instruction_preset: { id: 'seed-executor', kind: 'custom', title: 'Исполнитель (английский)', revision: 1, current_revision: null, deleted: true }
+			},
+			pending: {},
+			rev: 2
+		}
+	});
+	hub.flush();
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+	await expect(page.getByText(/сессия работает со своей копией/)).toBeVisible();
 });
 
 test('pause_cards_render_mockup_08_in_both_themes', async ({ page }) => {

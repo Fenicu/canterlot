@@ -78,18 +78,19 @@ pub async fn discover(cfg: &CodexConfig) -> Result<CodexCatalog, DiscoverError> 
         .map_err(DiscoverError::Version)?;
     let mut failure = None;
     for attempt in 0..3 {
-        match probe::probe(
+        match probe::probe_pages(
             &cfg.executable,
             "model/list",
-            json!({"includeHidden": false, "limit": 100}),
+            input::model_list_params(None),
             Duration::from_secs(15),
+            input::MODEL_LIST_MAX_PAGES,
         )
         .await
         {
-            Ok(result) => {
+            Ok(pages) => {
                 return Ok(CodexCatalog {
                     version,
-                    models: model_entries(&result),
+                    models: pages.iter().flat_map(model_entries).collect(),
                 });
             }
             Err(error) => {
@@ -122,7 +123,7 @@ pub struct CodexAdapter {
     limits: LimitTracker,
     broker: Option<Broker>,
     events: VecDeque<AdapterEvent>,
-    hold: Vec<AdapterEvent>,
+    hold: Vec<HeldTool>,
     pending_writes: VecDeque<Value>,
     effective: Option<Effective>,
     owner: OwnerDefaults,
@@ -144,6 +145,35 @@ pub struct CodexAdapter {
     exited: bool,
     start_attempted: bool,
     relay_executable: Option<PathBuf>,
+    crunch: Option<PendingCrunch>,
+}
+
+/// Ход, кончившийся лимитом без исчерпанного окна в снимке: свежее чтение
+/// лимитов идёт отдельной задачей, конец хода ждёт его в `self`, а не на стеке
+/// `next_event`, который супервизор бросает.
+struct PendingCrunch {
+    ctx: CrunchContext,
+    command: Option<Uuid>,
+    task: tokio::task::JoinHandle<Result<Value, probe::ProbeError>>,
+    finish: Vec<AdapterEvent>,
+}
+
+type CrunchResult = Result<Result<Value, probe::ProbeError>, tokio::task::JoinError>;
+
+async fn crunch_done(crunch: &mut Option<PendingCrunch>) -> CrunchResult {
+    match crunch {
+        Some(pending) => (&mut pending.task).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Начало вызова команды или правки файла ждёт решения о пометке «Разрешено
+/// правилами CLI»: запрос владельцу (без пометки), начало вывода или
+/// завершение без запроса (пометка по политике). События этого блока ждут с ним.
+struct HeldTool {
+    item_id: String,
+    block_id: Uuid,
+    events: Vec<AdapterEvent>,
 }
 
 /// Параметры перезапуска app-server с возобновлением треда.
@@ -173,12 +203,7 @@ impl CodexAdapter {
             hold: Vec::new(),
             pending_writes: VecDeque::new(),
             effective: None,
-            owner: OwnerDefaults {
-                approval_policy: None,
-                sandbox_mode: None,
-                sandbox_workspace_write: None,
-                developer_instructions: None,
-            },
+            owner: thread::owner_defaults_from(&Value::Null),
             models: Vec::new(),
             mode: PermissionMode::Owner,
             effort: None,
@@ -203,6 +228,7 @@ impl CodexAdapter {
             exited: false,
             start_attempted: false,
             relay_executable: None,
+            crunch: None,
         }
     }
 
@@ -246,27 +272,32 @@ impl CodexAdapter {
 
     // --- чтение потока ------------------------------------------------------
 
-    // Одно чтение stdout, событие брокера или проверка выхода; отмена безопасна.
+    // Одно чтение stdout, событие брокера, конец свежего чтения лимитов или
+    // проверка выхода. Отмена безопасна: обработка синхронна, состояние в `self`.
     async fn pump_once(&mut self) {
         if self.exited || self.proc.is_none() {
-            std::future::pending::<()>().await;
+            let result = crunch_done(&mut self.crunch).await;
+            self.finish_crunch(result);
             return;
         }
         let proc = self.proc.as_mut().unwrap();
         let broker = self.broker.as_mut().unwrap();
+        let crunch = &mut self.crunch;
         if self.eof {
             tokio::select! {
+                result = crunch_done(crunch) => self.finish_crunch(result),
                 status = proc.wait() => {
                     self.exited = true;
                     self.events.push_back(status.map(exit_event).unwrap_or(AdapterEvent::ProcessExited { code: None, signal: None }));
                 }
-                event = broker.next() => self.on_broker(event).await,
+                event = broker.next() => self.on_broker(event),
             }
         } else {
             tokio::select! {
                 biased;
-                line = proc.next_line() => self.dispatch_line(line).await,
-                event = broker.next() => self.on_broker(event).await,
+                result = crunch_done(crunch) => self.finish_crunch(result),
+                line = proc.next_line() => self.dispatch_line(line),
+                event = broker.next() => self.on_broker(event),
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {
                     if let Some(status) = proc.try_wait().ok().flatten() {
                         self.exited = true;
@@ -277,7 +308,7 @@ impl CodexAdapter {
         }
     }
 
-    async fn dispatch_line(&mut self, line: StdoutLine) {
+    fn dispatch_line(&mut self, line: StdoutLine) {
         match line {
             StdoutLine::Eof => self.eof = true,
             StdoutLine::Oversized(_) => self.diagnostic("oversized_frame", false),
@@ -289,7 +320,31 @@ impl CodexAdapter {
                 }
                 Incoming::Notification { method, params } => {
                     let translated = self.feed_notification(&method, &params);
-                    self.dispatch_translated(translated).await;
+                    let markable = (method == "item/started")
+                        .then(|| params.get("item"))
+                        .flatten()
+                        .filter(|item| {
+                            matches!(
+                                item.get("type").and_then(Value::as_str),
+                                Some("commandExecution" | "fileChange")
+                            )
+                        })
+                        .and_then(|item| item.get("id").and_then(Value::as_str))
+                        .map(str::to_owned);
+                    for item in translated {
+                        match (&markable, item) {
+                            (
+                                Some(item_id),
+                                Translated::Event(
+                                    event @ AdapterEvent::BlockStarted {
+                                        kind: BlockKind::ToolCall,
+                                        ..
+                                    },
+                                ),
+                            ) => self.hold_tool(item_id.clone(), event),
+                            (_, item) => self.on_translated(item),
+                        }
+                    }
                 }
                 Incoming::ServerRequest { id, method, params } => {
                     self.on_server_request(id, &method, &params)
@@ -305,12 +360,15 @@ impl CodexAdapter {
             self.events.push_back(event);
         }
         if method == "item/started"
-            && let Some(active) = self.outbox.active()
-            && params.get("turnId").and_then(Value::as_str) == Some(active.turn_id.as_str())
             && let Some(item) = params.get("item")
             && let Some(id) = item.get("id").and_then(Value::as_str)
         {
-            self.turn_items.insert(id.to_owned());
+            if self.outbox.active().is_some_and(|active| {
+                params.get("turnId").and_then(Value::as_str) == Some(active.turn_id.as_str())
+            }) {
+                self.turn_items.insert(id.to_owned());
+            }
+            // Правка любого треда (и субагента): карточке разрешения нужен её diff.
             if item.get("type").and_then(Value::as_str) == Some("fileChange") {
                 self.started_items.insert(id.to_owned(), item.clone());
             }
@@ -329,14 +387,72 @@ impl CodexAdapter {
         }
     }
 
-    // Полная обработка с возможными зондами (ошибки хода, лимиты).
-    async fn dispatch_translated(&mut self, translated: Vec<Translated>) {
-        for item in translated {
-            self.on_translated(item).await;
+    fn hold_tool(&mut self, item_id: String, event: AdapterEvent) {
+        let AdapterEvent::BlockStarted { block_id, .. } = &event else {
+            return;
+        };
+        let block_id = *block_id;
+        if self
+            .translator
+            .as_ref()
+            .is_some_and(|translator| translator.approval_noted(&item_id))
+        {
+            self.events.push_back(event);
+            return;
+        }
+        self.hold.push(HeldTool {
+            item_id,
+            block_id,
+            events: vec![event],
+        });
+    }
+
+    /// Пометка по действующей политике, если по элементу не было запроса владельцу.
+    fn cli_mark_for(&self, item_id: &str) -> Option<&'static str> {
+        if self
+            .translator
+            .as_ref()
+            .is_some_and(|translator| translator.approval_noted(item_id))
+        {
+            return None;
+        }
+        self.effective.as_ref().and_then(|effective| {
+            requests::cli_policy_mark(&effective.approval_policy, &effective.sandbox)
+        })
+    }
+
+    fn release_tool(&mut self, position: usize, mark: Option<&'static str>) {
+        let held = self.hold.remove(position);
+        for mut event in held.events {
+            if let AdapterEvent::BlockStarted { approved_by, .. } = &mut event {
+                *approved_by = mark.map(str::to_owned);
+            }
+            self.events.push_back(event);
+        }
+    }
+
+    fn release_item(&mut self, item_id: &str, mark: Option<&'static str>) {
+        if let Some(position) = self.hold.iter().position(|held| held.item_id == item_id) {
+            self.release_tool(position, mark);
+        }
+    }
+
+    fn release_all(&mut self) {
+        while !self.hold.is_empty() {
+            self.release_tool(0, None);
         }
     }
 
     fn on_server_request(&mut self, id: RpcId, method: &str, params: &Value) {
+        // Запрос разрешения по элементу: решает владелец, пометки CLI не будет.
+        if method.ends_with("/requestApproval")
+            && let Some(item_id) = params.get("itemId").and_then(Value::as_str)
+        {
+            if let Some(translator) = self.translator.as_mut() {
+                translator.note_approval(item_id);
+            }
+            self.release_item(item_id, None);
+        }
         let main = params.get("threadId").and_then(Value::as_str)
             == self
                 .effective
@@ -375,13 +491,13 @@ impl CodexAdapter {
         }
     }
 
-    async fn on_translated(&mut self, translated: Translated) {
+    fn on_translated(&mut self, translated: Translated) {
         match translated {
             Translated::TurnCompleted {
                 turn_id,
                 status,
                 error,
-            } => self.on_turn_completed(turn_id, status, error).await,
+            } => self.on_turn_completed(turn_id, status, error),
             Translated::RateLimits(snapshot) => {
                 for fact in self.limits.on_snapshot(&snapshot) {
                     self.events.push_back(AdapterEvent::Limit(fact));
@@ -392,9 +508,7 @@ impl CodexAdapter {
                     Some(Resolved::Ours { request_id }) => {
                         self.resolved.push_back(Resolved::Ours { request_id })
                     }
-                    Some(Resolved::Cleared { request_id })
-                        if self.outbox.active().is_some() =>
-                    {
+                    Some(Resolved::Cleared { request_id }) if self.outbox.active().is_some() => {
                         self.events.push_back(AdapterEvent::RequestClosed {
                             request_id,
                             reason: "cli_cancelled".into(),
@@ -404,42 +518,22 @@ impl CodexAdapter {
                 }
             }
             Translated::ItemCompleted {
-                item_id,
-                item_type,
-                status,
-                approved_by_cli,
+                item_id, status, ..
             } => {
-                self.completed_status.insert(item_id, status);
-                let mark = (matches!(item_type.as_str(), "commandExecution" | "fileChange")
-                    && approved_by_cli)
-                    .then(|| {
-                        self.effective.as_ref().and_then(|effective| {
-                            requests::cli_policy_mark(
-                                &effective.approval_policy,
-                                &effective.sandbox,
-                            )
-                        })
-                    })
-                    .flatten();
-                for held in &mut self.hold {
-                    if let AdapterEvent::BlockStarted {
-                        kind: BlockKind::ToolCall,
-                        approved_by,
-                        ..
-                    } = held
-                        && approved_by.is_none()
-                    {
-                        *approved_by = mark.map(str::to_owned);
-                    }
-                }
-                self.events.extend(self.hold.drain(..));
+                let mark = self.cli_mark_for(&item_id);
+                self.completed_status.insert(item_id.clone(), status);
+                self.release_item(&item_id, mark);
             }
             Translated::SettingsUpdated(settings) => {
                 if let Some(effective) = self.effective.as_mut() {
                     if let Some(policy) = settings.get("approvalPolicy") {
                         effective.approval_policy = policy.clone();
                     }
-                    if let Some(sandbox) = settings.get("sandbox") {
+                    // ThreadSettings называет песочницу sandboxPolicy (ev/question.jsonl).
+                    if let Some(sandbox) = settings
+                        .get("sandboxPolicy")
+                        .or_else(|| settings.get("sandbox"))
+                    {
                         effective.sandbox = sandbox.clone();
                     }
                     if let Some(model) = settings.get("model").and_then(Value::as_str) {
@@ -456,25 +550,41 @@ impl CodexAdapter {
                 }
             }
             Translated::TurnStarted { turn_id } => self.outbox.on_turn_started(&turn_id),
-            Translated::Event(event) => match &event {
-                AdapterEvent::BlockStarted {
-                    kind: BlockKind::ToolCall | BlockKind::ToolResult,
-                    ..
-                } => self.hold.push(event),
-                AdapterEvent::BlockFinal { block_id, .. }
-                    if self.hold.iter().any(|held| {
-                        matches!(held, AdapterEvent::BlockStarted { block_id: id, .. } if id == block_id)
-                    }) =>
-                {
-                    self.hold.push(event);
-                }
-                _ => self.events.push_back(event),
-            },
+            Translated::Event(event) => self.on_block_event(event),
             Translated::McpStatus { .. } | Translated::Ignored => {}
         }
     }
 
-    async fn on_turn_completed(
+    // Начало результата у отложенного вызова — команда уже выполняется без
+    // запроса: вызов отпускается с пометкой, и вывод идёт вживую. Прочие события
+    // отложенного блока ждут вместе с ним.
+    fn on_block_event(&mut self, event: AdapterEvent) {
+        if let AdapterEvent::BlockStarted {
+            kind: BlockKind::ToolResult,
+            parent: Some(parent),
+            ..
+        } = &event
+            && let Some(position) = self.hold.iter().position(|held| held.block_id == *parent)
+        {
+            let mark = self.cli_mark_for(&self.hold[position].item_id.clone());
+            self.release_tool(position, mark);
+        }
+        let block = match &event {
+            AdapterEvent::BlockDelta { block_id, .. }
+            | AdapterEvent::BlockFinal { block_id, .. }
+            | AdapterEvent::Media { block_id, .. } => Some(*block_id),
+            _ => None,
+        };
+        if let Some(block) = block
+            && let Some(held) = self.hold.iter_mut().find(|held| held.block_id == block)
+        {
+            held.events.push(event);
+            return;
+        }
+        self.events.push_back(event);
+    }
+
+    fn on_turn_completed(
         &mut self,
         turn_id: String,
         status: TurnStatus,
@@ -486,31 +596,42 @@ impl CodexAdapter {
             .filter(|active| active.turn_id == turn_id)
             .map(|active| active.command_id);
         let was_active = self.outbox.on_turn_completed(&turn_id);
-        // Отложенные вызовы уходят как есть: ход кончился без их завершения.
-        self.events.extend(self.hold.drain(..));
+        // Отложенные вызовы уходят без пометки: ход кончился без их завершения.
+        self.release_all();
         self.turn_items.clear();
         self.completed_status.clear();
         if !was_active {
             return;
         }
-        match (status, error) {
-            (TurnStatus::Interrupted, _) => {}
-            (_, None) if status != TurnStatus::Failed => {}
-            (_, Some(error)) => self.on_turn_error(error, command).await,
-            (_, None) => self.error_block("Ошибка Codex".into(), command),
-        }
+        let mut finish = Vec::new();
         if let Some(translator) = self.translator.as_mut() {
-            let finished = translator.finish_turn();
-            self.events.push_back(finished);
+            finish.push(translator.finish_turn());
         }
-        self.events.push_back(AdapterEvent::Phase {
+        finish.push(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,
             tool_name: None,
             summary: None,
         });
+        match (status, error) {
+            (TurnStatus::Interrupted, _) => {}
+            (_, None) if status != TurnStatus::Failed => {}
+            (_, Some(error)) => {
+                if let Some(ctx) = self.on_turn_error(error, command) {
+                    self.start_fresh_read(ctx, command, finish);
+                    return;
+                }
+            }
+            (_, None) => self.error_block("Ошибка Codex".into(), command),
+        }
+        self.events.extend(finish);
     }
 
-    async fn on_turn_error(&mut self, error: TurnErrorInfo, command: Option<Uuid>) {
+    // `Some` — нужен свежий снимок лимитов до конца хода.
+    fn on_turn_error(
+        &mut self,
+        error: TurnErrorInfo,
+        command: Option<Uuid>,
+    ) -> Option<CrunchContext> {
         match error.kind.as_str() {
             "unauthorized" => {
                 self.error_block(
@@ -520,18 +641,23 @@ impl CodexAdapter {
                 self.diagnostic("auth_required", false);
             }
             "contextWindowExceeded" => {}
-            "usageLimitExceeded" => {
+            "usageLimitExceeded" | "rateLimitExceeded" => {
                 let decision = self.limits.on_turn_failed(&limits::TurnErrorInfo {
                     codex_error_info: Some(error.kind.clone()),
                 });
-                self.crunch_reached(decision).await;
-                self.error_block("Исчерпан лимит Codex".into(), command);
-            }
-            "rateLimitExceeded" => {
-                let decision = self.limits.on_turn_failed(&limits::TurnErrorInfo {
-                    codex_error_info: Some(error.kind.clone()),
-                });
-                self.crunch_reached(decision).await;
+                let usage = error.kind == "usageLimitExceeded";
+                let fresh = match decision {
+                    ReachedDecision::Reached(fact) => {
+                        self.events.push_back(AdapterEvent::Limit(fact));
+                        None
+                    }
+                    ReachedDecision::NeedFreshRead(ctx) => Some(ctx),
+                    ReachedDecision::NotALimit => None,
+                };
+                if usage {
+                    self.error_block("Исчерпан лимит Codex".into(), command);
+                }
+                return fresh;
             }
             "other" if error.message.contains("model_not_found") => {
                 self.error_block("Модель не найдена".into(), command);
@@ -540,38 +666,55 @@ impl CodexAdapter {
                 self.error_block(turn_error_text(kind, error.http_status), command);
             }
         }
+        None
     }
 
-    async fn crunch_reached(&mut self, decision: ReachedDecision) {
-        match decision {
-            ReachedDecision::Reached(fact) => {
-                self.events.push_back(AdapterEvent::Limit(fact));
-            }
-            ReachedDecision::NeedFreshRead(ctx) => {
-                for fact in self.fresh_read(ctx).await {
-                    self.events.push_back(AdapterEvent::Limit(fact));
-                }
-            }
-            ReachedDecision::NotALimit => {}
+    // Свежие окна без запроса к модели: короткий probe account/rateLimits/read
+    // отдельной задачей; конец хода (`finish`) ждёт его завершения.
+    fn start_fresh_read(
+        &mut self,
+        ctx: CrunchContext,
+        command: Option<Uuid>,
+        finish: Vec<AdapterEvent>,
+    ) {
+        let executable = self.cfg.executable.clone();
+        let task = tokio::spawn(async move {
+            probe::probe(
+                &executable,
+                "account/rateLimits/read",
+                json!({}),
+                CRUNCH_PROBE,
+            )
+            .await
+        });
+        self.crunch = Some(PendingCrunch {
+            ctx,
+            command,
+            task,
+            finish,
+        });
+    }
+
+    fn finish_crunch(&mut self, result: CrunchResult) {
+        let Some(pending) = self.crunch.take() else {
+            return;
+        };
+        let facts = match result {
+            Ok(Ok(response)) => self.limits.on_fresh_read(&response, pending.ctx),
+            _ => Vec::new(),
+        };
+        let reached = facts
+            .iter()
+            .any(|fact| matches!(fact, crate::adapter::LimitFact::Reached { .. }));
+        self.events
+            .extend(facts.into_iter().map(AdapterEvent::Limit));
+        if pending.ctx == CrunchContext::RateLimitExceeded && !reached {
+            self.error_block("Codex ограничил частоту запросов".into(), pending.command);
         }
+        self.events.extend(pending.finish);
     }
 
-    // Свежие окна без запроса к модели: короткий probe account/rateLimits/read.
-    async fn fresh_read(&mut self, ctx: CrunchContext) -> Vec<crate::adapter::LimitFact> {
-        let response = probe::probe(
-            &self.cfg.executable,
-            "account/rateLimits/read",
-            json!({}),
-            CRUNCH_PROBE,
-        )
-        .await;
-        match response {
-            Ok(response) => self.limits.on_fresh_read(&response, ctx),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    async fn on_broker(&mut self, event: BrokerEvent) {
+    fn on_broker(&mut self, event: BrokerEvent) {
         let BrokerEvent::LimitsQuery { rpc_id } = event else {
             return;
         };
@@ -599,18 +742,14 @@ impl CodexAdapter {
             )
         })
         .collect();
-        self.broker
-            .as_mut()
-            .unwrap()
-            .answer_limits(
-                rpc_id,
-                &canterlot_proto::worker::v1::LimitsSnapshot {
-                    provider: "codex".into(),
-                    current,
-                    ..Default::default()
-                },
-            )
-            .await;
+        self.broker.as_mut().unwrap().answer_limits(
+            rpc_id,
+            &canterlot_proto::worker::v1::LimitsSnapshot {
+                provider: "codex".into(),
+                current,
+                ..Default::default()
+            },
+        );
     }
 
     // --- RPC поверх насоса ----------------------------------------------------
@@ -637,14 +776,17 @@ impl CodexAdapter {
         }
     }
 
+    // Строка уходит в буфер процесса синхронно, до первой точки ожидания:
+    // отмена посреди записи её не теряет и не рвёт (дописывается следующим вызовом).
     async fn flush_writes(&mut self) {
+        let Some(proc) = self.proc.as_mut() else {
+            return;
+        };
+        if proc.flush_out().await.is_err() {
+            return;
+        }
         while let Some(line) = self.pending_writes.pop_front() {
-            let Some(proc) = self.proc.as_mut() else {
-                self.pending_writes.push_front(line);
-                break;
-            };
             if proc.write_message(&line).await.is_err() {
-                self.pending_writes.push_front(line);
                 break;
             }
         }
@@ -706,46 +848,39 @@ impl CodexAdapter {
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("app_server_failed"))?;
-        self.owner = thread::owner_defaults_from(&config);
+        self.owner.reread(&config);
         Ok(())
+    }
+
+    /// Все страницы model/list на соединении сессии.
+    async fn list_models(&mut self) -> Result<Vec<ModelEntry>, AdapterError> {
+        let mut models = Vec::new();
+        let mut cursor = None;
+        for _ in 0..input::MODEL_LIST_MAX_PAGES {
+            let page = self
+                .rpc_round(
+                    "model/list",
+                    input::model_list_params(cursor.as_deref()),
+                    HANDSHAKE_STEP,
+                )
+                .await
+                .ok_or(AdapterError::StartFailed("model_list_failed"))?
+                .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
+            models.extend(model_entries(&page));
+            cursor = input::next_cursor(&page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(models)
     }
 
     async fn handshake(&mut self, spec: &StartSpec) -> Result<Started, AdapterError> {
         self.workdir = spec.workdir.clone();
         self.handshake_base().await?;
-        let models = self
-            .rpc_round(
-                "model/list",
-                json!({"includeHidden": false, "limit": 100}),
-                HANDSHAKE_STEP,
-            )
-            .await
-            .ok_or(AdapterError::StartFailed("model_list_failed"))?
-            .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
-        self.models = model_entries(&models);
+        self.models = self.list_models().await?;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
-        // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c, задача 7).
-        self.codex_home = match spec.instructions.mode {
-            InstructionMode::Owner => None,
-            _ => {
-                let home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
-                    .map_err(|error| {
-                        AdapterError::StartFailed(match error {
-                            HomeError::Unusable => "codex_home_unusable",
-                            HomeError::Io(_) => "codex_home_failed",
-                        })
-                    })?;
-                home.prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
-                    .map_err(|error| {
-                        AdapterError::StartFailed(match error {
-                            HomeError::Unusable => "codex_home_unusable",
-                            HomeError::Io(_) => "codex_home_failed",
-                        })
-                    })?;
-                Some(home)
-            }
-        };
         let instructions = thread::compose_developer_instructions(
             &spec.instructions,
             &self.owner,
@@ -754,24 +889,17 @@ impl CodexAdapter {
         );
         let model = (!spec.model.is_empty()).then(|| spec.model.clone());
         let effective = if let Some(native) = spec.native_conversation_id.as_deref() {
-            let result = self
-                .rpc_round(
-                    "thread/resume",
-                    thread::thread_resume_params(
-                        native,
-                        self.mode,
-                        model.as_deref(),
-                        &spec.workdir,
-                        &instructions,
-                        None,
-                    ),
-                    HANDSHAKE_STEP,
-                )
-                .await
-                .ok_or(AdapterError::StartFailed("app_server_failed"))?
-                .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
-            thread::parse_thread_result(&result)
-                .map_err(|_| AdapterError::StartFailed("resume_failed"))?
+            // Тред, созданный под другим домом, ищется по рулону в доме владельца.
+            let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
+            let launch = ResumeLaunch {
+                mode: self.mode,
+                launch_mode: spec.instructions.mode,
+                model: model.as_deref(),
+                dev: &instructions,
+                home: None,
+                owner_home: owner_home.as_deref(),
+            };
+            self.resume_with_fallback(native, launch).await?
         } else {
             let result = self
                 .rpc_round(
@@ -787,8 +915,14 @@ impl CodexAdapter {
                 .await
                 .ok_or(AdapterError::StartFailed("app_server_failed"))?
                 .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?;
-            thread::parse_thread_result(&result)
-                .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?
+            let effective = thread::parse_thread_result(&result)
+                .map_err(|_| AdapterError::StartFailed("thread_start_failed"))?;
+            // Старт без полей политики показывает действующую политику владельца.
+            if self.mode == PermissionMode::Owner {
+                self.owner
+                    .observe_thread(&effective.approval_policy, &effective.sandbox);
+            }
+            effective
         };
         let mut translator = Translator::new(&effective.thread_id, &effective.model);
         translator.set_workdir(&spec.workdir);
@@ -864,9 +998,10 @@ impl CodexAdapter {
     /// рулона из дома владельца.
     async fn resume_with_fallback(
         &mut self,
+        thread_id: &str,
         launch: ResumeLaunch<'_>,
     ) -> Result<thread::Effective, AdapterError> {
-        let thread_id = self.thread_id();
+        let thread_id = thread_id.to_owned();
         let workdir = self.workdir.clone();
         let params = thread::thread_resume_params(
             &thread_id,
@@ -954,10 +1089,7 @@ impl CodexAdapter {
             mcp::SERVER_INSTRUCTIONS,
             note,
         );
-        self.stop_old_server().await;
-        self.rpc = RpcClient::new();
-        self.responses.clear();
-        self.pending_writes.clear();
+        self.discard_server().await;
         let launch = ResumeLaunch {
             mode,
             launch_mode: next.mode,
@@ -986,8 +1118,22 @@ impl CodexAdapter {
                 });
                 Ok(())
             }
-            Err(_) => self.respawn_previous(group).await,
+            Err(_) => {
+                // Упавший или зависший новый сервер уходит до запасного запуска:
+                // иначе он работает рядом, а его eof/exited ломают рукопожатие.
+                self.discard_server().await;
+                self.respawn_previous(group).await
+            }
         }
+    }
+
+    /// Остановить текущий app-server и забыть состояние его соединения.
+    async fn discard_server(&mut self) {
+        self.stop_old_server().await;
+        self.requests.next_generation();
+        self.rpc = RpcClient::new();
+        self.responses.clear();
+        self.pending_writes.clear();
     }
 
     async fn spawn_and_resume(
@@ -1004,7 +1150,8 @@ impl CodexAdapter {
         };
         self.proc = Some(proc);
         self.handshake_base().await?;
-        self.resume_with_fallback(launch).await
+        let thread_id = self.thread_id();
+        self.resume_with_fallback(&thread_id, launch).await
     }
 
     /// Запасной запуск со старыми инструкциями и домом после неудачного
@@ -1054,6 +1201,7 @@ impl CodexAdapter {
                 Err("instructions_change_failed")
             }
             Err(_) => {
+                self.discard_server().await;
                 self.events.push_back(AdapterEvent::ProcessExited {
                     code: None,
                     signal: None,
@@ -1106,7 +1254,7 @@ impl CodexAdapter {
         }
     }
 
-    async fn history_lookup(&mut self, command_id: &str) -> Option<String> {
+    async fn history_lookup(&mut self, command_id: &str) -> Option<(String, Option<String>)> {
         let thread_id = self.thread_id();
         let (id, message) = self.rpc.request(
             "thread/turns/list",
@@ -1119,7 +1267,7 @@ impl CodexAdapter {
             .wait_response(id, Instant::now() + self.deadline)
             .await?;
         let result = result.ok()?;
-        input::history_contains(&result, command_id)
+        input::history_turn(&result, command_id)
     }
 
     async fn transmit_inner(
@@ -1136,6 +1284,9 @@ impl CodexAdapter {
                 .as_ref()
                 .unwrap_or(&crate::adapter::SettingsChange::default()),
             &self.models,
+            self.effective
+                .as_ref()
+                .map(|effective| effective.model.as_str()),
         ) {
             return TransmitOutcome::Rejected(reason.into());
         }
@@ -1157,12 +1308,28 @@ impl CodexAdapter {
             return TransmitOutcome::Rejected("turn_active".into());
         }
         if input.attempt > 1
-            && let Some(turn) = self.history_lookup(&input.command_id.to_string()).await
+            && let Some((turn, status)) = self.history_lookup(&input.command_id.to_string()).await
         {
-            // Ввод уже принят: не шлём второй раз, цепляемся к живому ходу.
-            self.outbox.attach(&turn, input.command_id);
-            if let Some(translator) = self.translator.as_mut() {
-                translator.begin_turn(&turn, input.command_id);
+            // Ввод уже принят: второй раз не шлём. Цепляемся, только если ход
+            // идёт в этом процессе; иначе (ход завершён или остался от убитого
+            // процесса) turn/completed не придёт, и ход закрывается сразу.
+            if status.as_deref() == Some("inProgress") && self.outbox.knows(&turn) {
+                self.outbox.attach(&turn, input.command_id);
+                if let Some(translator) = self.translator.as_mut() {
+                    translator.begin_turn(&turn, input.command_id);
+                }
+            } else {
+                self.events.push_back(AdapterEvent::RunFinished {
+                    input_command_id: input.command_id,
+                    usage: Vec::new(),
+                    context_tokens: 0,
+                    context_window_tokens: 0,
+                });
+                self.events.push_back(AdapterEvent::Phase {
+                    phase: Phase::AwaitingInput,
+                    tool_name: None,
+                    summary: None,
+                });
             }
             return TransmitOutcome::Accepted(Proof {
                 command_id: input.command_id,
@@ -1193,9 +1360,12 @@ impl CodexAdapter {
         if !self.write_request(message).await {
             return TransmitOutcome::Undetermined;
         }
-        self.apply_settings_override(input);
         let limit = Instant::now() + self.deadline;
         let response = self.wait_response(id, limit).await;
+        // Отказ сервера оставляет прежние модель, усилие и режим.
+        if matches!(response, Some(Ok(_))) {
+            self.apply_settings_override(input);
+        }
         let turn_id = match response {
             Some(Ok(value)) => match value
                 .get("turn")
@@ -1346,7 +1516,7 @@ async fn drain_until_exit(
             return false;
         }
         if let Ok(line) = timeout(Duration::from_millis(50), proc.next_line()).await {
-            adapter.dispatch_line(line).await;
+            adapter.dispatch_line(line);
         }
     }
 }
@@ -1354,7 +1524,7 @@ async fn drain_until_exit(
 async fn drain_available(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
     loop {
         match timeout(Duration::from_millis(50), proc.next_line()).await {
-            Ok(line @ StdoutLine::Line(_)) => adapter.dispatch_line(line).await,
+            Ok(line @ StdoutLine::Line(_)) => adapter.dispatch_line(line),
             _ => return,
         }
     }
@@ -1363,7 +1533,7 @@ async fn drain_available(proc: &mut AppServerProcess, adapter: &mut CodexAdapter
 async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
     loop {
         match proc.next_line().await {
-            line @ StdoutLine::Line(_) => adapter.dispatch_line(line).await,
+            line @ StdoutLine::Line(_) => adapter.dispatch_line(line),
             _ => return,
         }
     }
@@ -1418,6 +1588,12 @@ impl Adapter for CodexAdapter {
             .relay_executable
             .clone()
             .unwrap_or(std::env::current_exe()?);
+        // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c,
+        // задача 7): готов до запуска, иначе первый сервер видит ~/.codex.
+        self.codex_home = match spec.instructions.mode {
+            InstructionMode::Owner => None,
+            _ => Some(prepare_home(&self.cfg, &self.exec_dir).map_err(AdapterError::StartFailed)?),
+        };
         let launch = LaunchSpec {
             executable: &self.cfg.executable,
             exec_dir: &self.exec_dir,
@@ -1450,6 +1626,9 @@ impl Adapter for CodexAdapter {
                 .as_ref()
                 .unwrap_or(&crate::adapter::SettingsChange::default()),
             &self.models,
+            self.effective
+                .as_ref()
+                .map(|effective| effective.model.as_str()),
         )
     }
 
@@ -1557,13 +1736,12 @@ impl Adapter for CodexAdapter {
                 if !self.write_request(terminate).await {
                     break;
                 }
-                if timeout(
-                    input::INTERRUPT_TIMEOUT,
-                    self.wait_response(terminate_id, Instant::now() + input::INTERRUPT_TIMEOUT),
-                )
-                .await
-                .is_err()
-                {
+                // Нет ответа к сроку или отказ — терминал мог остаться жив.
+                if !matches!(
+                    self.wait_response(terminate_id, Instant::now() + input::INTERRUPT_TIMEOUT)
+                        .await,
+                    Some(Ok(_))
+                ) {
                     self.diagnostic("interrupt_cleanup_failed", false);
                 }
             }
@@ -1589,6 +1767,9 @@ impl Adapter for CodexAdapter {
         mode: CloseMode,
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
+        if let Some(pending) = self.crunch.take() {
+            pending.task.abort();
+        }
         if let Some(broker) = &mut self.broker {
             broker.shutdown().await;
         }

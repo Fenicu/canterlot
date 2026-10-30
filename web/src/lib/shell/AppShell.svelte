@@ -2,7 +2,7 @@
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { clock } from '#lib/clock.js';
-  import { browserRuntime, openChatSession } from '#lib/screens/chat/open.js';
+  import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
   import type { Runtime } from '#lib/app/runtime.js';
   import type { Snippet, Component } from 'svelte';
@@ -16,6 +16,7 @@
   import type { UpdateController } from '#lib/pwa/update.js';
   import { staleness } from '#lib/pwa/offline.js';
   import { announce } from '#lib/a11y/announce.js';
+  import { followSignout, watchSignout } from '#lib/pwa/signout.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
 
   let { children }: { children: Snippet } = $props();
@@ -47,15 +48,18 @@
 
   $effect(() => {
     const id = chatId;
+    currentChat = null;
     if (onChat && id) {
       let alive = true;
-      openChatSession(id)
+      const lease = leaseChatSession(id);
+      lease.chat
         .then((store) => {
           if (alive) currentChat = store;
         })
         .catch(() => {});
       return () => {
         alive = false;
+        lease.release();
       };
     } else {
       currentChat = null;
@@ -63,7 +67,7 @@
   });
   const onNew = $derived(path === '/new');
   const harness = $derived(path.startsWith('/__test'));
-  const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : 'sessions');
+  const nav = $derived(path.startsWith('/machines') ? 'machines' : path.startsWith('/limits') ? 'limits' : path.startsWith('/presets') ? 'presets' : 'sessions');
   const now = $derived.by(() => {
     void tick;
     return clock.serverNow();
@@ -73,6 +77,9 @@
     installation();
     applyMotion();
     let alive = true;
+    const stopSignout = watchSignout(() => {
+      void followSignout({ ls: localStorage, reload: () => window.location.reload() });
+    });
     const offlineChanged = () => { offlineLabel = staleness.label(Date.now()); };
     const online = () => staleness.setOnline(navigator.onLine);
     staleness.addEventListener('change', offlineChanged);
@@ -116,6 +123,7 @@
     }).catch(() => undefined);
     return () => {
       alive = false;
+      stopSignout();
       update?.removeEventListener('change', changed);
       update?.destroy();
       staleness.removeEventListener('change', offlineChanged);
@@ -184,7 +192,7 @@
       <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
       <div data-pane="chat">
         {#if mode === 'desktop' && onChat}
-          <button type="button" onclick={() => lane = !lane}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>
+          <button type="button" class="lane-toggle" onclick={() => lane = !lane}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>
         {/if}
         {@render children()}
       </div>
@@ -250,7 +258,7 @@
     display: flex;
     flex-direction: column;
     border-radius: var(--radius-sheet);
-    background: var(--surface);
+    background: var(--chat-bg);
   }
 
   [data-pane="list"] {
@@ -275,6 +283,15 @@
     border: var(--s0);
     background: var(--transparent);
     color: var(--accent-link);
+  }
+
+  .lane-toggle {
+    align-self: flex-end;
+    margin: var(--s4) var(--s6) 0;
+    padding-inline: var(--s8);
+    border-radius: var(--radius-pill);
+    background: var(--raised);
+    font-size: var(--fs-meta);
   }
 
   .platform-banner {

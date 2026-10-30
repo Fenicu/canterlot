@@ -197,6 +197,54 @@ describe("stores task 4", () => {
     expect(blocks.get(BLOCK)!.state).toBe("streaming");
   });
 
+  it("failed_refetch_does_not_stop_later_block_work_and_retries_with_backoff", async () => {
+    const OTHER = "00000000-0000-4000-8000-0000000000b2";
+    const blocks = new Map<string, BlockModel>();
+    const fetched: string[] = [];
+    let failFirst = true;
+    const timers: { ms: number; fn: () => void }[] = [];
+    const sync = new BlockSync(
+      blocks,
+      {
+        sha256Hex,
+        fetchContent: async (blockId) => {
+          fetched.push(blockId);
+          if (blockId === BLOCK && failFirst) {
+            failFirst = false;
+            throw new TypeError("Failed to fetch");
+          }
+          return { content: "ABC", offset: 0, rev: 3, state: "streaming", total_bytes: 3 };
+        },
+      },
+      {
+        schedule: (fn, ms) => {
+          timers.push({ ms, fn });
+          return () => undefined;
+        },
+      },
+    );
+    const apply = (event: HubEvent) => sync.handle(applyBlockEvent(blocks, event));
+    apply(started());
+    apply(delta(0, 1, "A"));
+    apply(delta(3, 4, "D", BLOCK, "4"));
+    await sync.settled.catch(() => undefined);
+    expect(blocks.get(BLOCK)!.state).toBe("stale");
+
+    apply(started(0, OTHER));
+    apply(delta(0, 1, "A", OTHER, "5"));
+    apply(delta(3, 4, "D", OTHER, "6"));
+    await sync.settled;
+    expect(fetched).toEqual([BLOCK, OTHER]);
+    expect(blocks.get(OTHER)!.text).toBe("ABCD");
+
+    expect(timers.map((timer) => timer.ms)).toEqual([1000]);
+    timers[0]!.fn();
+    await sync.settled;
+    expect(fetched).toEqual([BLOCK, OTHER, BLOCK]);
+    expect(blocks.get(BLOCK)!.text).toBe("ABCD");
+    expect(blocks.get(BLOCK)!.state).toBe("streaming");
+  });
+
   it("overlapping_merged_delta_marks_stale_and_refetches_instead_of_splitting", async () => {
     const blocks = new Map<string, BlockModel>();
     const chunks = Array.from({ length: 110 }, (_, index) =>
@@ -1095,6 +1143,23 @@ describe("stores task 4", () => {
     ).not.toThrow();
     expect(chat.unknownKinds).toBe(1);
     expect(chat.blocks.size).toBe(0);
+  });
+
+  it("delta_marks_and_diagnostics_stay_bounded_without_a_mounted_timeline", () => {
+    const chat = chatOf();
+    chat.applier.applyEvents([{ event: started(), overlap: false }]);
+    const batch = [];
+    for (let rev = 1; rev <= 3000; rev++)
+      batch.push({ event: delta(rev - 1, rev, "x", BLOCK, String(rev)), overlap: false });
+    for (let n = 0; n < 3000; n++)
+      batch.push({
+        event: ev("adapter_diagnostic", { code: "noise" }, String(4000 + n)),
+        overlap: false,
+      });
+    chat.applier.applyEvents(batch);
+    expect(chat.blocks.get(BLOCK)!.text).toHaveLength(3000);
+    expect(chat.deltaMarks.length).toBeLessThanOrEqual(512);
+    expect(chat.diagnostics.length).toBeLessThanOrEqual(200);
   });
 
   it("hidden_events_do_not_reach_the_reducers", () => {
@@ -2079,6 +2144,7 @@ function listOf(): ListStore {
           items: [],
           limits: [],
           truncated: false,
+          presets: [],
         },
       }),
       events: async () => ({ events: [], head: "0" }),

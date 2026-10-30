@@ -6,6 +6,9 @@ use canterlot_worker::config::ClaudeCodeConfig;
 use canterlot_worker::containment::Containment;
 use tempfile::TempDir;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 #[tokio::test]
 async fn close_kills_detached_grandchild() {
     let td = TempDir::new().unwrap();
@@ -19,9 +22,7 @@ sleep 60
 ",
         pidfile.display()
     );
-    std::fs::write(&script, cmd).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fake_exec::write_executable(&script, cmd, 0o755);
     let group = canterlot_worker::containment::TreeContainment::new().unwrap();
     let owner = InstructionSpec {
         mode: InstructionMode::Owner,

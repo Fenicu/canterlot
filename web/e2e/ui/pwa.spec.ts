@@ -3,6 +3,7 @@ import { test, expect } from './fixtures';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
+import { postShare } from './secondary-fixture';
 
 test.beforeEach(({ browserName }, info) => {
   test.skip(info.title.includes('@chromium') && browserName !== 'chromium', 'Проверка Chromium');
@@ -112,15 +113,14 @@ test('update_flow_does_not_reload_while_typing_and_activates_after_flush @chromi
 
 test('share_post_is_stashed_and_redirected_by_the_worker @chromium', async ({ page }) => {
   await boot(page);
-  const result = await page.evaluate(async () => {
-    const form = new FormData(); form.set('title', 'Название'); form.set('text', 'Текст'); form.set('url', 'https://example.org/'); form.append('files', new File(['payload'], 'sample.txt'));
-    const response = await fetch('/_share', { method: 'POST', body: form });
+  const url = await postShare(page, { title: 'Название', text: 'Текст', url: 'https://example.org/', files: [{ name: 'sample.txt', body: 'payload' }] });
+  expect(url).toMatch(/\/share\?id=/);
+  const values = await page.evaluate(async () => {
     const db = await new Promise<IDBDatabase>((resolve, reject) => { const r = indexedDB.open('canterlot', 1); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
     const values = await new Promise<unknown[]>((resolve, reject) => { const r = db.transaction('share_inbox').objectStore('share_inbox').getAll(); r.onsuccess = () => resolve(r.result); r.onerror = () => reject(r.error); });
-    db.close(); return { url: response.url, values: values.map(value => { const v = value as { files: File[]; title: string; text: string; url: string }; return { ...v, files: v.files.map(f => ({ name: f.name, size: f.size })) }; }) };
+    db.close(); return values.map(value => { const v = value as { files: File[]; title: string; text: string; url: string }; return { ...v, files: v.files.map(f => ({ name: f.name, size: f.size })) }; });
   });
-  expect(result.url).toMatch(/\/share\?id=/);
-  expect(result.values).toEqual([expect.objectContaining({ title: 'Название', text: 'Текст', url: 'https://example.org/', files: [{ name: 'sample.txt', size: 7 }] })]);
+  expect(values).toEqual([expect.objectContaining({ title: 'Название', text: 'Текст', url: 'https://example.org/', files: [{ name: 'sample.txt', size: 7 }] })]);
 });
 
 test('share_post_without_an_active_worker_is_redirected_to_the_explanation_by_the_edge', async ({ request }) => {

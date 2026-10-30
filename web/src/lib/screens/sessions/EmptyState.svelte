@@ -16,4 +16,5 @@
 <style>
   p, a, button { margin: var(--s4) var(--s6); }
   a, button { min-height: var(--target); color: var(--accent-link); background: var(--transparent); border: var(--s0); }
+  p a { margin: var(--s0); }
 </style>

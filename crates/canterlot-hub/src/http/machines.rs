@@ -216,7 +216,7 @@ async fn get(
     .await?;
     Ok(Json(view))
 }
-#[utoipa::path(get,path="/api/v1/machines/{id}/workdirs/recent",tag="machines",params(("id"=Uuid,Path)),responses((status=200,description="Недавние каталоги",body=Workdirs)))]
+#[utoipa::path(get,path="/api/v1/machines/{id}/workdirs/recent",tag="machines",params(("id"=Uuid,Path)),responses((status=200,description="Последние каталоги для экрана новой сессии",body=Workdirs)))]
 async fn recent(
     State(s): State<AppState>,
     o: Owner,
@@ -233,7 +233,7 @@ async fn recent(
         return Err(ApiError::new(ErrorCode::NotFound));
     }
     Ok(Json(Workdirs {
-        workdirs: conversations::recent_workdirs(&mut conn, o.owner_id, id, 20).await?,
+        workdirs: conversations::recent_workdirs(&mut conn, o.owner_id, id, 3).await?,
     }))
 }
 

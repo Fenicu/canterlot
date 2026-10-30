@@ -25,6 +25,9 @@ use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 fn evidence_data(name: &str, line: usize) -> Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../docs/stage0/evidence/codex")
@@ -79,16 +82,14 @@ struct Fake {
 impl Fake {
     fn start(dir: &TempDir, lines: &[String]) -> Self {
         let script = dir.path().join("fake-codex.sh");
-        std::fs::write(
+        fake_exec::write_executable(
             &script,
             "#!/bin/bash\ndir=\"$(cd \"$(dirname \"$0\")\" && pwd)\"\ncat \"$dir/canned.out\" 2>/dev/null\nwhile IFS= read -r line; do :; done\n",
-        )
-        .unwrap();
+            0o755,
+        );
         if !lines.is_empty() {
             std::fs::write(dir.path().join("canned.out"), lines.join("\n") + "\n").unwrap();
         }
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let group = canterlot_worker::containment::TreeContainment::new().unwrap();
         let relay = PathBuf::from("/usr/bin/canterlot-worker");
         let spec = LaunchSpec {
@@ -325,11 +326,11 @@ fn attachments_add_paths_and_local_images() {
 
 #[test]
 fn settings_become_turn_start_overrides() {
-    let owner = owner_defaults_from(&json!({
+    let owner = owner_defaults_from(&json!({"config": {
         "approval_policy": "on-request",
         "sandbox_mode": "read-only",
         "sandbox_workspace_write": {"network_access": false, "writable_roots": []},
-    }));
+    }, "origins": {}}));
     let change = |model: Option<&str>, effort: Option<&str>, mode: Option<&str>| {
         let mut t = tx(command_id(), 1, "Hi.");
         t.settings = Some(SettingsChange {
@@ -413,7 +414,7 @@ fn unknown_model_or_effort_is_rejected() {
         instructions: None,
     };
     assert_eq!(
-        validate_settings(&change, &models),
+        validate_settings(&change, &models, None),
         Err("settings_unavailable")
     );
     let change = SettingsChange {
@@ -423,7 +424,7 @@ fn unknown_model_or_effort_is_rejected() {
         instructions: None,
     };
     assert_eq!(
-        validate_settings(&change, &models),
+        validate_settings(&change, &models, None),
         Err("settings_unavailable")
     );
     let change = SettingsChange {
@@ -432,9 +433,9 @@ fn unknown_model_or_effort_is_rejected() {
         permission_mode: None,
         instructions: None,
     };
-    assert_eq!(validate_settings(&change, &models), Ok(()));
+    assert_eq!(validate_settings(&change, &models, None), Ok(()));
     assert_eq!(
-        validate_settings(&SettingsChange::default(), &models),
+        validate_settings(&SettingsChange::default(), &models, None),
         Ok(())
     );
 }

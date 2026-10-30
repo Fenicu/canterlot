@@ -17,9 +17,12 @@ use canterlot_worker::{
 
 use canterlot_worker::adapter::codex::home::TempDirPolicy;
 use serde_json::{Value, json};
-use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 
 const WAIT: Duration = Duration::from_secs(15);
 
@@ -198,8 +201,7 @@ impl Fake {
     fn new(evidence: Vec<String>) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-codex");
-        std::fs::write(&exe, REPLAY).unwrap();
-        std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, REPLAY, 0o700);
         write_lines(&dir, "evidence.jsonl", &evidence);
         std::os::unix::fs::symlink(repo_fixtures(), dir.path().join("fixtures")).unwrap();
         let context = AdapterContext {
@@ -520,6 +522,174 @@ async fn replay_permissions_end_to_end() {
     fake.close().await;
 }
 
+fn tool_starts(events: &[AdapterEvent]) -> Vec<(Option<String>, Option<String>)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolCall,
+                tool_name,
+                approved_by,
+                ..
+            } => Some((tool_name.clone(), approved_by.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn owner_decided_commands_carry_no_cli_policy_mark() {
+    // Запись: команда и правка файла, обе через запрос владельцу.
+    let mut fake = Fake::new(evidence_slice("permissions", 1, 55));
+    fake.start().await;
+    let id = fake.start_turn("do it").await;
+    let mut events = vec![];
+    let request_id = loop {
+        let event = fake.event().await;
+        match &event {
+            AdapterEvent::RequestOpened {
+                request_id, kind, ..
+            } if kind == "permission" => break request_id.clone(),
+            _ => events.push(event),
+        }
+    };
+    fake.decide(&request_id, &allow()).await;
+    events.extend(fake.finish(id).await);
+    let starts = tool_starts(&events);
+    assert!(starts.len() >= 2, "{starts:?}");
+    assert!(
+        starts.iter().all(|(_, mark)| mark.is_none()),
+        "approved or declined by the owner, not by CLI policy: {starts:?}"
+    );
+    fake.close().await;
+}
+
+fn note(method: &str, params: Value) -> String {
+    w_out(json!({"method": method, "params": params}))
+}
+
+fn command_item(id: &str, status: &str, output: Option<&str>) -> Value {
+    json!({"id": id, "type": "commandExecution", "command": "/bin/bash -lc 'ls'",
+        "commandActions": [{"command": "ls", "type": "unknown"}], "cwd": "/tmp",
+        "status": status, "aggregatedOutput": output, "exitCode": output.map(|_| 0)})
+}
+
+fn tool_turn(body: Vec<String>) -> Vec<String> {
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.extend(body);
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "completed", "items": []}}),
+    ));
+    lines
+}
+
+fn started(item: Value) -> String {
+    note(
+        "item/started",
+        json!({"threadId": "thread-mini", "turnId": "turn-1", "item": item}),
+    )
+}
+
+fn completed(item: Value) -> String {
+    note(
+        "item/completed",
+        json!({"threadId": "thread-mini", "turnId": "turn-1", "completedAtMs": 1, "item": item}),
+    )
+}
+
+#[tokio::test]
+async fn tool_blocks_stream_live_and_only_unrequested_commands_get_the_cli_mark() {
+    let mcp = |status: &str| {
+        json!({"id": "mcp-1", "type": "mcpToolCall", "server": "s", "tool": "t",
+            "arguments": {}, "status": status,
+            "result": {"content": [{"type": "text", "text": "r"}]}})
+    };
+    let image = json!({"id": "img-1", "type": "imageView", "path": "/tmp/pic.png"});
+    let message = |text: &str| json!({"id": "a-1", "type": "agentMessage", "text": text});
+    let mut fake = Fake::new(tool_turn(vec![
+        started(command_item("exec-y", "inProgress", None)),
+        started(mcp("inProgress")),
+        note(
+            "item/commandExecution/outputDelta",
+            json!({"threadId": "thread-mini", "turnId": "turn-1", "itemId": "exec-y", "delta": "tick "}),
+        ),
+        completed(command_item("exec-y", "completed", Some("tick "))),
+        completed(mcp("completed")),
+        started(image.clone()),
+        started(message("")),
+        completed(message("DONE")),
+        completed(image),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    // Каждое событие блока идёт после его BlockStarted: дельты и Media не теряются.
+    let mut seen = std::collections::HashSet::new();
+    for (index, event) in events.iter().enumerate() {
+        match event {
+            AdapterEvent::BlockStarted { block_id, .. } => {
+                seen.insert(*block_id);
+            }
+            AdapterEvent::BlockDelta { block_id, .. }
+            | AdapterEvent::BlockFinal { block_id, .. }
+            | AdapterEvent::Media { block_id, .. } => assert!(
+                seen.contains(block_id),
+                "event {index} before its block start: {events:?}"
+            ),
+            _ => {}
+        }
+    }
+    let position = |name: &str| {
+        events.iter().position(|event| {
+            matches!(event, AdapterEvent::BlockStarted { tool_name: Some(tool), .. } if tool == name)
+        })
+    };
+    let image_at = position("view_image").expect("image block");
+    let message_at = events
+        .iter()
+        .position(|event| {
+            matches!(
+                event,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Text,
+                    ..
+                }
+            )
+        })
+        .expect("message block");
+    assert!(image_at < message_at, "image block not delayed: {events:?}");
+    let starts = tool_starts(&events);
+    for (tool, mark) in &starts {
+        let expected = (tool.as_deref() == Some("shell")).then(|| "cli_policy".to_owned());
+        assert_eq!(mark, &expected, "{tool:?}: {starts:?}");
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn settings_update_sandbox_policy_reaches_the_cli_mark() {
+    let mut fake = Fake::new(tool_turn(vec![
+        note(
+            "thread/settings/updated",
+            json!({"threadId": "thread-mini", "threadSettings": {
+                "approvalPolicy": "on-request",
+                "sandboxPolicy": {"type": "dangerFullAccess"}}}),
+        ),
+        started(command_item("exec-z", "inProgress", None)),
+        completed(command_item("exec-z", "completed", Some("ok"))),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    let starts = tool_starts(&events);
+    assert_eq!(starts.len(), 1, "{starts:?}");
+    assert_eq!(
+        starts[0].1, None,
+        "full access is not a CLI-policy approval"
+    );
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn replay_question_end_to_end() {
     let mut fake = Fake::new(evidence_slice("question_default_mode", 1, 41));
@@ -608,6 +778,313 @@ async fn replay_interrupt_end_to_end() {
     fake.close().await;
 }
 
+fn model_page(ids: &[&str], next: Option<&str>) -> Value {
+    let data: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id, "model": id, "displayName": id, "description": "d",
+                "hidden": false, "isDefault": *id == ids[0] && next.is_some(),
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "l"},
+                    {"reasoningEffort": "high", "description": "h"},
+                ],
+                "inputModalities": ["text", "image"],
+            })
+        })
+        .collect();
+    json!({"data": data, "nextCursor": next})
+}
+
+#[tokio::test]
+async fn session_model_list_reads_data_and_follows_next_cursor() {
+    let mut lines = handshake("thread-mini");
+    let start = lines.len() - 2;
+    let pages = vec![
+        w_in(3, "model/list", json!({})),
+        w_out(json!({"id": 3, "result": model_page(&["gpt-6-luna"], Some("page-2"))})),
+        w_in(4, "model/list", json!({})),
+        w_out(json!({"id": 4, "result": model_page(&["gpt-6-astra"], None)})),
+    ];
+    lines.splice(start..start, pages);
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let lists: Vec<Value> = fake
+        .stdin_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["method"] == "model/list")
+        .collect();
+    assert_eq!(lists.len(), 2, "both pages read: {lists:?}");
+    assert_eq!(lists[1]["params"]["cursor"], "page-2");
+    let mut t = fake.tx("hi");
+    for (model, effort, ok) in [
+        ("gpt-6-luna", "high", true),
+        ("gpt-6-astra", "low", true),
+        ("gpt-6-astra", "ultra", false),
+        ("no-such-model", "low", false),
+    ] {
+        t.settings = Some(adapter::SettingsChange {
+            model: Some(model.into()),
+            effort: Some(effort.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            fake.adapter.validate_transmission(&t).is_ok(),
+            ok,
+            "{model}/{effort}"
+        );
+    }
+    fake.close().await;
+}
+
+const PAGED_PROBE: &str = r#"#!/usr/bin/env python3
+import json, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('codex-cli 0.164.0'); sys.exit(0)
+def model(i):
+    return {"id": i, "model": i, "displayName": i, "description": "d", "hidden": False,
+            "isDefault": i == "gpt-6.1-sol", "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "l"}],
+            "inputModalities": ["text"]}
+for line in sys.stdin:
+    msg = json.loads(line)
+    (d / 'requests.log').open('a').write(line)
+    m = msg.get('method'); i = msg.get('id'); p = msg.get('params') or {}
+    if m == 'initialize':
+        print(json.dumps({'id': i, 'result': {}}), flush=True)
+    elif m == 'model/list':
+        if p.get('cursor') == 'next-page':
+            r = {'data': [model('gpt-6-luna')], 'nextCursor': None}
+        else:
+            r = {'data': [model('gpt-6.1-sol')], 'nextCursor': 'next-page'}
+        print(json.dumps({'id': i, 'result': r}), flush=True)
+"#;
+
+#[tokio::test]
+async fn discover_reads_every_model_list_page() {
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-codex");
+    std::fs::write(&exe, PAGED_PROBE).unwrap();
+    std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+    let catalog = tokio::time::timeout(
+        WAIT,
+        canterlot_worker::adapter::codex::discover(&CodexConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let ids: Vec<String> = catalog.models().into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-luna"]);
+}
+
+#[tokio::test]
+async fn retried_input_found_in_a_finished_turn_finishes_at_once_and_queue_moves_on() {
+    // Форма хода после возобновления: убитый ход — `interrupted` (ev/resume.jsonl:107);
+    // `inProgress` от убитого процесса этот процесс тоже не ведёт.
+    for status in ["interrupted", "inProgress", "completed"] {
+        let command = Uuid::now_v7();
+        let mut lines = handshake("thread-mini");
+        lines.push(w_in(10, "thread/turns/list", json!({})));
+        lines.push(w_out(json!({"id": 10, "result": {"data": [{
+            "id": "turn-old", "status": status, "error": null,
+            "items": [{"id": "u-old", "type": "userMessage", "clientId": command.to_string(),
+                "content": []}],
+        }], "nextCursor": null}})));
+        lines.extend(turn_exchange(11, "thread-mini", "turn-next"));
+        lines.push(w_out(json!({
+            "method": "turn/completed",
+            "params": {"threadId": "thread-mini",
+                "turn": {"id": "turn-next", "status": "completed", "items": []}},
+        })));
+        let mut fake = Fake::new(lines);
+        fake.start().await;
+        let retry = Transmission {
+            command_id: command,
+            attempt: 2,
+            text: "again".into(),
+            files: vec![],
+            settings: None,
+        };
+        match tokio::time::timeout(WAIT, fake.adapter.transmit(&retry, &fake.group))
+            .await
+            .unwrap()
+        {
+            TransmitOutcome::Accepted(proof) => {
+                assert_eq!(proof.kind, "codex_history_client_id", "{status}")
+            }
+            other => panic!("{status}: {other:?}"),
+        }
+        let finished = tokio::time::timeout(Duration::from_secs(3), fake.finish(command))
+            .await
+            .unwrap_or_else(|_| panic!("{status}: no RunFinished for the retried input"));
+        assert!(matches!(
+            finished.last(),
+            Some(AdapterEvent::RunFinished { usage, .. }) if usage.is_empty()
+        ));
+        assert!(matches!(
+            fake.event().await,
+            AdapterEvent::Phase {
+                phase: canterlot_worker::adapter::Phase::AwaitingInput,
+                ..
+            }
+        ));
+        assert!(
+            !fake.stdin_methods().contains(&"turn/start".to_owned()),
+            "{status}: input not sent again"
+        );
+        // Очередь идёт дальше: следующий ввод не упирается в turn_active.
+        let (_, events) = fake.send("next").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::RunFinished { .. })),
+            "{status}"
+        );
+        fake.close().await;
+    }
+}
+
+#[tokio::test]
+async fn refused_terminal_cleanup_after_interrupt_is_reported() {
+    use canterlot_worker::adapter::InterruptOutcome;
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(started(command_item("exec-1", "inProgress", None)));
+    lines.push(w_in(11, "turn/interrupt", json!({})));
+    lines.push(w_out(json!({"id": 11, "result": {}})));
+    lines.push(w_in(12, "thread/backgroundTerminals/list", json!({})));
+    lines.push(w_out(
+        json!({"id": 12, "result": {"data": [{"itemId": "exec-1", "processId": "p-1"}]}}),
+    ));
+    lines.push(w_in(13, "thread/backgroundTerminals/terminate", json!({})));
+    lines.push(w_out(
+        json!({"id": 13, "error": {"code": -32000, "message": "terminate refused"}}),
+    ));
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "interrupted", "items": []}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let id = fake.start_turn("run").await;
+    match tokio::time::timeout(WAIT, fake.adapter.interrupt())
+        .await
+        .unwrap()
+    {
+        InterruptOutcome::Acknowledged => {}
+        other => panic!("interrupt: {other:?}"),
+    }
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic { kind, .. } if *kind == "interrupt_cleanup_failed"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        fake.stdin_methods()
+            .contains(&"thread/backgroundTerminals/terminate".to_owned())
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn subagent_file_change_approval_carries_the_diff() {
+    let change = json!({"id": "patch-child", "type": "fileChange", "status": "inProgress",
+        "changes": [{"path": "/tmp/a.txt", "kind": {"type": "add"}, "diff": "hi\n"}]});
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(note(
+        "item/started",
+        json!({"threadId": "thread-child", "turnId": "turn-child", "item": change}),
+    ));
+    lines.push(w_out(
+        json!({"id": 0, "method": "item/fileChange/requestApproval",
+        "params": {"threadId": "thread-child", "turnId": "turn-child",
+            "itemId": "patch-child", "reason": null, "grantRoot": null}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    fake.start_turn("spawn").await;
+    let payload = loop {
+        match fake.event().await {
+            AdapterEvent::RequestOpened { payload, .. } => break payload,
+            AdapterEvent::RunFinished { .. } => panic!("request never opened"),
+            _ => {}
+        }
+    };
+    assert_eq!(payload["agent"], "subagent");
+    assert_eq!(payload["changes"][0]["diff"], "hi\n", "{payload}");
+}
+
+#[tokio::test]
+async fn effort_only_change_is_checked_against_the_current_model() {
+    let mut fake = Fake::new(handshake("thread-mini"));
+    fake.start().await;
+    let mut t = fake.tx("hi");
+    // Модель сессии gpt-6-luna: у неё нет ultra, у модели по умолчанию есть.
+    for (effort, ok) in [("ultra", false), ("max", true)] {
+        t.settings = Some(adapter::SettingsChange {
+            effort: Some(effort.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            fake.adapter.validate_transmission(&t).is_ok(),
+            ok,
+            "{effort}"
+        );
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn rejected_turn_keeps_the_previous_settings() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w_out(
+        json!({"id": 10, "error": {"code": -32600, "message": "effort not allowed"}}),
+    ));
+    lines.extend(turn_exchange(11, "thread-mini", "turn-1"));
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "completed", "items": []}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let mut t = fake.tx("hi");
+    t.settings = Some(adapter::SettingsChange {
+        effort: Some("high".into()),
+        permission_mode: Some("bypass".into()),
+        ..Default::default()
+    });
+    let out = tokio::time::timeout(WAIT, fake.adapter.transmit(&t, &fake.group))
+        .await
+        .unwrap();
+    assert!(matches!(out, TransmitOutcome::Rejected(_)), "{out:?}");
+    fake.send("plain").await;
+    let starts: Vec<Value> = fake
+        .stdin_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["method"] == "turn/start")
+        .map(|message| message["params"].clone())
+        .collect();
+    assert_eq!(starts.len(), 2);
+    assert_eq!(
+        starts[1]["effort"], "low",
+        "rejected effort not kept: {}",
+        starts[1]
+    );
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));
@@ -670,12 +1147,10 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
         (dir.path().join("broken"), "cli_version_failed"),
     ] {
         if expected == "cli_too_old" {
-            std::fs::write(&executable, "#!/bin/sh\necho 'codex-cli 0.1.0'\n").unwrap();
-            std::fs::set_permissions(&executable, PermissionsExt::from_mode(0o700)).unwrap();
+            fake_exec::write_executable(&executable, "#!/bin/sh\necho 'codex-cli 0.1.0'\n", 0o700);
         }
         if expected == "cli_version_failed" {
-            std::fs::write(&executable, "#!/bin/sh\nexit 1\n").unwrap();
-            std::fs::set_permissions(&executable, PermissionsExt::from_mode(0o700)).unwrap();
+            fake_exec::write_executable(&executable, "#!/bin/sh\nexit 1\n", 0o700);
         }
         let context = AdapterContext {
             transmit_deadline: WAIT,
@@ -721,8 +1196,11 @@ async fn start_fails_when_app_server_exits_at_once() {
     use canterlot_worker::adapter::AdapterError;
     let dir = TempDir::new().unwrap();
     let exe = dir.path().join("quitter");
-    std::fs::write(&exe, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.164.0'; exit 0; fi\nexit 1\n").unwrap();
-    std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+    fake_exec::write_executable(
+        &exe,
+        "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-cli 0.164.0'; exit 0; fi\nexit 1\n",
+        0o700,
+    );
     let context = AdapterContext {
         transmit_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
@@ -971,6 +1449,88 @@ async fn rate_limit_exceeded_reads_fresh_limits() {
         event,
         AdapterEvent::Limit(canterlot_worker::adapter::LimitFact::Observed { .. })
     )));
+}
+
+// Ответ свежего чтения для зонда: тот же двойник проигрывает его по методу.
+fn fresh_read_lines(result: Value) -> Vec<String> {
+    vec![
+        w_in(1, "account/rateLimits/read", json!({})),
+        w_out(json!({"id": 1, "result": result})),
+    ]
+}
+
+fn rate_limited_turn(read: Value) -> Vec<String> {
+    let mut lines = failed_turn(
+        "thread-mini",
+        "turn-1",
+        json!({"codexErrorInfo": "rateLimitExceeded", "message": "slow down"}),
+    );
+    lines.extend(fresh_read_lines(read));
+    lines
+}
+
+fn quiet_read() -> Value {
+    json!({"rateLimits": {"limitId": "codex",
+        "primary": {"windowDurationMins": 300, "usedPercent": 40.0, "resetsAt": 1792927784},
+        "secondary": {"windowDurationMins": 10080, "usedPercent": 10.0, "resetsAt": 1793514584}},
+        "ordinaryUsageAllowed": true})
+}
+
+#[tokio::test]
+async fn rate_limit_without_exhausted_window_is_an_error_block_without_reached() {
+    let events = run_failed_turn(rate_limited_turn(quiet_read()), "hi").await;
+    assert!(
+        error_text(&events).contains("Codex ограничил частоту запросов"),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Limit(canterlot_worker::adapter::LimitFact::Reached { .. })
+    )));
+}
+
+#[tokio::test]
+async fn limit_failure_turn_end_survives_dropped_event_polls() {
+    let mut fake = Fake::new(rate_limited_turn(quiet_read()));
+    fake.start().await;
+    let id = fake.start_turn("hi").await;
+    // Как супервизор: next_event опрашивается коротко и бросается.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut events = vec![];
+    while std::time::Instant::now() < deadline {
+        if let Ok(event) =
+            tokio::time::timeout(Duration::from_millis(1), fake.adapter.next_event()).await
+        {
+            let done = matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if input_command_id == id);
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RunFinished { .. })),
+        "turn end lost: {events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::RunFinished { .. })
+    ));
+    let after = fake.event().await;
+    assert!(
+        matches!(
+            after,
+            AdapterEvent::Phase {
+                phase: canterlot_worker::adapter::Phase::AwaitingInput,
+                ..
+            }
+        ),
+        "{after:?}"
+    );
+    assert!(error_text(&events).contains("Codex ограничил частоту запросов"));
+    fake.close().await;
 }
 
 #[tokio::test]

@@ -19,8 +19,13 @@ import { onOwnerRetired } from "#lib/storage/owner.js";
 import { resetConfig } from "#lib/api/config.js";
 import { restoreComposerText } from "#lib/composer/restore.js";
 
+/** Сколько отпущенных чатов держать готовыми к возврату; остальные освобождаются целиком. */
+const WARM_CHATS = 4;
+
 let pending: Promise<Runtime> | null = null;
 const chats = new Map<string, ChatStore>();
+const opening = new Map<string, Promise<ChatStore>>();
+const holds = new Map<string, number>();
 let uploads: UploadManager | null = null;
 let cleanupBound = false;
 
@@ -31,6 +36,7 @@ function bindCleanup(): void {
     restoreComposerText("");
     for (const chat of chats.values()) chat.dispose();
     chats.clear();
+    opening.clear();
     uploads?.dispose();
     uploads = null;
     pending = null;
@@ -75,12 +81,64 @@ export function browserRuntime(): Promise<Runtime> {
   }
 }
 
-export async function openChatSession(id: string): Promise<ChatStore> {
+export interface ChatLease {
+  readonly chat: Promise<ChatStore>;
+  release(): void;
+}
+
+/** Экран держит подписку сессии, пока смонтирован; после release она закрывается. */
+export function leaseChatSession(id: string): ChatLease {
+  holds.set(id, (holds.get(id) ?? 0) + 1);
+  let released = false;
+  return {
+    chat: openChatSession(id),
+    release() {
+      if (released) return;
+      released = true;
+      const left = (holds.get(id) ?? 1) - 1;
+      if (left > 0) {
+        holds.set(id, left);
+        return;
+      }
+      holds.delete(id);
+      chats.get(id)?.close();
+      trimChats();
+    },
+  };
+}
+
+function trimChats(): void {
+  for (const [id, chat] of chats) {
+    if (chats.size <= WARM_CHATS) return;
+    if (holds.has(id)) continue;
+    chats.delete(id);
+    chat.dispose();
+  }
+}
+
+function openChatSession(id: string): Promise<ChatStore> {
   const existing = chats.get(id);
-  if (existing) return existing;
+  if (existing) {
+    chats.delete(id);
+    try {
+      existing.open();
+    } catch (error) {
+      existing.dispose();
+      return Promise.reject(error);
+    }
+    chats.set(id, existing);
+    return Promise.resolve(existing);
+  }
+  let creating = opening.get(id);
+  if (!creating) {
+    creating = createChatSession(id).finally(() => opening.delete(id));
+    opening.set(id, creating);
+  }
+  return creating;
+}
+
+async function createChatSession(id: string): Promise<ChatStore> {
   const runtime = await browserRuntime();
-  const raced = chats.get(id);
-  if (raced) return raced;
   const chat = new ChatStore(id, {
     api: {
       async conversationSnapshot(conversationId) {
@@ -123,7 +181,14 @@ export async function openChatSession(id: string): Promise<ChatStore> {
     clock: { now: () => Date.now() },
     probe,
   });
+  try {
+    chat.open();
+  } catch (error) {
+    chat.dispose();
+    throw error;
+  }
   chats.set(id, chat);
-  chat.open();
+  if (!holds.has(id)) chat.close();
+  trimChats();
   return chat;
 }

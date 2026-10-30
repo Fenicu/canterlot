@@ -11,11 +11,13 @@ use canterlot_worker::adapter::{
 use canterlot_worker::config::CodexConfig;
 use canterlot_worker::containment::TreeContainment;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
+
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 
 const WAIT: Duration = Duration::from_secs(20);
 
@@ -80,8 +82,11 @@ def cfg(name, default):
 def emit(obj):
     print(json.dumps(obj), flush=True)
 config = cfg('config.json', {})
-models = cfg('models.json', {"models": [{"id": "gpt-6-luna", "default": True,
-    "efforts": ["low", "medium", "high"]}]})
+models = cfg('models.json', {"data": [{"id": "gpt-6-luna", "model": "gpt-6-luna",
+    "displayName": "gpt-6-luna", "description": "d", "hidden": False, "isDefault": True,
+    "defaultReasoningEffort": "low", "supportedReasoningEfforts": [
+        {"reasoningEffort": e, "description": e} for e in ("low", "medium", "high")],
+    "inputModalities": ["text", "image"]}], "nextCursor": None})
 thread = cfg('thread.json', None)
 turn_no = 0
 for line in sys.stdin:
@@ -94,12 +99,21 @@ for line in sys.stdin:
     elif m == 'initialized':
         pass
     elif m == 'account/read':
+        if (d / 'die-account-once').exists() and not (d / 'died').exists():
+            (d / 'died').write_text(str(pid))
+            sys.exit(3)
         emit({'id': i, 'result': {'account': {'type': 'chatgpt'}}})
     elif m == 'config/read':
         emit({'id': i, 'result': config})
     elif m == 'model/list':
         emit({'id': i, 'result': models})
     elif m in ('thread/start', 'thread/resume'):
+        if m == 'thread/resume' and (d / 'resume-hang-once').exists() and not (d / 'hung').exists():
+            # Сервер отвечает ошибкой и виснет, не реагируя на EOF stdin.
+            (d / 'hung').write_text(str(pid))
+            emit({'id': i, 'error': {'code': -32000, 'message': 'boom'}})
+            import time
+            time.sleep(120)
         err = cfg('resume-error.json', None)
         if m == 'thread/resume' and err is not None and not (d / 'resume-retried').exists():
             (d / 'resume-retried').write_text('1')
@@ -142,10 +156,27 @@ struct PresetHarness {
 
 impl PresetHarness {
     async fn new() -> Self {
+        Self::start_with(owner_spec(), None, |_| {}).await
+    }
+
+    async fn start_with(
+        instructions: InstructionSpec,
+        native: Option<&str>,
+        setup: impl FnOnce(&std::path::Path),
+    ) -> Self {
+        Self::start_full(instructions, native, "ask", setup).await
+    }
+
+    async fn start_full(
+        instructions: InstructionSpec,
+        native: Option<&str>,
+        permission: &str,
+        setup: impl FnOnce(&std::path::Path),
+    ) -> Self {
         let dir = TempDir::new().unwrap();
+        setup(dir.path());
         let exe = dir.path().join("fake-codex");
-        std::fs::write(&exe, PRESET_FAKE).unwrap();
-        std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
         let owner = dir.path().join("owner-home");
         std::fs::create_dir_all(&owner).unwrap();
         std::fs::write(owner.join("config.toml"), "model = \"x\"\n").unwrap();
@@ -168,12 +199,12 @@ impl PresetHarness {
             execution_id: Uuid::now_v7(),
             generation: 1,
             workdir: dir.path().into(),
-            native_conversation_id: None,
+            native_conversation_id: native.map(str::to_owned),
             profile: "codex".into(),
             model: "gpt-6-luna".into(),
             effort: "low".into(),
-            permission_mode: "ask".into(),
-            instructions: owner_spec(),
+            permission_mode: permission.into(),
+            instructions,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -312,6 +343,69 @@ async fn owner_launch_keeps_environment_untouched() {
         Value::Null,
         "owner keeps real environment: {env}"
     );
+    assert!(
+        !h.dir.path().join("codex-home").exists(),
+        "owner start builds no canterlot home"
+    );
+    assert!(
+        !spawns[0].1.contains(&"memories".to_string()),
+        "{:?}",
+        spawns[0].1
+    );
+}
+
+#[tokio::test]
+async fn clean_and_preset_start_spawns_the_first_app_server_under_canterlot_home() {
+    for (mode, spec) in [("clean", clean_spec()), ("preset", preset_spec("текст"))] {
+        let h = PresetHarness::start_with(spec, None, |_| {}).await;
+        let spawns = h.spawns();
+        assert_eq!(spawns.len(), 1, "{mode}: no restart needed");
+        let env = h.env_of(h.old_pid);
+        let canterlot = h.dir.path().join("codex-home");
+        assert_eq!(
+            env["CODEX_HOME"].as_str(),
+            Some(canterlot.to_str().unwrap()),
+            "{mode}: first process runs under the canterlot home: {env}"
+        );
+        assert!(
+            env.get("CODEX_SQLITE_HOME").is_none_or(Value::is_null),
+            "{mode}: {env}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(canterlot.join("AGENTS.md")).unwrap(),
+            canterlot_worker::adapter::codex::mcp::SERVER_INSTRUCTIONS,
+            "{mode}: home prepared before the spawn"
+        );
+        assert!(
+            canterlot.join("config.toml").is_symlink(),
+            "{mode}: owner entries linked"
+        );
+    }
+}
+
+#[tokio::test]
+async fn clean_start_resume_falls_back_to_owner_rollout_path() {
+    // Тред создан под домом владельца: в доме canterlot его нет.
+    let h = PresetHarness::start_with(clean_spec(), Some("thread-1"), |dir| {
+        std::fs::write(
+            dir.join("resume-error.json"),
+            r#"{"code": -32000, "message": "Thread thread-1 not found"}"#,
+        )
+        .unwrap();
+        let sessions = dir.join("owner-home").join("sessions").join("2026");
+        std::fs::create_dir_all(&sessions).unwrap();
+        std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
+    })
+    .await;
+    let resumes = h.method_params("thread/resume");
+    assert_eq!(resumes.len(), 2, "retry with path: {resumes:?}");
+    assert!(
+        resumes[1]["path"]
+            .as_str()
+            .is_some_and(|p| p.ends_with("rollout-2026-thread-1.jsonl")),
+        "{}",
+        resumes[1]
+    );
 }
 
 #[tokio::test]
@@ -369,7 +463,9 @@ async fn developer_instructions_by_mode() {
     use canterlot_worker::adapter::codex::thread::{
         ChangeNote, compose_developer_instructions, owner_defaults_from,
     };
-    let owner = owner_defaults_from(&json!({"developer_instructions": "Отвечай кратко."}));
+    let owner = owner_defaults_from(
+        &json!({"config": {"developer_instructions": "Отвечай кратко."}, "origins": {}}),
+    );
     let bare = owner_defaults_from(&json!({}));
     // Владелец: свой текст плюс блок.
     assert_eq!(
@@ -552,4 +648,170 @@ async fn failed_restart_respawns_previous_and_rejects_the_input() {
     // Ввод не записан ни в упавший, ни в запасной процесс.
     let turn_starts = h.method_params("turn/start");
     assert_eq!(turn_starts.len(), 1, "input not sent: {turn_starts:?}");
+}
+
+fn mode_change(mode: &str) -> SettingsChange {
+    SettingsChange {
+        permission_mode: Some(mode.into()),
+        ..Default::default()
+    }
+}
+
+fn write_json(dir: &std::path::Path, name: &str, value: Value) {
+    std::fs::write(dir.join(name), value.to_string()).unwrap();
+}
+
+#[tokio::test]
+async fn owner_preset_keeps_owner_developer_instructions_from_config_read() {
+    let h = PresetHarness::start_with(owner_spec(), None, |dir| {
+        write_json(
+            dir,
+            "config.json",
+            json!({"config": {"developer_instructions": "OWNER-DEV-CANARY"},
+                "origins": {}, "layers": null}),
+        );
+    })
+    .await;
+    let starts = h.method_params("thread/start");
+    let dev = starts[0]["developerInstructions"].as_str().unwrap();
+    assert!(
+        dev.starts_with("OWNER-DEV-CANARY\n\n"),
+        "owner text kept before the canterlot block: {dev}"
+    );
+}
+
+#[tokio::test]
+async fn switching_back_to_owner_restores_owner_policy_from_config() {
+    let mut h = PresetHarness::start_with(owner_spec(), None, |dir| {
+        write_json(
+            dir,
+            "config.json",
+            json!({"config": {
+                "approval_policy": "on-request",
+                "sandbox_mode": "workspace-write",
+                "sandbox_workspace_write": {"network_access": true, "writable_roots": ["/w"]},
+            }, "origins": {}}),
+        );
+    })
+    .await;
+    for mode in ["bypass", "owner"] {
+        let out = h.transmit(Some(mode_change(mode))).await;
+        assert!(
+            matches!(out, TransmitOutcome::Accepted(_)),
+            "{mode}: {out:?}"
+        );
+        h.until_finished().await;
+    }
+    let starts = h.method_params("turn/start");
+    assert_eq!(starts[0]["approvalPolicy"], "never");
+    assert_eq!(starts[1]["approvalPolicy"], "on-request", "{}", starts[1]);
+    assert_eq!(
+        starts[1]["sandboxPolicy"],
+        json!({"type": "workspaceWrite", "networkAccess": true, "writableRoots": ["/w"]}),
+        "{}",
+        starts[1]
+    );
+}
+
+#[tokio::test]
+async fn switching_back_to_owner_restores_policy_seen_at_owner_thread_start() {
+    let mut h = PresetHarness::start_full(owner_spec(), None, "owner", |dir| {
+        write_json(dir, "config.json", json!({"config": {}, "origins": {}}));
+        write_json(
+            dir,
+            "thread.json",
+            json!({"thread": {"id": "thread-1"}, "model": "gpt-6-luna",
+                "approvalPolicy": "untrusted",
+                "sandbox": {"type": "workspaceWrite", "networkAccess": false},
+                "instructionSources": []}),
+        );
+    })
+    .await;
+    assert!(
+        h.method_params("thread/start")[0]
+            .get("approvalPolicy")
+            .is_none()
+    );
+    for mode in ["bypass", "owner"] {
+        let out = h.transmit(Some(mode_change(mode))).await;
+        assert!(
+            matches!(out, TransmitOutcome::Accepted(_)),
+            "{mode}: {out:?}"
+        );
+        h.until_finished().await;
+    }
+    let starts = h.method_params("turn/start");
+    assert_eq!(starts[1]["approvalPolicy"], "untrusted", "{}", starts[1]);
+    assert_eq!(
+        starts[1]["sandboxPolicy"],
+        json!({"type": "workspaceWrite", "networkAccess": false})
+    );
+}
+
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn restart_dying_during_handshake_falls_back_to_the_previous_configuration() {
+    let mut h = PresetHarness::new().await;
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    // Новый сервер живёт дольше секунды и умирает на account/read.
+    std::fs::write(h.dir.path().join("die-account-once"), "").unwrap();
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    assert!(h.dir.path().join("died").exists(), "restart attempted");
+    let mut events = vec![];
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(300), h.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::ProcessExited { .. })),
+        "fallback with the previous configuration works: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CliRestarted { .. })),
+        "{events:?}"
+    );
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+}
+
+#[tokio::test]
+async fn failed_restart_stops_the_failed_server_before_the_fallback() {
+    let mut h = PresetHarness::new().await;
+    std::fs::write(h.dir.path().join("resume-hang-once"), "").unwrap();
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let hung: u32 = std::fs::read_to_string(h.dir.path().join("hung"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        !alive(hung),
+        "failed app-server {hung} is gone before the fallback runs"
+    );
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
 }

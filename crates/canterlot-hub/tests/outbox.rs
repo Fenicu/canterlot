@@ -398,7 +398,14 @@ async fn submit_and_committed_receipts_trigger_without_waiting_for_sweep(pool: P
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn pending_commands_are_sent_in_created_at_order(pool: PgPool) {
-    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_secs(30),
+            ..timers()
+        },
+    )
+    .await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let start: Uuid = sqlx::query_scalar("update commands set delivery_state = 'pending', completed_at = null, created_at = now() - interval '2 hours' where conversation_id = $1 returning id")
         .bind(conversation).fetch_one(&pool).await.unwrap();

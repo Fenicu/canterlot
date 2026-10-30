@@ -23,6 +23,7 @@ use crate::{
     session::{CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, Registry},
 };
 
+mod agent;
 mod attachments;
 mod auth;
 mod control;

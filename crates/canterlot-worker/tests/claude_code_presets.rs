@@ -24,6 +24,9 @@ use std::{
 use tempfile::TempDir;
 use uuid::Uuid;
 
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
+
 const WAIT: Duration = Duration::from_secs(20);
 
 fn owner_spec() -> InstructionSpec {
@@ -304,13 +307,14 @@ if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
     sys.exit(1)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
-def usage():
-    return json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
 def emit(v):
     print(json.dumps(v), flush=True)
 for line in sys.stdin:
     (d / f'stdin-{pid}.log').open('a').write(line)
     v = json.loads(line)
+    # usage.json читается на каждый ход: файл пишется тестом между запусками,
+    # чтение при старте процесса гоняло бы со стартом интерпретатора.
+    usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
     if v.get('type') == 'control_request':
         emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': v['request_id'], 'response': {}}})
         continue
@@ -319,7 +323,7 @@ for line in sys.stdin:
           'mcp_servers': [{'name': 'canterlot', 'status': 'connected'}]})
     uid = v.get('uuid')
     emit({'type': 'result', 'subtype': 'success', 'session_id': sid, 'is_error': False,
-          'user_message_uuids': [uid], 'modelUsage': usage(), 'result': 'ok'})
+          'user_message_uuids': [uid], 'modelUsage': usage, 'result': 'ok'})
 "#;
 
 struct RestartHarness {
@@ -333,8 +337,7 @@ impl RestartHarness {
     async fn new() -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-cli");
-        std::fs::write(&exe, RESTART_FAKE).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        fake_exec::write_executable(&exe, RESTART_FAKE, 0o700);
         let workdir = dir.path().join("repo");
         std::fs::create_dir_all(workdir.join(".git")).unwrap();
         let context = AdapterContext {
@@ -604,8 +607,7 @@ for line in sys.stdin:
 "#;
     let dir = TempDir::new().unwrap();
     let exe = dir.path().join("fake-cli");
-    std::fs::write(&exe, STUBBORN).unwrap();
-    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+    fake_exec::write_executable(&exe, STUBBORN, 0o700);
     let workdir = dir.path().join("repo");
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {

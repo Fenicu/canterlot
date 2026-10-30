@@ -14,11 +14,19 @@ if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
 }
 
 const phone = { ...devices['Pixel 7'], browserName: 'chromium' as const };
+const LAYOUT_SPEC = /desktop-layout\.spec\.ts$/;
+const firefoxLayout = (name: string, width: number, height: number) => ({
+  name,
+  workers: 1,
+  testMatch: LAYOUT_SPEC,
+  testIgnore: [],
+  use: { browserName: 'firefox' as const, viewport: { width, height } }
+});
 
 export default defineConfig({
   testDir: './e2e',
   // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
-  testIgnore: isStackOrPerf ? undefined : ['**/e2e/stack/**', '**/e2e/perf/**'],
+  testIgnore: isStackOrPerf ? LAYOUT_SPEC : ['**/e2e/stack/**', '**/e2e/perf/**', LAYOUT_SPEC],
   fullyParallel: false,
   workers: isStackOrPerf ? 1 : 4,
   globalSetup: isStackOrPerf ? './e2e/stack/global-setup.ts' : undefined,
@@ -30,6 +38,10 @@ export default defineConfig({
   projects: [
     { name: 'phone', grepInvert: /render_budget_during_long_stream/, use: phone },
     { name: 'desktop', workers: isStackOrPerf ? 1 : 2, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
+    firefoxLayout('layout-1024', 1024, 768),
+    firefoxLayout('layout-1440', 1440, 900),
+    firefoxLayout('layout-2560', 2560, 1440),
+    firefoxLayout('layout-3840', 3840, 2160),
     // Дроссель 4× считает время кадра по настенным часам: соседний браузер на этой машине раздувает задачу за 200 мс.
     { name: 'budget', workers: 1, dependencies: ['phone', 'desktop'], grep: /render_budget_during_long_stream/, use: phone }
   ]

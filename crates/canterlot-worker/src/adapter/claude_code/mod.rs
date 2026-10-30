@@ -399,18 +399,14 @@ impl ClaudeCodeAdapter {
                     })
                 })
                 .collect();
-                self.broker
-                    .as_mut()
-                    .unwrap()
-                    .answer_limits(
-                        rpc_id,
-                        &LimitsSnapshot {
-                            provider: "claude".into(),
-                            current,
-                            ..Default::default()
-                        },
-                    )
-                    .await;
+                self.broker.as_mut().unwrap().answer_limits(
+                    rpc_id,
+                    &LimitsSnapshot {
+                        provider: "claude".into(),
+                        current,
+                        ..Default::default()
+                    },
+                );
             }
         }
     }

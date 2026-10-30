@@ -30,6 +30,24 @@ test('session_picker_attaches_files_to_the_chosen_conversation_and_starts_upload
   await expect(page.getByText('Переданные данные не найдены или срок хранения истёк')).toBeVisible();
 });
 
+test('share_target_ignores_a_background_post_from_a_page @chromium', async ({ page }) => {
+  await bootSecondary(page, '/sessions');
+  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
+  await page.waitForFunction(() => !!navigator.serviceWorker.controller);
+  const response = await page.evaluate(async () => {
+    const form = new FormData(); form.set('text', 'подброшено');
+    form.append('files', new File(['x'], 'drop.txt'));
+    const reply = await fetch('/_share', { method: 'POST', body: form });
+    return { url: reply.url };
+  });
+  expect(response.url).not.toContain('/share?id=');
+  const stored = await page.evaluate(() => new Promise<number>(resolve => {
+    const open = indexedDB.open('canterlot', 1);
+    open.onsuccess = () => { const count = open.result.transaction('share_inbox').objectStore('share_inbox').count(); count.onsuccess = () => { open.result.close(); resolve(count.result); }; };
+  }));
+  expect(stored).toBe(0);
+});
+
 test('share_without_an_active_service_worker_shows_the_explanation', async ({ page }) => {
   await bootSecondary(page, '/share?error=sw_inactive');
   await expect(page.getByText('Приложение ещё не готово принять файл: откройте canterlot и поделитесь ещё раз')).toBeVisible();
@@ -37,13 +55,7 @@ test('share_without_an_active_service_worker_shows_the_explanation', async ({ pa
 
 test('share_picker_reuses_composer_validation_and_keeps_the_text @chromium', async ({ page }) => {
   const { ids } = await bootSecondary(page, '/sessions');
-  await page.evaluate(async () => { await navigator.serviceWorker.ready; });
-  await page.waitForFunction(() => !!navigator.serviceWorker.controller);
-  const url = await page.evaluate(async () => {
-    const form = new FormData(); form.set('text', 'Текст с пустым файлом');
-    form.append('files', new File([], 'empty.txt'));
-    return (await fetch('/_share', { method: 'POST', body: form })).url;
-  });
+  const url = await postShare(page, { text: 'Текст с пустым файлом', files: [{ name: 'empty.txt', body: '' }] });
   await page.goto(url);
   await page.locator('main').getByRole('button', { name: /Восстановление потока/ }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${ids.pinned}$`));

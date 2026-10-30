@@ -25,7 +25,7 @@ const labels: Record<ConnectionPhase, string> = {
   connecting: 'Подключение', live: 'Соединение установлено', reconnecting: 'Восстановление соединения',
   offline: 'Нет связи с сервером', auth_required: 'Сессия истекла. Войдите снова', incompatible: 'Обновите приложение для продолжения'
 };
-type Slot = { sync: ScopeSync; refs: number; cancelRelease?: () => void };
+type Slot = { sync: ScopeSync; applier: ScopeApplier; refs: number; cancelRelease?: () => void };
 export class ConnectionManager {
   readonly status: ConnectionStatus;
   private scopes = new Map<ScopeName, Slot>();
@@ -144,8 +144,14 @@ export class ConnectionManager {
   subscribe(scope: ScopeName, applier: ScopeApplier): { release(): void; readonly status: ScopeStatus; readonly cursor: string } {
     if (this.disposed) throw new Error('connection_disposed');
     let slot = this.scopes.get(scope);
+    // Отпущенный слот с чужим получателем доставлял бы события уже закрытому хранилищу.
+    if (slot && !slot.refs && slot.applier !== applier) { this.drop(scope, slot); slot = undefined; }
     if (!slot) {
-      if (this.scopes.size >= 16) throw new Error('too_many_subscriptions');
+      if (this.scopes.size >= 16) {
+        const idle = [...this.scopes].find(([, item]) => !item.refs);
+        if (!idle) throw new Error('too_many_subscriptions');
+        this.drop(idle[0], idle[1]);
+      }
       const batcher = new FrameBatcher<AppliedEvent>(items => applier.applyEvents(items), {
         raf: this.deps.raf, cancelRaf: this.deps.cancelRaf, now: () => performance.now(),
         visible: () => this.deps.lifecycle.visible, schedule: (fn, ms) => this.schedule(fn, ms)
@@ -155,7 +161,7 @@ export class ConnectionManager {
         schedule: (fn, ms) => this.schedule(fn, ms), batcher, probe,
         onIncompatible: () => this.incompatible(), onResync: () => { this.status.resyncs++; }
       });
-      slot = { sync, refs: 0 }; this.scopes.set(scope, slot);
+      slot = { sync, applier, refs: 0 }; this.scopes.set(scope, slot);
       sync.start(); if (this.opened) sync.onTransportOpen();
       if (this.status.phase === 'incompatible') sync.incompatible();
     }
@@ -166,9 +172,14 @@ export class ConnectionManager {
       release: () => {
         if (released || this.disposed) return;
         released = true; current.refs--;
-        if (!current.refs) current.cancelRelease = this.schedule(() => { current.sync.stop(); this.scopes.delete(scope); }, 30_000);
+        if (!current.refs) current.cancelRelease = this.schedule(() => this.drop(scope, current), 30_000);
       }
     };
+  }
+  private drop(scope: ScopeName, slot: Slot): void {
+    slot.cancelRelease?.(); slot.cancelRelease = undefined;
+    slot.sync.stop();
+    if (this.scopes.get(scope) === slot) this.scopes.delete(scope);
   }
   probe(reason: ResumeReason | 'manual'): void {
     if (this.disposed || this.status.phase === 'incompatible') return;

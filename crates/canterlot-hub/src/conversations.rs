@@ -587,7 +587,40 @@ pub async fn recent_workdirs(
     machine_id: Uuid,
     limit: i64,
 ) -> Result<Vec<String>, sqlx::Error> {
-    sqlx::query_scalar("select workdir from conversations where owner_id=$1 and machine_id=$2 group by workdir order by max(created_at) desc,workdir limit $3").bind(owner_id).bind(machine_id).bind(limit.clamp(0,20)).fetch_all(conn).await
+    sqlx::query_scalar("select workdir from machine_workdirs where owner_id=$1 and machine_id=$2 order by last_used_at desc, workdir desc limit $3").bind(owner_id).bind(machine_id).bind(limit.clamp(0,20)).fetch_all(conn).await
+}
+
+/// Запомнить рабочий каталог машины: upsert метки использования, старше
+/// 20 самых свежих удаляются. Вызывать только с проверенным каталогом.
+pub async fn remember_workdir(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    machine_id: Uuid,
+    workdir: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into machine_workdirs(owner_id, machine_id, workdir, last_used_at)
+         values ($1, $2, $3, clock_timestamp())
+         on conflict (owner_id, machine_id, workdir)
+         do update set last_used_at = clock_timestamp()",
+    )
+    .bind(owner_id)
+    .bind(machine_id)
+    .bind(workdir)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "delete from machine_workdirs
+         where owner_id = $1 and machine_id = $2 and workdir not in (
+           select workdir from machine_workdirs
+           where owner_id = $1 and machine_id = $2
+           order by last_used_at desc, workdir desc limit 20)",
+    )
+    .bind(owner_id)
+    .bind(machine_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
 }
 
 pub(crate) async fn lock_owner(conn: &mut PgConnection, owner: Uuid) -> Result<(), sqlx::Error> {
@@ -1045,6 +1078,7 @@ async fn create_in_tx(
     };
     sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
             .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
+    remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;
     sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
         .bind(id)
         .bind(sqlx::types::Json(&holds))
