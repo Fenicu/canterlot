@@ -406,12 +406,16 @@ struct RestartHarness {
 
 impl RestartHarness {
     async fn new() -> Self {
-        Self::with_native(None).await
+        Self::launched(None, false).await
     }
 
     async fn with_native(native: Option<String>) -> Self {
+        Self::launched(native, true).await
+    }
+
+    async fn launched(native: Option<String>, transcript: bool) -> Self {
         let dir = TempDir::new().unwrap();
-        if let Some(native) = &native {
+        if let (Some(native), true) = (&native, transcript) {
             std::fs::write(dir.path().join(format!("transcript-{native}")), "1").unwrap();
         }
         let exe = dir.path().join("fake-cli");
@@ -769,6 +773,33 @@ async fn resumed_session_stays_resumed_on_a_change_before_its_first_input() {
     assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
     let (_, new_args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
     assert_eq!(flag_value(new_args, "--resume"), Some(native));
+}
+
+#[tokio::test]
+async fn missing_transcript_is_named_before_the_process_exit() {
+    let native = Uuid::now_v7().to_string();
+    let mut h = RestartHarness::launched(Some(native), false).await;
+    let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+        .await
+        .expect("event deadline");
+    assert!(
+        matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "resume_transcript_missing",
+                required: false,
+                ..
+            }
+        ),
+        "{event:?}"
+    );
+    let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+        .await
+        .expect("event deadline");
+    assert!(
+        matches!(event, AdapterEvent::ProcessExited { code: Some(1), .. }),
+        "{event:?}"
+    );
 }
 
 #[tokio::test]

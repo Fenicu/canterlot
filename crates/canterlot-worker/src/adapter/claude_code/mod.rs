@@ -531,8 +531,21 @@ impl ClaudeCodeAdapter {
         if let Some(broker) = &self.broker {
             broker.arm();
         }
-        let mut cli = CliProcess::spawn(launch, &self.cfg, group).await.ok()?;
+        let mut cli = match CliProcess::spawn(launch, &self.cfg, group).await {
+            Ok(cli) => cli,
+            Err(error) => {
+                tracing::warn!(
+                    kind = "cli_restart_failed",
+                    reason = error.reason(),
+                    "cli restart failed"
+                );
+                return None;
+            }
+        };
         if exited_early(&mut cli).await {
+            if let Some(kind) = process::exit_cause(&cli.final_stderr().await) {
+                self.diagnostic(kind, false);
+            }
             return None;
         }
         Some(cli)
@@ -736,6 +749,25 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Причина встаёт перед событием выхода: после него сопровождение событий не читает.
+    /// Событие уже в очереди, поэтому отмена этого ожидания его не теряет.
+    async fn name_exit_cause(&mut self) {
+        let Some(cli) = self.cli.as_mut() else {
+            return;
+        };
+        if let Some(kind) = process::exit_cause(&cli.final_stderr().await) {
+            let at = self.events.len().saturating_sub(1);
+            self.events.insert(
+                at,
+                AdapterEvent::Diagnostic {
+                    kind,
+                    event_type: kind.into(),
+                    required: false,
+                },
+            );
+        }
+    }
+
     // Every wait is cancellation-safe: the line reader retains partial bytes.
     async fn pump(&mut self) {
         if self.exited || self.cli.is_none() {
@@ -764,6 +796,9 @@ impl ClaudeCodeAdapter {
                     }
                 }
             }
+        }
+        if self.exited {
+            self.name_exit_cause().await;
         }
     }
 }
@@ -946,7 +981,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .clone()
                 .unwrap_or(std::env::current_exe()?),
         )
-        .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+        .map_err(|error| AdapterError::StartFailed(error.reason()))?;
         broker.arm();
         self.broker = Some(broker);
         self.queue = Some(InputQueue::new(LaunchSettings {
@@ -956,7 +991,7 @@ impl Adapter for ClaudeCodeAdapter {
         }));
         let cli = CliProcess::spawn(&launch, &self.cfg, group)
             .await
-            .map_err(|_| AdapterError::StartFailed("cli_launch_failed"))?;
+            .map_err(|error| AdapterError::StartFailed(error.reason()))?;
         let started = Started {
             native_conversation_id: self.native_id.clone(),
             cli_pid: cli.pid,

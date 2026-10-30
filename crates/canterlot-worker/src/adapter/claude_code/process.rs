@@ -187,6 +187,31 @@ pub enum LaunchError {
     Io(std::io::Error),
 }
 
+impl LaunchError {
+    pub fn reason(&self) -> &'static str {
+        match self {
+            Self::UnknownPermissionMode => "unknown_permission_mode",
+            Self::MissingInstructions => "missing_instructions",
+            Self::WorkdirNotDir => "workdir_not_dir",
+            Self::SpawnFailed(_) => "cli_spawn_failed",
+            Self::CliNotFoundInContainment => "cli_not_contained",
+            Self::Io(_) => "cli_launch_io",
+        }
+    }
+}
+
+/// Причина выхода CLI по хвосту stderr: только категория, сам текст нигде не остаётся.
+pub fn exit_cause(stderr: &[u8]) -> Option<&'static str> {
+    let text = String::from_utf8_lossy(stderr);
+    if text.contains("No conversation found with session ID") {
+        Some("resume_transcript_missing")
+    } else if text.contains("Session ID") && text.contains("is already in use") {
+        Some("session_id_in_use")
+    } else {
+        None
+    }
+}
+
 #[derive(Debug)]
 pub enum StdoutLine {
     Line(String),
@@ -331,6 +356,7 @@ pub struct CliProcess {
     partial: Vec<u8>,
     discarded: Option<usize>,
     stderr_ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+    stderr_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl CliProcess {
@@ -375,7 +401,7 @@ impl CliProcess {
         let stdout = child.stdout.take().map(tokio::io::BufReader::new);
         let stderr = child.stderr.take();
         let ring = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        if let Some(mut se) = stderr {
+        let stderr_task = stderr.map(|mut se| {
             let ringc = ring.clone();
             tokio::spawn(async move {
                 use tokio::io::AsyncReadExt;
@@ -394,8 +420,8 @@ impl CliProcess {
                         Err(_) => break,
                     }
                 }
-            });
-        }
+            })
+        });
         Ok(Self {
             pid,
             start_ticks,
@@ -405,6 +431,7 @@ impl CliProcess {
             partial: Vec::new(),
             discarded: None,
             stderr_ring: ring,
+            stderr_task,
         })
     }
     pub async fn write_line(&mut self, json: &serde_json::Value) -> std::io::Result<()> {
@@ -459,6 +486,13 @@ impl CliProcess {
     }
     pub fn stderr_tail(&self) -> Vec<u8> {
         self.stderr_ring.lock().unwrap().clone()
+    }
+    /// Хвост stderr вышедшего процесса: чтение успевает дойти до конца, если pipe не держат потомки.
+    pub async fn final_stderr(&mut self) -> Vec<u8> {
+        if let Some(task) = self.stderr_task.take() {
+            let _ = tokio::time::timeout(std::time::Duration::from_millis(100), task).await;
+        }
+        self.stderr_tail()
     }
     pub fn close_stdin(&mut self) {
         self.stdin.take();
