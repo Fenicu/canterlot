@@ -531,10 +531,21 @@ pub(crate) async fn close_for_ended_execution_in_tx(
     .fetch_all(&mut *conn)
     .await?;
     for (id, state, winner) in rows {
-        // Решение, переданное агенту, могло быть применено: доказательства нет.
+        // Команда на машине могла дойти до агента, а факты сопровождения идут отдельным
+        // журналом и могут опоздать; решения дальше хаба не ушло только у `pending`.
+        let on_machine: bool = sqlx::query_scalar(
+            "select exists(select 1 from commands
+             where kind = 'deliver_decision' and delivery_state = 'stored_on_machine'
+               and conversation_id = $1 and payload->>'request_id' = $2 and payload->>'decision_id' = $3)",
+        )
+        .bind(conversation_id)
+        .bind(id.to_string())
+        .bind(winner.map(|winner| winner.to_string()))
+        .fetch_one(&mut *conn)
+        .await?;
         let (next, event_reason, applied) = match state.as_str() {
             "open" => ("closed_without_decision", reason, json!(false)),
-            "decision_saved" => ("decision_not_applied", reason, json!(false)),
+            "decision_saved" if !on_machine => ("decision_not_applied", reason, json!(false)),
             _ => (
                 "decision_unconfirmed",
                 "unconfirmed",

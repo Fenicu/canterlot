@@ -367,6 +367,7 @@ stateDiagram-v2
 | `decision_transmitting` | `application_proven` | адаптер: `accepted(proof)` | `SJ`, PG: запрос закрыт как решённый; снять удержание | `decision_applied` |
 | `decision_transmitting` | `explicit_rejection` | адаптер однозначно отклонил: закрытие запроса наблюдено раньше записи ответа в CLI. Сами CLI решения не отвергают (отображение ниже) | `SJ`, PG | `decision_not_applied` |
 | `decision_transmitting` | `application_undetermined` | `undetermined` или смерть сопровождения | `SJ`/`CJ`, PG; повтор запрещён | `decision_unconfirmed` |
+| `decision_on_machine` | `execution_ended` | исполнение закончилось или сопровождение потеряно, а факты передачи могут опоздать: `SJ` идёт отдельно от `CJ` и сверки | PG; повтор запрещён | `decision_unconfirmed` |
 | `decision_unconfirmed` | `application_proven` | поздний факт или `reconcile` | PG | `decision_applied` |
 | `decision_unconfirmed` | `retry_as_new` | явное действие владельца с предупреждением, запрос по данным адаптера ещё открыт | новое решение со ссылкой на исходное. На закреплённых версиях недостижим: ответ привязан к JSON-RPC `id` запроса в пределах соединения (Codex) или к ответу на MCP `tools/call` (Claude Code), повторный ответ CLI молча игнорирует, а после потери сопровождения запроса больше нет | исходный без изменений |
 
