@@ -81,9 +81,9 @@
 			<div class="info-header-meta">
 				<p class="meta">
 					{#if summary.pending}
-						ответ ещё поступает
+						Ответ ещё поступает
 					{:else}
-						ход завершён
+						Ход завершён
 					{/if}
 				</p>
 			</div>

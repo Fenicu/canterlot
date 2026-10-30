@@ -26,7 +26,7 @@
     try {
       runtime = await browserRuntime();
     } catch {
-      error = 'Не удалось загрузить пресеты. Повторите при восстановлении связи';
+      error = 'Не удалось загрузить инструкции. Повторите при восстановлении связи';
     }
   }
 
@@ -38,7 +38,7 @@
       await deletePreset(target.id, crypto.randomUUID());
       deleting = null;
     } catch (err) {
-      deleteError = err instanceof ApiError ? err.message : 'Не удалось удалить пресет';
+      deleteError = err instanceof ApiError ? err.message : 'Не удалось удалить инструкцию';
     }
   }
 
@@ -54,9 +54,9 @@
       <p class="error">{error}</p>
       <Button onclick={() => void load()}>Повторить</Button>
     {:else if !runtime}
-      <p>Загружаю пресеты…</p>
+      <p>Загружаю инструкции…</p>
     {:else}
-      <Button variant="primary" onclick={() => (creating = true)}>Новый пресет</Button>
+      <Button variant="primary" onclick={() => (creating = true)}>Новая инструкция</Button>
       {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
       <ul>
         {#each presets as preset (preset.id)}
@@ -102,9 +102,9 @@
 
 {#if deleting}
   <ConfirmDialog
-    title={`Удалить пресет «${deleting.title}»?`}
+    title={`Удалить инструкцию «${deleting.title}»?`}
     body={`Сессии, где он применён (${deleting.used_by}), продолжат работать со своей копией.`}
-    confirmLabel="Удалить пресет"
+    confirmLabel="Удалить инструкцию"
     onconfirm={() => void remove()}
     onclose={() => (deleting = null)}
   />

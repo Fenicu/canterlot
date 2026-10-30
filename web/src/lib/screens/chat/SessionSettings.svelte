@@ -130,7 +130,7 @@
 			const response = await listPresets();
 			presets = response.data;
 		} catch {
-			presetsError = 'Не удалось загрузить пресеты';
+			presetsError = 'Не удалось загрузить инструкции';
 		}
 	}
 
@@ -200,7 +200,7 @@
 				} else if (code === 'permission_mode_unknown') {
 					permissionError = err.message || 'Режим разрешений не поддерживается';
 				} else if (code === 'profile_unknown') {
-					presetError = 'Пресет не найден';
+					presetError = 'Инструкции не найдены';
 				} else if (code === 'settings_midsession_unsupported') {
 					generalError = 'Настройка посреди сессии не поддерживается';
 				} else {
@@ -223,7 +223,7 @@
 			await updateSettings(chat.id, { instruction_profile: effectiveRef });
 		} catch (err) {
 			if (err instanceof ApiError && err.code === 'profile_unknown') {
-				presetError = 'Пресет не найден';
+				presetError = 'Инструкции не найдены';
 			} else if (err instanceof Error) {
 				generalError = err.message;
 			}

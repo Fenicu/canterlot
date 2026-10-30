@@ -6,9 +6,13 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
+  import { effortLabel } from '#lib/screens/chat/settingsLabels.js';
   import Button from '#lib/ui/Button.svelte';
+  import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
+  import Select from '#lib/ui/Select.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
+  import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount } from 'svelte';
   import { machineProblem, NewSessionModel } from './newSessionModel';
@@ -59,6 +63,16 @@
   ];
   const presets = $derived(runtime && runtime.list.presets.length > 0 ? sortPresets([...runtime.list.presets]) : BUILTIN_PRESETS);
   const selectedPreset = $derived(presets.find((item) => item.id === profile) ?? BUILTIN_PRESETS[0]);
+  const machineOptions = $derived([
+    { value: '', label: 'Выберите машину' },
+    ...machines.map((item) => {
+      const problem = machineProblem(item);
+      return { value: item.id, label: `${item.name}${problem ? ` · ${problem}` : ''}`, disabled: Boolean(problem) };
+    })
+  ]);
+  const modelOptions = $derived([{ value: '', label: 'Выберите модель' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
+  const effortOptions = $derived([{ value: '', label: 'Выберите усилие' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
+  const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
@@ -116,56 +130,34 @@
 
 {#snippet fields()}
   <div class="fields">
-  <label>Машина
-    <select aria-label="Машина" bind:value={machineId}>
-      <option value="">Выберите машину</option>
-      {#each machines as item (item.id)}
-        {@const problem = machineProblem(item)}
-        <option value={item.id} disabled={Boolean(problem)}>{item.name}{problem ? ` · ${problem}` : ''}</option>
-      {/each}
-    </select>
-  </label>
-  {#if recent.length > 0}
-    <div role="group" aria-label="Недавние папки" class="recent">
-      <p class="hint">Недавние папки</p>
-      {#each recent as item (item)}
-        <button type="button" class="recent-item" onclick={() => { path = item; }}>{item}</button>
-      {/each}
+    <Select label="Машина" options={machineOptions} bind:value={machineId} />
+    {#if recent.length > 0}
+      <div role="group" aria-label="Недавние папки" class="recent">
+        <p class="hint">Недавние папки</p>
+        {#each recent as item (item)}
+          <button type="button" class="recent-item" onclick={() => { path = item; }}>{item}</button>
+        {/each}
+      </div>
+    {/if}
+    <Field label="Рабочая папка">
+      {#snippet children({ id })}<input {id} aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />{/snippet}
+    </Field>
+    <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
+    <div class="pair">
+      <Select label="Модель" options={modelOptions} bind:value={modelId} />
+      <Select label="Усилие" options={effortOptions} bind:value={effort} />
     </div>
-  {/if}
-  <label>Рабочая папка
-    <input aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />
-  </label>
-  <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
-  <label>Модель
-    <select aria-label="Модель" bind:value={modelId}>
-      <option value="">Выберите модель</option>
-      {#each models as item (item.id)}<option value={item.id}>{item.title}</option>{/each}
-    </select>
-  </label>
-  <label>Усилие
-    <select aria-label="Усилие" bind:value={effort}>
-      <option value="">Выберите усилие</option>
-      {#each efforts as item (item)}<option value={item}>{item}</option>{/each}
-    </select>
-  </label>
-  <label>Инструкции
-    <select aria-label="Инструкции" bind:value={profile}>
-      {#each presets as item (item.id)}
-        <option value={item.id}>{item.title}</option>
-      {/each}
-    </select>
-    {#if selectedPreset}<p class="note">{selectedPreset.description}</p>{/if}
-  </label>
-  <Toggle label="Кранч" bind:checked={crunch} />
-  {#if crunch}<label>Текст продолжения <textarea aria-label="Текст продолжения" bind:value={resume}></textarea></label>{/if}
-  {#if error}<p>{error}</p>{/if}
-  {#if model?.errors.machine}<p>{model.errors.machine}</p>{/if}
-  {#if gate.ok}
-    <Button variant="primary" full onclick={send}>Создать</Button>
-  {:else}
-    <Button variant="primary" full disabled reason={gate.reason} onclick={send}>Создать</Button>
-  {/if}
+    <Select label="Инструкции" options={presetOptions} bind:value={profile} hint={selectedPreset?.description} />
+    <Toggle block label="Кранч" bind:checked={crunch} />
+    {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}
+    {#if error}<p class="error" role="alert">{error}</p>{/if}
+    {#if model?.errors.machine}<p class="error">{model.errors.machine}</p>{/if}
+    {#if gate.ok}
+      <Button variant="primary" full onclick={send}>Создать</Button>
+    {:else}
+      <Button variant="primary" full disabled reason={gate.reason} onclick={send}>Создать</Button>
+    {/if}
+    {#if !touch}<Button variant="text" full onclick={() => goto(resolve('sessions'))}>Отмена</Button>{/if}
   </div>
 {/snippet}
 
@@ -192,37 +184,28 @@
     border-radius: var(--radius-card);
     background: var(--surface);
     color: var(--text);
-    padding: var(--s6);
+    padding: var(--s6) var(--s8) var(--s8);
   }
   .fields { display: flex; flex-direction: column; gap: var(--s6); }
-  label { display: flex; flex-direction: column; gap: var(--s2); }
-  select, input, textarea {
-    min-height: var(--target);
-    border: var(--s0);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    color: var(--text);
-    padding: var(--s4) var(--s6);
-  }
-  p { color: var(--danger); }
-  .note { color: var(--muted); font-size: var(--fs-sm); }
+  .pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, var(--gauge-width)), 1fr)); gap: var(--s4); }
+  .error { margin: 0; color: var(--danger); }
   .hint { color: var(--muted); font-size: var(--fs-sm); margin: 0; }
-  .recent { display: flex; flex-direction: column; gap: var(--s2); margin-bottom: var(--s4); }
+  .recent { display: flex; flex-direction: column; gap: var(--s1); }
   .recent-item {
     display: block;
     width: 100%;
     min-height: var(--target);
     border: var(--s0);
     border-radius: var(--radius-pill);
-    background: var(--chip);
-    color: var(--chip-text);
-    padding: var(--s4) var(--s6);
-    font-size: var(--fs-meta);
+    background: var(--transparent);
+    color: var(--secondary);
+    padding: var(--s2) var(--s4);
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
     text-align: left;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
-  .recent-item:focus-visible { outline: var(--focus-width) solid var(--accent); }
   h2 { margin: 0 0 var(--s4); font-size: var(--fs-title); }
 </style>
