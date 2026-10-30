@@ -779,3 +779,62 @@ async fn delete_clears_pending_references_and_keeps_effective_snapshot(pool: PgP
     assert_eq!(applied.revision, Some(1));
     assert!(applied.current_revision.is_none());
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_description_or_text_is_invalid_not_internal(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for (key, body, field) in [
+        (
+            "nul_description",
+            json!({"title": "Нуль", "description": "до\u{0}после", "text": "текст"}),
+            "description",
+        ),
+        (
+            "nul_text",
+            json!({"title": "Нуль", "text": "до\u{0}после"}),
+            "text",
+        ),
+    ] {
+        let response = f
+            .request(Method::POST, "/api/v1/presets", Some(key), Some(body))
+            .await;
+        assert_eq!(
+            response.status.as_u16(),
+            422,
+            "{field}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(Fx::error_code(&response), "preset_invalid");
+        assert_eq!(response.json::<Value>()["error"]["details"]["field"], field);
+    }
+    let created = f.create("nul_base", "Правка", "текст").await;
+    let id = created["id"].as_str().unwrap();
+    for (key, body, field) in [
+        (
+            "nul_patch_description",
+            json!({"description": "\u{0}", "base_revision": 1}),
+            "description",
+        ),
+        (
+            "nul_patch_text",
+            json!({"text": "a\u{0}b", "base_revision": 1}),
+            "text",
+        ),
+    ] {
+        let response = f
+            .request(
+                Method::PATCH,
+                &format!("/api/v1/presets/{id}"),
+                Some(key),
+                Some(body),
+            )
+            .await;
+        assert_eq!(
+            response.status.as_u16(),
+            422,
+            "{field}: {}",
+            String::from_utf8_lossy(&response.body)
+        );
+        assert_eq!(response.json::<Value>()["error"]["details"]["field"], field);
+    }
+}

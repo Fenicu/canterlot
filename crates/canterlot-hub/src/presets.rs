@@ -473,12 +473,12 @@ fn validate_new(
     if is_builtin_title(&title) {
         return Err(PresetError::TitleTaken);
     }
-    if description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS {
+    if description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS || description.contains('\0') {
         return Err(PresetError::Invalid {
             field: "description",
         });
     }
-    if text.trim().is_empty() {
+    if text.trim().is_empty() || text.contains('\0') {
         return Err(PresetError::Invalid { field: "text" });
     }
     if text.len() > MAX_PRESET_TEXT_BYTES {
@@ -637,7 +637,9 @@ async fn update_in_tx(
         .as_deref()
         .unwrap_or(&description)
         .to_owned();
-    if new_description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS {
+    if new_description.chars().count() > MAX_PRESET_DESCRIPTION_CHARS
+        || new_description.contains('\0')
+    {
         return Err(PresetError::Invalid {
             field: "description",
         });
@@ -647,7 +649,10 @@ async fn update_in_tx(
         .as_deref()
         .unwrap_or(&current_text_value)
         .to_owned();
-    if patch.text.as_ref().is_some_and(|t| t.trim().is_empty()) || new_text.trim().is_empty() {
+    if patch.text.as_ref().is_some_and(|t| t.trim().is_empty())
+        || new_text.trim().is_empty()
+        || new_text.contains('\0')
+    {
         return Err(PresetError::Invalid { field: "text" });
     }
     if new_text.len() > MAX_PRESET_TEXT_BYTES {

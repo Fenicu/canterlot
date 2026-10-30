@@ -1481,3 +1481,44 @@ async fn resent_decision_refused_as_already_transmitted_keeps_request_state(pool
     assert_eq!(request_state(&pool, request).await, "decision_applied");
     assert_eq!(closed_reason(&pool, request).await, ["applied"]);
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_request_payload_does_not_wedge_the_session_journal(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                journal,
+                vec![
+                    opened(&execution),
+                    record_body::Body::RequestOpened(RequestOpened {
+                        request_id: "toolu_nul".into(),
+                        execution_id: execution.execution_id.to_string(),
+                        generation: execution.generation as u64,
+                        kind: "permission".into(),
+                        payload_json:
+                            br#"{"tool_name":"Write","input":{"content":"a\u0000b","n\u0000":1}}"#
+                                .to_vec(),
+                    }),
+                ],
+            ),
+        )
+        .await
+        .map_err(|error| error.to_string());
+    assert_eq!(outcome, Ok(IngestOutcome::Committed { up_to_seq: 2 }));
+    let payload: Value = sqlx::query_scalar(
+        "select request_payload from requests where native_request_id = 'toolu_nul'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payload,
+        json!({"tool_name":"Write","input":{"content":"ab","n":1}})
+    );
+}

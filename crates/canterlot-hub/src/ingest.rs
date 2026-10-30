@@ -2030,6 +2030,24 @@ async fn decision_execution(
     }))
 }
 
+fn strip_nul(value: &mut Value) {
+    match value {
+        Value::String(text) if text.contains('\0') => text.retain(|c| c != '\0'),
+        Value::Array(items) => items.iter_mut().for_each(strip_nul),
+        Value::Object(map) if map.keys().any(|key| key.contains('\0')) => {
+            *map = std::mem::take(map)
+                .into_iter()
+                .map(|(key, mut item)| {
+                    strip_nul(&mut item);
+                    (key.replace('\0', ""), item)
+                })
+                .collect();
+        }
+        Value::Object(map) => map.values_mut().for_each(strip_nul),
+        _ => {}
+    }
+}
+
 type QueueRowTuple = (
     sqlx::types::Json<Vec<PauseReason>>,
     sqlx::types::Json<Vec<HoldReason>>,
@@ -2076,11 +2094,13 @@ async fn apply_request_opened(
         .kind
         .parse::<crate::requests::RequestKind>()
         .map_err(|_| IngestError::InvalidRecord)?;
-    let payload_val: Value = if fact.payload_json.is_empty() {
+    let mut payload_val: Value = if fact.payload_json.is_empty() {
         json!({})
     } else {
         serde_json::from_slice(&fact.payload_json).map_err(|_| IngestError::InvalidRecord)?
     };
+    // jsonb не принимает \u0000: иначе запись повторялась бы с того же seq вечно.
+    strip_nul(&mut payload_val);
     let generation = i64::try_from(fact.generation).map_err(|_| IngestError::InvalidRecord)?;
 
     sqlx::query("select id from conversations where id = $1 for no key update")
