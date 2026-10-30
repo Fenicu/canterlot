@@ -35,7 +35,7 @@ export class HeightIndex {
 
   set(i: number, h: number): void {
     const prev = this.#heights[i];
-    if (prev === undefined) return;
+    if (prev === undefined || prev === h) return;
     this.#heights[i] = h;
     this.#add(i + 1, h - prev);
   }

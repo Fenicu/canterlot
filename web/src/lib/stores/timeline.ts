@@ -66,9 +66,13 @@ export class TimelineModel {
 			this.newerCount += 1;
 			return;
 		}
-		const without = this.entries.filter((item) => item.key !== entry.key);
+		const current = this.entries.find((item) => item.key === entry.key);
+		// Новый массив пересобирает все строки ленты: повтор той же записи (accepted после transmitting) его не создаёт.
+		if (current && sameEntry(current, entry)) return;
+		const without = current ? this.entries.filter((item) => item !== current) : [...this.entries];
+		const last = without[without.length - 1];
 		without.push(entry);
-		without.sort((a, b) => cmpSeq(a.seq, b.seq));
+		if (last && cmpSeq(last.seq, entry.seq) > 0) without.sort((a, b) => cmpSeq(a.seq, b.seq));
 		if (without.length > this.maxLoaded) {
 			without.splice(0, without.length - this.maxLoaded);
 			this.hasOlder = true;
@@ -77,6 +81,7 @@ export class TimelineModel {
 	}
 
 	remove(key: string): void {
+		if (!this.entries.some((item) => item.key === key)) return;
 		this.#entries.set(this.entries.filter((item) => item.key !== key));
 	}
 
@@ -88,6 +93,12 @@ export class TimelineModel {
 	oldestSeq(): string | null {
 		return this.entries[0]?.seq ?? null;
 	}
+}
+
+function sameEntry(a: TimelineEntry, b: TimelineEntry): boolean {
+	if (a.seq !== b.seq) return false;
+	if (a.kind === 'block') return b.kind === 'block' && a.block === b.block;
+	return b.kind === 'input' && a.input === b.input;
 }
 
 function dedupe(items: TimelineEntry[]): TimelineEntry[] {
