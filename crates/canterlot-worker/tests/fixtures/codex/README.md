@@ -63,7 +63,8 @@
   проверку настроек задачи 3 (`gpt-6-luna` без `ultra`).
 - `settings_updated.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `thread/settings/updated` после смены (`ev/question.jsonl:92`; песочница —
-  ключ `sandboxPolicy`, как в записи и схеме `ThreadSettings`).
+  ключ `sandboxPolicy`, как в записи и схеме `ThreadSettings`; обязательный по
+  схеме `collaborationMode` — режим `default`).
   Покрывает подтверждение смены модели и режима задачей 3.
 - `question_free_text.jsonl` — сконструировано, подтвердить в live smoke. Источник
   формы: `item/tool/requestUserInput` (`ev/question_default_mode.jsonl:28`) с
@@ -74,7 +75,10 @@
 - `elicitation.jsonl` — сконструировано, подтвердить в live smoke. Источник формы:
   `mcpServer/elicitation/request` из схемы 0.164 (`McpServerElicitationRequestParams`:
   `serverName`, `threadId`, `turnId`, без `itemId`; form — `requestedSchema`,
-  url — `url` и `elicitationId`). Покрывает elicitation задачей 4.
+  url — `url` и `elicitationId`, `openai/userVerification` — `title`,
+  `description`, `challenge`). Строки: form с обязательным полем, url, form без
+  обязательных полей, `openai/userVerification`, `openai/form`. Покрывает
+  elicitation задачей 4 и сразу отклоняемые режимы.
 - `unknown_server_request.jsonl` — сконструировано, подтвердить в live smoke.
   Методы `attestation/generate` и `item/tool/call` из схемы серверных запросов.
   Покрывает ответ-ошибку `-32601` задачей 4.

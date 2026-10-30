@@ -1,9 +1,14 @@
 use std::path::Path;
+use std::process::Stdio;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::time::timeout;
 
+use super::process::GroupKill;
 use crate::adapter::spawn_with_retry_io;
+
+const OUTPUT_CAP: u64 = 64 * 1024;
 
 // Минимальная проверенная версия CLI.
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (0, 164, 0);
@@ -59,7 +64,11 @@ pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
 }
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
-    let out = match spawn_with_retry_io(|| {
+    check_within(executable, Duration::from_secs(5)).await
+}
+
+pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersion, VersionError> {
+    let mut child = match spawn_with_retry_io(|| {
         let mut cmd = Command::new(executable);
         cmd.env_clear()
             .envs(super::process::build_env(
@@ -68,31 +77,42 @@ pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
                 None,
             ))
             .arg("--version")
-            .kill_on_drop(true);
-        async move {
-            match timeout(Duration::from_secs(5), cmd.output()).await {
-                Ok(v) => v,
-                Err(_) => Err(std::io::Error::other("timeout")),
-            }
-        }
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .kill_on_drop(true)
+            .process_group(0);
+        async move { cmd.spawn() }
     })
     .await
     {
-        Ok(o) => o,
-        Err(err) => {
-            if err.kind() == std::io::ErrorKind::NotFound {
-                return Err(VersionError::NotFound);
-            }
-            if err.to_string() == "timeout" {
-                return Err(VersionError::Failed);
-            }
-            return Err(VersionError::Failed);
+        Ok(child) => child,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Err(VersionError::NotFound);
         }
+        Err(_) => return Err(VersionError::Failed),
     };
-    if !out.status.success() {
+    // Тайм-аут и ошибка чтения убивают всю группу, а не только обёртку.
+    let mut group = GroupKill::of(&child);
+    let mut stdout = child.stdout.take().ok_or(VersionError::Failed)?;
+    let work = async {
+        let mut text = Vec::new();
+        (&mut stdout)
+            .take(OUTPUT_CAP)
+            .read_to_end(&mut text)
+            .await?;
+        let status = child.wait().await?;
+        Ok::<_, std::io::Error>((status, text))
+    };
+    let (status, output) = match timeout(limit, work).await {
+        Ok(Ok(out)) => out,
+        _ => return Err(VersionError::Failed),
+    };
+    group.disarm();
+    if !status.success() {
         return Err(VersionError::Failed);
     }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let text = String::from_utf8_lossy(&output);
     let token = version_token(&text)?;
     let (v, pre) = split_version(token)?;
     let label = if pre {

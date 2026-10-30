@@ -383,29 +383,36 @@ async fn clean_and_preset_start_spawns_the_first_app_server_under_canterlot_home
     }
 }
 
+// Кандидаты на ошибку thread/resume для треда без рулона в текущем доме: тексты —
+// строки бинарника codex-cli 0.164.0 (`strings`), код -32600 предположен.
+// Настоящий ответ снимает пункт 5 live smoke.
+const MISSING_THREAD_ERRORS: [&str; 3] = [
+    r#"{"code": -32600, "message": "no rollout found for thread id thread-1"}"#,
+    r#"{"code": -32600, "message": "no rollout found for conversation id thread-1"}"#,
+    r#"{"code": -32600, "message": "thread not found: thread-1"}"#,
+];
+
 #[tokio::test]
 async fn clean_start_resume_falls_back_to_owner_rollout_path() {
-    // Тред создан под домом владельца: в доме canterlot его нет.
-    let h = PresetHarness::start_with(clean_spec(), Some("thread-1"), |dir| {
-        std::fs::write(
-            dir.join("resume-error.json"),
-            r#"{"code": -32000, "message": "Thread thread-1 not found"}"#,
-        )
-        .unwrap();
-        let sessions = dir.join("owner-home").join("sessions").join("2026");
-        std::fs::create_dir_all(&sessions).unwrap();
-        std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
-    })
-    .await;
-    let resumes = h.method_params("thread/resume");
-    assert_eq!(resumes.len(), 2, "retry with path: {resumes:?}");
-    assert!(
-        resumes[1]["path"]
-            .as_str()
-            .is_some_and(|p| p.ends_with("rollout-2026-thread-1.jsonl")),
-        "{}",
-        resumes[1]
-    );
+    for error in MISSING_THREAD_ERRORS {
+        // Тред создан под домом владельца: в доме canterlot его нет.
+        let h = PresetHarness::start_with(clean_spec(), Some("thread-1"), |dir| {
+            std::fs::write(dir.join("resume-error.json"), error).unwrap();
+            let sessions = dir.join("owner-home").join("sessions").join("2026");
+            std::fs::create_dir_all(&sessions).unwrap();
+            std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
+        })
+        .await;
+        let resumes = h.method_params("thread/resume");
+        assert_eq!(resumes.len(), 2, "{error}: retry with path: {resumes:?}");
+        assert!(
+            resumes[1]["path"]
+                .as_str()
+                .is_some_and(|p| p.ends_with("rollout-2026-thread-1.jsonl")),
+            "{error}: {}",
+            resumes[1]
+        );
+    }
 }
 
 #[tokio::test]
@@ -603,7 +610,7 @@ async fn cross_home_resume_falls_back_to_rollout_path() {
     // Тред известен только по rollout в доме владельца.
     std::fs::write(
         h.dir.path().join("resume-error.json"),
-        r#"{"code": -32000, "message": "Thread thread-1 not found"}"#,
+        MISSING_THREAD_ERRORS[0],
     )
     .unwrap();
     let sessions = h.dir.path().join("owner-home").join("sessions").join("sub");

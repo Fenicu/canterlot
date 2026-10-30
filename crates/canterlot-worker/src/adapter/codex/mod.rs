@@ -994,8 +994,8 @@ impl CodexAdapter {
         Some(proc)
     }
 
-    /// thread/resume с новыми инструкциями; «not found» — одна попытка с путём
-    /// рулона из дома владельца.
+    /// thread/resume с новыми инструкциями; тред не найден в доме — одна попытка
+    /// с путём рулона из дома владельца.
     async fn resume_with_fallback(
         &mut self,
         thread_id: &str,
@@ -1018,7 +1018,7 @@ impl CodexAdapter {
         match result {
             Ok(value) => thread::parse_thread_result(&value)
                 .map_err(|_| AdapterError::StartFailed("resume_failed")),
-            Err(error) if is_not_found(&error) => {
+            Err(error) if is_missing_thread(&error) => {
                 if let Some(path) = launch
                     .owner_home
                     .and_then(|home| thread::find_rollout(home, &thread_id))
@@ -1539,8 +1539,16 @@ async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
     }
 }
 
-fn is_not_found(error: &RpcError) -> bool {
-    error.message.to_lowercase().contains("not found")
+// В схеме 0.164 нет кода или data отсутствующего треда, поэтому узнаём его по
+// тексту. Варианты — строки бинарника codex-cli 0.164.0; живая ошибка
+// thread/resume ещё не снята (пункт 5 live smoke).
+const MISSING_THREAD_MARKERS: [&str; 2] = ["no rollout found", "not found"];
+
+fn is_missing_thread(error: &RpcError) -> bool {
+    let message = error.message.to_lowercase();
+    MISSING_THREAD_MARKERS
+        .iter()
+        .any(|marker| message.contains(marker))
 }
 
 #[async_trait::async_trait]

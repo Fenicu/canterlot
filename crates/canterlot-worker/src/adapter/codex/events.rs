@@ -1415,6 +1415,9 @@ impl Translator {
     }
 
     fn on_settings_updated(&mut self, params: &Value) -> Vec<Translated> {
+        if !self.is_main(params) {
+            return vec![Translated::Ignored];
+        }
         let settings = params.get("threadSettings").cloned().unwrap_or(Value::Null);
         if let Some(model) = settings.get("model").and_then(Value::as_str) {
             self.model = model.to_owned();
