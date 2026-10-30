@@ -82,8 +82,11 @@ def cfg(name, default):
 def emit(obj):
     print(json.dumps(obj), flush=True)
 config = cfg('config.json', {})
-models = cfg('models.json', {"models": [{"id": "gpt-6-luna", "default": True,
-    "efforts": ["low", "medium", "high"]}]})
+models = cfg('models.json', {"data": [{"id": "gpt-6-luna", "model": "gpt-6-luna",
+    "displayName": "gpt-6-luna", "description": "d", "hidden": False, "isDefault": True,
+    "defaultReasoningEffort": "low", "supportedReasoningEfforts": [
+        {"reasoningEffort": e, "description": e} for e in ("low", "medium", "high")],
+    "inputModalities": ["text", "image"]}], "nextCursor": None})
 thread = cfg('thread.json', None)
 turn_no = 0
 for line in sys.stdin:

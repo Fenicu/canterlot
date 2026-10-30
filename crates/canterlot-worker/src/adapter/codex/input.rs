@@ -35,9 +35,10 @@ pub struct ModelEntry {
     pub default: bool,
 }
 
+// Страница ответа model/list: `data` по схеме ModelListResponse.
 pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
     result
-        .get("models")
+        .get("data")
         .and_then(Value::as_array)
         .map(|models| {
             models
@@ -69,6 +70,27 @@ pub fn model_entries(result: &Value) -> Vec<ModelEntry> {
         })
         .unwrap_or_default()
 }
+
+// Курсор следующей страницы model/list; пустой или null — страниц больше нет.
+pub fn next_cursor(result: &Value) -> Option<String> {
+    result
+        .get("nextCursor")
+        .and_then(Value::as_str)
+        .filter(|cursor| !cursor.is_empty())
+        .map(str::to_owned)
+}
+
+// Параметры model/list: страница по курсору.
+pub fn model_list_params(cursor: Option<&str>) -> Value {
+    let mut params = json!({"includeHidden": false, "limit": 100});
+    if let Some(cursor) = cursor {
+        params["cursor"] = cursor.into();
+    }
+    params
+}
+
+// Предел страниц model/list: защита от зацикленного курсора.
+pub const MODEL_LIST_MAX_PAGES: usize = 20;
 
 // `efforts` в краткой сводке или `supportedReasoningEfforts[].reasoningEffort` в схеме.
 fn model_efforts(model: &Value) -> Vec<String> {

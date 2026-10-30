@@ -78,18 +78,19 @@ pub async fn discover(cfg: &CodexConfig) -> Result<CodexCatalog, DiscoverError> 
         .map_err(DiscoverError::Version)?;
     let mut failure = None;
     for attempt in 0..3 {
-        match probe::probe(
+        match probe::probe_pages(
             &cfg.executable,
             "model/list",
-            json!({"includeHidden": false, "limit": 100}),
+            input::model_list_params(None),
             Duration::from_secs(15),
+            input::MODEL_LIST_MAX_PAGES,
         )
         .await
         {
-            Ok(result) => {
+            Ok(pages) => {
                 return Ok(CodexCatalog {
                     version,
-                    models: model_entries(&result),
+                    models: pages.iter().flat_map(model_entries).collect(),
                 });
             }
             Err(error) => {
@@ -710,19 +711,33 @@ impl CodexAdapter {
         Ok(())
     }
 
+    /// Все страницы model/list на соединении сессии.
+    async fn list_models(&mut self) -> Result<Vec<ModelEntry>, AdapterError> {
+        let mut models = Vec::new();
+        let mut cursor = None;
+        for _ in 0..input::MODEL_LIST_MAX_PAGES {
+            let page = self
+                .rpc_round(
+                    "model/list",
+                    input::model_list_params(cursor.as_deref()),
+                    HANDSHAKE_STEP,
+                )
+                .await
+                .ok_or(AdapterError::StartFailed("model_list_failed"))?
+                .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
+            models.extend(model_entries(&page));
+            cursor = input::next_cursor(&page);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(models)
+    }
+
     async fn handshake(&mut self, spec: &StartSpec) -> Result<Started, AdapterError> {
         self.workdir = spec.workdir.clone();
         self.handshake_base().await?;
-        let models = self
-            .rpc_round(
-                "model/list",
-                json!({"includeHidden": false, "limit": 100}),
-                HANDSHAKE_STEP,
-            )
-            .await
-            .ok_or(AdapterError::StartFailed("model_list_failed"))?
-            .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
-        self.models = model_entries(&models);
+        self.models = self.list_models().await?;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
         // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c, задача 7).

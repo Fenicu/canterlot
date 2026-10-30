@@ -610,6 +610,111 @@ async fn replay_interrupt_end_to_end() {
     fake.close().await;
 }
 
+fn model_page(ids: &[&str], next: Option<&str>) -> Value {
+    let data: Vec<Value> = ids
+        .iter()
+        .map(|id| {
+            json!({
+                "id": id, "model": id, "displayName": id, "description": "d",
+                "hidden": false, "isDefault": *id == ids[0] && next.is_some(),
+                "defaultReasoningEffort": "low",
+                "supportedReasoningEfforts": [
+                    {"reasoningEffort": "low", "description": "l"},
+                    {"reasoningEffort": "high", "description": "h"},
+                ],
+                "inputModalities": ["text", "image"],
+            })
+        })
+        .collect();
+    json!({"data": data, "nextCursor": next})
+}
+
+#[tokio::test]
+async fn session_model_list_reads_data_and_follows_next_cursor() {
+    let mut lines = handshake("thread-mini");
+    let start = lines.len() - 2;
+    let pages = vec![
+        w_in(3, "model/list", json!({})),
+        w_out(json!({"id": 3, "result": model_page(&["gpt-6-luna"], Some("page-2"))})),
+        w_in(4, "model/list", json!({})),
+        w_out(json!({"id": 4, "result": model_page(&["gpt-6-astra"], None)})),
+    ];
+    lines.splice(start..start, pages);
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let lists: Vec<Value> = fake
+        .stdin_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["method"] == "model/list")
+        .collect();
+    assert_eq!(lists.len(), 2, "both pages read: {lists:?}");
+    assert_eq!(lists[1]["params"]["cursor"], "page-2");
+    let mut t = fake.tx("hi");
+    for (model, effort, ok) in [
+        ("gpt-6-luna", "high", true),
+        ("gpt-6-astra", "low", true),
+        ("gpt-6-astra", "ultra", false),
+        ("no-such-model", "low", false),
+    ] {
+        t.settings = Some(adapter::SettingsChange {
+            model: Some(model.into()),
+            effort: Some(effort.into()),
+            ..Default::default()
+        });
+        assert_eq!(
+            fake.adapter.validate_transmission(&t).is_ok(),
+            ok,
+            "{model}/{effort}"
+        );
+    }
+    fake.close().await;
+}
+
+const PAGED_PROBE: &str = r#"#!/usr/bin/env python3
+import json, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('codex-cli 0.164.0'); sys.exit(0)
+def model(i):
+    return {"id": i, "model": i, "displayName": i, "description": "d", "hidden": False,
+            "isDefault": i == "gpt-6.1-sol", "defaultReasoningEffort": "low",
+            "supportedReasoningEfforts": [{"reasoningEffort": "low", "description": "l"}],
+            "inputModalities": ["text"]}
+for line in sys.stdin:
+    msg = json.loads(line)
+    (d / 'requests.log').open('a').write(line)
+    m = msg.get('method'); i = msg.get('id'); p = msg.get('params') or {}
+    if m == 'initialize':
+        print(json.dumps({'id': i, 'result': {}}), flush=True)
+    elif m == 'model/list':
+        if p.get('cursor') == 'next-page':
+            r = {'data': [model('gpt-6-luna')], 'nextCursor': None}
+        else:
+            r = {'data': [model('gpt-6.1-sol')], 'nextCursor': 'next-page'}
+        print(json.dumps({'id': i, 'result': r}), flush=True)
+"#;
+
+#[tokio::test]
+async fn discover_reads_every_model_list_page() {
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-codex");
+    std::fs::write(&exe, PAGED_PROBE).unwrap();
+    std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+    let catalog = tokio::time::timeout(
+        WAIT,
+        canterlot_worker::adapter::codex::discover(&CodexConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let ids: Vec<String> = catalog.models().into_iter().map(|m| m.id).collect();
+    assert_eq!(ids, ["gpt-6.1-sol", "gpt-6-luna"]);
+}
+
 #[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));

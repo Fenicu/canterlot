@@ -83,6 +83,29 @@ pub async fn probe(
     params: serde_json::Value,
     probe_timeout: Duration,
 ) -> Result<serde_json::Value, ProbeError> {
+    let mut pages = run(executable, method, params, probe_timeout, 1).await?;
+    pages.pop().ok_or(ProbeError::InvalidResponse)
+}
+
+/// То же для постраничного метода: запросы с `cursor` из `nextCursor`
+/// до последней страницы (не больше `max_pages`) в одном процессе.
+pub async fn probe_pages(
+    executable: &Path,
+    method: &'static str,
+    params: serde_json::Value,
+    probe_timeout: Duration,
+    max_pages: usize,
+) -> Result<Vec<serde_json::Value>, ProbeError> {
+    run(executable, method, params, probe_timeout, max_pages).await
+}
+
+async fn run(
+    executable: &Path,
+    method: &'static str,
+    mut params: serde_json::Value,
+    probe_timeout: Duration,
+    max_pages: usize,
+) -> Result<Vec<serde_json::Value>, ProbeError> {
     let work = async {
         // Повтор при ETXTBSY: зонд запускает свежезаписанного двойника тестов.
         let mut child = spawn_with_retry_io(|| {
@@ -121,12 +144,21 @@ pub async fn probe(
             .write_all(format!("{initialized}\n").as_bytes())
             .await
             .map_err(|_| ProbeError::WriteFailed)?;
-        let (req_id, req_msg) = rpc.request(method, params);
-        stdin
-            .write_all(format!("{req_msg}\n").as_bytes())
-            .await
-            .map_err(|_| ProbeError::WriteFailed)?;
-        let result = wait_response(&mut reader, req_id).await?;
+        let mut pages = Vec::new();
+        loop {
+            let (req_id, req_msg) = rpc.request(method, params.clone());
+            stdin
+                .write_all(format!("{req_msg}\n").as_bytes())
+                .await
+                .map_err(|_| ProbeError::WriteFailed)?;
+            let page = wait_response(&mut reader, req_id).await?;
+            let cursor = super::input::next_cursor(&page);
+            pages.push(page);
+            match cursor {
+                Some(cursor) if pages.len() < max_pages => params["cursor"] = cursor.into(),
+                _ => break,
+            }
+        }
         drop(stdin);
         let wait = timeout(SHUTDOWN_WAIT, child.wait()).await;
         match wait {
@@ -141,7 +173,7 @@ pub async fn probe(
                 let _ = child.kill().await;
             }
         }
-        Ok(result)
+        Ok(pages)
     };
     timeout(probe_timeout, work)
         .await
