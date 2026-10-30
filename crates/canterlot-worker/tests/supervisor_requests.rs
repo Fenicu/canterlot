@@ -616,8 +616,12 @@ async fn terminal_requests_are_not_reannounced_after_supervisor_restart() {
     h.attach(committed).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
         .await;
-    h.wait(|b| matches!(b, Body::DecisionNotApplied(f) if f.reason == "already_transmitted"))
-        .await;
+    // Причина зависит от того, успела ли компакция убрать подтверждённый RequestOpened.
+    h.wait(|b| {
+        matches!(b, Body::DecisionNotApplied(f)
+            if f.reason == "already_transmitted" || f.reason == "request_closed")
+    })
+    .await;
     assert!(!h.bodies.iter().any(|b| matches!(b, Body::RequestOpened(_))));
 }
 
