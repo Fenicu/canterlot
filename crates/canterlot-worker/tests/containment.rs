@@ -54,6 +54,7 @@ cases!(
     unrelated_process_is_never_a_member_or_signalled,
     pid_reuse_guard_checks_start_ticks,
     terminate_reports_survivors_when_deadline_expires,
+    terminate_sends_one_sigterm_to_a_member,
     zombies_are_not_members
 );
 
@@ -71,7 +72,29 @@ async fn containment_child() {
         .parse()
         .unwrap();
     assert!(!group.members().unwrap().iter().any(|m| m.pid == unrelated));
-    if case == "escaped_grandchild_is_tracked_and_terminated" {
+    if case == "terminate_sends_one_sigterm_to_a_member" {
+        let script = "import signal, sys, time\n\
+            log = open(sys.argv[1], 'a', buffering=1)\n\
+            signal.signal(signal.SIGTERM, lambda *_: log.write('term\\n'))\n\
+            log.write('ready\\n')\n\
+            while True: time.sleep(0.01)\n";
+        let log = directory.path().join("signals");
+        let mut command = tokio::process::Command::new("/usr/bin/python3");
+        command.args(["-c", script]).arg(&log);
+        group.prepare_command(&mut command);
+        let mut child = command.spawn().unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !std::fs::read_to_string(&log).is_ok_and(|text| text.contains("ready")) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        group.terminate(Duration::from_millis(300)).await.unwrap();
+        child.wait().await.unwrap();
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(text.lines().filter(|line| *line == "term").count(), 1);
+    } else if case == "escaped_grandchild_is_tracked_and_terminated" {
         let mut command = tokio::process::Command::new(env!("CARGO_BIN_EXE_canterlot-worker"));
         command
             .current_dir(directory.path())

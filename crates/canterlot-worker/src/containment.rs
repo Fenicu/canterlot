@@ -246,6 +246,9 @@ impl Containment for TreeContainment {
     }
 
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError> {
+        // Сигнал один на процесс: повторный SIGTERM многие программы считают
+        // требованием выйти немедленно, а новые участники получают свой.
+        let mut signalled = HashSet::new();
         let deadline = tokio::time::Instant::now() + grace;
         loop {
             let members = self.members()?;
@@ -253,7 +256,9 @@ impl Containment for TreeContainment {
                 return Ok(Termination::Empty);
             }
             for member in &members {
-                self.signal_member(member, Signal::TERM)?;
+                if !signalled.contains(member) && self.signal_member(member, Signal::TERM)? {
+                    signalled.insert(member.clone());
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 break;
@@ -264,6 +269,7 @@ impl Containment for TreeContainment {
             )
             .await;
         }
+        let mut signalled = HashSet::new();
         let kill_deadline = tokio::time::Instant::now() + grace;
         loop {
             let members = self.members()?;
@@ -271,7 +277,9 @@ impl Containment for TreeContainment {
                 return Ok(Termination::Empty);
             }
             for member in &members {
-                self.signal_member(member, Signal::KILL)?;
+                if !signalled.contains(member) && self.signal_member(member, Signal::KILL)? {
+                    signalled.insert(member.clone());
+                }
             }
             if tokio::time::Instant::now() >= kill_deadline {
                 return Ok(Termination::Survivors(members));
