@@ -51,7 +51,6 @@ function machine(patch: Partial<MachineRecord> = {}): MachineRecord {
         permission_modes: ["default"],
       },
     ],
-    profiles: [],
     ...patch,
   };
 }
