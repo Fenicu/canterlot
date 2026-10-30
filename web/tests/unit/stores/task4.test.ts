@@ -27,6 +27,7 @@ import {
 } from "#lib/stores/delegation.js";
 import { fmt } from "#lib/format/ru.js";
 import {
+  freshInput,
   placeInput,
   type AttachmentRef,
   type InputUiState,
@@ -870,6 +871,76 @@ describe("stores task 4", () => {
     ]);
     expect(chat.inputs.get(key)!.feedSeq).toBe("10");
     expect(chat.timeline.entries.map((item) => item.seq)).toEqual(["1", "10"]);
+  });
+
+  it("snapshot_queue_restores_queued_inputs_and_their_count_after_a_reload", () => {
+    const chat = chatOf();
+    const first = queuedView("idem-q1", "00000000-0000-4000-8000-0000000000c1");
+    const second = queuedView("idem-q2", "00000000-0000-4000-8000-0000000000c2");
+    chat.applier.applySnapshot(
+      {
+        queue: {
+          queued: [first, second],
+          pause_reasons: [],
+          hold_reasons: [],
+          run_slot: "free",
+        },
+      },
+      "9",
+    );
+    expect(chat.queue.queued).toBe(2);
+    expect(chat.strip().map((item) => [item.id, item.state, item.text])).toEqual(
+      [
+        [first.id, "queued", "idem-q1"],
+        [second.id, "queued", "idem-q2"],
+      ],
+    );
+    chat.applier.applyEvents([
+      {
+        event: ev(
+          "input_state_changed",
+          { input_id: first.id, state: "transmitting" },
+          "10",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(chat.timeline.entries.map((item) => item.key)).toEqual([
+      "input:idem-q1",
+    ]);
+    expect(chat.strip().map((item) => item.key)).toEqual(["idem-q2"]);
+  });
+
+  it("snapshot_queue_settles_a_local_entry_the_post_already_committed", () => {
+    const key = "idem-commit";
+    const settled: string[] = [];
+    const ops = {
+      ops: new Map(),
+      settle: (id: string) => settled.push(id),
+    };
+    const chat = chatOf(ops as unknown as OpJournal);
+    chat.inputs.set(key, freshInput(key, "ещё сохраняется", 1));
+    const view = queuedView(key, "00000000-0000-4000-8000-0000000000c3");
+    chat.applier.applySnapshot({ queue: { queued: [view] } }, "9");
+    expect(chat.inputs.get(key)?.id).toBe(view.id);
+    expect(chat.inputs.get(key)?.state).toBe("queued");
+    expect(settled).toEqual([key]);
+  });
+
+  it("snapshot_queue_drops_strip_rows_the_hub_no_longer_holds", () => {
+    const chat = chatOf();
+    const kept = queuedView("idem-kept", "00000000-0000-4000-8000-0000000000c4");
+    const gone = queuedView("idem-gone", "00000000-0000-4000-8000-0000000000c5");
+    chat.applier.applySnapshot({ queue: { queued: [kept, gone] } }, "9");
+    chat.inputs.set("idem-local", freshInput("idem-local", "ещё не на хабе", 1));
+
+    chat.applier.applySnapshot({ queue: { queued: [kept] } }, "10");
+
+    expect(chat.queue.queued).toBe(1);
+    expect(chat.strip().map((item) => item.key).sort()).toEqual([
+      "idem-kept",
+      "idem-local",
+    ]);
   });
 
   it("cancelled_input_leaves_the_feed_and_notes_in_the_strip_for_four_seconds", () => {
@@ -2096,6 +2167,20 @@ function sampleRow(id: string): ListRow {
     queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
     crunch: { enabled: false },
     last_activity_at: null,
+  };
+}
+
+function queuedView(key: string, id: string) {
+  return {
+    id,
+    idempotency_key: key,
+    state: "queued",
+    content: [{ type: "text" as const, text: key }],
+    attachments: [],
+    created_seq: "5",
+    feed_seq: null,
+    created_at: "2026-10-28T12:00:00.000Z",
+    retry_of: null,
   };
 }
 

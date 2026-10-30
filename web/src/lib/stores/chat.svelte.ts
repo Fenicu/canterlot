@@ -29,6 +29,7 @@ import {
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { RequestsModel } from "./requests.svelte";
+import type { components } from "#lib/api/generated/openapi.js";
 
 export interface HistoryBlock {
   kind: "block";
@@ -102,14 +103,12 @@ export interface ChatApi {
   markRead(id: string, seq: string): Promise<void>;
 }
 
+type QueueSnapshot = components["schemas"]["SnapshotQueueView"];
+type QueuedInput = QueueSnapshot["queued"][number];
+
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
-  queue?: {
-    pause_reasons?: unknown[];
-    hold_reasons?: unknown[];
-    queued?: number;
-    run_slot?: RunSlot;
-  };
+  queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
   scheduled?: unknown[];
   open_requests?: unknown[];
@@ -775,7 +774,6 @@ export class ChatStore {
     if (data.queue) {
       this.queue.pause_reasons = data.queue.pause_reasons ?? [];
       this.queue.hold_reasons = data.queue.hold_reasons ?? [];
-      this.queue.queued = data.queue.queued ?? this.queue.queued;
       if (data.queue.run_slot) this.queue.run_slot = data.queue.run_slot;
     }
     if (data.scheduled) this.scheduled = data.scheduled;
@@ -804,6 +802,19 @@ export class ChatStore {
       for (const entry of older)
         if (!keptSeq.has(entry.key) && !terminalEntry(entry))
           this.timeline.remove(entry.key);
+    }
+    if (data.queue?.queued) this.#adoptQueued(data.queue.queued);
+  }
+
+  /** Вводы без места в ленте есть только в очереди снимка: полоса сходится с ней в обе стороны. */
+  #adoptQueued(queued: QueuedInput[]): void {
+    this.queue.queued = queued.length;
+    const held = new SvelteSet(
+      queued.map((view) => this.#inputFromHistory({ ...view, kind: "input" }).key),
+    );
+    for (const input of [...this.inputs.values()]) {
+      if (input.id && input.placement === "strip" && input.state !== "cancelled" && !held.has(input.key))
+        this.inputs.delete(input.key);
     }
   }
 
