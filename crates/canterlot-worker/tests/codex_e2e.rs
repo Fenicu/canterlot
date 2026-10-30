@@ -2353,17 +2353,9 @@ async fn unsupported_request_gets_error_reply_and_diagnostic() {
             ..
         }
     )));
-    let replies: Vec<Value> = fake
-        .stdin_log()
-        .lines()
-        .filter_map(|line| serde_json::from_str(line).ok())
-        .filter(|line: &Value| line.get("method").is_none())
-        .collect();
-    assert!(
-        replies
-            .iter()
-            .any(|reply| reply["error"]["code"] == -32601 && reply["id"] == 20)
-    );
+    // Ответ уходит в трубу раньше конца хода, но двойник читает его сам по себе.
+    let (reply, _) = fake.reply_to(20).await;
+    assert_eq!(reply["error"]["code"], -32601);
     fake.close().await;
 }
 
