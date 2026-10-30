@@ -93,7 +93,7 @@
   $effect(() => {
     const current = model;
     const id = machineId;
-    if (!current || !id) return;
+    if (!current) return;
     current.machineId = id;
     void current.refreshRecent().then(() => {
       recent = current.recent;

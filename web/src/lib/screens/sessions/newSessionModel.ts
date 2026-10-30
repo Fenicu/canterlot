@@ -136,12 +136,14 @@ export class NewSessionModel {
   }
 
   async refreshRecent(): Promise<void> {
-    if (!this.machineId) {
+    const machineId = this.machineId;
+    if (!machineId) {
       this.recent = [];
       return;
     }
-    const response = await recentWorkdirs(this.machineId);
-    this.recent = response.data.workdirs.slice(0, 3);
+    const response = await recentWorkdirs(machineId).catch(() => null);
+    if (this.machineId !== machineId) return;
+    this.recent = response?.data.workdirs.slice(0, 3) ?? [];
   }
 
   async submit(): Promise<{ conversationId: string }> {

@@ -200,6 +200,40 @@ describe("sessions/new", () => {
     expect(model.canSubmit).toEqual({ ok: true });
   });
 
+  it("new_session_ignores_recent_folders_of_a_machine_no_longer_selected", async () => {
+    let answer!: (value: { data: { workdirs: string[] } }) => void;
+    vi.mocked(recentWorkdirs).mockImplementationOnce(
+      () => new Promise((resolve) => (answer = resolve)) as never,
+    );
+    const model = new NewSessionModel(
+      store([machine(), machine({ id: "m2" })]),
+      config,
+      ops(),
+    );
+    model.machineId = "m1";
+    const slow = model.refreshRecent();
+    model.machineId = "m2";
+    await model.refreshRecent();
+    const fresh = model.recent;
+
+    answer({ data: { workdirs: ["/from/m1"] } });
+    await slow;
+
+    expect(model.recent).toEqual(fresh);
+    expect(model.recent).not.toContain("/from/m1");
+  });
+
+  it("new_session_recent_folders_failure_leaves_the_form_usable", async () => {
+    vi.mocked(recentWorkdirs).mockRejectedValueOnce(new Error("down"));
+    const model = new NewSessionModel(store([machine()]), config, ops());
+    model.recent = ["/stale"];
+    model.machineId = "m1";
+
+    await expect(model.refreshRecent()).resolves.toBeUndefined();
+
+    expect(model.recent).toEqual([]);
+  });
+
   it("new_session_disables_unavailable_machine_with_a_reason", () => {
     const down = new NewSessionModel(
       store([machine({ availability: "degraded" })]),
