@@ -819,6 +819,49 @@ fn mcp_tool_call_and_output_delta_blocks() {
 }
 
 #[test]
+fn approved_command_leaves_the_waiting_phase() {
+    // Запись: флаг ожидания ставится раньше item/started, снимается уже при
+    // запущенной команде (ev/permissions.jsonl:25-30).
+    let mut translator = Translator::new("01a171c1-2578-7941-bc6d-d6ddc5b5ca1f", "gpt-6-luna");
+    translator.begin_turn("01a171c1-259e-7d31-a49c-500a44d9eed4", command_id());
+    feed_line(&mut translator, "permissions", 25, "thread/status/changed");
+    feed_line(&mut translator, "permissions", 26, "item/started");
+    let out = feed_line(&mut translator, "permissions", 30, "thread/status/changed");
+    assert!(
+        events_of(&out).into_iter().any(|e| matches!(
+            e,
+            AdapterEvent::Phase { phase: Phase::RunningTool, tool_name: Some(name), .. }
+                if name == "shell"
+        )),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn compaction_end_returns_to_generating() {
+    let frames = codex::replay("compaction");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let phases: Vec<&AdapterEvent> = events_of(&out)
+        .into_iter()
+        .filter(|e| matches!(e, AdapterEvent::Phase { .. }))
+        .collect();
+    assert!(
+        phases
+            .last()
+            .is_some_and(|e| is_phase(e, &Phase::Generating)),
+        "{phases:?}"
+    );
+    // Устаревшее уведомление приходит уже после сжатия.
+    let out = translator.feed(
+        "thread/compacted",
+        &json!({"threadId": "thread-main", "turnId": "turn-main"}),
+    );
+    assert!(events_of(&out).is_empty(), "{out:?}");
+}
+
+#[test]
 fn child_thread_reroute_keeps_the_main_model() {
     let mut translator = Translator::new("thread-main", "gpt-6-luna");
     translator.begin_turn("turn-main", command_id());

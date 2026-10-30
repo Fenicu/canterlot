@@ -223,6 +223,8 @@ pub struct Translator {
     last_context_window: u64,
     phase: Phase,
     previous_phase: Phase,
+    waiting: bool,
+    tool: Option<String>,
     retry_count: u32,
     approval_items: HashSet<String>,
     unknown_methods: HashSet<String>,
@@ -263,6 +265,8 @@ impl Translator {
             last_context_window: 0,
             phase: Phase::Generating,
             previous_phase: Phase::Generating,
+            waiting: false,
+            tool: None,
             retry_count: 0,
             approval_items: HashSet::new(),
             unknown_methods: HashSet::new(),
@@ -353,7 +357,6 @@ impl Translator {
             "thread/started" => self.on_thread_started(params),
             "thread/closed" => self.on_thread_closed(params),
             "thread/settings/updated" => self.on_settings_updated(params),
-            "thread/compacted" => vec![self.context_maintenance()],
             "model/rerouted" => self.on_model_rerouted(params),
             "subAgentActivity" => self.on_sub_agent_activity(params),
             "serverRequest/resolved" => self.on_request_resolved(params),
@@ -366,6 +369,7 @@ impl Translator {
             "configWarning" => vec![self.optional("codex_config_warning")],
             "deprecationNotice" => vec![self.optional("codex_deprecation")],
             "account/updated"
+            | "thread/compacted"
             | "turn/moderationMetadata"
             | "remoteControl/status/changed"
             | "thread/readState/changed"
@@ -617,12 +621,7 @@ impl Translator {
                     Some("shell"),
                     Some(&summary),
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some("shell".into()),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool("shell"));
             }
             "fileChange" => {
                 let summary = file_summary(item, self.workdir.as_deref());
@@ -653,12 +652,7 @@ impl Translator {
                     Some("apply_patch"),
                     Some(&summary),
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some("apply_patch".into()),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool("apply_patch"));
                 return out;
             }
             "mcpToolCall" => {
@@ -673,12 +667,7 @@ impl Translator {
                     Some(&name),
                     Some(&summary),
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some(name),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool(&name));
             }
             "collabAgentToolCall" => {
                 let (name, summary, model_override) = collab_summary(item);
@@ -708,12 +697,7 @@ impl Translator {
                         Some(&summary)
                     },
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some(name),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool(&name));
                 self.open.insert(
                     item_id.to_owned(),
                     OpenBlock {
@@ -752,12 +736,7 @@ impl Translator {
                         Some(&summary)
                     },
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some("web_search".into()),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool("web_search"));
             }
             "imageView" => {
                 let path = item.get("path").and_then(Value::as_str).unwrap_or_default();
@@ -776,12 +755,7 @@ impl Translator {
                     block_id,
                     source: MediaSource::Path(PathBuf::from(path)),
                 }));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some("view_image".into()),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool("view_image"));
                 self.open.insert(
                     item_id.to_owned(),
                     OpenBlock {
@@ -811,12 +785,7 @@ impl Translator {
                     Some(item_type),
                     None,
                 ));
-                out.push(Translated::Event(AdapterEvent::Phase {
-                    phase: Phase::RunningTool,
-                    tool_name: Some(item_type.to_owned()),
-                    summary: None,
-                }));
-                self.phase = Phase::RunningTool;
+                out.push(self.running_tool(item_type));
             }
         }
         self.open.insert(
@@ -863,6 +832,16 @@ impl Translator {
         })
     }
 
+    fn running_tool(&mut self, name: &str) -> Translated {
+        self.phase = Phase::RunningTool;
+        self.tool = Some(name.to_owned());
+        Translated::Event(AdapterEvent::Phase {
+            phase: Phase::RunningTool,
+            tool_name: Some(name.to_owned()),
+            summary: None,
+        })
+    }
+
     fn context_maintenance(&mut self) -> Translated {
         self.phase = Phase::ContextMaintenance;
         Translated::Event(AdapterEvent::Phase {
@@ -876,6 +855,14 @@ impl Translator {
         let item = params.get("item").unwrap_or(&Value::Null);
         let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
+        if item_type == "contextCompaction" {
+            self.phase = Phase::Generating;
+            return vec![Translated::Event(AdapterEvent::Phase {
+                phase: Phase::Generating,
+                tool_name: None,
+                summary: None,
+            })];
+        }
         let Some(mut block) = self.open.remove(item_id) else {
             return vec![Translated::Ignored];
         };
@@ -1289,36 +1276,48 @@ impl Translator {
             .and_then(Value::as_array)
             .map(|flags| flags.iter().filter_map(Value::as_str).collect())
             .unwrap_or_default();
-        if flags.contains(&"waitingOnApproval") {
-            self.previous_phase = self.phase.clone();
-            self.phase = Phase::AwaitingPermission;
-            return vec![Translated::Event(AdapterEvent::Phase {
-                phase: Phase::AwaitingPermission,
-                tool_name: None,
-                summary: None,
-            })];
-        }
-        if flags.contains(&"waitingOnUserInput") {
-            self.previous_phase = self.phase.clone();
-            self.phase = Phase::AwaitingAnswer;
-            return vec![Translated::Event(AdapterEvent::Phase {
-                phase: Phase::AwaitingAnswer,
-                tool_name: None,
-                summary: None,
-            })];
-        }
-        if matches!(
+        let waiting = if flags.contains(&"waitingOnApproval") {
+            Some(Phase::AwaitingPermission)
+        } else if flags.contains(&"waitingOnUserInput") {
+            Some(Phase::AwaitingAnswer)
+        } else {
+            None
+        };
+        let in_wait = matches!(
             self.phase,
             Phase::AwaitingPermission | Phase::AwaitingAnswer
-        ) {
-            self.phase = self.previous_phase.clone();
+        );
+        if let Some(phase) = waiting {
+            if !in_wait {
+                self.previous_phase = self.phase.clone();
+            }
+            self.phase = phase.clone();
+            self.waiting = true;
             return vec![Translated::Event(AdapterEvent::Phase {
-                phase: self.phase.clone(),
+                phase,
                 tool_name: None,
                 summary: None,
             })];
         }
-        vec![Translated::Ignored]
+        if !self.waiting {
+            return vec![Translated::Ignored];
+        }
+        // Флаг снят, а элемент мог начаться за время ожидания: последней ушла фаза
+        // ожидания от самого запроса, поэтому текущая отправляется в любом случае.
+        self.waiting = false;
+        if in_wait {
+            self.phase = self.previous_phase.clone();
+        }
+        let tool_name = if matches!(self.phase, Phase::RunningTool) {
+            self.tool.clone()
+        } else {
+            None
+        };
+        vec![Translated::Event(AdapterEvent::Phase {
+            phase: self.phase.clone(),
+            tool_name,
+            summary: None,
+        })]
     }
 
     fn on_token_usage(&mut self, params: &Value) -> Vec<Translated> {
