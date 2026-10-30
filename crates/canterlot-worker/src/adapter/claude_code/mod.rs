@@ -301,7 +301,10 @@ impl ClaudeCodeAdapter {
                 error,
                 terminal_reason,
             } => {
-                if terminal_reason.as_deref() == Some("aborted_tools") {
+                if terminal_reason
+                    .as_deref()
+                    .is_some_and(input::is_interrupt_reason)
+                {
                     return;
                 }
                 let error = error.unwrap_or_else(|| "API error".into());

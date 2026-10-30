@@ -715,6 +715,80 @@ async fn interrupted_turn_finishes_without_error_block() {
     f.close().await;
 }
 
+fn captured(name: &str) -> Vec<Value> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_code")
+        .join(format!("{name}.jsonl"));
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+fn out_frames(rows: &[Value]) -> Vec<Value> {
+    rows.iter()
+        .filter(|r| r["dir"] == "out")
+        .map(|r| r["data"].clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn interrupt_while_streaming_is_acknowledged() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let rows = captured("interrupt_streaming");
+    let id: Uuid = rows.iter().find(|r| r["dir"] == "in").unwrap()["data"]["uuid"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let split = rows
+        .iter()
+        .position(|r| r["data"]["signal"] == "SIGINT")
+        .unwrap();
+    let after = out_frames(&rows[split..]);
+    assert!(
+        after
+            .iter()
+            .any(|v| v["type"] == "result" && v["terminal_reason"] == "aborted_streaming")
+    );
+    let mut turn = out_frames(&rows[..split]);
+    turn.push(json!("@wait"));
+    let mut f = Fake::new(vec![turn]);
+    std::fs::write(
+        f.dir.path().join("interrupt.json"),
+        serde_json::to_vec(&after).unwrap(),
+    )
+    .unwrap();
+    f.start().await;
+    f.send(&tx(id)).await;
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.interrupt())
+            .await
+            .unwrap(),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    let events = f.finish().await;
+    assert!(!events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockStarted {
+            kind: BlockKind::Error,
+            ..
+        }
+    )));
+    loop {
+        if let AdapterEvent::ProcessExited { code, signal } = f.event().await {
+            assert_eq!(
+                canterlot_worker::supervisor::exit_outcome(code, signal, true),
+                ("stopped", "user_stop")
+            );
+            break;
+        }
+    }
+    f.close().await;
+}
+
 #[tokio::test]
 async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);

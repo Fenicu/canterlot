@@ -44,3 +44,18 @@ Each follows a recorded frame shape; the sources are given per file.
   `assistant` frame (`service_failure.jsonl:19`) and `rate_limit_event`
   (`resume.jsonl:25`). Covers: the reset time of `Reached` comes from the
   error's `rate_limit_info` (it differs from the earlier event on purpose).
+
+## Captured in the live smoke (CLI 2.1.311, haiku, effort low)
+
+Recorded from the real CLI by the live smoke (`claude_code_e2e.rs`,
+`live_smoke`) and scrubbed: hook frames and the owner's MCP servers, plugins,
+skills and commands are dropped from `system/init`, thinking signatures are
+emptied, the temp workdir becomes `/tmp/canterlot-smoke` and `$HOME`
+becomes `/home/owner`. Same wrapper as stage 0: `dir == "in"` is what the
+adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
+(`mcp_trace`) or a marker (`signal`: where the smoke sent SIGINT).
+
+- `interrupt_streaming.jsonl` — SIGINT while the model streams (the CLI
+  moved a `sleep 60` chain to the background, so no tool was running): the
+  `result` has `terminal_reason: "aborted_streaming"`, not `aborted_tools`;
+  both acknowledge the interrupt.
