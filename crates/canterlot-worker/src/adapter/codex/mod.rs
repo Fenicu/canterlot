@@ -143,6 +143,8 @@ pub struct CodexAdapter {
     proof_seen: bool,
     /// Вводы с `Undetermined` по сроку: позднее доказательство уходит `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
+    /// turn/start без разобранного ответа: в пути или опоздал к сроку.
+    pending_turn: Option<PendingTurn>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -167,6 +169,12 @@ async fn crunch_done(crunch: &mut Option<PendingCrunch>) -> CrunchResult {
         Some(pending) => (&mut pending.task).await,
         None => std::future::pending().await,
     }
+}
+
+struct PendingTurn {
+    rpc_id: i64,
+    command_id: Uuid,
+    settings: Option<SettingsChange>,
 }
 
 /// Начало вызова команды или правки файла ждёт решения о пометке «Разрешено
@@ -227,6 +235,7 @@ impl CodexAdapter {
             proof_for: None,
             proof_seen: false,
             unconfirmed: HashSet::new(),
+            pending_turn: None,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -501,6 +510,15 @@ impl CodexAdapter {
                 status,
                 error,
             } => self.on_turn_completed(turn_id, status, error),
+            Translated::UntrackedTurnEnded => {
+                if !self.turn_running() {
+                    self.events.push_back(AdapterEvent::Phase {
+                        phase: Phase::AwaitingInput,
+                        tool_name: None,
+                        summary: None,
+                    });
+                }
+            }
             Translated::RateLimits(snapshot) => {
                 for fact in self.limits.on_snapshot(&snapshot) {
                     self.events.push_back(AdapterEvent::Limit(fact));
@@ -556,7 +574,16 @@ impl CodexAdapter {
                         .push_back(AdapterEvent::InputAccepted { command_id });
                 }
             }
-            Translated::TurnStarted { turn_id } => self.outbox.on_turn_started(&turn_id),
+            Translated::TurnStarted { turn_id } => {
+                self.outbox.on_turn_started(&turn_id);
+                // Ответ turn/start ещё не разобран, а элементы хода уже идут.
+                if self.outbox.active().is_none()
+                    && let Some(command_id) = self.pending_turn.as_ref().map(|t| t.command_id)
+                {
+                    self.outbox.adopt(&turn_id, command_id);
+                    self.begin_turn(&turn_id, command_id);
+                }
+            }
             Translated::Event(event) => self.on_block_event(event),
             Translated::McpStatus { .. } | Translated::Ignored => {}
         }
@@ -1161,6 +1188,7 @@ impl CodexAdapter {
         self.responses.clear();
         self.pending_writes.clear();
         self.unconfirmed.clear();
+        self.pending_turn = None;
     }
 
     async fn spawn_and_resume(
@@ -1249,9 +1277,64 @@ impl CodexAdapter {
         }
     }
 
+    fn turn_running(&self) -> bool {
+        self.outbox.active().is_some() || self.pending_turn.is_some()
+    }
+
+    fn begin_turn(&mut self, turn_id: &str, command_id: Uuid) {
+        if let Some(translator) = self.translator.as_mut() {
+            translator.begin_turn(turn_id, command_id);
+        }
+        self.turn_items.clear();
+    }
+
+    // Ответ turn/start после срока: ввод уже назван неподтверждённым. Ход принимается,
+    // а отказ освобождает исполнение: иначе конца хода никто не дождётся.
+    fn settle_late_turn(&mut self) {
+        let Some(rpc_id) = self.pending_turn.as_ref().map(|turn| turn.rpc_id) else {
+            return;
+        };
+        let Some(result) = self.responses.remove(&rpc_id) else {
+            if self.outbox.adopted_turn_ended() {
+                self.pending_turn = None;
+            }
+            return;
+        };
+        let Some(pending) = self.pending_turn.take() else {
+            return;
+        };
+        let accepted = result.as_ref().ok().map(input::started_turn_id);
+        match accepted {
+            Some(Some(turn_id)) => {
+                self.apply_settings_override(pending.settings.as_ref());
+                if self.outbox.take_adopted(&turn_id) {
+                    return;
+                }
+                match self.outbox.on_turn_response(pending.command_id, &turn_id) {
+                    Some(diagnostic) => self.events.push_back(diagnostic),
+                    None => self.begin_turn(&turn_id, pending.command_id),
+                }
+            }
+            _ => {
+                self.unconfirmed.remove(&pending.command_id);
+                self.events.push_back(AdapterEvent::RunFinished {
+                    input_command_id: pending.command_id,
+                    usage: Vec::new(),
+                    context_tokens: 0,
+                    context_window_tokens: 0,
+                });
+                self.events.push_back(AdapterEvent::Phase {
+                    phase: Phase::AwaitingInput,
+                    tool_name: None,
+                    summary: None,
+                });
+            }
+        }
+    }
+
     // Смена настроек едет оверрайдами; действующие правим сразу.
-    fn apply_settings_override(&mut self, input: &Transmission) {
-        let Some(change) = input.settings.as_ref() else {
+    fn apply_settings_override(&mut self, change: Option<&SettingsChange>) {
+        let Some(change) = change else {
             return;
         };
         if let Some(model) = change.model.clone() {
@@ -1324,14 +1407,14 @@ impl CodexAdapter {
                 .as_ref()
                 .is_some_and(|next| !next.same_effect(&self.instructions))
         {
-            if self.outbox.active().is_some() {
+            if self.turn_running() {
                 return TransmitOutcome::Rejected("turn_active".into());
             }
             if let Err(reason) = self.restart_for_instructions(&change, group).await {
                 return TransmitOutcome::Rejected(reason.into());
             }
         }
-        if self.outbox.active().is_some() {
+        if self.turn_running() {
             return TransmitOutcome::Rejected("turn_active".into());
         }
         if input.attempt > 1
@@ -1342,10 +1425,7 @@ impl CodexAdapter {
             // процесса) turn/completed не придёт, и ход закрывается сразу.
             if status.as_deref() == Some("inProgress") && self.outbox.knows(&turn) {
                 self.outbox.attach(&turn, input.command_id);
-                if let Some(translator) = self.translator.as_mut() {
-                    translator.begin_turn(&turn, input.command_id);
-                }
-                self.turn_items.clear();
+                self.begin_turn(&turn, input.command_id);
             } else {
                 self.events.push_back(AdapterEvent::RunFinished {
                     input_command_id: input.command_id,
@@ -1385,37 +1465,58 @@ impl CodexAdapter {
             }
         };
         let (id, message) = self.rpc.request("turn/start", request.params);
+        // До записи: turn/started и userMessage могут обогнать ответ.
+        self.proof_for = Some(input.command_id);
+        self.proof_seen = false;
+        self.pending_turn = Some(PendingTurn {
+            rpc_id: id,
+            command_id: input.command_id,
+            settings: input.settings.clone(),
+        });
         if !self.write_request(message).await {
+            self.proof_for = None;
+            self.pending_turn = None;
             return TransmitOutcome::Undetermined;
         }
         let limit = Instant::now() + self.deadline;
-        let response = self.wait_response(id, limit).await;
+        let Some(response) = self.wait_response(id, limit).await else {
+            // pending_turn остаётся: поздний ответ разберёт settle_late_turn.
+            self.proof_for = None;
+            if self.proof_seen {
+                return TransmitOutcome::Accepted(Proof {
+                    command_id: input.command_id,
+                    kind: input::PROOF_KIND_MESSAGE,
+                });
+            }
+            self.unconfirmed.insert(input.command_id);
+            return TransmitOutcome::Undetermined;
+        };
+        self.pending_turn = None;
         // Отказ сервера оставляет прежние модель, усилие и режим.
-        if matches!(response, Some(Ok(_))) {
-            self.apply_settings_override(input);
+        if response.is_ok() {
+            self.apply_settings_override(input.settings.as_ref());
         }
         let turn_id = match response {
-            Some(Ok(value)) => match value
-                .get("turn")
-                .and_then(|turn| turn.get("id"))
-                .and_then(Value::as_str)
-            {
-                Some(id) => id.to_owned(),
-                None => return TransmitOutcome::Undetermined,
+            Ok(value) => match input::started_turn_id(&value) {
+                Some(id) => id,
+                None => {
+                    self.proof_for = None;
+                    return TransmitOutcome::Undetermined;
+                }
             },
-            Some(Err(error)) => return TransmitOutcome::Rejected(input::error_rejection(&error)),
-            None => return TransmitOutcome::Undetermined,
+            Err(error) => {
+                self.proof_for = None;
+                return TransmitOutcome::Rejected(input::error_rejection(&error));
+            }
         };
-        if let Some(diagnostic) = self.outbox.on_turn_response(input.command_id, &turn_id) {
-            self.events.push_back(diagnostic);
-            return TransmitOutcome::Undetermined;
+        if !self.outbox.take_adopted(&turn_id) {
+            if let Some(diagnostic) = self.outbox.on_turn_response(input.command_id, &turn_id) {
+                self.proof_for = None;
+                self.events.push_back(diagnostic);
+                return TransmitOutcome::Undetermined;
+            }
+            self.begin_turn(&turn_id, input.command_id);
         }
-        if let Some(translator) = self.translator.as_mut() {
-            translator.begin_turn(&turn_id, input.command_id);
-        }
-        self.turn_items.clear();
-        self.proof_for = Some(input.command_id);
-        self.proof_seen = false;
         loop {
             if self.proof_seen {
                 self.proof_for = None;
@@ -1800,6 +1901,7 @@ impl Adapter for CodexAdapter {
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
             self.flush_writes().await;
+            self.settle_late_turn();
             if let Some(event) = self.events.pop_front() {
                 return event;
             }

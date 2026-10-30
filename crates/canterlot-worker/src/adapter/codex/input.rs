@@ -269,6 +269,15 @@ fn attachment_lines(files: &[LocalFile]) -> std::io::Result<String> {
     Ok(list)
 }
 
+// Id хода из ответа turn/start.
+pub fn started_turn_id(result: &Value) -> Option<String> {
+    result
+        .get("turn")
+        .and_then(|turn| turn.get("id"))
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+}
+
 // Ошибка JSON-RPC на turn/start — отказ с обрезанным сообщением.
 pub fn error_rejection(error: &RpcError) -> String {
     error.message.chars().take(128).collect()
@@ -324,7 +333,11 @@ pub struct ActiveTurn {
 
 pub struct Outbox {
     active: Option<ActiveTurn>,
+    // Ходы из ответов turn/start: повтор такого id и есть слияние.
     known_turns: HashSet<String>,
+    // Ходы из turn/started: порядок с ответом схема не задаёт, слиянием не считаются.
+    announced_turns: HashSet<String>,
+    adopted: Option<String>,
 }
 
 impl fmt::Debug for Outbox {
@@ -332,6 +345,7 @@ impl fmt::Debug for Outbox {
         f.debug_struct("Outbox")
             .field("has_active", &self.active.is_some())
             .field("known_turns", &self.known_turns.len())
+            .field("announced_turns", &self.announced_turns.len())
             .finish_non_exhaustive()
     }
 }
@@ -341,6 +355,8 @@ impl Outbox {
         Self {
             active: None,
             known_turns: HashSet::new(),
+            announced_turns: HashSet::new(),
+            adopted: None,
         }
     }
 
@@ -367,11 +383,34 @@ impl Outbox {
 
     // Ход, о котором этот процесс сообщал (ответ turn/start или turn/started).
     pub fn knows(&self, turn_id: &str) -> bool {
-        self.known_turns.contains(turn_id)
+        self.known_turns.contains(turn_id) || self.announced_turns.contains(turn_id)
     }
 
     pub fn on_turn_started(&mut self, turn_id: &str) {
-        self.known_turns.insert(turn_id.to_owned());
+        self.announced_turns.insert(turn_id.to_owned());
+    }
+
+    // turn/started раньше ответа turn/start: ход активен, ответ только подтвердит его.
+    pub fn adopt(&mut self, turn_id: &str, command_id: Uuid) {
+        self.adopted = Some(turn_id.to_owned());
+        self.active = Some(ActiveTurn {
+            turn_id: turn_id.to_owned(),
+            command_id,
+        });
+    }
+
+    // Ход принят по turn/started и уже кончился: ответ turn/start ничего не решает.
+    pub fn adopted_turn_ended(&self) -> bool {
+        self.adopted.is_some() && self.active.is_none()
+    }
+
+    // Ответ подтвердил принятый ход (он мог уже и закончиться).
+    pub fn take_adopted(&mut self, turn_id: &str) -> bool {
+        let adopted = self.adopted.take().is_some_and(|id| id == turn_id);
+        if adopted {
+            self.known_turns.insert(turn_id.to_owned());
+        }
+        adopted
     }
 
     // Привязка к живому ходу после проверки истории: без диагностики слияния.

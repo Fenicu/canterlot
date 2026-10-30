@@ -98,6 +98,8 @@ pub enum Translated {
         status: TurnStatus,
         error: Option<TurnErrorInfo>,
     },
+    // Конец хода главного треда без ввода canterlot.
+    UntrackedTurnEnded,
     RateLimits(Value),
     ServerRequestResolved {
         request_id: RpcId,
@@ -144,6 +146,7 @@ impl fmt::Debug for Translated {
                 .field("status", status)
                 .field("has_error", &error.is_some())
                 .finish(),
+            Translated::UntrackedTurnEnded => f.write_str("UntrackedTurnEnded"),
             Translated::RateLimits(_) => f.write_str("RateLimits"),
             Translated::ServerRequestResolved { request_id } => f
                 .debug_struct("ServerRequestResolved")
@@ -446,7 +449,11 @@ impl Translator {
             .as_ref()
             .is_some_and(|(id, _)| *id == turn_id);
         if !active {
-            return vec![Translated::Ignored];
+            return vec![if self.active_turn.is_none() {
+                Translated::UntrackedTurnEnded
+            } else {
+                Translated::Ignored
+            }];
         }
         // Поздние завершения старого хода не должны переоткрывать блоки.
         let active_command = self.active_turn.as_ref().map(|(_, id)| *id);

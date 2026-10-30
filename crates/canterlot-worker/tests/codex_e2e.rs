@@ -1090,6 +1090,185 @@ async fn transmit(fake: &mut Fake, text: &str, limit: Duration) -> (Uuid, Transm
     (id, outcome)
 }
 
+fn turn_started(thread: &str, turn: &str) -> String {
+    note(
+        "turn/started",
+        json!({"threadId": thread, "turn": {"id": turn, "status": "inProgress", "items": []}}),
+    )
+}
+
+#[tokio::test]
+async fn turn_started_before_the_response_keeps_the_session_running() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let id = fake.start_turn("reversed").await;
+    let events = fake.finish(id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "turn_merged")),
+        "{events:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn user_message_before_the_response_proves_delivery() {
+    // На следующих ходах userMessage идёт через 10-20 мс после ответа, и его
+    // пишет другая задача сервера: обратный порядок не должен терять доказательство.
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_secs(2));
+    fake.start().await;
+    let id = fake.start_turn("reversed").await;
+    fake.finish(id).await;
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn adopted_turn_ending_without_a_response_frees_the_next_input() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    lines.extend(turn_response(11, "turn-2"));
+    lines.extend(user_message("thread-mini", "turn-2"));
+    lines.push(turn_end("thread-mini", "turn-2", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(300));
+    fake.start().await;
+    let id = fake.start_turn("first").await;
+    fake.finish(id).await;
+    let id = fake.start_turn("second").await;
+    fake.finish(id).await;
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn late_turn_start_response_adopts_the_turn() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w("sleep", json!(600)));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(150));
+    fake.start().await;
+    let (id, outcome) = transmit(&mut fake, "slow", WAIT).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == id)
+        ),
+        "{events:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn turn_started_after_the_deadline_adopts_the_turn_before_the_response() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w("sleep", json!(600)));
+    lines.push(turn_started("thread-mini", "turn-1"));
+    lines.extend(user_message("thread-mini", "turn-1"));
+    lines.push(w_out(
+        json!({"id": 10, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}}),
+    ));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(150));
+    fake.start().await;
+    let (id, outcome) = transmit(&mut fake, "slow", WAIT).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(
+            |event| matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == id)
+        ),
+        "{events:?}"
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn late_turn_start_refusal_frees_the_queue() {
+    let mut lines = handshake("thread-mini");
+    lines.push(w_in(10, "turn/start", json!({})));
+    lines.push(w("sleep", json!(600)));
+    lines.push(w_out(
+        json!({"id": 10, "error": {"code": -32000, "message": "refused"}}),
+    ));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(150));
+    fake.start().await;
+    let (id, outcome) = transmit(&mut fake, "slow", WAIT).await;
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    fake.finish(id).await;
+    assert!(matches!(
+        fake.event().await,
+        AdapterEvent::Phase {
+            phase: canterlot_worker::adapter::Phase::AwaitingInput,
+            ..
+        }
+    ));
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn server_turn_end_returns_the_phase_to_awaiting_input() {
+    // Ход без ввода canterlot (продолжение после субагента): фаза Generating не должна остаться.
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(turn_end("thread-mini", "turn-1", "completed"));
+    lines.push(turn_started("thread-mini", "turn-server"));
+    lines.push(turn_end("thread-mini", "turn-server", "completed"));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let id = fake.start_turn("run").await;
+    fake.finish(id).await;
+    let mut last = None;
+    for _ in 0..3 {
+        last = Some(fake.event().await);
+    }
+    assert!(
+        matches!(
+            last,
+            Some(AdapterEvent::Phase {
+                phase: canterlot_worker::adapter::Phase::AwaitingInput,
+                ..
+            })
+        ),
+        "{last:?}"
+    );
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn late_user_message_confirms_an_unconfirmed_input() {
     let mut lines = handshake("thread-mini");

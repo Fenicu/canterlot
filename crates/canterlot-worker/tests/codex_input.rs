@@ -234,6 +234,21 @@ fn error_response_is_rejected() {
 }
 
 #[test]
+fn turn_started_before_the_response_is_not_a_merge() {
+    let turn = "01a171c0-9a55-7cb0-827a-e6374967a52a";
+    let mut outbox = Outbox::new();
+    outbox.on_turn_started(turn);
+    assert!(outbox.knows(turn));
+    assert!(outbox.on_turn_response(command_id(), turn).is_none());
+    assert_eq!(
+        outbox.active().map(|active| active.turn_id.as_str()),
+        Some(turn)
+    );
+    // Настоящее слияние по-прежнему ловится: тот же id во втором ответе.
+    assert!(outbox.on_turn_response(Uuid::now_v7(), turn).is_some());
+}
+
+#[test]
 fn merged_turn_id_stops_the_queue() {
     let active = "01a171c0-a0ee-7bb1-8143-c946003ee0ea";
     let mut outbox = Outbox::new();
