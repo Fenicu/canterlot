@@ -19,6 +19,9 @@ import { onOwnerRetired } from "#lib/storage/owner.js";
 import { resetConfig } from "#lib/api/config.js";
 import { restoreComposerText } from "#lib/composer/restore.js";
 
+/** Сколько отпущенных чатов держать готовыми к возврату; остальные освобождаются целиком. */
+const WARM_CHATS = 4;
+
 let pending: Promise<Runtime> | null = null;
 const chats = new Map<string, ChatStore>();
 const opening = new Map<string, Promise<ChatStore>>();
@@ -99,14 +102,31 @@ export function leaseChatSession(id: string): ChatLease {
       }
       holds.delete(id);
       chats.get(id)?.close();
+      trimChats();
     },
   };
+}
+
+function trimChats(): void {
+  for (const [id, chat] of chats) {
+    if (chats.size <= WARM_CHATS) return;
+    if (holds.has(id)) continue;
+    chats.delete(id);
+    chat.dispose();
+  }
 }
 
 function openChatSession(id: string): Promise<ChatStore> {
   const existing = chats.get(id);
   if (existing) {
-    existing.open();
+    chats.delete(id);
+    try {
+      existing.open();
+    } catch (error) {
+      existing.dispose();
+      return Promise.reject(error);
+    }
+    chats.set(id, existing);
     return Promise.resolve(existing);
   }
   let creating = opening.get(id);
@@ -161,8 +181,14 @@ async function createChatSession(id: string): Promise<ChatStore> {
     clock: { now: () => Date.now() },
     probe,
   });
+  try {
+    chat.open();
+  } catch (error) {
+    chat.dispose();
+    throw error;
+  }
   chats.set(id, chat);
-  chat.open();
   if (!holds.has(id)) chat.close();
+  trimChats();
   return chat;
 }

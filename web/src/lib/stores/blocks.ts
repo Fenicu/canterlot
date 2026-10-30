@@ -355,9 +355,15 @@ export class BlockSync {
     return this.#chain;
   }
 
+  #diag(effect: BlockEffect): void {
+    this.diagnostics.push(effect);
+    if (this.diagnostics.length > 200)
+      this.diagnostics.splice(0, this.diagnostics.length - 200);
+  }
+
   async #handle(effects: BlockEffect[]): Promise<void> {
     for (const effect of effects) {
-      if (effect.type === "diag") this.diagnostics.push(effect);
+      if (effect.type === "diag") this.#diag(effect);
       else if (effect.type === "verify") await this.#verify(effect.blockId);
       else await this.#refetch(effect.blockId, effect.fromBytes);
     }
@@ -372,7 +378,7 @@ export class BlockSync {
       publish(block);
       return;
     }
-    this.diagnostics.push({
+    this.#diag({
       type: "diag",
       kind: "block_checksum_mismatch",
       blockId,
@@ -407,7 +413,7 @@ export class BlockSync {
       const delta = pending[i];
       if (!delta || delta.rev <= block.rev) continue;
       if (block.state === "final") {
-        this.diagnostics.push({
+        this.#diag({
           type: "diag",
           kind: "delta_after_final",
           blockId: block.id,

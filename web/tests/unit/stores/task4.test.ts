@@ -1097,6 +1097,23 @@ describe("stores task 4", () => {
     expect(chat.blocks.size).toBe(0);
   });
 
+  it("delta_marks_and_diagnostics_stay_bounded_without_a_mounted_timeline", () => {
+    const chat = chatOf();
+    chat.applier.applyEvents([{ event: started(), overlap: false }]);
+    const batch = [];
+    for (let rev = 1; rev <= 3000; rev++)
+      batch.push({ event: delta(rev - 1, rev, "x", BLOCK, String(rev)), overlap: false });
+    for (let n = 0; n < 3000; n++)
+      batch.push({
+        event: ev("adapter_diagnostic", { code: "noise" }, String(4000 + n)),
+        overlap: false,
+      });
+    chat.applier.applyEvents(batch);
+    expect(chat.blocks.get(BLOCK)!.text).toHaveLength(3000);
+    expect(chat.deltaMarks.length).toBeLessThanOrEqual(512);
+    expect(chat.diagnostics.length).toBeLessThanOrEqual(200);
+  });
+
   it("hidden_events_do_not_reach_the_reducers", () => {
     const chat = chatOf();
     chat.applier.applyEvents([

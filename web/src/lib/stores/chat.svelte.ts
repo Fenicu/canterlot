@@ -149,6 +149,9 @@ function textOf(content: HistoryInput["content"]): string {
     .join("");
 }
 
+const MAX_DELTA_MARKS = 512;
+const MAX_DIAGNOSTICS = 200;
+
 function scopeOf(id: string): ScopeName {
   return `conversation:${id}`;
 }
@@ -223,6 +226,7 @@ export class ChatStore {
   #readSeq = 0n;
   #readAt = -10_000;
   #noteTimers = new SvelteMap<string, () => void>();
+  #applier: ScopeApplier | null = null;
 
   constructor(
     readonly id: string,
@@ -245,7 +249,8 @@ export class ChatStore {
   }
 
   get applier(): ScopeApplier {
-    return {
+    // Один получатель на хранилище: по нему соединение отличает своё отпущенное окно от чужого.
+    return (this.#applier ??= {
       loadSnapshot: async () => {
         const snap = await this.deps.api.conversationSnapshot(this.id);
         return { cursor: snap.cursor, data: snap.data };
@@ -256,7 +261,7 @@ export class ChatStore {
       applyEvents: (batch) => this.#applyBatch(batch),
       fetchRange: (after, limit) =>
         this.deps.api.events(scopeOf(this.id), after, limit),
-    };
+    });
   }
 
   get ops(): OpJournal {
@@ -483,7 +488,7 @@ export class ChatStore {
           };
         return;
       case "limit_reached":
-        if (event.kind === "limit_reached") this.diagnostics.push(event);
+        if (event.kind === "limit_reached") this.#diagnose(event);
         return;
       case "scheduled_changed":
         if (event.kind === "scheduled_changed") {
@@ -565,11 +570,17 @@ export class ChatStore {
       case "state_divergence":
       case "block_revision_gap":
       case "block_checksum_mismatch":
-        this.diagnostics.push(event);
+        this.#diagnose(event);
         return;
       default:
         this.unknownKinds += 1;
     }
+  }
+
+  #diagnose(item: unknown): void {
+    this.diagnostics.push(item);
+    if (this.diagnostics.length > MAX_DIAGNOSTICS)
+      this.diagnostics.splice(0, this.diagnostics.length - MAX_DIAGNOSTICS);
   }
 
   #attachMedia(payload: {
@@ -599,9 +610,11 @@ export class ChatStore {
     const effects = applyBlockEvent(this.blocks, event);
     this.#sync.handle(effects);
     for (const effect of effects)
-      if (effect.type === "diag") this.diagnostics.push(effect);
+      if (effect.type === "diag") this.#diagnose(effect);
     if (event.kind === "block_delta") {
       this.deltaMarks.push(event.committed_at_from);
+      if (this.deltaMarks.length > MAX_DELTA_MARKS)
+        this.deltaMarks.splice(0, this.deltaMarks.length - MAX_DELTA_MARKS);
       this.deltaSerial += 1;
     }
     if (event.kind === "block_started") {
