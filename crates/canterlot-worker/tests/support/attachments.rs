@@ -252,6 +252,11 @@ impl Fixture {
     pub async fn ready(&self, bytes: &[u8]) -> Uuid {
         let id = Uuid::now_v7();
         let size = bytes.len() as u64;
+        // `sqlx::test` держит хаб и воркер на одном потоке: хеш на нём останавливает heartbeat.
+        let owned = bytes.to_vec();
+        let sha256 = tokio::task::spawn_blocking(move || sha(&owned))
+            .await
+            .unwrap();
         let chunks: Vec<_> = bytes
             .chunks(131_072)
             .map(|b| Ok(b.to_vec().into()))
@@ -260,8 +265,8 @@ impl Fixture {
             .append_staging(id, 0, Box::pin(tokio_stream::iter(chunks)), size)
             .await
             .unwrap();
-        self.blobs.publish(id, size, &sha(bytes)).await.unwrap();
-        sqlx::query("insert into attachments(id,owner_id,conversation_id,name,size_bytes,sha256,state,ready_at) values($1,$2,$3,'../fixture.bin',$4,$5,'ready',clock_timestamp())").bind(id).bind(self.owner).bind(self.conversation).bind(size as i64).bind(sha(bytes)).execute(&self.pool).await.unwrap();
+        self.blobs.publish(id, size, &sha256).await.unwrap();
+        sqlx::query("insert into attachments(id,owner_id,conversation_id,name,size_bytes,sha256,state,ready_at) values($1,$2,$3,'../fixture.bin',$4,$5,'ready',clock_timestamp())").bind(id).bind(self.owner).bind(self.conversation).bind(size as i64).bind(sha256).execute(&self.pool).await.unwrap();
         id
     }
     pub async fn submit(&self, ids: &[Uuid], text: &str) -> SubmittedInput {
