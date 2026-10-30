@@ -123,6 +123,7 @@
 </script>
 
 {#snippet fields()}
+  <div class="fields">
   <label>Машина
     <select aria-label="Машина" bind:value={machineId}>
       <option value="">Выберите машину</option>
@@ -159,17 +160,18 @@
         <option value={item.id}>{item.title}</option>
       {/each}
     </select>
-    {#if selectedPreset}<p>{selectedPreset.description}</p>{/if}
+    {#if selectedPreset}<p class="note">{selectedPreset.description}</p>{/if}
   </label>
   <Toggle label="Кранч" bind:checked={crunch} />
   {#if crunch}<label>Текст продолжения <textarea aria-label="Текст продолжения" bind:value={resume}></textarea></label>{/if}
   {#if error}<p>{error}</p>{/if}
   {#if model?.errors.machine}<p>{model.errors.machine}</p>{/if}
   {#if gate.ok}
-    <Button variant="primary" onclick={send}>Создать</Button>
+    <Button variant="primary" full onclick={send}>Создать</Button>
   {:else}
-    <Button variant="primary" disabled reason={gate.reason} onclick={send}>Создать</Button>
+    <Button variant="primary" full disabled reason={gate.reason} onclick={send}>Создать</Button>
   {/if}
+  </div>
 {/snippet}
 
 {#if touch}
@@ -187,6 +189,8 @@
 
 <style>
   dialog {
+    position: static;
+    flex-shrink: 0;
     width: min(100%, var(--phone-max));
     margin: var(--s8) auto;
     border: var(--s0);
@@ -195,7 +199,8 @@
     color: var(--text);
     padding: var(--s6);
   }
-  label { display: flex; flex-direction: column; gap: var(--s2); margin-bottom: var(--s4); }
+  .fields { display: flex; flex-direction: column; gap: var(--s6); }
+  label { display: flex; flex-direction: column; gap: var(--s2); }
   select, input, textarea {
     min-height: var(--target);
     border: var(--s0);
@@ -205,5 +210,6 @@
     padding: var(--s4) var(--s6);
   }
   p { color: var(--danger); }
+  .note { color: var(--muted); font-size: var(--fs-sm); }
   h2 { margin: 0 0 var(--s4); font-size: var(--fs-title); }
 </style>
