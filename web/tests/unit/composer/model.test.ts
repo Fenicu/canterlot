@@ -510,6 +510,106 @@ describe("composer/model", () => {
     expect(model.text).toBe("отправлено и дописано");
   });
 
+  it("text_typed_after_the_press_stays_out_of_the_sent_message", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "foo";
+
+    const sending = model.send();
+    expect(model.text).toBe("");
+    model.text = " bar";
+    open("ok");
+    await sending;
+
+    expect(deps.ops.begin).toHaveBeenCalledWith(
+      "input",
+      expect.objectContaining({ content: [{ type: "text", text: "foo" }] }),
+      expect.anything(),
+    );
+    expect(model.text).toBe(" bar");
+    expect(deps.drafts.clear).not.toHaveBeenCalled();
+  });
+
+  it("offline_after_the_press_returns_the_text_before_what_was_typed", async () => {
+    let open!: (value: "offline") => void;
+    const { deps, draftsMap } = createMockDeps({
+      canSend: vi.fn(
+        () => new Promise<"offline">((resolve) => (open = resolve)),
+      ),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+
+    const sending = model.send();
+    model.text = "Второе";
+    open("offline");
+    await sending;
+
+    expect(model.text).toBe("Первое\nВторое");
+    expect(draftsMap.get("conv-1")?.text).toBe("Первое\nВторое");
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+  });
+
+  it("queue_filled_during_the_network_check_returns_the_text", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Очередь заполнится";
+
+    const sending = model.send();
+    deps.chat.queue.queued = 100;
+    open("ok");
+    await sending;
+
+    expect(model.text).toBe("Очередь заполнится");
+    expect(deps.ops.begin).not.toHaveBeenCalled();
+  });
+
+  it("send_later_clears_the_field_on_press_and_keeps_what_was_typed", async () => {
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps({
+      canSend: vi.fn(() => new Promise<"ok">((resolve) => (open = resolve))),
+      serverNow: () => 1_000_000,
+    });
+    const model = new ComposerModel(deps);
+    model.text = "foo";
+
+    const sending = model.sendLater(1_000_000 + 15 * 60_000);
+    expect(model.text).toBe("");
+    model.text = "bar";
+    open("ok");
+    await sending;
+
+    expect(deps.ops.begin).toHaveBeenCalledWith(
+      "scheduled",
+      expect.objectContaining({ content: [{ type: "text", text: "foo" }] }),
+      expect.anything(),
+    );
+    expect(model.text).toBe("bar");
+    expect(deps.drafts.clear).not.toHaveBeenCalled();
+  });
+
+  it("send_later_keeps_the_text_when_the_journal_write_fails", async () => {
+    const { deps } = createMockDeps({ serverNow: () => 1_000_000 });
+    deps.ops.begin = vi.fn(async () => {
+      throw new Error("IndexedDB disk full");
+    });
+    const model = new ComposerModel(deps);
+    model.text = "Позже";
+
+    await expect(
+      model.sendLater(1_000_000 + 15 * 60_000),
+    ).rejects.toThrow();
+
+    expect(model.text).toBe("Позже");
+    expect(model.errorMessage).toBe("Не удалось сохранить на устройстве");
+  });
+
   it("offline_press_keeps_a_draft_and_creates_no_operation", async () => {
     const { deps, inputs, draftsMap } = createMockDeps({
       canSend: vi.fn(async () => "offline" as const),

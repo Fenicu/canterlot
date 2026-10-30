@@ -51,7 +51,11 @@ export class ComposerModel {
   }
 
   get gate(): SendGate {
-    const trimmed = this.text.trim();
+    return this.#gateFor(this.text);
+  }
+
+  #gateFor(text: string): SendGate {
+    const trimmed = text.trim();
     const uploadsList = this.deps.uploads.list(this.deps.conversationId);
     const activeUploads = uploadsList.filter(
       (u) => u.phase !== "cancelled" && u.phase !== "failed",
@@ -73,8 +77,8 @@ export class ComposerModel {
 
     // 3. Текст превышает лимит в 256 КиБ (проверяется UTF-8 только если длина * 3 может превысить лимит)
     const maxBytes = this.deps.config()?.max_input_text_bytes ?? 262_144;
-    if (this.text.length * 3 > maxBytes) {
-      if (utf8Length(this.text) > maxBytes) {
+    if (text.length * 3 > maxBytes) {
+      if (utf8Length(text) > maxBytes) {
         return { ok: false, reason: "Текст длиннее 256 КиБ" };
       }
     }
@@ -107,15 +111,9 @@ export class ComposerModel {
       .list(this.deps.conversationId)
       .filter((u) => u.phase === "ready");
 
-    // Проверка доступности сети (HTTP-проверка, не зависит от WSS)
-    const canSend = await this.deps.canSend();
-    if (canSend === "offline") {
-      this.errorMessage =
-        "Нет связи: сообщение сохранено как черновик и не отправлено";
-      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
-      return;
-    }
-    if (!this.gate.ok) return;
+    // Поле свободно с нажатия: текст, набранный за время проверки сети, не прилипнет к этому сообщению.
+    this.text = "";
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -131,12 +129,10 @@ export class ComposerModel {
     const key = crypto.randomUUID();
     const createdAt = this.deps.serverNow ? this.deps.serverNow() : Date.now();
 
-    // Шаг 1: локальный элемент в полосе (strip) и свободное поле ввода в том же кадре.
-    // Текст остаётся в черновике, пока операция не легла в журнал.
+    // Шаг 1: локальный элемент в полосе (strip). Текст остаётся в черновике, пока операция не легла в журнал.
     this.deps.probe?.mark("send_pressed");
     const localInput = freshInput(key, sendText, createdAt, attachmentRefs);
     this.deps.chat.inputs.set(key, localInput);
-    if (this.text === sendText) this.text = "";
     this.errorMessage = null;
     this.deps.probe?.mark("input_painted");
 
@@ -157,7 +153,7 @@ export class ComposerModel {
       });
     } catch (err) {
       this.deps.chat.inputs.delete(key);
-      this.text = this.text ? `${sendText}\n${this.text}` : sendText;
+      this.#giveBack(sendText);
       this.errorMessage = "Не удалось сохранить на устройстве";
       throw err;
     }
@@ -188,8 +184,24 @@ export class ComposerModel {
     }
   }
 
-  #restore(key: string, text: string, detached: Upload[]): void {
+  /** После проверки сети: нажатие либо идёт дальше, либо текст возвращается в поле. */
+  #mayGo(text: string, reach: "ok" | "offline"): boolean {
+    if (reach === "ok" && this.#gateFor(text).ok) return true;
+    this.#giveBack(text);
+    if (reach === "offline") {
+      this.errorMessage =
+        "Нет связи: сообщение сохранено как черновик и не отправлено";
+      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
+    }
+    return false;
+  }
+
+  #giveBack(text: string): void {
     this.text = this.text ? `${text}\n${this.text}` : text;
+  }
+
+  #restore(key: string, text: string, detached: Upload[]): void {
+    this.#giveBack(text);
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
     this.deps.chat.inputs.delete(key);
     this.deps.uploads.reattach(detached);
@@ -223,33 +235,33 @@ export class ComposerModel {
       .list(this.deps.conversationId)
       .filter((u) => u.phase === "ready");
 
-    const canSend = await this.deps.canSend();
-    if (canSend === "offline") {
-      this.errorMessage =
-        "Нет связи: сообщение сохранено как черновик и не отправлено";
-      this.deps.drafts.set(this.deps.conversationId, { text: this.text });
-      return;
-    }
-    if (!this.gate.ok) return;
+    this.text = "";
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
 
-    const op = await this.deps.ops.begin(
-      "scheduled",
-      {
-        content: [{ type: "text" as const, text: sendText }],
-        attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
-        run_at: new SvelteDate(at).toISOString(),
-      },
-      { conversationId: this.deps.conversationId, persist: true },
-    );
+    let op: Op;
+    try {
+      op = await this.deps.ops.begin(
+        "scheduled",
+        {
+          content: [{ type: "text" as const, text: sendText }],
+          attachment_ids: attachmentIds.length > 0 ? attachmentIds : undefined,
+          run_at: new SvelteDate(at).toISOString(),
+        },
+        { conversationId: this.deps.conversationId, persist: true },
+      );
+    } catch (err) {
+      this.#giveBack(sendText);
+      this.errorMessage = "Не удалось сохранить на устройстве";
+      throw err;
+    }
 
     this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.errorMessage = null;
-    if (this.text === sendText) {
-      this.text = "";
-      await this.deps.drafts.clear(this.deps.conversationId);
+    if (!this.text) {
+      void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
     }
 
     void this.deps.ops.run(op);
