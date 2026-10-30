@@ -60,6 +60,7 @@ for n,line in enumerate(sys.stdin,1):
             if not select.select([relay.stdout],[],[],10)[0]: raise RuntimeError('MCP reply timeout')
             with (d/'mcp-replies.jsonl').open('a') as replies: replies.write(relay.stdout.readline())
         elif frame=='@wait':
+            (d/'waiting').write_text('1')
             while True: time.sleep(1)
         elif frame=='@exit': sys.exit(7)
         else: emit(frame)
@@ -187,6 +188,17 @@ impl Fake {
                 return events;
             }
         }
+    }
+    /// Двойник дошёл до `@wait`: SIGINT посреди его print дал бы reentrant-ошибку
+    /// Python вместо кадров прерывания.
+    async fn wait_point(&self) {
+        tokio::time::timeout(WAIT, async {
+            while !self.dir.path().join("waiting").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fake reached @wait");
     }
     async fn close(&mut self) {
         tokio::time::timeout(WAIT, self.adapter.close(CloseMode::Force, &self.group))
@@ -520,8 +532,11 @@ async fn restart_resumes_with_the_same_native_id() {
     assert_eq!(second.start().await, native);
     let args: Vec<String> = tokio::time::timeout(WAIT, async {
         loop {
-            if let Ok(bytes) = std::fs::read(second.dir.path().join("args.json")) {
-                break serde_json::from_slice(&bytes).unwrap();
+            // Двойник пишет файл не атомарно: недописанный JSON читается заново.
+            if let Ok(bytes) = std::fs::read(second.dir.path().join("args.json"))
+                && let Ok(args) = serde_json::from_slice(&bytes)
+            {
+                break args;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
@@ -689,6 +704,7 @@ async fn interrupted_turn_finishes_without_error_block() {
     .unwrap();
     f.start().await;
     f.send(&tx(id)).await;
+    f.wait_point().await;
     assert!(matches!(
         tokio::time::timeout(WAIT, f.adapter.interrupt())
             .await
@@ -763,6 +779,7 @@ async fn interrupt_while_streaming_is_acknowledged() {
     .unwrap();
     f.start().await;
     f.send(&tx(id)).await;
+    f.wait_point().await;
     assert!(matches!(
         tokio::time::timeout(WAIT, f.adapter.interrupt())
             .await
