@@ -51,6 +51,7 @@ const FAKE_TOKEN: &str = "sk-ant-oat01-canterlot-fake-token-for-tests";
 const FAR_FUTURE_MS: u64 = 4_102_444_800_000;
 const HALF_HOUR: Duration = Duration::from_secs(1800);
 const FIRST_TICK: Duration = Duration::from_secs(60);
+const WARNING_SCENARIO: &str = "CANTERLOT_OAUTH_WARNING_SCENARIO";
 
 type Fact = (&'static str, LimitWindow, Option<u16>, Option<u64>);
 
@@ -598,6 +599,111 @@ async fn expired_token_skips_request_and_never_refreshes() {
         OAuthPollError::Credentials
     );
     assert_eq!(stub.count(), 0);
+}
+
+#[derive(Clone, Default)]
+struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl LogBuffer {
+    fn lines(&self, level: &str) -> Vec<String> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .filter(|line| line.contains(level))
+            .map(str::to_owned)
+            .collect()
+    }
+}
+
+// Подписчик действует в своём потоке, а кеш интереса tracing общий на процесс: соседний
+// тест закрыл бы вызов для всех, поэтому сценарий идёт отдельным процессом.
+#[test]
+fn poll_failure_warns_once_until_its_reason_changes() {
+    let output = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "poll_failure_warning_scenario"])
+        .env(WARNING_SCENARIO, "1")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("1 passed"), "{text}");
+}
+
+#[tokio::test]
+async fn poll_failure_warning_scenario() {
+    if std::env::var_os(WARNING_SCENARIO).is_none() {
+        return;
+    }
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let _guard = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || writer.clone())
+            .finish(),
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let path = credentials(dir.path(), FAKE_TOKEN, 1_000);
+    let limited = || (429, r#"{"error":"rate_limited"}"#.to_owned());
+    let stub = Stub::start(vec![(200, usage_body(10.0, 20.0)), limited(), limited()]).await;
+    let clock = TestClock::new();
+    let source = source(&path, &stub, &clock, LiveLimits::default());
+    let long_past_backoff = Duration::from_secs(5 * 3600);
+
+    assert!(source.poll_idle("claude").await.is_empty());
+    clock.advance(HALF_HOUR);
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(logs.lines("WARN").len(), 1, "repeat stays quiet");
+    assert!(logs.lines("WARN")[0].contains("claude oauth token expired"));
+
+    credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
+    clock.advance(HALF_HOUR);
+    assert_eq!(source.poll_idle("claude").await.len(), 2);
+    assert_eq!(logs.lines("recovered").len(), 1);
+
+    clock.advance(HALF_HOUR);
+    assert!(source.poll_idle("claude").await.is_empty());
+    clock.advance(long_past_backoff);
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(stub.count(), 3);
+    assert_eq!(logs.lines("WARN").len(), 2, "new reason warns once");
+    assert!(logs.lines("WARN")[1].contains("rate limited"));
+
+    credentials(dir.path(), FAKE_TOKEN, 1_000);
+    clock.advance(long_past_backoff);
+    assert!(source.poll_idle("claude").await.is_empty());
+    assert_eq!(logs.lines("WARN").len(), 3);
+    assert!(logs.lines("WARN")[2].contains("claude oauth token expired"));
+
+    let text = logs.lines("").join("\n");
+    assert!(!text.contains(FAKE_TOKEN), "{text}");
+}
+
+#[tokio::test]
+async fn usage_response_without_windows_is_an_invalid_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
+    let stub = Stub::start(vec![(
+        200,
+        json!({"five_hour": null, "seven_day": {"utilization": null}}).to_string(),
+    )])
+    .await;
+    let clock = TestClock::new();
+    let source = source(&path, &stub, &clock, LiveLimits::default());
+    assert_eq!(source.fetch().await.unwrap_err(), OAuthPollError::Body);
 }
 
 #[tokio::test]

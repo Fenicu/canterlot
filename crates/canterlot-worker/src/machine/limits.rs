@@ -207,6 +207,7 @@ struct PollState {
     last_request: Option<Instant>,
     backoff_until: Option<Instant>,
     rate_limited: u32,
+    reported: Option<OAuthPollError>,
 }
 
 /// Окна Claude без живых сессий через OAuth-точку `usage`: без запроса к модели.
@@ -339,6 +340,12 @@ impl ClaudeOAuthLimitsSource {
             Ok(observations) => {
                 state.rate_limited = 0;
                 state.backoff_until = None;
+                if state.reported.take().is_some() {
+                    tracing::info!(
+                        kind = "claude_oauth_poll_recovered",
+                        "claude limits poll recovered"
+                    );
+                }
                 observations
             }
             Err(error) => {
@@ -351,8 +358,10 @@ impl ClaudeOAuthLimitsSource {
                         .max(self.interval);
                     state.backoff_until = Some(now + backoff);
                 }
-                if matches!(error, OAuthPollError::Expired | OAuthPollError::RateLimited) {
-                    tracing::debug!(kind = "claude_oauth_poll_skipped", reason = %error, "claude limits poll skipped");
+                // Просроченный токен и 429 штатны, но без них окна Claude молчат: причина
+                // видна один раз, повтор той же причины журнал не засоряет.
+                if state.reported.replace(error) == Some(error) {
+                    tracing::debug!(kind = "claude_oauth_poll_repeated", reason = %error, "claude limits poll failed again");
                 } else {
                     tracing::warn!(kind = "claude_oauth_poll_failed", reason = %error, "claude limits poll failed");
                 }
@@ -431,6 +440,9 @@ fn usage_observations(
         Some((window, utilization, resets))
     })
     .collect();
+    if rows.is_empty() {
+        return Err(OAuthPollError::Body);
+    }
     Ok(rows
         .into_iter()
         .map(|(window, utilization, resets)| LimitObservation {
