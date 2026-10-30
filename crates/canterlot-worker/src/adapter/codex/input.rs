@@ -280,6 +280,11 @@ pub fn history_lookup_params(thread_id: &str) -> Value {
 
 // Ход, где ввод с этим clientId уже принят.
 pub fn history_contains(result: &Value, client_id: &str) -> Option<String> {
+    history_turn(result, client_id).map(|(id, _)| id)
+}
+
+// Ход с этим clientId и его `status` (completed|interrupted|failed|inProgress).
+pub fn history_turn(result: &Value, client_id: &str) -> Option<(String, Option<String>)> {
     let turns = result.get("data")?.as_array()?;
     turns.iter().find_map(|turn| {
         let items = turn.get("items")?.as_array()?;
@@ -287,7 +292,12 @@ pub fn history_contains(result: &Value, client_id: &str) -> Option<String> {
             .iter()
             .any(|item| item.get("clientId").and_then(Value::as_str) == Some(client_id));
         if found {
-            turn.get("id")?.as_str().map(str::to_owned)
+            let id = turn.get("id")?.as_str()?.to_owned();
+            let status = turn
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            Some((id, status))
         } else {
             None
         }
@@ -352,6 +362,11 @@ impl Outbox {
             command_id,
         });
         None
+    }
+
+    // Ход, о котором этот процесс сообщал (ответ turn/start или turn/started).
+    pub fn knows(&self, turn_id: &str) -> bool {
+        self.known_turns.contains(turn_id)
     }
 
     pub fn on_turn_started(&mut self, turn_id: &str) {

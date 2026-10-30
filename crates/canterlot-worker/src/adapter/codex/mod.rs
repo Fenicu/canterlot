@@ -1149,7 +1149,7 @@ impl CodexAdapter {
         }
     }
 
-    async fn history_lookup(&mut self, command_id: &str) -> Option<String> {
+    async fn history_lookup(&mut self, command_id: &str) -> Option<(String, Option<String>)> {
         let thread_id = self.thread_id();
         let (id, message) = self.rpc.request(
             "thread/turns/list",
@@ -1162,7 +1162,7 @@ impl CodexAdapter {
             .wait_response(id, Instant::now() + self.deadline)
             .await?;
         let result = result.ok()?;
-        input::history_contains(&result, command_id)
+        input::history_turn(&result, command_id)
     }
 
     async fn transmit_inner(
@@ -1200,12 +1200,28 @@ impl CodexAdapter {
             return TransmitOutcome::Rejected("turn_active".into());
         }
         if input.attempt > 1
-            && let Some(turn) = self.history_lookup(&input.command_id.to_string()).await
+            && let Some((turn, status)) = self.history_lookup(&input.command_id.to_string()).await
         {
-            // Ввод уже принят: не шлём второй раз, цепляемся к живому ходу.
-            self.outbox.attach(&turn, input.command_id);
-            if let Some(translator) = self.translator.as_mut() {
-                translator.begin_turn(&turn, input.command_id);
+            // Ввод уже принят: второй раз не шлём. Цепляемся, только если ход
+            // идёт в этом процессе; иначе (ход завершён или остался от убитого
+            // процесса) turn/completed не придёт, и ход закрывается сразу.
+            if status.as_deref() == Some("inProgress") && self.outbox.knows(&turn) {
+                self.outbox.attach(&turn, input.command_id);
+                if let Some(translator) = self.translator.as_mut() {
+                    translator.begin_turn(&turn, input.command_id);
+                }
+            } else {
+                self.events.push_back(AdapterEvent::RunFinished {
+                    input_command_id: input.command_id,
+                    usage: Vec::new(),
+                    context_tokens: 0,
+                    context_window_tokens: 0,
+                });
+                self.events.push_back(AdapterEvent::Phase {
+                    phase: Phase::AwaitingInput,
+                    tool_name: None,
+                    summary: None,
+                });
             }
             return TransmitOutcome::Accepted(Proof {
                 command_id: input.command_id,

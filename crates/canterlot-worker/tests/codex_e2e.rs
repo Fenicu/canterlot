@@ -716,6 +716,73 @@ async fn discover_reads_every_model_list_page() {
 }
 
 #[tokio::test]
+async fn retried_input_found_in_a_finished_turn_finishes_at_once_and_queue_moves_on() {
+    // Форма хода после возобновления: убитый ход — `interrupted` (ev/resume.jsonl:107);
+    // `inProgress` от убитого процесса этот процесс тоже не ведёт.
+    for status in ["interrupted", "inProgress", "completed"] {
+        let command = Uuid::now_v7();
+        let mut lines = handshake("thread-mini");
+        lines.push(w_in(10, "thread/turns/list", json!({})));
+        lines.push(w_out(json!({"id": 10, "result": {"data": [{
+            "id": "turn-old", "status": status, "error": null,
+            "items": [{"id": "u-old", "type": "userMessage", "clientId": command.to_string(),
+                "content": []}],
+        }], "nextCursor": null}})));
+        lines.extend(turn_exchange(11, "thread-mini", "turn-next"));
+        lines.push(w_out(json!({
+            "method": "turn/completed",
+            "params": {"threadId": "thread-mini",
+                "turn": {"id": "turn-next", "status": "completed", "items": []}},
+        })));
+        let mut fake = Fake::new(lines);
+        fake.start().await;
+        let retry = Transmission {
+            command_id: command,
+            attempt: 2,
+            text: "again".into(),
+            files: vec![],
+            settings: None,
+        };
+        match tokio::time::timeout(WAIT, fake.adapter.transmit(&retry, &fake.group))
+            .await
+            .unwrap()
+        {
+            TransmitOutcome::Accepted(proof) => {
+                assert_eq!(proof.kind, "codex_history_client_id", "{status}")
+            }
+            other => panic!("{status}: {other:?}"),
+        }
+        let finished = tokio::time::timeout(Duration::from_secs(3), fake.finish(command))
+            .await
+            .unwrap_or_else(|_| panic!("{status}: no RunFinished for the retried input"));
+        assert!(matches!(
+            finished.last(),
+            Some(AdapterEvent::RunFinished { usage, .. }) if usage.is_empty()
+        ));
+        assert!(matches!(
+            fake.event().await,
+            AdapterEvent::Phase {
+                phase: canterlot_worker::adapter::Phase::AwaitingInput,
+                ..
+            }
+        ));
+        assert!(
+            !fake.stdin_methods().contains(&"turn/start".to_owned()),
+            "{status}: input not sent again"
+        );
+        // Очередь идёт дальше: следующий ввод не упирается в turn_active.
+        let (_, events) = fake.send("next").await;
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, AdapterEvent::RunFinished { .. })),
+            "{status}"
+        );
+        fake.close().await;
+    }
+}
+
+#[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));
     fake.spec.native_conversation_id = Some("01a171c3-4681-7b81-bd8b-be81cac722c8".into());
