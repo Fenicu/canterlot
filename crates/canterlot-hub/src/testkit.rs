@@ -505,6 +505,49 @@ pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) 
     conversation_id
 }
 
+/// Записать за последним исполнением разговора принятый агентом ввод.
+pub async fn seed_recorded_turn(pool: &PgPool, conversation_id: Uuid) {
+    let (owner_id, machine_id, execution_id, generation): (Uuid, Uuid, Uuid, i64) =
+        sqlx::query_as(
+            "select c.owner_id, c.machine_id, e.id, e.generation
+             from conversations c join executions e on e.conversation_id = c.id
+             where c.id = $1 order by e.generation desc limit 1",
+        )
+        .bind(conversation_id)
+        .fetch_one(pool)
+        .await
+        .expect("seed recorded turn: execution");
+    let command_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id,
+                               execution_generation, kind, payload, delivery_state)
+         values ($1, $2, $3, $4, $5, 'deliver_input', '{}', 'completed')",
+    )
+    .bind(command_id)
+    .bind(machine_id)
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .execute(pool)
+    .await
+    .expect("seed recorded turn: command");
+    sqlx::query(
+        "insert into inputs (id, conversation_id, owner_id, input_seq, idempotency_key,
+                             content, state, command_id, received_at)
+         select $1, $2, $3, coalesce(max(input_seq), 0) + 1, $4, '[]', 'accepted', $5,
+                clock_timestamp()
+         from inputs where conversation_id = $2",
+    )
+    .bind(Uuid::now_v7())
+    .bind(conversation_id)
+    .bind(owner_id)
+    .bind(Uuid::now_v7().to_string())
+    .bind(command_id)
+    .execute(pool)
+    .await
+    .expect("seed recorded turn: input");
+}
+
 pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
     let owner: Uuid = sqlx::query_scalar("select owner_id from machines where id=$1")
         .bind(machine_id)

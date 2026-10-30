@@ -210,6 +210,7 @@ async fn resume_carries_the_last_native_conversation_id(pool: PgPool) {
     .execute(&pool)
     .await
     .unwrap();
+    testkit::seed_recorded_turn(&pool, id).await;
     sqlx::query(
         "insert into executions(id,conversation_id,generation,state) values($1,$2,2,'failed')",
     )
@@ -239,6 +240,108 @@ async fn resume_carries_the_last_native_conversation_id(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(payload["native_conversation_id"], "native-id");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resume_without_a_recorded_turn_starts_a_new_native_conversation(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = testkit::seed_conversation(&pool, owner, machine).await;
+    let started = canterlot_hub::executions::start(&pool, owner, id, Uuid::now_v7())
+        .await
+        .unwrap();
+    sqlx::query(
+        "update executions set state='stopped',native_conversation_id='never-used' where id=$1",
+    )
+    .bind(started.execution_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/resume"),
+            Some("resume"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 201);
+    let command: Uuid = r.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["native_conversation_id"], Value::Null);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resume_skips_a_newer_execution_that_never_ran_a_turn(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let id = testkit::seed_conversation(&pool, owner, machine).await;
+    let started = canterlot_hub::executions::start(&pool, owner, id, Uuid::now_v7())
+        .await
+        .unwrap();
+    sqlx::query(
+        "update executions set state='stopped',native_conversation_id='with-turn' where id=$1",
+    )
+    .bind(started.execution_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    testkit::seed_recorded_turn(&pool, id).await;
+    sqlx::query(
+        "insert into executions(id,conversation_id,generation,state,native_conversation_id)
+         values($1,$2,2,'stopped','without-turn')",
+    )
+    .bind(Uuid::now_v7())
+    .bind(id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/resume"),
+            Some("resume"),
+            Some(serde_json::json!({})),
+        )
+        .await;
+    assert_eq!(r.status, 201);
+    let command: Uuid = r.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    let payload: Value = sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["native_conversation_id"], "with-turn");
 }
 
 #[cfg(feature = "fault-injection")]

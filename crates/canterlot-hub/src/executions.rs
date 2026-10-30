@@ -185,7 +185,8 @@ pub async fn start_in_tx(
         "text": resolved.text.unwrap_or_default(),
     });
     let native: Option<String> = if options.resume {
-        sqlx::query_scalar("select native_conversation_id from executions where conversation_id=$1 and native_conversation_id is not null order by generation desc limit 1")
+        // Беседа записана только после хода: без него CLI отказывает в --resume.
+        sqlx::query_scalar("select e.native_conversation_id from executions e where e.conversation_id=$1 and e.native_conversation_id is not null and exists(select 1 from inputs i join commands c on c.id=i.command_id where c.execution_id=e.id and i.state='accepted') order by e.generation desc limit 1")
             .bind(conversation_id).fetch_optional(&mut *conn).await?.flatten()
     } else {
         None
