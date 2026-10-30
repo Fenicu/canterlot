@@ -77,7 +77,7 @@
 			evidence: activity?.evidence ?? null
 		},
 		scope: {
-			cursor: 'journal:live',
+			cursor: chat.cursor,
 			status: chat.status,
 			resyncCount: 0,
 			lastFrameAgeMs: 0
@@ -125,7 +125,7 @@
 			<div class="rows">
 				<div class="key-value"><span>Сессия</span><code>{diagData.conversationId}</code></div>
 				<div class="key-value"><span>Подписка</span><code>{scopeStatusLabel(diagData.scope?.status ?? 'idle')}</code></div>
-				<div class="key-value"><span>Курсор</span><code>{diagData.scope?.cursor ?? 'none'}</code></div>
+				<div class="key-value"><span>Курсор</span><code>{diagData.scope?.cursor ?? 'нет'}</code></div>
 			</div>
 		</section>
 

@@ -258,6 +258,10 @@ export class ChatStore {
     return this.#sub?.status ?? "idle";
   }
 
+  get cursor(): string | null {
+    return this.#sub?.cursor ?? null;
+  }
+
   /** Экран, который заменит чат, когда открывать больше нечего. */
   get gone(): "deleted" | "unavailable" | null {
     if (this.deleted || this.status === "deleted") return "deleted";
