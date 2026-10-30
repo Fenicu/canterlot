@@ -2,7 +2,7 @@ import { SvelteDate } from "svelte/reactivity";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { OpJournal, Op } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
-import type { UploadManager } from "#lib/uploads/manager.js";
+import type { Upload, UploadManager } from "#lib/uploads/manager.js";
 import type { ConnectionStatus } from "#lib/sync/connection.js";
 import type { LimitsView } from "#lib/api/config.js";
 import type { AttachmentRef } from "#lib/stores/inputs.js";
@@ -159,7 +159,8 @@ export class ComposerModel {
       throw err;
     }
 
-    // Шаг 3: очистка поля ввода и черновика
+    // Шаг 3: очистка поля ввода, черновика и лотка: отправленные файлы принадлежат сообщению
+    const detached = this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.text = "";
     this.errorMessage = null;
     await this.deps.drafts.clear(this.deps.conversationId);
@@ -169,9 +170,7 @@ export class ComposerModel {
       await this.deps.ops.run(op);
     } catch (err) {
       if (op.state === "refused") {
-        this.text = sendText;
-        this.deps.drafts.set(this.deps.conversationId, { text: sendText });
-        this.deps.chat.inputs.delete(key);
+        this.#restore(key, sendText, detached);
         this.errorMessage =
           op.refusal?.message ??
           (err instanceof Error ? err.message : "Отклонено");
@@ -180,11 +179,16 @@ export class ComposerModel {
     }
 
     if (op.state === "refused") {
-      this.text = sendText;
-      this.deps.drafts.set(this.deps.conversationId, { text: sendText });
-      this.deps.chat.inputs.delete(key);
+      this.#restore(key, sendText, detached);
       this.errorMessage = op.refusal?.message ?? "Отклонено";
     }
+  }
+
+  #restore(key: string, text: string, detached: Upload[]): void {
+    this.text = text;
+    this.deps.drafts.set(this.deps.conversationId, { text });
+    this.deps.chat.inputs.delete(key);
+    this.deps.uploads.reattach(detached);
   }
 
   async sendLater(at: number): Promise<void> {
@@ -226,6 +230,7 @@ export class ComposerModel {
       { conversationId: this.deps.conversationId, persist: true },
     );
 
+    this.deps.uploads.detach(readyUploads.map((u) => u.id));
     this.text = "";
     this.errorMessage = null;
     await this.deps.drafts.clear(this.deps.conversationId);
