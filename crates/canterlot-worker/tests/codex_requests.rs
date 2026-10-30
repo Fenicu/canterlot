@@ -227,6 +227,32 @@ fn question_payload_is_normalised_and_passes_valid_decision() {
 }
 
 #[test]
+fn secret_question_marks_is_secret_and_keeps_answer_out_of_diagnostics() {
+    let mut data = evidence_data("question_default_mode", 28);
+    data["params"]["questions"][0]["isSecret"] = json!(true);
+    let mut requests = Requests::new();
+    let (request_id, kind, payload) = open(&mut requests, &data, "orchestrator", None);
+    assert_eq!(kind, "question");
+    assert_eq!(payload["questions"][0]["is_secret"], true);
+    let line = requests
+        .answer(&request_id, &single_answer("color_preference", "СЕКРЕТ-42"))
+        .unwrap();
+    // Ответ уходит серверу, но никуда больше.
+    assert!(line.to_string().contains("СЕКРЕТ-42"));
+    assert!(check_decision(
+        "question",
+        &payload,
+        &single_answer("color_preference", "СЕКРЕТ-42")
+    ));
+    for event in requests.drain_diagnostics() {
+        assert!(
+            !format!("{event:?}").contains("СЕКРЕТ-42"),
+            "secret answer leaked into diagnostics: {event:?}"
+        );
+    }
+}
+
+#[test]
 fn answer_bytes_match_recorded_response() {
     let data = evidence_data("question_default_mode", 28);
     let mut requests = Requests::new();
