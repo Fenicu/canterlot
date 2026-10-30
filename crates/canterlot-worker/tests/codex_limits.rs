@@ -460,3 +460,52 @@ async fn probes_drop_billing_and_leaked_environment() {
         assert!(env.get("PATH").is_some(), "{name}: PATH kept");
     }
 }
+
+fn process_alive(pid: u32) -> bool {
+    fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn probe_timeout_kills_the_whole_app_server_group() {
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    // Обёртка как node /usr/bin/codex: родной сервер — её ребёнок в той же группе.
+    fs::write(
+        &exe,
+        "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/native.pid\"\nexec sleep 300\n",
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    let err = probe::probe(
+        &exe,
+        "account/rateLimits/read",
+        json!({}),
+        Duration::from_millis(800),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(err, ProbeError::Timeout);
+    let native: u32 = fs::read_to_string(dir.path().join("native.pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while process_alive(native) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let alive = process_alive(native);
+    if alive {
+        let _ = std::process::Command::new("kill")
+            .arg(native.to_string())
+            .status();
+    }
+    assert!(!alive, "native server {native} survived the probe timeout");
+}
