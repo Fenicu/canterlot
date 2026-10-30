@@ -29,7 +29,7 @@
   import { beforeNavigate } from '$app/navigation';
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { collapsedSet, readCollapsed, writeCollapsed } from './collapsed';
   import EmptyState from './EmptyState.svelte';
   import GroupManager from './GroupManager.svelte';
@@ -127,13 +127,30 @@
     return 'В этой группе пока нет сессий';
   });
   const openRow = $derived(rows.find((item) => item.id === (page.params.id ?? '')) ?? null);
-  const sheetItem = $derived(rows.find((item) => item.id === sheetId) ?? null);
+  const sheetItem = $derived(
+    sections.some((section) => section.items.some((item) => item.id === sheetId))
+      ? (rows.find((item) => item.id === sheetId) ?? null)
+      : null
+  );
   const groupCounts = $derived.by(() => {
     const counts: Record<string, number> = {};
     for (const item of rows) for (const id of item.groups) counts[id] = (counts[id] ?? 0) + 1;
     return counts;
   });
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
+
+  // Меню принадлежит строке: смена вкладки, поиска или экрана закрывает его, как и уход строки из списка.
+  $effect(() => {
+    void tab;
+    void query;
+    void page.url.pathname;
+    untrack(() => {
+      sheetId = '';
+    });
+  });
+  $effect(() => {
+    if (sheetId && !sheetItem) sheetId = '';
+  });
 
   $effect(() => {
     const node = scroller;

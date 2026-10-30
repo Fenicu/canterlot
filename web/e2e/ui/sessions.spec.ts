@@ -141,6 +141,65 @@ test('archive_with_active_crunch_asks_for_confirmation_and_retries_with_force', 
   expect(bodies[0]?.key).not.toBe(bodies[1]?.key);
 });
 
+test('session_menu_closes_on_tab_change', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: вкладки под ним недоступны');
+  await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await tablist.getByRole('tab', { name: /Закреплённые/ }).click();
+  await expect(menu).toHaveCount(0);
+  await tablist.getByRole('tab', { name: /Все/ }).click();
+  await expect(menu).toHaveCount(0);
+});
+
+test('session_menu_closes_when_the_search_changes_or_the_route_changes', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: поиск и переход под ним недоступны');
+  await boot(page);
+  await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('очередь');
+  await expect(menu).toHaveCount(0);
+  await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('');
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await page.getByRole('link', { name: 'Новая сессия' }).click();
+  await expect(page).toHaveURL(/\/new$/);
+  await expect(menu).toHaveCount(0);
+});
+
+test('session_menu_closes_when_the_session_leaves_the_list_from_another_device', async ({ page }) => {
+  const { hub, api, ids } = await boot(page);
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  const row = api.list.get(ids.plain);
+  hub.append('conversations', {
+    kind: 'conversation_updated',
+    conversation_id: ids.plain,
+    payload: {
+      id: ids.plain,
+      title: row?.title,
+      title_source: 'user',
+      color: row?.color ?? null,
+      pinned: false,
+      archived: true,
+      groups: row?.groups ?? [],
+      machine: row?.machine,
+      harness: row?.harness,
+      workdir: row?.workdir,
+      created_at: row?.created_at,
+      counts: api.counts
+    }
+  });
+  hub.flush();
+  await expect(menu).toHaveCount(0);
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+});
+
 test('unread_dot_and_counts_update_from_events', async ({ page }) => {
   const { hub, api, ids } = await boot(page);
   const row = api.list.get(ids.plain);
