@@ -917,6 +917,78 @@ async fn late_delivery_proof_after_undetermined_is_reported() {
 }
 
 #[tokio::test]
+async fn graceful_close_sends_sigterm_before_sigkill() {
+    // Двойник не выходит по EOF (как CLI с фоновой командой): мягкая остановка
+    // должна дать ему SIGTERM; упрямый к SIGTERM убивается после stop_grace.
+    const STAY: &str = r#"#!/usr/bin/python3
+import sys, os, pathlib, signal, time
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+def term(*_):
+    (d / 'got-term').write_text('1')
+    if not (d / 'ignore-term').exists():
+        os._exit(143)
+signal.signal(signal.SIGTERM, term)
+sys.stdin.read()
+(d / 'stdin-eof').write_text('1')
+while True:
+    time.sleep(0.1)
+"#;
+    for stubborn in [false, true] {
+        let dir = TempDir::new().unwrap();
+        let exe = dir.path().join("fake-cli");
+        fake_exec::write_executable(&exe, STAY, 0o700);
+        if stubborn {
+            std::fs::write(dir.path().join("ignore-term"), "").unwrap();
+        }
+        let mut adapter: Box<dyn Adapter> = Box::new(adapter::claude_code::ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: exe,
+                ..Default::default()
+            },
+            dir.path().join("exec"),
+            WAIT,
+        ));
+        adapter.set_stop_grace(Duration::from_millis(500));
+        let group = TreeContainment::new().unwrap();
+        let spec = StartSpec {
+            execution_id: Uuid::now_v7(),
+            generation: 1,
+            workdir: dir.path().into(),
+            native_conversation_id: None,
+            profile: "claude_code".into(),
+            model: "haiku".into(),
+            effort: "low".into(),
+            permission_mode: "ask".into(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
+        };
+        let _permit = CLI_GATE.lock().await;
+        adapter.start(&spec, &group).await.unwrap();
+        let began = std::time::Instant::now();
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            adapter.close(CloseMode::Graceful, &group),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(dir.path().join("stdin-eof").exists(), "EOF comes first");
+        assert!(
+            dir.path().join("got-term").exists(),
+            "SIGTERM before SIGKILL"
+        );
+        assert!(began.elapsed() < Duration::from_secs(5));
+    }
+}
+
+#[tokio::test]
 async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);
     f.start().await;

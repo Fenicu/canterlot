@@ -37,6 +37,7 @@ pub struct ClaudeCodeAdapter {
     cfg: ClaudeCodeConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    stop_grace: Duration,
     cli: Option<CliProcess>,
     broker: Option<Broker>,
     parser: Parser,
@@ -69,6 +70,7 @@ impl ClaudeCodeAdapter {
             cfg,
             exec_dir,
             deadline,
+            stop_grace: Duration::from_secs(5),
             cli: None,
             broker: None,
             parser: Parser::new(),
@@ -930,6 +932,9 @@ impl Adapter for ClaudeCodeAdapter {
         self.cli = Some(cli);
         Ok(started)
     }
+    fn set_stop_grace(&mut self, grace: Duration) {
+        self.stop_grace = grace;
+    }
     fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
         // Смена инструкций обрабатывается перезапуском CLI, а не управляющими запросами.
         if let Some(change) = input.settings.as_ref()
@@ -1032,15 +1037,24 @@ impl Adapter for ClaudeCodeAdapter {
         };
         cli.close_stdin();
         let grace = Duration::from_secs(2);
+        let member = Member {
+            pid: cli.pid,
+            start_ticks: cli.start_ticks,
+        };
         if !self.exited {
-            if matches!(mode, CloseMode::Force) || timeout(grace, cli.wait()).await.is_err() {
-                group.signal_member(
-                    &Member {
-                        pid: cli.pid,
-                        start_ticks: cli.start_ticks,
-                    },
-                    rustix::process::Signal::KILL,
-                )?;
+            // Мягко: EOF, затем SIGTERM (CLI сам гасит деревья Bash и выходит
+            // с 143), затем срок stop_grace; SIGKILL — только после него.
+            let exited = match mode {
+                CloseMode::Force => false,
+                CloseMode::Graceful => {
+                    timeout(grace, cli.wait()).await.is_ok() || {
+                        group.signal_member(&member, rustix::process::Signal::TERM)?;
+                        timeout(self.stop_grace, cli.wait()).await.is_ok()
+                    }
+                }
+            };
+            if !exited {
+                group.signal_member(&member, rustix::process::Signal::KILL)?;
                 timeout(grace, cli.wait())
                     .await
                     .map_err(|_| AdapterError::Deadline)??;

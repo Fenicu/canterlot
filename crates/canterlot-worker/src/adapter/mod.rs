@@ -682,6 +682,9 @@ pub trait Adapter: Send {
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
     async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}
+    /// Срок мягкой остановки из таймеров сопровождения: сколько `Graceful`
+    /// close ждёт выхода после SIGTERM, прежде чем убить CLI.
+    fn set_stop_grace(&mut self, _grace: Duration) {}
     async fn close(&mut self, mode: CloseMode, group: &dyn Containment)
     -> Result<(), AdapterError>;
 }

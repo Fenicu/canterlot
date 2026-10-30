@@ -1014,6 +1014,7 @@ impl Supervisor {
             );
             return self.begin_stop(StopCause::StartFailed, false);
         };
+        adapter.set_stop_grace(timers.stop_grace);
         self.pilot_v1 = start.pilot_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
