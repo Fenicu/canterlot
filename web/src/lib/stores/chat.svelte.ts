@@ -1,3 +1,4 @@
+import { untrack } from "svelte";
 import { SvelteMap, SvelteSet } from "svelte/reactivity";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { DraftStore } from "#lib/drafts/store.js";
@@ -274,8 +275,11 @@ export class ChatStore {
   }
 
   open(): void {
-    this.#adoptSaving();
-    this.#reviveNotes();
+    // Тёплый чат открывается прямо из $effect маршрута: без untrack экран пересоздавался бы при каждой операции.
+    untrack(() => {
+      this.#adoptSaving();
+      this.#reviveNotes();
+    });
     this.#stopRefused ??= this.deps.ops.onOrphanRefused((op) => {
       this.inputs.delete(op.key);
     });

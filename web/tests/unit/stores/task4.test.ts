@@ -1,5 +1,7 @@
 import "fake-indexeddb/auto";
 import { describe, expect, it, vi } from "vitest";
+import { flushSync } from "svelte";
+import { SvelteMap } from "svelte/reactivity";
 import { DraftStore } from "#lib/drafts/store.js";
 import { OpJournal, type Op } from "#lib/ops/journal.js";
 import { openDb } from "#lib/storage/idb.js";
@@ -47,6 +49,7 @@ import {
   seedMachine,
 } from "../../../testing/fake-hub";
 import { TestLifecycle } from "../sync/helpers";
+import { countEffectRuns } from "./effect-runs.svelte";
 
 const CONV = "00000000-0000-4000-8000-0000000000aa";
 const BLOCK = "00000000-0000-4000-8000-0000000000b1";
@@ -1095,6 +1098,33 @@ describe("stores task 4", () => {
     expect(chat.strip().map((item) => item.key)).toEqual(["late"]);
     clock.advance(2000);
     expect(chat.strip()).toEqual([]);
+  });
+
+  it("reopening_a_warm_chat_from_an_effect_does_not_tie_it_to_the_store", () => {
+    const journal = new SvelteMap<string, Op>();
+    const chat = chatOf({
+      ops: journal,
+      settle() {},
+      onOrphanRefused: () => () => undefined,
+    } as unknown as OpJournal);
+    const effect = countEffectRuns(() => chat.open());
+    flushSync();
+    expect(effect.runs()).toBe(1);
+
+    journal.set("k", {
+      key: "k",
+      kind: "input",
+      conversationId: CONV,
+      body: {},
+      state: "saving",
+      attempts: 0,
+      createdAt: 1,
+    });
+    chat.inputs.set("k", freshInput("k", "текст", 1));
+    flushSync();
+
+    expect(effect.runs()).toBe(1);
+    effect.stop();
   });
 
   it("queue_state_changed_updates_pauses_holds_and_run_slot", () => {
