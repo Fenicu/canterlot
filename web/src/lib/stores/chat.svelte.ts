@@ -240,7 +240,9 @@ export class ChatStore {
       probe: unknown;
     },
   ) {
-    this.#sync = new BlockSync(this.blocks, deps.blockIO);
+    this.#sync = new BlockSync(this.blocks, deps.blockIO, {
+      schedule: deps.clock.schedule,
+    });
     this.requests = new RequestsModel(this.id);
   }
 
@@ -283,6 +285,7 @@ export class ChatStore {
 
   dispose(): void {
     this.close();
+    this.#sync.stop();
     this.blocks.clear();
     this.inputs.clear();
     this.timeline.clear();
