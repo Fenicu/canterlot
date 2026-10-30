@@ -9,6 +9,9 @@ const tag = { tag: ['@perf', '@stack'] };
 const chromiumTag = { tag: ['@perf', '@stack', '@chromium'] };
 const PHONE_CONDITIONS = { cpu_throttle: '4x (CDP Emulation.setCPUThrottlingRate)', viewport: '412x892, touch, Chromium', browser: 'chromium (project phone)' };
 
+// Трасса Playwright снимает DOM до и после каждого действия на основном потоке страницы под дросселем:
+// на пути отправки это четверть времени потока, поэтому в замерах она выключена.
+test.use({ trace: 'off' });
 test.afterAll(() => writeReport());
 test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.project.name !== 'phone', 'Замеры идут только в телефонном профиле Chromium');
