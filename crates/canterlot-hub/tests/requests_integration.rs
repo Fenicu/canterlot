@@ -385,32 +385,19 @@ async fn terminal_decision_applied_clears_queue_hold_and_emits_request_closed(
         )
         .await?;
 
-    let mut tx = pool.begin().await?;
-    canterlot_hub::requests::save_decision_in_tx(
-        &mut tx,
-        seed.conversation_id,
-        req_id,
-        execution.generation,
-        &canterlot_proto::requests::DecisionPayload::Permission {
-            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
-            message: None,
-        },
-        "idemp-1",
-    )
-    .await?;
-    tx.commit().await?;
+    let (winner, _) = decide(&pool, &seed, req_id, execution.generation).await;
 
     let mut sj2 = batch(
         journal,
         vec![
             record_body::Body::DecisionTransmissionStarted(DecisionTransmissionStarted {
                 request_id: req_id.to_string(),
-                decision_id: "dec-1".into(),
+                decision_id: winner.to_string(),
                 machine_time_ms: 100,
             }),
             record_body::Body::DecisionApplied(DecisionApplied {
                 request_id: req_id.to_string(),
-                decision_id: "dec-1".into(),
+                decision_id: winner.to_string(),
                 proof_kind: "tool_result".into(),
                 proof_payload_json: br#"{"ok":true}"#.to_vec(),
             }),
@@ -554,20 +541,7 @@ async fn decision_transmission_started_emits_request_transmitting_event(
         )
         .await?;
 
-    let mut tx = pool.begin().await?;
-    canterlot_hub::requests::save_decision_in_tx(
-        &mut tx,
-        seed.conversation_id,
-        req_id,
-        execution.generation,
-        &canterlot_proto::requests::DecisionPayload::Permission {
-            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
-            message: None,
-        },
-        "idemp-transmitting",
-    )
-    .await?;
-    tx.commit().await?;
+    let (winner, _) = decide(&pool, &seed, req_id, execution.generation).await;
 
     let count_transmitting = || async {
         sqlx::query_scalar::<_, i64>(
@@ -589,7 +563,7 @@ async fn decision_transmission_started_emits_request_transmitting_event(
             vec![record_body::Body::DecisionTransmissionStarted(
                 DecisionTransmissionStarted {
                     request_id: req_id.to_string(),
-                    decision_id: "dec-1".into(),
+                    decision_id: winner.to_string(),
                     machine_time_ms: 100,
                 },
             )],
@@ -1023,4 +997,183 @@ async fn cj_decision_not_applied_closes_request_and_keeps_control_journal_moving
         vec![json!({"request_id": request, "reason": "request_closed"})]
     );
     Ok(())
+}
+
+async fn sj(
+    ingest: &Ingest,
+    seed: &Seed,
+    journal: Uuid,
+    seq: &mut u64,
+    bodies: Vec<record_body::Body>,
+) {
+    let mut records = batch(journal, bodies);
+    for record in &mut records.records {
+        *seq += 1;
+        record.seq = *seq;
+    }
+    let outcome = ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: *seq });
+}
+
+fn applied(native: &str, decision: Uuid) -> record_body::Body {
+    record_body::Body::DecisionApplied(DecisionApplied {
+        request_id: native.into(),
+        decision_id: decision.to_string(),
+        proof_kind: "tool_result".into(),
+        proof_payload_json: br#"{"ok":true}"#.to_vec(),
+    })
+}
+
+fn closed(native: &str, reason: &str) -> record_body::Body {
+    record_body::Body::RequestClosed(canterlot_proto::worker::v1::RequestClosed {
+        request_id: native.into(),
+        reason: reason.into(),
+    })
+}
+
+async fn request_state(pool: &PgPool, request: Uuid) -> String {
+    sqlx::query_scalar("select state from requests where id = $1")
+        .bind(request)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn command_state(pool: &PgPool, command: Uuid) -> String {
+    sqlx::query_scalar("select delivery_state from commands where id = $1")
+        .bind(command)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn closed_events(pool: &PgPool, request: Uuid) -> usize {
+    sqlx::query_scalar::<_, i64>(
+        "select count(*) from events where kind = 'request_closed' and payload->>'request_id' = $1",
+    )
+    .bind(request.to_string())
+    .fetch_one(pool)
+    .await
+    .unwrap() as usize
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_outcome_completes_only_the_command_of_its_request(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let first = open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_a").await;
+    let second =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_b").await;
+    let (first_decision, first_command) = decide(&pool, &seed, first, execution.generation).await;
+    let (_, second_command) = decide(&pool, &seed, second, execution.generation).await;
+    let mut seq = 3;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_a", first_decision)],
+    )
+    .await;
+    assert_eq!(request_state(&pool, first).await, "decision_applied");
+    assert_eq!(command_state(&pool, first_command).await, "completed");
+    assert_eq!(
+        command_state(&pool, second_command).await,
+        "pending",
+        "the other request's decision must still be delivered"
+    );
+    assert_eq!(request_state(&pool, second).await, "decision_saved");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_facts_respect_request_state_and_winner(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let journal = Uuid::now_v7();
+    let closed_first =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 1, "toolu_c").await;
+    let decided =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 3, "toolu_d").await;
+    let cancelled =
+        open_native_request(&pool, &ingest, &seed, &execution, journal, 4, "toolu_e").await;
+    let mut seq = 4;
+    // Поздний факт применения не открывает заново закрытый запрос, повтор закрытия не шлёт событие.
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![closed("toolu_c", "cancelled")],
+    )
+    .await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            applied("toolu_c", Uuid::now_v7()),
+            closed("toolu_c", "cancelled"),
+        ],
+    )
+    .await;
+    assert_eq!(
+        request_state(&pool, closed_first).await,
+        "closed_without_decision"
+    );
+    assert_eq!(closed_events(&pool, closed_first).await, 1);
+    // Чужое решение игнорируется; после применения поздние факты ничего не меняют.
+    let (winner, command) = decide(&pool, &seed, decided, execution.generation).await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![applied("toolu_d", Uuid::now_v7())],
+    )
+    .await;
+    assert_eq!(request_state(&pool, decided).await, "decision_saved");
+    assert_eq!(command_state(&pool, command).await, "pending");
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![
+            applied("toolu_d", winner),
+            record_body::Body::DecisionNotApplied(DecisionNotApplied {
+                request_id: "toolu_d".into(),
+                decision_id: winner.to_string(),
+                reason: "request_closed".into(),
+            }),
+            closed("toolu_d", "decided"),
+        ],
+    )
+    .await;
+    assert_eq!(request_state(&pool, decided).await, "decision_applied");
+    assert_eq!(closed_events(&pool, decided).await, 1);
+    // Закрытие на машине до передачи решения: решение не применено, команда погашена.
+    let (_, command) = decide(&pool, &seed, cancelled, execution.generation).await;
+    sj(
+        &ingest,
+        &seed,
+        journal,
+        &mut seq,
+        vec![closed("toolu_e", "cancelled")],
+    )
+    .await;
+    assert_eq!(
+        request_state(&pool, cancelled).await,
+        "decision_not_applied"
+    );
+    assert_eq!(command_state(&pool, command).await, "completed");
 }

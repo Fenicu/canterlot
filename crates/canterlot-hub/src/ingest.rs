@@ -2161,45 +2161,149 @@ async fn apply_request_opened(
     Ok(false)
 }
 
+struct LockedRequest {
+    id: Uuid,
+    conversation_id: Uuid,
+    state: String,
+    winner: Option<Uuid>,
+}
+
+/// Строка запроса исполнения под блокировкой; очередь разговора уже заблокирована вызывающим.
+async fn locked_request(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    request_id: &str,
+) -> Result<Option<LockedRequest>, IngestError> {
+    let row: Option<(Uuid, Uuid, String, Option<Uuid>)> = sqlx::query_as(
+        "select id, conversation_id, state, winner_decision_id from requests
+         where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
+    )
+    .bind(Uuid::parse_str(request_id).ok())
+    .bind(request_id)
+    .bind(run.execution_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(
+        row.map(|(id, conversation_id, state, winner)| LockedRequest {
+            id,
+            conversation_id,
+            state,
+            winner,
+        }),
+    )
+}
+
+impl LockedRequest {
+    /// Факт относится к решению-победителю этого запроса.
+    fn won_by(&self, decision_id: &str) -> bool {
+        self.winner.is_some() && Uuid::parse_str(decision_id).ok() == self.winner
+    }
+}
+
+/// Гасит команду доставки решения только этого запроса.
+async fn complete_decision_command(
+    conn: &mut PgConnection,
+    request: &LockedRequest,
+    result: Value,
+) -> Result<(), IngestError> {
+    let Some(winner) = request.winner else {
+        return Ok(());
+    };
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()), result = $3
+         where kind = 'deliver_decision' and delivery_state <> 'completed'
+           and conversation_id = $4 and payload->>'request_id' = $1 and payload->>'decision_id' = $2",
+    )
+    .bind(request.id.to_string())
+    .bind(winner.to_string())
+    .bind(result)
+    .bind(request.conversation_id)
+    .execute(&mut *conn)
+    .await?;
+    Ok(())
+}
+
+async fn set_request_state(
+    conn: &mut PgConnection,
+    request: &LockedRequest,
+    state: &str,
+) -> Result<(), IngestError> {
+    sqlx::query("update requests set state = $2, updated_at = clock_timestamp() where id = $1")
+        .bind(request.id)
+        .bind(state)
+        .execute(&mut *conn)
+        .await?;
+    Ok(())
+}
+
+async fn request_closed_event(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    request: &LockedRequest,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: request.conversation_id,
+            },
+            kind: "request_closed",
+            conversation_id: Some(request.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload: json!({
+                "request_id": request.id,
+                "reason": reason,
+            }),
+            correlation_id,
+        },
+    )
+    .await?;
+    clear_awaiting_hold_if_no_open_requests(
+        conn,
+        request.conversation_id,
+        run.execution_id,
+        correlation_id,
+    )
+    .await
+}
+
+fn non_empty_reason(reason: &str, fallback: &str) -> String {
+    if reason.is_empty() {
+        fallback.to_owned()
+    } else {
+        sanitize_reason(reason)
+    }
+}
+
 async fn apply_decision_transmission_started(
     conn: &mut PgConnection,
     run: &ExecutionRef,
     fact: &DecisionTransmissionStarted,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
-    let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "select id, conversation_id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
-    )
-    .bind(req_uuid)
-    .bind(&fact.request_id)
-    .bind(run.execution_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    let Some((req_id, conv_id, state)) = row else {
+    let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
         return Ok(true);
     };
-
-    if state == "decision_saved" {
-        sqlx::query("update requests set state = 'decision_transmitting', updated_at = clock_timestamp() where id = $1")
-            .bind(req_id)
-            .execute(&mut *conn)
-            .await?;
-
-        events::append(
-            conn,
-            NewEvent {
-                scope: Scope::Conversation { id: conv_id },
-                kind: "request_transmitting",
-                conversation_id: Some(conv_id),
-                execution_id: Some(run.execution_id),
-                payload: json!({ "request_id": req_id }),
-                correlation_id,
-            },
-        )
-        .await?;
+    if request.state != "decision_saved" || !request.won_by(&fact.decision_id) {
+        return Ok(true);
     }
+    set_request_state(conn, &request, "decision_transmitting").await?;
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: request.conversation_id,
+            },
+            kind: "request_transmitting",
+            conversation_id: Some(request.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload: json!({ "request_id": request.id }),
+            correlation_id,
+        },
+    )
+    .await?;
     Ok(false)
 }
 
@@ -2209,51 +2313,19 @@ async fn apply_decision_applied(
     fact: &DecisionApplied,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
-    let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "select id, conversation_id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
-    )
-    .bind(req_uuid)
-    .bind(&fact.request_id)
-    .bind(run.execution_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    let Some((req_id, conv_id, _)) = row else {
+    let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
         return Ok(true);
     };
-
-    sqlx::query("update requests set state = 'decision_applied', updated_at = clock_timestamp() where id = $1")
-        .bind(req_id)
-        .execute(&mut *conn)
-        .await?;
-
-    sqlx::query(
-        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp())
-         where conversation_id = $1 and kind = 'deliver_decision' and delivery_state <> 'completed'",
-    )
-    .bind(conv_id)
-    .execute(&mut *conn)
-    .await?;
-
-    events::append(
-        conn,
-        NewEvent {
-            scope: Scope::Conversation { id: conv_id },
-            kind: "request_closed",
-            conversation_id: Some(conv_id),
-            execution_id: Some(run.execution_id),
-            payload: json!({
-                "request_id": req_id,
-                "reason": "applied",
-            }),
-            correlation_id,
-        },
-    )
-    .await?;
-
-    clear_awaiting_hold_if_no_open_requests(conn, conv_id, run.execution_id, correlation_id)
-        .await?;
+    if !matches!(
+        request.state.as_str(),
+        "decision_saved" | "decision_transmitting"
+    ) || !request.won_by(&fact.decision_id)
+    {
+        return Ok(true);
+    }
+    set_request_state(conn, &request, "decision_applied").await?;
+    complete_decision_command(conn, &request, json!({"applied": true})).await?;
+    request_closed_event(conn, run, &request, "applied", correlation_id).await?;
     Ok(false)
 }
 
@@ -2263,58 +2335,20 @@ async fn apply_decision_not_applied(
     fact: &DecisionNotApplied,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
-    let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "select id, conversation_id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
-    )
-    .bind(req_uuid)
-    .bind(&fact.request_id)
-    .bind(run.execution_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    let Some((req_id, conv_id, _)) = row else {
+    let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
         return Ok(true);
     };
-
-    sqlx::query("update requests set state = 'decision_not_applied', updated_at = clock_timestamp() where id = $1")
-        .bind(req_id)
-        .execute(&mut *conn)
-        .await?;
-
-    sqlx::query(
-        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()), result = jsonb_build_object('applied', false, 'reason', $2::text)
-         where conversation_id = $1 and kind = 'deliver_decision' and delivery_state <> 'completed'",
-    )
-    .bind(conv_id)
-    .bind(&fact.reason)
-    .execute(&mut *conn)
-    .await?;
-
-    let reason = if fact.reason.is_empty() {
-        "not_applied".to_string()
-    } else {
-        fact.reason.clone()
-    };
-
-    events::append(
-        conn,
-        NewEvent {
-            scope: Scope::Conversation { id: conv_id },
-            kind: "request_closed",
-            conversation_id: Some(conv_id),
-            execution_id: Some(run.execution_id),
-            payload: json!({
-                "request_id": req_id,
-                "reason": reason,
-            }),
-            correlation_id,
-        },
-    )
-    .await?;
-
-    clear_awaiting_hold_if_no_open_requests(conn, conv_id, run.execution_id, correlation_id)
-        .await?;
+    if !matches!(
+        request.state.as_str(),
+        "decision_saved" | "decision_transmitting"
+    ) || !request.won_by(&fact.decision_id)
+    {
+        return Ok(true);
+    }
+    let reason = non_empty_reason(&fact.reason, "not_applied");
+    set_request_state(conn, &request, "decision_not_applied").await?;
+    complete_decision_command(conn, &request, json!({"applied": false, "reason": reason})).await?;
+    request_closed_event(conn, run, &request, &reason, correlation_id).await?;
     Ok(false)
 }
 
@@ -2324,51 +2358,21 @@ async fn apply_request_closed(
     fact: &RequestClosed,
     correlation_id: Uuid,
 ) -> Result<bool, IngestError> {
-    let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let row: Option<(Uuid, Uuid, String)> = sqlx::query_as(
-        "select id, conversation_id, state from requests where (id = $1 or native_request_id = $2) and execution_id = $3 for update",
-    )
-    .bind(req_uuid)
-    .bind(&fact.request_id)
-    .bind(run.execution_id)
-    .fetch_optional(&mut *conn)
-    .await?;
-
-    let Some((req_id, conv_id, state)) = row else {
+    let Some(request) = locked_request(conn, run, &fact.request_id).await? else {
         return Ok(true);
     };
-
-    if state == "open" || state == "decision_saved" {
-        sqlx::query("update requests set state = 'closed_without_decision', updated_at = clock_timestamp() where id = $1")
-            .bind(req_id)
-            .execute(&mut *conn)
-            .await?;
+    let reason = non_empty_reason(&fact.reason, "closed");
+    match request.state.as_str() {
+        "open" => set_request_state(conn, &request, "closed_without_decision").await?,
+        // Запрос закрылся на машине раньше, чем решение было передано агенту.
+        "decision_saved" => {
+            set_request_state(conn, &request, "decision_not_applied").await?;
+            complete_decision_command(conn, &request, json!({"applied": false, "reason": reason}))
+                .await?;
+        }
+        _ => return Ok(true),
     }
-
-    let reason = if fact.reason.is_empty() {
-        "closed".to_string()
-    } else {
-        fact.reason.clone()
-    };
-
-    events::append(
-        conn,
-        NewEvent {
-            scope: Scope::Conversation { id: conv_id },
-            kind: "request_closed",
-            conversation_id: Some(conv_id),
-            execution_id: Some(run.execution_id),
-            payload: json!({
-                "request_id": req_id,
-                "reason": reason,
-            }),
-            correlation_id,
-        },
-    )
-    .await?;
-
-    clear_awaiting_hold_if_no_open_requests(conn, conv_id, run.execution_id, correlation_id)
-        .await?;
+    request_closed_event(conn, run, &request, &reason, correlation_id).await?;
     Ok(false)
 }
 

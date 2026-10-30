@@ -55,7 +55,7 @@
 | Разговор | `scheduled_changed` | Отложенное сообщение |
 | Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
 | Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}` |
-| Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено, остальные причины передаёт воркер (например, `execution_stopped`, `generation_closed`, `too_late`) |
+| Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено, остальные причины передаёт воркер (например, `request_closed`, `stale_generation`, `cancelled`, `interrupted`). Один раз на запрос: поздние факты после терминального состояния и факты чужого решения события не порождают |
 | Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}` |
 | Разговор | `request_transmitting` | Решение передаётся агенту: `{request_id}`, один раз при переходе `decision_saved` в `decision_transmitting` |
 | Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
