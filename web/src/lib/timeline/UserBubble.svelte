@@ -1,6 +1,5 @@
 <script lang="ts">
   import { getRuntime } from '#lib/app/runtime.js';
-  import { restoreComposerText } from '#lib/composer/restore.js';
   import StageTrack from '#lib/ui/StageTrack.svelte';
   import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import type { Stage } from '#lib/ui/stage-track.js';
@@ -62,8 +61,7 @@
         returnToDraft(input, {
           drafts: getRuntime().drafts,
           conversationId: chat.id,
-          chat,
-          onReturn: restoreComposerText
+          chat
         })}
     >Вернуть в черновик</button>
   {/if}
