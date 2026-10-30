@@ -578,6 +578,9 @@ impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
 async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
     const SECRET: &str = "hunter2-very-secret";
     let logs = LogBuffer::default();
+    // При единственном диспетчере интерес к месту лога считает поток, первым туда
+    // попавший: соседний тест без подписчика выключил бы запись и здесь.
+    let _second = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
     let _logs = tracing::subscriber::set_default(
         tracing_subscriber::fmt()
             .with_ansi(false)
