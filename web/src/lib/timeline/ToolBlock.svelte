@@ -1,7 +1,7 @@
 <script lang="ts">
-  import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
+  import type { Component } from 'svelte';
+  import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { toolStatusText } from '#lib/timeline/present.js';
-  import MediaViewer from '#lib/timeline/MediaViewer.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
@@ -16,6 +16,12 @@
   } = $props();
   let open = $state(false);
   let viewing = $state<number | null>(null);
+  let Viewer = $state<Component<{ shots: BlockMedia[]; start?: number; title: string; onclose: () => void }> | null>(null);
+
+  async function view(index: number): Promise<void> {
+    Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
+    viewing = index;
+  }
   const running = $derived(block.state === 'streaming' || block.state === 'stale');
   const error = $derived(block.state === 'incomplete' || block.kind === 'error');
   const status = $derived(toolStatusText({
@@ -50,7 +56,7 @@
       {#each shots as shot (shot.media_id)}
         <figure class="shot" data-state={shot.ready ? 'ready' : shot.failed ? 'failed' : 'loading'} style:max-width={`${shot.width}px`} style:aspect-ratio={`${shot.width} / ${shot.height}`}>
           {#if shot.ready}
-            <button type="button" aria-label="Открыть картинку" onclick={() => { viewing = readyShots.indexOf(shot); }}>
+            <button type="button" aria-label="Открыть картинку" onclick={() => void view(readyShots.indexOf(shot))}>
               <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" />
             </button>
           {:else if shot.failed}
@@ -70,8 +76,8 @@
     </div>
   {/if}
 </div>
-{#if viewing !== null}
-  <MediaViewer shots={readyShots} start={viewing} title={block.summary || block.toolName || 'инструмент'} onclose={() => { viewing = null; }} />
+{#if viewing !== null && Viewer}
+  <Viewer shots={readyShots} start={viewing} title={block.summary || block.toolName || 'инструмент'} onclose={() => { viewing = null; }} />
 {/if}
 
 <style>

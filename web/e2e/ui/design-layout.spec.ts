@@ -61,13 +61,14 @@ test.describe('поле ввода', () => {
   test('field_grows_up_to_six_lines_and_the_capsule_carries_the_focus_ring', async ({ page }) => {
     await boot(page);
     const field = page.getByRole('textbox', { name: 'Сообщение' });
+    const line = await field.evaluate((node) => parseFloat(getComputedStyle(node).lineHeight));
     const empty = (await field.boundingBox())!.height;
     await field.fill(['раз', 'два', 'три'].join('\n'));
-    await expect.poll(async () => (await field.boundingBox())!.height).toBeGreaterThan(empty * 2);
+    await expect.poll(async () => (await field.boundingBox())!.height).toBeGreaterThan(empty + line);
     await field.fill(Array.from({ length: 14 }, (_, index) => `строка ${index}`).join('\n'));
-    await expect.poll(async () => (await field.boundingBox())!.height).toBeGreaterThan(empty * 5);
+    await expect.poll(async () => (await field.boundingBox())!.height).toBeGreaterThan(line * 5);
     const capped = (await field.boundingBox())!.height;
-    expect(capped).toBeLessThanOrEqual(empty * 6 + 1);
+    expect(capped).toBeLessThan(line * 7);
     await field.focus();
     const ring = await page.locator('.capsule').evaluate((node) => getComputedStyle(node).outlineStyle);
     expect(ring).toBe('solid');
@@ -401,8 +402,7 @@ test.describe('лимиты и баннеры', () => {
     const strip = page.locator('.limits').first();
     await expect(strip.locator('.row')).toHaveCount(2);
     await expect(strip.locator('b.hot')).toHaveText(['96%']);
-    const open = await strip.locator('.row').evaluateAll((nodes) => nodes.map((node) => getComputedStyle(node).whiteSpace));
-    expect(open).toEqual(['nowrap', 'nowrap']);
+    await expect(strip.locator('.pair')).toHaveCount(4);
     await strip.locator('summary').click();
     const radius = await strip.evaluate((node) => parseFloat(getComputedStyle(node).borderTopLeftRadius));
     expect(radius).toBeLessThan(40);

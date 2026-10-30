@@ -346,6 +346,7 @@
 		background: var(--transparent);
 		color: var(--secondary);
 		font-size: var(--fs-meta);
+		transition: background-color var(--duration-fast) var(--ease);
 	}
 	.pane-action[aria-pressed='true'] {
 		background: var(--selected);

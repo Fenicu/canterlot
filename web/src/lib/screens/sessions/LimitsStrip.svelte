@@ -32,7 +32,7 @@
           <span>{view.crunchLabel}</span>
         {:else}
           {#each shown as row (row.label)}
-            <span class="row">{compact ? 'Лимиты ·' : row.label} 5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b> · неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span>
+            <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span></span>
           {/each}
         {/if}
         {#if view.tone === 'reserve'}<span class="reserve">резерв</span>{/if}
@@ -75,7 +75,7 @@
   summary::marker { content: ''; }
   .rows { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s6); min-width: 0; }
   :global([data-pane='list']) .rows { flex-direction: column; }
-  .row { white-space: nowrap; }
+  .pair { white-space: nowrap; }
   b { font-weight: var(--weight-semibold); }
   .hot, .reserve { color: var(--warning); }
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }

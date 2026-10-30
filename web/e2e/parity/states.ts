@@ -47,7 +47,7 @@ function fresh() {
   return { hub, api };
 }
 
-async function chat(page: Page, seeder: (api: FakeHubApi) => string, afterOpen?: (page: Page) => Promise<void>): Promise<void> {
+async function chat(page: Page, seeder: (api: FakeHubApi) => string, afterOpen?: (page: Page, hub: FakeHub, api: FakeHubApi, id: string) => Promise<void>): Promise<void> {
   const { hub, api } = fresh();
   const id = seeder(api);
   const detail = api.details.get(id);
@@ -63,7 +63,17 @@ async function chat(page: Page, seeder: (api: FakeHubApi) => string, afterOpen?:
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
-  await afterOpen?.(page);
+  await afterOpen?.(page, hub, api, id);
+}
+
+async function menuItem(page: Page, item: string): Promise<void> {
+  await page.getByRole('button', { name: 'Меню сессии' }).click();
+  await page.getByRole('menuitem', { name: item }).click();
+}
+
+function openRequest(hub: FakeHub, api: FakeHubApi, id: string, kind: string, payload: unknown): void {
+  hub.append(`conversation:${id}`, { kind: 'request_opened', conversation_id: id, payload: { request_id: api.id(), kind, payload } });
+  hub.flush();
 }
 
 async function sessions(page: Page, route: string, ready: string): Promise<void> {
@@ -126,7 +136,69 @@ export const SCREENS: Screen[] = [
   screen('share', false, PHONE, 'dark', async (page) => {
     await bootSecondary(page, '/share');
     await expect(page.locator('main')).toBeVisible();
-  })
+  }),
+  // Состояния поверх экранов: листы, меню, очередь и карточки, которые не видны при обычном открытии.
+  screen('session-sheet', false, PHONE, 'dark', async (page) => {
+    await sessions(page, '/sessions', '[data-list-ready]');
+    await page.getByRole('button', { name: /^Действия:/ }).first().click();
+    await expect(page.getByRole('dialog').first()).toBeVisible();
+  }),
+  screen('session-popover', false, DESKTOP, 'dark', async (page) => {
+    await sessions(page, '/sessions', '[data-list-ready]');
+    await page.getByRole('button', { name: /^Действия:/ }).first().click();
+    await expect(page.getByRole('dialog').first()).toBeVisible();
+  }),
+  screen('group-manager', false, PHONE, 'dark', async (page) => {
+    await sessions(page, '/sessions', '[data-list-ready]');
+    await page.getByRole('button', { name: 'Ещё' }).click();
+    await page.getByRole('menuitem', { name: 'Группы' }).click();
+    await expect(page.getByRole('dialog', { name: 'Группы' })).toBeVisible();
+  }),
+  screen('session-menu', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    await opened.getByRole('button', { name: 'Меню сессии' }).click();
+    await expect(opened.getByRole('menu')).toBeVisible();
+  })),
+  screen('settings-sheet', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    await menuItem(opened, 'Настройки сессии');
+    await expect(opened.getByRole('dialog', { name: 'Настройки сессии' })).toBeVisible();
+  })),
+  screen('settings-pane', false, DESKTOP, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    await menuItem(opened, 'Настройки сессии');
+    await expect(opened.locator('[data-pane="lane"] #model')).toBeVisible();
+  })),
+  screen('diagnostics', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    await menuItem(opened, 'Диагностика');
+    await expect(opened.getByRole('dialog', { name: 'Диагностика' })).toBeVisible();
+  })),
+  screen('send-later', false, DESKTOP, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    const field = opened.getByRole('textbox', { name: 'Сообщение' });
+    await field.fill('Черновик');
+    await field.press('Control+Shift+Enter');
+    await expect(opened.getByRole('dialog', { name: 'Отправить позже' })).toBeVisible();
+  })),
+  screen('queue', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
+    for (const [index, text] of ['Проверь гонку двух подписок', 'Собери итог', 'Обнови README', 'Закрой задачу'].entries()) {
+      hub.append(`conversation:${id}`, { kind: 'input_queued', conversation_id: id, payload: { input_id: api.id(), input_seq: String(index + 50), idempotency_key: api.id(), state: 'queued', content: [{ type: 'text', text }] } });
+    }
+    hub.flush();
+    await expect(opened.getByRole('button', { name: /^Ещё \d+ в очереди/ })).toBeVisible();
+  })),
+  screen('attachments', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened) => {
+    await opened.setInputFiles('input[type=file]', { name: 'hub.log', mimeType: 'text/plain', buffer: Buffer.from('журнал') });
+    await expect(opened.locator('.tray')).toBeVisible();
+  })),
+  screen('permission-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
+    openRequest(hub, api, id, 'permission', { tool_name: 'Bash', description: 'Запустить тесты', command: 'cargo test' });
+    await expect(opened.locator('.permission-card')).toBeVisible();
+  })),
+  screen('url-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
+    openRequest(hub, api, id, 'permission', { tool_name: 'mcp_elicitation', server: 'github', mode: 'url', message: 'Подтвердите доступ', url: 'https://github.com/login/device?code=WDJB' });
+    await expect(opened.locator('.permission-card')).toBeVisible();
+  })),
+  screen('question-request', false, PHONE, 'dark', (page) => chat(page, seedMockupChat, async (opened, hub, api, id) => {
+    openRequest(hub, api, id, 'question', { truncated: true, questions: [{ id: 'q0', text: 'Что делать?', options: ['Да', 'Нет'] }, { id: 'q1', text: 'Какие тесты?', options: ['Сон', 'Сеть'], multi_select: true, allow_custom: true }] });
+    await expect(opened.locator('.question-card')).toBeVisible();
+  }))
 ];
 
 export async function bootScreen(page: Page, target: Screen, theme: Theme = target.theme, viewport = target.viewport): Promise<void> {

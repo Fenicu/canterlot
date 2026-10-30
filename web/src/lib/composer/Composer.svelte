@@ -287,13 +287,12 @@
     align-items: center;
     gap: var(--s2);
     min-width: 0;
-    padding: var(--s5) var(--s3) var(--s3);
+    padding: var(--s1) var(--s3) var(--s3);
     border-radius: var(--radius-composer);
     background: var(--surface);
   }
   .capsule:has(:global(.tray)) {
     grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach extras clock send';
-    border-radius: var(--radius-sheet);
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {
@@ -301,9 +300,9 @@
     field-sizing: content;
     min-width: 0;
     width: 100%;
-    min-height: calc(var(--fs-input) * var(--lh-body));
-    max-height: calc(var(--fs-input) * var(--lh-body) * 6);
-    padding: var(--s0) var(--s5);
+    min-height: var(--target);
+    max-height: calc(var(--fs-input) * var(--lh-body) * 6 + var(--s5) * 2);
+    padding: var(--s5);
     overflow: auto;
     resize: none;
     border: var(--s0);
