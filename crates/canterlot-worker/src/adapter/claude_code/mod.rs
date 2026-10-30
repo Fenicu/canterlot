@@ -48,7 +48,6 @@ pub struct ClaudeCodeAdapter {
     permission_mode: String,
     workdir: PathBuf,
     instructions: InstructionSpec,
-    first_session: Option<SessionArg>,
     approved: HashSet<String>,
     tools: HashMap<Uuid, AdapterEvent>,
     tool_ids: HashMap<String, Uuid>,
@@ -87,7 +86,6 @@ impl ClaudeCodeAdapter {
                 revision: 0,
                 title: String::new(),
             },
-            first_session: None,
             approved: HashSet::new(),
             tools: HashMap::new(),
             tool_ids: HashMap::new(),
@@ -543,7 +541,6 @@ impl ClaudeCodeAdapter {
         let native_id = self.native_id.clone();
         // 1. Файл инструкций нового запуска (или удаление устаревшего).
         if process::write_instructions_file(&exec_dir, &next).is_err() {
-            eprintln!("RESTART file fail");
             return Err("instructions_change_failed");
         }
         // 2. Остановить старый CLI.
@@ -562,7 +559,6 @@ impl ClaudeCodeAdapter {
         };
         let spawned = self.spawn_for_restart(&launch, group).await;
         let Some(cli) = spawned else {
-            eprintln!("RESTART fallback");
             return self.respawn_previous(group).await;
         };
         let started = (cli.pid, cli.start_ticks);
@@ -579,7 +575,10 @@ impl ClaudeCodeAdapter {
     }
 
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
-    /// перезапуска. Успех — отказ входа, провал — остановка исполнения.
+    /// перезапуска. Беседа уже записана, поэтому всегда `--resume` (CLI
+    /// отказывает повторному `--session-id`: «Session ID … is already in use»).
+    /// Успех — отказ входа; провал, в том числе невозвращённый файл прежних
+    /// инструкций, — остановка исполнения с причиной `restart_failed`.
     async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
         let previous = self.instructions.clone();
         let (model, effort, permission_mode) = match self.queue.as_ref() {
@@ -593,20 +592,20 @@ impl ClaudeCodeAdapter {
             }
             None => return Err("instructions_change_failed"),
         };
-        // Вернуть файл прежних инструкций (перезапись из памяти, удаление для Owner/Clean).
-        let _ = process::write_instructions_file(&self.exec_dir, &previous);
+        // Без прежнего файла запасной CLI получил бы новый текст пресета,
+        // а адаптер и хаб считали бы действующим старый.
+        if process::write_instructions_file(&self.exec_dir, &previous).is_err() {
+            self.diagnostic("restart_failed", true);
+            return Err("instructions_change_failed");
+        }
         let workdir = self.workdir.clone();
         let exec_dir = self.exec_dir.clone();
         let executable = self.cfg.executable.clone();
-        let session = self
-            .first_session
-            .clone()
-            .unwrap_or_else(|| SessionArg::Resume(self.native_id.clone()));
         let launch = process::LaunchSpec {
             executable: &executable,
             exec_dir: &exec_dir,
             workdir: &workdir,
-            session,
+            session: SessionArg::Resume(self.native_id.clone()),
             model: &model,
             effort: &effort,
             permission_mode: &permission_mode,
@@ -623,10 +622,7 @@ impl ClaudeCodeAdapter {
                 Err("instructions_change_failed")
             }
             None => {
-                self.events.push_back(AdapterEvent::ProcessExited {
-                    code: None,
-                    signal: None,
-                });
+                self.diagnostic("restart_failed", true);
                 Err("instructions_change_failed")
             }
         }
@@ -905,7 +901,6 @@ impl Adapter for ClaudeCodeAdapter {
         };
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
-        self.first_session = Some(launch.session.clone());
         // The exec manager stages a named Task-1 profile before starting the supervisor.
         let broker = Broker::bind(&self.exec_dir).await?;
         process::write_exec_files(

@@ -305,6 +305,9 @@ if (d / 'fail-resume-once').exists() and '--resume' in sys.argv and not (d / 're
     sys.exit(1)
 if (d / 'fail-resume-always').exists() and '--resume' in sys.argv:
     sys.exit(1)
+if (d / 'lock-exec-on-resume').exists() and '--resume' in sys.argv:
+    os.chmod(pathlib.Path(sys.argv[sys.argv.index('--mcp-config') + 1]).parent, 0o500)
+    sys.exit(1)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 sid = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id') + 1]
 def emit(v):
@@ -539,10 +542,18 @@ async fn failed_restart_respawns_previous_and_rejects_the_input() {
     for (pid, _) in spawns.iter().filter(|(pid, _)| *pid != h.old_pid) {
         assert_eq!(h.stdin_lines(*pid), 0, "input must not be sent");
     }
+    // Беседа уже записана: запасной запуск продолжает её, повторный
+    // --session-id настоящий CLI отвергает («Session ID … is already in use»).
+    let (_, fallback) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(fallback.iter().any(|a| a == "--resume"), "{fallback:?}");
+    assert!(
+        !fallback.iter().any(|a| a == "--session-id"),
+        "{fallback:?}"
+    );
 }
 
 #[tokio::test]
-async fn failed_fallback_restart_reports_process_exited() {
+async fn failed_fallback_restart_stops_with_restart_failed() {
     let mut h = RestartHarness::new().await;
     let first = h.transmit(None).await;
     assert!(matches!(first, TransmitOutcome::Accepted(_)));
@@ -558,8 +569,54 @@ async fn failed_fallback_restart_reports_process_exited() {
         .await
         .expect("event deadline");
     assert!(
-        matches!(event, AdapterEvent::ProcessExited { .. }),
-        "fallback failure stops the execution: {event:?}"
+        matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "restart_failed",
+                required: true,
+                ..
+            }
+        ),
+        "fallback failure stops the execution as restart_failed, not a crash: {event:?}"
+    );
+}
+
+#[tokio::test]
+async fn unrestored_previous_instructions_fail_the_fallback() {
+    let mut h = RestartHarness::new().await;
+    let out = h.transmit(Some(change(preset_spec("PRESET-A")))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let exec_dir = h.dir.path().join("exec");
+    assert!(exec_dir.join("instructions.md").exists());
+    // Перезапуск падает и закрывает каталог исполнения на запись: прежний файл
+    // инструкций не вернуть, запасной CLI с чужим текстом не запускается.
+    std::fs::write(h.dir.path().join("lock-exec-on-resume"), "").unwrap();
+    let out = h.transmit(Some(change(preset_spec("PRESET-B")))).await;
+    std::fs::set_permissions(&exec_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let spawns = h.spawns();
+    assert_eq!(
+        spawns.len(),
+        2,
+        "no fallback CLI with the wrong preset: {spawns:?}"
+    );
+    let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+        .await
+        .expect("event deadline");
+    assert!(
+        matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "restart_failed",
+                required: true,
+                ..
+            }
+        ),
+        "{event:?}"
     );
 }
 

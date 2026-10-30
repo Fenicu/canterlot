@@ -1654,7 +1654,7 @@ impl Supervisor {
                         match kind {
                             "auth_required" => StopCause::AuthRequired,
                             "cli_too_old" | "session_id_mismatch" => StopCause::CliIncompatible,
-                            "mcp_unavailable" => StopCause::StartFailed,
+                            "mcp_unavailable" | "restart_failed" => StopCause::StartFailed,
                             _ => StopCause::ProtocolIncompatible,
                         },
                         false,
