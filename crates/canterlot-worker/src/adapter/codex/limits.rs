@@ -87,8 +87,9 @@ fn parse_window(row: &Value) -> Option<(LimitWindow, u16, u64)> {
     Some((window, permille, reset))
 }
 
-fn ordinary_usage_blocked(snapshot: &Value) -> bool {
-    snapshot
+// Поле ответа account/rateLimits/read (GetAccountRateLimitsResponse), не снимка.
+fn ordinary_usage_blocked(response: &Value) -> bool {
+    response
         .get("ordinaryUsageAllowed")
         .is_some_and(|v| v.as_bool() == Some(false))
 }
@@ -183,9 +184,7 @@ impl LimitTracker {
             facts.extend(self.on_snapshot(&snapshot));
         }
         let exhausted = self.exhausted_window_prefer_weekly();
-        let blocked = snapshots_from_read_response(response)
-            .iter()
-            .any(ordinary_usage_blocked);
+        let blocked = ordinary_usage_blocked(response);
         let highest = self.highest_window();
         match ctx {
             CrunchContext::UsageLimitExceeded => {

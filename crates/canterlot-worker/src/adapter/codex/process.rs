@@ -120,6 +120,8 @@ pub struct AppServerProcess {
     // Недочитанная строка живёт здесь, а не в локальной переменной: отмена next_line ничего не теряет.
     partial: Vec<u8>,
     discarded: Option<usize>,
+    out: Vec<u8>,
+    out_pos: usize,
     stderr_ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
 }
 
@@ -195,20 +197,37 @@ impl AppServerProcess {
             stdout,
             partial: Vec::new(),
             discarded: None,
+            out: Vec::new(),
+            out_pos: 0,
             stderr_ring: ring,
         })
     }
 
+    /// Строка ставится в буфер до первой точки ожидания и дописывается
+    /// `flush_out`: отменённая запись продолжается следующим вызовом целиком.
     pub async fn write_message(&mut self, msg: &serde_json::Value) -> std::io::Result<()> {
-        use tokio::io::AsyncWriteExt;
-        if let Some(stdin) = &mut self.stdin {
-            let line = format!("{msg}\n");
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok(())
-        } else {
-            Err(std::io::Error::other("no stdin"))
+        if self.stdin.is_none() {
+            return Err(std::io::Error::other("no stdin"));
         }
+        self.out.extend_from_slice(format!("{msg}\n").as_bytes());
+        self.flush_out().await
+    }
+
+    pub async fn flush_out(&mut self) -> std::io::Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let Some(stdin) = &mut self.stdin else {
+            return Err(std::io::Error::other("no stdin"));
+        };
+        while self.out_pos < self.out.len() {
+            let written = stdin.write(&self.out[self.out_pos..]).await?;
+            if written == 0 {
+                return Err(std::io::ErrorKind::WriteZero.into());
+            }
+            self.out_pos += written;
+        }
+        self.out.clear();
+        self.out_pos = 0;
+        stdin.flush().await
     }
 
     /// Следующая строка stdout без `\n`; длиннее 64 МиБ пропускается до перевода строки.

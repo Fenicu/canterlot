@@ -1081,6 +1081,88 @@ async fn rate_limit_exceeded_reads_fresh_limits() {
     )));
 }
 
+// Ответ свежего чтения для зонда: тот же двойник проигрывает его по методу.
+fn fresh_read_lines(result: Value) -> Vec<String> {
+    vec![
+        w_in(1, "account/rateLimits/read", json!({})),
+        w_out(json!({"id": 1, "result": result})),
+    ]
+}
+
+fn rate_limited_turn(read: Value) -> Vec<String> {
+    let mut lines = failed_turn(
+        "thread-mini",
+        "turn-1",
+        json!({"codexErrorInfo": "rateLimitExceeded", "message": "slow down"}),
+    );
+    lines.extend(fresh_read_lines(read));
+    lines
+}
+
+fn quiet_read() -> Value {
+    json!({"rateLimits": {"limitId": "codex",
+        "primary": {"windowDurationMins": 300, "usedPercent": 40.0, "resetsAt": 1792927784},
+        "secondary": {"windowDurationMins": 10080, "usedPercent": 10.0, "resetsAt": 1793514584}},
+        "ordinaryUsageAllowed": true})
+}
+
+#[tokio::test]
+async fn rate_limit_without_exhausted_window_is_an_error_block_without_reached() {
+    let events = run_failed_turn(rate_limited_turn(quiet_read()), "hi").await;
+    assert!(
+        error_text(&events).contains("Codex ограничил частоту запросов"),
+        "{events:?}"
+    );
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Limit(canterlot_worker::adapter::LimitFact::Reached { .. })
+    )));
+}
+
+#[tokio::test]
+async fn limit_failure_turn_end_survives_dropped_event_polls() {
+    let mut fake = Fake::new(rate_limited_turn(quiet_read()));
+    fake.start().await;
+    let id = fake.start_turn("hi").await;
+    // Как супервизор: next_event опрашивается коротко и бросается.
+    let deadline = std::time::Instant::now() + Duration::from_secs(15);
+    let mut events = vec![];
+    while std::time::Instant::now() < deadline {
+        if let Ok(event) =
+            tokio::time::timeout(Duration::from_millis(1), fake.adapter.next_event()).await
+        {
+            let done = matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if input_command_id == id);
+            events.push(event);
+            if done {
+                break;
+            }
+        }
+    }
+    assert!(
+        events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RunFinished { .. })),
+        "turn end lost: {events:?}"
+    );
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::RunFinished { .. })
+    ));
+    let after = fake.event().await;
+    assert!(
+        matches!(
+            after,
+            AdapterEvent::Phase {
+                phase: canterlot_worker::adapter::Phase::AwaitingInput,
+                ..
+            }
+        ),
+        "{after:?}"
+    );
+    assert!(error_text(&events).contains("Codex ограничил частоту запросов"));
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn context_window_exceeded_is_context_exhausted() {
     let mut lines = handshake("thread-mini");

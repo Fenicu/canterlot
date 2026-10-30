@@ -197,7 +197,8 @@ impl Broker {
         })
     }
 
-    pub async fn answer_limits(&mut self, rpc_id: Value, snapshot: &LimitsSnapshot) {
+    // Запись ответа — отдельной задачей: отмена next_event адаптера её не обрывает.
+    pub fn answer_limits(&mut self, rpc_id: Value, snapshot: &LimitsSnapshot) {
         let provider = if snapshot.provider.is_empty() {
             self.limits_provider.as_str()
         } else {
@@ -205,7 +206,10 @@ impl Broker {
         };
         let text = mcp::limits_tool_text(snapshot, provider);
         let reply = mcp::tool_call_reply(&rpc_id, &Value::String(text));
-        let _ = write_line(&self.writer, &reply).await;
+        let writer = self.writer.clone();
+        tokio::spawn(async move {
+            let _ = write_line(&writer, &reply).await;
+        });
     }
 
     pub async fn shutdown(&mut self) {

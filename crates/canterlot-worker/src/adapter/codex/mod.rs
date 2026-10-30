@@ -145,6 +145,26 @@ pub struct CodexAdapter {
     exited: bool,
     start_attempted: bool,
     relay_executable: Option<PathBuf>,
+    crunch: Option<PendingCrunch>,
+}
+
+/// Ход, кончившийся лимитом без исчерпанного окна в снимке: свежее чтение
+/// лимитов идёт отдельной задачей, конец хода ждёт его в `self`, а не на стеке
+/// `next_event`, который супервизор бросает.
+struct PendingCrunch {
+    ctx: CrunchContext,
+    command: Option<Uuid>,
+    task: tokio::task::JoinHandle<Result<Value, probe::ProbeError>>,
+    finish: Vec<AdapterEvent>,
+}
+
+type CrunchResult = Result<Result<Value, probe::ProbeError>, tokio::task::JoinError>;
+
+async fn crunch_done(crunch: &mut Option<PendingCrunch>) -> CrunchResult {
+    match crunch {
+        Some(pending) => (&mut pending.task).await,
+        None => std::future::pending().await,
+    }
 }
 
 /// Параметры перезапуска app-server с возобновлением треда.
@@ -199,6 +219,7 @@ impl CodexAdapter {
             exited: false,
             start_attempted: false,
             relay_executable: None,
+            crunch: None,
         }
     }
 
@@ -242,27 +263,32 @@ impl CodexAdapter {
 
     // --- чтение потока ------------------------------------------------------
 
-    // Одно чтение stdout, событие брокера или проверка выхода; отмена безопасна.
+    // Одно чтение stdout, событие брокера, конец свежего чтения лимитов или
+    // проверка выхода. Отмена безопасна: обработка синхронна, состояние в `self`.
     async fn pump_once(&mut self) {
         if self.exited || self.proc.is_none() {
-            std::future::pending::<()>().await;
+            let result = crunch_done(&mut self.crunch).await;
+            self.finish_crunch(result);
             return;
         }
         let proc = self.proc.as_mut().unwrap();
         let broker = self.broker.as_mut().unwrap();
+        let crunch = &mut self.crunch;
         if self.eof {
             tokio::select! {
+                result = crunch_done(crunch) => self.finish_crunch(result),
                 status = proc.wait() => {
                     self.exited = true;
                     self.events.push_back(status.map(exit_event).unwrap_or(AdapterEvent::ProcessExited { code: None, signal: None }));
                 }
-                event = broker.next() => self.on_broker(event).await,
+                event = broker.next() => self.on_broker(event),
             }
         } else {
             tokio::select! {
                 biased;
-                line = proc.next_line() => self.dispatch_line(line).await,
-                event = broker.next() => self.on_broker(event).await,
+                result = crunch_done(crunch) => self.finish_crunch(result),
+                line = proc.next_line() => self.dispatch_line(line),
+                event = broker.next() => self.on_broker(event),
                 _ = tokio::time::sleep(Duration::from_millis(25)) => {
                     if let Some(status) = proc.try_wait().ok().flatten() {
                         self.exited = true;
@@ -273,7 +299,7 @@ impl CodexAdapter {
         }
     }
 
-    async fn dispatch_line(&mut self, line: StdoutLine) {
+    fn dispatch_line(&mut self, line: StdoutLine) {
         match line {
             StdoutLine::Eof => self.eof = true,
             StdoutLine::Oversized(_) => self.diagnostic("oversized_frame", false),
@@ -285,7 +311,9 @@ impl CodexAdapter {
                 }
                 Incoming::Notification { method, params } => {
                     let translated = self.feed_notification(&method, &params);
-                    self.dispatch_translated(translated).await;
+                    for item in translated {
+                        self.on_translated(item);
+                    }
                 }
                 Incoming::ServerRequest { id, method, params } => {
                     self.on_server_request(id, &method, &params)
@@ -322,13 +350,6 @@ impl CodexAdapter {
         match self.translator.as_mut() {
             Some(translator) => translator.feed(method, params),
             None => Vec::new(),
-        }
-    }
-
-    // Полная обработка с возможными зондами (ошибки хода, лимиты).
-    async fn dispatch_translated(&mut self, translated: Vec<Translated>) {
-        for item in translated {
-            self.on_translated(item).await;
         }
     }
 
@@ -371,13 +392,13 @@ impl CodexAdapter {
         }
     }
 
-    async fn on_translated(&mut self, translated: Translated) {
+    fn on_translated(&mut self, translated: Translated) {
         match translated {
             Translated::TurnCompleted {
                 turn_id,
                 status,
                 error,
-            } => self.on_turn_completed(turn_id, status, error).await,
+            } => self.on_turn_completed(turn_id, status, error),
             Translated::RateLimits(snapshot) => {
                 for fact in self.limits.on_snapshot(&snapshot) {
                     self.events.push_back(AdapterEvent::Limit(fact));
@@ -470,7 +491,7 @@ impl CodexAdapter {
         }
     }
 
-    async fn on_turn_completed(
+    fn on_turn_completed(
         &mut self,
         turn_id: String,
         status: TurnStatus,
@@ -489,24 +510,35 @@ impl CodexAdapter {
         if !was_active {
             return;
         }
-        match (status, error) {
-            (TurnStatus::Interrupted, _) => {}
-            (_, None) if status != TurnStatus::Failed => {}
-            (_, Some(error)) => self.on_turn_error(error, command).await,
-            (_, None) => self.error_block("Ошибка Codex".into(), command),
-        }
+        let mut finish = Vec::new();
         if let Some(translator) = self.translator.as_mut() {
-            let finished = translator.finish_turn();
-            self.events.push_back(finished);
+            finish.push(translator.finish_turn());
         }
-        self.events.push_back(AdapterEvent::Phase {
+        finish.push(AdapterEvent::Phase {
             phase: Phase::AwaitingInput,
             tool_name: None,
             summary: None,
         });
+        match (status, error) {
+            (TurnStatus::Interrupted, _) => {}
+            (_, None) if status != TurnStatus::Failed => {}
+            (_, Some(error)) => {
+                if let Some(ctx) = self.on_turn_error(error, command) {
+                    self.start_fresh_read(ctx, command, finish);
+                    return;
+                }
+            }
+            (_, None) => self.error_block("Ошибка Codex".into(), command),
+        }
+        self.events.extend(finish);
     }
 
-    async fn on_turn_error(&mut self, error: TurnErrorInfo, command: Option<Uuid>) {
+    // `Some` — нужен свежий снимок лимитов до конца хода.
+    fn on_turn_error(
+        &mut self,
+        error: TurnErrorInfo,
+        command: Option<Uuid>,
+    ) -> Option<CrunchContext> {
         match error.kind.as_str() {
             "unauthorized" => {
                 self.error_block(
@@ -516,18 +548,23 @@ impl CodexAdapter {
                 self.diagnostic("auth_required", false);
             }
             "contextWindowExceeded" => {}
-            "usageLimitExceeded" => {
+            "usageLimitExceeded" | "rateLimitExceeded" => {
                 let decision = self.limits.on_turn_failed(&limits::TurnErrorInfo {
                     codex_error_info: Some(error.kind.clone()),
                 });
-                self.crunch_reached(decision).await;
-                self.error_block("Исчерпан лимит Codex".into(), command);
-            }
-            "rateLimitExceeded" => {
-                let decision = self.limits.on_turn_failed(&limits::TurnErrorInfo {
-                    codex_error_info: Some(error.kind.clone()),
-                });
-                self.crunch_reached(decision).await;
+                let usage = error.kind == "usageLimitExceeded";
+                let fresh = match decision {
+                    ReachedDecision::Reached(fact) => {
+                        self.events.push_back(AdapterEvent::Limit(fact));
+                        None
+                    }
+                    ReachedDecision::NeedFreshRead(ctx) => Some(ctx),
+                    ReachedDecision::NotALimit => None,
+                };
+                if usage {
+                    self.error_block("Исчерпан лимит Codex".into(), command);
+                }
+                return fresh;
             }
             "other" if error.message.contains("model_not_found") => {
                 self.error_block("Модель не найдена".into(), command);
@@ -536,38 +573,55 @@ impl CodexAdapter {
                 self.error_block(turn_error_text(kind, error.http_status), command);
             }
         }
+        None
     }
 
-    async fn crunch_reached(&mut self, decision: ReachedDecision) {
-        match decision {
-            ReachedDecision::Reached(fact) => {
-                self.events.push_back(AdapterEvent::Limit(fact));
-            }
-            ReachedDecision::NeedFreshRead(ctx) => {
-                for fact in self.fresh_read(ctx).await {
-                    self.events.push_back(AdapterEvent::Limit(fact));
-                }
-            }
-            ReachedDecision::NotALimit => {}
+    // Свежие окна без запроса к модели: короткий probe account/rateLimits/read
+    // отдельной задачей; конец хода (`finish`) ждёт его завершения.
+    fn start_fresh_read(
+        &mut self,
+        ctx: CrunchContext,
+        command: Option<Uuid>,
+        finish: Vec<AdapterEvent>,
+    ) {
+        let executable = self.cfg.executable.clone();
+        let task = tokio::spawn(async move {
+            probe::probe(
+                &executable,
+                "account/rateLimits/read",
+                json!({}),
+                CRUNCH_PROBE,
+            )
+            .await
+        });
+        self.crunch = Some(PendingCrunch {
+            ctx,
+            command,
+            task,
+            finish,
+        });
+    }
+
+    fn finish_crunch(&mut self, result: CrunchResult) {
+        let Some(pending) = self.crunch.take() else {
+            return;
+        };
+        let facts = match result {
+            Ok(Ok(response)) => self.limits.on_fresh_read(&response, pending.ctx),
+            _ => Vec::new(),
+        };
+        let reached = facts
+            .iter()
+            .any(|fact| matches!(fact, crate::adapter::LimitFact::Reached { .. }));
+        self.events
+            .extend(facts.into_iter().map(AdapterEvent::Limit));
+        if pending.ctx == CrunchContext::RateLimitExceeded && !reached {
+            self.error_block("Codex ограничил частоту запросов".into(), pending.command);
         }
+        self.events.extend(pending.finish);
     }
 
-    // Свежие окна без запроса к модели: короткий probe account/rateLimits/read.
-    async fn fresh_read(&mut self, ctx: CrunchContext) -> Vec<crate::adapter::LimitFact> {
-        let response = probe::probe(
-            &self.cfg.executable,
-            "account/rateLimits/read",
-            json!({}),
-            CRUNCH_PROBE,
-        )
-        .await;
-        match response {
-            Ok(response) => self.limits.on_fresh_read(&response, ctx),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    async fn on_broker(&mut self, event: BrokerEvent) {
+    fn on_broker(&mut self, event: BrokerEvent) {
         let BrokerEvent::LimitsQuery { rpc_id } = event else {
             return;
         };
@@ -595,18 +649,14 @@ impl CodexAdapter {
             )
         })
         .collect();
-        self.broker
-            .as_mut()
-            .unwrap()
-            .answer_limits(
-                rpc_id,
-                &canterlot_proto::worker::v1::LimitsSnapshot {
-                    provider: "codex".into(),
-                    current,
-                    ..Default::default()
-                },
-            )
-            .await;
+        self.broker.as_mut().unwrap().answer_limits(
+            rpc_id,
+            &canterlot_proto::worker::v1::LimitsSnapshot {
+                provider: "codex".into(),
+                current,
+                ..Default::default()
+            },
+        );
     }
 
     // --- RPC поверх насоса ----------------------------------------------------
@@ -633,14 +683,17 @@ impl CodexAdapter {
         }
     }
 
+    // Строка уходит в буфер процесса синхронно, до первой точки ожидания:
+    // отмена посреди записи её не теряет и не рвёт (дописывается следующим вызовом).
     async fn flush_writes(&mut self) {
+        let Some(proc) = self.proc.as_mut() else {
+            return;
+        };
+        if proc.flush_out().await.is_err() {
+            return;
+        }
         while let Some(line) = self.pending_writes.pop_front() {
-            let Some(proc) = self.proc.as_mut() else {
-                self.pending_writes.push_front(line);
-                break;
-            };
             if proc.write_message(&line).await.is_err() {
-                self.pending_writes.push_front(line);
                 break;
             }
         }
@@ -1336,7 +1389,7 @@ async fn drain_until_exit(
             return false;
         }
         if let Ok(line) = timeout(Duration::from_millis(50), proc.next_line()).await {
-            adapter.dispatch_line(line).await;
+            adapter.dispatch_line(line);
         }
     }
 }
@@ -1344,7 +1397,7 @@ async fn drain_until_exit(
 async fn drain_available(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
     loop {
         match timeout(Duration::from_millis(50), proc.next_line()).await {
-            Ok(line @ StdoutLine::Line(_)) => adapter.dispatch_line(line).await,
+            Ok(line @ StdoutLine::Line(_)) => adapter.dispatch_line(line),
             _ => return,
         }
     }
@@ -1353,7 +1406,7 @@ async fn drain_available(proc: &mut AppServerProcess, adapter: &mut CodexAdapter
 async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
     loop {
         match proc.next_line().await {
-            line @ StdoutLine::Line(_) => adapter.dispatch_line(line).await,
+            line @ StdoutLine::Line(_) => adapter.dispatch_line(line),
             _ => return,
         }
     }
@@ -1585,6 +1638,9 @@ impl Adapter for CodexAdapter {
         mode: CloseMode,
         group: &dyn Containment,
     ) -> Result<(), AdapterError> {
+        if let Some(pending) = self.crunch.take() {
+            pending.task.abort();
+        }
         if let Some(broker) = &mut self.broker {
             broker.shutdown().await;
         }

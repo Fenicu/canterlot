@@ -197,6 +197,35 @@ fn rate_limit_exceeded_without_exhausted_window_is_not_reached() {
     assert!(!facts.iter().any(|f| f.0 == "reached"), "{facts:?}");
 }
 
+#[test]
+fn ordinary_usage_blocked_is_read_from_the_response_top_level() {
+    let window = |percent: f64| {
+        json!({"limitId": "codex",
+            "primary": {"windowDurationMins": 300, "usedPercent": percent, "resetsAt": 1792927784},
+            "secondary": {"windowDurationMins": 10080, "usedPercent": 10.0, "resetsAt": 1793514584}})
+    };
+    let reached = |read: Value| {
+        let mut tracker = LimitTracker::default();
+        tracker
+            .on_fresh_read(&read, CrunchContext::RateLimitExceeded)
+            .iter()
+            .any(|fact| matches!(fact, LimitFact::Reached { .. }))
+    };
+    // Схема GetAccountRateLimitsResponse: ordinaryUsageAllowed — поле ответа.
+    assert!(reached(
+        json!({"rateLimits": window(40.0), "ordinaryUsageAllowed": false})
+    ));
+    assert!(!reached(
+        json!({"rateLimits": window(40.0), "ordinaryUsageAllowed": true})
+    ));
+    let mut nested = window(40.0);
+    nested["ordinaryUsageAllowed"] = false.into();
+    assert!(
+        !reached(json!({"rateLimits": nested})),
+        "not a snapshot field"
+    );
+}
+
 struct FakeProbeServer {
     executable: PathBuf,
     methods_log: PathBuf,
