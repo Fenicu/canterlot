@@ -75,6 +75,10 @@ export function defaultModelId(
     : (models[0]?.id ?? "");
 }
 
+function submittedWorkdir(path: string): string {
+  return path.trim().replace(/(?<=.)\/+$/, "");
+}
+
 export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {
@@ -176,8 +180,9 @@ export class NewSessionModel {
       "create_conversation",
       {
         machine_id: this.machineId,
-        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой.
-        workdir: this.workdir.trim(),
+        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой, а косая
+        // черта после выбранной подсказки завела бы вторую запись в недавних папках.
+        workdir: submittedWorkdir(this.workdir),
         harness: this.harness,
         model: this.model,
         effort: this.effort,

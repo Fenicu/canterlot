@@ -8,7 +8,6 @@
   import { browserRuntime } from '#lib/screens/chat/open.js';
   import { effortLabel } from '#lib/screens/chat/settingsLabels.js';
   import Button from '#lib/ui/Button.svelte';
-  import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
@@ -16,6 +15,7 @@
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
   import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
+  import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
@@ -162,9 +162,7 @@
         {/each}
       </div>
     {/if}
-    <Field label="Рабочая папка">
-      {#snippet children({ id })}<input {id} aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />{/snippet}
-    </Field>
+    <WorkdirField {machineId} bind:value={path} />
     <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
     <div class="pair">
       <Select label="Модель" options={modelOptions} bind:value={modelId} />

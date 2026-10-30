@@ -780,6 +780,11 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
   });
 
+  await page.route('**/api/v1/machines/*/workdirs/suggest?*', async (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path') ?? '';
+    await route.fulfill({ headers: headers(), json: api.suggestWorkdirs(path) });
+  });
+
   const decisions = api.decisions;
 
   await page.route('**/api/v1/conversations/*/requests/*/decision', async (route) => {

@@ -122,6 +122,22 @@ describe("sessions/new", () => {
     expect(defaultModelId([], "opus")).toBe("");
   });
 
+  it("new_session_submits_a_chosen_suggestion_without_the_trailing_slash", async () => {
+    const journal = ops();
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    model.workdir = "/srv/canterlot/";
+    await model.submit();
+    expect(vi.mocked(journal.begin).mock.calls[0]?.[1]).toMatchObject({
+      workdir: "/srv/canterlot",
+    });
+    model.workdir = "/";
+    await model.submit();
+    expect(vi.mocked(journal.begin).mock.calls[1]?.[1]).toMatchObject({
+      workdir: "/",
+    });
+  });
+
   it("new_session_model_accepts_any_absolute_workdir", () => {
     const model = new NewSessionModel(store([machine()]), config, ops());
     model.machineId = "m1";

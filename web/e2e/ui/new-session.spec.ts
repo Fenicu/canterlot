@@ -1,4 +1,5 @@
 import type { Page } from '@playwright/test';
+import AxeBuilder from '@axe-core/playwright';
 import { FakeHub, FakeHubApi, seedPresets } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
@@ -22,6 +23,13 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null;
 }
 
 const pathField = (page: Page) => page.getByRole('textbox', { name: 'Рабочая папка' });
+const hint = (page: Page, name: string) => page.getByRole('option', { name, exact: true });
+
+async function openWithMachine(page: Page) {
+  await page.goto('/new');
+  await expect(page.getByRole('combobox', { name: 'Машина' })).not.toHaveValue('');
+}
+
 test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async ({ page }) => {
   await boot(page);
   const bodies: { start?: boolean; instruction_profile?: string; key: string }[] = [];
@@ -132,6 +140,82 @@ test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({
   await page.getByRole('button', { name: 'Создать' }).click();
   await expect(page).toHaveURL(/\/c\//);
   await expect(page.getByText(/Claude Code · Opus 1M · workstation/).first()).toBeVisible();
+});
+
+test('new_session_suggests_existing_folders_by_keyboard_and_continues_into_the_choice', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/c');
+  await expect(hint(page, '/srv/canterlot')).toBeVisible();
+  await expect(page.getByRole('option', { name: '/srv/notes' })).toHaveCount(0);
+  await pathField(page).press('ArrowDown');
+  await expect(hint(page, '/srv/canterlot')).toHaveAttribute('aria-selected', 'true');
+  await pathField(page).press('Enter');
+  await expect(pathField(page)).toHaveValue('/srv/canterlot/');
+  await expect(pathField(page)).toBeFocused();
+  await expect(hint(page, '/srv/canterlot/web')).toBeVisible();
+  await expect(page.getByRole('option', { name: '/srv/canterlot/.git' })).toHaveCount(0);
+  await pathField(page).press('Escape');
+  await expect(page.getByRole('option', { name: '/srv/canterlot/web' })).toHaveCount(0);
+  await expect(pathField(page)).toBeVisible();
+});
+
+test('new_session_suggestion_is_chosen_by_pointer_and_the_field_keeps_focus', async ({ page, hasTouch }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  await pathField(page).click();
+  await pathField(page).pressSequentially('/srv/');
+  if (hasTouch) await hint(page, '/srv/notes').tap();
+  else await hint(page, '/srv/notes').click();
+  await expect(pathField(page)).toHaveValue('/srv/notes/');
+  await expect(pathField(page)).toBeFocused();
+});
+
+test('new_session_shows_no_list_and_no_error_when_the_machine_does_not_answer', async ({ page }) => {
+  await boot(page, { solo: true });
+  await page.route('**/api/v1/machines/*/workdirs/suggest?*', (route) => route.abort());
+  await openWithMachine(page);
+  await pathField(page).fill('/tmp/typed-by-hand');
+  await page.waitForTimeout(400);
+  await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await expect(page.getByRole('button', { name: 'Создать' })).toBeEnabled();
+});
+
+test('new_session_ignores_a_late_answer_for_an_older_input', async ({ page }) => {
+  const { api } = await boot(page, { solo: true });
+  let older: (() => Promise<void>) | undefined;
+  const held = new Promise<void>((resolve) => {
+    void page.route('**/api/v1/machines/*/workdirs/suggest?*', async (route) => {
+      const url = new URL(route.request().url());
+      if (url.searchParams.get('path') === '/srv/c') {
+        older = () => route.fulfill({ json: { workdirs: ['/srv/late-answer'] } }).catch(() => undefined);
+        resolve();
+        return;
+      }
+      await route.fulfill({ json: api.suggestWorkdirs(url.searchParams.get('path') ?? '') });
+    });
+  });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/c');
+  await held;
+  await pathField(page).fill('/srv/n');
+  await expect(hint(page, '/srv/notes')).toBeVisible();
+  await older?.();
+  await page.waitForTimeout(100);
+  await expect(hint(page, '/srv/notes')).toBeVisible();
+  await expect(page.getByRole('option', { name: '/srv/late-answer' })).toHaveCount(0);
+});
+
+test('new_session_with_suggestions_has_no_axe_violations', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/');
+  await expect(hint(page, '/srv/notes')).toBeVisible();
+  const results = await new AxeBuilder({ page }).analyze();
+  expect(results.violations).toEqual([]);
 });
 
 test('new_session_crunch_default_text_comes_from_config', async ({ page }) => {

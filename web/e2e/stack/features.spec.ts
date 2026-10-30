@@ -1,5 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { PNG } from 'pngjs';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
@@ -293,6 +296,26 @@ test.describe('stack: features and security', () => {
     await expect(page.getByRole('progressbar', { name: 'notes.txt' })).toBeVisible({ timeout: 20_000 });
     await expect.poll(async () => Number(await page.getByRole('progressbar', { name: 'notes.txt' }).getAttribute('aria-valuenow')), { timeout: 20_000 }).toBe(Buffer.byteLength('содержимое файла'));
     await expect(page.getByRole('textbox', { name: 'Сообщение' })).toHaveValue(/Сверь с кодом/);
+  });
+
+  test('new_session_gets_home_and_suggestions_from_the_real_worker', tag, async ({ page }) => {
+    const stack = getStack();
+    mkdirSync(join(stack.workRoot, 'suggest-alpha', 'inner'), { recursive: true });
+    writeFileSync(join(stack.workRoot, 'suggest-file.txt'), 'файл');
+    await page.goto(`${stack.baseUrl}/new`);
+    await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
+    const field = page.getByRole('textbox', { name: 'Рабочая папка' });
+    await expect(page.getByRole('combobox', { name: 'Машина' })).not.toHaveValue('');
+    await expect(field).toHaveValue(homedir());
+    await field.fill(`${stack.workRoot}/suggest`);
+    await expect(page.getByRole('option', { name: `${stack.workRoot}/suggest-alpha`, exact: true })).toBeVisible();
+    await expect(page.getByRole('listbox', { name: 'Подсказки папок' }).getByRole('option')).toHaveCount(1);
+    await field.press('ArrowDown');
+    await field.press('Enter');
+    await expect(field).toHaveValue(`${stack.workRoot}/suggest-alpha/`);
+    await expect(page.getByRole('option', { name: `${stack.workRoot}/suggest-alpha/inner`, exact: true })).toBeVisible();
+    await field.fill('/etc/');
+    await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
   });
 
   test('edge_proxy_strips_client_remote_headers', tag, async ({ page }) => {
