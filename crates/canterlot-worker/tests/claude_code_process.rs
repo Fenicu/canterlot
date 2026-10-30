@@ -238,6 +238,27 @@ fn permission_modes_map_to_cli_values() {
 }
 
 #[test]
+fn environment_opts_into_todo_write_on_current_models() {
+    // Без согласия CLI 2.1.311 не даёт моделям 5-го поколения ни TodoWrite, ни Task*.
+    let parent = [
+        ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "false"),
+        ("CLAUDE_CODE_ENABLE_TASKS", "true"),
+    ]
+    .map(|(k, v)| (std::ffi::OsString::from(k), std::ffi::OsString::from(v)));
+    let out = build_env(parent.into_iter());
+    let value = |key: &str| {
+        let found: Vec<_> = out
+            .iter()
+            .filter(|(k, _)| k.to_string_lossy() == key)
+            .map(|(_, v)| v.to_string_lossy().to_string())
+            .collect();
+        found
+    };
+    assert_eq!(value("CLAUDE_CODE_ENABLE_TODO_TOOLS"), ["true"]);
+    assert_eq!(value("CLAUDE_CODE_ENABLE_TASKS"), ["false"]);
+}
+
+#[test]
 fn environment_drops_billing_and_nested_session_variables() {
     let pairs = vec![
         ("ANTHROPIC_API_KEY".to_string(), "x".to_string()),

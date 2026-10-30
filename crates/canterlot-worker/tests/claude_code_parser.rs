@@ -5,7 +5,7 @@
 //! tests/fixtures/claude_code/ (see its README.md).
 
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, Phase,
+    AdapterEvent, BlockKind, Phase, TodoItem, TodoStatus,
     claude_code::parser::{Parsed, Parser},
 };
 use serde_json::{Value, json};
@@ -494,4 +494,140 @@ fn tool_summary_cuts_a_four_byte_char_at_the_limit() {
         assert!(summary.len() > 116, "{} bytes", summary.len());
         assert!(summary.starts_with("Bash: a"));
     }
+}
+
+fn todos(parsed: &[Parsed]) -> Vec<(Option<Uuid>, Vec<TodoItem>)> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::TodoUpdated { lane, items }) => {
+                Some((*lane, items.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn todo(text: &str, status: TodoStatus) -> TodoItem {
+    TodoItem {
+        text: text.to_owned(),
+        status,
+    }
+}
+
+// Форма настоящего кадра из todo_write.jsonl; отличаются только дорожка и результат.
+fn todo_result(parent: Option<&str>, result: Value) -> String {
+    json!({
+        "type": "user",
+        "parent_tool_use_id": parent,
+        "session_id": "11111111-1111-4111-8111-111111111111",
+        "uuid": "aaaaaaaa-0000-4000-8000-000000000099",
+        "message": {"role": "user", "content": [{"type": "tool_result",
+            "tool_use_id": "toolu_todo2", "content": "Todos have been modified successfully."}]},
+        "tool_use_result": result,
+    })
+    .to_string()
+}
+
+fn new_todos(list: Value) -> Value {
+    json!({"oldTodos": [], "newTodos": list})
+}
+
+#[test]
+fn real_todo_write_gives_one_full_list() {
+    let lines = fixtures::replay_fixture("todo_write");
+    let parsed = feed_all(&mut Parser::new(), &lines);
+    assert_eq!(
+        todos(&parsed),
+        vec![(
+            None,
+            vec![
+                todo("Write the first note", TodoStatus::InProgress),
+                todo("Write the second note", TodoStatus::Pending),
+            ]
+        )]
+    );
+}
+
+#[test]
+fn subagent_todo_write_goes_to_the_lane_of_its_call() {
+    let mut parser = Parser::new();
+    let lines = fixtures::replay_fixture("subagent");
+    let parsed = feed_all(&mut parser, &lines);
+    let lane = parsed
+        .iter()
+        .find_map(|p| match p {
+            Parsed::ToolCallComplete {
+                block_id,
+                tool_name,
+                ..
+            } if tool_name == "Task" => Some(*block_id),
+            _ => None,
+        })
+        .expect("Task call");
+    let list = json!([{"content": "Read", "status": "completed", "activeForm": "Reading"}]);
+    let parsed = parser.feed(&todo_result(Some("toolu_task9"), new_todos(list)));
+    assert_eq!(
+        todos(&parsed),
+        vec![(Some(lane), vec![todo("Read", TodoStatus::Completed)])]
+    );
+}
+
+#[test]
+fn todo_of_an_unknown_subagent_never_lands_in_the_main_lane() {
+    let list = json!([{"content": "Read", "status": "pending", "activeForm": "Reading"}]);
+    let parsed = Parser::new().feed(&todo_result(Some("toolu_lost"), new_todos(list)));
+    assert_eq!(todos(&parsed), vec![]);
+    assert!(
+        parsed.iter().any(|p| matches!(
+            p,
+            Parsed::Event(AdapterEvent::Diagnostic {
+                kind: "todo_lane_unknown",
+                required: false,
+                ..
+            })
+        )),
+        "{parsed:?}"
+    );
+}
+
+#[test]
+fn rejected_todo_write_changes_nothing() {
+    let parsed = Parser::new().feed(&todo_result(
+        None,
+        json!("Error: InputValidationError: todos"),
+    ));
+    assert_eq!(todos(&parsed), vec![]);
+}
+
+#[test]
+fn empty_list_clears_and_odd_items_do_not_break_the_list() {
+    let parsed = Parser::new().feed(&todo_result(None, new_todos(json!([]))));
+    assert_eq!(todos(&parsed), vec![(None, vec![])]);
+    let list = json!([
+        {"content": "Later", "status": "blocked"},
+        {"status": "pending"},
+        {"content": 7, "status": "pending"},
+        {"content": "Now", "status": "in_progress"},
+    ]);
+    let parsed = Parser::new().feed(&todo_result(None, new_todos(list)));
+    assert_eq!(
+        todos(&parsed),
+        vec![(
+            None,
+            vec![
+                todo("Later", TodoStatus::Pending),
+                todo("Now", TodoStatus::InProgress),
+            ]
+        )]
+    );
+}
+
+#[test]
+fn todo_text_stays_out_of_debug() {
+    let marker = "PRIVATE_TODO_MARKER";
+    let list = json!([{"content": marker, "status": "pending", "activeForm": marker}]);
+    let parsed = Parser::new().feed(&todo_result(None, new_todos(list)));
+    assert!(!format!("{parsed:?}").contains(marker), "{parsed:?}");
+    assert_eq!(todos(&parsed).len(), 1);
 }

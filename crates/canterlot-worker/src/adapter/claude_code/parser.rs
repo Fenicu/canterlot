@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase};
+use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoStatus};
 
 /// Summary of a tool call: tool name plus the identifying argument.
 const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
@@ -183,6 +183,18 @@ impl std::fmt::Debug for Parsed {
             Self::Ignored => f.write_str("Ignored"),
         }
     }
+}
+
+/// Незнакомое состояние не должно терять пункт: он показывается как ожидающий.
+fn todo_item(todo: &serde_json::Value) -> Option<TodoItem> {
+    Some(TodoItem {
+        text: todo.get("content")?.as_str()?.to_owned(),
+        status: match todo.get("status").and_then(serde_json::Value::as_str) {
+            Some("in_progress") => TodoStatus::InProgress,
+            Some("completed") => TodoStatus::Completed,
+            _ => TodoStatus::Pending,
+        },
+    })
 }
 
 pub struct Parser {
@@ -751,6 +763,40 @@ impl Parser {
                 is_error,
             });
         }
+        self.feed_todos(value, out);
+    }
+
+    /// `newTodos` есть только у успешного `TodoWrite`, и в нём весь список. Вызовы субагента
+    /// приходят без потоковых кадров, поэтому источник один на все дорожки — этот кадр.
+    fn feed_todos(&self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let Some(todos) = value
+            .get("tool_use_result")
+            .and_then(|result| result.get("newTodos"))
+            .and_then(serde_json::Value::as_array)
+        else {
+            return;
+        };
+        let lane = match value
+            .get("parent_tool_use_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            None => None,
+            Some(id) => match self.tool_blocks.get(id) {
+                Some(block) => Some(*block),
+                None => {
+                    out.push(Parsed::Event(AdapterEvent::Diagnostic {
+                        kind: "todo_lane_unknown",
+                        event_type: String::new(),
+                        required: false,
+                    }));
+                    return;
+                }
+            },
+        };
+        out.push(Parsed::Event(AdapterEvent::TodoUpdated {
+            lane,
+            items: todos.iter().filter_map(todo_item).collect(),
+        }));
     }
 
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {

@@ -63,3 +63,14 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   `{"type":"image","source":{"type":"base64","media_type":"image/png","data":…}}`
   block; in mode `ask` the CLI allows `Read` inside the workdir itself, so
   the tool block carries `approved_by: "cli_policy"`.
+- `todo_write.jsonl` — `TodoWrite` through `claude -p` (not the live smoke),
+  bypass mode, no MCP servers, with `CLAUDE_CODE_ENABLE_TODO_TOOLS=true` and
+  `CLAUDE_CODE_ENABLE_TASKS=false`. The same prompt without those variables got
+  no todo tool on `claude-haiku-5-5`: CLI 2.1.311 gates `TodoWrite` and `Task*`
+  to models up to `claude-*-4-*`, and `system/init` `tools` lists neither.
+  `TodoWrite` is deferred, so `ToolSearch` comes first. Scrubbed: ids, hook,
+  thinking and rate limit frames, and `system/init` down to what the parser
+  reads. The list arrives whole in the `user` frame as
+  `tool_use_result.newTodos`, the same frame for both lanes. A subagent's
+  frames are not recorded; `assistant` and `user` frames with a non-null
+  `parent_tool_use_id` are read from the CLI binary.

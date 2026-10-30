@@ -319,6 +319,10 @@ pub fn build_env(parent: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsS
         }
     }
     out.push(("DISABLE_AUTOUPDATER".into(), "1".into()));
+    // Без первого CLI 2.1.311 прячет список задач от моделей новее claude-*-4; второй оставляет
+    // TodoWrite с полным списком вместо инкрементальных TaskCreate/TaskUpdate.
+    out.push(("CLAUDE_CODE_ENABLE_TODO_TOOLS".into(), "true".into()));
+    out.push(("CLAUDE_CODE_ENABLE_TASKS".into(), "false".into()));
     out
 }
 
