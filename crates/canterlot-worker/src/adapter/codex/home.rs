@@ -87,6 +87,32 @@ fn is_temp_path(path: &Path) -> bool {
     false
 }
 
+/// Канонический вид пути: сам путь, если существует, иначе ближайший
+/// существующий предок плюс остаток. Алиасы-симлинки раскрываются.
+fn canonical_form(path: &Path) -> PathBuf {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return canonical;
+    }
+    let mut existing = path;
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    while !existing.exists() {
+        match existing.parent() {
+            Some(parent) if parent != existing => {
+                if let Some(name) = existing.file_name() {
+                    rest.push(name.to_os_string());
+                }
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
+    let mut out = std::fs::canonicalize(existing).unwrap_or_else(|_| existing.to_path_buf());
+    for component in rest.into_iter().rev() {
+        out.push(component);
+    }
+    out
+}
+
 impl CodexHome {
     /// Дом владельца из конфигурации (явный override) или окружения
     /// ($CODEX_HOME или $HOME/.codex).
@@ -140,6 +166,20 @@ impl CodexHome {
             }
         };
         if path == owner_home {
+            return Err(HomeError::Unusable);
+        }
+        // Дом canterlot не должен совпадать с домом владельца, лежать внутри него,
+        // содержать его или указывать на него через симлинк: сравниваются
+        // канонические пути. Относительные пути запрещены с обеих сторон.
+        if path.is_relative() || owner_home.is_relative() {
+            return Err(HomeError::Unusable);
+        }
+        let home_canon = canonical_form(&path);
+        let owner_canon = canonical_form(&owner_home);
+        if home_canon == owner_canon
+            || home_canon.starts_with(&owner_canon)
+            || owner_canon.starts_with(&home_canon)
+        {
             return Err(HomeError::Unusable);
         }
         Ok(Self { path, owner_home })

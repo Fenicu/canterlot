@@ -270,6 +270,95 @@ fn builder_never_opens_owner_files() {
     assert!(!found_secret, "owner file contents must not be copied");
 }
 
+#[test]
+fn canterlot_home_inside_or_around_owner_home_is_refused() {
+    use std::os::unix::fs::symlink;
+    let td = TempDir::new().unwrap();
+    let owner = td.path().join("owner");
+    std::fs::create_dir_all(&owner).unwrap();
+    let home_env = |codex: Option<&std::ffi::OsStr>| {
+        let mut env = vec![(
+            OsString::from("HOME"),
+            OsString::from("/nonexistent-test-home"),
+        )];
+        if let Some(home) = codex {
+            env.push((OsString::from("CODEX_HOME"), home.to_os_string()));
+        }
+        env
+    };
+    let attempt = |home_dir: &Path, env: &[(OsString, OsString)]| {
+        let cfg = CodexConfig {
+            home_dir: Some(home_dir.to_path_buf()),
+            owner_home: None,
+            home_policy: TempDirPolicy::Allow,
+            ..Default::default()
+        };
+        CodexHome::resolve(&cfg, Path::new("/tmp/exec"), env)
+    };
+    // Вложен: дом canterlot внутри дома владельца.
+    let nested = owner.join("nested-home");
+    assert!(
+        attempt(&nested, &home_env(Some(owner.as_os_str()))).is_err(),
+        "canterlot home inside owner home must be refused"
+    );
+    // Родитель: дом canterlot содержит дом владельца.
+    assert!(
+        attempt(td.path(), &home_env(Some(owner.as_os_str()))).is_err(),
+        "canterlot home around owner home must be refused"
+    );
+    // Симлинк-алиас: canterlot ведёт в дом владельца.
+    let alias = td.path().join("alias-home");
+    symlink(&owner, &alias).unwrap();
+    assert!(
+        attempt(&alias, &home_env(Some(owner.as_os_str()))).is_err(),
+        "symlinked alias of owner home must be refused"
+    );
+    // Алиас внутрь дома владельца — тоже отказ.
+    let nested_dir = owner.join("nested");
+    std::fs::create_dir_all(&nested_dir).unwrap();
+    let alias_inside = td.path().join("alias-inside");
+    symlink(&nested_dir, &alias_inside).unwrap();
+    assert!(
+        attempt(&alias_inside, &home_env(Some(owner.as_os_str()))).is_err(),
+        "symlink into owner home must be refused"
+    );
+    // Тот же дом через алиас наоборот: canterlot настоящий, владелец — ссылка
+    // на посторонний каталог. Пересечений нет — разрешается.
+    let owner_alias = td.path().join("owner-alias");
+    symlink(&owner, &owner_alias).unwrap();
+    let real_canterlot = td.path().join("real-home");
+    std::fs::create_dir_all(&real_canterlot).unwrap();
+    assert!(
+        attempt(&real_canterlot, &home_env(Some(owner_alias.as_os_str()))).is_ok(),
+        "unrelated homes must resolve even when the owner is behind a symlink"
+    );
+    // Относительный дом владельца.
+    assert!(
+        attempt(
+            &td.path().join("elsewhere"),
+            &home_env(Some(std::ffi::OsStr::new("relative/codex")))
+        )
+        .is_err(),
+        "relative owner home must be refused"
+    );
+    // Пустой HOME: запасной `.codex` относителен — тоже отказ.
+    assert!(
+        attempt(
+            &td.path().join("elsewhere"),
+            &[(OsString::from("HOME"), OsString::from(""))]
+        )
+        .is_err(),
+        "empty HOME fallback must be refused"
+    );
+    // Разные существующие каталоги рядом — можно.
+    let sibling = td.path().join("sibling-home");
+    std::fs::create_dir_all(&sibling).unwrap();
+    assert!(
+        attempt(&sibling, &home_env(Some(owner.as_os_str()))).is_ok(),
+        "unrelated absolute homes must resolve"
+    );
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = vec![];
     let mut stack = vec![dir.to_path_buf()];
