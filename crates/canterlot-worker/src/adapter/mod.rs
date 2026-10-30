@@ -556,6 +556,18 @@ pub struct HarnessCatalog {
     pub permission_modes: Vec<&'static str>,
     pub models: Vec<ModelCatalog>,
 }
+// Первая модель харнесса — выбор формы по умолчанию. `haiku[1m]` CLI отказывает в
+// `set_model`, поэтому у Haiku варианта 1M нет.
+const CLAUDE_MODELS: &[(&str, &str)] = &[
+    ("opus[1m]", "Opus 1M"),
+    ("sonnet[1m]", "Sonnet 1M"),
+    ("fable[1m]", "Fable 1M"),
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("fable", "Fable"),
+    ("haiku", "Haiku"),
+];
+
 pub fn catalog() -> Vec<HarnessCatalog> {
     catalog_with(None, None, None)
 }
@@ -575,9 +587,9 @@ pub fn catalog_with(
             settings_midsession: true,
             settings_midsession_effort: false,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
-            models: [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
-                .into_iter()
-                .map(|(id, title)| ModelCatalog {
+            models: CLAUDE_MODELS
+                .iter()
+                .map(|&(id, title)| ModelCatalog {
                     id: id.into(),
                     title: title.into(),
                     efforts: ["low", "medium", "high", "xhigh", "max"]
