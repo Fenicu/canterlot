@@ -511,6 +511,56 @@ async fn post_decision_refuses_nul_in_text_and_keeps_the_request_open(pool: PgPo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_takes_the_queue_lock_before_the_request_row(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let request = f.request("permission", json!({"tool":"Bash"})).await;
+    // Пакет SJ держит очередь с первой записи и позже берёт счётчик событий и строку запроса.
+    let mut batch = f.pool.begin().await.unwrap();
+    sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
+        .bind(f.conversation)
+        .execute(&mut *batch)
+        .await
+        .unwrap();
+    let (client, path) = (f.client.clone(), f.path(request));
+    let decision = tokio::spawn(async move {
+        client
+            .send(Method::POST, &path, Some("decision"), Some(permission()))
+            .await
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let waiting: i64 = sqlx::query_scalar(
+                "select count(*) from pg_stat_activity
+                 where datname=current_database() and wait_event_type='Lock'
+                   and query like '%queue_state%'",
+            )
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+            if waiting > 0 {
+                break;
+            }
+            assert!(
+                !decision.is_finished(),
+                "the decision committed while the queue was locked"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let row_free: Option<Uuid> =
+        sqlx::query_scalar("select id from requests where id=$1 for update skip locked")
+            .bind(request)
+            .fetch_optional(&mut *batch)
+            .await
+            .unwrap();
+    assert_eq!(row_free, Some(request));
+    batch.rollback().await.unwrap();
+    assert_eq!(decision.await.unwrap().status, 200);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn post_decision_free_text_requires_an_explicit_true_contract_flag(pool: PgPool) {
     let f = Fixture::new(pool).await;
     for flag in ["allow_custom", "isOther", "is_other"] {

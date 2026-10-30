@@ -417,6 +417,17 @@ async fn decision(
                 .bind(lock_id)
                 .execute(&mut *conn)
                 .await?;
+            // Пакет SJ держит очередь с первой записи: без неё решение встретило бы его
+            // на строке запроса и счётчике событий в обратном порядке.
+            sqlx::query(
+                "select q.conversation_id from queue_state q
+                 join conversations c on c.id = q.conversation_id
+                 where c.id=$1 and c.owner_id=$2 for update of q",
+            )
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&mut *conn)
+            .await?;
             let owned: Option<Uuid> = sqlx::query_scalar(
                 "select id from conversations where id=$1 and owner_id=$2 for no key update",
             )
