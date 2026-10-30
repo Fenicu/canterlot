@@ -913,9 +913,7 @@ fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
     } else {
         format!("{tool_name}: {argument}")
     };
-    if summary.len() > TOOL_CALL_SUMMARY_LIMIT {
-        summary.truncate(TOOL_CALL_SUMMARY_LIMIT);
-    }
+    summary.truncate(summary.floor_char_boundary(TOOL_CALL_SUMMARY_LIMIT));
     summary
 }
 
