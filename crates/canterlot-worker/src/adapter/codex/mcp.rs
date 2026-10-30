@@ -5,7 +5,9 @@ use std::{ffi::OsString, path::Path};
 use crate::adapter::{AdapterEvent, canterlot_mcp};
 use serde_json::Value;
 
-pub use canterlot_mcp::{SERVER_INSTRUCTIONS, ToolSet, limits_tool_text};
+pub use canterlot_mcp::{
+    CODEX_SERVER_INSTRUCTIONS as SERVER_INSTRUCTIONS, ToolSet, limits_tool_text,
+};
 
 pub const SERVER_NAME: &str = canterlot_mcp::SERVER_NAME;
 

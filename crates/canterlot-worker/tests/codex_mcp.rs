@@ -102,6 +102,15 @@ fn server_instructions_go_to_initialize_and_developer_instructions() {
 }
 
 #[test]
+fn codex_instructions_do_not_describe_claude_tools() {
+    assert!(!SERVER_INSTRUCTIONS.contains("Claude"));
+    assert!(!SERVER_INSTRUCTIONS.contains("approve tool"));
+    assert!(!SERVER_INSTRUCTIONS.contains("AskUserQuestion"));
+    assert!(SERVER_INSTRUCTIONS.contains("canterlot_limits"));
+    assert!(SERVER_INSTRUCTIONS.contains("canterlot_preset_apply"));
+}
+
+#[test]
 fn failed_startup_status_is_an_optional_diagnostic() {
     let params = json!({"name": "canterlot", "status": "failed"});
     let event =
