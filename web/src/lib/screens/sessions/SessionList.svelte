@@ -235,6 +235,8 @@
         <Section
           {...section}
           now={now}
+          current={openRow?.id ?? ''}
+          heading={tab.kind === 'all' && !results}
           ontoggle={toggle}
           onopen={(id) => sheetId = id}
         />

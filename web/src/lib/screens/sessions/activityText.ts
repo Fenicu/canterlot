@@ -69,7 +69,7 @@ export function activityLine(
     case "stalled": {
       const from = Date.parse(evidence.last_event_at ?? activity.since ?? "");
       const duration = Number.isFinite(from)
-        ? fmt.duration(Math.max(0, ctx.now - from))
+        ? fmt.durationCoarse(Math.max(0, ctx.now - from))
         : fmt.duration(0);
       return {
         text: `Подвисла? Нет событий ${duration}`,
@@ -81,7 +81,7 @@ export function activityLine(
       return quota(evidence, ctx.now);
     case "failed":
       return {
-        text: `Сбой: ${FAILED[evidence.reason ?? ""] ?? "ошибка"}`,
+        text: `Сбой: ${FAILED[evidence.reason ?? ""] ?? "причина неизвестна"}`,
         tone: "danger",
         live: false,
       };
@@ -120,7 +120,7 @@ function working(
     const name = evidence.summary || evidence.tool_name || "инструмент";
     const from = Date.parse(evidence.phase_since ?? since ?? "");
     const duration = Number.isFinite(from)
-      ? fmt.duration(Math.max(0, now - from))
+      ? fmt.durationCoarse(Math.max(0, now - from))
       : fmt.duration(0);
     return {
       text: `Выполняет ${name} · ${duration}`,

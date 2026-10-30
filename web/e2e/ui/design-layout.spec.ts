@@ -1,6 +1,8 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
+import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -14,6 +16,14 @@ async function boot(page: Page, seed?: (api: FakeHubApi, id: string) => void) {
   await page.goto(`/c/${id}`);
   await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
   return { hub, api, id };
+}
+
+function block(api: FakeHubApi, seq: string, partial: Partial<HistoryBlock>): HistoryBlock {
+  const id = api.id();
+  const content = partial.content ?? 'вывод';
+  const at = new Date(Date.now() - 60_000).toISOString();
+  api.blocks.set(id, { text: content, rev: 1, state: 'final' });
+  return { kind: 'block', id, block_kind: 'text', content, content_bytes: content.length, content_truncated: false, created_seq: seq, created_at: at, rev: 1, state: 'final', agent: 'claude', model: 'opus-5.5', tool_name: null, summary: null, parent_block_id: null, input_command_id: null, line_count: 1, started_at: at, finished_at: new Date(Date.now() - 59_000).toISOString(), ...partial };
 }
 
 function startTurn(hub: FakeHub, api: FakeHubApi, id: string): void {
@@ -61,5 +71,52 @@ test.describe('поле ввода', () => {
     const ring = await page.locator('.capsule').evaluate((node) => getComputedStyle(node).outlineStyle);
     expect(ring).toBe('solid');
     expect(await field.evaluate((node) => getComputedStyle(node).outlineStyle)).toBe('none');
+  });
+});
+
+test.describe('строки инструментов и сессий', () => {
+  test('tool_row_keeps_the_name_whole_and_the_status_at_the_right_edge', async ({ page }) => {
+    const { api, id } = await boot(page);
+    api.histories.set(id, [block(api, '1', { block_kind: 'tool_call', tool_name: 'Bash', summary: 'cargo test -p canterlot-hub --test stream -- --nocapture reconnect_after_sleep', content: 'ok' })]);
+    api.bindConversation(id);
+    await page.reload();
+    const head = page.locator('.tool .head');
+    await expect(head).toBeVisible();
+    const box = await head.evaluate((node) => {
+      const name = node.querySelector('.name')!;
+      const summary = node.querySelector('.summary')!;
+      const pill = node.querySelector('.pill')!;
+      const style = getComputedStyle(name);
+      return { nameHeight: name.getBoundingClientRect().height, line: parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6, summaryLines: summary.getBoundingClientRect().height, gap: node.getBoundingClientRect().right - pill.getBoundingClientRect().right, ellipsis: getComputedStyle(summary).textOverflow, chevron: node.querySelectorAll('svg').length };
+    });
+    expect(box.nameHeight).toBeLessThan(box.line * 1.5);
+    expect(box.summaryLines).toBeLessThan(box.line * 1.5);
+    expect(box.gap).toBeLessThan(24);
+    expect(box.ellipsis).toBe('ellipsis');
+    expect(box.chevron).toBe(1);
+  });
+
+  test('session_row_shows_unread_or_time_and_never_lays_them_over_the_meta_line', async ({ page }) => {
+    const hub = new FakeHub();
+    const api = new FakeHubApi(hub);
+    const ids = seedMockupSessions(api);
+    for (const row of api.list.values()) row.last_activity_at = new Date().toISOString();
+    await installChatRoutes(page, hub, api, ids.pinned);
+    await page.goto('/sessions');
+    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+    const rows = await page.locator('[data-session]').evaluateAll((nodes) => nodes.map((node) => {
+      const time = node.querySelector('time')?.getBoundingClientRect();
+      const meta = node.querySelector('.meta')!.getBoundingClientRect();
+      const title = node.querySelector('.title')!.getBoundingClientRect();
+      return { time: time ? { top: time.top, bottom: time.bottom, left: time.left } : null, metaTop: meta.top, titleRight: title.right, unread: node.querySelector('.unread, .count') !== null };
+    }));
+    expect(rows.length).toBeGreaterThan(3);
+    for (const row of rows) {
+      if (row.unread) expect(row.time).toBeNull();
+      if (row.time) {
+        expect(row.time.bottom).toBeLessThanOrEqual(row.metaTop + 1);
+        expect(row.time.left).toBeGreaterThanOrEqual(row.titleRight - 1);
+      }
+    }
   });
 });
