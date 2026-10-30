@@ -23,6 +23,7 @@
 	import {
 		PERMISSION_MODES,
 		effortLabel,
+		modelLabel,
 		permissionHint,
 		permissionLabel,
 		permissionValue
@@ -282,7 +283,7 @@
 				options={modelOptions}
 				bind:value={selectedModel}
 				disabled={locked}
-				hint={pending?.model ? `${effective.model} → ${pending.model} со следующего хода` : undefined}
+				hint={pending?.model ? `${modelLabel(effective.model ?? '')} → ${modelLabel(pending.model)} со следующего хода` : undefined}
 				error={!midsessionSupported ? 'Настройка посреди сессии не поддерживается' : (modelError ?? undefined)}
 			/>
 			<Select

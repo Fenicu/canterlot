@@ -43,7 +43,7 @@ use super::{
 use crate::{
     adapter::{
         Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, DecisionOutcome,
-        InstructionSpec, InterruptOutcome, LimitFact, LimitWindow, LocalFile, MediaSource, Phase,
+        InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase,
         SettingsChange, StartSpec, Transmission, TransmitOutcome, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
@@ -1655,14 +1655,6 @@ impl Supervisor {
                         event_type: "limit_fact_dropped".into(),
                     }))?;
                 } else {
-                    let window = |w| match w {
-                        LimitWindow::FiveHour => {
-                            canterlot_proto::worker::v1::LimitWindow::FiveHour as i32
-                        }
-                        LimitWindow::Weekly => {
-                            canterlot_proto::worker::v1::LimitWindow::Weekly as i32
-                        }
-                    };
                     let body = match fact {
                         LimitFact::Observed {
                             window: w,
@@ -1670,7 +1662,7 @@ impl Supervisor {
                             resets_at_ms,
                         } => Body::LimitObserved(canterlot_proto::worker::v1::LimitObservation {
                             provider: self.provider.clone(),
-                            window: window(w),
+                            window: w.into(),
                             used_permille: u32::from(used_permille),
                             resets_at_ms: resets_at_ms.unwrap_or(0),
                             observed_machine_ms: now_ms(),
@@ -1681,7 +1673,7 @@ impl Supervisor {
                         } => Body::LimitReached(canterlot_proto::worker::v1::LimitReached {
                             execution_id: self.spec.execution_id.to_string(),
                             provider: self.provider.clone(),
-                            window: window(w),
+                            window: w.into(),
                             resets_at_ms: resets_at_ms.unwrap_or(0),
                             input_command_id: self
                                 .active_turn

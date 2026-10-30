@@ -138,7 +138,7 @@ pub fn observations_from_read_response(
         for (window, permille, resets_at_ms) in windows_from_snapshot(&snapshot) {
             observations.push(LimitObservation {
                 provider: "codex".into(),
-                window: window as i32,
+                window: window.into(),
                 used_permille: u32::from(permille),
                 resets_at_ms: resets_at_ms.unwrap_or_default(),
                 observed_machine_ms: observed_ms,

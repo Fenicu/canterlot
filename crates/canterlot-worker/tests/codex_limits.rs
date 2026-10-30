@@ -9,12 +9,13 @@ use std::{
     time::Duration,
 };
 
-use canterlot_proto::worker::v1::LimitObservation;
+use canterlot_proto::worker::v1::{LimitObservation, LimitWindow as ProtoLimitWindow};
 use canterlot_worker::{
     adapter::{
         LimitFact, LimitWindow,
         codex::limits::{
-            CrunchContext, LimitTracker, ReachedDecision, TurnErrorInfo, windows_from_snapshot,
+            CrunchContext, LimitTracker, ReachedDecision, TurnErrorInfo,
+            observations_from_read_response, windows_from_snapshot,
         },
         codex::probe::{self, ProbeError},
     },
@@ -382,6 +383,32 @@ for line in sys.stdin:
             .lines()
             .map(str::to_owned)
             .collect()
+    }
+}
+
+#[test]
+fn live_read_response_reports_proto_windows() {
+    let response = fixture_json("rate_limits_read_live.json");
+    let observed: Vec<(i32, u32, u64)> = observations_from_read_response(&response, NOW)
+        .iter()
+        .map(|o| (o.window, o.used_permille, o.resets_at_ms))
+        .collect();
+    let five_hour = (1, 0, 1_793_413_335_000);
+    let weekly = (2, 970, 1_793_774_201_000);
+    assert_eq!(observed, vec![five_hour, weekly, five_hour, weekly]);
+    assert_eq!(five_hour.0, ProtoLimitWindow::FiveHour as i32);
+    assert_eq!(weekly.0, ProtoLimitWindow::Weekly as i32);
+}
+
+#[test]
+fn internal_windows_convert_to_proto_values() {
+    for (window, proto) in [
+        (LimitWindow::FiveHour, ProtoLimitWindow::FiveHour),
+        (LimitWindow::Weekly, ProtoLimitWindow::Weekly),
+    ] {
+        assert_eq!(ProtoLimitWindow::from(window), proto);
+        assert_eq!(i32::from(window), proto as i32);
+        assert_eq!(window as i32, proto as i32);
     }
 }
 

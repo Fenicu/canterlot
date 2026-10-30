@@ -135,6 +135,7 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 		os: patch.os ?? 'linux',
 		warnings: patch.warnings ?? [],
 		metrics: patch.metrics ?? { observed_at: '2026-10-28T12:00:00.000Z' },
+		home_dir: patch.home_dir ?? null,
 		harnesses: patch.harnesses ?? [
 			{
 				id: 'claude',

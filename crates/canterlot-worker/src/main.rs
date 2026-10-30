@@ -118,14 +118,22 @@ async fn mcp_relay() -> Option<ExitCode> {
     }
 }
 
+fn init_tracing() {
+    let filter = tracing_subscriber::EnvFilter::builder()
+        .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+        .from_env_lossy();
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .with_writer(std::io::stderr)
+        .init();
+}
+
 async fn supervise() -> Option<ExitCode> {
     let Command::Supervise { exec_dir } = Cli::try_parse().ok()?.command else {
         return None;
     };
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+    init_tracing();
     Some(match canterlot_worker::supervisor::run(exec_dir).await {
         Ok(code) => code,
         Err(error) => {
@@ -158,10 +166,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
     };
-    tracing_subscriber::fmt()
-        .with_target(false)
-        .with_writer(std::io::stderr)
-        .init();
+    init_tracing();
     let (config, store) = tokio::task::spawn_blocking(move || {
         let config = config::load(&path)?;
         let _token = config::read_token(&config.token_file)?;

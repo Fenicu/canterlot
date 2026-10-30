@@ -203,3 +203,9 @@ export function providerLabel(value: Value): string {
 function capitalize(text: string): string {
   return text.charAt(0).toLocaleUpperCase("ru-RU") + text.slice(1);
 }
+
+/** Строка сессии не держит каталог машины, а `opus[1m]` владельцу показывается названием продукта. */
+export const modelLabel = (value: string): string => {
+  const base = value.replace(/\[1m\]$/, '');
+  return base === value ? value : `${base.charAt(0).toUpperCase()}${base.slice(1)} 1M`;
+};

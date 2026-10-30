@@ -12,6 +12,7 @@ use crate::adapter::codex::{limits::observations_from_read_response, probe};
 use crate::config::{ClaudeCodeConfig, CodexConfig};
 
 pub const CODEX_IDLE_TICK_INTERVAL: Duration = Duration::from_secs(60);
+const FIRST_TICK_MAX_DELAY: Duration = Duration::from_secs(60);
 const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
@@ -120,7 +121,8 @@ impl LiveLimits {
 }
 
 /// Общий тикер опроса лимитов без живых сессий: каждый провайдер со своим интервалом,
-/// первый тик через интервал после регистрации. Решение, опрашивать ли на самом деле,
+/// первый тик не позже чем через минуту после регистрации: при перезапусках чаще
+/// интервала иначе не дошло бы до первого опроса. Решение, опрашивать ли на самом деле,
 /// остаётся за источником провайдера.
 #[derive(Debug, Default)]
 pub struct IdleTicker {
@@ -129,8 +131,11 @@ pub struct IdleTicker {
 
 impl IdleTicker {
     pub fn register(&mut self, provider: &str, interval: Duration) {
-        self.entries
-            .push((provider.to_owned(), interval, Instant::now() + interval));
+        self.entries.push((
+            provider.to_owned(),
+            interval,
+            Instant::now() + interval.min(FIRST_TICK_MAX_DELAY),
+        ));
     }
 
     /// Ждёт ближайшего срока и возвращает провайдеров, чей срок наступил; без записей не завершается.
@@ -202,6 +207,7 @@ struct PollState {
     last_request: Option<Instant>,
     backoff_until: Option<Instant>,
     rate_limited: u32,
+    reported: Option<OAuthPollError>,
 }
 
 /// Окна Claude без живых сессий через OAuth-точку `usage`: без запроса к модели.
@@ -334,6 +340,12 @@ impl ClaudeOAuthLimitsSource {
             Ok(observations) => {
                 state.rate_limited = 0;
                 state.backoff_until = None;
+                if state.reported.take().is_some() {
+                    tracing::info!(
+                        kind = "claude_oauth_poll_recovered",
+                        "claude limits poll recovered"
+                    );
+                }
                 observations
             }
             Err(error) => {
@@ -346,8 +358,10 @@ impl ClaudeOAuthLimitsSource {
                         .max(self.interval);
                     state.backoff_until = Some(now + backoff);
                 }
-                if matches!(error, OAuthPollError::Expired | OAuthPollError::RateLimited) {
-                    tracing::debug!(kind = "claude_oauth_poll_skipped", reason = %error, "claude limits poll skipped");
+                // Просроченный токен и 429 штатны, но без них окна Claude молчат: причина
+                // видна один раз, повтор той же причины журнал не засоряет.
+                if state.reported.replace(error) == Some(error) {
+                    tracing::debug!(kind = "claude_oauth_poll_repeated", reason = %error, "claude limits poll failed again");
                 } else {
                     tracing::warn!(kind = "claude_oauth_poll_failed", reason = %error, "claude limits poll failed");
                 }
@@ -426,6 +440,9 @@ fn usage_observations(
         Some((window, utilization, resets))
     })
     .collect();
+    if rows.is_empty() {
+        return Err(OAuthPollError::Body);
+    }
     Ok(rows
         .into_iter()
         .map(|(window, utilization, resets)| LimitObservation {

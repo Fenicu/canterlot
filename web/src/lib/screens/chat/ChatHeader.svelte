@@ -5,6 +5,7 @@
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
+	import { modelLabel } from '#lib/format/labels.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import Menu from '#lib/ui/Menu.svelte';
@@ -64,8 +65,8 @@
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
 
-	const effectiveModel = $derived(settings?.effective?.model || detail?.model || 'opus-5.5');
-	const pendingModel = $derived(settings?.pending?.model);
+	const effectiveModel = $derived(modelLabel(settings?.effective?.model || detail?.model || 'opus-5.5'));
+	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
 
 	const subtitle = $derived(
 		pendingModel

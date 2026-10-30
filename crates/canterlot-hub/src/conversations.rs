@@ -663,7 +663,7 @@ fn valid_text(s: &str, max: usize) -> bool {
     !s.contains('\0') && s.chars().count() <= max
 }
 /// Путь входит в ключ `machine_workdirs`, а строка btree ограничена примерно 2700 байтами.
-pub const MAX_WORKDIR_BYTES: usize = 2048;
+pub use canterlot_proto::limits::MAX_WORKDIR_BYTES;
 
 fn workdir_allowed(workdir: &str, roots: &Value) -> bool {
     use std::path::{Component, Path};

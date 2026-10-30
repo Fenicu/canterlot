@@ -1,5 +1,6 @@
 use crate::containment::{Containment, ContainmentError};
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
+use canterlot_proto::worker::v1::LimitWindow as ProtoLimitWindow;
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -193,9 +194,26 @@ pub struct ModelUsage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LimitWindow {
-    FiveHour,
-    Weekly,
+    // Значения берутся из proto: приведение `as i32` не может дать чужое окно.
+    FiveHour = ProtoLimitWindow::FiveHour as isize,
+    Weekly = ProtoLimitWindow::Weekly as isize,
 }
+
+impl From<LimitWindow> for ProtoLimitWindow {
+    fn from(window: LimitWindow) -> Self {
+        match window {
+            LimitWindow::FiveHour => Self::FiveHour,
+            LimitWindow::Weekly => Self::Weekly,
+        }
+    }
+}
+
+impl From<LimitWindow> for i32 {
+    fn from(window: LimitWindow) -> Self {
+        ProtoLimitWindow::from(window).into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LimitFact {
     Observed {
@@ -556,6 +574,18 @@ pub struct HarnessCatalog {
     pub permission_modes: Vec<&'static str>,
     pub models: Vec<ModelCatalog>,
 }
+// Первая модель харнесса — выбор формы по умолчанию. `haiku[1m]` CLI отказывает в
+// `set_model`, поэтому у Haiku варианта 1M нет.
+const CLAUDE_MODELS: &[(&str, &str)] = &[
+    ("opus[1m]", "Opus 1M"),
+    ("sonnet[1m]", "Sonnet 1M"),
+    ("fable[1m]", "Fable 1M"),
+    ("opus", "Opus"),
+    ("sonnet", "Sonnet"),
+    ("fable", "Fable"),
+    ("haiku", "Haiku"),
+];
+
 pub fn catalog() -> Vec<HarnessCatalog> {
     catalog_with(None, None, None)
 }
@@ -575,9 +605,9 @@ pub fn catalog_with(
             settings_midsession: true,
             settings_midsession_effort: false,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
-            models: [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")]
-                .into_iter()
-                .map(|(id, title)| ModelCatalog {
+            models: CLAUDE_MODELS
+                .iter()
+                .map(|&(id, title)| ModelCatalog {
                     id: id.into(),
                     title: title.into(),
                     efforts: ["low", "medium", "high", "xhigh", "max"]

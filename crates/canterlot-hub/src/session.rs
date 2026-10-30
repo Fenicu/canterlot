@@ -7,8 +7,11 @@ use std::{
     time::Instant,
 };
 
-use canterlot_proto::worker::v1::ControlDown;
-use tokio::sync::{Notify, broadcast, mpsc};
+use canterlot_proto::{
+    limits::MAX_WORKDIR_SUGGESTIONS,
+    worker::v1::{ControlDown, SuggestWorkdirs, WorkdirSuggestions, control_down},
+};
+use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -18,6 +21,10 @@ pub const CAPABILITY_PILOT_V1: &str = "pilot_v1";
 pub const CAPABILITY_INSTRUCTIONS_V1: &str = "instructions_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
+pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
+
+/// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
+pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -49,11 +56,29 @@ struct SessionEntry {
     clock_samples: VecDeque<chrono::Duration>,
 }
 
+type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
+
 #[derive(Clone)]
 pub struct Registry {
     entries: Arc<Mutex<HashMap<Uuid, SessionEntry>>>,
     timers: HubTimers,
     changes: broadcast::Sender<(Uuid, Availability)>,
+    suggests: SuggestWaiters,
+}
+
+/// Снимает ожидание и на сроке, и при обрыве HTTP-запроса.
+struct SuggestSlot {
+    waiters: SuggestWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for SuggestSlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("suggest waiters lock")
+            .remove(&self.key);
+    }
 }
 
 /// Тестовое подключение к реестру: держит слот, пока живёт guard.
@@ -69,6 +94,7 @@ impl Registry {
             entries: Arc::new(Mutex::new(HashMap::new())),
             timers,
             changes: broadcast::channel(256).0,
+            suggests: Arc::default(),
         }
     }
 
@@ -237,6 +263,68 @@ impl Registry {
                 entry.credential.clone(),
             )
         })
+    }
+
+    /// Подсказка рабочей папки от живого воркера. Нет сеанса с возможностью, занято или
+    /// вышел срок: пустой список, форма остаётся со свободным вводом.
+    pub async fn suggest_workdirs(
+        &self,
+        machine_id: Uuid,
+        path: &str,
+        wait: std::time::Duration,
+    ) -> Vec<String> {
+        if !self.has_capability(machine_id, CAPABILITY_WORKDIR_SUGGEST_V1) {
+            return Vec::new();
+        }
+        let Some(sender) = self.command_sender(machine_id) else {
+            return Vec::new();
+        };
+        let request_id = Uuid::now_v7();
+        let key = (machine_id, request_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self.suggests.lock().expect("suggest waiters lock");
+            let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
+            if busy >= MAX_SUGGESTS_PER_MACHINE {
+                return Vec::new();
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = SuggestSlot {
+            waiters: self.suggests.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::SuggestWorkdirs(SuggestWorkdirs {
+                request_id: request_id.to_string(),
+                path: path.to_owned(),
+            })),
+        };
+        if sender.try_send(message).is_err() {
+            return Vec::new();
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_default()
+    }
+
+    /// Ответ принимается только от машины, которую спросили.
+    pub fn finish_suggest(&self, machine_id: Uuid, reply: WorkdirSuggestions) {
+        let Ok(request_id) = Uuid::parse_str(&reply.request_id) else {
+            return;
+        };
+        let waiter = self
+            .suggests
+            .lock()
+            .expect("suggest waiters lock")
+            .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let mut directories = reply.directories;
+            directories.truncate(MAX_WORKDIR_SUGGESTIONS);
+            let _ = waiter.send(directories);
+        }
     }
 
     pub fn subscribe_changes(&self) -> broadcast::Receiver<(Uuid, Availability)> {

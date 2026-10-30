@@ -47,6 +47,9 @@
   `account/rateLimits/read` (`schema:GetAccountRateLimitsResponse`) с окнами
   `primary`/`secondary` и дубликатом в `rateLimitsByLimitId.codex`.
 
+- `rate_limits_read_live.json` — настоящий ответ `account/rateLimits/read` (пилот,
+  31.10, codex 0.164). Удалены `accountId` и `planType`, остальное без правок.
+
 - `usage_limit_turn.jsonl`, `usage_limit_need_read.jsonl`, `usage_limit_read.json`,
   `rate_limit_turn.jsonl` — сконструировано, подтвердить в live smoke. Сценарии
   «кранча» для `usageLimitExceeded` и `rateLimitExceeded` (Task 6).

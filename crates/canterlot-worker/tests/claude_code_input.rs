@@ -514,6 +514,42 @@ fn attachments_add_paths_and_small_images_as_native_blocks() {
 // --- настройки посреди сессии ----------------------------------------------------
 
 #[tokio::test]
+async fn one_million_variant_goes_to_set_model_unchanged() {
+    let (one, two) = (Uuid::now_v7(), Uuid::now_v7());
+    let mut fake = Fake::start(|dir| {
+        write_frames(dir, "turn_1.out", &alpha_turn(one));
+        write_frames(dir, "turn_2.out", &alpha_turn(two));
+    })
+    .await;
+    let mut driver = InputDriver::new(
+        InputQueue::new(launch("ask")).with_control_timeout(Duration::from_secs(1)),
+        Parser::new(),
+    );
+    let outcome = driver
+        .transmit(&mut fake.cli, &tx(one, 1, "one"), None, DEADLINE)
+        .await;
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &with_settings(tx(two, 1, "two"), model("fable[1m]")),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+    assert_eq!(
+        fake.stdin_log()[1]["request"],
+        json!({"subtype": "set_model", "model": "fable[1m]"})
+    );
+    finish_turn(&mut driver, &mut fake).await;
+    assert_eq!(driver.queue.effective().model, "fable[1m]");
+}
+
+#[tokio::test]
 async fn model_change_sends_set_model_between_turns_and_rejects_the_input_when_it_fails() {
     let (one, two, three, four, five) = (
         Uuid::now_v7(),

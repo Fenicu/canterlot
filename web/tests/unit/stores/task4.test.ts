@@ -1646,6 +1646,36 @@ describe("stores task 4", () => {
     expect(store.catalog().some((item) => item.id === "claude")).toBe(true);
   });
 
+  it("machines_store_takes_the_home_directory_from_the_report_event", async () => {
+    const api = new FakeHubApi(new FakeHub());
+    const machine = seedMachine(api);
+    const store = new MachinesStore({
+      connection: {} as ConnectionManager,
+      clock: new FakeClock(1),
+      api: {
+        snapshot: () => api.machinesSnapshot(),
+        events: async () => ({ events: [], head: "0" }) as never,
+      },
+    });
+    store.applier.applySnapshot({ items: [machine] }, "1");
+    expect(store.items.get(machine.id)?.home_dir ?? null).toBeNull();
+    store.applier.applyEvents([
+      {
+        event: {
+          kind: "machine_report_updated",
+          payload: {
+            machine_id: machine.id,
+            worker_version: "1",
+            capabilities: ["pilot_v1"],
+            limits_ok: true,
+            home_dir: "/home/owner",
+          },
+        },
+      },
+    ] as never);
+    expect(store.items.get(machine.id)?.home_dir).toBe("/home/owner");
+  });
+
   it("limit_view_marks_warning_from_configured_thresholds_reserve_and_stale_observations", () => {
     const now = Date.parse("2026-10-28T12:00:00.000Z");
     const cfg = {

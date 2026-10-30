@@ -14,6 +14,10 @@ pub const MAX_PRESET_TEXT_BYTES: usize = 65_536;
 /// Аргументы одного вызова инструмента агента по каналу данных.
 pub const MAX_AGENT_CALL_BYTES: usize = 262_144;
 
+/// Рабочая папка: входит в ключ `machine_workdirs`, длиннее не принимается и подсказка.
+pub const MAX_WORKDIR_BYTES: usize = 2048;
+pub const MAX_WORKDIR_SUGGESTIONS: usize = 30;
+
 pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_MESSAGE_BYTES: usize = 1_048_576;
 pub const MAX_INPUT_TEXT_BYTES: usize = 262_144;
