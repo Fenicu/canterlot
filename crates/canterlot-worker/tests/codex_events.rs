@@ -2,7 +2,7 @@
 //! docs/stage0/evidence/codex/, сконструированные — tests/fixtures/codex/.
 
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, MediaSource, Phase,
+    AdapterEvent, BlockKind, MediaSource, Phase, TodoItem, TodoStatus,
     codex::events::{Translated, Translator, TurnStatus},
 };
 use serde_json::{Value, json};
@@ -1032,4 +1032,108 @@ fn debug_output_contains_no_text() {
     let translator = Translator::new("thread-main", "gpt-6-luna");
     let debug = format!("{translator:?}");
     assert!(!debug.is_empty());
+}
+
+// Форма по схеме TurnPlanUpdatedNotification 0.164.0; живого кадра ещё нет.
+fn plan_update(thread: &str, plan: Value) -> Value {
+    json!({"threadId": thread, "turnId": "turn-main", "explanation": null, "plan": plan})
+}
+
+fn todo_events(out: &[Translated]) -> Vec<(Option<Uuid>, Vec<TodoItem>)> {
+    events_of(out)
+        .into_iter()
+        .filter_map(|e| match e {
+            AdapterEvent::TodoUpdated { lane, items } => Some((*lane, items.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn todo(text: &str, status: TodoStatus) -> TodoItem {
+    TodoItem {
+        text: text.to_owned(),
+        status,
+    }
+}
+
+#[test]
+fn turn_plan_is_a_full_list_in_the_main_lane() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let plan = json!([
+        {"step": "Собрать", "status": "completed"},
+        {"step": "Проверить", "status": "inProgress"},
+        {"step": "Выкатить", "status": "pending"},
+    ]);
+    let out = translator.feed("turn/plan/updated", &plan_update("thread-main", plan));
+    assert_eq!(
+        todo_events(&out),
+        vec![(
+            None,
+            vec![
+                todo("Собрать", TodoStatus::Completed),
+                todo("Проверить", TodoStatus::InProgress),
+                todo("Выкатить", TodoStatus::Pending),
+            ]
+        )]
+    );
+}
+
+#[test]
+fn child_thread_plan_goes_to_the_lane_of_its_spawn() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed("item/started", &spawn_item("inProgress", &[]));
+    let spawn = events_of(&out)
+        .into_iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted { block_id, .. } => Some(*block_id),
+            _ => None,
+        })
+        .expect("spawn block");
+    translator.feed("thread/started", &child_started());
+    let plan = json!([{"step": "Читать", "status": "pending"}]);
+
+    // Родитель известен только из завершённого вызова: до него список не приписать никому.
+    let early = translator.feed(
+        "turn/plan/updated",
+        &plan_update("thread-child-1", plan.clone()),
+    );
+    assert_eq!(todo_events(&early), vec![]);
+    assert!(
+        events_of(&early).iter().any(|e| matches!(
+            e,
+            AdapterEvent::Diagnostic {
+                kind: "todo_lane_unknown",
+                required: false,
+                ..
+            }
+        )),
+        "{early:?}"
+    );
+
+    translator.feed(
+        "item/completed",
+        &spawn_item("completed", &["thread-child-1"]),
+    );
+    let out = translator.feed("turn/plan/updated", &plan_update("thread-child-1", plan));
+    assert_eq!(
+        todo_events(&out),
+        vec![(Some(spawn), vec![todo("Читать", TodoStatus::Pending)])]
+    );
+}
+
+#[test]
+fn plan_of_a_foreign_thread_is_ignored_and_text_stays_out_of_debug() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let marker = "PRIVATE_PLAN_MARKER";
+    let plan = json!([{"step": marker, "status": "pending"}]);
+    let out = translator.feed(
+        "turn/plan/updated",
+        &plan_update("thread-other", plan.clone()),
+    );
+    assert!(events_of(&out).is_empty(), "{out:?}");
+    let out = translator.feed("turn/plan/updated", &plan_update("thread-main", plan));
+    assert_eq!(todo_events(&out).len(), 1);
+    assert!(!format!("{out:?}").contains(marker), "{out:?}");
 }

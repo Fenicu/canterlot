@@ -1,7 +1,7 @@
 // Перевод уведомлений app-server в события адаптера: блоки, фазы, субагенты,
 // расход, картинки и ошибки. Переводчик не паникует и сессию не завершает:
 // неизвестное игнорируется с одной диагностикой на метод за исполнение.
-use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase};
+use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -358,6 +358,7 @@ impl Translator {
             "model/rerouted" => self.on_model_rerouted(params),
             "subAgentActivity" => self.on_sub_agent_activity(params),
             "serverRequest/resolved" => self.on_request_resolved(params),
+            "turn/plan/updated" => self.on_plan_updated(params),
             "account/rateLimits/updated" => vec![Translated::RateLimits(
                 params.get("rateLimits").cloned().unwrap_or(Value::Null),
             )],
@@ -372,7 +373,6 @@ impl Translator {
             | "remoteControl/status/changed"
             | "thread/readState/changed"
             | "turn/diff/updated"
-            | "turn/plan/updated"
             | "skills/changed"
             | "fs/changed"
             | "app/list/updated" => vec![Translated::Ignored],
@@ -1359,6 +1359,40 @@ impl Translator {
             acc.cache_write += get("cacheWriteInputTokens");
         }
         vec![Translated::Ignored]
+    }
+
+    /// План хода приходит целиком; детский поток пишет в дорожку своего вызова.
+    fn on_plan_updated(&self, params: &Value) -> Vec<Translated> {
+        let thread_id = Self::thread_of(params).unwrap_or_default();
+        let lane = if thread_id == self.main_thread_id {
+            None
+        } else {
+            match self.children.get(thread_id) {
+                Some(ChildInfo {
+                    parent: Some(block),
+                    ..
+                }) => Some(*block),
+                Some(_) => return vec![self.optional("todo_lane_unknown")],
+                None => return vec![Translated::Ignored],
+            }
+        };
+        let Some(plan) = params.get("plan").and_then(Value::as_array) else {
+            return vec![Translated::Ignored];
+        };
+        let items = plan
+            .iter()
+            .filter_map(|step| {
+                Some(TodoItem {
+                    text: step.get("step")?.as_str()?.to_owned(),
+                    status: match step.get("status").and_then(Value::as_str) {
+                        Some("inProgress") => TodoStatus::InProgress,
+                        Some("completed") => TodoStatus::Completed,
+                        _ => TodoStatus::Pending,
+                    },
+                })
+            })
+            .collect();
+        vec![Translated::Event(AdapterEvent::TodoUpdated { lane, items })]
     }
 
     fn on_thread_started(&mut self, params: &Value) -> Vec<Translated> {
