@@ -38,6 +38,8 @@ use uuid::Uuid;
 
 #[path = "support/e2e_gate.rs"]
 mod e2e_gate;
+#[path = "support/fake_exec.rs"]
+mod fake_exec;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -177,6 +179,10 @@ async fn connect(exec_dir: &Path) -> Conn {
 
 impl Harness {
     async fn start(extra_env: &[(&str, &str)]) -> Harness {
+        Self::start_with(extra_env, "1s", "").await
+    }
+
+    async fn start_with(extra_env: &[(&str, &str)], stop_grace: &str, extra_spec: &str) -> Harness {
         let root = TempDir::new().unwrap();
         let exec_dir = root.path().join("exec");
         fs::create_dir(&exec_dir).unwrap();
@@ -189,7 +195,7 @@ impl Harness {
         fs::write(
             exec_dir.join("spec.toml"),
             format!(
-                "execution_id = \"{execution_id}\"\ngeneration = 1\nconversation_id = \"{conversation_id}\"\nprotocol_version = 1\n[timers]\nattach_wait = \"30s\"\nready_deadline = \"10s\"\ntransmit_deadline = \"2s\"\nstop_grace = \"1s\"\nstop_retry = \"200ms\"\n"
+                "execution_id = \"{execution_id}\"\ngeneration = 1\nconversation_id = \"{conversation_id}\"\nprotocol_version = 1\n[timers]\nattach_wait = \"30s\"\nready_deadline = \"10s\"\ntransmit_deadline = \"2s\"\nstop_grace = \"{stop_grace}\"\nstop_retry = \"200ms\"\n{extra_spec}"
             ),
         )
         .unwrap();
@@ -947,6 +953,76 @@ async fn stop_waits_for_group_empty_including_escaped_children() {
         "open blocks end incomplete"
     );
     assert!(matches!(bodies.last(), Some(Body::JournalClosed(_))));
+    assert!(harness.wait_exit().await.success());
+}
+
+#[tokio::test]
+async fn force_stop_preempts_a_soft_close_in_progress() {
+    const STUBBORN: &str = r#"#!/usr/bin/python3
+import signal, sys, time
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+while True:
+    time.sleep(0.2)
+"#;
+    let _gate = e2e_gate::acquire().await;
+    let tools = TempDir::new().unwrap();
+    let exe = tools.path().join("fake-cli");
+    fake_exec::write_executable(&exe, STUBBORN, 0o700);
+    let spec = format!(
+        "[claude_code]\nexecutable = \"{}\"\noauth_poll_interval_s = 1800\nallow_paid_model_poll = false\n",
+        exe.display()
+    );
+    let mut harness = Harness::start_with(&[], "60s", &spec).await;
+    harness.attach_and_ship(0).await;
+    let workdir = harness._root.path().to_string_lossy().into_owned();
+    harness
+        .send(down::Msg::StartCli(StartCli {
+            profile: "claude_code".into(),
+            workdir,
+            model: "haiku".into(),
+            effort: "low".into(),
+            permission_mode: "ask".into(),
+            instructions: Some(Instructions {
+                mode: "owner".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+    harness
+        .next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+        .await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            force: false,
+        }))
+        .await;
+    // Мягкая остановка ждёт CLI, а цикл супервизора продолжает обслуживать поток и команды.
+    harness
+        .wait_records("stopping", |b| b.iter().any(|x| state(x, "stopping")))
+        .await;
+    harness
+        .send(down::Msg::Stop(StopRequest {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 2,
+            force: true,
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("closed", |b| {
+            b.iter().any(|x| matches!(x, Body::JournalClosed(_)))
+        })
+        .await;
+    assert!(
+        bodies.iter().any(
+            |b| matches!(b, Body::ExecutionState(f) if f.state == "stopped" && f.outcome == "force_stopped")
+        ),
+        "{bodies:?}"
+    );
     assert!(harness.wait_exit().await.success());
 }
 

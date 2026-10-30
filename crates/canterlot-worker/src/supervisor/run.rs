@@ -148,6 +148,8 @@ struct Supervisor {
     started: Option<CliStarted>,
     ready: bool,
     lifecycle: Lifecycle,
+    /// Адаптер на время `close`: цикл продолжает обслуживать поток и команды.
+    closing: Option<JoinHandle<Box<dyn Adapter>>>,
     terminate: Option<JoinHandle<Result<Termination, ContainmentError>>>,
     inputs: HashMap<(Uuid, u32), Input>,
     queue: VecDeque<(Uuid, u32)>,
@@ -268,6 +270,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         started: None,
         ready: false,
         lifecycle,
+        closing: None,
         terminate: None,
         inputs: HashMap::new(),
         queue: VecDeque::new(),
@@ -369,6 +372,15 @@ async fn ready_adapter_event(adapter: &mut Option<Box<dyn Adapter>>) -> Option<A
     .await
 }
 
+async fn close_result(
+    handle: &mut Option<JoinHandle<Box<dyn Adapter>>>,
+) -> Result<Box<dyn Adapter>, tokio::task::JoinError> {
+    match handle {
+        Some(handle) => handle.await,
+        None => std::future::pending().await,
+    }
+}
+
 async fn terminate_result(
     handle: &mut Option<JoinHandle<Result<Termination, ContainmentError>>>,
 ) -> Result<Result<Termination, ContainmentError>, tokio::task::JoinError> {
@@ -446,6 +458,10 @@ impl Supervisor {
                         self.on_adapter_event(event).await?;
                     }
                 },
+                result = close_result(&mut self.closing) => {
+                    self.closing = None;
+                    self.adapter = result.ok();
+                }
                 result = terminate_result(&mut self.terminate) => self.on_terminate(result).await?,
                 () = async { match wake { Some(at) => sleep_until(at).await, None => std::future::pending().await } } => {
                     self.attach_deadline = None;
@@ -458,7 +474,9 @@ impl Supervisor {
         let mut wake: Option<Instant> = None;
         let mut consider = |at: Instant| wake = Some(wake.map_or(at, |current| current.min(at)));
         match &self.lifecycle {
-            Lifecycle::Stopping(state) if self.terminate.is_none() => consider(state.next_round),
+            Lifecycle::Stopping(state) if self.terminate.is_none() && self.closing.is_none() => {
+                consider(state.next_round)
+            }
             _ => {}
         }
         if !self.queue.is_empty() && self.faults.gate_held(&self.exec_dir) {
@@ -1887,6 +1905,10 @@ impl Supervisor {
                         state.cause = StopCause::User { force: true };
                     }
                     state.next_round = Instant::now();
+                    // Адаптер уходит вместе с задачей, а CLI убивает kill_on_drop.
+                    if let Some(closing) = &self.closing {
+                        closing.abort();
+                    }
                 }
                 Ok(())
             }
@@ -1928,7 +1950,9 @@ impl Supervisor {
     async fn drive_stop(&mut self) -> Result<(), SupervisorError> {
         let (force, closed) = match &self.lifecycle {
             Lifecycle::Stopping(state)
-                if self.terminate.is_none() && Instant::now() >= state.next_round =>
+                if self.terminate.is_none()
+                    && self.closing.is_none()
+                    && Instant::now() >= state.next_round =>
             {
                 (state.force, state.closed)
             }
@@ -1939,13 +1963,18 @@ impl Supervisor {
                 state.closed = true;
             }
             self.fail_agent_calls().await;
-            if let Some(adapter) = self.adapter.as_mut() {
+            if let Some(mut adapter) = self.adapter.take() {
                 let mode = if force {
                     CloseMode::Force
                 } else {
                     CloseMode::Graceful
                 };
-                let _ = adapter.close(mode, &*self.containment).await;
+                let containment = self.containment.clone();
+                self.closing = Some(tokio::spawn(async move {
+                    let _ = adapter.close(mode, &*containment).await;
+                    adapter
+                }));
+                return Ok(());
             }
         }
         let grace = if force {

@@ -914,6 +914,65 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn soft_close_reads_stdout_so_the_cli_can_finish_writing() {
+    const NOISY: &str = r#"#!/usr/bin/python3
+import signal, sys, pathlib
+d = pathlib.Path(__file__).parent
+if '--version' in sys.argv:
+    print('2.1.311'); sys.exit(0)
+signal.signal(signal.SIGTERM, signal.SIG_IGN)
+for line in sys.stdin:
+    pass
+sys.stdout.write('x' * (1 << 20) + '\n')
+sys.stdout.flush()
+(d / 'flushed').write_text('1')
+"#;
+    let dir = TempDir::new().unwrap();
+    let exe = dir.path().join("fake-cli");
+    fake_exec::write_executable(&exe, NOISY, 0o700);
+    let workdir = dir.path().join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    let context = AdapterContext {
+        transmit_deadline: WAIT,
+        exec_dir: dir.path().join("exec"),
+        claude_code: Some(ClaudeCodeConfig {
+            executable: exe,
+            ..Default::default()
+        }),
+        codex: None,
+    };
+    let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
+    adapter.set_stop_grace(Duration::from_millis(200));
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir,
+        native_conversation_id: None,
+        profile: "claude_code".into(),
+        model: "haiku".into(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: owner_spec(),
+    };
+    tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+        .await
+        .expect("start deadline")
+        .expect("start ok");
+    tokio::time::timeout(
+        WAIT,
+        adapter.close(canterlot_worker::adapter::CloseMode::Graceful, &group),
+    )
+    .await
+    .expect("close deadline")
+    .expect("close ok");
+    assert!(
+        dir.path().join("flushed").exists(),
+        "the CLI was killed while blocked on a full stdout pipe"
+    );
+}
+
+#[tokio::test]
 async fn usage_baseline_resets_after_restart() {
     let mut h = RestartHarness::new().await;
     std::fs::write(

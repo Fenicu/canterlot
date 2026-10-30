@@ -872,8 +872,9 @@ async fn drain_until_exit(
                     }
                 }
             }
-            Ok(_) => {}
-            Err(_) => {}
+            // Конец stdout отвечает мгновенно, а процесс ещё жив.
+            Ok(StdoutLine::Eof) => tokio::time::sleep(Duration::from_millis(50)).await,
+            Ok(_) | Err(_) => {}
         }
     }
 }
@@ -1137,13 +1138,15 @@ impl Adapter for ClaudeCodeAdapter {
         };
         if !self.exited {
             // Мягко: EOF, затем SIGTERM (CLI сам гасит деревья Bash и выходит
-            // с 143), затем срок stop_grace; SIGKILL — только после него.
+            // с 143), затем срок stop_grace; SIGKILL — только после него. Stdout
+            // читается и здесь: CLI на записи в полный pipe сигнал бы не обработал.
             let exited = match mode {
                 CloseMode::Force => false,
                 CloseMode::Graceful => {
-                    timeout(grace, cli.wait()).await.is_ok() || {
+                    drain_until_exit(cli, &mut self.parser, &mut self.queue, grace).await || {
                         group.signal_member(&member, rustix::process::Signal::TERM)?;
-                        timeout(self.stop_grace, cli.wait()).await.is_ok()
+                        drain_until_exit(cli, &mut self.parser, &mut self.queue, self.stop_grace)
+                            .await
                     }
                 }
             };
