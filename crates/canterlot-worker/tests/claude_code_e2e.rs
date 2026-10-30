@@ -1338,6 +1338,21 @@ async fn smoke_turn_raw(
     }
 }
 
+/// Удаляет ссылки и каталоги живого прогона при любом исходе.
+struct SmokeDirs(Vec<PathBuf>);
+
+impl Drop for SmokeDirs {
+    fn drop(&mut self) {
+        for path in &self.0 {
+            if path.is_symlink() {
+                let _ = std::fs::remove_file(path);
+            } else {
+                let _ = std::fs::remove_dir_all(path);
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn live_smoke() {
     if !live_smoke_enabled() {
@@ -1602,6 +1617,8 @@ async fn live_smoke() {
     let link = PathBuf::from(format!("/tmp/canterlot-smoke-link-{}", std::process::id()));
     let _ = std::fs::remove_file(&link);
     std::os::unix::fs::symlink(&smoke_home, &link).unwrap();
+    // Упавший прогон не оставляет каталог в $HOME и ссылку в /tmp.
+    let _cleanup = SmokeDirs(vec![link.clone(), smoke_home.clone()]);
     let linked_repo = link.join("repo");
     let exe = std::env::var_os("CANTERLOT_CLAUDE_CODE_EXECUTABLE")
         .map(PathBuf::from)
@@ -1728,8 +1745,6 @@ async fn live_smoke() {
         .await
         .unwrap()
         .unwrap();
-    let _ = std::fs::remove_file(&link);
-    let _ = std::fs::remove_dir_all(&smoke_home);
     eprintln!("CONFIRMED: presets smoke done (context, canaries A/B/NONE, cache report)");
 }
 
