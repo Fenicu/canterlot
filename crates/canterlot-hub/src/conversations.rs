@@ -656,10 +656,14 @@ fn valid_color(color: &str) -> bool {
 fn valid_text(s: &str, max: usize) -> bool {
     !s.contains('\0') && s.chars().count() <= max
 }
+/// Путь входит в ключ `machine_workdirs`, а строка btree ограничена примерно 2700 байтами.
+pub const MAX_WORKDIR_BYTES: usize = 2048;
+
 fn workdir_allowed(workdir: &str, roots: &Value) -> bool {
     use std::path::{Component, Path};
     let path = Path::new(workdir);
-    path.is_absolute()
+    workdir.len() <= MAX_WORKDIR_BYTES
+        && path.is_absolute()
         && !workdir.contains('\0')
         && !path.components().any(|c| c == Component::ParentDir)
         && roots.as_array().is_some_and(|rs| {
