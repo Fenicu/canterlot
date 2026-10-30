@@ -13,6 +13,6 @@
 {/if}
 <style>
   .item { display: flex; align-items: center; gap: var(--s5); min-height: var(--target); width: 100%; padding: var(--s2) var(--s5); border: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--text); font-size: var(--fs-body); text-align: left; }
-  .item:hover { background: var(--popover-hover); }
+  @media (hover: hover) and (pointer: fine) { .item:hover { background: var(--popover-hover); } }
   .danger { color: var(--danger); }
 </style>

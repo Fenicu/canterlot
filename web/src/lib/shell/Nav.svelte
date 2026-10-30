@@ -18,9 +18,9 @@
 </div>
 
 <style>
-  .dock { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s2); min-width: 0; }
-  .dock :global(nav) { flex: 1; min-width: 0; flex-wrap: wrap; }
-  .dock :global(nav a) { flex: 1 1 auto; padding-inline: var(--s3); }
+  .dock { display: flex; align-items: flex-end; gap: var(--s2); min-width: 0; padding-bottom: env(safe-area-inset-bottom); }
+  .dock :global(nav) { flex: 1; min-width: 0; overflow-x: auto; scrollbar-width: none; justify-content: flex-start; }
+  .dock :global(nav a) { flex: 1 0 auto; padding-inline: var(--s3); white-space: nowrap; }
   .fab {
     display: inline-flex;
     align-items: center;
