@@ -73,10 +73,10 @@
   });
 
   const trackReason = $derived.by(() => {
-    if (trackState === 'error') {
-      return translateReason(request.closedReason);
-    }
-    return undefined;
+    if (trackState !== 'error') return undefined;
+    const reason = translateReason(request.closedReason);
+    if (request.state !== 'not_applied') return reason;
+    return reason === 'Запрос закрыт' || reason === 'не применено' ? 'не применено' : `не применено: ${reason}`;
   });
 
   const trackStatus = $derived.by(() => {

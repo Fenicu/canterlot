@@ -386,6 +386,30 @@ describe('RequestsModel', () => {
     expect(model.items.get('req-not-applied')!.closedReason).toBe('not_applied');
   });
 
+  it('decision_the_hub_did_not_apply_is_not_applied_under_any_reason', () => {
+    const model = new RequestsModel('conv-1');
+    const close = (id: string, reason: string) =>
+      model.applyClosed({
+        kind: 'request_closed',
+        payload: { request_id: id, reason }
+      } as unknown as HubEvent);
+    const seed = (id: string, state: 'saved' | 'transmitting' | 'open') =>
+      model.items.set(id, { id, conversationId: 'conv-1', kind: 'permission', state, payload: {} });
+
+    seed('saved', 'saved');
+    close('saved', 'unsupported_command');
+    expect(model.items.get('saved')!.state).toBe('not_applied');
+    expect(model.items.get('saved')!.closedReason).toBe('unsupported_command');
+
+    seed('moving', 'transmitting');
+    close('moving', 'execution_ended');
+    expect(model.items.get('moving')!.state).toBe('not_applied');
+
+    seed('open', 'open');
+    close('open', 'execution_ended');
+    expect(model.items.get('open')!.state).toBe('closed');
+  });
+
   it('turn_interrupt_event_closes_pending_requests', () => {
     const model = new RequestsModel('conv-1');
     model.items.set('req-open', {
