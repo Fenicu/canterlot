@@ -136,6 +136,32 @@ fn other_limit_ids_and_unknown_durations_are_ignored() {
 }
 
 #[test]
+fn window_without_reset_keeps_the_usage_reading() {
+    // В схеме RateLimitWindow обязателен только usedPercent.
+    let snapshot = json!({"limitId": "codex",
+        "primary": {"usedPercent": 42, "resetsAt": null, "windowDurationMins": 300}});
+    assert_eq!(windows_from_snapshot(&snapshot).len(), 1);
+    let mut tracker = LimitTracker::default();
+    assert_eq!(
+        tracker.on_snapshot(&snapshot),
+        vec![LimitFact::Observed {
+            window: LimitWindow::FiveHour,
+            used_permille: 420,
+            resets_at_ms: None,
+        }]
+    );
+    assert_eq!(tracker.snapshot().five_hour, Some((420, None)));
+    // Известный сброс не теряется, когда он пропал из следующего снимка.
+    tracker.on_snapshot(&json!({"limitId": "codex",
+        "primary": {"usedPercent": 42, "resetsAt": 1792927784, "windowDurationMins": 300}}));
+    tracker.on_snapshot(&snapshot);
+    assert_eq!(
+        tracker.snapshot().five_hour,
+        Some((420, Some(1_792_927_784_000)))
+    );
+}
+
+#[test]
 fn usage_limit_turn_becomes_reached_with_reset_of_exhausted_window() {
     let frames = fixture_turn("usage_limit_turn.jsonl");
     let mut tracker = LimitTracker::default();

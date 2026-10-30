@@ -79,11 +79,13 @@ fn resets_at_ms(value: &Value) -> Option<u64> {
     Some(seconds.saturating_mul(1000))
 }
 
-fn parse_window(row: &Value) -> Option<(LimitWindow, u16, u64)> {
+// По схеме RateLimitWindow обязателен только usedPercent: без resetsAt показание
+// остаётся. Окно без длительности отбрасывается: его нечем опознать.
+fn parse_window(row: &Value) -> Option<(LimitWindow, u16, Option<u64>)> {
     let mins = row.get("windowDurationMins")?.as_u64()?;
     let window = window_from_duration(mins)?;
     let permille = permille_from_percent(row.get("usedPercent")?)?;
-    let reset = resets_at_ms(row.get("resetsAt")?)?;
+    let reset = row.get("resetsAt").and_then(resets_at_ms);
     Some((window, permille, reset))
 }
 
@@ -95,7 +97,7 @@ fn ordinary_usage_blocked(response: &Value) -> bool {
 }
 
 /// Окна из одного `RateLimitSnapshot` (primary/secondary).
-pub fn windows_from_snapshot(snapshot: &Value) -> Vec<(LimitWindow, u16, u64)> {
+pub fn windows_from_snapshot(snapshot: &Value) -> Vec<(LimitWindow, u16, Option<u64>)> {
     if !limit_id_ok(snapshot) {
         return Vec::new();
     }
@@ -130,7 +132,7 @@ pub fn observations_from_read_response(
                 provider: "codex".into(),
                 window: window as i32,
                 used_permille: u32::from(permille),
-                resets_at_ms,
+                resets_at_ms: resets_at_ms.unwrap_or_default(),
                 observed_machine_ms: observed_ms,
             });
         }
@@ -143,17 +145,18 @@ impl LimitTracker {
         let mut facts = Vec::new();
         for (window, permille, resets_at_ms) in windows_from_snapshot(snapshot) {
             let state = slot(self, window);
+            let resets_at_ms = resets_at_ms.or(state.resets_at_ms);
             state.permille = Some(permille);
-            state.resets_at_ms = Some(resets_at_ms);
+            state.resets_at_ms = resets_at_ms;
             let changed = state.last_emitted_permille != Some(permille)
-                || state.last_emitted_reset != Some(resets_at_ms);
+                || state.last_emitted_reset != resets_at_ms;
             if changed {
                 state.last_emitted_permille = Some(permille);
-                state.last_emitted_reset = Some(resets_at_ms);
+                state.last_emitted_reset = resets_at_ms;
                 facts.push(LimitFact::Observed {
                     window,
                     used_permille: permille,
-                    resets_at_ms: Some(resets_at_ms),
+                    resets_at_ms,
                 });
             }
         }
