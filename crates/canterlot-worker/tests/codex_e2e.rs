@@ -1971,8 +1971,8 @@ async fn usage_limit_exceeded_reports_reached_and_error() {
             "threadId": "thread-mini",
             "rateLimits": {
                 "limitId": "codex",
-                "primary": {"windowDurationMins": 300, "usedPercent": 50.0, "resetsAt": 1792927784},
-                "secondary": {"windowDurationMins": 10080, "usedPercent": 100.0, "resetsAt": 1793514584},
+                "primary": {"windowDurationMins": 300, "usedPercent": 50.0, "resetsAt": 4102444800u64},
+                "secondary": {"windowDurationMins": 10080, "usedPercent": 100.0, "resetsAt": 4102444800u64},
             },
         },
     })));

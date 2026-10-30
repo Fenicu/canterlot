@@ -687,9 +687,12 @@ impl CodexAdapter {
             }
             "contextWindowExceeded" => {}
             "usageLimitExceeded" | "rateLimitExceeded" => {
-                let decision = self.limits.on_turn_failed(&limits::TurnErrorInfo {
-                    codex_error_info: Some(error.kind.clone()),
-                });
+                let decision = self.limits.on_turn_failed(
+                    &limits::TurnErrorInfo {
+                        codex_error_info: Some(error.kind.clone()),
+                    },
+                    limits::now_ms(),
+                );
                 let usage = error.kind == "usageLimitExceeded";
                 let fresh = match decision {
                     ReachedDecision::Reached(fact) => {
@@ -745,7 +748,9 @@ impl CodexAdapter {
             return;
         };
         let facts = match result {
-            Ok(Ok(response)) => self.limits.on_fresh_read(&response, pending.ctx),
+            Ok(Ok(response)) => self
+                .limits
+                .on_fresh_read(&response, pending.ctx, limits::now_ms()),
             _ => Vec::new(),
         };
         let reached = facts

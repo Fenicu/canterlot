@@ -48,6 +48,9 @@ fn fixture_json(name: &str) -> Value {
     serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap()
 }
 
+// Раньше сбросов в фикстурах.
+const NOW: u64 = 1_792_900_000_000;
+
 fn fixture_turn(name: &str) -> Vec<Value> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/codex")
@@ -136,6 +139,25 @@ fn other_limit_ids_and_unknown_durations_are_ignored() {
 }
 
 #[test]
+fn window_past_its_reset_is_not_exhausted() {
+    let frames = fixture_turn("usage_limit_turn.jsonl");
+    let mut tracker = LimitTracker::default();
+    tracker.on_snapshot(snapshot_from_notification(&frames[0]));
+    let error = TurnErrorInfo {
+        codex_error_info: Some("usageLimitExceeded".into()),
+    };
+    // Сброс уже прошёл: окно устарело, нужен свежий снимок.
+    assert_eq!(
+        tracker.on_turn_failed(&error, 1_792_929_900_001),
+        ReachedDecision::NeedFreshRead(CrunchContext::UsageLimitExceeded)
+    );
+    assert!(matches!(
+        tracker.on_turn_failed(&error, NOW),
+        ReachedDecision::Reached(_)
+    ));
+}
+
+#[test]
 fn window_without_reset_keeps_the_usage_reading() {
     // В схеме RateLimitWindow обязателен только usedPercent.
     let snapshot = json!({"limitId": "codex",
@@ -166,9 +188,12 @@ fn usage_limit_turn_becomes_reached_with_reset_of_exhausted_window() {
     let frames = fixture_turn("usage_limit_turn.jsonl");
     let mut tracker = LimitTracker::default();
     tracker.on_snapshot(snapshot_from_notification(&frames[0]));
-    let decision = tracker.on_turn_failed(&TurnErrorInfo {
-        codex_error_info: Some("usageLimitExceeded".into()),
-    });
+    let decision = tracker.on_turn_failed(
+        &TurnErrorInfo {
+            codex_error_info: Some("usageLimitExceeded".into()),
+        },
+        NOW,
+    );
     assert_eq!(
         decision,
         ReachedDecision::Reached(LimitFact::Reached {
@@ -184,14 +209,17 @@ fn usage_limit_without_exhausted_window_reads_limits_first() {
     let mut tracker = LimitTracker::default();
     tracker.on_snapshot(snapshot_from_notification(&frames[0]));
     assert_eq!(
-        tracker.on_turn_failed(&TurnErrorInfo {
-            codex_error_info: Some("usageLimitExceeded".into()),
-        }),
+        tracker.on_turn_failed(
+            &TurnErrorInfo {
+                codex_error_info: Some("usageLimitExceeded".into()),
+            },
+            NOW,
+        ),
         ReachedDecision::NeedFreshRead(CrunchContext::UsageLimitExceeded)
     );
     let read = fixture_json("usage_limit_read.json");
     let facts: Vec<_> = tracker
-        .on_fresh_read(&read, CrunchContext::UsageLimitExceeded)
+        .on_fresh_read(&read, CrunchContext::UsageLimitExceeded, NOW)
         .iter()
         .map(fact_key)
         .collect();
@@ -209,14 +237,17 @@ fn rate_limit_exceeded_without_exhausted_window_is_not_reached() {
     let mut tracker = LimitTracker::default();
     tracker.on_snapshot(snapshot_from_notification(&frames[0]));
     assert_eq!(
-        tracker.on_turn_failed(&TurnErrorInfo {
-            codex_error_info: Some("rateLimitExceeded".into()),
-        }),
+        tracker.on_turn_failed(
+            &TurnErrorInfo {
+                codex_error_info: Some("rateLimitExceeded".into()),
+            },
+            NOW,
+        ),
         ReachedDecision::NeedFreshRead(CrunchContext::RateLimitExceeded)
     );
     let read = fixture_json("rate_limits_read.json");
     let facts: Vec<_> = tracker
-        .on_fresh_read(&read, CrunchContext::RateLimitExceeded)
+        .on_fresh_read(&read, CrunchContext::RateLimitExceeded, NOW)
         .iter()
         .map(fact_key)
         .collect();
@@ -233,7 +264,7 @@ fn ordinary_usage_blocked_is_read_from_the_response_top_level() {
     let reached = |read: Value| {
         let mut tracker = LimitTracker::default();
         tracker
-            .on_fresh_read(&read, CrunchContext::RateLimitExceeded)
+            .on_fresh_read(&read, CrunchContext::RateLimitExceeded, NOW)
             .iter()
             .any(|fact| matches!(fact, LimitFact::Reached { .. }))
     };

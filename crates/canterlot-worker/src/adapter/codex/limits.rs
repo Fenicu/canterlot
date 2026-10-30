@@ -41,6 +41,14 @@ pub struct LimitTracker {
     weekly: WindowState,
 }
 
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
 fn slot(tracker: &mut LimitTracker, window: LimitWindow) -> &mut WindowState {
     match window {
         LimitWindow::FiveHour => &mut tracker.five_hour,
@@ -163,10 +171,10 @@ impl LimitTracker {
         facts
     }
 
-    pub fn on_turn_failed(&mut self, error: &TurnErrorInfo) -> ReachedDecision {
+    pub fn on_turn_failed(&mut self, error: &TurnErrorInfo, now_ms: u64) -> ReachedDecision {
         match error.codex_error_info.as_deref() {
             Some("usageLimitExceeded") => {
-                if let Some(window) = self.exhausted_window_prefer_weekly() {
+                if let Some(window) = self.exhausted_window_prefer_weekly(now_ms) {
                     return ReachedDecision::Reached(LimitFact::Reached {
                         window,
                         resets_at_ms: slot(self, window).resets_at_ms,
@@ -181,12 +189,17 @@ impl LimitTracker {
         }
     }
 
-    pub fn on_fresh_read(&mut self, response: &Value, ctx: CrunchContext) -> Vec<LimitFact> {
+    pub fn on_fresh_read(
+        &mut self,
+        response: &Value,
+        ctx: CrunchContext,
+        now_ms: u64,
+    ) -> Vec<LimitFact> {
         let mut facts = Vec::new();
         for snapshot in snapshots_from_read_response(response) {
             facts.extend(self.on_snapshot(&snapshot));
         }
-        let exhausted = self.exhausted_window_prefer_weekly();
+        let exhausted = self.exhausted_window_prefer_weekly(now_ms);
         let blocked = ordinary_usage_blocked(response);
         let highest = self.highest_window();
         match ctx {
@@ -220,17 +233,15 @@ impl LimitTracker {
         }
     }
 
-    fn exhausted_window_prefer_weekly(&self) -> Option<LimitWindow> {
-        let five = self
-            .five_hour
-            .permille
-            .is_some_and(|p| p >= 1000)
-            .then_some(LimitWindow::FiveHour);
-        let weekly = self
-            .weekly
-            .permille
-            .is_some_and(|p| p >= 1000)
-            .then_some(LimitWindow::Weekly);
+    // Окно со сбросом в прошлом исчерпанным не считается: снимок устарел, и его
+    // время только разбудило бы очередь сразу же.
+    fn exhausted_window_prefer_weekly(&self, now_ms: u64) -> Option<LimitWindow> {
+        let exhausted = |state: &WindowState| {
+            state.permille.is_some_and(|p| p >= 1000)
+                && state.resets_at_ms.is_none_or(|reset| reset > now_ms)
+        };
+        let five = exhausted(&self.five_hour).then_some(LimitWindow::FiveHour);
+        let weekly = exhausted(&self.weekly).then_some(LimitWindow::Weekly);
         weekly.or(five)
     }
 
