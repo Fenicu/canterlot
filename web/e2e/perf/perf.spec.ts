@@ -102,6 +102,8 @@ test.describe('perf: P-01…P-05', () => {
     const startedAt = Date.now();
     try {
       await runSends(page, 'p02', N);
+      // Запрос последнего нажатия может уйти позже кадра с локальным элементом: ждём ответ на каждое нажатие.
+      await page.waitForFunction((n) => performance.getEntriesByType('resource').filter((entry) => /\/conversations\/[^/]+\/inputs$/.test(entry.name)).length >= n, N, { timeout: 30_000 });
     } finally {
       await sendChaos(stack.control, { action: 'latency', ms: 0 });
     }
