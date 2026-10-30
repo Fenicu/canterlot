@@ -2369,6 +2369,33 @@ async fn malformed_line_is_optional_and_stream_continues() {
 }
 
 #[tokio::test]
+async fn hung_server_that_stops_reading_cannot_block_the_supervisor() {
+    let mut lines = handshake("thread-mini");
+    // Сервер перестаёт читать stdin, а ввод больше буфера трубы.
+    lines.push(w("sleep", json!(30_000)));
+    let mut fake = Fake::with_deadline(lines, Duration::from_millis(300));
+    fake.start().await;
+    let mut t = fake.tx("x");
+    t.text = "x".repeat(200_000);
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(5),
+        fake.adapter.transmit(&t, &fake.group),
+    )
+    .await
+    .expect("a hung pipe stops the supervisor loop");
+    assert!(
+        matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    loop {
+        if matches!(fake.event().await, AdapterEvent::ProcessExited { .. }) {
+            break;
+        }
+    }
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn broken_pipe_is_undetermined() {
     let mut lines = handshake("thread-mini");
     lines.push(w_in(10, "turn/start", json!({})));

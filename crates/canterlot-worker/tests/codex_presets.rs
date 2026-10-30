@@ -74,6 +74,14 @@ if (d / 'fail-spawn-break-home').exists():
     shutil.rmtree(d / 'owner-home')
     (d / 'owner-home').write_text('x')
     sys.exit(7)
+if (d / 'stubborn').exists():
+    # Не реагирует на EOF и SIGTERM, а stdout держит процесс вне группы сервера.
+    import signal, subprocess, time
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    subprocess.Popen(['sleep', '26'], stdout=sys.stdout, stdin=subprocess.DEVNULL, start_new_session=True)
+if (d / 'fail-once').exists() and not (d / 'spawned').exists():
+    (d / 'spawned').write_text('1')
+    sys.exit(7)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 (d / f'env-{pid}.json').write_text(json.dumps({
     'CODEX_HOME': os.environ.get('CODEX_HOME'),
@@ -148,6 +156,8 @@ for line in sys.stdin:
             'item': {'id': 'a', 'type': 'agentMessage', 'text': f'TURN-{turn_no}'}}})
         emit({'method': 'turn/completed', 'params': {'threadId': t,
             'turn': {'id': tid, 'status': 'completed', 'items': []}}})
+if (d / 'stubborn').exists():
+    time.sleep(120)
 "#;
 
 struct PresetHarness {
@@ -651,6 +661,19 @@ async fn failed_home_in_the_fallback_reports_process_exited() {
         matches!(event, AdapterEvent::ProcessExited { .. }),
         "{event:?}"
     );
+}
+
+#[tokio::test]
+async fn restart_is_not_held_by_a_stray_process_with_the_old_stdout() {
+    let mut h = PresetHarness::new().await;
+    std::fs::write(h.dir.path().join("stubborn"), "").unwrap();
+    // Запуск с флагом идёт уже в перезапуске: новый сервер сам станет упрямым.
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    let out = h.transmit(Some(change(preset_spec("новый")))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
 }
 
 #[tokio::test]

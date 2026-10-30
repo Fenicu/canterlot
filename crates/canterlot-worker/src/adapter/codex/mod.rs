@@ -818,7 +818,15 @@ impl CodexAdapter {
         let Some(proc) = self.proc.as_mut() else {
             return false;
         };
-        proc.write_message(&message).await.is_ok()
+        match timeout(self.deadline, proc.write_message(&message)).await {
+            Ok(written) => written.is_ok(),
+            // Сервер не читает stdin, а цикл супервизора ждёт эту запись: сервер
+            // снимается, и исполнение получает ProcessExited.
+            Err(_) => {
+                signal_group(proc.pid, rustix::process::Signal::KILL);
+                false
+            }
+        }
     }
 
     async fn wait_response(&mut self, id: i64, until: Instant) -> Option<RpcResult> {
@@ -829,8 +837,9 @@ impl CodexAdapter {
             if self.eof || self.exited {
                 return None;
             }
-            self.flush_writes().await;
-            if timeout_at(until, self.pump_once()).await.is_err() {
+            if timeout_at(until, self.flush_writes()).await.is_err()
+                || timeout_at(until, self.pump_once()).await.is_err()
+            {
                 return self.responses.remove(&id);
             }
         }
@@ -1017,7 +1026,8 @@ impl CodexAdapter {
             signal_group(proc.pid, rustix::process::Signal::TERM);
             if !drain_until_exit(&mut proc, self, Duration::from_secs(2)).await {
                 signal_group(proc.pid, rustix::process::Signal::KILL);
-                drain_to_eof(&mut proc, self).await;
+                // Stdout может держать процесс вне группы: EOF тогда не придёт.
+                let _ = timeout(Duration::from_secs(2), drain_to_eof(&mut proc, self)).await;
             }
         }
         self.eof = false;
@@ -1854,8 +1864,9 @@ impl Adapter for CodexAdapter {
             if self.eof || self.exited {
                 return DecisionOutcome::Undetermined;
             }
-            self.flush_writes().await;
-            if timeout_at(limit, self.pump_once()).await.is_err() {
+            if timeout_at(limit, self.flush_writes()).await.is_err()
+                || timeout_at(limit, self.pump_once()).await.is_err()
+            {
                 return DecisionOutcome::Undetermined;
             }
         }
