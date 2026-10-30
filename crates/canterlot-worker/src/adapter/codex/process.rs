@@ -1,3 +1,5 @@
+use super::home::CodexHome;
+use crate::adapter::InstructionMode;
 use crate::containment::Containment;
 use std::ffi::OsString;
 use std::path::Path;
@@ -7,7 +9,6 @@ use tokio::process::Command as TokioCommand;
 #[derive(Debug)]
 pub enum LaunchError {
     UnknownPermissionMode,
-    UnsupportedInstructions,
     WorkdirNotDir,
     SpawnFailed(std::io::Error),
     CliNotFoundInContainment,
@@ -51,7 +52,8 @@ pub fn mcp_args_value(exec_dir: &Path) -> String {
 }
 
 // Только добавление нашего MCP и флага вопросов; чужая конфигурация не трогается.
-pub fn build_args(spec: &LaunchSpec) -> Result<Vec<OsString>, LaunchError> {
+// He-владелец добавляет `--disable memories` (память Codex, не проектные документы).
+pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsString>, LaunchError> {
     if !spec.workdir.is_dir() {
         return Err(LaunchError::WorkdirNotDir);
     }
@@ -63,11 +65,20 @@ pub fn build_args(spec: &LaunchSpec) -> Result<Vec<OsString>, LaunchError> {
         "default_mode_request_user_input".into(),
     ];
     args.extend(super::mcp::launch_overrides(spec.relay_exe, spec.exec_dir));
+    if mode != InstructionMode::Owner {
+        args.push("--disable".into());
+        args.push("memories".into());
+    }
     Ok(args)
 }
 
-// Чужие ключи биллинга и просочившееся окружение родителя отрезаем, ничего не добавляем.
-pub fn build_env(parent: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsString, OsString)> {
+// Чужие ключи биллинга и просочившееся окружение родителя отрезаем.
+// Владелец хранит всё своё окружение; остальным подменяем CODEX_HOME и убираем CODEX_SQLITE_HOME.
+pub fn build_env(
+    parent: impl Iterator<Item = (OsString, OsString)>,
+    mode: InstructionMode,
+    home: Option<&CodexHome>,
+) -> Vec<(OsString, OsString)> {
     let mut out = Vec::new();
     for (k, v) in parent {
         let ks = k.to_string_lossy();
@@ -78,9 +89,23 @@ pub fn build_env(parent: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsS
             || ks.starts_with("CLAUDE_CODE_")
             || ks.starts_with("CANTERLOT_")
             || ks == "RUST_LOG";
-        if !drop {
-            out.push((k, v));
+        if drop {
+            continue;
         }
+        // Не-владелец не наследует дома: путь ставит canterlot, SQLite владельца
+        // отключается (иначе зависание account/read).
+        if mode != InstructionMode::Owner && (ks == "CODEX_HOME" || ks == "CODEX_SQLITE_HOME") {
+            continue;
+        }
+        out.push((k, v));
+    }
+    if mode != InstructionMode::Owner
+        && let Some(home) = home
+    {
+        out.push((
+            OsString::from("CODEX_HOME"),
+            home.path.as_os_str().to_os_string(),
+        ));
     }
     out
 }
@@ -98,9 +123,14 @@ pub struct AppServerProcess {
 }
 
 impl AppServerProcess {
-    pub fn spawn(spec: &LaunchSpec<'_>, group: &dyn Containment) -> Result<Self, LaunchError> {
-        let args = build_args(spec)?;
-        let envs = build_env(std::env::vars_os());
+    pub fn spawn(
+        spec: &LaunchSpec<'_>,
+        group: &dyn Containment,
+        mode: InstructionMode,
+        home: Option<&CodexHome>,
+    ) -> Result<Self, LaunchError> {
+        let args = build_args(spec, mode)?;
+        let envs = build_env(std::env::vars_os(), mode, home);
         let mut cmd = TokioCommand::new(spec.executable);
         cmd.env_clear()
             .args(&args)

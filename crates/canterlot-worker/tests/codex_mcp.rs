@@ -5,7 +5,7 @@
 use canterlot_proto::worker::v1::{LimitObservation, LimitWindow, LimitsSnapshot};
 use canterlot_worker::adapter::codex::{
     mcp::{self, SERVER_INSTRUCTIONS, launch_overrides},
-    thread::{OwnerDefaults, compose_developer_instructions},
+    thread::{ChangeNote, OwnerDefaults, compose_developer_instructions},
 };
 use canterlot_worker::adapter::{AdapterEvent, canterlot_mcp::ToolSet};
 use serde_json::{Value, json};
@@ -81,7 +81,18 @@ fn server_instructions_go_to_initialize_and_developer_instructions() {
         sandbox_workspace_write: None,
         developer_instructions: Some("Owner line.".into()),
     };
-    let dev = compose_developer_instructions("owner", &owner, SERVER_INSTRUCTIONS).unwrap();
+    let dev = compose_developer_instructions(
+        &canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        },
+        &owner,
+        SERVER_INSTRUCTIONS,
+        ChangeNote::None,
+    );
     assert!(dev.starts_with("Owner line."));
     assert!(dev.ends_with(SERVER_INSTRUCTIONS));
 }

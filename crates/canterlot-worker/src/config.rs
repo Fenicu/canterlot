@@ -347,6 +347,15 @@ pub struct CodexConfig {
     pub executable: PathBuf,
     #[serde(default = "default_codex_rate_limits_poll_interval_s")]
     pub rate_limits_poll_interval_s: u64,
+    /// Корень собственного CODEX_HOME canterlot; по умолчанию <data_dir>/codex-home.
+    #[serde(default)]
+    pub home_dir: Option<PathBuf>,
+    /// Явный корень дома владельца (тесты, флот без env); иначе $CODEX_HOME или $HOME/.codex.
+    #[serde(skip, default)]
+    pub owner_home: Option<PathBuf>,
+    /// Политика временных каталогов для дома canterlot; тесты ставят Allow.
+    #[serde(skip, default)]
+    pub home_policy: crate::adapter::codex::home::TempDirPolicy,
 }
 
 impl Default for CodexConfig {
@@ -354,6 +363,9 @@ impl Default for CodexConfig {
         Self {
             executable: PathBuf::from("codex"),
             rate_limits_poll_interval_s: default_codex_rate_limits_poll_interval_s(),
+            home_dir: None,
+            owner_home: None,
+            home_policy: crate::adapter::codex::home::TempDirPolicy::Refuse,
         }
     }
 }

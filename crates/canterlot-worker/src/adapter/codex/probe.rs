@@ -90,7 +90,11 @@ pub async fn probe(
             .stderr(Stdio::null())
             .kill_on_drop(true)
             .process_group(0);
-        for (key, value) in super::process::build_env(std::env::vars_os()) {
+        for (key, value) in super::process::build_env(
+            std::env::vars_os(),
+            crate::adapter::InstructionMode::Owner,
+            None,
+        ) {
             cmd.env(key, value);
         }
         let mut child = cmd.spawn().map_err(|_| ProbeError::SpawnFailed)?;

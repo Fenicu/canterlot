@@ -7,15 +7,17 @@ use canterlot_worker::adapter::codex::process::{
 };
 use canterlot_worker::adapter::codex::rpc::{Incoming, RpcClient, RpcId, classify};
 use canterlot_worker::adapter::codex::thread::{
-    PermissionMode, StartError, account_read_params, check_account, compose_developer_instructions,
-    config_read_params, initialize_params, owner_defaults_from, parse_thread_result,
-    thread_resume_params, thread_start_params, turn_policy,
+    ChangeNote, PermissionMode, StartError, account_read_params, check_account,
+    compose_developer_instructions, config_read_params, initialize_params, owner_defaults_from,
+    parse_thread_result, thread_resume_params, thread_start_params, turn_policy,
 };
 use canterlot_worker::adapter::codex::version::{CliVersion, VersionError, check, parse_version};
+use canterlot_worker::adapter::{InstructionMode, InstructionSpec};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tempfile::TempDir;
+use uuid::Uuid;
 
 fn evidence(name: &str) -> Vec<serde_json::Value> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -96,7 +98,7 @@ fn launch_args_add_only_feature_flag_and_canterlot_mcp() {
     let workdir = td.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
     let relay = PathBuf::from("/usr/bin/canterlot-worker");
-    let args = build_args(&spec(&exec_dir, &workdir, &relay)).unwrap();
+    let args = build_args(&spec(&exec_dir, &workdir, &relay), InstructionMode::Owner).unwrap();
     let s: Vec<String> = args
         .iter()
         .map(|o| o.to_string_lossy().to_string())
@@ -136,7 +138,7 @@ fn mcp_override_values_are_valid_toml_for_awkward_paths() {
     let workdir = td.path().join("work");
     std::fs::create_dir_all(&workdir).unwrap();
     let relay = td.path().join("bin \"dir/canterlot-worker");
-    let args = build_args(&spec(&exec_dir, &workdir, &relay)).unwrap();
+    let args = build_args(&spec(&exec_dir, &workdir, &relay), InstructionMode::Owner).unwrap();
     let s: Vec<String> = args
         .iter()
         .map(|o| o.to_string_lossy().to_string())
@@ -192,7 +194,7 @@ fn environment_drops_billing_and_leaked_variables() {
     let it = pairs
         .into_iter()
         .map(|(k, v)| (OsString::from(k), OsString::from(v)));
-    let out = build_env(it);
+    let out = build_env(it, InstructionMode::Owner, None);
     let keys: Vec<String> = out
         .iter()
         .map(|(k, _)| k.to_string_lossy().to_string())
@@ -341,26 +343,68 @@ fn not_logged_in_fails_start_with_auth_required() {
 }
 
 #[test]
-fn developer_instructions_owner_keeps_owner_text_and_adds_block() {
+fn developer_instructions_by_mode() {
     let lines = fixture_lines();
     let owner = owner_defaults_from(&lines[0]);
-    assert_eq!(
-        compose_developer_instructions("owner", &owner, "BLOCK").unwrap(),
-        "Отвечай кратко.\n\nBLOCK"
-    );
-    assert_eq!(
-        compose_developer_instructions("", &owner, "BLOCK").unwrap(),
-        "Отвечай кратко.\n\nBLOCK"
-    );
     let bare = owner_defaults_from(&serde_json::json!({}));
+    let owner_spec = InstructionSpec {
+        mode: InstructionMode::Owner,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    };
+    let clean_spec = InstructionSpec {
+        mode: InstructionMode::Clean,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    };
+    let preset_spec = InstructionSpec {
+        mode: InstructionMode::Preset,
+        text: "текст".to_string(),
+        preset_id: Some(Uuid::now_v7()),
+        revision: 3,
+        title: "t".to_string(),
+    };
+    // Владелец: свой текст плюс блок; без текста — один блок.
     assert_eq!(
-        compose_developer_instructions("owner", &bare, "BLOCK").unwrap(),
+        compose_developer_instructions(&owner_spec, &owner, "BLOCK", ChangeNote::None),
+        "Отвечай кратко.\n\nBLOCK"
+    );
+    assert_eq!(
+        compose_developer_instructions(&owner_spec, &bare, "BLOCK", ChangeNote::None),
         "BLOCK"
     );
+    // «Без инструкций»: пусто, перекрывает developer_instructions владельца.
     assert_eq!(
-        compose_developer_instructions("clean", &owner, "BLOCK").unwrap_err(),
-        StartError::UnsupportedInstructions
+        compose_developer_instructions(&clean_spec, &owner, "BLOCK", ChangeNote::None),
+        ""
     );
+    // Пресет: только его текст.
+    assert_eq!(
+        compose_developer_instructions(&preset_spec, &owner, "BLOCK", ChangeNote::None),
+        "текст"
+    );
+    // Примечание о смене — первой строкой.
+    let noted = compose_developer_instructions(
+        &preset_spec,
+        &owner,
+        "BLOCK",
+        ChangeNote::To {
+            title: "T",
+            revision: 3,
+        },
+    );
+    assert!(noted.starts_with("[canterlot]"), "{noted}");
+    assert!(noted.contains("T") && noted.contains('3') && noted.ends_with("текст"));
+    let to_clean =
+        compose_developer_instructions(&clean_spec, &owner, "BLOCK", ChangeNote::ToClean);
+    assert!(to_clean.starts_with("[canterlot]"), "{to_clean}");
+    let to_owner =
+        compose_developer_instructions(&owner_spec, &owner, "BLOCK", ChangeNote::ToOwner);
+    assert!(to_owner.starts_with("[canterlot]"), "{to_owner}");
 }
 
 #[test]
@@ -400,7 +444,7 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             policy
         );
         assert_eq!(params.get("sandbox").and_then(|v| v.as_str()), sandbox);
-        let resume = thread_resume_params("tid", mode, None, workdir, "BLOCK");
+        let resume = thread_resume_params("tid", mode, None, workdir, "BLOCK", None);
         assert_eq!(
             resume.get("approvalPolicy").and_then(|v| v.as_str()),
             policy
@@ -485,6 +529,7 @@ fn resume_params_exclude_turns() {
         Some("gpt-6-luna"),
         workdir,
         "BLOCK",
+        None,
     );
     // Форма записи ev/resume.jsonl:49 плюс developerInstructions.
     let recorded = &data("resume.jsonl", 49)["params"];
@@ -526,7 +571,13 @@ async fn oversized_stdout_line_is_skipped_and_reading_continues() {
         workdir: td.path(),
         relay_exe: &relay,
     };
-    let mut proc = AppServerProcess::spawn(&spec, &group).unwrap();
+    let mut proc = AppServerProcess::spawn(
+        &spec,
+        &group,
+        canterlot_worker::adapter::InstructionMode::Owner,
+        None,
+    )
+    .unwrap();
     match tokio::time::timeout(Duration::from_secs(60), proc.next_line()).await {
         Ok(StdoutLine::Oversized(n)) => assert!(n > 64 * 1024 * 1024),
         other => panic!("expected Oversized, got {other:?}"),

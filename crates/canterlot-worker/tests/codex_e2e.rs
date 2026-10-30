@@ -14,6 +14,8 @@ use canterlot_worker::{
     config::CodexConfig,
     containment::TreeContainment,
 };
+
+use canterlot_worker::adapter::codex::home::TempDirPolicy;
 use serde_json::{Value, json};
 use std::{os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 use tempfile::TempDir;
@@ -1576,7 +1578,7 @@ async fn live_smoke() {
         workdir: workdir.clone(),
         native_conversation_id: Some(started.native_conversation_id.clone()),
         profile: "codex".into(),
-        model,
+        model: model.clone(),
         effort: "low".into(),
         permission_mode: "ask".into(),
         instructions: canterlot_worker::adapter::InstructionSpec {
@@ -1603,6 +1605,168 @@ async fn live_smoke() {
     .await;
     assert!(Fake::final_text(&events).contains("ZEBRA-SMOKE"));
     eprintln!("SMOKE: resume by id recalls the code word (resume OPEN closed)");
+    // План 2c, задача 7, live: собственный CODEX_HOME под $HOME (предки владельца
+    // существуют), настоящее окружение владельца, настоящий codex.
+    let home_base = std::env::var("HOME").expect("smoke needs HOME");
+    let smoke_home = PathBuf::from(format!(
+        "{home_base}/canterlot-smoke-codex-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&smoke_home);
+    let repo = smoke_home.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    assert!(
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    std::fs::write(repo.join("AGENTS.md"), "# canterlot smoke repo\n").unwrap();
+    let codex_home = smoke_home.join("codex-home");
+    let home_config = || CodexConfig {
+        executable: std::env::var_os("CANTERLOT_CODEX_EXECUTABLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| "codex".into()),
+        home_dir: Some(codex_home.clone()),
+        owner_home: None,
+        home_policy: TempDirPolicy::Refuse,
+        ..Default::default()
+    };
+    let clean_instructions = || canterlot_worker::adapter::InstructionSpec {
+        mode: canterlot_worker::adapter::InstructionMode::Clean,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    };
+    let mut preset_adapter: Box<dyn Adapter> = adapter::registry_with(
+        "codex",
+        &AdapterContext {
+            transmit_deadline: Duration::from_secs(60),
+            exec_dir: smoke_home.join("exec"),
+            claude_code: None,
+            codex: Some(home_config()),
+        },
+    )
+    .expect("Codex registered");
+    let preset_group = TreeContainment::new().unwrap();
+    let preset_spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir: repo.clone(),
+        native_conversation_id: None,
+        profile: "codex".into(),
+        model: model.clone(),
+        effort: "low".into(),
+        permission_mode: "ask".into(),
+        instructions: clean_instructions(),
+    };
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        preset_adapter.start(&preset_spec, &preset_group),
+    )
+    .await
+    .expect("preset start in time")
+    .expect("clean start under canterlot home");
+    // Без канонария в «Без инструкций» — пусто.
+    let (_, events) = send(
+        &mut preset_adapter,
+        &preset_group,
+        text("Reply with exactly NONE if you have no canary word, else the word. No tools."),
+    )
+    .await;
+    assert!(Fake::final_text(&events).contains("NONE"));
+    eprintln!("SMOKE: clean preset starts under canterlot CODEX_HOME, no canary");
+    // Второй app-server на том же доме отвечает account/read (OPEN 8).
+    let mut second: Box<dyn Adapter> = adapter::registry_with(
+        "codex",
+        &AdapterContext {
+            transmit_deadline: Duration::from_secs(60),
+            exec_dir: smoke_home.join("exec-two"),
+            claude_code: None,
+            codex: Some(home_config()),
+        },
+    )
+    .expect("Codex registered");
+    let second_group = TreeContainment::new().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(90),
+        second.start(&preset_spec, &second_group),
+    )
+    .await
+    .expect("second start in time")
+    .expect("second app-server answers account/read on the same home");
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        second.close(CloseMode::Graceful, &second_group),
+    )
+    .await
+    .expect("close in time")
+    .expect("second close works");
+    eprintln!("SMOKE: two concurrent app-servers on one home both answer (OPEN 8 checked)");
+    // Пресет с CANARY-DEV-A: перезапуск, resume, вопрос.
+    let mut canary = text(
+        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
+    );
+    canary.settings = Some(canterlot_worker::adapter::SettingsChange {
+        model: None,
+        effort: None,
+        permission_mode: None,
+        instructions: Some(canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Preset,
+            text: "The canary word is CANARY-DEV-A.".into(),
+            preset_id: Some(Uuid::now_v7()),
+            revision: 1,
+            title: "canary".into(),
+        }),
+    });
+    let (_, events) = send(&mut preset_adapter, &preset_group, canary).await;
+    assert!(Fake::final_text(&events).contains("CANARY-DEV-A"));
+    eprintln!("SMOKE: preset text reaches the model, app-server restarts with resume");
+    // «Как у владельца»: присутствует ли ещё A — вопрос OPEN 5, 6.
+    let mut back_to_owner = text(
+        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
+    );
+    back_to_owner.settings = Some(canterlot_worker::adapter::SettingsChange {
+        model: None,
+        effort: None,
+        permission_mode: None,
+        instructions: Some(canterlot_worker::adapter::InstructionSpec {
+            mode: canterlot_worker::adapter::InstructionMode::Owner,
+            text: String::new(),
+            preset_id: None,
+            revision: 0,
+            title: String::new(),
+        }),
+    });
+    let (_, events) = send(&mut preset_adapter, &preset_group, back_to_owner).await;
+    eprintln!(
+        "SMOKE: owner preset after canary answers: {} (OPEN 5, 6)",
+        Fake::final_text(&events).trim()
+    );
+    // Назад в «Без инструкций»: снова NONE.
+    let mut clean_again = text(
+        "Reply with exactly the canary word from your developer instructions or NONE. No tools.",
+    );
+    clean_again.settings = Some(canterlot_worker::adapter::SettingsChange {
+        model: None,
+        effort: None,
+        permission_mode: None,
+        instructions: Some(clean_instructions()),
+    });
+    let (_, events) = send(&mut preset_adapter, &preset_group, clean_again).await;
+    assert!(Fake::final_text(&events).contains("NONE"));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        preset_adapter.close(CloseMode::Graceful, &preset_group),
+    )
+    .await
+    .expect("close in time")
+    .expect("preset close works");
+    let _ = std::fs::remove_dir_all(&smoke_home);
+    eprintln!("SMOKE: presets smoke done (context is covered by behavior, OPEN 8 checked)");
     tokio::time::timeout(
         Duration::from_secs(10),
         adapter.close(CloseMode::Graceful, &group),

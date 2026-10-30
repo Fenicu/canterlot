@@ -97,7 +97,13 @@ impl Fake {
             workdir: dir.path(),
             relay_exe: &relay,
         };
-        let proc = AppServerProcess::spawn(&spec, &group).unwrap();
+        let proc = AppServerProcess::spawn(
+            &spec,
+            &group,
+            canterlot_worker::adapter::InstructionMode::Owner,
+            None,
+        )
+        .unwrap();
         Self {
             proc,
             _group: group,

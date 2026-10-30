@@ -26,7 +26,13 @@ async fn close_kills_detached_grandchild() {
         workdir: td.path(),
         relay_exe: &relay,
     };
-    let proc = AppServerProcess::spawn(&spec, &group).unwrap();
+    let proc = AppServerProcess::spawn(
+        &spec,
+        &group,
+        canterlot_worker::adapter::InstructionMode::Owner,
+        None,
+    )
+    .unwrap();
     // wait for grandchild pid file
     for _ in 0..50 {
         if pidfile.exists() {

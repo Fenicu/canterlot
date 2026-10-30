@@ -2,9 +2,10 @@
 // конфигурации и аккаунта, developerInstructions и thread/start|resume.
 // Ответы config/read и account/read не логируются и не хранятся.
 use super::process::LaunchError;
+use crate::adapter::{InstructionMode, InstructionSpec};
 use serde_json::Value;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -79,7 +80,6 @@ pub struct Effective {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartError {
     AuthRequired,
-    UnsupportedInstructions,
     ResumeFailed,
     Protocol,
 }
@@ -88,7 +88,6 @@ impl StartError {
     pub fn reason(&self) -> &'static str {
         match self {
             StartError::AuthRequired => "auth_required",
-            StartError::UnsupportedInstructions => "unsupported_instructions",
             StartError::ResumeFailed => "resume_failed",
             StartError::Protocol => "protocol",
         }
@@ -136,21 +135,89 @@ pub fn check_account(result: &Value) -> Result<(), StartError> {
     }
 }
 
-// Профиль владельца сохраняет его текст и добавляет блок сервера; остальные
-// профили до задачи 7 плана 2c не поддерживаются.
+/// Примечание о смене пресета в начале developerInstructions.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChangeNote<'a> {
+    /// Смены нет (первый запуск).
+    None,
+    /// Новый пресет: название и версия.
+    To { title: &'a str, revision: u64 },
+    /// Возврат к «Без инструкций».
+    ToClean,
+    /// Переход на «Как у владельца».
+    ToOwner,
+}
+
+/// Текст инструкций по режиму пресета: владелец хранит свой текст и блок сервера,
+/// «Без инструкций» — пусто (перекрывает owner developer_instructions из конфига),
+/// пресет — его текст. Примечание о смене идёт первой строкой.
 pub fn compose_developer_instructions(
-    profile: &str,
+    spec: &InstructionSpec,
     owner: &OwnerDefaults,
     server_block: &str,
-) -> Result<String, StartError> {
-    if profile == "owner" || profile.is_empty() {
-        Ok(match owner.developer_instructions.as_deref() {
+    note: ChangeNote<'_>,
+) -> String {
+    // Текст пресета — данные сообщения: в логи и Debug не попадает.
+    let mut body = match spec.mode {
+        InstructionMode::Owner => match owner.developer_instructions.as_deref() {
             Some(text) if !text.is_empty() => format!("{text}\n\n{server_block}"),
             _ => server_block.to_owned(),
-        })
-    } else {
-        Err(StartError::UnsupportedInstructions)
+        },
+        // Пусто перекрывает owner developer_instructions из связанного конфига.
+        InstructionMode::Clean => String::new(),
+        InstructionMode::Preset => spec.text.clone(),
+    };
+    let prefix = match note {
+        ChangeNote::None => None,
+        ChangeNote::To { title, revision } => Some(format!(
+            "[canterlot] The instructions preset of this conversation changed to «{title}» (revision {revision}); it replaces any earlier canterlot preset instructions in this thread."
+        )),
+        ChangeNote::ToClean => Some("[canterlot] This conversation no longer uses an instructions preset; disregard earlier canterlot preset instructions in this thread.".to_owned()),
+        ChangeNote::ToOwner => Some("[canterlot] This conversation now uses the owner's own configuration; disregard earlier canterlot preset instructions in this thread.".to_owned()),
+    };
+    if let Some(prefix) = prefix {
+        if body.is_empty() {
+            body = prefix;
+        } else {
+            body = format!("{prefix}\n{body}");
+        }
     }
+    body
+}
+
+/// Рулон треда в доме владельца: sessions/**/rollout-*-<thread_id>.jsonl.
+/// Рулон треда в доме владельца: sessions/**/rollout-*-<thread_id>.jsonl.
+pub fn find_rollout(owner_home: &Path, thread_id: &str) -> Option<PathBuf> {
+    fn walk(dir: &Path, suffix: &str, depth: usize, out: &mut Vec<PathBuf>) {
+        if depth == 0 {
+            return;
+        }
+        let Ok(listing) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = listing.filter_map(|entry| entry.ok()).collect();
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            if path.is_dir() && !path.is_symlink() {
+                walk(&path, suffix, depth - 1, out);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix))
+            {
+                out.push(path);
+            }
+        }
+    }
+    let mut found = Vec::new();
+    walk(
+        &owner_home.join("sessions"),
+        &format!("-{thread_id}.jsonl"),
+        4,
+        &mut found,
+    );
+    found.into_iter().next()
 }
 
 fn thread_policy(mode: PermissionMode) -> (Option<&'static str>, Option<&'static str>) {
@@ -208,10 +275,18 @@ pub fn thread_resume_params(
     model: Option<&str>,
     workdir: &Path,
     developer_instructions: &str,
+    path: Option<&Path>,
 ) -> Value {
     let mut params = base_params(mode, model, workdir, developer_instructions);
     params.insert("threadId".to_owned(), thread_id.into());
     params.insert("excludeTurns".to_owned(), true.into());
+    // Путь рулона — только запасной вариант (UNSTABLE в схеме).
+    if let Some(path) = path {
+        params.insert(
+            "path".to_owned(),
+            path.to_string_lossy().into_owned().into(),
+        );
+    }
     Value::Object(params)
 }
 

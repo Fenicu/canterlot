@@ -1,4 +1,5 @@
 pub mod events;
+pub mod home;
 pub mod input;
 pub mod limits;
 pub mod mcp;
@@ -13,6 +14,7 @@ pub mod version;
 
 use self::{
     events::{Translated, Translator, TurnErrorInfo, TurnStatus},
+    home::{CodexHome, HomeError},
     input::{CurrentSettings, ModelEntry, Outbox, model_entries},
     limits::{CrunchContext, LimitTracker, ReachedDecision},
     process::{AppServerProcess, LaunchSpec, StdoutLine},
@@ -23,8 +25,9 @@ use self::{
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, BlockKind, Capabilities, CloseMode, DecisionOutcome,
-        DecisionProof, InterruptOutcome, ModelCatalog, Phase, Proof, StartSpec, Started, Support,
-        Transmission, TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
+        DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome, ModelCatalog, Phase,
+        Proof, SettingsChange, StartSpec, Started, Support, Transmission, TransmitOutcome,
+        canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
     },
     config::CodexConfig,
     containment::Containment,
@@ -33,7 +36,7 @@ use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::time::{Instant, timeout, timeout_at};
@@ -126,6 +129,9 @@ pub struct CodexAdapter {
     models: Vec<ModelEntry>,
     mode: PermissionMode,
     effort: Option<String>,
+    workdir: PathBuf,
+    instructions: InstructionSpec,
+    codex_home: Option<CodexHome>,
     last_noted: Option<u16>,
     turn_items: HashSet<String>,
     started_items: HashMap<String, Value>,
@@ -138,6 +144,16 @@ pub struct CodexAdapter {
     exited: bool,
     start_attempted: bool,
     relay_executable: Option<PathBuf>,
+}
+
+/// Параметры перезапуска app-server с возобновлением треда.
+struct ResumeLaunch<'a> {
+    mode: PermissionMode,
+    launch_mode: InstructionMode,
+    model: Option<&'a str>,
+    dev: &'a str,
+    home: Option<&'a CodexHome>,
+    owner_home: Option<&'a Path>,
 }
 
 impl CodexAdapter {
@@ -166,6 +182,15 @@ impl CodexAdapter {
             models: Vec::new(),
             mode: PermissionMode::Owner,
             effort: None,
+            workdir: PathBuf::new(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
+            codex_home: None,
             last_noted: None,
             turn_items: HashSet::new(),
             started_items: HashMap::new(),
@@ -640,7 +665,8 @@ impl CodexAdapter {
 
     // --- handshake ------------------------------------------------------------
 
-    async fn handshake(&mut self, spec: &StartSpec) -> Result<Started, AdapterError> {
+    /// Базовое рукопожатие: initialize, account/read, config/read. Дом и модели — отдельно.
+    async fn handshake_base(&mut self) -> Result<(), AdapterError> {
         let worker_version = env!("CARGO_PKG_VERSION");
         let (id, message) = self
             .rpc
@@ -674,13 +700,19 @@ impl CodexAdapter {
         let config = self
             .rpc_round(
                 "config/read",
-                thread::config_read_params(&spec.workdir),
+                thread::config_read_params(&self.workdir),
                 HANDSHAKE_STEP,
             )
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("app_server_failed"))?;
         self.owner = thread::owner_defaults_from(&config);
+        Ok(())
+    }
+
+    async fn handshake(&mut self, spec: &StartSpec) -> Result<Started, AdapterError> {
+        self.workdir = spec.workdir.clone();
+        self.handshake_base().await?;
         let models = self
             .rpc_round(
                 "model/list",
@@ -691,17 +723,35 @@ impl CodexAdapter {
             .ok_or(AdapterError::StartFailed("model_list_failed"))?
             .map_err(|_| AdapterError::StartFailed("model_list_failed"))?;
         self.models = model_entries(&models);
-        // Пресеты инструкций — задача 7 плана 2c: пока поддерживается только «Как у владельца».
-        let profile_name = match spec.instructions.mode {
-            crate::adapter::InstructionMode::Owner => "owner",
-            _ => return Err(AdapterError::StartFailed("instructions_unsupported")),
+        self.workdir = spec.workdir.clone();
+        self.instructions = spec.instructions.clone();
+        // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c, задача 7).
+        self.codex_home = match spec.instructions.mode {
+            InstructionMode::Owner => None,
+            _ => {
+                let home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
+                    .map_err(|error| {
+                        AdapterError::StartFailed(match error {
+                            HomeError::Unusable => "codex_home_unusable",
+                            HomeError::Io(_) => "codex_home_failed",
+                        })
+                    })?;
+                home.prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
+                    .map_err(|error| {
+                        AdapterError::StartFailed(match error {
+                            HomeError::Unusable => "codex_home_unusable",
+                            HomeError::Io(_) => "codex_home_failed",
+                        })
+                    })?;
+                Some(home)
+            }
         };
         let instructions = thread::compose_developer_instructions(
-            profile_name,
+            &spec.instructions,
             &self.owner,
             mcp::SERVER_INSTRUCTIONS,
-        )
-        .map_err(|_| AdapterError::StartFailed("unsupported_instructions"))?;
+            thread::ChangeNote::None,
+        );
         let model = (!spec.model.is_empty()).then(|| spec.model.clone());
         let effective = if let Some(native) = spec.native_conversation_id.as_deref() {
             let result = self
@@ -713,6 +763,7 @@ impl CodexAdapter {
                         model.as_deref(),
                         &spec.workdir,
                         &instructions,
+                        None,
                     ),
                     HANDSHAKE_STEP,
                 )
@@ -756,6 +807,261 @@ impl CodexAdapter {
     }
 
     // --- передача ---------------------------------------------------------------
+
+    // --- передача ---------------------------------------------------------------
+
+    // --- перезапуск между ходами --------------------------------------------
+
+    /// Остановить старый app-server: stdin EOF, до 5 с ожидания с чтением stdout,
+    /// затем SIGTERM группе и до 2 с, затем SIGKILL. Никогда не трогает сдерживание.
+    async fn stop_old_server(&mut self) {
+        let Some(mut proc) = self.proc.take() else {
+            return;
+        };
+        proc.close_stdin();
+        if !drain_until_exit(&mut proc, self, Duration::from_secs(5)).await {
+            signal_group(proc.pid, rustix::process::Signal::TERM);
+            if !drain_until_exit(&mut proc, self, Duration::from_secs(2)).await {
+                signal_group(proc.pid, rustix::process::Signal::KILL);
+                drain_to_eof(&mut proc, self).await;
+            }
+        }
+        self.eof = false;
+        self.exited = false;
+    }
+
+    /// Запустить app-server для перезапуска: мгновенно упавший процесс —
+    /// неудача запуска (init приходит только после первого ввода).
+    async fn spawn_for_restart(
+        &mut self,
+        mode: InstructionMode,
+        home: Option<&CodexHome>,
+        group: &dyn Containment,
+    ) -> Option<AppServerProcess> {
+        if version::check(&self.cfg.executable).await.is_err() {
+            return None;
+        }
+        let relay = self
+            .relay_executable
+            .clone()
+            .unwrap_or_else(|| std::env::current_exe().unwrap_or_default());
+        let workdir = self.workdir.clone();
+        let exec_dir = self.exec_dir.clone();
+        let launch = LaunchSpec {
+            executable: &self.cfg.executable,
+            exec_dir: &exec_dir,
+            workdir: &workdir,
+            relay_exe: &relay,
+        };
+        let mut proc = AppServerProcess::spawn(&launch, group, mode, home).ok()?;
+        if exited_early(&mut proc).await {
+            return None;
+        }
+        Some(proc)
+    }
+
+    /// thread/resume с новыми инструкциями; «not found» — одна попытка с путём
+    /// рулона из дома владельца.
+    async fn resume_with_fallback(
+        &mut self,
+        launch: ResumeLaunch<'_>,
+    ) -> Result<thread::Effective, AdapterError> {
+        let thread_id = self.thread_id();
+        let workdir = self.workdir.clone();
+        let params = thread::thread_resume_params(
+            &thread_id,
+            launch.mode,
+            launch.model,
+            &workdir,
+            launch.dev,
+            None,
+        );
+        let result = self
+            .rpc_round("thread/resume", params, HANDSHAKE_STEP)
+            .await
+            .ok_or(AdapterError::StartFailed("app_server_failed"))?;
+        match result {
+            Ok(value) => thread::parse_thread_result(&value)
+                .map_err(|_| AdapterError::StartFailed("resume_failed")),
+            Err(error) if is_not_found(&error) => {
+                if let Some(path) = launch
+                    .owner_home
+                    .and_then(|home| thread::find_rollout(home, &thread_id))
+                {
+                    let params = thread::thread_resume_params(
+                        &thread_id,
+                        launch.mode,
+                        launch.model,
+                        &workdir,
+                        launch.dev,
+                        Some(&path),
+                    );
+                    let result = self
+                        .rpc_round("thread/resume", params, HANDSHAKE_STEP)
+                        .await
+                        .ok_or(AdapterError::StartFailed("app_server_failed"))?;
+                    match result {
+                        Ok(value) => thread::parse_thread_result(&value)
+                            .map_err(|_| AdapterError::StartFailed("resume_failed")),
+                        Err(_) => Err(AdapterError::StartFailed("resume_failed")),
+                    }
+                } else {
+                    Err(AdapterError::StartFailed("resume_failed"))
+                }
+            }
+            Err(_) => Err(AdapterError::StartFailed("resume_failed")),
+        }
+    }
+
+    /// Перезапустить app-server между ходами с новыми инструкциями.
+    async fn restart_for_instructions(
+        &mut self,
+        change: &SettingsChange,
+        group: &dyn Containment,
+    ) -> Result<(), &'static str> {
+        let next = change
+            .instructions
+            .clone()
+            .ok_or("instructions_change_failed")?;
+        let model = change.model.clone().or_else(|| {
+            self.effective
+                .as_ref()
+                .map(|effective| effective.model.clone())
+        });
+        let mode = change
+            .permission_mode
+            .as_deref()
+            .and_then(|mode| PermissionMode::parse(mode).ok())
+            .unwrap_or(self.mode);
+        let effort = change.effort.clone().or_else(|| self.effort.clone());
+        let new_home = if next.mode == InstructionMode::Owner {
+            None
+        } else {
+            Some(prepare_home(&self.cfg, &self.exec_dir)?)
+        };
+        let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
+        let note = match next.mode {
+            InstructionMode::Preset => thread::ChangeNote::To {
+                title: next.title.as_str(),
+                revision: next.revision,
+            },
+            InstructionMode::Clean => thread::ChangeNote::ToClean,
+            InstructionMode::Owner => thread::ChangeNote::ToOwner,
+        };
+        let dev = thread::compose_developer_instructions(
+            &next,
+            &self.owner,
+            mcp::SERVER_INSTRUCTIONS,
+            note,
+        );
+        self.stop_old_server().await;
+        self.rpc = RpcClient::new();
+        self.responses.clear();
+        self.pending_writes.clear();
+        let launch = ResumeLaunch {
+            mode,
+            launch_mode: next.mode,
+            model: model.as_deref(),
+            dev: &dev,
+            home: new_home.as_ref(),
+            owner_home: owner_home.as_deref(),
+        };
+        match self.spawn_and_resume(launch, group).await {
+            Ok(effective) => {
+                let started = (
+                    self.proc.as_ref().map(|proc| proc.pid).unwrap_or_default(),
+                    self.proc
+                        .as_ref()
+                        .map(|proc| proc.start_ticks)
+                        .unwrap_or_default(),
+                );
+                self.effective = Some(effective);
+                self.mode = mode;
+                self.effort = effort;
+                self.instructions = next;
+                self.codex_home = new_home;
+                self.events.push_back(AdapterEvent::CliRestarted {
+                    cli_pid: started.0,
+                    cli_start_ticks: started.1,
+                });
+                Ok(())
+            }
+            Err(_) => self.respawn_previous(group).await,
+        }
+    }
+
+    async fn spawn_and_resume(
+        &mut self,
+        launch: ResumeLaunch<'_>,
+        group: &dyn Containment,
+    ) -> Result<thread::Effective, AdapterError> {
+        let proc = match self
+            .spawn_for_restart(launch.launch_mode, launch.home, group)
+            .await
+        {
+            Some(proc) => proc,
+            None => return Err(AdapterError::StartFailed("app_server_failed")),
+        };
+        self.proc = Some(proc);
+        self.handshake_base().await?;
+        self.resume_with_fallback(launch).await
+    }
+
+    /// Запасной запуск со старыми инструкциями и домом после неудачного
+    /// перезапуска. Успех — отказ входа, провал — остановка исполнения.
+    async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
+        let previous = self.instructions.clone();
+        let previous_home = if previous.mode == InstructionMode::Owner {
+            None
+        } else {
+            Some(prepare_home(&self.cfg, &self.exec_dir)?)
+        };
+        let mode = self.mode;
+        let model = self
+            .effective
+            .as_ref()
+            .map(|effective| effective.model.clone());
+        let dev = thread::compose_developer_instructions(
+            &previous,
+            &self.owner,
+            mcp::SERVER_INSTRUCTIONS,
+            thread::ChangeNote::None,
+        );
+        let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
+        let launch = ResumeLaunch {
+            mode,
+            launch_mode: previous.mode,
+            model: model.as_deref(),
+            dev: &dev,
+            home: previous_home.as_ref(),
+            owner_home: owner_home.as_deref(),
+        };
+        match self.spawn_and_resume(launch, group).await {
+            Ok(effective) => {
+                let started = (
+                    self.proc.as_ref().map(|proc| proc.pid).unwrap_or_default(),
+                    self.proc
+                        .as_ref()
+                        .map(|proc| proc.start_ticks)
+                        .unwrap_or_default(),
+                );
+                self.effective = Some(effective);
+                self.codex_home = previous_home;
+                self.events.push_back(AdapterEvent::CliRestarted {
+                    cli_pid: started.0,
+                    cli_start_ticks: started.1,
+                });
+                Err("instructions_change_failed")
+            }
+            Err(_) => {
+                self.events.push_back(AdapterEvent::ProcessExited {
+                    code: None,
+                    signal: None,
+                });
+                Err("instructions_change_failed")
+            }
+        }
+    }
 
     fn current_settings(&self) -> CurrentSettings {
         CurrentSettings {
@@ -816,7 +1122,11 @@ impl CodexAdapter {
         input::history_contains(&result, command_id)
     }
 
-    async fn transmit_inner(&mut self, input: &Transmission) -> TransmitOutcome {
+    async fn transmit_inner(
+        &mut self,
+        input: &Transmission,
+        group: &dyn Containment,
+    ) -> TransmitOutcome {
         if self.translator.is_none() {
             return TransmitOutcome::Undetermined;
         }
@@ -828,6 +1138,20 @@ impl CodexAdapter {
             &self.models,
         ) {
             return TransmitOutcome::Rejected(reason.into());
+        }
+        // Смена инструкций — перезапуск app-server между ходами, до записи ввода.
+        if let Some(change) = input.settings.clone()
+            && change
+                .instructions
+                .as_ref()
+                .is_some_and(|next| !next.same_effect(&self.instructions))
+        {
+            if self.outbox.active().is_some() {
+                return TransmitOutcome::Rejected("turn_active".into());
+            }
+            if let Err(reason) = self.restart_for_instructions(&change, group).await {
+                return TransmitOutcome::Rejected(reason.into());
+            }
         }
         if self.outbox.active().is_some() {
             return TransmitOutcome::Rejected("turn_active".into());
@@ -921,6 +1245,19 @@ impl CodexAdapter {
     }
 }
 
+/// Окружение для дома владельца: явный корень из конфигурации подменяет $CODEX_HOME.
+fn owner_env(cfg: &CodexConfig) -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    let mut env: Vec<_> = std::env::vars_os().collect();
+    if let Some(owner) = &cfg.owner_home {
+        env.retain(|(key, _)| key.to_string_lossy() != "CODEX_HOME");
+        env.push((
+            std::ffi::OsString::from("CODEX_HOME"),
+            owner.as_os_str().to_os_string(),
+        ));
+    }
+    env
+}
+
 fn turn_error_text(kind: &str, http_status: Option<u16>) -> String {
     let name = match kind {
         "serverOverloaded" => "Сервер перегружен",
@@ -942,6 +1279,98 @@ fn exit_event(status: std::process::ExitStatus) -> AdapterEvent {
         code: status.code(),
         signal: status.signal(),
     }
+}
+
+/// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
+fn prepare_home(cfg: &CodexConfig, exec_dir: &Path) -> Result<CodexHome, &'static str> {
+    let home = CodexHome::resolve(cfg, exec_dir, &owner_env(cfg)).map_err(|error| match error {
+        HomeError::Unusable => "codex_home_unusable",
+        HomeError::Io(_) => "codex_home_failed",
+    })?;
+    home.prepare(mcp::SERVER_INSTRUCTIONS, cfg.home_policy)
+        .map_err(|error| match error {
+            HomeError::Unusable => "codex_home_unusable",
+            HomeError::Io(_) => "codex_home_failed",
+        })?;
+    Ok(home)
+}
+
+/// Ребёнок уже убран другой проверкой members (общий супервизор тестового
+/// процесса): `ECHILD` означает, что процесса точно нет.
+fn reaped(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error())
+}
+
+/// Сигнал группе процессов app-server (сервер — лидер своей группы).
+fn signal_group(pid: u32, signal: rustix::process::Signal) {
+    use rustix::process::{Pid, kill_process_group};
+    let Some(pid) = i32::try_from(pid).ok().and_then(Pid::from_raw) else {
+        return;
+    };
+    let _ = kill_process_group(pid, signal);
+}
+
+/// Ранний выход app-server сразу после запуска: процесс не прожил и секунды.
+async fn exited_early(proc: &mut AppServerProcess) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(1) {
+        match proc.try_wait() {
+            Ok(Some(_)) => {
+                let _ = proc.wait().await;
+                return true;
+            }
+            Err(error) if reaped(&error) => return true,
+            _ => {}
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    false
+}
+
+async fn drain_until_exit(
+    proc: &mut AppServerProcess,
+    adapter: &mut CodexAdapter,
+    limit: Duration,
+) -> bool {
+    let start = Instant::now();
+    loop {
+        match proc.try_wait() {
+            Ok(Some(_)) => {
+                drain_available(proc, adapter).await;
+                return true;
+            }
+            Err(error) if reaped(&error) => return true,
+            _ => {}
+        }
+        if start.elapsed() >= limit {
+            return false;
+        }
+        if let Ok(line) = timeout(Duration::from_millis(50), proc.next_line()).await {
+            adapter.dispatch_line(line).await;
+        }
+    }
+}
+
+async fn drain_available(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
+    loop {
+        match timeout(Duration::from_millis(50), proc.next_line()).await {
+            Ok(line @ StdoutLine::Line(_)) => adapter.dispatch_line(line).await,
+            _ => return,
+        }
+    }
+}
+
+async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
+    loop {
+        match proc.next_line().await {
+            line @ StdoutLine::Line(_) => adapter.dispatch_line(line).await,
+            _ => return,
+        }
+    }
+}
+
+fn is_not_found(error: &RpcError) -> bool {
+    error.message.to_lowercase().contains("not found")
 }
 
 #[async_trait::async_trait]
@@ -995,14 +1424,22 @@ impl Adapter for CodexAdapter {
             workdir: &spec.workdir,
             relay_exe: &relay,
         };
-        self.proc = Some(AppServerProcess::spawn(&launch, group).map_err(|error| {
-            // Мгновенно упавший сервер: запуск удался, умер сам процесс.
-            if matches!(error, process::LaunchError::CliNotFoundInContainment) {
-                AdapterError::StartFailed("app_server_failed")
-            } else {
-                AdapterError::StartFailed("cli_launch_failed")
-            }
-        })?);
+        self.proc = Some(
+            AppServerProcess::spawn(
+                &launch,
+                group,
+                spec.instructions.mode,
+                self.codex_home.as_ref(),
+            )
+            .map_err(|error| {
+                // Мгновенно упавший сервер: запуск удался, умер сам процесс.
+                if matches!(error, process::LaunchError::CliNotFoundInContainment) {
+                    AdapterError::StartFailed("app_server_failed")
+                } else {
+                    AdapterError::StartFailed("cli_launch_failed")
+                }
+            })?,
+        );
         self.handshake(spec).await
     }
 
@@ -1016,15 +1453,11 @@ impl Adapter for CodexAdapter {
         )
     }
 
-    async fn transmit(
-        &mut self,
-        input: &Transmission,
-        _group: &dyn Containment,
-    ) -> TransmitOutcome {
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
         if self.proc.is_none() || self.exited || self.eof {
             return TransmitOutcome::Undetermined;
         }
-        self.transmit_inner(input).await
+        self.transmit_inner(input, group).await
     }
 
     async fn deliver_decision(
