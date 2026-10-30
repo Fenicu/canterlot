@@ -37,6 +37,7 @@ use uuid::Uuid;
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
+    payload::{MAX_REQUEST_ID_BYTES, bounded_json},
     sj::Sj,
 };
 use crate::{
@@ -1439,13 +1440,18 @@ impl Supervisor {
                     && matches!(self.lifecycle, Lifecycle::Running)
                     && self.sj.request(&request_id).is_none()
                 {
+                    let payload_json = (request_id.len() <= MAX_REQUEST_ID_BYTES)
+                        .then(|| bounded_json(&kind, payload))
+                        .flatten();
+                    let Some(payload_json) = payload_json else {
+                        return self.refuse_oversized(&request_id).await;
+                    };
                     self.record(Body::RequestOpened(RequestOpened {
                         request_id,
                         execution_id: self.spec.execution_id.to_string(),
                         generation: self.spec.generation,
                         kind,
-                        payload_json: serde_json::to_vec(&payload)
-                            .map_err(|_| SupervisorError::Spec)?,
+                        payload_json,
                     }))?;
                     if self.aborting_turn {
                         self.close_requests("interrupted")?;
@@ -1460,6 +1466,12 @@ impl Supervisor {
                 tool_name,
                 summary,
             } => {
+                // Без открытого запроса фаза ожидания держала бы очередь разговора.
+                if matches!(phase, Phase::AwaitingPermission | Phase::AwaitingAnswer)
+                    && !self.sj.has_open_requests()
+                {
+                    return Ok(());
+                }
                 let ready = matches!(phase, Phase::AwaitingInput);
                 self.record(Body::PhaseChanged(PhaseChanged {
                     execution_id: self.spec.execution_id.to_string(),
@@ -1734,6 +1746,22 @@ impl Supervisor {
                     },
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Запрос, который нельзя показать владельцу, получает явный отказ: иначе
+    /// CLI ждал бы ответа вечно. В журнале остаётся только отметка.
+    async fn refuse_oversized(&mut self, request_id: &str) -> Result<(), SupervisorError> {
+        self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: self.spec.execution_id.to_string(),
+            kind: "unknown_optional_event".into(),
+            event_type: "request_too_large".into(),
+        }))?;
+        if let Some(adapter) = self.adapter.as_mut() {
+            adapter
+                .refuse_request(request_id, "Request is too large to show to the owner")
+                .await;
         }
         Ok(())
     }

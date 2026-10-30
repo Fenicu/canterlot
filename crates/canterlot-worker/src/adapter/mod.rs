@@ -1,5 +1,5 @@
 use crate::containment::{Containment, ContainmentError};
-use canterlot_proto::requests::{AnswerValue, DecisionPayload};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use std::{fmt, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
@@ -679,6 +679,16 @@ pub trait Adapter: Send {
         request_id: &str,
         decision: &DecisionPayload,
     ) -> DecisionOutcome;
+    /// Отказать в запросе без участия владельца: он его не видел или уже не может
+    /// ответить, а CLI ждёт. Журнал этого запроса ведёт сопровождение: `RequestClosed`
+    /// адаптер не шлёт.
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        let deny = DecisionPayload::Permission {
+            behavior: PermissionBehavior::Deny,
+            message: Some(message.to_owned()),
+        };
+        let _ = self.deliver_decision(request_id, &deny).await;
+    }
     async fn interrupt(&mut self) -> InterruptOutcome;
     async fn next_event(&mut self) -> AdapterEvent;
     async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}

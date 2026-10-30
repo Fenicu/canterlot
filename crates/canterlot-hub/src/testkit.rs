@@ -507,16 +507,15 @@ pub async fn seed_conversation(pool: &PgPool, owner_id: Uuid, machine_id: Uuid) 
 
 /// Записать за последним исполнением разговора принятый агентом ввод.
 pub async fn seed_recorded_turn(pool: &PgPool, conversation_id: Uuid) {
-    let (owner_id, machine_id, execution_id, generation): (Uuid, Uuid, Uuid, i64) =
-        sqlx::query_as(
-            "select c.owner_id, c.machine_id, e.id, e.generation
+    let (owner_id, machine_id, execution_id, generation): (Uuid, Uuid, Uuid, i64) = sqlx::query_as(
+        "select c.owner_id, c.machine_id, e.id, e.generation
              from conversations c join executions e on e.conversation_id = c.id
              where c.id = $1 order by e.generation desc limit 1",
-        )
-        .bind(conversation_id)
-        .fetch_one(pool)
-        .await
-        .expect("seed recorded turn: execution");
+    )
+    .bind(conversation_id)
+    .fetch_one(pool)
+    .await
+    .expect("seed recorded turn: execution");
     let command_id = Uuid::now_v7();
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id,

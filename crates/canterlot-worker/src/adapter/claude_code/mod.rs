@@ -369,6 +369,11 @@ impl ClaudeCodeAdapter {
                 }
                 self.requests
                     .insert(request_id.clone(), (kind.into(), payload.clone()));
+                self.events.push_back(AdapterEvent::RequestOpened {
+                    request_id,
+                    kind: kind.into(),
+                    payload,
+                });
                 self.events.push_back(AdapterEvent::Phase {
                     phase: if kind == "question" {
                         Phase::AwaitingAnswer
@@ -377,11 +382,6 @@ impl ClaudeCodeAdapter {
                     },
                     tool_name: None,
                     summary: None,
-                });
-                self.events.push_back(AdapterEvent::RequestOpened {
-                    request_id,
-                    kind: kind.into(),
-                    payload,
                 });
             }
             BrokerEvent::Cancelled { request_id } => {
@@ -1000,6 +1000,13 @@ impl Adapter for ClaudeCodeAdapter {
             });
         }
         outcome
+    }
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        if self.requests.remove(request_id).is_some()
+            && let Some(broker) = self.broker.as_mut()
+        {
+            broker.refuse(request_id, message).await;
+        }
     }
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
         // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.

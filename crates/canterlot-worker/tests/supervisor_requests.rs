@@ -143,6 +143,13 @@ impl Harness {
         self.start_profile(steps, "synthetic").await
     }
     async fn start_profile(&mut self, steps: Value, profile: &str) -> String {
+        self.launch(steps, profile).await;
+        match self.wait(|b| matches!(b, Body::RequestOpened(_))).await {
+            Body::RequestOpened(r) => r.request_id,
+            _ => unreachable!(),
+        }
+    }
+    async fn launch(&mut self, steps: Value, profile: &str) {
         self.attach(0).await;
         self.send(down::Msg::StartCli(StartCli {
             profile: profile.into(),
@@ -178,10 +185,6 @@ impl Harness {
             files: vec![],
         }))
         .await;
-        match self.wait(|b| matches!(b, Body::RequestOpened(_))).await {
-            Body::RequestOpened(r) => r.request_id,
-            _ => unreachable!(),
-        }
     }
     fn decision(request: &str, generation: u64, payload: DecisionPayload) -> DeliverDecision {
         let kind = match payload {
@@ -395,6 +398,75 @@ async fn synthetic_adapter_pauses_on_permission_and_resumes_on_allow() {
         assert_eq!(f.proof_kind, "tool_result");
     }
     h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+}
+
+#[tokio::test]
+async fn oversized_permission_is_journaled_as_a_marked_preview() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    let request = h
+        .start(json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":400_000}},{"delta":"resumed"}]))
+        .await;
+    let Body::RequestOpened(opened) = h.wait(|b| matches!(b, Body::RequestOpened(_))).await else {
+        unreachable!()
+    };
+    assert!(
+        opened.payload_json.len() <= 262_144,
+        "{} bytes",
+        opened.payload_json.len()
+    );
+    let payload: Value = serde_json::from_slice(&opened.payload_json).unwrap();
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["tool_name"], "Write");
+    assert_eq!(payload["tool_use_id"], "toolu_large");
+    assert_eq!(payload["input"]["file_path"], "/tmp/x");
+    let preview = payload["input"]["content"].as_str().unwrap();
+    assert!(!preview.is_empty() && preview.chars().all(|c| c == 'щ'));
+    h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
+        .await;
+    h.wait(|b| matches!(b, Body::DecisionApplied(_))).await;
+    h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+}
+
+#[tokio::test]
+async fn payload_within_the_limit_stays_unmarked() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    h.start(json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":1000}}]))
+        .await;
+    let Body::RequestOpened(opened) = h.wait(|b| matches!(b, Body::RequestOpened(_))).await else {
+        unreachable!()
+    };
+    let payload: Value = serde_json::from_slice(&opened.payload_json).unwrap();
+    assert_eq!(payload.get("truncated"), None);
+    assert_eq!(payload["input"]["content"].as_str().unwrap().len(), 2000);
+}
+
+#[tokio::test]
+async fn payload_without_a_preview_is_denied_and_never_reaches_the_journal() {
+    let _gate = e2e_gate::acquire().await;
+    let mut h = Harness::new(None).await;
+    h.launch(
+        json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":400_000,"bare":true}},{"delta":"resumed"}]),
+        "synthetic",
+    )
+    .await;
+    let diagnostic = h
+        .wait(|b| matches!(b, Body::AdapterDiagnostic(f) if f.event_type == "request_too_large"))
+        .await;
+    assert!(matches!(diagnostic, Body::AdapterDiagnostic(_)));
+    h.wait(|b| matches!(b, Body::RunFinished(_))).await;
+    assert!(!h.bodies.iter().any(|b| matches!(b, Body::RequestOpened(_))));
+    assert_eq!(
+        h.stdin().iter().filter(|f| f["type"] == "decision").count(),
+        1
+    );
+    assert!(
+        h.bodies
+            .iter()
+            .any(|b| matches!(b, Body::BlockFinal(f) if f.text == "denied")),
+        "the agent must get an explicit deny"
+    );
 }
 
 #[tokio::test]

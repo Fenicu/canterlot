@@ -316,6 +316,15 @@ impl Broker {
         })
     }
 
+    /// Отказ без решения владельца: годится и для вопроса, где ответа просто нет.
+    pub async fn refuse(&mut self, request_id: &str, message: &str) {
+        let Some(call) = self.pending.lock().await.remove(request_id) else {
+            return;
+        };
+        let reply = mcp::tool_call_reply(&call.rpc_id, &text_value(&mcp::deny_text(Some(message))));
+        let _ = write_line(&call.writer, &reply).await;
+    }
+
     /// Итог вызова пресетов от хаба: текст плюс подсказка или `isError` с кодом.
     /// Неизвестный (отменённый или чужой) вызов молча отбрасывается.
     pub async fn answer_agent_tool(

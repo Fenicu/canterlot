@@ -807,6 +807,115 @@ async fn interrupt_while_streaming_is_acknowledged() {
     f.close().await;
 }
 
+fn with_mcp_call(call: Value, frames: Vec<Value>) -> Fake {
+    let f = Fake::new(vec![frames]);
+    std::fs::write(
+        f.dir.path().join("relay-exe"),
+        env!("CARGO_BIN_EXE_canterlot-worker"),
+    )
+    .unwrap();
+    std::fs::write(
+        f.dir.path().join("mcp-calls.json"),
+        serde_json::to_vec(&vec![call]).unwrap(),
+    )
+    .unwrap();
+    f
+}
+
+fn mcp_reply_text(f: &Fake) -> Value {
+    let line = std::fs::read_to_string(f.dir.path().join("mcp-replies.jsonl")).unwrap();
+    let frame: Value = serde_json::from_str(&line).unwrap();
+    serde_json::from_str(frame["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[tokio::test]
+async fn approval_of_a_large_request_returns_the_original_input() {
+    let id = Uuid::now_v7();
+    let input = json!({"file_path": "/tmp/x", "content": "щ".repeat(200_000)});
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"Write","input":input,"tool_use_id":"toolu_large"},
+        "_meta":{"claudecode/toolUseId":"toolu_large"}}});
+    let mut f = with_mcp_call(
+        call,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
+        ],
+    );
+    f.start().await;
+    f.send(&tx(id)).await;
+    loop {
+        match f.event().await {
+            AdapterEvent::RequestOpened { request_id, .. } => {
+                let decision = DecisionPayload::Permission {
+                    behavior: PermissionBehavior::Allow,
+                    message: None,
+                };
+                assert!(matches!(
+                    tokio::time::timeout(WAIT, f.adapter.deliver_decision(&request_id, &decision))
+                        .await
+                        .unwrap(),
+                    adapter::DecisionOutcome::Applied(_)
+                ));
+            }
+            AdapterEvent::RunFinished { .. } => break,
+            _ => {}
+        }
+    }
+    let reply = mcp_reply_text(&f);
+    assert_eq!(reply["behavior"], "allow");
+    assert_eq!(reply["updatedInput"], input);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn refused_question_gets_a_deny_and_stays_out_of_the_journal() {
+    let id = Uuid::now_v7();
+    let call = json!({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"approve",
+        "arguments":{"tool_name":"AskUserQuestion","tool_use_id":"toolu_question","input":{"questions":[
+            {"question":"Какой?","header":"Выбор","multiSelect":false,"options":[{"label":"да","description":""}]}
+        ]}},
+        "_meta":{"claudecode/toolUseId":"toolu_question"}}});
+    let mut f = with_mcp_call(
+        call,
+        vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@request:0"),
+            json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id]}),
+        ],
+    );
+    f.start().await;
+    f.send(&tx(id)).await;
+    let mut closed = 0;
+    loop {
+        match f.event().await {
+            AdapterEvent::RequestOpened { request_id, .. } => {
+                f.adapter.refuse_request(&request_id, "too large").await;
+                let decision = DecisionPayload::Question {
+                    answers: BTreeMap::new(),
+                };
+                assert!(matches!(
+                    f.adapter.deliver_decision(&request_id, &decision).await,
+                    adapter::DecisionOutcome::NotApplied(reason) if reason == "request_not_pending"
+                ));
+            }
+            AdapterEvent::RequestClosed { .. } => closed += 1,
+            AdapterEvent::RunFinished { .. } => break,
+            _ => {}
+        }
+    }
+    assert_eq!(
+        closed, 0,
+        "the supervisor owns the journal of a refused request"
+    );
+    assert_eq!(
+        mcp_reply_text(&f),
+        json!({"behavior": "deny", "message": "too large"})
+    );
+    f.close().await;
+}
+
 #[tokio::test]
 async fn request_closed_by_interrupt_is_not_closed_again_on_relay_disconnect() {
     let _sigint =

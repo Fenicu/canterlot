@@ -9,7 +9,9 @@
 //! {"error":"..."},{"unknown":{"event_type":"...","required":false}},
 //! {"exit":0},{"detach_child":true},{"hang":true}]}.
 //! Запросы: {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
-//! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}}.
+//! {"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}},
+//! {"request_large":{"tool_name":"Write","repeat":"щ","times":400000}} (вход сверх предела
+//! ввода), с "bare":true — тот же текст вместо объекта.
 //! Эти шаги ждут решения без таймаута; ответы на вопросы привязаны к `id`.
 //! {"echo_instructions":true} пишет блок с режимом и версией инструкций ввода;
 //! {"agent_call":{"tool":"...","arguments":{...}}} отдаёт вызов инструмента агента
@@ -149,14 +151,14 @@ struct Turn {
 impl Turn {
     async fn request(&mut self, kind: &str, payload: &Value, lane: &Lane) -> io::Result<()> {
         let id = Uuid::now_v7().to_string();
+        emit(json!({"type":"request_opened", "request_id":id, "kind":kind, "payload":payload}))
+            .await?;
         phase(if kind == "permission" {
             Phase::AwaitingPermission
         } else {
             Phase::AwaitingAnswer
         })
         .await?;
-        emit(json!({"type":"request_opened", "request_id":id, "kind":kind, "payload":payload}))
-            .await?;
         while let Some((request_id, decision)) = self.decisions.recv().await {
             let reason = if request_id != id {
                 "request_closed"
@@ -298,6 +300,17 @@ fn run_steps<'a>(
                 turn.request("permission", payload, lane).await?;
             } else if let Some(payload) = step.get("ask_question") {
                 turn.request("question", payload, lane).await?;
+            } else if let Some(spec) = step.get("request_large") {
+                let text = spec["repeat"]
+                    .as_str()
+                    .unwrap_or("x")
+                    .repeat(spec["times"].as_u64().unwrap_or(0) as usize);
+                let payload = if spec["bare"] == true {
+                    json!(text)
+                } else {
+                    json!({"tool_name":spec["tool_name"],"input":{"file_path":"/tmp/x","content":text},"tool_use_id":"toolu_large"})
+                };
+                turn.request("permission", &payload, lane).await?;
             } else if let Some(text) = step["delta"].as_str() {
                 text_delta(turn, lane, text).await?;
             } else if step["echo_instructions"].as_bool() == Some(true) {

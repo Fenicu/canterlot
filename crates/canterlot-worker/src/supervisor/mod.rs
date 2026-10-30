@@ -14,6 +14,7 @@ use crate::containment::ContainmentError;
 pub use crate::config::SupervisorTimers;
 
 pub mod ipc;
+mod payload;
 mod run;
 mod sj;
 
