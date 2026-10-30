@@ -1157,6 +1157,15 @@ async fn apply_body(
                         correlation_id,
                     )
                     .await?;
+                } else if target.kind == "deliver_decision" {
+                    crate::requests::fail_decision_command_in_tx(
+                        conn,
+                        command_id,
+                        dispatch_attempt,
+                        &fact.reason,
+                        correlation_id,
+                    )
+                    .await?;
                 } else {
                     complete_rejected(conn, command_id, dispatch_attempt, &fact.reason).await?;
                 }
@@ -2287,13 +2296,14 @@ async fn request_closed_event(
         },
     )
     .await?;
-    clear_awaiting_hold_if_no_open_requests(
+    crate::requests::clear_awaiting_hold_in_tx(
         conn,
         request.conversation_id,
         run.execution_id,
         correlation_id,
     )
-    .await
+    .await?;
+    Ok(())
 }
 
 fn non_empty_reason(reason: &str, fallback: &str) -> String {
@@ -2433,61 +2443,6 @@ async fn apply_decision_unconfirmed(
     .await?;
     request_closed_event(conn, run, &request, "unconfirmed", correlation_id).await?;
     Ok(false)
-}
-
-async fn clear_awaiting_hold_if_no_open_requests(
-    conn: &mut PgConnection,
-    conversation_id: Uuid,
-    execution_id: Uuid,
-    correlation_id: Uuid,
-) -> Result<(), IngestError> {
-    let open_count: i64 = sqlx::query_scalar(crate::requests::LIVE_OPEN_REQUESTS)
-        .bind(conversation_id)
-        .fetch_one(&mut *conn)
-        .await?;
-
-    if open_count == 0 {
-        let queue_opt: Option<QueueRowTuple> = sqlx::query_as(
-            "select pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt
-             from queue_state where conversation_id = $1 for update",
-        )
-        .bind(conversation_id)
-        .fetch_optional(&mut *conn)
-        .await?;
-
-        if let Some((pauses, mut holds, slot_str, slot_input, slot_attempt)) = queue_opt
-            && holds.0.contains(&HoldReason::AwaitingUserRequest)
-        {
-            holds.0.retain(|r| *r != HoldReason::AwaitingUserRequest);
-            sqlx::query("update queue_state set hold_reasons = $2 where conversation_id = $1")
-                .bind(conversation_id)
-                .bind(&holds)
-                .execute(&mut *conn)
-                .await?;
-
-            let slot = RunSlot::from_columns(&slot_str, slot_input, slot_attempt)
-                .map_err(|_| IngestError::Database)?;
-            events::append(
-                conn,
-                NewEvent {
-                    scope: Scope::Conversation {
-                        id: conversation_id,
-                    },
-                    kind: "queue_state_changed",
-                    conversation_id: Some(conversation_id),
-                    execution_id: Some(execution_id),
-                    payload: json!({
-                        "pause_reasons": pauses.0,
-                        "hold_reasons": holds.0,
-                        "run_slot": slot,
-                    }),
-                    correlation_id,
-                },
-            )
-            .await?;
-        }
-    }
-    Ok(())
 }
 
 async fn timed_receipt(

@@ -1606,3 +1606,91 @@ async fn request_opened_after_events_in_one_batch_does_not_invert_lock_order(poo
         )
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_decision_fact_of_another_machine_changes_nothing(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_f",
+    )
+    .await;
+    let (winner, command) = decide(&pool, &seed, request, execution.generation).await;
+    let stranger = testkit::seed(&pool).await;
+    let outcome = ingest
+        .apply_batch(
+            stranger.machine_id,
+            &stranger.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![not_applied("toolu_f", winner, "request_closed")],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+    assert_eq!(request_state(&pool, request).await, "decision_saved");
+    assert_eq!(command_state(&pool, command).await, "pending");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_command_rejected_by_the_worker_closes_the_request(pool: PgPool) {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let ingest = Ingest::new(pool.clone());
+    let request = open_native_request(
+        &pool,
+        &ingest,
+        &seed,
+        &execution,
+        Uuid::now_v7(),
+        1,
+        "toolu_w",
+    )
+    .await;
+    let (_, command) = decide(&pool, &seed, request, execution.generation).await;
+    let attempt: i32 = sqlx::query_scalar("select dispatch_attempt from commands where id = $1")
+        .bind(command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    ingest
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Cj,
+            &cj(
+                Uuid::now_v7(),
+                vec![record_body::Body::CommandRejected(
+                    canterlot_proto::worker::v1::CommandRejected {
+                        command_id: command.to_string(),
+                        dispatch_attempt: attempt as u32,
+                        reason: "unsupported_command".into(),
+                    },
+                )],
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(request_state(&pool, request).await, "decision_not_applied");
+    assert_eq!(closed_reason(&pool, request).await, ["unsupported_command"]);
+    assert!(
+        !holds(&pool, seed.conversation_id)
+            .await
+            .contains(&HoldReason::AwaitingUserRequest)
+    );
+    let (delivery, payload): (String, Value) =
+        sqlx::query_as("select delivery_state, payload from commands where id = $1")
+            .bind(command)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(delivery, "completed");
+    assert!(payload.get("decision_payload").is_none(), "{payload}");
+}

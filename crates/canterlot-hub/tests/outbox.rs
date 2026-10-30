@@ -1186,3 +1186,36 @@ async fn start_with_instructions_is_withheld_from_a_session_without_instructions
     ));
     assert!(canterlot_hub::outbox::to_proto_for_session(&row("owner"), &registry).is_ok());
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_command_the_outbox_cannot_send_closes_the_request(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let (request, generation) = open_permission(&pool, &machine, conversation, "toolu_03").await;
+    let (_, command_id) = decide(&pool, conversation, request, generation).await;
+    sqlx::query("update commands set payload = payload - 'kind' where id = $1")
+        .bind(command_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let _worker = Worker::connect(&hub, &machine).await;
+    let state = async || {
+        sqlx::query_scalar::<_, String>("select state from requests where id = $1")
+            .bind(request)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    let closed = timeout(Duration::from_secs(3), async {
+        while state().await != "decision_not_applied" {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(
+        closed.is_ok(),
+        "request stuck in {} after the outbox rejected its command",
+        state().await
+    );
+    stop(hub).await;
+}

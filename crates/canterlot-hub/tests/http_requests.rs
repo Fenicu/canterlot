@@ -634,6 +634,10 @@ async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
     .fetch_all(&f.pool)
     .await
     .unwrap();
+    assert!(
+        !logs.0.lock().unwrap().is_empty(),
+        "the log check needs captured output"
+    );
     for (place, text) in [
         (
             "response",
@@ -681,4 +685,25 @@ async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
         !command.contains(SECRET),
         "completed command keeps the secret"
     );
+}
+
+#[test]
+fn redaction_covers_every_form_of_a_secret_question() {
+    use canterlot_hub::requests::{REDACTED_ANSWER, redact_decision};
+    let decision = json!({"kind":"question", "answers":{"a":"pin", "b":["x","y"], "c":"open"}});
+    let by_question = json!({"questions":[
+        {"id":"a", "is_secret":true},
+        {"id":"b", "isSecret":true},
+        {"id":"c", "is_secret":false}
+    ]});
+    assert_eq!(
+        redact_decision(&by_question, &decision),
+        json!({"kind":"question", "answers":{"a":REDACTED_ANSWER, "b":REDACTED_ANSWER, "c":"open"}})
+    );
+    assert_eq!(
+        redact_decision(&json!({"is_secret":true}), &decision)["answers"],
+        json!({"a":REDACTED_ANSWER, "b":REDACTED_ANSWER, "c":REDACTED_ANSWER})
+    );
+    let permission = json!({"kind":"permission", "behavior":"deny", "message":"нет"});
+    assert_eq!(redact_decision(&by_question, &permission), permission);
 }

@@ -579,6 +579,16 @@ async fn reject(pool: &PgPool, row: &CommandRow, reason: &str) -> Result<(), sql
     let reason = reason.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
+            if kind == "deliver_decision" {
+                return crate::requests::fail_decision_command_in_tx(
+                    &mut *conn,
+                    id,
+                    attempt,
+                    &reason,
+                    Uuid::now_v7(),
+                )
+                .await;
+            }
             if kind == "deliver_input" {
                 let outcome = apply_input_receipt_in_tx(
                     &mut *conn,
