@@ -75,3 +75,23 @@ test('lane_route_follows_the_conversation_id_on_same_route_navigation', async ({
   await expect(lane.getByRole('heading', { level: 1 })).toHaveText('задача беты');
   await expect(lane.getByRole('link', { name: 'К оркестратору' })).toHaveAttribute('href', `/c/${b}`);
 });
+
+test('waiting_activity_without_a_request_shows_a_notice_not_an_answer_form', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedConversation(api, {
+    title: 'Ждёт ответа',
+    activity: { state: 'waiting_for_user', evidence: { question: 'Какой профиль выбрать?' }, since: '2026-10-28T12:00:00.000Z' }
+  });
+  seedHistory(api, id, 1);
+  await installChatRoutes(page, hub, api, OWNER);
+  const decisions: string[] = [];
+  page.on('request', (request) => { if (request.url().includes('/decision')) decisions.push(request.url()); });
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const notice = page.getByRole('region', { name: 'Агент ждёт ответа' });
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText('Какой профиль выбрать?');
+  await expect(page.getByRole('button', { name: 'Ответить' })).toHaveCount(0);
+  expect(decisions).toEqual([]);
+});

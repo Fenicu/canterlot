@@ -28,6 +28,7 @@
     disabled?: boolean;
   } = $props();
 
+  const uid = $props.id();
   let formEl: HTMLFormElement | undefined = $state();
   let selectedSingle = $state<Record<string, string>>({});
   let selectedMulti = $state<Record<string, string[]>>({});
@@ -192,12 +193,12 @@
   </div>
 
   <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form">
-    {#each questions as q (q.id)}
+    {#each questions as q, qIndex (q.id)}
       <section class="question-section" data-question={q.id}>
         {#if q.header}
           <span class="q-header">{q.header}</span>
         {/if}
-        <h3 class="q-text">{q.text}</h3>
+        <h3 class="q-text" id={`${uid}-q${qIndex}`}>{q.text}</h3>
 
         <span class="selection-mode">
           {q.multi_select ? 'Выберите несколько вариантов' : 'Выберите один вариант'}
@@ -243,6 +244,7 @@
               class="custom-input"
               data-custom="true"
               placeholder="Свой ответ"
+              aria-labelledby={`${uid}-q${qIndex}`}
               value={customValues[q.id] ?? ''}
               disabled={isDisabled}
               use:bindCustomInput={q.id}

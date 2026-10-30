@@ -260,6 +260,50 @@ describe('PWA Request Cards', () => {
     unmount(instance);
   });
 
+  it('applied_permission_without_a_known_decision_reads_neutral_not_allowed', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const request = createRequestItem({
+      id: 'req-unknown',
+      conversationId: 'conv-1',
+      kind: 'permission',
+      state: 'applied',
+      payload: { command: 'rm -rf build' }
+    });
+    const instance = mount(RequestCard, { target, props: { request, onDecision: vi.fn() } });
+    flushSync();
+    expect(target.textContent).toContain('Решение применено');
+    expect(target.textContent).not.toContain('Разрешено');
+    unmount(instance);
+  });
+
+  it('custom_answer_fields_are_labelled_by_their_question', async () => {
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    const request: RequestItem = {
+      id: 'req-labels',
+      conversationId: 'conv-1',
+      kind: 'question',
+      state: 'open',
+      payload: {
+        questions: [
+          { id: 'q1', text: 'Имя ветки', allow_custom: true },
+          { id: 'q2', text: 'Токен доступа', allow_custom: true, is_secret: true }
+        ]
+      }
+    };
+    const instance = mount(QuestionCard, { target, props: { request, onDecision: vi.fn() } });
+    flushSync();
+    const inputs = [...target.querySelectorAll<HTMLInputElement>('input[data-custom="true"]')];
+    expect(inputs).toHaveLength(2);
+    const names = inputs.map((input) => {
+      const ids = (input.getAttribute('aria-labelledby') ?? '').split(' ').filter(Boolean);
+      return ids.map((id) => document.getElementById(id)?.textContent?.trim()).join(' ');
+    });
+    expect(names).toEqual(['Имя ветки', 'Токен доступа']);
+    unmount(instance);
+  });
+
   it('request_card_renders_compact_stage_track_without_check_glyphs', async () => {
     const target = document.createElement('div');
     document.body.appendChild(target);

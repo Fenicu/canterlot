@@ -84,7 +84,7 @@
     if (request.kind === 'permission') {
       if (winner?.behavior === 'allow') return 'Разрешено';
       if (winner?.behavior === 'deny') return 'Отклонено';
-      return 'Разрешено';
+      return 'Решение применено';
     }
 
     const payload = (request.payload ?? {}) as Record<string, unknown>;
