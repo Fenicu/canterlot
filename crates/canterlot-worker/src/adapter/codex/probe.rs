@@ -110,7 +110,9 @@ async fn run(
         // Повтор при ETXTBSY: зонд запускает свежезаписанного двойника тестов.
         let mut child = spawn_with_retry_io(|| {
             let mut cmd = Command::new(executable);
-            cmd.args(probe_launch_args())
+            // Как у основного процесса: только отфильтрованное окружение, без ключей биллинга.
+            cmd.env_clear()
+                .args(probe_launch_args())
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())

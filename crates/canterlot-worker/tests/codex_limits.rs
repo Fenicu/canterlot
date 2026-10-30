@@ -359,3 +359,75 @@ async fn idle_ticker_polls_only_without_a_recent_observation() {
     clock.advance(Duration::from_secs(301));
     assert_eq!(source.poll_idle("codex").await.len(), 4);
 }
+
+const ENV_DUMP_CODEX: &str = r#"#!/usr/bin/env python3
+import json, os, sys, pathlib
+d = pathlib.Path(__file__).parent
+name = 'version' if '--version' in sys.argv else 'probe'
+(d / f'{name}-env.json').write_text(json.dumps(dict(os.environ)))
+if name == 'version':
+    print('codex-cli 0.164.0'); sys.exit(0)
+for line in sys.stdin:
+    msg = json.loads(line)
+    if 'id' in msg:
+        print(json.dumps({'id': msg['id'], 'result': {}}), flush=True)
+"#;
+
+const LEAKED: [&str; 6] = [
+    "OPENAI_API_KEY",
+    "CODEX_API_KEY",
+    "OPENAI_BASE_URL",
+    "RUST_LOG",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDECODE",
+];
+
+// Тест перезапускает сам себя с отравленным окружением: так родительское
+// окружение проверки содержит ключи биллинга без изменения env процесса тестов.
+#[tokio::test]
+async fn probes_drop_billing_and_leaked_environment() {
+    if std::env::var_os("CANTERLOT_PROBE_ENV_CHILD").is_none() {
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap());
+        child
+            .args([
+                "probes_drop_billing_and_leaked_environment",
+                "--exact",
+                "--nocapture",
+            ])
+            .env("CANTERLOT_PROBE_ENV_CHILD", "1");
+        for key in LEAKED {
+            child.env(key, "canary-value");
+        }
+        let status = child.status().unwrap();
+        assert!(status.success(), "child run failed: {status}");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("codex");
+    fs::write(&exe, ENV_DUMP_CODEX).unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&exe, fs::Permissions::from_mode(0o755)).unwrap();
+    probe::probe(
+        &exe,
+        "account/rateLimits/read",
+        json!({}),
+        Duration::from_secs(10),
+    )
+    .await
+    .unwrap();
+    canterlot_worker::adapter::codex::version::check(&exe)
+        .await
+        .unwrap();
+    for name in ["probe-env.json", "version-env.json"] {
+        let env: Value =
+            serde_json::from_str(&fs::read_to_string(dir.path().join(name)).unwrap()).unwrap();
+        for key in LEAKED {
+            assert!(env.get(key).is_none(), "{name}: {key} leaked");
+        }
+        assert!(
+            env.get("CANTERLOT_PROBE_ENV_CHILD").is_none(),
+            "{name}: CANTERLOT_* leaked"
+        );
+        assert!(env.get("PATH").is_some(), "{name}: PATH kept");
+    }
+}

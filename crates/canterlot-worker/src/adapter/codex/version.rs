@@ -48,7 +48,14 @@ pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
     let out = match spawn_with_retry_io(|| {
         let mut cmd = Command::new(executable);
-        cmd.arg("--version").kill_on_drop(true);
+        cmd.env_clear()
+            .envs(super::process::build_env(
+                std::env::vars_os(),
+                crate::adapter::InstructionMode::Owner,
+                None,
+            ))
+            .arg("--version")
+            .kill_on_drop(true);
         async move {
             match timeout(Duration::from_secs(5), cmd.output()).await {
                 Ok(v) => v,

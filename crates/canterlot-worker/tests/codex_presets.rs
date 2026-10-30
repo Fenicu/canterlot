@@ -687,7 +687,10 @@ async fn switching_back_to_owner_restores_owner_policy_from_config() {
     .await;
     for mode in ["bypass", "owner"] {
         let out = h.transmit(Some(mode_change(mode))).await;
-        assert!(matches!(out, TransmitOutcome::Accepted(_)), "{mode}: {out:?}");
+        assert!(
+            matches!(out, TransmitOutcome::Accepted(_)),
+            "{mode}: {out:?}"
+        );
         h.until_finished().await;
     }
     let starts = h.method_params("turn/start");
@@ -715,10 +718,17 @@ async fn switching_back_to_owner_restores_policy_seen_at_owner_thread_start() {
         );
     })
     .await;
-    assert!(h.method_params("thread/start")[0].get("approvalPolicy").is_none());
+    assert!(
+        h.method_params("thread/start")[0]
+            .get("approvalPolicy")
+            .is_none()
+    );
     for mode in ["bypass", "owner"] {
         let out = h.transmit(Some(mode_change(mode))).await;
-        assert!(matches!(out, TransmitOutcome::Accepted(_)), "{mode}: {out:?}");
+        assert!(
+            matches!(out, TransmitOutcome::Accepted(_)),
+            "{mode}: {out:?}"
+        );
         h.until_finished().await;
     }
     let starts = h.method_params("turn/start");

@@ -508,8 +508,10 @@ fn permission_modes_map_to_thread_and_turn_policy() {
         turn_policy(PermissionMode::Owner, &write),
         (
             Some(serde_json::json!("untrusted")),
-            Some(serde_json::json!({"type": "workspaceWrite", "networkAccess": true,
-                "writableRoots": ["/w"], "excludeTmpdirEnvVar": true, "excludeSlashTmp": false}))
+            Some(
+                serde_json::json!({"type": "workspaceWrite", "networkAccess": true,
+                "writableRoots": ["/w"], "excludeTmpdirEnvVar": true, "excludeSlashTmp": false})
+            )
         )
     );
     let full = owner_defaults_from(&serde_json::json!({"config": {
