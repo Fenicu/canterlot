@@ -1086,10 +1086,7 @@ impl CodexAdapter {
             mcp::SERVER_INSTRUCTIONS,
             note,
         );
-        self.stop_old_server().await;
-        self.rpc = RpcClient::new();
-        self.responses.clear();
-        self.pending_writes.clear();
+        self.discard_server().await;
         let launch = ResumeLaunch {
             mode,
             launch_mode: next.mode,
@@ -1118,8 +1115,21 @@ impl CodexAdapter {
                 });
                 Ok(())
             }
-            Err(_) => self.respawn_previous(group).await,
+            Err(_) => {
+                // Упавший или зависший новый сервер уходит до запасного запуска:
+                // иначе он работает рядом, а его eof/exited ломают рукопожатие.
+                self.discard_server().await;
+                self.respawn_previous(group).await
+            }
         }
+    }
+
+    /// Остановить текущий app-server и забыть состояние его соединения.
+    async fn discard_server(&mut self) {
+        self.stop_old_server().await;
+        self.rpc = RpcClient::new();
+        self.responses.clear();
+        self.pending_writes.clear();
     }
 
     async fn spawn_and_resume(
@@ -1187,6 +1197,7 @@ impl CodexAdapter {
                 Err("instructions_change_failed")
             }
             Err(_) => {
+                self.discard_server().await;
                 self.events.push_back(AdapterEvent::ProcessExited {
                     code: None,
                     signal: None,

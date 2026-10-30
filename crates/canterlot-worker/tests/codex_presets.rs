@@ -99,12 +99,21 @@ for line in sys.stdin:
     elif m == 'initialized':
         pass
     elif m == 'account/read':
+        if (d / 'die-account-once').exists() and not (d / 'died').exists():
+            (d / 'died').write_text(str(pid))
+            sys.exit(3)
         emit({'id': i, 'result': {'account': {'type': 'chatgpt'}}})
     elif m == 'config/read':
         emit({'id': i, 'result': config})
     elif m == 'model/list':
         emit({'id': i, 'result': models})
     elif m in ('thread/start', 'thread/resume'):
+        if m == 'thread/resume' and (d / 'resume-hang-once').exists() and not (d / 'hung').exists():
+            # Сервер отвечает ошибкой и виснет, не реагируя на EOF stdin.
+            (d / 'hung').write_text(str(pid))
+            emit({'id': i, 'error': {'code': -32000, 'message': 'boom'}})
+            import time
+            time.sleep(120)
         err = cfg('resume-error.json', None)
         if m == 'thread/resume' and err is not None and not (d / 'resume-retried').exists():
             (d / 'resume-retried').write_text('1')
@@ -737,4 +746,72 @@ async fn switching_back_to_owner_restores_policy_seen_at_owner_thread_start() {
         starts[1]["sandboxPolicy"],
         json!({"type": "workspaceWrite", "networkAccess": false})
     );
+}
+
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| {
+            stat.rsplit_once(") ")
+                .map(|(_, rest)| !rest.starts_with('Z'))
+        })
+        .unwrap_or(false)
+}
+
+#[tokio::test]
+async fn restart_dying_during_handshake_falls_back_to_the_previous_configuration() {
+    let mut h = PresetHarness::new().await;
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+    // Новый сервер живёт дольше секунды и умирает на account/read.
+    std::fs::write(h.dir.path().join("die-account-once"), "").unwrap();
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    assert!(h.dir.path().join("died").exists(), "restart attempted");
+    let mut events = vec![];
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(300), h.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::ProcessExited { .. })),
+        "fallback with the previous configuration works: {events:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CliRestarted { .. })),
+        "{events:?}"
+    );
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+}
+
+#[tokio::test]
+async fn failed_restart_stops_the_failed_server_before_the_fallback() {
+    let mut h = PresetHarness::new().await;
+    std::fs::write(h.dir.path().join("resume-hang-once"), "").unwrap();
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let hung: u32 = std::fs::read_to_string(h.dir.path().join("hung"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert!(
+        !alive(hung),
+        "failed app-server {hung} is gone before the fallback runs"
+    );
+    let out = h.transmit(None).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
 }
