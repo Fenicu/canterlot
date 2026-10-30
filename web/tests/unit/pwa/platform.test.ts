@@ -55,7 +55,9 @@ test('sw_classify_never_handles_api_or_mutations', async () => {
   const { classify } = await load('sw-routing');
   for (const [url, method, mode, destination, expected] of [
     ['/api/v1/me', 'GET', 'navigate', '', 'api'], ['/api/v1/attachments/a/content', 'PATCH', 'cors', '', 'api'],
-    ['/healthz', 'GET', 'navigate', '', 'api'], ['/_share', 'POST', 'cors', '', 'share_target'],
+    ['/healthz', 'GET', 'navigate', '', 'api'], ['/_share', 'POST', 'navigate', 'document', 'share_target'],
+    ['/_share', 'POST', 'cors', '', 'passthrough'], ['/_share', 'POST', 'navigate', 'iframe', 'passthrough'],
+    ['/_share', 'POST', 'no-cors', 'document', 'passthrough'],
     ['/new', 'POST', 'navigate', '', 'passthrough'], ['/x.js', 'PUT', 'cors', 'script', 'passthrough'],
     ['/c/123', 'GET', 'navigate', 'document', 'navigation'], ['/_app/immutable/a.js', 'GET', 'cors', 'script', 'asset'],
     ['/private.png', 'GET', 'cors', 'image', 'passthrough'], ['/config', 'GET', 'cors', '', 'api']
