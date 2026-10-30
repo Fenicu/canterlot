@@ -595,8 +595,8 @@ backoff_max = "30s"                                 # crates/canterlot-worker/sr
 backoff_reset_after = "30s"                         # crates/canterlot-worker/src/config.rs:74
 
 [execution]                                         # crates/canterlot-worker/src/config.rs:35
-# Белый список путей, в которых разрешено запускать сессии агентов
-allowed_workdir_roots = ["/home/user/myprojects", "/home/user/work"] # crates/canterlot-worker/src/config.rs:36
+# Корни рабочих каталогов; ["/"] разрешает любой абсолютный путь, как решил владелец.
+allowed_workdir_roots = ["/"] # crates/canterlot-worker/src/config.rs:36
 supervisor_exe = "/usr/local/bin/canterlot-worker"  # crates/canterlot-worker/src/config.rs:37 (current_exe по умолчанию)
 spawn_timeout = "10s"                               # crates/canterlot-worker/src/config.rs:39
 
