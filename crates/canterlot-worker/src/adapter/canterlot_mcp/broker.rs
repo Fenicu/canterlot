@@ -435,6 +435,12 @@ async fn serve_conn(
                     continue;
                 }
                 if let mcp::ToolKind::Agent { tool } = kind {
+                    // Вытесненный CLI уже не вправе менять сессию.
+                    if !gate.lock().expect("mcp gate").current(conn) {
+                        let _ =
+                            write_line(&writer, &rpc_error(&rpc_id, "connection superseded")).await;
+                        continue;
+                    }
                     let call_id = uuid::Uuid::now_v7();
                     agent_pending.lock().await.insert(
                         (conn, rpc_id.to_string()),

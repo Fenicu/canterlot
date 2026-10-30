@@ -357,6 +357,37 @@ async fn cancel_on_one_connection_keeps_the_preset_call_of_another() {
     );
 }
 
+#[tokio::test]
+async fn superseded_relay_does_not_reach_presets() {
+    let mut relay = RelayHarness::bind(
+        canterlot_worker::adapter::canterlot_mcp::ToolSet::ApproveAndLimits,
+        "claude",
+    )
+    .await;
+    relay
+        .call(json!(1), "canterlot_presets_list", json!({}))
+        .await;
+    agent_call(&mut relay.broker).await;
+    // Перезапуск CLI: новый relay вытесняет прежний.
+    relay.broker.arm();
+    let (_reader, mut sink) = relay.peer().await;
+    send(
+        &mut sink,
+        json!({"jsonrpc":"2.0","id":7,"method":"tools/call",
+            "params":{"name":"canterlot_presets_list","arguments":{}}}),
+    )
+    .await;
+    agent_call(&mut relay.broker).await;
+    relay
+        .call(json!(2), "canterlot_preset_apply", json!({"id": "clean"}))
+        .await;
+    let reply = relay.reply().await;
+    assert_eq!(reply["id"], 2);
+    assert_eq!(reply["error"]["code"], -32602, "{reply}");
+    let quiet = tokio::time::timeout(Duration::from_millis(300), relay.broker.next()).await;
+    assert!(quiet.is_err(), "вытесненный relay хаб не зовёт: {quiet:?}");
+}
+
 #[test]
 fn invalid_arguments_are_rejected_before_the_hub() {
     // Не объект.
