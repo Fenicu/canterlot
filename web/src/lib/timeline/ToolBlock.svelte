@@ -83,8 +83,8 @@
   .chevron { flex: none; color: var(--muted); transition: transform var(--duration-expand) var(--ease-expand); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   [data-open] .chevron { transform: rotate(90deg); }
-  .name { flex: none; font-family: var(--font-mono); font-weight: var(--weight-semibold); }
-  .summary { flex: 1; min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
+  .name { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; font-family: var(--font-mono); font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
+  .summary { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
   .policy-badge {
     flex: none;
     padding: var(--s1) var(--s3);

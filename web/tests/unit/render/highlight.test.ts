@@ -1,5 +1,5 @@
 import { describe, test, expect, vi } from 'vitest';
-import { highlightLazy, HIGHLIGHT_LIMITS } from '../../../src/lib/render/highlight';
+import { highlightLazy, highlightWithin, HIGHLIGHT_LIMITS } from '../../../src/lib/render/highlight';
 
 describe('highlighting', () => {
   test('highlight_before_markdown_initialisation_filters_every_class_token', async () => {
@@ -77,10 +77,34 @@ describe('highlighting', () => {
     const jsonRes = await highlightLazy('{"key": "value", "num": 123}', 'json');
     expect(jsonRes).not.toBeNull();
 
+    // highlight.js разбирает TOML языком ini.
+    const tomlRes = await highlightLazy('[package]\nname = "canterlot"', 'toml');
+    expect(tomlRes).toContain('hljs-');
+
     // Svelte maps to xml
     const svelteRes = await highlightLazy('<script>let x = 1;</script><div>{x}</div>', 'svelte');
     expect(svelteRes).not.toBeNull();
     expect(svelteRes).toContain('hljs-tag');
+  });
+
+  test('final_code_blocks_are_painted_in_place_and_repeat_mounts_paint_at_once', async () => {
+    const root = document.createElement('div');
+    const fill = () => {
+      const pre = document.createElement('pre');
+      const code = document.createElement('code');
+      code.className = 'language-rust';
+      code.textContent = 'fn main() {}';
+      pre.append(code);
+      root.replaceChildren(pre);
+      return code;
+    };
+    const first = fill();
+    highlightWithin(root);
+    await vi.waitFor(() => expect(first.querySelector('.hljs-keyword')).not.toBeNull());
+    expect(first.textContent).toBe('fn main() {}');
+    const again = fill();
+    highlightWithin(root);
+    expect(again.classList.contains('hljs')).toBe(true);
   });
 
   test('highlighted_output_passes_through_the_dompurify_allow_list', async () => {

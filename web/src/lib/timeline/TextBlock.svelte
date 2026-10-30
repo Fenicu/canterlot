@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { highlightWithin } from '#lib/render/highlight.js';
   import Html from '#lib/render/Html.svelte';
   import { createMarkdown } from '#lib/render/markdown.js';
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
@@ -23,9 +24,20 @@
       }
     };
   }
+
+  /** Подсветка стартует, только когда текст завершён; пока идёт поток, значение пустое и работы нет. */
+  function highlightFinal(node: HTMLElement, text: string | null) {
+    let stop: () => void = () => undefined;
+    const apply = (value: string | null) => {
+      stop();
+      stop = value === null ? () => undefined : highlightWithin(node);
+    };
+    apply(text);
+    return { update: apply, destroy: () => stop() };
+  }
 </script>
 
-<div class="text" data-block={block.id}>
+<div class="text prose" data-block={block.id} use:highlightFinal={streaming ? null : block.text}>
   {#each rendered.chunks as chunk (chunk.id)}
     <Html html={chunk.html} />
   {/each}
@@ -40,7 +52,6 @@
 
 <style>
   .text { min-width: 0; }
-  .text :global(pre) { overflow-x: auto; max-width: 100%; }
   .tail > :global(div), .tail > :global(div > p:last-child) { display: inline; }
   .caret {
     display: inline-block;

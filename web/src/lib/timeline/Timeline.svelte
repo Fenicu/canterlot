@@ -337,7 +337,7 @@
 </div>
 
 <style>
-  .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; }
+  .feed-wrap { position: relative; flex: 1; min-height: 0; display: flex; container-type: inline-size; }
   .feed { overflow: auto; overflow-anchor: none; scrollbar-gutter: stable; flex: 1; min-width: 0; padding-inline: max(var(--gutter), calc((100% - var(--reading-max)) / 2 + var(--gutter))); padding-bottom: var(--s4); }
   .feed :global(*) { overflow-anchor: none; }
   .row { padding-top: var(--s3); }

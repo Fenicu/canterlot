@@ -1,6 +1,8 @@
 <script lang="ts">
   import '../lib/styles/tokens.css';
   import '../lib/styles/base.css';
+  import '../lib/styles/prose.css';
+  import '../lib/styles/highlight.css';
   import { onMount, type Snippet } from 'svelte';
   import { afterNavigate } from '$app/navigation';
   import { initTheme } from '#lib/theme.js';

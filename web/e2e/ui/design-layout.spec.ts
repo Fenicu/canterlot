@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
@@ -182,5 +183,87 @@ test.describe('шапка и сообщения', () => {
     expect(box.height).toBeGreaterThanOrEqual(44);
     expect(Math.abs(box.x + box.width / 2 - (wrap.x + wrap.width / 2))).toBeLessThan(2);
     expect(wrap.y + wrap.height - (box.y + box.height)).toBeLessThan(24);
+  });
+});
+
+const MARKDOWN = `## Причина
+
+Первый абзац со [ссылкой](https://example.org/doc) и кодом \`resync_required\`.
+
+> Цитата из журнала.
+
+- пункт раз
+- пункт два
+
+| Сценарий | Было |
+| --- | --- |
+| Сон 30 с | теряет дельты |
+
+\`\`\`rust
+fn main() { println!("привет"); }
+\`\`\`
+
+Слово ${'Превысокомногорассмотрительствующий'.repeat(4)} в конце.`;
+
+test.describe('текст ответа', () => {
+  test('prose_elements_get_their_styles_and_long_words_stay_inside_the_card', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { api, id } = await boot(page);
+    api.histories.set(id, [block(api, '1', { content: MARKDOWN })]);
+    api.bindConversation(id);
+    await page.reload();
+    const text = page.locator('.text');
+    await expect(text.locator('a')).toBeVisible();
+    const style = await text.evaluate((node) => {
+      const css = (selector: string) => getComputedStyle(node.querySelector(selector)!);
+      const body = getComputedStyle(node);
+      return {
+        link: [css('a').textDecorationLine, css('a').color !== body.color],
+        pre: [css('pre').backgroundColor, css('pre').paddingTop],
+        inline: css('p code').backgroundColor,
+        quote: [css('blockquote').backgroundColor, css('blockquote').borderLeftWidth, css('blockquote').marginLeft],
+        th: css('th').textAlign,
+        heading: css('h2').marginTop,
+        overflow: node.scrollWidth - node.clientWidth
+      };
+    });
+    expect(style.link).toEqual(['underline', true]);
+    expect(style.pre[0]).not.toBe('rgba(0, 0, 0, 0)');
+    expect(parseFloat(style.pre[1]!)).toBeGreaterThan(0);
+    expect(style.inline).not.toBe('rgba(0, 0, 0, 0)');
+    expect(style.quote[0]).not.toBe('rgba(0, 0, 0, 0)');
+    expect(style.quote.slice(1)).toEqual(['0px', '0px']);
+    expect(style.th).toBe('left');
+    expect(style.overflow).toBeLessThanOrEqual(0);
+  });
+
+  test('code_is_highlighted_only_after_the_block_is_final', async ({ page }) => {
+    const { hub, api, id } = await boot(page);
+    const streaming = block(api, '1', { content: '```rust\nfn main() {}\n```\n', state: 'streaming' });
+    api.blocks.set(streaming.id, { text: streaming.content, rev: 1, state: 'streaming' });
+    api.histories.set(id, [streaming]);
+    api.bindConversation(id);
+    await page.reload();
+    await expect(page.locator('.text pre')).toBeVisible();
+    await page.waitForTimeout(300);
+    await expect(page.locator('.text .hljs-keyword')).toHaveCount(0);
+    hub.append(`conversation:${id}`, { kind: 'block_final', conversation_id: id, payload: { block_id: streaming.id, rev: 2, text: streaming.content, checksum: createHash('sha256').update(streaming.content).digest('hex'), text_omitted: false, summary: null } });
+    hub.flush();
+    await expect(page.locator('.text .hljs-keyword').first()).toBeVisible();
+  });
+
+  test('wide_code_may_leave_the_column_on_a_large_screen_but_stays_inside_the_pane', async ({ page }) => {
+    await page.setViewportSize({ width: 2560, height: 1440 });
+    const { api, id } = await boot(page);
+    api.histories.set(id, [block(api, '1', { content: `\`\`\`text\n${'длинная строка вывода '.repeat(20)}\n\`\`\`` })]);
+    api.bindConversation(id);
+    await page.reload();
+    const pre = page.locator('.text pre');
+    await expect(pre).toBeVisible();
+    const box = (await pre.boundingBox())!;
+    const card = (await page.locator('article.card').boundingBox())!;
+    const pane = (await page.locator('.feed-wrap').boundingBox())!;
+    expect(box.width).toBeGreaterThan(card.width);
+    expect(box.x + box.width).toBeLessThanOrEqual(pane.x + pane.width);
   });
 });
