@@ -1723,13 +1723,12 @@ impl Adapter for CodexAdapter {
                 if !self.write_request(terminate).await {
                     break;
                 }
-                if timeout(
-                    input::INTERRUPT_TIMEOUT,
-                    self.wait_response(terminate_id, Instant::now() + input::INTERRUPT_TIMEOUT),
-                )
-                .await
-                .is_err()
-                {
+                // Нет ответа к сроку или отказ — терминал мог остаться жив.
+                if !matches!(
+                    self.wait_response(terminate_id, Instant::now() + input::INTERRUPT_TIMEOUT)
+                        .await,
+                    Some(Ok(_))
+                ) {
                     self.diagnostic("interrupt_cleanup_failed", false);
                 }
             }

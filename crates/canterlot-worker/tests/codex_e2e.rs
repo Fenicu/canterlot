@@ -951,6 +951,51 @@ async fn retried_input_found_in_a_finished_turn_finishes_at_once_and_queue_moves
 }
 
 #[tokio::test]
+async fn refused_terminal_cleanup_after_interrupt_is_reported() {
+    use canterlot_worker::adapter::InterruptOutcome;
+    let mut lines = handshake("thread-mini");
+    lines.extend(turn_exchange(10, "thread-mini", "turn-1"));
+    lines.push(started(command_item("exec-1", "inProgress", None)));
+    lines.push(w_in(11, "turn/interrupt", json!({})));
+    lines.push(w_out(json!({"id": 11, "result": {}})));
+    lines.push(w_in(12, "thread/backgroundTerminals/list", json!({})));
+    lines.push(w_out(
+        json!({"id": 12, "result": {"data": [{"itemId": "exec-1", "processId": "p-1"}]}}),
+    ));
+    lines.push(w_in(13, "thread/backgroundTerminals/terminate", json!({})));
+    lines.push(w_out(
+        json!({"id": 13, "error": {"code": -32000, "message": "terminate refused"}}),
+    ));
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "interrupted", "items": []}}),
+    ));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let id = fake.start_turn("run").await;
+    match tokio::time::timeout(WAIT, fake.adapter.interrupt())
+        .await
+        .unwrap()
+    {
+        InterruptOutcome::Acknowledged => {}
+        other => panic!("interrupt: {other:?}"),
+    }
+    let events = fake.finish(id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic { kind, .. } if *kind == "interrupt_cleanup_failed"
+        )),
+        "{events:?}"
+    );
+    assert!(
+        fake.stdin_methods()
+            .contains(&"thread/backgroundTerminals/terminate".to_owned())
+    );
+    fake.close().await;
+}
+
+#[tokio::test]
 async fn restart_resumes_thread_by_id() {
     let mut fake = Fake::new(evidence_slice("resume", 38, 73));
     fake.spec.native_conversation_id = Some("01a171c3-4681-7b81-bd8b-be81cac722c8".into());
