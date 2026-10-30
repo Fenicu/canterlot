@@ -9,7 +9,7 @@ use canterlot_worker::{
         StartSpec, Transmission, TransmitOutcome,
         claude_code::process::{
             LaunchSpec, SessionArg, build_args, needs_restart, owner_instruction_excludes,
-            repository_root, settings_json, write_instructions_file,
+            owner_instruction_excludes_in, repository_root, settings_json, write_instructions_file,
         },
     },
     config::ClaudeCodeConfig,
@@ -121,6 +121,61 @@ fn clean_preset_excludes_ancestor_and_user_files_but_keeps_repository_claude_md(
             .any(|e| e.starts_with(&repo.display().to_string()))
     );
     assert!(!excludes.is_empty());
+}
+
+#[test]
+fn symlinked_workdir_excludes_the_physical_ancestor_chain_too() {
+    // Живой прогон CLI 2.1.311: через /tmp/link → ~/x CLI грузит ~/CLAUDE.md,
+    // идя от физического cwd, а исключения сверяет с физическими путями.
+    let td = fake_tree();
+    let real = std::fs::canonicalize(td.path()).unwrap();
+    let home = real.join("home");
+    let alias = real.join("alias");
+    std::os::unix::fs::symlink(home.join("projects"), &alias).unwrap();
+    let workdir = alias.join("repo").join("sub");
+    let excludes = owner_instruction_excludes_in(&workdir, &home, &home.join(".claude"));
+    let has = |p: &Path| excludes.iter().any(|e| *e == p.display().to_string());
+    // Логическая цепочка: над корнем `alias/repo`.
+    assert!(has(&alias.join("CLAUDE.md")));
+    // Физическая цепочка: над `home/projects/repo` — файлы владельца.
+    assert!(has(&home.join("projects").join("CLAUDE.md")));
+    assert!(has(&home.join("CLAUDE.md")));
+    assert!(has(&home.join(".claude/rules/**")));
+    // Файлы репозитория — ни в каком виде.
+    let repo = home.join("projects").join("repo").display().to_string();
+    let logical_repo = alias.join("repo").display().to_string();
+    assert!(
+        !excludes
+            .iter()
+            .any(|e| e.starts_with(&repo) || e.starts_with(&logical_repo)),
+        "{excludes:?}"
+    );
+}
+
+#[test]
+fn claude_config_dir_moves_the_user_level() {
+    use canterlot_worker::config::claude_config_dir;
+    let td = TempDir::new().unwrap();
+    let home = td.path().join("home");
+    let config = td.path().join("cfg");
+    std::fs::create_dir_all(&config).unwrap();
+    assert_eq!(claude_config_dir(&home, Some(config.as_os_str())), config);
+    assert_eq!(claude_config_dir(&home, None), home.join(".claude"));
+    assert_eq!(
+        claude_config_dir(&home, Some(std::ffi::OsStr::new("relative"))),
+        home.join(".claude")
+    );
+    let link = td.path().join("cfg-link");
+    std::os::unix::fs::symlink(&config, &link).unwrap();
+    let workdir = td.path().join("repo");
+    std::fs::create_dir_all(workdir.join(".git")).unwrap();
+    let excludes = owner_instruction_excludes_in(&workdir, &home, &link);
+    let has = |p: String| excludes.contains(&p);
+    assert!(has(format!("{}/CLAUDE.md", link.display())));
+    assert!(has(format!("{}/rules/**", link.display())));
+    let real = std::fs::canonicalize(&config).unwrap();
+    assert!(has(format!("{}/CLAUDE.md", real.display())));
+    assert!(has(format!("{}/.claude/CLAUDE.md", home.display())));
 }
 
 #[test]

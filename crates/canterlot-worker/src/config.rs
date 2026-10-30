@@ -328,12 +328,22 @@ impl ClaudeCodeConfig {
 
     pub fn credentials_file(&self) -> PathBuf {
         self.credentials_path.clone().unwrap_or_else(|| {
-            std::env::var_os("HOME")
+            let home = std::env::var_os("HOME")
                 .map(PathBuf::from)
-                .unwrap_or_default()
-                .join(".claude/.credentials.json")
+                .unwrap_or_default();
+            claude_config_dir(&home, std::env::var_os("CLAUDE_CONFIG_DIR").as_deref())
+                .join(".credentials.json")
         })
     }
+}
+
+/// Пользовательский каталог Claude Code: `CLAUDE_CONFIG_DIR`, если задан
+/// абсолютным путём (окружение воркера доходит до CLI), иначе `~/.claude`.
+pub fn claude_config_dir(home: &std::path::Path, config_dir: Option<&std::ffi::OsStr>) -> PathBuf {
+    config_dir
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .unwrap_or_else(|| home.join(".claude"))
 }
 
 fn default_claude_executable() -> PathBuf {

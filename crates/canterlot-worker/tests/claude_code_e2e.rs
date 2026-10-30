@@ -1574,6 +1574,12 @@ async fn live_smoke() {
             .success()
     );
     std::fs::write(repo.join("CLAUDE.md"), "# canterlot smoke repo\n").unwrap();
+    // Ревью M4: рабочий каталог через символическую ссылку вне $HOME. CLI идёт
+    // от физического cwd и без исключений по физической цепочке грузит ~/CLAUDE.md.
+    let link = PathBuf::from(format!("/tmp/canterlot-smoke-link-{}", std::process::id()));
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(&smoke_home, &link).unwrap();
+    let linked_repo = link.join("repo");
     let exe = std::env::var_os("CANTERLOT_CLAUDE_CODE_EXECUTABLE")
         .map(PathBuf::from)
         .unwrap_or_else(|| "claude".into());
@@ -1592,7 +1598,7 @@ async fn live_smoke() {
     let preset_spec = StartSpec {
         execution_id: Uuid::now_v7(),
         generation: 1,
-        workdir: repo.clone(),
+        workdir: linked_repo.clone(),
         native_conversation_id: None,
         profile: "claude_code".into(),
         model: "haiku".into(),
@@ -1628,6 +1634,14 @@ async fn live_smoke() {
     assert!(
         context_text.contains("CLAUDE.md"),
         "repository file stays in context"
+    );
+    assert!(
+        !context_text.contains(&format!("{home}/CLAUDE.md"))
+            && !context_text.contains("~/CLAUDE.md"),
+        "owner's home CLAUDE.md must stay out through a symlinked workdir"
+    );
+    eprintln!(
+        "CONFIRMED: clean preset through a symlinked workdir keeps only the repository memory file"
     );
 
     for canary in ["CANARY-PRESET-A", "CANARY-PRESET-B"] {
@@ -1691,6 +1705,7 @@ async fn live_smoke() {
         .await
         .unwrap()
         .unwrap();
+    let _ = std::fs::remove_file(&link);
     let _ = std::fs::remove_dir_all(&smoke_home);
     eprintln!("CONFIRMED: presets smoke done (context, canaries A/B/NONE, cache report)");
 }
