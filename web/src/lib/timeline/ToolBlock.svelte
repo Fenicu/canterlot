@@ -126,7 +126,7 @@
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
   .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }
   .shot { flex: 1 1 calc(50% - var(--s2)); min-width: 0; max-height: var(--preview-height); margin: 0; overflow: hidden; border-radius: var(--radius-sm); background: var(--chat-bg); }
-  .shot[data-state='failed'] { background: var(--danger-soft); color: var(--danger); }
+  .shot[data-state='failed'] { background: var(--danger-soft); }
   .shot:not([data-state='ready']) { display: flex; align-items: center; justify-content: center; min-height: var(--target); padding: var(--s4); color: var(--secondary); font-size: var(--fs-sm); text-align: center; }
   .shot[data-state='failed'] { color: var(--danger); }
   .shot button { display: block; width: 100%; height: 100%; padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); }

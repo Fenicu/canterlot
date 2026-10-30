@@ -27,7 +27,7 @@
   }
 </script>
 
-<div class="tabs" role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move}>
+<div class="tabs" class:fade={tabs.length > 3} role="tablist" aria-label="Группы сессий" tabindex="-1" onkeydown={move}>
   {#each tabs as item, index (item.label + index)}
     <button
       type="button"
@@ -52,8 +52,8 @@
     padding: var(--s2);
     border-radius: var(--radius-pill);
     background: var(--raised);
-    mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9));
   }
+  .fade { mask-image: linear-gradient(to left, var(--transparent), var(--text) var(--s9)); }
   :global([data-pane='list']) .tabs { mask-image: none; }
   button {
     flex: 1 0 auto;
@@ -69,5 +69,5 @@
   .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
   button[aria-selected='true'] { background: var(--tab-selected); color: var(--accent-link); font-weight: var(--weight-medium); }
   :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; border-radius: var(--radius-card); }
-  :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
 </style>

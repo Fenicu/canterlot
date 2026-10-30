@@ -396,7 +396,7 @@ test('tool_block_shows_thumbnail_without_layout_shift', async ({ page }) => {
   const shot = page.locator('.shot');
   await expect(shot).toBeVisible();
   const before = await shot.boundingBox();
-  await expect(shot).toContainText('картинка загружается');
+  await expect(shot).toContainText('Картинка загружается');
   const after = await shot.boundingBox();
   expect(before && after ? Math.abs(before.height - after.height) : 99).toBeLessThanOrEqual(1);
 });
