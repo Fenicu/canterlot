@@ -78,6 +78,7 @@ export class NewSessionModel {
   resumeText: string;
   recent: string[] = [];
   #server: Partial<Record<Field, string>> = {};
+  #refusedForm = "";
   #key = "";
 
   constructor(
@@ -88,9 +89,22 @@ export class NewSessionModel {
     this.resumeText = config.defaults?.crunch_resume_text ?? "";
   }
 
+  /** Отказ хаба относится ко всей форме: `capability_missing` снимает и смена пресета. */
+  get #form(): string {
+    return JSON.stringify([
+      this.machineId,
+      this.workdir,
+      this.harness,
+      this.model,
+      this.effort,
+      this.profile,
+    ]);
+  }
+
   get errors(): Partial<Record<Field, string>> {
     const machine = this.machines.items.get(this.machineId);
-    const out: Partial<Record<Field, string>> = { ...this.#server };
+    const out: Partial<Record<Field, string>> =
+      this.#form === this.#refusedForm ? { ...this.#server } : {};
     const machineError = this.machineId ? machineProblem(machine) : null;
     if (machineError) out.machine = machineError;
     if (this.workdir) {
@@ -156,11 +170,10 @@ export class NewSessionModel {
     } catch (err) {
       if (err instanceof ApiError) {
         const field = FIELD_OF[err.code];
-        if (field)
-          this.#server = {
-            ...this.#server,
-            [field]: MESSAGE[err.code] ?? err.message,
-          };
+        if (field) {
+          this.#server = { [field]: MESSAGE[err.code] ?? err.message };
+          this.#refusedForm = this.#form;
+        }
       }
       throw err;
     }

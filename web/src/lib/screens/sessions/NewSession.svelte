@@ -102,6 +102,7 @@
 
   async function send() {
     if (!model || !gate.ok) return;
+    error = '';
     try {
       const created = await model.submit();
       const share = page.url.searchParams.get('share');

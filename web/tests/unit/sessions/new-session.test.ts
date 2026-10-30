@@ -167,6 +167,39 @@ describe("sessions/new", () => {
     }
   });
 
+  it("new_session_refusal_lasts_only_until_the_form_changes", async () => {
+    const refuse = (code: string) =>
+      vi.fn(async () => {
+        throw new ApiError(
+          422,
+          code as never,
+          "нет",
+          "browser",
+          "never",
+          "00000000-0000-4000-8000-0000000000e1",
+        );
+      });
+    const journal = ops();
+    journal.run = refuse("workdir_not_allowed");
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
+    expect(model.canSubmit).toEqual({
+      ok: false,
+      reason: "Рабочая папка не разрешена",
+    });
+
+    model.workdir = "/srv/other";
+    expect(model.canSubmit).toEqual({ ok: true });
+    expect(model.errors.workdir).toBeUndefined();
+
+    journal.run = refuse("capability_missing");
+    await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
+    expect(model.canSubmit.ok).toBe(false);
+    model.profile = "owner";
+    expect(model.canSubmit).toEqual({ ok: true });
+  });
+
   it("new_session_disables_unavailable_machine_with_a_reason", () => {
     const down = new NewSessionModel(
       store([machine({ availability: "degraded" })]),
