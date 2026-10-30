@@ -3,6 +3,7 @@ import type { CanterlotDb } from "#lib/storage/idb.js";
 export interface DraftAttachment {
   id: string;
   name?: string;
+  size?: number;
 }
 
 export interface Draft {
@@ -222,6 +223,23 @@ export class DraftStore {
     const chosen = idbDraft ?? null;
     if (chosen) this.#known.set(conversationId, chosen);
     return chosen;
+  }
+
+  /** Возвращённое сообщение встаёт перед набранным и сразу уходит на диск: другой копии может не быть. */
+  async prepend(
+    conversationId: string,
+    text: string,
+    attachments: DraftAttachment[],
+  ): Promise<void> {
+    const current =
+      this.#pending.get(conversationId) ??
+      this.#known.get(conversationId) ??
+      (await this.load(conversationId));
+    this.set(conversationId, {
+      text: current?.text ? `${text}\n${current.text}` : text,
+      attachments: [...(current?.attachments ?? []), ...attachments],
+    });
+    await this.flush();
   }
 
   async clear(conversationId: string): Promise<void> {

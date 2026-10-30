@@ -167,6 +167,89 @@ describe("sessions/new", () => {
     }
   });
 
+  it("new_session_refusal_lasts_only_until_the_form_changes", async () => {
+    const refuse = (code: string) =>
+      vi.fn(async () => {
+        throw new ApiError(
+          422,
+          code as never,
+          "нет",
+          "browser",
+          "never",
+          "00000000-0000-4000-8000-0000000000e1",
+        );
+      });
+    const journal = ops();
+    journal.run = refuse("workdir_not_allowed");
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
+    expect(model.canSubmit).toEqual({
+      ok: false,
+      reason: "Рабочая папка не разрешена",
+    });
+
+    model.workdir = "/srv/other";
+    expect(model.canSubmit).toEqual({ ok: true });
+    expect(model.errors.workdir).toBeUndefined();
+
+    journal.run = refuse("capability_missing");
+    await expect(model.submit()).rejects.toBeInstanceOf(ApiError);
+    expect(model.canSubmit.ok).toBe(false);
+    model.profile = "owner";
+    expect(model.canSubmit).toEqual({ ok: true });
+  });
+
+  it("new_session_ignores_recent_folders_of_a_machine_no_longer_selected", async () => {
+    let answer!: (value: { data: { workdirs: string[] } }) => void;
+    vi.mocked(recentWorkdirs).mockImplementationOnce(
+      () => new Promise((resolve) => (answer = resolve)) as never,
+    );
+    const model = new NewSessionModel(
+      store([machine(), machine({ id: "m2" })]),
+      config,
+      ops(),
+    );
+    model.machineId = "m1";
+    const slow = model.refreshRecent();
+    model.machineId = "m2";
+    await model.refreshRecent();
+    const fresh = model.recent;
+
+    answer({ data: { workdirs: ["/from/m1"] } });
+    await slow;
+
+    expect(model.recent).toEqual(fresh);
+    expect(model.recent).not.toContain("/from/m1");
+  });
+
+  it("new_session_recent_folders_failure_leaves_the_form_usable", async () => {
+    vi.mocked(recentWorkdirs).mockRejectedValueOnce(new Error("down"));
+    const model = new NewSessionModel(store([machine()]), config, ops());
+    model.recent = ["/stale"];
+    model.machineId = "m1";
+
+    await expect(model.refreshRecent()).resolves.toBeUndefined();
+
+    expect(model.recent).toEqual([]);
+  });
+
+  it("new_session_sends_the_path_without_surrounding_spaces", async () => {
+    const journal = ops();
+    const model = new NewSessionModel(store([machine()]), config, journal);
+    ready(model);
+    model.workdir = " /srv/canterlot ";
+
+    expect(model.canSubmit).toEqual({ ok: true });
+    await model.submit();
+
+    expect(journal.begin).toHaveBeenCalledWith(
+      "create_conversation",
+      expect.objectContaining({ workdir: "/srv/canterlot" }),
+      expect.anything(),
+    );
+  });
+
   it("new_session_disables_unavailable_machine_with_a_reason", () => {
     const down = new NewSessionModel(
       store([machine({ availability: "degraded" })]),

@@ -178,6 +178,58 @@ test.describe('stack: input and queue', () => {
     void composer;
   });
 
+  test('reload_keeps_a_queued_input_in_the_strip_and_delivers_its_bubble', tag, async ({ page }) => {
+    test.setTimeout(120_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const id = await createSessionUI(page, stack);
+
+    await sendScript(page, synthetic.script([synthetic.delta('Z-идёт'), synthetic.hang()]));
+    await expect(page.locator('article.card [data-block]')).toContainText('Z-идёт', { timeout: 20_000 });
+    await sendScript(page, synthetic.script([synthetic.delta('Z-ответ')]));
+    const strip = page.locator('.strip');
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
+
+    await page.reload();
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(strip.locator('[data-state="queued"]')).toContainText('Z-ответ', { timeout: 15_000 });
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(1);
+
+    await page.getByRole('button', { name: 'Прервать', exact: true }).click();
+    await page.getByRole('button', { name: 'Продолжить очередь', exact: true }).click({ timeout: 30_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-ответ' })).toBeVisible({ timeout: 40_000 });
+    await expect(page.locator('article.bubble').filter({ hasText: 'Z-ответ' })).toBeVisible();
+    await expect(strip.getByRole('button', { name: 'Отменить' })).toHaveCount(0);
+    await hub.waitIdle(id);
+    expect(await hub.inputs(id)).toHaveLength(2);
+  });
+
+  test('cancelled_and_fired_scheduled_messages_leave_the_strip', tag, async ({ page }) => {
+    test.setTimeout(90_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const id = await createSessionUI(page, stack);
+    const strip = page.locator('.strip');
+    const schedule = (run_at: string, text: string) =>
+      hub.json(`/api/v1/conversations/${id}/scheduled`, { method: 'POST', body: JSON.stringify({ run_at, content: [{ type: 'text', text }] }) });
+
+    await schedule(new Date(Date.now() + 3_600_000).toISOString(), 'Z-отменить');
+    await expect(strip).toContainText('Z-отменить', { timeout: 15_000 });
+    await strip.getByRole('button', { name: 'Отменить' }).click();
+    await expect(strip).not.toContainText('Z-отменить', { timeout: 15_000 });
+
+    await schedule(new Date(Date.now() + 3000).toISOString(), synthetic.script([synthetic.delta('Z-сработало')]));
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 30_000 });
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+
+    await page.reload();
+    await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 15_000 });
+    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(strip).not.toContainText('Z-отменить');
+  });
+
   test('interrupt_on_a_harness_that_exits_resumes_the_queue_end_to_end', tag, async ({ page }) => {
     test.setTimeout(120_000);
     const stack = getStack();

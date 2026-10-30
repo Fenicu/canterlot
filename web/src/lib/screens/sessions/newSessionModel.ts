@@ -78,6 +78,7 @@ export class NewSessionModel {
   resumeText: string;
   recent: string[] = [];
   #server: Partial<Record<Field, string>> = {};
+  #refusedForm = "";
   #key = "";
 
   constructor(
@@ -88,13 +89,26 @@ export class NewSessionModel {
     this.resumeText = config.defaults?.crunch_resume_text ?? "";
   }
 
+  /** Отказ хаба относится ко всей форме: `capability_missing` снимает и смена пресета. */
+  get #form(): string {
+    return JSON.stringify([
+      this.machineId,
+      this.workdir,
+      this.harness,
+      this.model,
+      this.effort,
+      this.profile,
+    ]);
+  }
+
   get errors(): Partial<Record<Field, string>> {
     const machine = this.machines.items.get(this.machineId);
-    const out: Partial<Record<Field, string>> = { ...this.#server };
+    const out: Partial<Record<Field, string>> =
+      this.#form === this.#refusedForm ? { ...this.#server } : {};
     const machineError = this.machineId ? machineProblem(machine) : null;
     if (machineError) out.machine = machineError;
     if (this.workdir) {
-      const work = workdirProblem(this.workdir);
+      const work = workdirProblem(this.workdir.trim());
       if (work) out.workdir = work;
     }
     return out;
@@ -122,12 +136,14 @@ export class NewSessionModel {
   }
 
   async refreshRecent(): Promise<void> {
-    if (!this.machineId) {
+    const machineId = this.machineId;
+    if (!machineId) {
       this.recent = [];
       return;
     }
-    const response = await recentWorkdirs(this.machineId);
-    this.recent = response.data.workdirs.slice(0, 3);
+    const response = await recentWorkdirs(machineId).catch(() => null);
+    if (this.machineId !== machineId) return;
+    this.recent = response?.data.workdirs.slice(0, 3) ?? [];
   }
 
   async submit(): Promise<{ conversationId: string }> {
@@ -137,7 +153,8 @@ export class NewSessionModel {
       "create_conversation",
       {
         machine_id: this.machineId,
-        workdir: this.workdir,
+        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой.
+        workdir: this.workdir.trim(),
         harness: this.harness,
         model: this.model,
         effort: this.effort,
@@ -156,11 +173,10 @@ export class NewSessionModel {
     } catch (err) {
       if (err instanceof ApiError) {
         const field = FIELD_OF[err.code];
-        if (field)
-          this.#server = {
-            ...this.#server,
-            [field]: MESSAGE[err.code] ?? err.message,
-          };
+        if (field) {
+          this.#server = { [field]: MESSAGE[err.code] ?? err.message };
+          this.#refusedForm = this.#form;
+        }
       }
       throw err;
     }

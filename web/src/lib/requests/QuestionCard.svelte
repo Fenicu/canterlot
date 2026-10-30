@@ -97,7 +97,9 @@
   const isDisabled = $derived(disabled || request.state !== 'open');
 
   function answerOf(q: QuestionDef): string | string[] {
-    const custom = customValues[q.id]?.trim() ?? '';
+    const raw = customValues[q.id] ?? '';
+    // Секрет уходит как введён: пробелы могут быть его частью.
+    const custom = raw.trim() ? (q.is_secret ? raw : raw.trim()) : '';
     if (q.multi_select) {
       const picked = selectedMulti[q.id] ?? [];
       return custom && !picked.includes(custom) ? [...picked, custom] : [...picked];

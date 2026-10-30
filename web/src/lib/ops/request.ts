@@ -51,19 +51,24 @@ export function opRequest(
   };
 }
 
+const SEND_TIMEOUT_MS = 30_000;
+
 /** Один запрос журнала. Принятый ответ хаба тоже свежий HTTP: затвор отправки не идёт в `GET /me`. */
 export async function sendOp(
   fetchImpl: typeof fetch,
   op: Pick<Op, "kind" | "key" | "conversationId" | "body">,
+  timeoutMs = SEND_TIMEOUT_MS,
 ): Promise<unknown> {
   const request = opRequest(op);
-  // Обрыв соединения или потерянный ответ: операция остаётся «неизвестной» и повторяется с тем же ключом.
-  const response = await fetchImpl(request.url, request.init).catch(
+  const signal = AbortSignal.timeout(timeoutMs);
+  // Обрыв соединения, потерянный ответ или зависший запрос: операция остаётся «неизвестной» и повторяется с тем же ключом.
+  const response = await fetchImpl(request.url, { ...request.init, signal }).catch(
     (cause: unknown) => {
       throw new NetworkError("send_failed", { cause });
     },
   );
   const body = await response.json().catch(() => null);
+  if (signal.aborted) throw new NetworkError("send_failed");
   if (!response.ok) throw httpFailure(response, body);
   httpHealth.recordSuccess();
   return body;

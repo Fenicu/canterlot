@@ -195,13 +195,15 @@ export class RequestsModel {
     const item = this.items.get(id);
     const reason = typeof payload.reason === 'string' ? payload.reason : undefined;
     if (item) {
+      // У решения, не дошедшего до агента, хаб передаёт причину работника, а не `not_applied`.
+      const decided = item.state === 'saved' || item.state === 'transmitting';
       item.closedReason = reason;
       if (reason === 'applied') {
         item.state = 'applied';
-      } else if (reason === 'not_applied') {
-        item.state = 'not_applied';
       } else if (reason === 'unconfirmed') {
         item.state = 'unconfirmed';
+      } else if (reason === 'not_applied' || decided) {
+        item.state = 'not_applied';
       } else {
         item.state = 'closed';
       }

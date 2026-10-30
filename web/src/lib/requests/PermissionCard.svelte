@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
+  import { permissionView } from './permissionView';
 
   let {
     request,
@@ -13,8 +14,7 @@
   } = $props();
 
   const payload = $derived((request.payload ?? {}) as Record<string, unknown>);
-  const command = $derived(typeof payload.command === 'string' ? payload.command : '');
-  const description = $derived(typeof payload.description === 'string' ? payload.description : '');
+  const view = $derived(permissionView(payload));
   const toolName = $derived(
     typeof payload.tool_name === 'string'
       ? payload.tool_name
@@ -90,8 +90,12 @@
     <p class="description">{elicitationMessage}</p>
   {/if}
 
-  {#if description}
-    <p class="description">{description}</p>
+  {#if view.description}
+    <p class="description">{view.description}</p>
+  {/if}
+
+  {#if view.reason}
+    <p class="description">{view.reason}</p>
   {/if}
 
   {#if elicitationUrl}
@@ -108,8 +112,28 @@
     <p class="missing-url">Сервер не передал адрес</p>
   {/if}
 
-  {#if command}
-    <pre class="command-block"><code>{command}</code></pre>
+  {#if view.command}
+    <pre class="command-block"><code>{view.command}</code></pre>
+  {/if}
+
+  {#each view.facts as fact (fact.label)}
+    <p class="meta-line">{fact.label}: {fact.value}</p>
+  {/each}
+
+  {#each view.changes as change, index (index)}
+    <p class="meta-line">{change.kind}: {change.path}</p>
+    {#if change.diff}
+      <pre class="command-block detail"><code>{change.diff}</code></pre>
+    {/if}
+  {/each}
+
+  {#each view.fields as field (field.label)}
+    <p class="meta-line">{field.label}</p>
+    <pre class="command-block detail"><code>{field.value}</code></pre>
+  {/each}
+
+  {#if view.denyInterrupts}
+    <p class="warning" role="note">Отказ также прервёт ход</p>
   {/if}
 
   <div class="actions">
@@ -158,6 +182,16 @@
     margin: var(--s0);
     font-size: var(--fs-meta);
     color: var(--muted);
+    overflow-wrap: anywhere;
+  }
+
+  .warning {
+    margin: var(--s0);
+    padding: var(--s2) var(--s3);
+    border-radius: var(--radius-sm);
+    background: var(--warning-soft);
+    color: var(--text);
+    font-size: var(--fs-meta);
   }
 
   .url,
@@ -203,6 +237,11 @@
     border-radius: var(--radius-sm);
     background: var(--code);
     overflow-x: auto;
+  }
+
+  .detail {
+    max-height: calc(var(--fs-sm) * var(--lh-body) * 12);
+    overflow-y: auto;
   }
 
   .command-block code {

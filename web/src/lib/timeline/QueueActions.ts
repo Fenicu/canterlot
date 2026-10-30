@@ -3,6 +3,7 @@ import type { OpJournal } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import { cancelInput as apiCancelInput } from "#lib/api/client.js";
+import { returnToComposer } from "#lib/composer/returned.js";
 import { freshInput } from "#lib/stores/inputs.js";
 
 export interface CancelDeps {
@@ -113,29 +114,30 @@ export async function retryAsNew(
 }
 
 export interface ReturnDraftDeps {
-  drafts?: DraftStore;
-  conversationId?: string;
-  chat?: ChatStore;
-  onReturn?: (text: string) => void;
+  drafts: DraftStore;
+  conversationId: string;
+  chat: ChatStore;
 }
 
 /**
- * Возврат отклонённого сообщения в черновик.
+ * Возврат отклонённого сообщения к автору: перед набранным текстом и вместе с файлами.
  */
-export function returnToDraft(input: InputView, deps?: ReturnDraftDeps): void {
-  if (deps?.onReturn) {
-    deps.onReturn(input.text);
-  }
-  if (deps?.drafts && deps.conversationId) {
-    deps.drafts.set(deps.conversationId, {
+export async function returnToDraft(
+  input: InputView,
+  deps: ReturnDraftDeps,
+): Promise<void> {
+  deps.chat.inputs.delete(input.key);
+  deps.chat.timeline.remove(`input:${input.key}`);
+  await returnToComposer(
+    deps.conversationId,
+    {
       text: input.text,
-      attachments: input.attachments.map((a) => ({
-        id: a.attachment_id,
-        name: a.name,
+      attachments: input.attachments.map((item) => ({
+        id: item.attachment_id,
+        name: item.name,
+        size: item.size,
       })),
-    });
-  }
-  if (deps?.chat) {
-    deps.chat.inputs.delete(input.key);
-  }
+    },
+    deps.drafts,
+  );
 }
