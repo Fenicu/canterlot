@@ -1640,6 +1640,32 @@ pub(crate) async fn promote_pending_for_launch_in_tx(
         return Ok(());
     }
     let owner: Uuid = sqlx::query_scalar("update conversations set model=coalesce($2,model),effort=coalesce($3,effort),permission_mode=coalesce($4,permission_mode),pending_settings=pending_settings-'{model,effort,permission_mode}'::text[] where id=$1 returning owner_id").bind(id).bind(model).bind(effort).bind(permission).fetch_one(&mut *conn).await?;
+    publish_settings_in_tx(conn, owner, id, correlation).await
+}
+
+/// Закрепляет версию пресета, выбранную при запуске сессии.
+pub(crate) async fn pin_preset_revision_in_tx(
+    conn: &mut PgConnection,
+    id: Uuid,
+    revision: Option<i64>,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
+    let owner: Uuid = sqlx::query_scalar(
+        "update conversations set instruction_preset_revision=$2 where id=$1 returning owner_id",
+    )
+    .bind(id)
+    .bind(revision)
+    .fetch_one(&mut *conn)
+    .await?;
+    publish_settings_in_tx(conn, owner, id, correlation).await
+}
+
+async fn publish_settings_in_tx(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    id: Uuid,
+    correlation: Uuid,
+) -> Result<(), sqlx::Error> {
     let view = detail(conn, owner, id)
         .await?
         .ok_or(sqlx::Error::RowNotFound)?

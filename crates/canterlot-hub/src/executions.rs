@@ -168,12 +168,18 @@ pub async fn start_in_tx(
     let machine_id: Uuid = row.try_get("machine_id")?;
     let preset_ref: String = row.try_get("instruction_profile")?;
     let preset_revision: Option<i64> = row.try_get("instruction_preset_revision")?;
+    // Сессия, созданная без старта, закрепляет версию первым запуском, а не созданием.
+    let first_start: bool =
+        sqlx::query_scalar("select not exists(select 1 from executions where conversation_id=$1)")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
     let resolved = crate::presets::resolve_in_tx(
         &mut *conn,
         owner_id,
         &crate::presets::PresetRef::parse(&preset_ref)
             .map_err(|_| ExecutionError::ConversationNotFound)?,
-        preset_revision,
+        preset_revision.filter(|_| !first_start),
     )
     .await
     .map_err(|_| ExecutionError::ConversationNotFound)?;
@@ -195,6 +201,15 @@ pub async fn start_in_tx(
     }
     if let Some((execution_id, _, _)) = live(conn, conversation_id).await? {
         return Err(ExecutionError::AlreadyLive { execution_id });
+    }
+    if resolved.revision != preset_revision {
+        crate::conversations::pin_preset_revision_in_tx(
+            conn,
+            conversation_id,
+            resolved.revision,
+            correlation_id,
+        )
+        .await?;
     }
     crate::conversations::promote_pending_for_launch_in_tx(conn, conversation_id, correlation_id)
         .await?;
