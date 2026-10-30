@@ -59,3 +59,9 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   moved a `sleep 60` chain to the background, so no tool was running): the
   `result` has `terminal_reason: "aborted_streaming"`, not `aborted_tools`;
   both acknowledge the interrupt.
+- `local_command.jsonl` — `/context` in «Без инструкций» through a symlinked
+  workdir. The output of a local command is a single `assistant` frame with
+  `local_command_source`, model `<synthetic>` and no stream frames; the
+  adapter turns its text into a text block. The output and `context_usage`
+  are trimmed to the memory section (only the repository `CLAUDE.md`: the
+  owner's `~/CLAUDE.md` stays out although the CLI walks the physical path).

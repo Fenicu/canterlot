@@ -989,6 +989,29 @@ while True:
 }
 
 #[tokio::test]
+async fn local_command_output_becomes_a_text_block() {
+    // `/context` в живом прогоне: один кадр `assistant` с `local_command_source`,
+    // модель `<synthetic>`, без потоковых кадров.
+    let rows = captured("local_command");
+    let events = error_turn(out_frames(&rows)).await;
+    let model = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::Text,
+                model,
+                ..
+            } => Some(model.clone()),
+            _ => None,
+        })
+        .expect("text block for the local command output");
+    assert_ne!(model, "<synthetic>");
+    assert!(events.iter().any(
+        |e| matches!(e, AdapterEvent::BlockFinal { text, .. } if text.contains("### Memory Files"))
+    ));
+}
+
+#[tokio::test]
 async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);
     f.start().await;

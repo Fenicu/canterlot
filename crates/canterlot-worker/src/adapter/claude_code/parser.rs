@@ -274,7 +274,8 @@ impl Parser {
     }
 
     fn note_model(&mut self, model: Option<&str>, parent_tool_use_id: Option<&str>) {
-        let Some(model) = model.filter(|m| !m.is_empty()) else {
+        // `<synthetic>` — кадры самого CLI (ошибки API, вывод локальных команд), не модель.
+        let Some(model) = model.filter(|m| !m.is_empty() && *m != "<synthetic>") else {
             return;
         };
         self.current_model = model.to_owned();
@@ -652,6 +653,39 @@ impl Parser {
             .filter(|info| info.is_object())
         {
             out.push(Parsed::RateLimit(info.clone()));
+        }
+        // Вывод локальной команды (`/context`, `/cost`) приходит одним кадром
+        // `assistant` с `local_command_source` и без потоковых кадров (CLI 2.1.311).
+        if value.get("local_command_source").is_some() {
+            let texts = message
+                .and_then(|message| message.get("content"))
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter(|block| {
+                    block.get("type").and_then(serde_json::Value::as_str) == Some("text")
+                })
+                .filter_map(|block| block.get("text").and_then(serde_json::Value::as_str));
+            for text in texts {
+                let (agent, parent) = self.agent_of(parent);
+                let block_id = Uuid::now_v7();
+                out.push(Parsed::Event(AdapterEvent::BlockStarted {
+                    block_id,
+                    kind: BlockKind::Text,
+                    input_command_id: self.input_command,
+                    parent,
+                    agent,
+                    model: self.current_model.clone(),
+                    tool_name: None,
+                    summary: None,
+                    approved_by: None,
+                }));
+                out.push(Parsed::Event(AdapterEvent::BlockFinal {
+                    block_id,
+                    text: text.to_owned(),
+                    summary: None,
+                }));
+            }
         }
     }
 
