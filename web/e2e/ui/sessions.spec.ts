@@ -28,7 +28,7 @@ test('list_matches_the_mockup_fixture_structure', async ({ page }) => {
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toBeVisible();
 });
 
-test('group_tabs_are_a_tablist_with_arrow_navigation_and_scroll_inside_the_pill', async ({ page }) => {
+test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', async ({ page, isMobile }) => {
   await boot(page);
   const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
   const all = tablist.getByRole('tab', { name: /Все/ });
@@ -40,7 +40,9 @@ test('group_tabs_are_a_tablist_with_arrow_navigation_and_scroll_inside_the_pill'
     client: node.clientWidth,
     page: document.documentElement.scrollWidth
   }));
-  expect(metrics.scroll).toBeGreaterThan(metrics.client);
+  // Телефон листает вкладки пальцем внутри капсулы, боковая панель переносит их на новую строку.
+  if (isMobile) expect(metrics.scroll).toBeGreaterThan(metrics.client);
+  else expect(metrics.scroll).toBeLessThanOrEqual(metrics.client);
   expect(metrics.page).toBeLessThanOrEqual((page.viewportSize()?.width ?? metrics.page) + 1);
 });
 

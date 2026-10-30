@@ -184,7 +184,7 @@
       <aside data-pane="list"><SessionList create /><Nav current={nav} create={false} /></aside>
       <div data-pane="chat">
         {#if mode === 'desktop' && onChat}
-          <button type="button" onclick={() => lane = !lane}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>
+          <button type="button" class="lane-toggle" onclick={() => lane = !lane}>{lane ? 'Скрыть поручения' : 'Поручения'}</button>
         {/if}
         {@render children()}
       </div>
@@ -250,7 +250,7 @@
     display: flex;
     flex-direction: column;
     border-radius: var(--radius-sheet);
-    background: var(--surface);
+    background: var(--chat-bg);
   }
 
   [data-pane="list"] {
@@ -275,6 +275,15 @@
     border: var(--s0);
     background: var(--transparent);
     color: var(--accent-link);
+  }
+
+  .lane-toggle {
+    align-self: flex-end;
+    margin: var(--s4) var(--s6) 0;
+    padding-inline: var(--s8);
+    border-radius: var(--radius-pill);
+    background: var(--raised);
+    font-size: var(--fs-meta);
   }
 
   .platform-banner {
