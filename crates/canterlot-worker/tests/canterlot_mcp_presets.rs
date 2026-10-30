@@ -130,6 +130,46 @@ impl RelayHarness {
             .expect("read");
         serde_json::from_str(&line).expect("json line")
     }
+
+    /// Второе соединение с тем же сокетом.
+    async fn peer(&self) -> Peer {
+        let (read, sink) = UnixStream::connect(self._dir.path().join("mcp.sock"))
+            .await
+            .expect("connect")
+            .into_split();
+        (BufReader::new(read), sink)
+    }
+}
+
+type Peer = (
+    BufReader<tokio::net::unix::OwnedReadHalf>,
+    tokio::net::unix::OwnedWriteHalf,
+);
+
+async fn send(sink: &mut tokio::net::unix::OwnedWriteHalf, value: Value) {
+    let mut line = value.to_string();
+    line.push('\n');
+    sink.write_all(line.as_bytes()).await.expect("write");
+    sink.flush().await.expect("flush");
+}
+
+async fn read_reply(reader: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Value {
+    let mut line = String::new();
+    tokio::time::timeout(Duration::from_secs(10), reader.read_line(&mut line))
+        .await
+        .expect("read timeout")
+        .expect("read");
+    serde_json::from_str(&line).expect("json line")
+}
+
+async fn agent_call(broker: &mut Broker) -> uuid::Uuid {
+    match tokio::time::timeout(Duration::from_secs(10), broker.next())
+        .await
+        .expect("broker event")
+    {
+        BrokerEvent::AgentTool { call_id, .. } => call_id,
+        other => panic!("ожидался AgentTool, получено {other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -245,6 +285,76 @@ async fn cancelled_preset_call_ignores_late_result() {
     let read =
         tokio::time::timeout(Duration::from_millis(300), relay.socket.read_line(&mut buf)).await;
     assert!(read.is_err(), "поздний итог отброшен, ответа нет: {buf}");
+}
+
+#[tokio::test]
+async fn connections_with_equal_rpc_ids_keep_their_own_preset_calls() {
+    // Codex: соединений несколько, нумерация rpc id у каждого своя.
+    let mut relay = RelayHarness::bind(
+        canterlot_worker::adapter::canterlot_mcp::ToolSet::LimitsOnly,
+        "codex",
+    )
+    .await;
+    relay
+        .call(json!(3), "canterlot_presets_list", json!({}))
+        .await;
+    let first = agent_call(&mut relay.broker).await;
+    let (mut reader, mut sink) = relay.peer().await;
+    send(
+        &mut sink,
+        json!({"jsonrpc":"2.0","id":3,"method":"tools/call",
+            "params":{"name":"canterlot_presets_list","arguments":{}}}),
+    )
+    .await;
+    let second = agent_call(&mut relay.broker).await;
+    relay
+        .broker
+        .answer_agent_tool(first, &AgentCallResult::Ok(json!({"from": "first"})))
+        .await;
+    relay
+        .broker
+        .answer_agent_tool(second, &AgentCallResult::Ok(json!({"from": "second"})))
+        .await;
+    let text = relay.reply().await["result"]["content"][0]["text"].clone();
+    assert!(text.as_str().unwrap().contains("first"), "{text}");
+    let text = read_reply(&mut reader).await["result"]["content"][0]["text"].clone();
+    assert!(text.as_str().unwrap().contains("second"), "{text}");
+}
+
+#[tokio::test]
+async fn cancel_on_one_connection_keeps_the_preset_call_of_another() {
+    let mut relay = RelayHarness::bind(
+        canterlot_worker::adapter::canterlot_mcp::ToolSet::LimitsOnly,
+        "codex",
+    )
+    .await;
+    relay
+        .call(json!(3), "canterlot_presets_list", json!({}))
+        .await;
+    let first = agent_call(&mut relay.broker).await;
+    let (_reader, mut sink) = relay.peer().await;
+    send(
+        &mut sink,
+        json!({"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":3}}),
+    )
+    .await;
+    // Строки соединения читаются по порядку: событие вызова значит, что отмена разобрана.
+    send(
+        &mut sink,
+        json!({"jsonrpc":"2.0","id":4,"method":"tools/call",
+            "params":{"name":"canterlot_presets_list","arguments":{}}}),
+    )
+    .await;
+    agent_call(&mut relay.broker).await;
+    relay
+        .broker
+        .answer_agent_tool(first, &AgentCallResult::Ok(json!({"presets": []})))
+        .await;
+    assert_eq!(
+        relay.reply().await["id"],
+        3,
+        "чужая отмена вызов не снимает"
+    );
 }
 
 #[test]

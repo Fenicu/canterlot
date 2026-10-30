@@ -37,10 +37,10 @@ struct AgentCall {
     rpc_id: Value,
     tool: &'static str,
     writer: ConnWriter,
-    conn: u64,
 }
 
-type AgentPending = Arc<Mutex<HashMap<String, AgentCall>>>;
+/// Ключ — соединение и rpc id: нумерация вызовов у каждого соединения своя.
+type AgentPending = Arc<Mutex<HashMap<(u64, String), AgentCall>>>;
 
 /// Ответ уходит в то соединение, откуда пришёл вызов.
 type ConnWriter = Arc<Mutex<OwnedWriteHalf>>;
@@ -140,7 +140,7 @@ fn same_user(stream: &UnixStream) -> bool {
 pub struct Broker {
     events: mpsc::UnboundedReceiver<BrokerEvent>,
     pending: Pending,
-    /// Ожидающие вызовы пресетов: строка rpc id → вызов с соединением ответа.
+    /// Ожидающие вызовы пресетов по соединению и строке rpc id.
     agent_pending: AgentPending,
     gate: Arc<SyncMutex<Gate>>,
     task: JoinHandle<()>,
@@ -437,13 +437,12 @@ async fn serve_conn(
                 if let mcp::ToolKind::Agent { tool } = kind {
                     let call_id = uuid::Uuid::now_v7();
                     agent_pending.lock().await.insert(
-                        rpc_id.to_string(),
+                        (conn, rpc_id.to_string()),
                         AgentCall {
                             call_id,
                             rpc_id: rpc_id.clone(),
                             tool,
                             writer: writer.clone(),
-                            conn,
                         },
                     );
                     let _ = events.send(BrokerEvent::AgentTool {
@@ -526,7 +525,7 @@ async fn serve_conn(
                 if agent_pending
                     .lock()
                     .await
-                    .remove(&request_id.to_string())
+                    .remove(&(conn, request_id.to_string()))
                     .is_some()
                 {
                     continue;
@@ -570,5 +569,5 @@ async fn serve_conn(
     agent_pending
         .lock()
         .await
-        .retain(|_, call| call.conn != conn);
+        .retain(|(owner, _), _| *owner != conn);
 }
