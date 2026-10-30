@@ -868,7 +868,7 @@ async fn discover_reads_every_model_list_page() {
     let dir = TempDir::new().unwrap();
     let exe = dir.path().join("fake-codex");
     std::fs::write(&exe, PAGED_PROBE).unwrap();
-    std::fs::set_permissions(&exe, PermissionsExt::from_mode(0o700)).unwrap();
+    std::fs::set_permissions(&exe, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
     let catalog = tokio::time::timeout(
         WAIT,
         canterlot_worker::adapter::codex::discover(&CodexConfig {
