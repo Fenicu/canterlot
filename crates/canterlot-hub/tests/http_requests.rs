@@ -463,6 +463,54 @@ async fn concurrent_same_key_decisions_return_the_same_winner_once(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn post_decision_refuses_nul_in_text_and_keeps_the_request_open(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let permission_request = f.request("permission", json!({"tool":"Bash"})).await;
+    let response = f
+        .post(
+            permission_request,
+            "permission",
+            json!({"kind":"permission","behavior":"deny","message":"нет\u{0}"}),
+        )
+        .await;
+    assert_error(&response, 422, "decision_invalid");
+
+    let single = f
+        .request(
+            "question",
+            json!({"questions":[{"id":"q1","options":[],"allow_custom":true}]}),
+        )
+        .await;
+    let response = f.post(single, "single", question(json!("a\u{0}b"))).await;
+    let details = assert_error(&response, 422, "decision_invalid");
+    assert_eq!(details["question_id"], "q1");
+
+    let multiple = f
+        .request(
+            "question",
+            json!({"questions":[{"id":"q1","options":[],"allow_custom":true,"multiSelect":true}]}),
+        )
+        .await;
+    let response = f
+        .post(multiple, "multiple", question(json!(["ok", "\u{0}"])))
+        .await;
+    let details = assert_error(&response, 422, "decision_invalid");
+    assert_eq!(details["question_id"], "q1");
+
+    assert_eq!(f.counts().await, (0, 0));
+    for request in [permission_request, single, multiple] {
+        let state: String = sqlx::query_scalar("select state from requests where id=$1")
+            .bind(request)
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+        assert_eq!(state, "open");
+    }
+    let accepted = f.post(single, "single-fixed", question(json!("ab"))).await;
+    assert_eq!(accepted.status, 200);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn post_decision_free_text_requires_an_explicit_true_contract_flag(pool: PgPool) {
     let f = Fixture::new(pool).await;
     for flag in ["allow_custom", "isOther", "is_other"] {

@@ -311,6 +311,12 @@ fn validate_decision(
 ) -> Result<(), ApiError> {
     use crate::requests::RequestKind;
     match (row.kind, decision) {
+        // jsonb не принимает \u0000: без проверки решение падало бы в 500.
+        (RequestKind::Permission, DecisionBody::Permission { message, .. })
+            if message.as_deref().is_some_and(|text| text.contains('\0')) =>
+        {
+            Err(invalid_decision(None))
+        }
         (RequestKind::Permission, DecisionBody::Permission { .. }) => Ok(()),
         (RequestKind::Question, DecisionBody::Question { answers }) => {
             let questions = row
@@ -354,7 +360,11 @@ fn validate_decision(
                                     == Some(value.as_str())
                             })
                         });
-                    if value.is_empty() || !selected.insert(value) || (!known && !custom) {
+                    if value.is_empty()
+                        || value.contains('\0')
+                        || !selected.insert(value)
+                        || (!known && !custom)
+                    {
                         return Err(invalid_decision(Some(id)));
                     }
                 }
