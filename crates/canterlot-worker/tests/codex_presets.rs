@@ -68,8 +68,11 @@ if '--version' in sys.argv:
     print('codex-cli 0.164.0'); sys.exit(0)
 if (d / 'fail-spawn').exists():
     sys.exit(7)
-if (d / 'fail-once').exists() and not (d / 'spawned').exists():
-    (d / 'spawned').write_text('1')
+if (d / 'fail-spawn-break-home').exists():
+    # Второй prepare запасного запуска упадёт: дом владельца больше не каталог.
+    import shutil
+    shutil.rmtree(d / 'owner-home')
+    (d / 'owner-home').write_text('x')
     sys.exit(7)
 (d / f'args-{pid}.json').write_text(json.dumps(sys.argv[1:]))
 (d / f'env-{pid}.json').write_text(json.dumps({
@@ -629,6 +632,24 @@ async fn cross_home_resume_falls_back_to_rollout_path() {
             .is_some_and(|p| p.contains("rollout-2026-thread-1.jsonl")),
         "second resume uses rollout path: {}",
         resumes[1]
+    );
+}
+
+#[tokio::test]
+async fn failed_home_in_the_fallback_reports_process_exited() {
+    let mut h = PresetHarness::start_with(clean_spec(), None, |_| {}).await;
+    std::fs::write(h.dir.path().join("fail-spawn-break-home"), "").unwrap();
+    let out = h.transmit(Some(change(preset_spec("новый")))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let event = tokio::time::timeout(Duration::from_secs(3), h.adapter.next_event())
+        .await
+        .expect("the session without a server looks alive");
+    assert!(
+        matches!(event, AdapterEvent::ProcessExited { .. }),
+        "{event:?}"
     );
 }
 

@@ -1223,7 +1223,17 @@ impl CodexAdapter {
         let previous_home = if previous.mode == InstructionMode::Owner {
             None
         } else {
-            Some(prepare_home(&self.cfg, &self.exec_dir)?)
+            match prepare_home(&self.cfg, &self.exec_dir) {
+                Ok(home) => Some(home),
+                // Сервера уже нет: без этого события сессия выглядела бы живой.
+                Err(_) => {
+                    self.events.push_back(AdapterEvent::ProcessExited {
+                        code: None,
+                        signal: None,
+                    });
+                    return Err("instructions_change_failed");
+                }
+            }
         };
         let mode = self.mode;
         let model = self
