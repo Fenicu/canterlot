@@ -646,6 +646,30 @@ async fn cross_home_resume_falls_back_to_rollout_path() {
 }
 
 #[tokio::test]
+async fn real_file_in_the_canterlot_home_is_reported_as_a_conflict() {
+    // Атомарная запись заменяет ссылку настоящим файлом: конфиг владельца отстаёт.
+    let mut h = PresetHarness::start_with(clean_spec(), None, |dir| {
+        std::fs::create_dir_all(dir.join("codex-home")).unwrap();
+        std::fs::write(dir.join("codex-home/config.toml"), "").unwrap();
+    })
+    .await;
+    let event = tokio::time::timeout(Duration::from_secs(3), h.adapter.next_event())
+        .await
+        .expect("conflict diagnostic");
+    assert!(
+        matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "codex_home_conflict",
+                required: false,
+                ..
+            }
+        ),
+        "{event:?}"
+    );
+}
+
+#[tokio::test]
 async fn failed_home_in_the_fallback_reports_process_exited() {
     let mut h = PresetHarness::start_with(clean_spec(), None, |_| {}).await;
     std::fs::write(h.dir.path().join("fail-spawn-break-home"), "").unwrap();

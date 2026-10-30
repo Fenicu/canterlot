@@ -1147,7 +1147,7 @@ impl CodexAdapter {
         let new_home = if next.mode == InstructionMode::Owner {
             None
         } else {
-            Some(prepare_home(&self.cfg, &self.exec_dir)?)
+            Some(self.prepare_home()?)
         };
         let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
         let note = match next.mode {
@@ -1238,7 +1238,7 @@ impl CodexAdapter {
         let previous_home = if previous.mode == InstructionMode::Owner {
             None
         } else {
-            match prepare_home(&self.cfg, &self.exec_dir) {
+            match self.prepare_home() {
                 Ok(home) => Some(home),
                 // Сервера уже нет: без этого события сессия выглядела бы живой.
                 Err(_) => {
@@ -1307,6 +1307,24 @@ impl CodexAdapter {
             effort: self.effort.clone(),
             mode: self.mode,
         }
+    }
+
+    /// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
+    fn prepare_home(&mut self) -> Result<CodexHome, &'static str> {
+        let home_error = |error| match error {
+            HomeError::Unusable => "codex_home_unusable",
+            HomeError::Io(_) => "codex_home_failed",
+        };
+        let home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
+            .map_err(home_error)?;
+        let report = home
+            .prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
+            .map_err(home_error)?;
+        // Настоящий файл вместо ссылки перестал следовать за настройками владельца.
+        if !report.conflicts.is_empty() {
+            self.diagnostic("codex_home_conflict", false);
+        }
+        Ok(home)
     }
 
     fn turn_running(&self) -> bool {
@@ -1620,20 +1638,6 @@ fn exit_event(status: std::process::ExitStatus) -> AdapterEvent {
     }
 }
 
-/// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
-fn prepare_home(cfg: &CodexConfig, exec_dir: &Path) -> Result<CodexHome, &'static str> {
-    let home = CodexHome::resolve(cfg, exec_dir, &owner_env(cfg)).map_err(|error| match error {
-        HomeError::Unusable => "codex_home_unusable",
-        HomeError::Io(_) => "codex_home_failed",
-    })?;
-    home.prepare(mcp::SERVER_INSTRUCTIONS, cfg.home_policy)
-        .map_err(|error| match error {
-            HomeError::Unusable => "codex_home_unusable",
-            HomeError::Io(_) => "codex_home_failed",
-        })?;
-    Ok(home)
-}
-
 /// Ребёнок уже убран другой проверкой members (общий супервизор тестового
 /// процесса): `ECHILD` означает, что процесса точно нет.
 fn reaped(error: &std::io::Error) -> bool {
@@ -1769,7 +1773,7 @@ impl Adapter for CodexAdapter {
         // задача 7): готов до запуска, иначе первый сервер видит ~/.codex.
         self.codex_home = match spec.instructions.mode {
             InstructionMode::Owner => None,
-            _ => Some(prepare_home(&self.cfg, &self.exec_dir).map_err(AdapterError::StartFailed)?),
+            _ => Some(self.prepare_home().map_err(AdapterError::StartFailed)?),
         };
         let launch = LaunchSpec {
             executable: &self.cfg.executable,

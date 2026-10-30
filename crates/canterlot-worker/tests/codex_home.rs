@@ -204,6 +204,130 @@ fn real_entries_are_never_replaced() {
 }
 
 #[test]
+fn lock_and_journal_entries_are_never_linked() {
+    let (_td, owner) = owner_home();
+    std::fs::create_dir_all(owner.join("mcp-oauth-locks")).unwrap();
+    std::fs::write(owner.join("state_5.sqlite-journal"), "journal").unwrap();
+    std::fs::write(owner.join("history.lock"), "").unwrap();
+    std::fs::write(owner.join("config.toml"), "").unwrap();
+    let td = TempDir::new().unwrap();
+    let home = resolve(&td.path().join("home"), &owner);
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    assert!(home.path.join("config.toml").exists());
+    for name in ["mcp-oauth-locks", "state_5.sqlite-journal", "history.lock"] {
+        assert!(
+            std::fs::symlink_metadata(home.path.join(name)).is_err(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn links_of_entries_excluded_later_are_removed() {
+    let (_td, owner) = owner_home();
+    std::fs::create_dir_all(owner.join("mcp-oauth-locks")).unwrap();
+    let td = TempDir::new().unwrap();
+    let home = resolve(&td.path().join("home"), &owner);
+    std::fs::create_dir_all(&home.path).unwrap();
+    let link = home.path.join("mcp-oauth-locks");
+    std::os::unix::fs::symlink(owner.join("mcp-oauth-locks"), &link).unwrap();
+    let report = home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    assert!(std::fs::symlink_metadata(&link).is_err());
+    assert_eq!(report.removed, 1);
+    assert!(owner.join("mcp-oauth-locks").is_dir(), "owner entry stays");
+}
+
+#[test]
+fn link_with_an_unreadable_target_is_not_treated_as_vanished() {
+    let (_td, owner) = owner_home();
+    let closed = owner.join("closed");
+    std::fs::create_dir_all(&closed).unwrap();
+    std::fs::write(closed.join("inner"), "").unwrap();
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let td = TempDir::new().unwrap();
+    let home = resolve(&td.path().join("home"), &owner);
+    std::fs::create_dir_all(&home.path).unwrap();
+    let link = home.path.join("kept");
+    std::os::unix::fs::symlink(closed.join("inner"), &link).unwrap();
+    let denied = std::fs::metadata(&link).is_err();
+    let report = home.prepare(BLOCK, TempDirPolicy::Allow);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    report.unwrap();
+    // Под root отказа в доступе нет, и проверять нечего.
+    if denied {
+        assert!(
+            std::fs::symlink_metadata(&link).is_ok(),
+            "EACCES is not gone"
+        );
+    }
+}
+
+#[test]
+fn relink_never_leaves_the_name_missing() {
+    let (_td, first) = owner_home();
+    let (_td2, second) = owner_home();
+    std::fs::write(first.join("config.toml"), "").unwrap();
+    std::fs::write(second.join("config.toml"), "").unwrap();
+    let td = TempDir::new().unwrap();
+    let path = td.path().join("home");
+    let homes = [resolve(&path, &first), resolve(&path, &second)];
+    homes[0].prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    let link = path.join("config.toml");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let (stop, link) = (stop.clone(), link.clone());
+        std::thread::spawn(move || {
+            let mut missing = 0u32;
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                if std::fs::symlink_metadata(&link).is_err() {
+                    missing += 1;
+                }
+            }
+            missing
+        })
+    };
+    for round in 0..400 {
+        homes[round % 2]
+            .prepare(BLOCK, TempDirPolicy::Allow)
+            .unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    assert_eq!(reader.join().unwrap(), 0, "running servers saw no config");
+    assert!(
+        std::fs::read_dir(&path).unwrap().all(|entry| !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .contains("link-")),
+        "no temporary link stays behind"
+    );
+}
+
+#[test]
+fn missing_path_behind_a_symlink_into_temp_is_refused() {
+    let (td, owner) = owner_home();
+    let base = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!(
+        "codex-home-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&base).unwrap();
+    let alias = base.join("alias");
+    let _ = std::fs::remove_file(&alias);
+    std::os::unix::fs::symlink(td.path(), &alias).unwrap();
+    let home = CodexHome {
+        path: alias.join("missing").join("home"),
+        owner_home: owner,
+    };
+    let refused = matches!(
+        home.prepare(BLOCK, TempDirPolicy::Refuse),
+        Err(HomeError::Unusable)
+    );
+    std::fs::remove_dir_all(&base).unwrap();
+    assert!(refused, "the path lies under the temp dir through the link");
+}
+
+#[test]
 fn home_under_temp_dir_is_refused_in_production_policy() {
     let (_td, owner) = owner_home();
     place_owner(&owner);

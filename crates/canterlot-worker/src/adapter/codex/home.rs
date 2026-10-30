@@ -16,6 +16,7 @@ pub const EXCLUDED_NAMES: &[&str] = &[
     "app-server-control",
     "app-server-daemon",
     "thread-writer-locks",
+    "mcp-oauth-locks",
     "hapi-runtime-owners",
     "tmp",
     ".tmp",
@@ -23,7 +24,11 @@ pub const EXCLUDED_NAMES: &[&str] = &[
 ];
 
 /// Суффиксы записей дома владельца, которые никогда не ссылаются.
-pub const EXCLUDED_SUFFIXES: &[&str] = &[".sqlite", ".sqlite-wal", ".sqlite-shm"];
+pub const EXCLUDED_SUFFIXES: &[&str] =
+    &[".sqlite", ".sqlite-wal", ".sqlite-shm", ".sqlite-journal"];
+
+/// Блокировки владельца; своя `LOCK_FILE` живёт только в доме canterlot.
+const LOCK_SUFFIX: &str = ".lock";
 
 /// Политика временных каталогов для дома canterlot.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
@@ -37,6 +42,7 @@ pub enum TempDirPolicy {
 
 const AGENTS_MD: &str = "AGENTS.md";
 const LOCK_FILE: &str = ".canterlot-home.lock";
+const LINK_TMP_PREFIX: &str = ".canterlot-link-";
 
 /// Дом canterlot: путь и дом владельца, чьи записи ссылаются.
 #[derive(Clone, Debug)]
@@ -66,14 +72,26 @@ fn excluded(name: &std::ffi::OsStr) -> bool {
     if EXCLUDED_NAMES.iter().any(|n| bytes == n.as_bytes()) {
         return true;
     }
-    EXCLUDED_SUFFIXES
-        .iter()
-        .any(|suffix| bytes.ends_with(suffix.as_bytes()))
+    bytes.ends_with(LOCK_SUFFIX.as_bytes())
+        || EXCLUDED_SUFFIXES
+            .iter()
+            .any(|suffix| bytes.ends_with(suffix.as_bytes()))
+}
+
+/// Ссылка убирается, только если имя исключено, это остаток перевязки или цели
+/// точно нет: другие ошибки metadata (EACCES) о цели ничего не говорят.
+fn removable_link(name: &std::ffi::OsStr, link: &Path) -> bool {
+    use std::io::ErrorKind;
+    excluded(name)
+        || name.as_bytes().starts_with(LINK_TMP_PREFIX.as_bytes())
+        || std::fs::metadata(link).is_err_and(|error| {
+            matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
+        })
 }
 
 /// Путь под временным каталогом: системный temp, /tmp или /var/tmp.
 fn is_temp_path(path: &Path) -> bool {
-    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = canonical_form(path);
     for base in [
         std::env::temp_dir(),
         PathBuf::from("/tmp"),
@@ -244,8 +262,12 @@ impl CodexHome {
                         .map(|current| current == target)
                         .unwrap_or(false);
                     if !same {
-                        std::fs::remove_file(&dest).map_err(HomeError::Io)?;
-                        std::os::unix::fs::symlink(&target, &dest).map_err(HomeError::Io)?;
+                        // Запущенные app-server блокировки не берут: имя не пропадает.
+                        let tmp = self
+                            .path
+                            .join(format!("{LINK_TMP_PREFIX}{}", std::process::id()));
+                        std::os::unix::fs::symlink(&target, &tmp).map_err(HomeError::Io)?;
+                        std::fs::rename(&tmp, &dest).map_err(HomeError::Io)?;
                         report.relinked += 1;
                     }
                 }
@@ -256,7 +278,7 @@ impl CodexHome {
                 Err(error) => return Err(HomeError::Io(error)),
             }
         }
-        // Ссылки с исчезнувшей целью убираются.
+        // Ссылки с исчезнувшей целью и на исключённые имена убираются.
         let mut current: Vec<OsString> = Vec::new();
         for entry in std::fs::read_dir(&self.path).map_err(HomeError::Io)? {
             let entry = entry.map_err(HomeError::Io)?;
@@ -272,9 +294,7 @@ impl CodexHome {
         }
         for name in &current {
             let dest = self.path.join(name);
-            // metadata идёт по ссылке: у висячей цели — ошибка.
-            let vanished = std::fs::metadata(&dest).is_err();
-            if vanished {
+            if removable_link(name, &dest) {
                 std::fs::remove_file(&dest).map_err(HomeError::Io)?;
                 report.removed += 1;
             }
