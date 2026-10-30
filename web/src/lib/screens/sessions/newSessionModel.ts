@@ -52,6 +52,19 @@ export function workdirProblem(path: string): string | null {
   return null;
 }
 
+export function soleMachine(machines: { id: string }[]): string | null {
+  return machines.length === 1 ? (machines[0]?.id ?? null) : null;
+}
+
+/** Путь, введённый владельцем, остаётся; подставленный ранее следует за машиной. */
+export function prefillWorkdir(
+  current: string,
+  prefilled: string,
+  home: string,
+): string {
+  return current === "" || current === prefilled ? home : current;
+}
+
 export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {

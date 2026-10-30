@@ -14,8 +14,8 @@
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
-  import { onMount } from 'svelte';
-  import { machineProblem, NewSessionModel } from './newSessionModel';
+  import { onMount, untrack } from 'svelte';
+  import { machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
@@ -34,6 +34,7 @@
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
+  const home = $derived(machine?.home_dir ?? '');
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
@@ -112,6 +113,21 @@
     void current.refreshRecent().then(() => {
       recent = current.recent;
     });
+  });
+
+  // Каталог приходит позже формы: подбор живёт в эффектах и срабатывает, когда данные появятся.
+  $effect(() => {
+    const only = soleMachine(machines);
+    if (only && !machineId) machineId = only;
+  });
+
+  let prefilled = '';
+  $effect(() => {
+    const next = home;
+    untrack(() => {
+      path = prefillWorkdir(path, prefilled, next);
+    });
+    prefilled = next;
   });
 
   async function send() {

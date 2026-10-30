@@ -11,6 +11,8 @@ import {
 } from "#lib/ops/journal.js";
 import {
   NewSessionModel,
+  prefillWorkdir,
+  soleMachine,
   type Field,
 } from "#lib/screens/sessions/newSessionModel.js";
 import { openDb, purgeAllStores } from "#lib/storage/idb.js";
@@ -89,6 +91,28 @@ function ready(model: NewSessionModel) {
 }
 
 describe("sessions/new", () => {
+  it("new_session_takes_the_machine_only_when_it_is_the_only_one", () => {
+    expect(soleMachine([])).toBeNull();
+    expect(soleMachine([machine()])).toBe("m1");
+    expect(soleMachine([machine(), machine({ id: "m2" })])).toBeNull();
+  });
+
+  it("new_session_prefills_home_and_follows_the_machine_until_the_owner_types", () => {
+    expect(prefillWorkdir("", "", "/home/owner")).toBe("/home/owner");
+    expect(prefillWorkdir("/home/owner", "/home/owner", "/home/other")).toBe(
+      "/home/other",
+    );
+    expect(prefillWorkdir("/srv/typed", "/home/owner", "/home/other")).toBe(
+      "/srv/typed",
+    );
+  });
+
+  it("new_session_stays_empty_for_a_worker_without_a_home", () => {
+    expect(prefillWorkdir("", "", "")).toBe("");
+    expect(prefillWorkdir("/home/owner", "/home/owner", "")).toBe("");
+    expect(prefillWorkdir("/srv/typed", "/home/owner", "")).toBe("/srv/typed");
+  });
+
   it("new_session_model_accepts_any_absolute_workdir", () => {
     const model = new NewSessionModel(store([machine()]), config, ops());
     model.machineId = "m1";
