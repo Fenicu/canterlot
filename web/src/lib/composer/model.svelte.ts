@@ -37,13 +37,20 @@ export interface ComposerDeps {
   interruptApi?(conversationId: string, key: string): Promise<unknown>;
 }
 
+interface Accepted {
+  op: Op;
+  key: string;
+  text: string;
+  detached: Upload[];
+}
+
 export class ComposerModel {
   readonly deps: ComposerDeps;
   text = $state("");
   errorMessage = $state<string | null>(null);
   interruptLabel = $state("Прервать");
   interruptRunning = $state(false);
-  /** Отправка идёт: повторное нажатие во время проверки сети не создаёт второе сообщение. */
+  /** Нажатие в работе: повторное во время проверки сети не создаёт второе сообщение. */
   sending = $state(false);
 
   constructor(deps: ComposerDeps) {
@@ -98,14 +105,17 @@ export class ComposerModel {
   async send(): Promise<void> {
     if (this.sending || !this.gate.ok) return;
     this.sending = true;
+    let accepted: Accepted | null;
     try {
-      await this.#send();
+      accepted = await this.#accept();
     } finally {
+      // Флаг держат только проверка сети и запись в журнал: доставка может идти сколько угодно.
       this.sending = false;
     }
+    if (accepted) await this.#deliver(accepted);
   }
 
-  async #send(): Promise<void> {
+  async #accept(): Promise<Accepted | null> {
     const sendText = this.text;
     const readyUploads = this.deps.uploads
       .list(this.deps.conversationId)
@@ -113,7 +123,7 @@ export class ComposerModel {
 
     // Поле свободно с нажатия: текст, набранный за время проверки сети, не прилипнет к этому сообщению.
     this.text = "";
-    if (!this.#mayGo(sendText, await this.deps.canSend())) return;
+    if (!this.#mayGo(sendText, await this.deps.canSend())) return null;
     const attachmentIds = readyUploads
       .map((u) => u.attachmentId!)
       .filter(Boolean);
@@ -164,24 +174,15 @@ export class ComposerModel {
     if (!this.text) {
       void this.deps.drafts.clear(this.deps.conversationId).catch(() => undefined);
     }
+    return { op, key, text: sendText, detached };
+  }
 
-    // Шаг 4: запуск операции
-    try {
-      await this.deps.ops.run(op);
-    } catch (err) {
-      if (op.state === "refused") {
-        this.#restore(key, sendText, detached);
-        this.errorMessage =
-          op.refusal?.message ??
-          (err instanceof Error ? err.message : "Отклонено");
-        return;
-      }
-    }
-
-    if (op.state === "refused") {
-      this.#restore(key, sendText, detached);
-      this.errorMessage = op.refusal?.message ?? "Отклонено";
-    }
+  /** Шаг 4: доставка. Отказ хаба возвращает текст и файлы, остальное журнал повторяет сам. */
+  async #deliver({ op, key, text, detached }: Accepted): Promise<void> {
+    await this.deps.ops.run(op).catch(() => undefined);
+    if (op.state !== "refused") return;
+    this.#restore(key, text, detached);
+    this.errorMessage = op.refusal?.message ?? "Отклонено";
   }
 
   /** После проверки сети: нажатие либо идёт дальше, либо текст возвращается в поле. */

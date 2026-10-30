@@ -570,6 +570,55 @@ describe("composer/model", () => {
     expect(deps.ops.begin).not.toHaveBeenCalled();
   });
 
+  it("send_frees_the_button_once_journaled_while_the_post_hangs", async () => {
+    const { deps } = createMockDeps();
+    deps.ops.run = vi.fn(() => new Promise<void>(() => undefined));
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+
+    void model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(1));
+    expect(model.sending).toBe(false);
+
+    model.text = "Второе";
+    void model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(2));
+    const keys = vi
+      .mocked(deps.ops.begin)
+      .mock.calls.map((call) => call[2].key);
+    expect(new Set(keys).size).toBe(2);
+    expect(model.text).toBe("");
+  });
+
+  it("finished_delivery_does_not_unlock_the_next_press", async () => {
+    let finish!: () => void;
+    let open!: (value: "ok") => void;
+    const { deps } = createMockDeps();
+    deps.ops.run = vi.fn(
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    const model = new ComposerModel(deps);
+    model.text = "Первое";
+    const first = model.send();
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(1));
+
+    deps.canSend = vi.fn(
+      () => new Promise<"ok">((resolve) => (open = resolve)),
+    );
+    model.text = "Второе";
+    const second = model.send();
+    finish();
+    await first;
+
+    expect(model.sending).toBe(true);
+    void model.send();
+    open("ok");
+    await vi.waitFor(() => expect(deps.ops.run).toHaveBeenCalledTimes(2));
+    finish();
+    await second;
+    expect(deps.ops.begin).toHaveBeenCalledTimes(2);
+  });
+
   it("send_later_clears_the_field_on_press_and_keeps_what_was_typed", async () => {
     let open!: (value: "ok") => void;
     const { deps } = createMockDeps({
