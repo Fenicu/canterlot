@@ -1,11 +1,14 @@
 use axum::http::Method;
 use canterlot_hub::{
     http::{self, AppState},
+    session::{CAPABILITY_WORKDIR_SUGGEST_V1, MAX_SUGGESTS_PER_MACHINE, Registry},
     testkit::{self, TestClient},
 };
+use canterlot_proto::worker::v1::{SuggestWorkdirs, WorkdirSuggestions, control_down};
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
 use sqlx::PgPool;
+use std::time::Duration;
 use uuid::Uuid;
 
 struct Fixture {
@@ -620,6 +623,10 @@ async fn foreign_conversation_ids_are_not_found(pool: PgPool) {
     for path in [
         format!("/api/v1/machines/{}", foreign.machine_id),
         format!("/api/v1/machines/{}/workdirs/recent", foreign.machine_id),
+        format!(
+            "/api/v1/machines/{}/workdirs/suggest?path=/tmp",
+            foreign.machine_id
+        ),
     ] {
         f.request(Method::GET, &path, None, 404).await;
     }
@@ -1223,6 +1230,181 @@ async fn machine_api_exposes_the_reported_home_and_an_old_worker_leaves_it_empty
         f.request(Method::GET, &path, None, 200).await["home_dir"],
         Value::Null
     );
+}
+
+fn suggested(session: &mut testkit::FakeSession) -> Option<SuggestWorkdirs> {
+    match session.commands.try_recv().ok()?.msg {
+        Some(control_down::Msg::SuggestWorkdirs(request)) => Some(request),
+        other => panic!("{other:?}"),
+    }
+}
+
+fn answer(machine: Uuid, directories: &[&str], request: SuggestWorkdirs, registry: &Registry) {
+    registry.finish_suggest(
+        machine,
+        WorkdirSuggestions {
+            request_id: request.request_id,
+            directories: directories.iter().map(|d| (*d).to_owned()).collect(),
+        },
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn workdir_suggestions_come_from_the_live_worker(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f._leases.clear();
+    let mut session = testkit::fake_session(
+        &f.registry,
+        f.machine,
+        &[CAPABILITY_WORKDIR_SUGGEST_V1],
+        true,
+    );
+    let (registry, machine) = (f.registry.clone(), f.machine);
+    let worker = tokio::spawn(async move {
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::SuggestWorkdirs(request)) = down.msg else {
+            panic!("{down:?}")
+        };
+        assert_eq!(request.path, "/srv/can ary");
+        answer(machine, &["/srv/can ary-one"], request, &registry);
+        session
+    });
+    let body = f
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/machines/{}/workdirs/suggest?path=%2Fsrv%2Fcan%20ary",
+                f.machine
+            ),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body, json!({"workdirs":["/srv/can ary-one"]}));
+    worker.await.unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn workdir_suggestions_are_empty_without_a_capable_live_worker(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    let path = format!("/api/v1/machines/{}/workdirs/suggest?path=/tmp/", f.machine);
+    f._leases.clear();
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await,
+        json!({"workdirs":[]}),
+        "offline machine"
+    );
+    let mut old = testkit::fake_session(&f.registry, f.machine, &["pilot_v1"], true);
+    assert_eq!(
+        f.request(Method::GET, &path, None, 200).await,
+        json!({"workdirs":[]}),
+        "worker without the capability"
+    );
+    assert!(suggested(&mut old).is_none(), "old worker gets no request");
+    drop(old);
+    let mut session = testkit::fake_session(
+        &f.registry,
+        f.machine,
+        &[CAPABILITY_WORKDIR_SUGGEST_V1],
+        true,
+    );
+    let long = "a".repeat(canterlot_proto::limits::MAX_WORKDIR_BYTES);
+    assert_eq!(
+        f.request(
+            Method::GET,
+            &format!(
+                "/api/v1/machines/{}/workdirs/suggest?path=/{long}",
+                f.machine
+            ),
+            None,
+            200
+        )
+        .await,
+        json!({"workdirs":[]}),
+        "oversized path"
+    );
+    assert!(
+        suggested(&mut session).is_none(),
+        "oversized path stays here"
+    );
+    let missing = f
+        .request(
+            Method::GET,
+            &format!("/api/v1/machines/{}/workdirs/suggest", f.machine),
+            None,
+            400,
+        )
+        .await;
+    assert_eq!(missing["error"]["code"], "invalid_request");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn suggestion_wait_is_bounded_and_answers_match_the_asking_machine(pool: PgPool) {
+    let mut f = Fixture::new(pool).await;
+    f._leases.clear();
+    let mut session = testkit::fake_session(
+        &f.registry,
+        f.machine,
+        &[CAPABILITY_WORKDIR_SUGGEST_V1],
+        true,
+    );
+    let wait = Duration::from_millis(40);
+    assert!(
+        f.registry
+            .suggest_workdirs(f.machine, "/tmp/", wait)
+            .await
+            .is_empty(),
+        "silent worker"
+    );
+    let late = suggested(&mut session).unwrap();
+    answer(f.machine, &["/tmp/late"], late, &f.registry);
+
+    let registry = f.registry.clone();
+    let machine = f.machine;
+    let asking =
+        tokio::spawn(async move { registry.suggest_workdirs(machine, "/tmp/", wait).await });
+    let request = session.commands.recv().await.unwrap();
+    let Some(control_down::Msg::SuggestWorkdirs(request)) = request.msg else {
+        panic!("{request:?}")
+    };
+    answer(Uuid::now_v7(), &["/tmp/foreign"], request, &f.registry);
+    assert!(asking.await.unwrap().is_empty(), "foreign machine ignored");
+
+    let many: Vec<_> = (0..MAX_SUGGESTS_PER_MACHINE)
+        .map(|_| {
+            let registry = f.registry.clone();
+            let machine = f.machine;
+            tokio::spawn(async move {
+                registry
+                    .suggest_workdirs(machine, "/tmp/", Duration::from_secs(30))
+                    .await
+            })
+        })
+        .collect();
+    let mut requests = Vec::new();
+    for _ in 0..MAX_SUGGESTS_PER_MACHINE {
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::SuggestWorkdirs(request)) = down.msg else {
+            panic!("{down:?}")
+        };
+        requests.push(request);
+    }
+    let over_bound = f
+        .registry
+        .suggest_workdirs(f.machine, "/tmp/", Duration::from_secs(30));
+    assert!(
+        tokio::time::timeout(Duration::from_secs(5), over_bound)
+            .await
+            .unwrap()
+            .is_empty(),
+        "over the bound nothing waits"
+    );
+    for request in requests {
+        answer(f.machine, &["/tmp/found"], request, &f.registry);
+    }
+    for task in many {
+        assert_eq!(task.await.unwrap(), ["/tmp/found"]);
+    }
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

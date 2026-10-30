@@ -357,6 +357,46 @@ async fn pilot_capability_is_echoed_and_stored_per_session(pool: PgPool) -> Test
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn workdir_suggestions_travel_the_control_stream(pool: PgPool) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let mut c = connect_with(
+        &hub,
+        &s,
+        Uuid::now_v7(),
+        &["pilot_v1", "workdir_suggest_v1"],
+        1000,
+    )
+    .await;
+    let registry = hub.registry.clone();
+    let machine = s.machine_id;
+    let asking = tokio::spawn(async move {
+        registry
+            .suggest_workdirs(machine, "/srv/ca", std::time::Duration::from_secs(10))
+            .await
+    });
+    let request = loop {
+        let down = tokio::time::timeout(WAIT, c.stream.message())
+            .await??
+            .unwrap();
+        if let Some(control_down::Msg::SuggestWorkdirs(request)) = down.msg {
+            break request;
+        }
+    };
+    assert_eq!(request.path, "/srv/ca");
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::WorkdirSuggestions(WorkdirSuggestions {
+            request_id: request.request_id,
+            directories: vec!["/srv/canterlot".into()],
+        })),
+    })
+    .await?;
+    assert_eq!(asking.await?, ["/srv/canterlot"]);
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestResult {
     let s = wire_seed(&pool).await;
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
