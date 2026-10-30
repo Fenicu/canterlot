@@ -981,6 +981,11 @@ async fn refused_terminal_cleanup_after_interrupt_is_reported() {
     lines.push(started(command_item("exec-1", "inProgress", None)));
     lines.push(w_in(11, "turn/interrupt", json!({})));
     lines.push(w_out(json!({"id": 11, "result": {}})));
+    // Порядок записи: конец хода раньше списка терминалов (ev/interrupt_cleanup.jsonl:31-37).
+    lines.push(note(
+        "turn/completed",
+        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "interrupted", "items": []}}),
+    ));
     lines.push(w_in(12, "thread/backgroundTerminals/list", json!({})));
     lines.push(w_out(
         json!({"id": 12, "result": {"data": [{"itemId": "exec-1", "processId": "p-1"}]}}),
@@ -988,10 +993,6 @@ async fn refused_terminal_cleanup_after_interrupt_is_reported() {
     lines.push(w_in(13, "thread/backgroundTerminals/terminate", json!({})));
     lines.push(w_out(
         json!({"id": 13, "error": {"code": -32000, "message": "terminate refused"}}),
-    ));
-    lines.push(note(
-        "turn/completed",
-        json!({"threadId": "thread-mini", "turn": {"id": "turn-1", "status": "interrupted", "items": []}}),
     ));
     let mut fake = Fake::new(lines);
     fake.start().await;
@@ -1003,7 +1004,10 @@ async fn refused_terminal_cleanup_after_interrupt_is_reported() {
         InterruptOutcome::Acknowledged => {}
         other => panic!("interrupt: {other:?}"),
     }
-    let events = fake.finish(id).await;
+    let mut events = fake.finish(id).await;
+    // Конец хода уже в очереди к моменту отказа: диагностика идёт за ним.
+    events.push(fake.event().await);
+    events.push(fake.event().await);
     assert!(
         events.iter().any(|event| matches!(
             event,
@@ -1015,6 +1019,31 @@ async fn refused_terminal_cleanup_after_interrupt_is_reported() {
         fake.stdin_methods()
             .contains(&"thread/backgroundTerminals/terminate".to_owned())
     );
+    fake.close().await;
+}
+
+#[tokio::test]
+async fn interrupt_terminates_the_running_command_in_the_captured_order() {
+    use canterlot_worker::adapter::InterruptOutcome;
+    // Конец хода приходит раньше ответа списка, а `sleep 45` ещё жив.
+    let mut fake = Fake::new(evidence_slice("interrupt_cleanup", 1, 37));
+    fake.start().await;
+    let id = fake.start_turn("run").await;
+    match tokio::time::timeout(WAIT, fake.adapter.interrupt())
+        .await
+        .unwrap()
+    {
+        InterruptOutcome::Acknowledged => {}
+        other => panic!("interrupt: {other:?}"),
+    }
+    fake.finish(id).await;
+    let terminate = fake
+        .stdin_log()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|line| line["method"] == "thread/backgroundTerminals/terminate")
+        .expect("the interrupted command is terminated");
+    assert_eq!(terminate["params"]["processId"], "39207");
     fake.close().await;
 }
 

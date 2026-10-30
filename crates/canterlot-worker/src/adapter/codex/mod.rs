@@ -598,7 +598,8 @@ impl CodexAdapter {
         let was_active = self.outbox.on_turn_completed(&turn_id);
         // Отложенные вызовы уходят без пометки: ход кончился без их завершения.
         self.release_all();
-        self.turn_items.clear();
+        // turn_items живут до следующего хода: при прерывании конец хода приходит
+        // раньше списка терминалов (ev/interrupt_cleanup.jsonl:34-37).
         self.completed_status.clear();
         if !was_active {
             return;
@@ -1333,6 +1334,7 @@ impl CodexAdapter {
                 if let Some(translator) = self.translator.as_mut() {
                     translator.begin_turn(&turn, input.command_id);
                 }
+                self.turn_items.clear();
             } else {
                 self.events.push_back(AdapterEvent::RunFinished {
                     input_command_id: input.command_id,
