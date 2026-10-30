@@ -431,8 +431,12 @@ impl ClaudeCodeAdapter {
 
     /// Остановить старый CLI для перезапуска между ходами: stdin EOF, до 5 с
     /// ожидания с чтением stdout через разбор, затем SIGTERM группе процесса
-    /// и до 2 с, затем SIGKILL. Открытые запросы закрываются как прерванные.
-    async fn stop_old_cli(&mut self) {
+    /// и до 2 с, затем SIGKILL. После SIGKILL дочитывание stdout и ожидание
+    /// выхода ограничены: вывод может держать процесс вне группы CLI (инструмент
+    /// ведёт свою группу), а сам CLI может застрять в непрерываемом сне; тогда
+    /// остатки дерева исполнения гасит контейнер. Открытые запросы закрываются
+    /// как прерванные.
+    async fn stop_old_cli(&mut self, group: &dyn Containment) {
         let Some(cli) = self.cli.as_mut() else {
             return;
         };
@@ -455,7 +459,17 @@ impl ClaudeCodeAdapter {
             .await
             {
                 signal_group(cli.pid, process::Signal::Kill);
-                drain_to_eof(cli, &mut self.parser, &mut self.queue).await;
+                let drained = timeout(
+                    KILL_DRAIN,
+                    drain_to_eof(cli, &mut self.parser, &mut self.queue),
+                )
+                .await
+                .is_ok();
+                if !drained || timeout(KILL_DRAIN, cli.wait()).await.is_err() {
+                    // Новый CLI ещё не запущен: всё в контейнере принадлежит старому.
+                    let _ = group.terminate(KILL_DRAIN).await;
+                    let _ = timeout(KILL_DRAIN, cli.wait()).await;
+                }
             }
         }
         self.cli = None;
@@ -533,7 +547,7 @@ impl ClaudeCodeAdapter {
             return Err("instructions_change_failed");
         }
         // 2. Остановить старый CLI.
-        self.stop_old_cli().await;
+        self.stop_old_cli(group).await;
         // 3. Сбросить состояние разбора, запустить новый CLI с --resume.
         self.parser.reset_process();
         let launch = process::LaunchSpec {
@@ -723,6 +737,9 @@ impl ClaudeCodeAdapter {
         }
     }
 }
+
+/// Предел дочитывания stdout и ожидания выхода после SIGKILL при перезапуске.
+const KILL_DRAIN: Duration = Duration::from_secs(1);
 
 /// Ранний выход CLI сразу после запуска: процесс не прожил и секунды.
 /// Ребёнок уже убран другой проверкой `members` (общий супервизор тестового
