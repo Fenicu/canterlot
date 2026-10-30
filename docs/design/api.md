@@ -56,7 +56,7 @@
 | Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
 | Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}` |
 | Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено; `unconfirmed` — передача агенту могла состояться, доказательства нет (запрос в `decision_unconfirmed`, повтор запрещён; позднее доказательство присылает второе событие с `applied`); `execution_ended` и `owner_lost` — исполнение закончилось или сопровождение потеряно без закрытия запроса на машине (открытый запрос становится `closed_without_decision`, сохранённое решение `decision_not_applied`, переданное `decision_unconfirmed`, удержание очереди снимается); остальные причины передаёт воркер (например, `request_closed`, `stale_generation`, `cancelled`, `interrupted`). Поздние факты после терминального состояния и факты чужого решения событий не порождают |
-| Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}` |
+| Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}`; ответ на секретный вопрос (`is_secret`) заменён на `"[redacted]"`, ключ вопроса сохраняется |
 | Разговор | `request_transmitting` | Решение передаётся агенту: `{request_id}`, один раз при переходе `decision_saved` в `decision_transmitting` |
 | Разговор, список | `derived_changed` | Вычисленное состояние: активность, непрочитанное, очередь, настройки, кранч |
 | Список | `conversation_created` | Создание разговора (полный элемент списка) |
@@ -150,7 +150,7 @@
 
 Разбивка по областям: `auth` (вход и источник запроса), `browser` (форма запроса, ключ идемпотентности, размеры), `hub_db` (хаб и PostgreSQL), `delivery` (очередь, разговор, исполнение). Чужой идентификатор неотличим от отсутствующего: оба дают `not_found`.
 
-`decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. `preset_revision_conflict` содержит `details.current_revision` (версию, с которой нужно повторить правку), `preset_invalid` — `details.field` (`title`, `description` или `text`). Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
+Ответы на секретные вопросы (`is_secret` у вопроса или у всего запроса) хаб отдаёт как `"[redacted]"` везде: в ответе на решение и его повторе, `details.winner_decision`, `open_requests` снимка, событии `request_decided` и хранилище ключей идемпотентности. Полный ответ есть только в команде `deliver_decision` до её погашения. `decision_conflict` содержит `details.winner_decision` и `details.current_state`; `request_not_open` содержит `details.current_state` и `details.reason` (`closed_without_decision` или `generation_advanced`). `decision_invalid` содержит `details.question_id`, если ошибка относится к конкретному вопросу. `preset_revision_conflict` содержит `details.current_revision` (версию, с которой нужно повторить правку), `preset_invalid` — `details.field` (`title`, `description` или `text`). Решения и ответы в details доступны только владельцу сессии и не записываются в журналы ошибок.
 
 Для недопустимой ссылки `retry_of` код `invalid_request` возвращается со статусом 422.
 

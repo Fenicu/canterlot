@@ -138,6 +138,43 @@ pub enum RequestDomainError {
     Serialization(#[from] serde_json::Error),
 }
 
+/// Значение ответа на секретный вопрос во всём, кроме команды доставки воркеру.
+pub const REDACTED_ANSWER: &str = "[redacted]";
+
+/// Копия решения без ответов на секретные вопросы (`is_secret`): её видят события,
+/// снимки, ответы HTTP и хранилище ключей идемпотентности.
+pub fn redact_decision(
+    request_payload: &serde_json::Value,
+    decision: &serde_json::Value,
+) -> serde_json::Value {
+    let secret = |value: &serde_json::Value| {
+        ["is_secret", "isSecret"]
+            .iter()
+            .any(|key| value.get(key) == Some(&serde_json::Value::Bool(true)))
+    };
+    let everything = secret(request_payload);
+    let secret_ids: std::collections::BTreeSet<&str> = request_payload
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|question| secret(question))
+        .filter_map(|question| question.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    let mut decision = decision.clone();
+    if let Some(answers) = decision
+        .get_mut("answers")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        for (id, answer) in answers.iter_mut() {
+            if everything || secret_ids.contains(id.as_str()) {
+                *answer = json!(REDACTED_ANSWER);
+            }
+        }
+    }
+    decision
+}
+
 pub async fn create_request_in_tx(
     tx: &mut PgConnection,
     req: &NewRequest,
@@ -239,6 +276,8 @@ pub async fn save_decision_in_tx(
     if row.state == RequestState::Open {
         let winner_decision_id = Uuid::now_v7();
         let decision_json = serde_json::to_value(decision)?;
+        // Полный ответ нужен только команде доставки; строка запроса хранит копию без секретов.
+        let visible = redact_decision(&row.request_payload, &decision_json);
 
         let updated_row: RequestRow = sqlx::query_as(
             r#"
@@ -260,7 +299,7 @@ pub async fn save_decision_in_tx(
         .bind(request_id)
         .bind(conversation_id)
         .bind(winner_decision_id)
-        .bind(&decision_json)
+        .bind(&visible)
         .bind(idempotency_key)
         .fetch_one(&mut *tx)
         .await?;
@@ -314,7 +353,7 @@ pub async fn save_decision_in_tx(
                 payload: json!({
                     "request_id": row.id,
                     "winner_decision_id": winner_decision_id,
-                    "decision": decision_json,
+                    "decision": visible,
                 }),
                 correlation_id: Uuid::now_v7(),
             },
@@ -346,15 +385,19 @@ pub(crate) async fn complete_decision_command_in_tx(
     decision_id: Uuid,
     result: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
+    // Погашенная команда больше не уходит на машину: ответ в ней заменяется копией без секретов.
     sqlx::query(
-        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, clock_timestamp()), result = $3
-         where kind = 'deliver_decision' and delivery_state <> 'completed'
-           and conversation_id = $4 and payload->>'request_id' = $1 and payload->>'decision_id' = $2",
+        "update commands c set delivery_state = 'completed', completed_at = coalesce(c.completed_at, clock_timestamp()), result = $3,
+                payload = jsonb_set(c.payload, '{decision_payload}', coalesce(r.decision_payload, 'null'::jsonb))
+         from requests r
+         where r.id = $5 and c.kind = 'deliver_decision' and c.delivery_state <> 'completed'
+           and c.conversation_id = $4 and c.payload->>'request_id' = $1 and c.payload->>'decision_id' = $2",
     )
     .bind(request_id.to_string())
     .bind(decision_id.to_string())
     .bind(result)
     .bind(conversation_id)
+    .bind(request_id)
     .execute(conn)
     .await?;
     Ok(())

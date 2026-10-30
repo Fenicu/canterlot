@@ -553,3 +553,132 @@ async fn post_decision_for_missing_request_rolls_back_synchronously(pool: PgPool
         assert!(free.is_some(), "conversation row still locked");
     }
 }
+
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+    type Writer = Self;
+    fn make_writer(&'a self) -> Self {
+        self.clone()
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn secret_answers_reach_only_the_delivery_command(pool: PgPool) {
+    const SECRET: &str = "hunter2-very-secret";
+    let logs = LogBuffer::default();
+    let _logs = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(logs.clone())
+            .finish(),
+    );
+    let f = Fixture::new(pool).await;
+    let request = f
+        .request(
+            "question",
+            json!({"questions":[
+                {"id":"pin", "text":"PIN?", "options":[], "allow_custom":true, "is_secret":true},
+                {"id":"go", "text":"Дальше?", "options":[{"label":"Да"}]}
+            ]}),
+        )
+        .await;
+    let body = json!({"kind":"question", "answers":{"pin":SECRET, "go":"Да"}});
+    let response = f.post(request, "secret-key", body.clone()).await;
+    assert_eq!(
+        response.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+    let view = response.json::<Value>();
+    assert_eq!(view["decision"]["answers"]["go"], "Да");
+    assert!(view["decision"]["answers"]["pin"].is_string());
+    let replay = f.post(request, "secret-key", body.clone()).await;
+    assert_eq!(replay.status, 200);
+    let conflict = f
+        .post(
+            request,
+            "other-key",
+            json!({"kind":"question", "answers":{"pin":"other", "go":"Да"}}),
+        )
+        .await;
+    assert_error(&conflict, 409, "decision_conflict");
+    let snapshot = f
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{}/snapshot", f.conversation),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(snapshot.status, 200);
+    let stored: Vec<String> = sqlx::query_scalar(
+        "select payload::text from events
+         union all select response::text from idempotency_keys
+         union all select coalesce(decision_payload::text, '') from requests",
+    )
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    for (place, text) in [
+        (
+            "response",
+            String::from_utf8_lossy(&response.body).into_owned(),
+        ),
+        ("replay", String::from_utf8_lossy(&replay.body).into_owned()),
+        (
+            "conflict",
+            String::from_utf8_lossy(&conflict.body).into_owned(),
+        ),
+        (
+            "snapshot",
+            String::from_utf8_lossy(&snapshot.body).into_owned(),
+        ),
+        ("stored", stored.join("\n")),
+        (
+            "logs",
+            String::from_utf8_lossy(&logs.0.lock().unwrap()).into_owned(),
+        ),
+    ] {
+        assert!(!text.contains(SECRET), "secret answer leaked into {place}");
+    }
+    // Команде доставки ответ нужен целиком, пока решение не дошло до воркера.
+    let command: Value =
+        sqlx::query_scalar("select payload from commands where kind = 'deliver_decision'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(command["decision_payload"]["answers"]["pin"], SECRET);
+    canterlot_hub::executions::set_state(
+        &f.pool,
+        f.execution,
+        canterlot_hub::model::ExecutionState::Stopped,
+        Some("machine_rebooted"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let command: String =
+        sqlx::query_scalar("select payload::text from commands where kind = 'deliver_decision'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert!(
+        !command.contains(SECRET),
+        "completed command keeps the secret"
+    );
+}

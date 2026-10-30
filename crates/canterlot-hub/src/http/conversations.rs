@@ -434,6 +434,7 @@ async fn decision(
                     // The request outlives the generic idempotency key's retention period.
                     let submitted = serde_json::to_value(&decision)
                         .map_err(|_| ApiError::new(ErrorCode::Internal))?;
+                    let submitted = requests::redact_decision(&row.request_payload, &submitted);
                     if row.decision_payload.as_ref() != Some(&submitted) {
                         return Err(ApiError::new(ErrorCode::IdempotencyConflict));
                     }
