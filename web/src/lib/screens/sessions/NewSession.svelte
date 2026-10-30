@@ -18,8 +18,7 @@
   let runtime = $state<Runtime | null>(null);
   let model = $state<NewSessionModel | null>(null);
   let machineId = $state('');
-  let root = $state('');
-  let sub = $state('');
+  let path = $state('');
   let harness = $state('');
   let modelId = $state('');
   let effort = $state('');
@@ -31,7 +30,6 @@
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
-  const roots = $derived(machine?.allowed_roots ?? []);
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
@@ -61,11 +59,10 @@
   ];
   const presets = $derived(runtime && runtime.list.presets.length > 0 ? sortPresets([...runtime.list.presets]) : BUILTIN_PRESETS);
   const selectedPreset = $derived(presets.find((item) => item.id === profile) ?? BUILTIN_PRESETS[0]);
-  const workdir = $derived(join(root, sub));
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
-    model.workdir = workdir;
+    model.workdir = path;
     model.harness = harness;
     model.model = modelId;
     model.effort = effort;
@@ -103,12 +100,6 @@
     });
   });
 
-  function join(base: string, extra: string): string {
-    if (!base) return extra.startsWith('/') ? extra : '';
-    const tail = extra.replace(/^\/+/, '');
-    return tail ? `${base.replace(/\/$/, '')}/${tail}` : base;
-  }
-
   async function send() {
     if (!model || !gate.ok) return;
     try {
@@ -133,13 +124,16 @@
       {/each}
     </select>
   </label>
+  {#if recent.length > 0}
+    <div role="group" aria-label="Недавние папки" class="recent">
+      <p class="hint">Недавние папки</p>
+      {#each recent as item (item)}
+        <button type="button" class="recent-item" onclick={() => { path = item; }}>{item}</button>
+      {/each}
+    </div>
+  {/if}
   <label>Рабочая папка
-    <select aria-label="Корень" bind:value={root}>
-      <option value="">Выберите корень</option>
-      {#each roots as item (item)}<option value={item}>{item}</option>{/each}
-      {#each recent as item (item)}<option value={item}>{item}</option>{/each}
-    </select>
-    <input aria-label="Подпуть" bind:value={sub} placeholder="подпуть" />
+    <input aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />
   </label>
   <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
   <label>Модель
@@ -211,5 +205,23 @@
   }
   p { color: var(--danger); }
   .note { color: var(--muted); font-size: var(--fs-sm); }
+  .hint { color: var(--muted); font-size: var(--fs-sm); margin: 0; }
+  .recent { display: flex; flex-direction: column; gap: var(--s2); margin-bottom: var(--s4); }
+  .recent-item {
+    display: block;
+    width: 100%;
+    min-height: var(--target);
+    border: var(--s0);
+    border-radius: var(--radius-pill);
+    background: var(--chip);
+    color: var(--chip-text);
+    padding: var(--s4) var(--s6);
+    font-size: var(--fs-meta);
+    text-align: left;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .recent-item:focus-visible { outline: var(--focus-width) solid var(--accent); }
   h2 { margin: 0 0 var(--s4); font-size: var(--fs-title); }
 </style>

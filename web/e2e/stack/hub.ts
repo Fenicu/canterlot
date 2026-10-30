@@ -231,9 +231,7 @@ export async function createSessionUI(page: Page, stack: Stack, opts: { agent?: 
   await page.goto(`${stack.baseUrl}/new`);
   await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
   await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: stack.machineName });
-  const root = page.getByRole('combobox', { name: 'Корень' });
-  await expect(root.locator('option')).not.toHaveCount(1, { timeout: 15_000 });
-  await root.selectOption({ index: 1 });
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill(stack.workRoot);
   await page.getByRole('radio', { name: opts.agent ?? 'Синтетический', exact: true }).check();
   await page.getByRole('combobox', { name: 'Модель' }).selectOption('synthetic-large');
   await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
