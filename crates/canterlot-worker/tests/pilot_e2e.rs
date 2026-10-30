@@ -2052,3 +2052,92 @@ async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
     let (_cmd4, echo4) = echo_turn(&p, id, &turn4.to_string()).await;
     assert!(echo4.contains("mode=clean"), "{echo4}");
 }
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
+    let _permit = e2e_gate::acquire().await;
+    let p = Pilot::new(&pool, PilotOptions::default()).await;
+    let id = p.create("synthetic", false).await;
+    let submitted = p
+        .submit(
+            id,
+            &script(json!([
+                {"request_permission": {"tool_name": "Bash", "command": "cargo test", "args": {}}},
+                {"delta": "после разрешения"}
+            ])),
+            &[],
+        )
+        .await;
+    let command = uuid(&submitted["command_id"]);
+    p.accepted(uuid(&submitted["input_id"])).await;
+    let mut request = Value::Null;
+    until("request opened", async || {
+        let snapshot = p.get(&format!("/api/v1/conversations/{id}/snapshot")).await;
+        match snapshot["data"]["open_requests"]
+            .as_array()
+            .and_then(|requests| requests.first())
+        {
+            Some(open) => {
+                request = open.clone();
+                true
+            }
+            None => false,
+        }
+    })
+    .await;
+    assert_eq!(request["state"], "open");
+    let request_id = uuid(&request["id"]);
+    let decided = p
+        .post(
+            &format!("/api/v1/conversations/{id}/requests/{request_id}/decision"),
+            Some(json!({"kind": "permission", "behavior": "allow", "message": null})),
+            200,
+        )
+        .await;
+    assert_eq!(decided["state"], "decision_saved");
+    let state = async || {
+        sqlx::query_scalar::<_, String>("select state from requests where id=$1")
+            .bind(request_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    if timeout(Duration::from_secs(15), async {
+        while state().await != "decision_applied" {
+            sleep(ms(20)).await;
+        }
+    })
+    .await
+    .is_err()
+    {
+        let command: Option<Value> = sqlx::query_scalar(
+            "select result from commands where conversation_id=$1 and kind='deliver_decision'",
+        )
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        panic!(
+            "decision not applied: request {}, command result {command:?}",
+            state().await
+        );
+    }
+    p.answered(id, command, "после разрешения").await;
+    let delivery: Vec<(String, Option<Value>)> = sqlx::query_as(
+        "select delivery_state, result from commands where conversation_id=$1 and kind='deliver_decision'",
+    )
+    .bind(id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(delivery.len(), 1);
+    assert_eq!(delivery[0].0, "completed");
+    assert!(
+        !delivery[0]
+            .1
+            .as_ref()
+            .is_some_and(|result| result.get("rejected").is_some()),
+        "decision command rejected: {:?}",
+        delivery[0].1
+    );
+}

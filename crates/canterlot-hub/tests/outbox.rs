@@ -982,3 +982,187 @@ fn settings_are_withheld_if_reconnected_session_lacks_pilot_v1() {
         Err(canterlot_hub::outbox::OutboxError::CapabilityMissing)
     ));
 }
+
+#[test]
+fn to_proto_builds_deliver_decision_from_command_payload() {
+    use canterlot_hub::outbox::to_proto;
+    use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
+    let request = Uuid::now_v7();
+    let decision = Uuid::now_v7();
+    let payload = json!({"kind":"permission","behavior":"allow","message":null});
+    let row = command_row(
+        "deliver_decision",
+        json!({
+            "request_id": request.to_string(),
+            "native_request_id": "toolu_01",
+            "decision_id": decision.to_string(),
+            "generation": 1,
+            "kind": "permission",
+            "decision_payload": payload,
+        }),
+    );
+    let command = to_proto(&row).expect("deliver_decision maps to a proto command");
+    assert_eq!(command.command_id, row.id.to_string());
+    assert_eq!(command.execution_generation, 1);
+    let Some(command::Kind::DeliverDecision(value)) = command.kind else {
+        panic!("expected DeliverDecision");
+    };
+    // Сопровождение ищет запрос по нативному идентификатору из SJ.
+    assert_eq!(value.request_id, "toolu_01");
+    assert_eq!(value.decision_id, decision.to_string());
+    assert_eq!(value.generation, 1);
+    assert_eq!(value.kind, "permission");
+    assert_eq!(
+        serde_json::from_slice::<DecisionPayload>(&value.decision_payload_json).unwrap(),
+        DecisionPayload::Permission {
+            behavior: PermissionBehavior::Allow,
+            message: None
+        }
+    );
+}
+
+async fn open_permission(
+    pool: &PgPool,
+    machine: &NewMachine,
+    conversation: Uuid,
+    native: &str,
+) -> (Uuid, i64) {
+    let (execution, generation): (Uuid, i64) =
+        sqlx::query_as("select id, generation from executions where conversation_id = $1")
+            .bind(conversation)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let records = [
+        record_body::Body::JournalOpened(JournalOpened {
+            execution_id: execution.to_string(),
+            generation: generation as u64,
+            supervisor_protocol_version: 1,
+        }),
+        record_body::Body::RequestOpened(RequestOpened {
+            request_id: native.into(),
+            execution_id: execution.to_string(),
+            generation: generation as u64,
+            kind: "permission".into(),
+            payload_json: br#"{"tool_name":"Bash","command":"cargo test"}"#.to_vec(),
+        }),
+    ];
+    canterlot_hub::ingest::Ingest::new(pool.clone())
+        .apply_batch(
+            machine.machine_id,
+            &sha2::Sha256::digest(machine.token.as_bytes()),
+            canterlot_hub::ingest::JournalKind::Sj,
+            &JournalRecords {
+                journal_id: Uuid::now_v7().to_string(),
+                records: records
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, body)| JournalRecord {
+                        seq: index as u64 + 1,
+                        body: Some(RecordBody { body: Some(body) }),
+                    })
+                    .collect(),
+            },
+        )
+        .await
+        .unwrap();
+    let request: Uuid = sqlx::query_scalar(
+        "select id from requests where conversation_id = $1 and native_request_id = $2",
+    )
+    .bind(conversation)
+    .bind(native)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (request, generation)
+}
+
+async fn decide(pool: &PgPool, conversation: Uuid, request: Uuid, generation: i64) -> (Uuid, Uuid) {
+    let mut tx = pool.begin().await.unwrap();
+    let outcome = canterlot_hub::requests::save_decision_in_tx(
+        &mut tx,
+        conversation,
+        request,
+        generation,
+        &canterlot_proto::requests::DecisionPayload::Permission {
+            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
+            message: None,
+        },
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    let canterlot_hub::requests::DecisionResult::Committed { row, command_id } = outcome else {
+        panic!("decision must be committed");
+    };
+    (row.winner_decision_id.unwrap(), command_id)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn saved_decision_reaches_worker_as_deliver_decision(pool: PgPool) {
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let mut worker = Worker::connect(&hub, &machine).await;
+    let (request, generation) = open_permission(&pool, &machine, conversation, "toolu_01").await;
+    let (decision, command_id) = decide(&pool, conversation, request, generation).await;
+    let message = timeout(Duration::from_secs(3), worker.down.message())
+        .await
+        .expect("the decision command must reach the worker")
+        .unwrap()
+        .unwrap();
+    let Some(control_down::Msg::Command(command)) = message.msg else {
+        panic!("expected command")
+    };
+    assert_eq!(command.command_id, command_id.to_string());
+    assert_eq!(command.execution_generation, generation as u64);
+    let Some(command::Kind::DeliverDecision(ref value)) = command.kind else {
+        panic!("expected DeliverDecision, got {:?}", command.kind);
+    };
+    assert_eq!(value.request_id, "toolu_01");
+    assert_eq!(value.decision_id, decision.to_string());
+    assert_eq!(value.generation, generation as u64);
+    assert_eq!(value.kind, "permission");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&value.decision_payload_json).unwrap(),
+        json!({"kind":"permission","behavior":"allow","message":null})
+    );
+    worker.stored(&command).await;
+    let (delivery, result): (String, Option<Value>) =
+        sqlx::query_as("select delivery_state, result from commands where id = $1")
+            .bind(command_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!((delivery.as_str(), result), ("stored_on_machine", None));
+    stop(hub).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn decision_wakes_outbox_without_waiting_for_sweep(pool: PgPool) {
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_secs(30),
+            dispatch_sweep: Duration::from_secs(30),
+            ..HubTimers::default()
+        },
+    )
+    .await;
+    let (machine, conversation) = setup(&pool, &hub).await;
+    let mut worker = Worker::connect(&hub, &machine).await;
+    let (request, generation) = open_permission(&pool, &machine, conversation, "toolu_02").await;
+    // Выдача по пробуждению сеанса уже прошла: решение будит outbox только уведомлением.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let (_, command_id) = decide(&pool, conversation, request, generation).await;
+    let message = timeout(Duration::from_secs(2), worker.down.message())
+        .await
+        .expect("a decision must wake the outbox through canterlot_outbox")
+        .unwrap()
+        .unwrap();
+    let Some(control_down::Msg::Command(command)) = message.msg else {
+        panic!("expected command")
+    };
+    assert_eq!(command.command_id, command_id.to_string());
+    stop(hub).await;
+}

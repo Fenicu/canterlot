@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ControlDown, DeliverInput, Instructions, Interrupt, SettingsOverride,
-        StartExecution, StopExecution, WithdrawInput, command, control_down,
+        CancelInput, Command, ControlDown, DeliverDecision, DeliverInput, Instructions, Interrupt,
+        SettingsOverride, StartExecution, StopExecution, WithdrawInput, command, control_down,
     },
 };
 use prost::Message;
@@ -241,6 +241,35 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             command::Kind::WithdrawInput(WithdrawInput {
                 target_command_id,
                 target_dispatch_attempt,
+            })
+        }
+        "deliver_decision" => {
+            // Сопровождение ищет запрос по нативному идентификатору из своего SJ.
+            let request_id = match row.payload.get("native_request_id") {
+                Some(value) => value
+                    .as_str()
+                    .ok_or(OutboxError::InvalidCommand)?
+                    .to_owned(),
+                None => text(&row.payload, "request_id")?,
+            };
+            let decision_id = text(&row.payload, "decision_id")?;
+            Uuid::parse_str(&decision_id).map_err(|_| OutboxError::InvalidCommand)?;
+            let decision = row
+                .payload
+                .get("decision_payload")
+                .filter(|value| value.is_object())
+                .ok_or(OutboxError::InvalidCommand)?;
+            command::Kind::DeliverDecision(DeliverDecision {
+                request_id,
+                decision_id,
+                generation: row
+                    .payload
+                    .get("generation")
+                    .and_then(Value::as_u64)
+                    .ok_or(OutboxError::InvalidCommand)?,
+                kind: text(&row.payload, "kind")?,
+                decision_payload_json: serde_json::to_vec(decision)
+                    .map_err(|_| OutboxError::InvalidCommand)?,
             })
         }
         "interrupt" => command::Kind::Interrupt(Interrupt {}),

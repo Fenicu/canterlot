@@ -1886,6 +1886,40 @@ async fn apply_journal_body(
     ) {
         return Ok(None);
     }
+    if kind == JournalKind::Cj {
+        // Управляющая служба пишет в CJ отказ по решению, когда исполнение его уже не примет.
+        let decision = match body {
+            Body::DecisionApplied(fact) => Some((&fact.request_id, &fact.decision_id)),
+            Body::DecisionNotApplied(fact) => Some((&fact.request_id, &fact.decision_id)),
+            Body::DecisionUnconfirmed(fact) => Some((&fact.request_id, &fact.decision_id)),
+            _ => None,
+        };
+        if let Some((request_id, decision_id)) = decision {
+            let Some(run) = decision_execution(conn, machine_id, request_id, decision_id).await?
+            else {
+                return Ok(Some(true));
+            };
+            sqlx::query(
+                "select conversation_id from queue_state where conversation_id = $1 for update",
+            )
+            .bind(run.conversation_id)
+            .execute(&mut *conn)
+            .await?;
+            let ignored = match body {
+                Body::DecisionApplied(fact) => {
+                    apply_decision_applied(conn, &run, fact, correlation_id).await?
+                }
+                Body::DecisionNotApplied(fact) => {
+                    apply_decision_not_applied(conn, &run, fact, correlation_id).await?
+                }
+                Body::DecisionUnconfirmed(fact) => {
+                    apply_decision_unconfirmed(conn, &run, fact, correlation_id).await?
+                }
+                _ => unreachable!("decision fact"),
+            };
+            return Ok(Some(ignored));
+        }
+    }
     if kind != JournalKind::Sj {
         return Err(IngestError::InvalidRecord);
     }
@@ -1965,6 +1999,35 @@ async fn apply_journal_body(
         _ => return Err(IngestError::InvalidRecord),
     }.map_err(|error| match error { sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord, _ => IngestError::Database })?;
     Ok(Some(matches!(outcome, BlockOutcome::Ignored(_))))
+}
+
+/// Исполнение решения из CJ: запрос машины с тем же решением-победителем.
+async fn decision_execution(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    request_id: &str,
+    decision_id: &str,
+) -> Result<Option<ExecutionRef>, IngestError> {
+    let Ok(decision_id) = Uuid::parse_str(decision_id) else {
+        return Ok(None);
+    };
+    let row: Option<(Uuid, Uuid)> = sqlx::query_as(
+        "select r.execution_id, r.conversation_id from requests r
+         join conversations c on c.id = r.conversation_id
+         where (r.id = $1 or r.native_request_id = $2) and r.winner_decision_id = $3
+           and c.machine_id = $4",
+    )
+    .bind(Uuid::parse_str(request_id).ok())
+    .bind(request_id)
+    .bind(decision_id)
+    .bind(machine_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(row.map(|(execution_id, conversation_id)| ExecutionRef {
+        execution_id,
+        conversation_id,
+        machine_id,
+    }))
 }
 
 type QueueRowTuple = (

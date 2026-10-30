@@ -265,6 +265,7 @@ pub async fn save_decision_in_tx(
         let command_id = Uuid::now_v7();
         let command_payload = json!({
             "request_id": row.id.to_string(),
+            "native_request_id": row.native_request_id,
             "decision_id": winner_decision_id.to_string(),
             "generation": row.generation,
             "kind": row.kind.as_str(),
@@ -292,7 +293,7 @@ pub async fn save_decision_in_tx(
         .await?;
 
         // Уведомление outbox о появлении исходящей команды
-        sqlx::query("select pg_notify('outbox', $1)")
+        sqlx::query("select pg_notify('canterlot_outbox', $1)")
             .bind(machine_id.to_string())
             .execute(&mut *tx)
             .await?;
