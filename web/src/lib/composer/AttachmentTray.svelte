@@ -1,5 +1,8 @@
 <script lang="ts">
+  import { fmt } from '#lib/format/ru.js';
   import type { Upload, UploadManager } from '#lib/uploads/manager.js';
+  import Button from '#lib/ui/Button.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
 
   let { uploads, conversationId }: { uploads: UploadManager; conversationId: string } = $props();
   let items = $state<Upload[]>([]);
@@ -14,36 +17,75 @@
     return () => clearInterval(timer);
   });
 
+  const ready = $derived(items.filter((item) => item.phase === 'ready').length);
+  const failed = $derived(items.filter((item) => item.phase === 'failed').length);
+  const tally = $derived([ready ? `${ready} готово` : '', failed ? `${failed} ${fmt.plural(failed, ['ошибка', 'ошибки', 'ошибок'])}` : ''].filter(Boolean).join(' · '));
+
   function sizeLabel(bytes: number): string {
     if (bytes >= 1_048_576) return `${Math.round(bytes / 1_048_576)} МиБ`;
     if (bytes >= 1024) return `${Math.round(bytes / 1024)} КиБ`;
     return `${bytes} Б`;
   }
+
+  function extension(name: string): string {
+    const dot = name.lastIndexOf('.');
+    return dot > 0 ? name.slice(dot + 1, dot + 5).toLocaleUpperCase('ru-RU') : 'ФАЙЛ';
+  }
+
+  function percent(item: Upload): number {
+    if (item.phase === 'ready') return 100;
+    return Math.round((item.sent / Math.max(item.size, 1)) * 100);
+  }
+
+  function statusOf(item: Upload): string {
+    if (item.phase === 'ready') return 'Загружено';
+    if (item.phase === 'failed') return 'сбой загрузки';
+    return `Загрузка · ${percent(item)}%`;
+  }
 </script>
 
 {#if items.length > 0}
-  <ul class="tray">
-    {#each items as item (item.id)}
-      <li>
-        <span class="name">{item.name}</span>
-        {#if item.size > 0}<span class="size">{sizeLabel(item.size)}</span>{/if}
-        <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' ? item.size : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}></span>
-        {#if item.error}<p class="error">{item.error.message}</p>{/if}
-        {#if item.phase === 'failed'}
-          <button type="button" onclick={() => uploads.retry(item.id)}>Повторить</button>
-        {/if}
-        <button type="button" onclick={() => uploads.cancel(item.id)}>Убрать</button>
-      </li>
-    {/each}
-  </ul>
+  <section class="tray" aria-label="Вложения">
+    <header><strong>Вложения · {items.length}</strong>{#if tally}<span>{tally}</span>{/if}</header>
+    <ul>
+      {#each items as item (item.id)}
+        <li data-phase={item.phase}>
+          <span class="tile" aria-hidden="true">{extension(item.name)}</span>
+          <div class="info">
+            <span class="name">{item.name}</span>
+            <span class="meta">{#if item.size > 0}{`${sizeLabel(item.size)} · `}{/if}<span class="status">{statusOf(item)}</span></span>
+            <span class="bar" role="progressbar" aria-valuemin={0} aria-valuenow={item.phase === 'ready' ? item.size : item.sent} aria-valuemax={Math.max(item.size, 1)} aria-label={item.name}><span class="fill" style:width={`${percent(item)}%`}></span></span>
+            {#if item.error}<p class="error">{item.error.message}</p>{/if}
+            {#if item.phase === 'failed'}
+              <span class="retry"><Button onclick={() => uploads.retry(item.id)}>Повторить</Button></span>
+            {/if}
+          </div>
+          <IconButton icon="close" label="Убрать" onclick={() => uploads.cancel(item.id)} />
+        </li>
+      {/each}
+    </ul>
+  </section>
 {/if}
 
 <style>
-  .tray { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: var(--s2); }
-  li { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s2); min-width: 0; }
-  .name { overflow-wrap: anywhere; }
-  .size { color: var(--muted); font-size: var(--fs-sm); }
-  .bar { flex: 1 1 100%; height: var(--s2); border-radius: var(--radius-pill); background: var(--accent-soft); }
-  .error { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
-  button { min-height: var(--target); border: var(--s0); background: var(--transparent); color: var(--secondary); font-size: var(--fs-meta); }
+  .tray { grid-area: tray; display: flex; flex-direction: column; gap: var(--s3); min-width: 0; max-height: 40dvh; overflow-y: auto; padding: var(--s1) var(--s3) var(--s3); }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s4); padding-inline: var(--s3); font-size: var(--fs-meta); }
+  strong { font-weight: var(--weight-semibold); }
+  header span { color: var(--secondary); font-size: var(--fs-sm); }
+  ul { display: flex; flex-direction: column; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+  li { display: flex; align-items: center; gap: var(--s4); min-width: 0; padding: var(--s3); border-radius: var(--radius-card); background: var(--chat-bg); }
+  li[data-phase='failed'] { background: var(--danger-soft); }
+  .tile { display: inline-flex; align-items: center; justify-content: center; flex: none; width: var(--s14); height: var(--s14); border-radius: var(--radius-sm); background: var(--code); color: var(--secondary); font-size: var(--fs-xs); font-weight: var(--weight-semibold); }
+  .info { display: flex; flex: 1; flex-direction: column; gap: var(--s1); min-width: 0; }
+  .name { overflow: hidden; font-size: var(--fs-meta); text-overflow: ellipsis; white-space: nowrap; }
+  .meta { color: var(--secondary); font-size: var(--fs-sm); }
+  [data-phase='ready'] .status { color: var(--success); }
+  [data-phase='failed'] .status, .error { color: var(--danger); }
+  .bar { display: block; height: var(--s1); overflow: hidden; border-radius: var(--radius-pill); background: var(--control-line); }
+  .fill { display: block; height: 100%; border-radius: var(--radius-pill); background: var(--accent); }
+  [data-phase='ready'] .bar { height: var(--hairline); background: var(--transparent); }
+  [data-phase='ready'] .fill { opacity: 0; }
+  [data-phase='failed'] .fill { background: var(--danger); }
+  .error { margin: 0; font-size: var(--fs-sm); }
+  .retry { display: flex; }
 </style>

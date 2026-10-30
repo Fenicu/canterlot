@@ -11,6 +11,7 @@ export const icons = {
   warning: 'M12 3 2 21h20ZM12 9v5m0 3v1',
   down: 'm6 9 6 6 6-6', up: 'm6 15 6-6 6 6', sliders: 'M4 7h9m4 0h3M13 4v6M4 17h3m4 0h9M11 14v6',
   folder: 'M3 6h6l2 3h10v10H3Z', download: 'M12 4v12m-5-5 5 5 5-5M5 20h14', archive: 'M3 5h18v4H3ZM5 9v10h14V9M10 13h4',
+  edit: 'M4 20h4L20 8l-4-4L4 16Zm10-14 4 4',
   retry: 'M4 12a8 8 0 1 0 2.5-5.8M4 4v5h5',
   clock: 'M12 3a9 9 0 1 0 0 18 9 9 0 0 0 0-18Zm0 4v5l3 2'
 } as const;

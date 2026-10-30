@@ -194,7 +194,6 @@
 </script>
 
 <section class="composer" data-composer role="group" aria-label="Поле ввода" ondragover={(event) => event.preventDefault()} ondrop={dropped}>
-  <AttachmentTray {uploads} conversationId={chat.id} />
   {#if notice}
     <p class="reason" id={reasonId}>{notice}</p>
   {:else}
@@ -202,6 +201,7 @@
   {/if}
   <div class="capsule">
     <input bind:this={file} class="file" type="file" multiple tabindex="-1" aria-label="Выбрать файлы" onchange={picked} />
+    <AttachmentTray {uploads} conversationId={chat.id} />
     <textarea
       bind:this={node}
       bind:value={model.text}
@@ -290,6 +290,10 @@
     padding: var(--s5) var(--s3) var(--s3);
     border-radius: var(--radius-composer);
     background: var(--surface);
+  }
+  .capsule:has(:global(.tray)) {
+    grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach extras clock send';
+    border-radius: var(--radius-sheet);
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {

@@ -340,3 +340,47 @@ test.describe('листы и панели', () => {
     await expect(popover).toHaveCount(0);
   });
 });
+
+test.describe('очередь и вложения', () => {
+  async function queue(hub: FakeHub, api: FakeHubApi, id: string, texts: string[]) {
+    texts.forEach((text, index) => hub.append(`conversation:${id}`, { kind: 'input_queued', conversation_id: id, payload: { input_id: api.id(), input_seq: String(index + 20), idempotency_key: api.id(), state: 'queued', content: [{ type: 'text', text }] } }));
+    hub.flush();
+  }
+
+  test('queue_pills_are_one_line_stay_in_the_gutter_and_collapse_above_three', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    const { hub, api, id } = await boot(page);
+    await queue(hub, api, id, ['После тестов обнови README и добавь строку про порядок подписки и снимка журнала', 'Потом собери релиз']);
+    const strip = page.locator('.strip');
+    await expect(strip.locator('[data-state]')).toHaveCount(2);
+    const first = await strip.locator('.pill').first().boundingBox();
+    expect(first!.height).toBeLessThanOrEqual(48);
+    expect(first!.x).toBeGreaterThan(8);
+    expect((await strip.boundingBox())!.height).toBeLessThan(110);
+    await queue(hub, api, id, ['Третье', 'Четвёртое']);
+    await expect(strip.getByRole('button', { name: 'Ещё 2 в очереди' })).toBeVisible();
+    await expect(strip.locator('[data-state]')).toHaveCount(2);
+    await strip.getByRole('button', { name: 'Ещё 2 в очереди' }).click();
+    await expect(strip.locator('[data-state]')).toHaveCount(4);
+  });
+
+  test('sent_attachments_stay_visible_in_the_bubble', async ({ page }) => {
+    const { api, id } = await boot(page);
+    api.histories.set(id, [{ kind: 'input', id: api.id(), idempotency_key: 'k-1', state: 'accepted', content: [{ type: 'text', text: 'Лог приложен' }], attachments: [{ attachment_id: api.id(), name: 'hub.log', size: 2048, mime: 'text/plain', sha256: 'x', image: false }], created_seq: '1', feed_seq: '1', created_at: new Date().toISOString() }] as never);
+    api.bindConversation(id);
+    await page.reload();
+    await expect(page.locator('article.bubble')).toContainText('hub.log');
+  });
+
+  test('image_tile_opens_the_viewer_and_a_pending_image_has_its_own_tile', async ({ page }) => {
+    const { api, id } = await boot(page);
+    api.histories.set(id, [block(api, '1', { block_kind: 'tool_call', tool_name: 'Screenshot', summary: 'экран чата', media: [{ media_id: api.id(), mime: 'image/png', width: 320, height: 180, ready: true }, { media_id: api.id(), mime: 'image/png', width: 320, height: 180, ready: false }] })]);
+    api.bindConversation(id);
+    await page.reload();
+    await expect(page.getByText('Картинка загружается')).toBeVisible();
+    await page.getByRole('button', { name: 'Открыть картинку' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Картинки ответа' });
+    await expect(dialog.locator('img')).toBeVisible();
+    await expect(dialog.getByRole('link', { name: 'Сохранить' })).toBeVisible();
+  });
+});

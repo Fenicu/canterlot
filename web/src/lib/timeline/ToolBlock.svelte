@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { toolStatusText } from '#lib/timeline/present.js';
+  import MediaViewer from '#lib/timeline/MediaViewer.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
@@ -14,6 +15,7 @@
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
   let open = $state(false);
+  let viewing = $state<number | null>(null);
   const running = $derived(block.state === 'streaming' || block.state === 'stale');
   const error = $derived(block.state === 'incomplete' || block.kind === 'error');
   const status = $derived(toolStatusText({
@@ -24,6 +26,7 @@
     now
   }));
   const shots = $derived(block.media);
+  const readyShots = $derived(shots.filter((shot) => shot.ready));
   const isCliPolicy = $derived(
     Boolean(
       (block as unknown as { approved_by?: string; approvedBy?: string }).approved_by === 'cli_policy' ||
@@ -45,13 +48,15 @@
   {#if shots.length > 0}
     <div class="shots">
       {#each shots as shot (shot.media_id)}
-        <figure class="shot" style:width={`${shot.width}px`} style:height={`${shot.height}px`}>
+        <figure class="shot" data-state={shot.ready ? 'ready' : shot.failed ? 'failed' : 'loading'} style:max-width={`${shot.width}px`} style:aspect-ratio={`${shot.width} / ${shot.height}`}>
           {#if shot.ready}
-            <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} />
+            <button type="button" aria-label="Открыть картинку" onclick={() => { viewing = readyShots.indexOf(shot); }}>
+              <img src={`/api/v1/media/${shot.media_id}`} alt="" width={shot.width} height={shot.height} loading="lazy" />
+            </button>
           {:else if shot.failed}
-            <span>картинка недоступна</span>
+            <span>Картинка недоступна</span>
           {:else}
-            <span>картинка загружается</span>
+            <span>Картинка загружается</span>
           {/if}
         </figure>
       {/each}
@@ -65,6 +70,9 @@
     </div>
   {/if}
 </div>
+{#if viewing !== null}
+  <MediaViewer shots={readyShots} start={viewing} title={block.summary || block.toolName || 'инструмент'} onclose={() => { viewing = null; }} />
+{/if}
 
 <style>
   .tool { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); background: var(--raised); }
@@ -110,7 +118,11 @@
   .body { min-height: 0; overflow: hidden; padding-inline: var(--s2); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
-  .shots { display: flex; gap: var(--s2); overflow-x: auto; }
-  .shot { margin: 0; overflow: hidden; }
-  img { display: block; max-width: 100%; height: auto; }
+  .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }
+  .shot { flex: 1 1 calc(50% - var(--s2)); min-width: 0; max-height: var(--preview-height); margin: 0; overflow: hidden; border-radius: var(--radius-sm); background: var(--chat-bg); }
+  .shot[data-state='failed'] { background: var(--danger-soft); color: var(--danger); }
+  .shot:not([data-state='ready']) { display: flex; align-items: center; justify-content: center; min-height: var(--target); padding: var(--s4); color: var(--secondary); font-size: var(--fs-sm); text-align: center; }
+  .shot[data-state='failed'] { color: var(--danger); }
+  .shot button { display: block; width: 100%; height: 100%; padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); }
+  img { display: block; width: 100%; height: 100%; object-fit: cover; }
 </style>

@@ -383,7 +383,7 @@ test('queue_and_scheduled_chips_have_cancel_and_edit_actions', async ({ page }) 
     }
   });
   hub.flush();
-  await expect(page.getByText('в очереди')).toBeVisible();
+  await expect(page.getByText('в очереди', { exact: true })).toBeVisible();
   await page.getByRole('button', { name: 'Отменить' }).first().click();
   const chip = page.locator('.strip div').filter({ hasText: 'вечером' });
   await chip.getByRole('button', { name: 'Изменить' }).click();
