@@ -136,7 +136,7 @@ export class ComposerModel {
     this.deps.probe?.mark("send_pressed");
     const localInput = freshInput(key, sendText, createdAt, attachmentRefs);
     this.deps.chat.inputs.set(key, localInput);
-    this.text = "";
+    if (this.text === sendText) this.text = "";
     this.errorMessage = null;
     this.deps.probe?.mark("input_painted");
 
