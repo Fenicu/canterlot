@@ -20,6 +20,7 @@
 <style>
   .dock { display: flex; flex-wrap: wrap; align-items: flex-end; gap: var(--s2); min-width: 0; }
   .dock :global(nav) { flex: 1; min-width: 0; flex-wrap: wrap; }
+  .dock :global(nav a) { flex: 1 1 auto; padding-inline: var(--s3); }
   .fab {
     display: inline-flex;
     align-items: center;
