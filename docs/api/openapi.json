@@ -3067,7 +3067,7 @@
         ],
         "responses": {
           "200": {
-            "description": "Недавние каталоги",
+            "description": "Последние каталоги для экрана новой сессии",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
