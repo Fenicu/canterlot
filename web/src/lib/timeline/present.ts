@@ -8,6 +8,9 @@ import type { InputUiState } from "#lib/stores/inputs.js";
 export const TOOL_PAGE_BYTES = 256 * 1024;
 export const TOOL_DOM_CAP = 2 * 1024 * 1024;
 export const REVEAL_LAG_MS = 600;
+const TOOL_MS_BELOW = 100;
+/** У Claude Code между началом и финалом вызова только запись в журнал: дольше живут вызовы, которые считают время сами. */
+const TOOL_OWN_TIME_MIN_MS = 100;
 
 export function deliveryLabel(
   state: InputUiState,
@@ -84,8 +87,38 @@ export function toolStatusText(opts: {
   if (!opts.running && opts.finishedAt === null) return "";
   const end = opts.running ? opts.now : (opts.finishedAt as number);
   const elapsed = Math.max(0, end - opts.startedAt);
+  if (!opts.running && elapsed < TOOL_MS_BELOW)
+    return `${Math.max(1, Math.round(elapsed))} мс`;
   const shown = opts.running ? Math.floor(elapsed / 1000) * 1000 : elapsed;
   return fmt.duration(shown);
+}
+
+/** Начало и конец работы инструмента. Вызов у Claude Code финален сразу, время даёт результат. */
+export function toolTiming(
+  call: BlockModel,
+  result: BlockModel | null,
+  working: boolean,
+): { running: boolean; startedAt: number; finishedAt: number | null } {
+  const startedAt = call.startedAt ?? call.createdAt;
+  // Такой вызов воркер придержал до результата: начало в ленте не совпадает с настоящим.
+  if (call.approvedBy === "cli_policy" || call.kind === "tool_result")
+    return { running: false, startedAt, finishedAt: null };
+  if (result) {
+    const done = result.state === "final" || result.state === "incomplete";
+    return {
+      running: !done,
+      startedAt,
+      finishedAt: done ? (result.finishedAt ?? result.createdAt) : null,
+    };
+  }
+  const own = (call.finishedAt ?? startedAt) - startedAt;
+  if (call.state !== "streaming" && own >= TOOL_OWN_TIME_MIN_MS)
+    return { running: false, startedAt, finishedAt: call.finishedAt };
+  return {
+    running: call.state === "streaming" || working,
+    startedAt,
+    finishedAt: null,
+  };
 }
 
 const MAIN_AGENTS = new Set(["orchestrator", "main", ""]);

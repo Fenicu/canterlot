@@ -2,16 +2,18 @@ import { describe, expect, it } from "vitest";
 import { modelLabel } from "#lib/format/labels.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import type { OpJournal } from "#lib/ops/journal.js";
-import { ChatStore, type ChatApi } from "#lib/stores/chat.svelte.js";
+import { ChatStore, type ChatApi, type HistoryBlock } from "#lib/stores/chat.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import {
   agentTitle,
   subagentCopy,
+  toolStatusText,
+  toolTiming,
   toolTitle,
 } from "#lib/timeline/present.js";
-import { shownInCard } from "#lib/timeline/rows.js";
-import { FIRST_DIALOG } from "../../../testing/fixtures/first-dialog";
+import { blockLinks } from "#lib/timeline/rows.js";
+import { FIRST_DIALOG, firstDialogBlock } from "../../../testing/fixtures/first-dialog";
 
 const CONV = "01a19179-9c91-73e5-bfc8-f4cb774a303d";
 
@@ -40,6 +42,51 @@ function loaded(items = FIRST_DIALOG): ChatStore {
 
 const calls = (chat: ChatStore, tool: string): BlockModel[] =>
   [...chat.blocks.values()].filter((block) => block.toolName === tool);
+
+function pill(chat: ChatStore, call: BlockModel, working = false): string {
+  const links = blockLinks(chat.timeline.entries);
+  const result = links.result(call.id);
+  const timing = toolTiming(call, result, working);
+  return toolStatusText({ ...timing, error: false, now: Date.parse("2026-10-31T11:00:00Z") });
+}
+
+describe("first dialog: durations", () => {
+  it("come_from_the_call_to_its_result", () => {
+    const chat = loaded();
+    expect(pill(chat, calls(chat, "ToolSearch")[0]!)).toBe("26 мс");
+    expect(pill(chat, calls(chat, "AskUserQuestion")[0]!)).toBe("43 с");
+    expect(pill(chat, calls(chat, "Bash")[0]!)).toBe("0,1 с");
+  });
+
+  it("background_sleep_is_as_short_as_the_tool_call_really_was", () => {
+    const chat = loaded();
+    const launched = calls(chat, "Bash").at(-1)!;
+    expect(launched.summary).toBe("Bash: sleep 90");
+    expect(pill(chat, launched)).toBe("14 мс");
+  });
+
+  it("call_without_a_result_is_live_while_the_turn_runs_and_silent_after", () => {
+    const call = firstDialogBlock((block) => block.tool_name === "Read");
+    const chat = loaded(FIRST_DIALOG.filter((item) => item.kind === "block" && item.id === call.id));
+    const only = calls(chat, "Read")[0]!;
+    expect(toolTiming(only, null, true).running).toBe(true);
+    expect(pill(chat, only, false)).toBe("");
+  });
+
+  it("call_that_keeps_its_own_time_shows_it_without_a_result", () => {
+    const call = firstDialogBlock((block) => block.tool_name === "Read");
+    const own: HistoryBlock = { ...call, finished_at: "2026-10-31T10:21:58.368Z" };
+    const chat = loaded([own]);
+    expect(pill(chat, calls(chat, "Read")[0]!)).toBe("2 с");
+  });
+
+  it("rule_allowed_call_has_no_true_start_and_shows_nothing", () => {
+    const chat = loaded();
+    const call = calls(chat, "Read")[0]!;
+    call.approvedBy = "cli_policy";
+    expect(pill(chat, call)).toBe("");
+  });
+});
 
 describe("first dialog: names", () => {
   it("main_agent_is_shown_as_the_harness", () => {

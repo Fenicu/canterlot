@@ -17,6 +17,7 @@
     entries,
     links,
     harness,
+    activeRun = null,
     conversationId,
     now,
     onInfo,
@@ -25,6 +26,8 @@
     entries: TimelineEntry[];
     links: BlockLinks;
     harness?: { title?: string; provider?: string } | null;
+    /** Ход, который идёт сейчас: вызов без результата в нём ещё работает. */
+    activeRun?: string | null;
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
@@ -41,6 +44,7 @@
   const started = $derived(blocks.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
+  const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
 </script>
 
 <article class="card">
@@ -54,7 +58,7 @@
     {#if block.toolName === 'Agent'}
       <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} result={links.result(block.id)} {now} {load} />
+      <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}

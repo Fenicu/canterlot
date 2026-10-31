@@ -650,7 +650,7 @@ describe('PWA Request Cards', () => {
     const block = new BlockModel('b-tool-1', 'tool_call');
     block.toolName = 'ReadFile';
     block.summary = 'read /etc/os-release';
-    (block as unknown as { approved_by: string }).approved_by = 'cli_policy';
+    block.approvedBy = 'cli_policy';
 
     const instance = mount(ToolBlock, {
       target,

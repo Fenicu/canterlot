@@ -51,6 +51,7 @@ export interface HistoryBlock {
   model?: string;
   tool_name?: string | null;
   summary?: string | null;
+  approved_by?: string | null;
   input_command_id?: string | null;
   incomplete_reason?: string | null;
   line_count?: number | null;
@@ -915,6 +916,7 @@ export class ChatStore {
     block.model = item.model ?? block.model;
     block.toolName = item.tool_name ?? block.toolName;
     block.summary = item.summary ?? block.summary;
+    block.approvedBy = item.approved_by ?? block.approvedBy;
     block.inputCommandId = item.input_command_id ?? block.inputCommandId;
     block.createdSeq = item.created_seq;
     block.createdAt = Date.parse(item.created_at);

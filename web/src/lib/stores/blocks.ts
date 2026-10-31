@@ -86,6 +86,7 @@ export class BlockModel {
   model = "";
   toolName: string | null = null;
   summary: string | null = null;
+  approvedBy: string | null = null;
   inputCommandId: string | null = null;
   createdSeq = "0";
   createdAt = 0;
@@ -216,6 +217,7 @@ function startBlock(
   block.model = payload.model;
   block.toolName = payload.tool_name;
   block.summary = payload.summary;
+  block.approvedBy = payload.approved_by;
   block.inputCommandId = payload.input_command_id;
   block.createdSeq = ev.scope_seq;
   block.createdAt = at(ev);

@@ -1,18 +1,20 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { toolStatusText, toolTitle } from '#lib/timeline/present.js';
+  import { toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
   let {
     block,
     result = null,
+    working = false,
     now,
     load
   }: {
     block: BlockModel;
     result?: BlockModel | null;
+    working?: boolean;
     now: number;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
@@ -26,23 +28,13 @@
   }
   const title = $derived(toolTitle(block));
   const detail = $derived([title.server, title.argument].filter(Boolean).join(' · '));
-  const running = $derived(block.state === 'streaming' || block.state === 'stale');
+  const timing = $derived(toolTiming(block, result, working));
+  const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(block.state === 'incomplete' || block.kind === 'error');
-  const status = $derived(toolStatusText({
-    running: block.state === 'streaming',
-    error,
-    startedAt: block.startedAt ?? block.createdAt,
-    finishedAt: block.finishedAt,
-    now
-  }));
+  const status = $derived(toolStatusText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
-  const isCliPolicy = $derived(
-    Boolean(
-      (block as unknown as { approved_by?: string; approvedBy?: string }).approved_by === 'cli_policy' ||
-        (block as unknown as { approved_by?: string; approvedBy?: string }).approvedBy === 'cli_policy'
-    )
-  );
+  const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
 </script>
 
 <div class="tool" data-open={open ? '' : undefined}>
@@ -75,7 +67,7 @@
   {#if open}
     <div class="fold">
       <div class="body">
-        <ToolOutput block={result ?? block} {running} {load} />
+        <ToolOutput block={result ?? block} running={timing.running} {load} />
       </div>
     </div>
   {/if}
