@@ -1,4 +1,4 @@
-import { failureLabel, providerLabel } from "#lib/format/labels.js";
+import { compactionLabel, failureLabel, providerLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -20,7 +20,8 @@ export type CardAction = {
     | "run"
     | "spend_reserve"
     | "edit_resume_text"
-    | "retry_as_new";
+    | "retry_as_new"
+    | "compact_context";
   label: string;
   /** Ввод, который повторяет `retry_as_new`. */
   inputId?: string;
@@ -46,7 +47,10 @@ const ACTION_LABELS: Record<Exclude<CardAction["id"], "run">, string> = {
   spend_reserve: "Продолжить, тратя резерв",
   edit_resume_text: "Изменить текст продолжения",
   retry_as_new: "Отправить повторно как новое",
+  compact_context: "Сжать контекст",
 };
+
+const STUCK_NOTE = "Причина отказа неизвестна. Сжатие контекста может его снять и тратит токены.";
 
 /** Единое действие запуска: хаб сам решает, продолжить ли беседу. */
 export function runLabel(turnRecorded: boolean | undefined): string {
@@ -109,7 +113,8 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
         const resetTime = p.resets_at
           ? fmt.resetAt(Date.parse(p.resets_at), ctx.now)
           : "";
-        const title = `Остановлена: достигнут лимит ${name}, сброс ${resetTime}; без «кранча» продолжение не отправляется`;
+        const reset = resetTime ? `, сброс ${resetTime}` : "";
+        const title = `Остановлена: достигнут лимит ${name}${reset}; без «кранча» продолжение не отправляется`;
         cards.push({
           key: "pause:limit_reached",
           tone: "warning",
@@ -155,6 +160,23 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           title: "Восстановление сессии",
           body: [],
           actions: [],
+        });
+        break;
+      }
+      case "session_stuck": {
+        const progress = compactionLabel(p.compaction);
+        const requested = p.compaction === "requested";
+        const compact: CardAction[] = effectiveLive
+          ? [{ id: "compact_context", label: ACTION_LABELS.compact_context }]
+          : [];
+        cards.push({
+          key: "pause:session_stuck",
+          tone: "danger",
+          title: `Очередь остановлена: ${failureLabel("session_stuck")}`,
+          body: requested
+            ? [progress ?? ""]
+            : [...(progress ? [progress] : []), STUCK_NOTE],
+          actions: requested ? [] : [...compact, ...forward],
         });
         break;
       }

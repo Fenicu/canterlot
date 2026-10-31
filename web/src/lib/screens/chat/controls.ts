@@ -32,6 +32,13 @@ export async function continueSessionQueue(
   return client.continueQueue(conversationId, key);
 }
 
+export async function compactSessionContext(
+  conversationId: string,
+  key = crypto.randomUUID(),
+) {
+  return client.compact(conversationId, key);
+}
+
 export async function spendSessionReserve(
   conversationId: string,
   key = crypto.randomUUID(),

@@ -122,11 +122,28 @@ const FAILURES: Record<string, string> = {
   supervisor_died: "процесс сопровождения завершился",
   admin_resolved: "закрыто администратором",
   invalid_instructions: "инструкции не подошли агенту",
+  session_stuck: "один и тот же отказ провайдера подряд",
 };
 
 /** Причина сбоя строчными: подставляется после «Сбой:» и в текст карточки. */
 export function failureLabel(value: Value): string {
   return lookup(FAILURES, value) ?? "причина неизвестна";
+}
+
+const COMPACTION: Record<string, string> = {
+  requested: "Контекст сжимается",
+  failed: "Сжатие не удалось",
+};
+
+/** Ход сжатия контекста на карточке застрявшей сессии. */
+export function compactionLabel(value: Value): string | undefined {
+  return lookup(COMPACTION, value);
+}
+
+/** Сводка фазы при повторе запроса: `retry <попытка>` от адаптера, повторяет сам агент. */
+export function retryLabel(summary: Value): string | null {
+  const attempt = typeof summary === "string" ? /^retry (\d+)$/.exec(summary) : null;
+  return attempt ? `Повторяет запрос к модели, попытка ${attempt[1]}` : null;
 }
 
 const OUTCOMES: Record<string, string> = {

@@ -1,4 +1,4 @@
-import { failureLabel, providerLabel } from "#lib/format/labels.js";
+import { failureLabel, providerLabel, retryLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 
 export type Tone = "accent" | "default" | "warning" | "danger";
@@ -94,7 +94,11 @@ function working(
   if (phase === "no_link")
     return { text: "Нет связи с машиной", tone: "warning", live: false };
   if (phase === "generating")
-    return { text: "Генерирует", tone: "accent", live: false };
+    return {
+      text: retryLabel(evidence.summary) ?? "Генерирует",
+      tone: "accent",
+      live: false,
+    };
   if (phase === "starting")
     return { text: "Запускается", tone: "accent", live: false };
   if (phase === "stopping")
