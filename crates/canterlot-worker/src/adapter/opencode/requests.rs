@@ -388,6 +388,19 @@ impl Requests {
             .collect()
     }
 
+    /// Прерывание сняло всё: отвечать некому.
+    pub fn drop_all(&mut self) {
+        self.pending.clear();
+    }
+
+    /// Прерывание ничего не сняло, а карточки закрыты: вызовы ждали бы вечно.
+    pub fn refuse_all(&mut self, message: &str) -> Vec<Reply> {
+        let ids: Vec<String> = self.pending.keys().cloned().collect();
+        ids.iter()
+            .filter_map(|id| self.refuse(id, message))
+            .collect()
+    }
+
     /// Период работы сессии кончился: её запросов на сервере больше нет.
     pub fn drop_session(&mut self, session: &str) {
         self.pending.retain(|_, pending| pending.session != session);

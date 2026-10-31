@@ -7,8 +7,9 @@
 //! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
 
 use canterlot_proto::worker::v1::{
-    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, SettingsOverride,
-    StartExecution, StopExecution, TextBlock, command::Kind, content_block, record_body::Body,
+    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, Interrupt, InterruptState,
+    SettingsOverride, StartExecution, StopExecution, TextBlock, command::Kind, content_block,
+    record_body::Body,
 };
 use canterlot_worker::{
     adapter::opencode::replay::{Reply, Script, Step},
@@ -789,6 +790,140 @@ async fn oversized_question_keeps_labels_in_the_preview() {
     env.send(env.decide(&request, "question", &answer())).await;
     env.wait_finished(input).await;
     assert_eq!(env.replies().len(), 1);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+fn session_id(script: &Script) -> String {
+    script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()
+                .and_then(|body| body.pointer("/data/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn interrupt_state(body: &Body, command: Uuid, wanted: InterruptState) -> bool {
+    matches!(body, Body::InterruptStatus(f)
+        if f.command_id == command.to_string() && f.state == i32::from(wanted))
+}
+
+// Прерывание по боевому пути: карточка закрыта, ход закончен, статус дошёл до конца.
+#[tokio::test]
+async fn interrupt_goes_through_the_supervisor() {
+    let script = Script::from_capture("interrupt", None)
+        .first_run()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("hang").await;
+    env.wait("accepted", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::InputAccepted(_)))
+    })
+    .await;
+    let stop = Uuid::now_v7();
+    env.send(env.command(stop, Kind::Interrupt(Interrupt {})))
+        .await;
+    env.wait("interrupt completed", |bodies| {
+        bodies
+            .iter()
+            .any(|body| interrupt_state(body, stop, InterruptState::Completed))
+    })
+    .await;
+    assert!(env.bodies.iter().any(|body| matches!(
+        body,
+        Body::RunFinished(f) if f.input_command_id == input.to_string()
+    )));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+/// Ход, затем запуск без ввода, который ждёт прерывания.
+fn autonomous_script() -> Script {
+    let mut script = Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let session = session_id(&script);
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.step.started", "data": {
+                "sessionID": session, "assistantMessageID": "msg_auto", "agent": "build",
+                "model": {"id": "fake-1", "providerID": "fake"}}}),
+            json!({"type": "session.step.ended", "data": {
+                "sessionID": session, "assistantMessageID": "msg_auto", "finish": "stop",
+                "tokens": {"input": 7, "output": 2, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}}}}),
+        ],
+    });
+    script.steps.push(Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/interrupt"),
+        reply: Reply {
+            body: Some(json!({"interrupted": true})),
+            ..Default::default()
+        },
+        bind: Default::default(),
+    });
+    script.steps.push(Step::Emit {
+        events: vec![json!({"type": "session.execution.interrupted",
+            "data": {"sessionID": session, "reason": "user"}})],
+    });
+    script
+}
+
+// Запуск без ввода тратит лимит: для супервизора он ход, значит его можно прервать, а
+// следующий ввод ждёт его конца.
+#[tokio::test]
+async fn autonomous_run_is_a_turn_for_the_supervisor() {
+    let mut env = Env::new(Some(autonomous_script())).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("первый").await;
+    env.wait_finished(input).await;
+    env.wait("second phase", |bodies| {
+        bodies
+            .iter()
+            .filter(|body| matches!(body, Body::PhaseChanged(f) if f.phase == "generating"))
+            .count()
+            >= 2
+    })
+    .await;
+    let stop = Uuid::now_v7();
+    env.send(env.command(stop, Kind::Interrupt(Interrupt {})))
+        .await;
+    env.wait("interrupt completed", |bodies| {
+        bodies
+            .iter()
+            .any(|body| interrupt_state(body, stop, InterruptState::Completed))
+    })
+    .await;
+    let finished: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::RunFinished(f) => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 2);
+    assert_eq!(finished[1].input_command_id, input.to_string());
+    assert!(!finished[0].adopted);
+    assert!(finished[1].adopted);
+    assert_eq!(finished[1].usage[0].input_tokens, 7);
     env.stop().await;
     env.fake().wait_gone().await;
 }

@@ -14,11 +14,12 @@ use canterlot_hub::{
     testkit::{self, spawn_test_hub},
 };
 use canterlot_worker::{
-    adapter::opencode::replay::Script,
+    adapter::opencode::replay::{Script, Step},
     config::WorkerConfig,
     session::{SessionState, Worker},
     store::WorkerStore,
 };
+use serde_json::json;
 use sqlx::PgPool;
 use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
@@ -91,6 +92,38 @@ executable = "{executable}"
     )
 }
 
+/// Запись хода и следом период без ввода: так выглядит завершение фоновой работы.
+fn with_autonomous_run(mut script: Script) -> Script {
+    let session = script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()
+                .and_then(|body| body.pointer("/data/id"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.step.started", "data": {
+                "sessionID": session, "assistantMessageID": "msg_auto", "agent": "build",
+                "model": {"id": "fake-1", "providerID": "fake"}}}),
+            json!({"type": "session.step.ended", "data": {
+                "sessionID": session, "assistantMessageID": "msg_auto", "finish": "stop",
+                "tokens": {"input": 7, "output": 2, "reasoning": 0,
+                           "cache": {"read": 0, "write": 0}}}}),
+            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
+        ],
+    });
+    script
+}
+
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool) {
     let _gate = e2e_gate::acquire().await;
@@ -110,11 +143,11 @@ async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool)
     fs::write(root.path().join("ca.pem"), &hub.pki.ca_pem).unwrap();
     let work = root.path().join("work");
     fs::create_dir(&work).unwrap();
-    let fake = Fake::new(
+    let fake = Fake::new(with_autonomous_run(
         Script::from_capture("start_stream", None)
             .with_canterlot_mcp("connected")
             .with_recorded_models(),
-    );
+    ));
     let config: WorkerConfig = toml::from_str(&worker_toml(
         &Paths {
             root: root.path(),

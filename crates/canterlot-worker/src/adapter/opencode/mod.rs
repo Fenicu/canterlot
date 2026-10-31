@@ -12,6 +12,7 @@ pub mod process;
 #[cfg(feature = "synthetic-adapter")]
 pub mod replay;
 pub mod requests;
+pub mod shells;
 pub mod sse;
 pub mod version;
 
@@ -52,6 +53,7 @@ use uuid::Uuid;
 /// Строка готовности и ожидание MCP: на проверенной версии доли секунды.
 const READY_WAIT: Duration = Duration::from_secs(20);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
+const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
 /// около 100 мс. Публичного сигнала нет, запас проверяет L2 на повторных холодных стартах.
@@ -168,6 +170,16 @@ struct Delivery {
     active: Option<Uuid>,
     /// Доказательства нет, супервизору сказано `Undetermined`.
     unconfirmed: Option<Uuid>,
+    /// Последний принятый ввод: ему приписываются запуски без ввода.
+    last: Option<Uuid>,
+    /// Идёт запуск без ввода, приписанный этой команде.
+    adopted: Option<Uuid>,
+    /// `active` записан в очередь сервера.
+    enqueued: bool,
+    /// `active` стал сообщением: терминал периода закрывает и его.
+    delivered: bool,
+    /// Идёт период, начатый не вводом `active`: его конец может оказаться чужим.
+    foreign: bool,
 }
 
 /// Чтение проекций после `Undetermined`. Отдельная задача: итог ждёт в `self`, а не на
@@ -180,6 +192,25 @@ struct Lookup {
 impl Drop for Lookup {
     fn drop(&mut self) {
         self.task.abort();
+    }
+}
+
+/// Список фоновых команд после прерывания; отдельная задача по той же причине.
+struct ShellList {
+    command: Uuid,
+    task: tokio::task::JoinHandle<Option<Value>>,
+}
+
+impl Drop for ShellList {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn shells_done(list: &mut Option<ShellList>) -> Option<Value> {
+    match list {
+        Some(pending) => (&mut pending.task).await.ok().flatten(),
+        None => std::future::pending().await,
     }
 }
 
@@ -217,6 +248,7 @@ pub struct OpenCodeAdapter {
     translator: Option<Translator>,
     delivery: Delivery,
     lookup: Option<Lookup>,
+    shells: Option<ShellList>,
     held: HeldTools,
     /// Вызовы, по которым был запрос: пометки CLI у них нет.
     asked: HashSet<String>,
@@ -254,6 +286,7 @@ impl OpenCodeAdapter {
             translator: None,
             delivery: Delivery::default(),
             lookup: None,
+            shells: None,
             held: HeldTools::default(),
             asked: HashSet::new(),
             requests: Requests::default(),
@@ -611,10 +644,14 @@ impl OpenCodeAdapter {
     fn error_block(&mut self, failure: &RunFailure, command: Uuid) {
         let mut text = format!("Ошибка OpenCode ({}): {}", failure.kind, failure.message);
         text.truncate(text.floor_char_boundary(ERROR_TEXT_BYTES));
+        self.text_block(BlockKind::Error, command, text);
+    }
+
+    fn text_block(&mut self, kind: BlockKind, command: Uuid, text: String) {
         let block_id = Uuid::now_v7();
         self.events.push_back(AdapterEvent::BlockStarted {
             block_id,
-            kind: BlockKind::Error,
+            kind,
             input_command_id: Some(command),
             parent: None,
             agent: "orchestrator".into(),
@@ -638,26 +675,92 @@ impl OpenCodeAdapter {
         });
     }
 
+    fn on_run_started(&mut self) {
+        if self.delivery.active.is_some() {
+            // Период начался раньше записи нашего ввода: начал его не ввод.
+            self.delivery.foreign |= !self.delivery.enqueued;
+            return;
+        }
+        if self.delivery.adopted.is_some() {
+            return;
+        }
+        let Some(command) = self.delivery.last else {
+            self.diagnostic("autonomous_run_unattributed", false);
+            return;
+        };
+        self.delivery.adopted = Some(command);
+        if let Some(translator) = self.translator.as_mut() {
+            translator.begin_run(Some(command));
+        }
+        self.events.push_back(AdapterEvent::RunAdopted {
+            input_command_id: command,
+        });
+    }
+
     fn on_run_ended(&mut self, outcome: RunOutcome) {
         self.held.release_all(&mut self.events);
         self.asked.clear();
         self.requests.drop_session(&self.session);
-        let Some(command) = self.delivery.active.take() else {
-            // Запуски без ввода разбирает свой срез: здесь только готовность к вводу.
+        let Some(command) = self.delivery.active.or(self.delivery.adopted) else {
+            // Запуск без единой команды: приписать некому, блоков хода нет.
             self.awaiting_input();
             return;
         };
+        if let RunOutcome::Failed(failure) = &outcome {
+            self.error_block(failure, command);
+        }
+        let interrupted = matches!(outcome, RunOutcome::Interrupted);
+        // Конец чужого периода, а наш ввод ещё в очереди: его ход впереди, расход пойдёт к нему.
+        if self.delivery.active.is_some()
+            && self.delivery.foreign
+            && !self.delivery.delivered
+            && !interrupted
+        {
+            self.delivery.foreign = false;
+            return;
+        }
+        self.delivery.active = None;
+        self.delivery.adopted = None;
+        self.delivery.foreign = false;
         if self.delivery.unconfirmed == Some(command) {
             self.delivery.unconfirmed = None;
             self.lookup = None;
-        }
-        if let RunOutcome::Failed(failure) = &outcome {
-            self.error_block(failure, command);
         }
         if let Some(translator) = self.translator.as_mut() {
             self.events.push_back(translator.finish_run(command));
         }
         self.awaiting_input();
+        if interrupted {
+            self.list_shells(command);
+        }
+    }
+
+    // После терминала: команды прерванного хода к этому моменту уже сняты сервером.
+    fn list_shells(&mut self, command: Uuid) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let task = tokio::spawn(async move { http.get("/api/shell", REQUEST_WAIT).await.ok() });
+        self.shells = Some(ShellList { command, task });
+    }
+
+    fn on_shells(&mut self, list: Option<Value>) {
+        let Some(pending) = self.shells.take() else {
+            return;
+        };
+        let commands = match (&list, &self.translator) {
+            (Some(list), Some(translator)) => {
+                shells::running(list, |session| translator.owns(session))
+            }
+            _ => Vec::new(),
+        };
+        if !commands.is_empty() {
+            self.text_block(
+                BlockKind::Warning,
+                pending.command,
+                shells::notice(&commands),
+            );
+        }
     }
 
     // Ввод закрыт без хода: конца хода от сервера не будет.
@@ -674,6 +777,7 @@ impl OpenCodeAdapter {
 
     fn prove_late(&mut self, command: Uuid) {
         self.delivery.unconfirmed = None;
+        self.delivery.last = Some(command);
         self.lookup = None;
         self.events.push_back(AdapterEvent::InputAccepted {
             command_id: command,
@@ -691,7 +795,7 @@ impl OpenCodeAdapter {
     }
 
     fn turn_running(&self) -> bool {
-        self.delivery.active.is_some()
+        self.delivery.active.is_some() || self.delivery.adopted.is_some()
     }
 
     // Ответ без ожидания итога: 404 значит, что сервер уже снял запрос сам. Цикл супервизора
@@ -773,13 +877,20 @@ impl OpenCodeAdapter {
                     self.close_request(request_id);
                 }
             }
-            Translated::InboxSeen(id) => {
+            Translated::InboxSeen { id, delivered } => {
+                if let Some(command) = self.delivery.active
+                    && input::message_id(command) == id
+                {
+                    self.delivery.enqueued = true;
+                    self.delivery.delivered |= delivered;
+                }
                 if let Some(command) = self.delivery.unconfirmed
                     && input::message_id(command) == id
                 {
                     self.prove_late(command);
                 }
             }
+            Translated::RunStarted => self.on_run_started(),
             Translated::RunEnded(outcome) => self.on_run_ended(outcome),
         }
     }
@@ -913,13 +1024,19 @@ impl OpenCodeAdapter {
         if let Err(reason) = self.apply_mode(&http, wanted).await {
             return TransmitOutcome::Rejected(reason.into());
         }
+        // Супервизор не узнал о запуске без ввода раньше ввода: сервер сольёт их в один период.
+        let adopted = self.delivery.adopted.take();
         self.delivery.active = Some(command);
+        self.delivery.enqueued = false;
+        self.delivery.delivered = false;
+        self.delivery.foreign = adopted.is_some();
         if let Some(translator) = self.translator.as_mut() {
-            translator.begin_run(command);
+            translator.begin_run(Some(command));
         }
         let path = format!("/api/session/{}/prompt", self.session);
         match http.post(&path, &body, self.deadline).await {
             Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                self.delivery.last = Some(command);
                 TransmitOutcome::Accepted(Proof {
                     command_id: command,
                     kind: input::PROOF_KIND,
@@ -928,6 +1045,11 @@ impl OpenCodeAdapter {
             // Хаб новых настроек не применил: сервер возвращается к прежним перед вводом.
             Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
                 self.delivery.active = None;
+                self.delivery.adopted = adopted;
+                self.delivery.foreign = false;
+                if let Some(translator) = self.translator.as_mut() {
+                    translator.begin_run(adopted);
+                }
                 if self.mode != previous {
                     self.mode = previous;
                     self.rules_dirty = true;
@@ -1018,6 +1140,7 @@ impl OpenCodeAdapter {
             }
         };
         let lookup = &mut self.lookup;
+        let shells = &mut self.shells;
         let kill_at = self.kill_at;
         let escalate = async {
             match kill_at {
@@ -1030,6 +1153,7 @@ impl OpenCodeAdapter {
             item = item => self.on_stream(item),
             event = broker.next() => self.on_broker(event),
             found = lookup_done(lookup) => self.on_lookup(found),
+            list = shells_done(shells) => self.on_shells(list),
             () = escalate => {
                 self.kill_at = None;
                 proc.signal(rustix::process::Signal::KILL);
@@ -1051,10 +1175,10 @@ impl Adapter for OpenCodeAdapter {
         Capabilities {
             streaming: Support::Supported,
             resume: Support::Supported,
-            interrupt: Support::Unavailable("opencode_interrupt"),
+            interrupt: Support::Supported,
             approvals: Support::Supported,
             questions: Support::Supported,
-            background_work: Support::Unavailable("opencode_interrupt"),
+            background_work: Support::Supported,
             interrupt_keeps_process: true,
         }
     }
@@ -1162,8 +1286,30 @@ impl Adapter for OpenCodeAdapter {
         }
     }
 
+    // Карточки супервизор уже закрыл. Сервер снимает потомков вместе с родителем, а всё,
+    // что он не снял, получает отказ: иначе вызовы ждали бы ответа вечно.
     async fn interrupt(&mut self) -> InterruptOutcome {
-        InterruptOutcome::NotApplicable
+        let Some(http) = self.http.clone() else {
+            return InterruptOutcome::NotApplicable;
+        };
+        let path = format!("/api/session/{}/interrupt", self.session);
+        let outcome = match http.post_empty(&path, INTERRUPT_WAIT).await {
+            Ok(reply) => match reply.get("interrupted").and_then(Value::as_bool) {
+                Some(true) => InterruptOutcome::Acknowledged,
+                Some(false) => InterruptOutcome::NotApplicable,
+                None => InterruptOutcome::Undetermined,
+            },
+            Err(HttpError::Status { status: 404, .. }) => InterruptOutcome::NotApplicable,
+            Err(_) => InterruptOutcome::Undetermined,
+        };
+        if matches!(outcome, InterruptOutcome::Acknowledged) {
+            self.requests.drop_all();
+        } else {
+            for reply in self.requests.refuse_all(requests::REFUSED) {
+                self.send_refusal(reply);
+            }
+        }
+        outcome
     }
 
     fn set_stop_grace(&mut self, grace: Duration) {

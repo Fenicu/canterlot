@@ -8,8 +8,8 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, DecisionOutcome,
-        InstructionMode, InstructionSpec, Phase, SettingsChange, StartSpec, Started, Transmission,
-        TransmitOutcome,
+        InstructionMode, InstructionSpec, InterruptOutcome, Phase, SettingsChange, StartSpec,
+        Started, Transmission, TransmitOutcome,
         opencode::{
             OpenCodeAdapter,
             replay::{Reply, Script, Step},
@@ -2710,6 +2710,584 @@ async fn invalid_answer_cancels_the_form_with_a_message() {
     })
     .await
     .expect("form cancel");
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Первый ход записи прерывания: модель зависла, прерывание снимает её.
+fn hanging_turn() -> Script {
+    Script::from_capture("interrupt", None)
+        .first_run()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+fn set_interrupt_reply(script: &mut Script, change: impl FnOnce(&mut Reply)) {
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/interrupt"))
+        })
+        .unwrap();
+    let Step::Expect { reply, .. } = &mut script.steps[position] else {
+        unreachable!();
+    };
+    change(reply);
+}
+
+impl Bench {
+    async fn interrupt(&mut self) -> InterruptOutcome {
+        tokio::time::timeout(WAIT, self.adapter.interrupt())
+            .await
+            .expect("interrupt must finish")
+    }
+}
+
+// Прерывание: подтверждение сервера, конец хода приходит обычным событием.
+#[tokio::test]
+async fn interrupt_is_acknowledged_and_the_turn_ends() {
+    let mut bench = Bench::new(hanging_turn());
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::Acknowledged
+    ));
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    let sent = find(&requests, "POST", "/interrupt").expect("interrupt");
+    assert_eq!(sent["body"], Value::Null);
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn interrupt_with_nothing_running_is_not_applicable() {
+    let mut script = hanging_turn();
+    set_interrupt_reply(&mut script, |reply| {
+        reply.body = Some(json!({"interrupted": false}));
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::NotApplicable
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn interrupt_without_an_answer_is_undetermined() {
+    let mut script = hanging_turn();
+    set_interrupt_reply(&mut script, |reply| {
+        reply.status = 500;
+        reply.body = Some(json!({"_tag": "InternalError"}));
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::Undetermined
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Запрос потомка и прерывание, которое ничего не сняло: потомок ждал бы ответа вечно.
+fn child_request_with_a_refused_interrupt() -> (Script, String, String) {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let child = "ses_child00000000000000000000000".to_owned();
+    let mut asked = tool_events(&capture, &["permission.asked"]).remove(0);
+    asked["data"]["sessionID"] = child.clone().into();
+    let request = asked["data"]["id"].as_str().unwrap().to_owned();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit {
+                events: vec![
+                    json!({"type": "session.created",
+                        "data": {"sessionID": child, "parentID": session}}),
+                    asked,
+                ],
+            },
+            Step::Expect {
+                method: "POST".into(),
+                path: format!("/api/session/{session}/interrupt"),
+                reply: Reply {
+                    body: Some(json!({"interrupted": false})),
+                    ..Default::default()
+                },
+                bind: Default::default(),
+            },
+        ],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{child}/permission/{request}/reply"),
+        vec![reply_204()],
+    );
+    (script, child, request)
+}
+
+#[tokio::test]
+async fn interrupt_that_stopped_nothing_refuses_the_open_requests() {
+    let (script, child, request) = child_request_with_a_refused_interrupt();
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_request().await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::NotApplicable
+    ));
+    tokio::time::timeout(WAIT, async {
+        while bench.replies().is_empty() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("refusal");
+    let reply = bench.replies().remove(0);
+    assert!(path_of(&reply).ends_with(&format!("{child}/permission/{request}/reply")));
+    assert_eq!(reply["body"]["decision"], "reject");
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Подтверждённое прерывание сняло запросы само: ответы на них были бы лишними 404.
+#[tokio::test]
+async fn acknowledged_interrupt_sends_no_refusals() {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let mut prefix = tool_prefix(&capture);
+    let called = prefix.last().unwrap().clone();
+    prefix.push(tool_events(&capture, &["permission.asked"]).remove(0));
+    let failed = json!({"type": "session.tool.failed", "data": {
+        "sessionID": session,
+        "assistantMessageID": called["data"]["assistantMessageID"],
+        "id": called["data"]["id"],
+        "error": {"type": "aborted", "message": "Tool execution interrupted"},
+        "executed": false,
+    }});
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: prefix },
+            Step::Expect {
+                method: "POST".into(),
+                path: format!("/api/session/{session}/interrupt"),
+                reply: Reply {
+                    body: Some(json!({"interrupted": true})),
+                    ..Default::default()
+                },
+                bind: Default::default(),
+            },
+            Step::Emit {
+                events: vec![
+                    failed,
+                    json!({"type": "session.execution.interrupted",
+                        "data": {"sessionID": session, "reason": "user"}}),
+                ],
+            },
+        ],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_request().await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::Acknowledged
+    ));
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AdapterEvent::RequestClosed { .. })),
+        "the supervisor has closed the cards: {events:?}"
+    );
+    assert!(bench.replies().is_empty());
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn shell_list(session: &str) -> Value {
+    json!({"data": [
+        {"id": "sh_1", "status": "running", "command": "sleep 171717 # фон",
+         "metadata": {"sessionID": session}},
+        {"id": "sh_2", "status": "killed", "command": "sleep 181818",
+         "metadata": {"sessionID": session}},
+        {"id": "sh_3", "status": "running", "command": "чужая команда",
+         "metadata": {"sessionID": "ses_stranger"}},
+    ]})
+}
+
+// Решение 9: фоновые команды прерывание переживают, владелец их видит, снятия нет.
+#[tokio::test]
+async fn background_shells_survive_the_interrupt_and_are_shown() {
+    let mut script = hanging_turn();
+    let session = session_of(&script);
+    script.set_route(
+        "GET",
+        "/api/shell",
+        vec![Reply {
+            body: Some(shell_list(&session)),
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert!(matches!(
+        bench.interrupt().await,
+        InterruptOutcome::Acknowledged
+    ));
+    bench.until_finished(input.command_id).await;
+    let mut warning = None;
+    let mut blocks = Vec::new();
+    while warning.is_none() {
+        let event = bench.event().await;
+        if let AdapterEvent::BlockFinal { block_id, text, .. } = &event
+            && blocks.contains(block_id)
+        {
+            warning = Some(text.clone());
+        }
+        if let AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::Warning,
+            input_command_id,
+            ..
+        } = &event
+        {
+            assert_eq!(*input_command_id, Some(input.command_id));
+            blocks.push(*block_id);
+        }
+    }
+    let warning = warning.unwrap();
+    assert!(warning.contains("sleep 171717 # фон"), "{warning}");
+    assert!(!warning.contains("sleep 181818"), "{warning}");
+    assert!(!warning.contains("чужая команда"), "{warning}");
+    let requests = bench.fake.requests();
+    assert!(requests.iter().all(|request| request["method"] != "DELETE"));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn interrupt_without_background_shells_shows_nothing() {
+    let mut script = hanging_turn();
+    script.set_route(
+        "GET",
+        "/api/shell",
+        vec![Reply {
+            body: Some(json!({"data": []})),
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    bench.interrupt().await;
+    bench.until_finished(input.command_id).await;
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
+    tokio::time::timeout(WAIT, async {
+        while find(&bench.fake.requests(), "GET", "/api/shell").is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("shell list");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event())
+            .await
+            .is_err()
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn first_terminal(script: &Script) -> usize {
+    script
+        .steps
+        .iter()
+        .position(|step| {
+            matches!(step, Step::Emit { events } if events.iter().any(|event| {
+                event["type"] == "session.execution.succeeded"
+            }))
+        })
+        .unwrap()
+}
+
+/// Запись субагента: фоновый потомок закончил, родитель запустился без ввода.
+fn background_child() -> Script {
+    Script::from_capture("subagent", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+// Решение 8: запуск без ввода принят и приписан последней команде, расход не потерян.
+#[tokio::test]
+async fn autonomous_run_is_attributed_to_the_last_command() {
+    let mut bench = Bench::new(background_child());
+    bench.start_ok().await;
+    let input = bench.input("delegate");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let mut events = Vec::new();
+    loop {
+        let event = bench.event().await;
+        let done = matches!(event, AdapterEvent::RunFinished { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    assert!(
+        matches!(
+            events.iter().find(|event| matches!(event, AdapterEvent::RunAdopted { .. })),
+            Some(AdapterEvent::RunAdopted { input_command_id }) if *input_command_id == input.command_id
+        ),
+        "{events:?}"
+    );
+    let adopted = events
+        .iter()
+        .position(|event| matches!(event, AdapterEvent::RunAdopted { .. }))
+        .unwrap();
+    assert!(
+        events[..adopted]
+            .iter()
+            .all(|event| matches!(event, AdapterEvent::Phase { .. })),
+        "{events:?}"
+    );
+    for event in &events {
+        if let AdapterEvent::BlockStarted {
+            input_command_id, ..
+        } = event
+        {
+            assert_eq!(*input_command_id, Some(input.command_id));
+        }
+    }
+    let Some(AdapterEvent::RunFinished {
+        input_command_id,
+        usage,
+        ..
+    }) = events.last()
+    else {
+        unreachable!();
+    };
+    assert_eq!(*input_command_id, input.command_id);
+    assert!(!usage.is_empty(), "the autonomous run spent tokens");
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Запуск без ввода: ход записи, затем начало периода и пауза на вмешательство теста.
+fn autonomous_start(steps: Vec<Step>) -> (Script, String) {
+    let mut script = two_turns();
+    let session = session_of(&script);
+    let terminal = first_terminal(&script);
+    let Step::Emit { events } = &mut script.steps[terminal] else {
+        unreachable!();
+    };
+    let end = events
+        .iter()
+        .position(|event| event["type"] == "session.execution.succeeded")
+        .unwrap();
+    events.truncate(end + 1);
+    script.steps.truncate(terminal + 1);
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.inbox.enqueued",
+                "data": {"inboxID": "msg_synthetic", "sessionID": session,
+                         "item": {"type": "synthetic"}}}),
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+        ],
+    });
+    script.steps.extend(steps);
+    (script, session)
+}
+
+fn step_usage(session: &str, message: &str, input: u64) -> Vec<Value> {
+    vec![
+        json!({"type": "session.step.started", "data": {
+            "sessionID": session, "assistantMessageID": message, "agent": "build",
+            "model": {"id": "fake-1", "providerID": "fake"}}}),
+        json!({"type": "session.step.ended", "data": {
+            "sessionID": session, "assistantMessageID": message, "finish": "stop",
+            "tokens": {"input": input, "output": 1, "reasoning": 0,
+                       "cache": {"read": 0, "write": 0}}}}),
+    ]
+}
+
+// Ввод обогнал конец запуска без ввода: период один, конец один, расход весь у нового ввода.
+// Кадры периода выдуманы из записанных: запись такой гонки нет.
+#[tokio::test]
+async fn input_during_an_autonomous_run_shares_its_end() {
+    let (mut script, session) = autonomous_start(Vec::new());
+    let mut merged = step_usage(&session, "msg_auto", 10);
+    merged.push(finish(&session));
+    script.steps.push(Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/prompt"),
+        reply: Reply {
+            body: Some(json!({"data": {"id": "$ID"}})),
+            ..Default::default()
+        },
+        bind: [("$ID".to_owned(), "/id".to_owned())].into_iter().collect(),
+    });
+    script.steps.push(Step::Emit { events: merged });
+    let mut steps = step_usage(&session, "msg_second", 5);
+    steps.insert(
+        0,
+        json!({"type": "session.inbox.enqueued",
+            "data": {"inboxID": "$ID", "sessionID": session}}),
+    );
+    steps.insert(
+        1,
+        json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+    );
+    steps.insert(
+        2,
+        json!({"type": "session.inbox.delivered",
+            "data": {"inboxID": "$ID", "sessionID": session}}),
+    );
+    steps.push(finish(&session));
+    script.steps.push(Step::Emit { events: steps });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("раз");
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    loop {
+        if matches!(bench.event().await, AdapterEvent::RunAdopted { .. }) {
+            break;
+        }
+    }
+    let second = bench.input("два");
+    bench.accepted(&second).await;
+    let events = bench.until_finished(second.command_id).await;
+    let finished: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::RunFinished {
+                input_command_id,
+                usage,
+                ..
+            } => Some((*input_command_id, usage.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(finished.len(), 1, "{events:?}");
+    assert_eq!(finished[0].0, second.command_id);
+    assert_eq!(finished[0].1[0].input_tokens, 15, "both periods counted");
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запрос в запуске без ввода показать есть кому: ход приписан последней команде.
+#[tokio::test]
+async fn request_during_an_autonomous_run_reaches_the_owner() {
+    let capture = Script::from_capture("permissions", None);
+    let asked = tool_events(&capture, &["permission.asked"]).remove(0);
+    let mut own = asked.clone();
+    let (mut script, session) = autonomous_start(Vec::new());
+    own["data"]["sessionID"] = session.clone().into();
+    let id = own["data"]["id"].as_str().unwrap().to_owned();
+    script.steps.push(Step::Emit { events: vec![own] });
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/permission/{id}/reply"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let first = bench.input("раз");
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let (request, ..) = bench.until_request().await;
+    assert!(matches!(
+        bench.deliver(&request, &allow()).await,
+        DecisionOutcome::Applied(_)
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запуск без ввода и без единой команды: приписать некому, но ход не теряется.
+#[tokio::test]
+async fn autonomous_run_with_no_command_ends_without_a_run() {
+    let mut script = ready();
+    let session = session_of(&script);
+    let prompt = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(prompt);
+    script.steps.push(Step::Stall { ms: 300 });
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            finish(&session),
+        ],
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Diagnostic {
+            kind: "autonomous_run_unattributed",
+            required: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
     bench.close(CloseMode::Graceful).await;
 }
 

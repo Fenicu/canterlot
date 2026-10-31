@@ -36,7 +36,7 @@ fn translator(events: &[Value]) -> (Translator, Uuid) {
     let windows = HashMap::from([("fake/fake-1".to_owned(), 200_000)]);
     let mut translator = Translator::new(&session_of(events), windows);
     let command = Uuid::now_v7();
-    translator.begin_run(command);
+    translator.begin_run(Some(command));
     (translator, command)
 }
 
@@ -198,7 +198,7 @@ fn failed_step_tokens_count_and_usage_resets_between_runs() {
     let session = "ses_a";
     let mut translator = Translator::new(session, HashMap::new());
     let first = Uuid::now_v7();
-    translator.begin_run(first);
+    translator.begin_run(Some(first));
     let step = |kind: &str, tokens: Value| {
         json!({"type": kind, "data": {"sessionID": session, "assistantMessageID": "msg_1",
             "agent": "build", "model": {"id": "m", "providerID": "p"}, "tokens": tokens}})
@@ -220,7 +220,7 @@ fn failed_step_tokens_count_and_usage_resets_between_runs() {
     assert_eq!(context_tokens, 10);
     assert_eq!(context_window_tokens, 0);
     let second = Uuid::now_v7();
-    translator.begin_run(second);
+    translator.begin_run(Some(second));
     let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(second) else {
         panic!("not a run end");
     };
@@ -237,7 +237,7 @@ fn failed_step_without_tokens_is_harmless() {
         .unwrap()
         .to_owned();
     let mut translator = Translator::new(&session, HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     let out = feed_all(&mut translator, &events);
     assert!(out.iter().any(|item| matches!(
         item,
@@ -249,7 +249,7 @@ fn failed_step_without_tokens_is_harmless() {
 fn other_sessions_are_dropped_and_children_are_remembered() {
     let events = stream("start_stream");
     let mut translator = Translator::new("ses_someone_else", HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     assert!(adapter_events(feed_all(&mut translator, &events)).is_empty());
     assert!(translator.owns("ses_someone_else"));
     assert!(!translator.owns("ses_child"));
@@ -268,7 +268,7 @@ fn inbox_events_name_the_input() {
     let seen: Vec<_> = feed_all(&mut translator, &events)
         .into_iter()
         .filter_map(|item| match item {
-            Translated::InboxSeen(id) => Some(id),
+            Translated::InboxSeen { id, .. } => Some(id),
             _ => None,
         })
         .collect();
@@ -313,7 +313,7 @@ fn every_recorded_event_type_is_known() {
             .unwrap_or("ses_none")
             .to_owned();
         let mut translator = Translator::new(&root, HashMap::new());
-        translator.begin_run(Uuid::now_v7());
+        translator.begin_run(Some(Uuid::now_v7()));
         for event in &events {
             for item in translator.feed(event) {
                 assert!(
@@ -365,7 +365,7 @@ fn unknown_execution_end_is_required() {
 #[test]
 fn delta_without_a_start_opens_the_block() {
     let mut translator = Translator::new("ses_a", HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     let out = adapter_events(translator.feed(&json!({"type": "session.text.delta",
         "data": {"sessionID": "ses_a", "assistantMessageID": "msg_1", "ordinal": 0, "delta": "Привет"}})));
     assert!(matches!(out[0], AdapterEvent::BlockStarted { .. }));
@@ -526,7 +526,7 @@ fn rejection_and_interruption_are_named() {
             .unwrap()
             .to_owned();
         let mut translator = Translator::new(&session, HashMap::new());
-        translator.begin_run(Uuid::now_v7());
+        translator.begin_run(Some(Uuid::now_v7()));
         tools_of(feed_all(&mut translator, &events))
     };
     let summaries: Vec<_> = translated("permissions")
@@ -586,7 +586,7 @@ fn tool_events_carry_the_item_for_the_mark() {
 #[test]
 fn result_without_a_start_still_opens_the_call() {
     let mut translator = Translator::new("ses_a", HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     let out = translator.feed(&json!({"type": "session.tool.failed", "data": {
         "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
         "error": {"type": "tool.execution", "message": "Ошибка инструмента"}}}));
@@ -598,7 +598,7 @@ fn result_without_a_start_still_opens_the_call() {
 #[test]
 fn long_cyrillic_command_is_cut_on_a_character_boundary() {
     let mut translator = Translator::new("ses_a", HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     translator.feed(&json!({"type": "session.tool.input.started", "data": {
         "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1", "name": "shell"}}));
     let command = "э".repeat(4000);
@@ -620,7 +620,7 @@ fn permission_and_form_requests_name_their_session_and_call() {
         .unwrap()
         .to_owned();
     let mut translator = Translator::new(&session, HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     let request = feed_all(&mut translator, &events)
         .into_iter()
         .find_map(|item| match item {
@@ -640,7 +640,7 @@ fn permission_and_form_requests_name_their_session_and_call() {
         .unwrap()
         .to_owned();
     let mut translator = Translator::new(&session, HashMap::new());
-    translator.begin_run(Uuid::now_v7());
+    translator.begin_run(Some(Uuid::now_v7()));
     let request = feed_all(&mut translator, &events)
         .into_iter()
         .find_map(|item| match item {

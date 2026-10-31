@@ -141,6 +141,11 @@ impl Http {
             .await
     }
 
+    /// `POST` без тела: прерывание схема описывает без него.
+    pub async fn post_empty(&self, path: &str, limit: Duration) -> Result<Value, HttpError> {
+        self.json(self.request(Method::POST, path), limit).await
+    }
+
     pub async fn patch(
         &self,
         path: &str,

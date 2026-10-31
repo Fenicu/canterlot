@@ -13,8 +13,8 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
-        InstructionSpec, ModelUsage, SettingsChange, StartSpec, Transmission, TransmitOutcome,
-        opencode::OpenCodeAdapter,
+        InstructionSpec, InterruptOutcome, ModelUsage, SettingsChange, StartSpec, Transmission,
+        TransmitOutcome, opencode::OpenCodeAdapter,
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -566,6 +566,106 @@ async fn read_only_rules_reach_the_provider_request() {
     assert!(tools.contains(&"read"), "{tools:?}");
     assert!(!tools.contains(&"shell"), "{tools:?}");
     assert!(!tools.contains(&"write"), "{tools:?}");
+    session.close().await;
+}
+
+// Настоящее прерывание: команда на переднем плане снята, фоновая осталась и показана.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_interrupt_leaves_the_background_shell_and_shows_it() {
+    let stub = Stub::start(vec![
+        Reply::Tools(vec![
+            (
+                "shell".into(),
+                json!({"command": "sleep 41 # фон", "description": "bg", "background": true}),
+            ),
+            (
+                "shell".into(),
+                json!({"command": "sleep 42 # перед", "description": "fg"}),
+            ),
+        ]),
+        Reply::text("не должно прийти"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("запусти");
+    session.transmit(&turn).await;
+    session
+        .until(|event| {
+            matches!(event, AdapterEvent::Phase { summary: Some(summary), .. }
+                if summary.contains("sleep 42"))
+        })
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let outcome = session.adapter.interrupt().await;
+    assert!(
+        matches!(outcome, InterruptOutcome::Acknowledged),
+        "{outcome:?}"
+    );
+    let command = turn.command_id;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    assert!(
+        summaries(&events)
+            .iter()
+            .any(|s| s.ends_with(", interrupted")),
+        "{:?}",
+        summaries(&events)
+    );
+    let events = session
+        .until(|event| {
+            matches!(event, AdapterEvent::BlockFinal { text, .. }
+                if text.starts_with("Фоновые команды"))
+        })
+        .await;
+    let notice = finals(&events).pop().unwrap();
+    assert!(notice.contains("sleep 41 # фон"), "{notice}");
+    assert!(!notice.contains("sleep 42"), "{notice}");
+    assert_eq!(stub.requests().len(), 1, "the model was not woken");
+    session.close().await;
+}
+
+// Фоновая команда закончилась: модель проснулась без ввода, запуск приписан последней команде.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_background_shell_wakes_a_run_attributed_to_the_last_command() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "shell",
+            json!({"command": "sleep 1 && echo готово", "description": "bg", "background": true}),
+        ),
+        Reply::text("жду"),
+        Reply::text("команда закончилась"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("запусти");
+    session.turn(&turn).await;
+    let command = turn.command_id;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+        .await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RunAdopted { input_command_id } if *input_command_id == command
+    )));
+    let Some(AdapterEvent::RunFinished {
+        input_command_id,
+        usage,
+        ..
+    }) = events.last()
+    else {
+        unreachable!();
+    };
+    assert_eq!(*input_command_id, command);
+    assert_eq!(usage.len(), 1);
+    assert!(
+        finals(&events)
+            .iter()
+            .any(|text| text == "команда закончилась")
+    );
+    assert_eq!(stub.requests().len(), 3);
     session.close().await;
 }
 

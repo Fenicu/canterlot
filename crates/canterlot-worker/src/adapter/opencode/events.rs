@@ -36,7 +36,6 @@ const KNOWN: &[&str] = &[
     "session.compaction.started",
     "session.created",
     "session.deleted",
-    "session.execution.started",
     "session.inbox.cancelled",
     "session.instructions.updated",
     "session.model.selected",
@@ -114,8 +113,12 @@ impl fmt::Debug for PendingRequest {
 #[derive(Debug)]
 pub enum Translated {
     Event(AdapterEvent),
-    /// Ввод с этим идентификатором записан сервером.
-    InboxSeen(String),
+    /// Ввод с этим идентификатором записан сервером; `delivered`: стал видимым сообщением.
+    InboxSeen {
+        id: String,
+        delivered: bool,
+    },
+    RunStarted,
     RunEnded(RunOutcome),
     /// Начало вызова: адаптер решает, ждать ли пометку «Разрешено правилами CLI».
     ToolCall {
@@ -273,10 +276,10 @@ impl Translator {
         self.children.iter().map(String::as_str)
     }
 
-    pub fn begin_run(&mut self, command: Uuid) {
-        self.command = Some(command);
-        self.usage.clear();
-        self.context_tokens = 0;
+    /// Команда следующих блоков. Расход не сбрасывается: запуск без ввода, в который влился
+    /// ввод, считается вместе с ним.
+    pub fn begin_run(&mut self, command: Option<Uuid>) {
+        self.command = command;
     }
 
     pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
@@ -354,10 +357,12 @@ impl Translator {
                         .to_owned(),
                 }))]
             }
+            "session.execution.started" => vec![Translated::RunStarted],
             "session.inbox.enqueued" | "session.inbox.delivered" => {
-                vec![Translated::InboxSeen(
-                    string_field(data, "inboxID").to_owned(),
-                )]
+                vec![Translated::InboxSeen {
+                    id: string_field(data, "inboxID").to_owned(),
+                    delivered: kind == "session.inbox.delivered",
+                }]
             }
             "session.step.started" => self.on_step_started(data),
             "session.step.ended" | "session.step.failed" => self.on_step_finished(data),
