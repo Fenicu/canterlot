@@ -31,6 +31,7 @@ const KNOWN: &[&str] = &[
     "agent.updated",
     "command.updated",
     "integration.updated",
+    "location.shutdown",
     "mcp.resources.changed",
     "mcp.status.changed",
     "mcp.tools.changed",

@@ -1404,6 +1404,14 @@ fn failed_compaction_names_an_overflow_only_when_the_provider_said_so() {
     )));
 }
 
+// `live/location_shutdown.jsonl`: выгрузка простаивающей локации не событие для владельца.
+#[test]
+fn location_shutdown_needs_no_diagnostic() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let frame = json!({"type": "location.shutdown", "location": {"directory": "/w"}, "data": {}});
+    assert!(translator.feed(&frame).is_empty());
+}
+
 #[test]
 fn compaction_of_a_child_is_not_reported() {
     let mut translator = Translator::new("ses_root", HashMap::new());
