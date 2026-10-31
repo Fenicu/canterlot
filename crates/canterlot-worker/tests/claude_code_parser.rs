@@ -631,3 +631,35 @@ fn todo_text_stays_out_of_debug() {
     assert!(!format!("{parsed:?}").contains(marker), "{parsed:?}");
     assert_eq!(todos(&parsed).len(), 1);
 }
+
+// `\u0000` в JSON — законная строка: разбор его не снимает, поэтому заменяет его хаб.
+#[test]
+fn json_nul_reaches_block_text_from_tool_results_and_text_deltas() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let parsed = parser.feed(
+        r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t","content":"a\u0000b"}]}}"#,
+    );
+    let final_text = finals(&parsed)
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockFinal { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(final_text, "a\0b");
+
+    parser.feed(
+        r#"{"type":"stream_event","event":{"content_block":{"text":"","type":"text"},"index":0,"type":"content_block_start"}}"#,
+    );
+    let parsed = parser.feed(
+        r#"{"type":"stream_event","event":{"delta":{"text":"c\u0000d","type":"text_delta"},"index":0,"type":"content_block_delta"}}"#,
+    );
+    assert!(
+        matches!(
+            deltas(&parsed)[0],
+            Parsed::Event(AdapterEvent::BlockDelta { append, .. }) if append == "c\0d"
+        ),
+        "{parsed:?}"
+    );
+}

@@ -1137,3 +1137,60 @@ fn plan_of_a_foreign_thread_is_ignored_and_text_stays_out_of_debug() {
     assert_eq!(todo_events(&out).len(), 1);
     assert!(!format!("{out:?}").contains(marker), "{out:?}");
 }
+
+// `\u0000` в JSON — законная строка: разбор его не снимает, поэтому заменяет его хаб.
+#[test]
+fn json_nul_reaches_block_text_from_command_output_and_agent_text() {
+    let frame = |body: &str| {
+        serde_json::from_str::<Value>(&format!(
+            r#"{{{body},"threadId":"thread","turnId":"turn"}}"#
+        ))
+        .unwrap()
+    };
+    let mut translator = Translator::new("thread", "gpt-6-luna");
+    translator.begin_turn("turn", command_id());
+    translator.feed(
+        "item/started",
+        &frame(r#""item":{"id":"c1","type":"commandExecution","command":"cat x","status":"inProgress"}"#),
+    );
+    let streamed = translator.feed(
+        "item/commandExecution/outputDelta",
+        &frame(r#""itemId":"c1","delta":"a\u0000b""#),
+    );
+    assert!(
+        events_of(&streamed).iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockDelta { append, .. } if append == "a\0b"
+        )),
+        "{streamed:?}"
+    );
+    let done = translator.feed(
+        "item/completed",
+        &frame(
+            r#""item":{"id":"c1","type":"commandExecution","command":"cat x","status":"completed","exitCode":0,"aggregatedOutput":"a\u0000b"}"#,
+        ),
+    );
+    assert!(
+        events_of(&done).iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { text, .. } if text == "a\0b"
+        )),
+        "{done:?}"
+    );
+
+    translator.feed(
+        "item/started",
+        &frame(r#""item":{"id":"m1","type":"agentMessage","text":""}"#),
+    );
+    let text = translator.feed(
+        "item/agentMessage/delta",
+        &frame(r#""itemId":"m1","delta":"c\u0000d""#),
+    );
+    assert!(
+        events_of(&text).iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockDelta { append, .. } if append == "c\0d"
+        )),
+        "{text:?}"
+    );
+}
