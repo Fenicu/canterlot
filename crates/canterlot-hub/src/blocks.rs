@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use canterlot_proto::limits::{BLOCK_FINAL_INLINE_MAX_BYTES, MAX_BLOCK_DELTA_BYTES};
 use canterlot_proto::worker::v1::{
     BlockDelta, BlockFinal, BlockIncomplete, BlockStarted, JournalClosed,
@@ -30,10 +32,21 @@ pub enum BlockIgnored {
 }
 
 pub fn checksum(text: &str) -> String {
-    Sha256::digest(text.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    hex(&Sha256::digest(text.as_bytes()))
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+/// PostgreSQL не принимает U+0000 ни в `text`, ни в `jsonb`, а отказ в одной записи
+/// повторялся бы вечно и держал поток данных всей машины.
+pub(crate) fn without_nul(text: &str) -> Cow<'_, str> {
+    if text.contains('\0') {
+        Cow::Owned(text.replace('\0', "\u{fffd}"))
+    } else {
+        Cow::Borrowed(text)
+    }
 }
 
 fn id(value: &str) -> Result<Uuid, sqlx::Error> {
@@ -162,19 +175,29 @@ pub async fn apply_delta(
         emit(conn, run, "block_revision_gap", json!({"block_id": block_id, "current_rev": block.rev, "base_rev": fact.base_rev, "rev": fact.rev}), correlation_id).await?;
         return Ok(BlockOutcome::Diagnosed("block_revision_gap"));
     }
-    sqlx::query("insert into block_chunks (block_id, seq, text) values ($1, $2, $3)")
+    let append = without_nul(&fact.append);
+    let raw = matches!(append, Cow::Owned(_)).then_some(fact.append.as_bytes());
+    sqlx::query("insert into block_chunks (block_id, seq, text, raw) values ($1, $2, $3, $4)")
         .bind(block_id)
         .bind(next)
-        .bind(&fact.append)
+        .bind(append.as_ref())
+        .bind(raw)
         .execute(&mut *conn)
         .await?;
     sqlx::query("update blocks set rev = $2, line_count = case when kind='tool_result' then coalesce(line_count,0)+$3 else line_count end, updated_at = clock_timestamp() where block_id = $1")
         .bind(block_id)
         .bind(next)
-        .bind(fact.append.bytes().filter(|b| *b==b'\n').count() as i32)
+        .bind(append.bytes().filter(|b| *b==b'\n').count() as i32)
         .execute(&mut *conn)
         .await?;
-    emit(conn, run, "block_delta", json!({"block_id": block_id, "base_rev": fact.base_rev, "rev": fact.rev, "append": fact.append}), correlation_id).await?;
+    emit(
+        conn,
+        run,
+        "block_delta",
+        json!({"block_id": block_id, "base_rev": fact.base_rev, "rev": fact.rev, "append": append}),
+        correlation_id,
+    )
+    .await?;
     Ok(BlockOutcome::Applied)
 }
 
@@ -191,8 +214,16 @@ pub async fn finalize(
     let Some(block) = load(conn, run, block_id).await? else {
         return Ok(BlockOutcome::Ignored(BlockIgnored::UnknownBlock));
     };
+    let text = without_nul(&fact.text);
+    let accumulated = read_text(conn, block_id).await?;
+    let content: &str = if fact.text_omitted {
+        &accumulated
+    } else {
+        &text
+    };
+    let expected = stored_checksum(conn, block_id, fact, content).await?;
     if block.state == "final" {
-        if block.checksum.as_deref() == Some(fact.checksum.as_str()) {
+        if block.checksum.as_deref() == Some(expected.as_str()) {
             return Ok(BlockOutcome::Ignored(BlockIgnored::AfterFinal));
         }
         emit(
@@ -205,13 +236,7 @@ pub async fn finalize(
         .await?;
         return Ok(BlockOutcome::Diagnosed("block_conflicting_final"));
     }
-    let accumulated = read_text(conn, block_id).await?;
-    let content = if fact.text_omitted {
-        &accumulated
-    } else {
-        &fact.text
-    };
-    let mismatch = checksum(&accumulated) != fact.checksum || checksum(content) != fact.checksum;
+    let mismatch = checksum(&accumulated) != expected || checksum(content) != expected;
     if fact.text_omitted && (block.revision_gap || mismatch) {
         sqlx::query("update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp() where block_id = $1")
             .bind(block_id).bind(content).bind(rev(fact.rev)?).execute(&mut *conn).await?;
@@ -241,8 +266,8 @@ pub async fn finalize(
         }));
     }
     sqlx::query("update blocks set content = $2, rev = $3, state = 'final', checksum = $4, incomplete_reason = null, updated_at = clock_timestamp() where block_id = $1")
-        .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&fact.checksum).execute(&mut *conn).await?;
-    let event = emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": fact.text, "checksum": fact.checksum, "text_omitted": fact.text_omitted, "summary": non_empty(&fact.summary)}), correlation_id).await?;
+        .bind(block_id).bind(content).bind(rev(fact.rev)?).bind(&expected).execute(&mut *conn).await?;
+    let event = emit(conn, run, "block_final", json!({"block_id": block_id, "rev": fact.rev, "text": text, "checksum": expected, "text_omitted": fact.text_omitted, "summary": non_empty(&fact.summary)}), correlation_id).await?;
     sqlx::query("update blocks set finished_at=$2,summary=coalesce(nullif($3,''),summary),line_count=case when kind='tool_result' then $4 else line_count end where block_id=$1").bind(block_id).bind(event.committed_at).bind(&fact.summary).bind(content.bytes().filter(|b|*b==b'\n').count() as i32).execute(&mut *conn).await?;
     if mismatch {
         emit(
@@ -256,6 +281,50 @@ pub async fn finalize(
         return Ok(BlockOutcome::Diagnosed("block_checksum_mismatch"));
     }
     Ok(BlockOutcome::Applied)
+}
+
+/// Воркер считает сумму по своему тексту, а хаб хранит текст без NUL, и браузер сверяет его.
+/// Верная сумма оригинала становится суммой сохранённого текста, неверная остаётся расхождением.
+async fn stored_checksum(
+    conn: &mut PgConnection,
+    block_id: Uuid,
+    fact: &BlockFinal,
+    stored: &str,
+) -> Result<String, sqlx::Error> {
+    let original = if fact.text_omitted {
+        raw_chunks_checksum(conn, block_id).await?
+    } else {
+        fact.text.contains('\0').then(|| checksum(&fact.text))
+    };
+    Ok(if original.as_deref() == Some(fact.checksum.as_str()) {
+        checksum(stored)
+    } else {
+        fact.checksum.clone()
+    })
+}
+
+/// Сумма дельт в том виде, как их прислал воркер; `None`, если ни одна не менялась.
+async fn raw_chunks_checksum(
+    conn: &mut PgConnection,
+    block_id: Uuid,
+) -> Result<Option<String>, sqlx::Error> {
+    let chunks: Vec<Vec<u8>> = sqlx::query_scalar(
+        "select coalesce(c.raw, convert_to(c.text, 'UTF8')) from block_chunks c
+         where c.block_id = $1
+           and exists (select 1 from block_chunks r where r.block_id = $1 and r.raw is not null)
+         order by c.seq",
+    )
+    .bind(block_id)
+    .fetch_all(conn)
+    .await?;
+    if chunks.is_empty() {
+        return Ok(None);
+    }
+    let mut digest = Sha256::new();
+    for chunk in &chunks {
+        digest.update(chunk);
+    }
+    Ok(Some(hex(&digest.finalize())))
 }
 
 pub async fn mark_incomplete(

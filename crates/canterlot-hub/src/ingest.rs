@@ -1015,7 +1015,7 @@ fn pilot_error(error: sqlx::Error) -> IngestError {
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
-    let mut value = value.replace('\0', "�");
+    let mut value = blocks::without_nul(value).into_owned();
     if let Some((end, ch)) = value.char_indices().nth(limit - 1)
         && end + ch.len_utf8() < value.len()
     {

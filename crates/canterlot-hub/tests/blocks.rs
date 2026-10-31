@@ -308,6 +308,163 @@ async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> Te
     Ok(())
 }
 
+const NUL_TEXT: &str = "a\0b \u{fffd} c\0";
+const NUL_STORED: &str = "a\u{fffd}b \u{fffd} c\u{fffd}";
+
+fn omitted_final(id: Uuid, rev: u64, checksum: String) -> Body {
+    Body::BlockFinal(BlockFinal {
+        block_id: id.to_string(),
+        rev,
+        checksum,
+        text_omitted: true,
+        ..Default::default()
+    })
+}
+async fn stored_checksum(pool: &PgPool, id: Uuid) -> Option<String> {
+    sqlx::query_scalar("select checksum from blocks where block_id = $1")
+        .bind(id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+fn kinds(events: &[(String, i64, Value)]) -> Vec<&str> {
+    events.iter().map(|event| event.0.as_str()).collect()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_deltas_and_final_is_replaced_and_keeps_the_checksum_valid(
+    pool: PgPool,
+) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    let (head, tail) = NUL_TEXT.split_at(2);
+    run.send(vec![
+        start(id),
+        delta(id, 0, 1, head),
+        delta(id, 1, 2, tail),
+        final_fact(id, 3, NUL_TEXT),
+    ])
+    .await;
+    let row = block(&pool, id).await;
+    assert_eq!((row.0.as_str(), row.2.as_str()), (NUL_STORED, "final"));
+    assert_eq!(
+        stored_checksum(&pool, id).await.as_deref(),
+        Some(hash(NUL_STORED).as_str())
+    );
+    let events = events(&pool, id).await;
+    assert_eq!(
+        kinds(&events),
+        ["block_started", "block_delta", "block_delta", "block_final"]
+    );
+    let sent: String = events[1..3]
+        .iter()
+        .map(|event| event.2["append"].as_str().unwrap())
+        .collect();
+    assert_eq!(sent, NUL_STORED);
+    assert_eq!(events[3].2["text"], NUL_STORED);
+    assert_eq!(events[3].2["checksum"], hash(NUL_STORED));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_a_final_without_deltas_is_replaced(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![start(id), final_fact(id, 1, NUL_TEXT)]).await;
+    let row = block(&pool, id).await;
+    assert_eq!((row.0.as_str(), row.2.as_str()), (NUL_STORED, "final"));
+    assert_eq!(
+        stored_checksum(&pool, id).await.as_deref(),
+        Some(hash(NUL_STORED).as_str())
+    );
+    Ok(())
+}
+
+// Текст крупнее финала хаб знает только по дельтам, а воркер считал сумму по оригиналу.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn omitted_final_of_nul_deltas_is_verified_against_the_original_text(
+    pool: PgPool,
+) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![
+        start(id),
+        delta(id, 0, 1, NUL_TEXT),
+        omitted_final(id, 2, hash(NUL_TEXT)),
+    ])
+    .await;
+    let row = block(&pool, id).await;
+    assert_eq!((row.0.as_str(), row.2.as_str()), (NUL_STORED, "final"));
+    assert_eq!(
+        stored_checksum(&pool, id).await.as_deref(),
+        Some(hash(NUL_STORED).as_str())
+    );
+    let events = events(&pool, id).await;
+    assert_eq!(
+        kinds(&events),
+        ["block_started", "block_delta", "block_final"]
+    );
+    assert_eq!(events[2].2["checksum"], hash(NUL_STORED));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wrong_checksum_over_nul_text_is_still_a_mismatch(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let inline = Uuid::now_v7();
+    let Body::BlockFinal(mut fact) = final_fact(inline, 2, NUL_TEXT) else {
+        unreachable!()
+    };
+    fact.checksum = hash("другой текст");
+    run.send(vec![
+        start(inline),
+        delta(inline, 0, 1, NUL_TEXT),
+        Body::BlockFinal(fact),
+    ])
+    .await;
+    assert_eq!(block(&pool, inline).await.2, "final");
+    assert!(kinds(&events(&pool, inline).await).contains(&"block_checksum_mismatch"));
+
+    let omitted = Uuid::now_v7();
+    run.send(vec![
+        start(omitted),
+        delta(omitted, 0, 1, NUL_TEXT),
+        omitted_final(omitted, 2, hash("другой текст")),
+    ])
+    .await;
+    let row = block(&pool, omitted).await;
+    assert_eq!((row.0.as_str(), row.2.as_str()), (NUL_STORED, "incomplete"));
+    assert!(kinds(&events(&pool, omitted).await).contains(&"block_checksum_mismatch"));
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn repeated_final_of_nul_text_is_recognised_as_the_same_final(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let inline = Uuid::now_v7();
+    run.send(vec![
+        start(inline),
+        delta(inline, 0, 1, NUL_TEXT),
+        final_fact(inline, 2, NUL_TEXT),
+        final_fact(inline, 2, NUL_TEXT),
+    ])
+    .await;
+    let omitted = Uuid::now_v7();
+    run.send(vec![
+        start(omitted),
+        delta(omitted, 0, 1, NUL_TEXT),
+        omitted_final(omitted, 2, hash(NUL_TEXT)),
+        omitted_final(omitted, 2, hash(NUL_TEXT)),
+    ])
+    .await;
+    for id in [inline, omitted] {
+        assert!(!kinds(&events(&pool, id).await).contains(&"block_conflicting_final"));
+    }
+    run.send(vec![final_fact(inline, 2, "a\0другое")]).await;
+    assert!(kinds(&events(&pool, inline).await).contains(&"block_conflicting_final"));
+    Ok(())
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn journal_closed_marks_streaming_blocks_incomplete_and_late_final_wins(
     pool: PgPool,

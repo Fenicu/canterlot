@@ -2041,3 +2041,91 @@ async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once(pool: PgPool)
     assert_eq!(prompts, 1, "no prompt is sent twice");
     fixture.finish().await;
 }
+
+// Поток данных общий для машины: запись одного разговора не должна держать другой.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn nul_in_one_session_leaves_the_machine_stream_running(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let other = testkit::seed_conversation(&pool, fixture.owner, fixture.config.machine_id).await;
+    sqlx::query("update conversations set workdir = $2 where id = $1")
+        .bind(other)
+        .bind(fixture.root.path().join("work").to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = executions::start(&pool, fixture.owner, other, Uuid::now_v7())
+        .await
+        .unwrap();
+    until("second execution running", async || {
+        sqlx::query_scalar::<_, String>("select state from executions where id = $1")
+            .bind(second.execution_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            == "running"
+    })
+    .await;
+    let (script, expected) = answer(3, 0);
+    fixture
+        .submit(json!({"synthetic":[{"delta":"a\u{0}b"}]}).to_string())
+        .await;
+    submit::submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: fixture.owner,
+            conversation_id: other,
+            idempotency_key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text { text: script }],
+            received_at: chrono::Utc::now(),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .unwrap();
+    fixture.hub().dispatcher.trigger(other);
+    let content = async |execution: Uuid| -> Option<String> {
+        sqlx::query_scalar("select content from blocks where execution_id = $1 and state = 'final'")
+            .bind(execution)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+    };
+    until("both answers final", async || {
+        content(fixture.execution).await.is_some() && content(second.execution_id).await.is_some()
+    })
+    .await;
+    assert_eq!(
+        content(fixture.execution).await.as_deref(),
+        Some("a\u{fffd}b")
+    );
+    assert!(content(second.execution_id).await.as_deref() == Some(expected.as_str()));
+    let mismatches: i64 = sqlx::query_scalar(
+        "select count(*) from events where execution_id = $1 and kind = 'block_checksum_mismatch'",
+    )
+    .bind(fixture.execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(mismatches, 0);
+    control::request_stop_execution(
+        &pool,
+        fixture.owner,
+        other,
+        true,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    until("second execution stopped", async || {
+        sqlx::query_scalar::<_, String>("select state from executions where id = $1")
+            .bind(second.execution_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+            == "stopped"
+    })
+    .await;
+    fixture.finish().await;
+}
