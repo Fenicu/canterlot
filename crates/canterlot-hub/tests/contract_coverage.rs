@@ -287,10 +287,12 @@ fn case(
 
 const SHA_ABC: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 
-/// Маршруты, освобождённые от ключа: загрузка части (идемпотентна по смещению) и отметка прочтения.
+/// Маршруты, освобождённые от ключа: загрузка части (идемпотентна по смещению), отметка прочтения
+/// и просьба обновить лимиты (повтор безвреден, частоту ограничивает хаб).
 fn exempt(method: &str, path: &str) -> bool {
     (method == "PATCH" && path.ends_with("/content"))
         || (method == "POST" && path.ends_with("/read"))
+        || (method == "POST" && path == "/api/v1/limits/refresh")
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

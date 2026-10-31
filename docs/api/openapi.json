@@ -3101,6 +3101,78 @@
         }
       }
     },
+    "/api/v1/limits/refresh": {
+      "post": {
+        "tags": [
+          "limits"
+        ],
+        "operationId": "post__api_v1_limits_refresh",
+        "responses": {
+          "202": {
+            "description": "Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RefreshView"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Нет доступного воркера с лимитами",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "429": {
+            "description": "Опрос просили слишком недавно",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/machines": {
       "get": {
         "tags": [
@@ -7663,6 +7735,27 @@
           }
         },
         "additionalProperties": false
+      },
+      "RefreshView": {
+        "type": "object",
+        "required": [
+          "requested",
+          "retry_after_secs"
+        ],
+        "properties": {
+          "requested": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Провайдеры, чьим машинам отправлена просьба об опросе."
+          },
+          "retry_after_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
       },
       "RequestItemView": {
         "type": "object",

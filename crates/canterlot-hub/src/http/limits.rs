@@ -5,7 +5,7 @@ use super::{
     extract::ApiQuery,
 };
 use crate::{conversations::time, limits};
-use axum::{Json, extract::State};
+use axum::{Json, extract::State, http::StatusCode};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
@@ -15,6 +15,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(current))
         .routes(routes!(history))
+        .routes(routes!(refresh))
 }
 #[derive(Serialize, ToSchema)]
 pub struct WindowView {
@@ -50,6 +51,15 @@ impl From<limits::ProviderLimits> for ProviderView {
             weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
         }
     }
+}
+/// Раньше этого срока повторную просьбу об опросе лимитов провайдера хаб не отправляет.
+const REFRESH_MIN_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+#[derive(Serialize, ToSchema)]
+pub struct RefreshView {
+    /// Провайдеры, чьим машинам отправлена просьба об опросе.
+    pub requested: Vec<String>,
+    pub retry_after_secs: u64,
 }
 #[derive(Deserialize, IntoParams)]
 pub struct HistoryParams {
@@ -144,4 +154,41 @@ async fn history(
         });
     }
     Ok(Json(History { usage, series }))
+}
+#[utoipa::path(post,path="/api/v1/limits/refresh",tag="limits",responses((status=202,description="Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed",body=RefreshView),(status=429,description="Опрос просили слишком недавно"),(status=409,description="Нет доступного воркера с лимитами")))]
+async fn refresh(
+    State(s): State<AppState>,
+    _o: Owner,
+) -> Result<(StatusCode, Json<RefreshView>), ApiError> {
+    use crate::crunch::{PollRequest, request_poll_outcome};
+    let providers: Vec<String> = sqlx::query_scalar(
+        "select distinct provider from machine_harnesses where provider in ('claude','codex') order by provider",
+    )
+    .fetch_all(&s.pool)
+    .await?;
+    let now = Utc::now();
+    let (mut requested, mut throttled) = (Vec::new(), false);
+    for provider in providers {
+        match request_poll_outcome(&s.pool, &s.registry, &provider, REFRESH_MIN_INTERVAL, now)
+            .await?
+        {
+            PollRequest::Sent => requested.push(provider),
+            PollRequest::Throttled => throttled = true,
+            PollRequest::NoMachine => {}
+        }
+    }
+    if requested.is_empty() {
+        return Err(ApiError::new(if throttled {
+            ErrorCode::TooManyRequests
+        } else {
+            ErrorCode::MachineUnavailable
+        }));
+    }
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(RefreshView {
+            requested,
+            retry_after_secs: REFRESH_MIN_INTERVAL.as_secs(),
+        }),
+    ))
 }

@@ -927,6 +927,16 @@ async fn spend_in_tx(
     Ok(SpendOutcome::Continued)
 }
 
+/// Чем закончилась просьба об опросе лимитов провайдера.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PollRequest {
+    Sent,
+    /// Недавно уже просили: повтор раньше `min_interval` не уходит.
+    Throttled,
+    /// Нет доступной машины провайдера с `pilot_v1` и свободным местом в очереди команд.
+    NoMachine,
+}
+
 /// Просит одну доступную машину провайдера с `pilot_v1` опросить лимиты; вызывается только после commit.
 pub async fn request_poll(
     pool: &PgPool,
@@ -935,6 +945,19 @@ pub async fn request_poll(
     min_interval: Duration,
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
+    Ok(
+        request_poll_outcome(pool, registry, provider, min_interval, now).await?
+            == PollRequest::Sent,
+    )
+}
+
+pub async fn request_poll_outcome(
+    pool: &PgPool,
+    registry: &Registry,
+    provider: &str,
+    min_interval: Duration,
+    now: DateTime<Utc>,
+) -> Result<PollRequest, sqlx::Error> {
     let machines: Vec<Uuid> = sqlx::query_scalar(
         "select distinct machine_id from machine_harnesses where provider=$1 order by machine_id",
     )
@@ -949,22 +972,22 @@ pub async fn request_poll(
         })
         .find_map(|m| registry.command_sender(m))
     else {
-        return Ok(false);
+        return Ok(PollRequest::NoMachine);
     };
     let Ok(permit) = sender.try_reserve() else {
-        return Ok(false);
+        return Ok(PollRequest::NoMachine);
     };
     let claimed: Option<String> = sqlx::query_scalar("insert into limit_polls(provider,last_requested_at) values($1,$2) on conflict(provider) do update set last_requested_at=excluded.last_requested_at where limit_polls.last_requested_at <= $3 returning provider")
         .bind(provider).bind(now).bind(now - delta(min_interval)?).fetch_optional(pool).await?;
     if claimed.is_none() {
-        return Ok(false);
+        return Ok(PollRequest::Throttled);
     }
     permit.send(ControlDown {
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: provider.into(),
         })),
     });
-    Ok(true)
+    Ok(PollRequest::Sent)
 }
 
 pub(crate) async fn clear_resume_in_tx(
