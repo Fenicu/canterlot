@@ -1,25 +1,27 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { toolFailed, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
-  import StatusPill from '#lib/timeline/StatusPill.svelte';
+  import { toolError, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import StepHead from '#lib/timeline/StepHead.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
-  import Icon from '#lib/ui/Icon.svelte';
 
   let {
     block,
     result = null,
     working = false,
     now,
+    open,
+    onToggle,
     load
   }: {
     block: BlockModel;
     result?: BlockModel | null;
     working?: boolean;
     now: number;
+    open: boolean;
+    onToggle: () => void;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
-  let open = $state(false);
   let viewing = $state<number | null>(null);
   let Viewer = $state<Component<{ shots: BlockMedia[]; start?: number; title: string; onclose: () => void }> | null>(null);
 
@@ -31,23 +33,19 @@
   const detail = $derived([title.server, title.argument].filter(Boolean).join(' · '));
   const timing = $derived(toolTiming(block, result, working));
   const running = $derived(timing.running || block.state === 'stale');
-  const error = $derived(block.state === 'incomplete' || block.kind === 'error' || toolFailed(result ?? (block.kind === 'tool_result' ? block : null)));
+  const error = $derived(toolError(block, result));
   const status = $derived(toolStatusText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
 </script>
 
-<div class="tool" data-open={open ? '' : undefined}>
-  <button type="button" class="head" aria-expanded={open} onclick={() => { open = !open; }}>
-    <span class="chevron"><Icon name="chevron" /></span>
-    <span class="name">{title.name || 'Результат инструмента'}</span>
-    {#if detail}<span class="summary">{detail}</span>{/if}
-    {#if isCliPolicy}
-      <span class="policy-badge">Разрешено правилами CLI</span>
-    {/if}
-    {#if status}<StatusPill state={error ? 'error' : running ? 'running' : 'done'} text={status} />{/if}
-  </button>
+<div class="tool">
+  <StepHead name={title.name || 'Результат инструмента'} {detail} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
+    {#snippet badge()}
+      {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}
+    {/snippet}
+  </StepHead>
   {#if shots.length > 0}
     <div class="shots">
       {#each shots as shot (shot.media_id)}
@@ -79,23 +77,6 @@
 
 <style>
   .tool { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); background: var(--raised); }
-  .head {
-    display: flex;
-    gap: var(--s3);
-    align-items: center;
-    width: 100%;
-    min-height: var(--target);
-    padding: var(--s2) var(--s5) var(--s2) var(--s4);
-    border-radius: var(--radius-card);
-    background: var(--transparent);
-    font-size: var(--fs-sm);
-    text-align: left;
-  }
-  .chevron { flex: none; color: var(--muted); transition: transform var(--duration-expand) var(--ease-expand); }
-  .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
-  [data-open] .chevron { transform: rotate(90deg); }
-  .name { flex: 0 1 auto; min-width: 0; max-width: 70%; overflow: hidden; font-family: var(--font-mono); font-weight: var(--weight-semibold); text-overflow: ellipsis; white-space: nowrap; }
-  .summary { flex: 1 1 0; min-width: 0; overflow: hidden; color: var(--secondary); font-family: var(--font-mono); text-overflow: ellipsis; white-space: nowrap; }
   .policy-badge {
     flex: none;
     padding: var(--s1) var(--s3);

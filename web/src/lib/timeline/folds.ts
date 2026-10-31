@@ -19,17 +19,35 @@ export interface CutView<T> {
 export class FeedFolds {
   readonly #open = new SvelteSet<string>();
   readonly #cuts = new Map<string, Cut | null>();
+  readonly #groups = new Map<string, string>();
+  readonly #beforeChange: (closing: boolean) => void;
+
+  /** `beforeChange` зовётся до правки ленты: раскрытие открывается на месте и не тянет окно к хвосту. */
+  constructor(beforeChange: (closing: boolean) => void = () => undefined) {
+    this.#beforeChange = beforeChange;
+  }
 
   isOpen(id: string): boolean {
     return this.#open.has(id);
   }
 
   toggle(id: string): void {
+    this.#beforeChange(this.#open.has(id));
     if (!this.#open.delete(id)) this.#open.add(id);
   }
 
   reveal(id: string): void {
+    this.#beforeChange(false);
     this.#open.add(`cut:${id}`);
+  }
+
+  /** Группа растёт с двух концов: живыми шагами в хвосте и старшей страницей в голове. Имя у неё одно на всё время. */
+  groupKey(members: string[], taken: Set<string>): string {
+    const known = members.map((key) => this.#groups.get(key)).find((key) => key !== undefined && !taken.has(key));
+    const id = known ?? `steps:${members[0]}`;
+    taken.add(id);
+    for (const key of members) this.#groups.set(key, id);
+    return id;
   }
 
   /** Разрез решается один раз и держится за свои строки: то, что владелец уже видел, из ленты не исчезает. */

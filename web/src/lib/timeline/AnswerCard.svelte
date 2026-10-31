@@ -7,9 +7,11 @@
   import type { FeedFolds } from '#lib/timeline/folds.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
+  import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
+  import StepGroupRow from '#lib/timeline/StepGroupRow.svelte';
   import SubagentRow from '#lib/timeline/SubagentRow.svelte';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import ToolBlock from '#lib/timeline/ToolBlock.svelte';
@@ -41,7 +43,12 @@
   } = $props();
 
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
-  const blocks = $derived(entries.filter((entry) => entry.kind !== 'block' || shownInCard(entry.block)));
+  // Текст рассуждения читается здесь один раз: токен меняет строку только тогда, когда пустое рассуждение обретает текст.
+  const hollow = $derived(entries.filter((entry) => entry.kind === 'block' && !shownInCard(entry.block)).map((entry) => entry.key).join(' '));
+  const blocks = $derived.by(() => {
+    const empty = new Set(hollow.split(' '));
+    return entries.filter((entry) => !empty.has(entry.key));
+  });
   const head = $derived(all[0]);
   const streaming = $derived(all.some((block) => block.state === 'streaming'));
   const active = $derived(all.findLast((block) => block.state === 'streaming'));
@@ -49,8 +56,31 @@
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
-  const view = $derived(folds.view(cardKey, blocks, working || streaming));
+  const live = $derived(working || streaming);
+  const items = $derived(foldSteps(blocks, { links, working, live, folds }));
+  const view = $derived(folds.view(cardKey, items, live));
 </script>
+
+{#snippet entryRow(entry: TimelineEntry)}
+  {#if entry.kind === 'request'}
+    <RequestCard request={entry.request} onDecision={async () => undefined} />
+  {:else if entry.kind === 'block'}
+    {@const block = entry.block}
+    {#if isSubagentCall(block)}
+      <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} {working} {now} {conversationId} />
+    {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
+      <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
+    {:else if block.kind === 'warning' || block.kind === 'error'}
+      <NoticeBlock {block} />
+    {:else if block.kind === 'reasoning'}
+      <ReasoningBlock {block} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
+    {:else}
+      {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
+      <TextBlock {block} />
+      {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+    {/if}
+  {/if}
+{/snippet}
 
 <article class="card">
   {#if head}
@@ -59,29 +89,16 @@
       <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
     </header>
   {/if}
-  {#each view.shown as entry (entry.key)}
-    {#if entry.key === view.seam}
+  {#each view.shown as item (item.key)}
+    {#if item.key === view.seam}
       <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
     {/if}
-    <div class="entry" data-key={entry.key}>
-    {#if entry.kind === 'request'}
-      <RequestCard request={entry.request} onDecision={async () => undefined} />
-    {:else if entry.kind === 'block'}
-      {@const block = entry.block}
-      {#if isSubagentCall(block)}
-        <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} {working} {now} {conversationId} />
-      {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-        <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
-      {:else if block.kind === 'warning' || block.kind === 'error'}
-        <NoticeBlock {block} />
-      {:else if block.kind === 'reasoning'}
-        <ReasoningBlock {block} />
+    <div class="entry" data-key={item.key}>
+      {#if item.kind === 'group'}
+        <StepGroupRow group={item} {folds} row={entryRow} />
       {:else}
-        {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
-        <TextBlock {block} />
-        {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+        {@render entryRow(item.entry)}
       {/if}
-    {/if}
     </div>
   {/each}
   {#if streaming && head}

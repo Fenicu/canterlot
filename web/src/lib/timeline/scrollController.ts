@@ -53,6 +53,12 @@ export class ScrollController {
     this.#last = this.#el.scrollTop;
   }
 
+  /** Владелец раскрыл строку: окно перестаёт следовать за хвостом до возвращения вниз. */
+  release(): void {
+    this.#pinned.set(false);
+    this.#cancelFrame();
+  }
+
   jumpToBottom(): void {
     this.#pinned.set(true);
     this.#showJump.set(false);

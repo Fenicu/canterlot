@@ -657,6 +657,8 @@ describe('PWA Request Cards', () => {
       props: {
         block,
         now: Date.now(),
+        open: false,
+        onToggle: vi.fn(),
         load: vi.fn()
       }
     });

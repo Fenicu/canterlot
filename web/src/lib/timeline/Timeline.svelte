@@ -50,8 +50,9 @@
   let settling = false;
   let measuring = false;
   let queued: { key: string; height: number }[] = [];
-  const folds = new FeedFolds();
+  const folds = new FeedFolds(keepInPlace);
   const PIN_PX = 48;
+  const OLDER_PAGE = 100;
 
   const today = $derived(dayStart(now));
   const links = $derived(blockLinks(chat.timeline.entries));
@@ -92,6 +93,18 @@
 
   function hold(): void {
     held = host && !controller?.pinned ? viewAnchor(host) : null;
+  }
+
+  function keepInPlace(closing: boolean): void {
+    controller?.release();
+    hold();
+    if (!closing) return;
+    // Свёрнутое у самого низа возвращает окно к хвосту.
+    void tick().then(() => {
+      if (!host || host.scrollHeight - host.clientHeight - host.scrollTop > PIN_PX) return;
+      held = null;
+      controller?.jumpToBottom();
+    });
   }
 
   function applyHeight(key: string, height: number): void {
@@ -263,6 +276,9 @@
       void tick().then(() => {
         if (target !== null) scrollTo(target);
         settle();
+        // Свёрнутый ход может уместиться в окно: тогда старшую страницу не вызвать прокруткой.
+        const room = chat.timeline.entries.length + OLDER_PAGE <= chat.timeline.maxLoaded;
+        if (room && el.scrollHeight - el.clientHeight <= PIN_PX) void pullOlder();
       });
       requestAnimationFrame(() => {
         if (grew) controller?.onContentChange('tail-growth');

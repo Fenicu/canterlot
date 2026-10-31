@@ -2,6 +2,7 @@ import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { FIRST_DIALOG, FIRST_QUESTION, dialogConversation, playFirstDialog, seedFirstDialog, seedLongTurn } from '../../testing/fixtures/first-dialog';
+import { sha256Hex } from '../../src/lib/stores/blocks';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -358,4 +359,108 @@ test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', 
   await page.waitForTimeout(300);
   const after = await row.boundingBox();
   expect(Math.abs((after?.y ?? -9999) - (before?.y ?? 0))).toBeLessThanOrEqual(1);
+});
+
+test('long_turn_folds_into_one_row_and_the_final_answer_stays_outside', async ({ page }) => {
+  await longTurn(page, 58, 'steps');
+  const feed = page.locator('.feed');
+  await feed.evaluate((el) => { el.scrollTop = 0; });
+  await expect(feed).toHaveAttribute('data-loaded', '134');
+  await feed.evaluate((el) => { el.scrollTop = 0; });
+  const group = page.locator('.steps');
+  await expect(group).toHaveCount(1);
+  await expect(group.locator('.surface .name')).toHaveText('58 шагов');
+  await expect(group.locator('.surface .summary')).toHaveText('Bash 44 · Read 14');
+  await expect(group.locator('.surface .pill')).toHaveText('3 мин');
+  await expect(page.locator('.tool')).toHaveCount(0);
+  await expect(page.locator('.reasoning')).toHaveCount(0);
+  await expect(page.locator('.prose')).toHaveCount(2);
+  const order = await page.locator('.card > .entry').evaluateAll((rows) => rows.map((row) => (row.querySelector('.steps') ? 'group' : 'text')));
+  expect(order).toEqual(['text', 'group', 'text']);
+  const box = (await group.boundingBox())!;
+  await group.locator('.surface .head').click();
+  await expect(group.getByRole('button', { name: /Показать ещё \d+ шаг/ })).toBeVisible();
+  await expect(page.locator('.tool').first()).toBeVisible();
+  expect(Math.abs((await group.boundingBox())!.y - box.y)).toBeLessThanOrEqual(1);
+  await group.getByRole('button', { name: /Показать ещё/ }).click();
+  await expect(group.locator('.reasoning')).toHaveCount(15);
+  await expect(group.locator('.tool')).toHaveCount(58);
+  await group.locator('.surface .head').click();
+  await expect(page.locator('.tool')).toHaveCount(0);
+});
+
+test('failed_step_shows_on_the_summary_and_inside_the_opened_group', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const turn = seedLongTurn(api, 6, 'steps');
+  const result = turn.items.filter((item) => item.kind === 'block' && item.block_kind === 'tool_result')[2] as { summary: string | null };
+  result.summary = 'error';
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${turn.id}`);
+  const group = page.locator('.steps');
+  await expect(group.locator('.surface .pill')).toHaveText('Ошибка 1');
+  await expect(group.locator('.surface .pill')).toHaveAttribute('data-state', 'error');
+  await group.locator('.surface .head').click();
+  await expect(group.locator('.tool .pill[data-state="error"]')).toHaveCount(1);
+});
+
+test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_owner_choice', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = dialogConversation(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const scope = `conversation:${id}`;
+  const run = api.id();
+  const at = (seconds: number) => new Date(Date.parse('2026-10-31T10:30:00.000Z') + seconds * 1000).toISOString();
+  const start = (block_id: string, kind: string, tool_name: string | null, parent: string | null, when: string) =>
+    hub.append(scope, { kind: 'block_started', conversation_id: id, payload: { block_id, rev: 0, kind, input_command_id: run, parent_block_id: parent, agent: 'orchestrator', model: 'claude-opus-5-5', tool_name, summary: tool_name ? `${tool_name}: команда` : null, approved_by: null }, at: when });
+  const finish = async (block_id: string, text: string, when: string) =>
+    hub.append(scope, { kind: 'block_final', conversation_id: id, payload: { block_id, rev: 1, text, checksum: await sha256Hex(text), text_omitted: false, summary: null }, at: when });
+  hub.append(scope, { kind: 'derived_changed', conversation_id: id, payload: { conversation_id: id, activity: { state: 'working', evidence: { phase: 'running_tool' }, since: at(0) }, unread_count: 0, queue: { queued: 0, pause_reasons: [], hold_reasons: [] }, last_activity_at: at(0), settings: { model: 'opus-5.5', effort: 'high', permission_mode: 'owner' }, crunch: { enabled: false } } });
+  const step = async (index: number) => {
+    const call = api.id();
+    start(call, 'tool_call', 'Bash', null, at(index * 2));
+    await finish(call, '', at(index * 2));
+    hub.flush();
+    await expect(page.locator('.tool .pill[data-state="running"]')).toHaveCount(1);
+    return call;
+  };
+  const done = async (call: string, index: number) => {
+    const result = api.id();
+    start(result, 'tool_result', null, call, at(index * 2 + 1));
+    await finish(result, 'ok', at(index * 2 + 1));
+    hub.flush();
+    await expect(page.locator('.tool .pill[data-state="running"]')).toHaveCount(0);
+  };
+  const feed = page.locator('.feed');
+  const bottom = () => feed.evaluate((el) => el.scrollHeight);
+  await done(await step(0), 0);
+  await done(await step(1), 1);
+  const heights: number[] = [];
+  const third = await step(2);
+  await expect(page.locator('.steps .surface .name')).toHaveText('2 шага');
+  await page.locator('.steps').evaluate((node) => { (node as HTMLElement & { mark?: boolean }).mark = true; });
+  heights.push(await bottom());
+  await page.locator('.steps .surface .head').click();
+  await expect(page.locator('.steps .tool')).toHaveCount(2);
+  await page.locator('.steps .surface .head').click();
+  await expect(page.locator('.steps .tool')).toHaveCount(0);
+  await done(third, 2);
+  for (let index = 3; index < 6; index++) {
+    const previous = page.locator('.card > .entry .tool');
+    await expect(previous).toHaveCount(1);
+    await done(await step(index), index);
+    await expect(page.locator('.steps .surface .name')).toHaveText(`${index} шага`.replace('5 шага', '5 шагов'));
+    await expect(page.locator('.card > .entry .tool')).toHaveCount(1);
+    heights.push(await bottom());
+  }
+  expect(new Set(heights).size).toBe(1);
+  expect(await page.locator('.steps').evaluate((node) => (node as HTMLElement & { mark?: boolean }).mark)).toBe(true);
+  await page.locator('.steps .surface .head').click();
+  await expect(page.locator('.steps .tool')).toHaveCount(5);
+  await done(await step(6), 6);
+  await expect(page.locator('.steps .surface .head')).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.steps .tool')).toHaveCount(6);
 });

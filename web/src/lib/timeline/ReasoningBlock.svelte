@@ -3,12 +3,11 @@
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
-  let { block }: { block: BlockModel } = $props();
-  let open = $state(false);
+  let { block, open, onToggle }: { block: BlockModel; open: boolean; onToggle: () => void } = $props();
 </script>
 
 <div class="reasoning" data-open={open ? '' : undefined}>
-  <button type="button" class="toggle" aria-expanded={open} onclick={() => { open = !open; }}>
+  <button type="button" class="toggle" aria-expanded={open} onclick={onToggle}>
     <span class="chevron"><Icon name="chevron" /></span>
     <span>Рассуждение</span>
   </button>

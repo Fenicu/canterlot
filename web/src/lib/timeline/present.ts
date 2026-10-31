@@ -129,6 +129,15 @@ export function toolFailed(result: BlockModel | null): boolean {
   return result.summary === TOOL_FAILED_MARK || result.text.startsWith(CLI_ERROR_OPEN);
 }
 
+/** Вызов считается неудачным и без своего результата: обрыв хода и старые строки без вызова. */
+export function toolError(block: BlockModel, result: BlockModel | null): boolean {
+  return (
+    block.state === "incomplete" ||
+    block.kind === "error" ||
+    toolFailed(result ?? (block.kind === "tool_result" ? block : null))
+  );
+}
+
 /** Обёртку CLI вокруг текста ошибки владельцу показывать незачем. */
 export function cleanToolOutput(text: string): string {
   const inner = /^<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/.exec(text);
