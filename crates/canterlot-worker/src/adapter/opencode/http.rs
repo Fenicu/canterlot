@@ -167,15 +167,25 @@ impl Http {
         &self,
         builder: reqwest::RequestBuilder,
         limit: Duration,
-    ) -> Result<Value, HttpError> {
+    ) -> Result<(Value, usize), HttpError> {
         let body = self.send(builder, limit, MAX_BODY_BYTES).await?;
         if body.is_empty() {
-            return Ok(Value::Null);
+            return Ok((Value::Null, 0));
         }
-        decode_json(&body).map_err(|_| HttpError::Decode)
+        let value = decode_json(&body).map_err(|_| HttpError::Decode)?;
+        Ok((value, body.len()))
     }
 
     pub async fn get(&self, path: &str, limit: Duration) -> Result<Value, HttpError> {
+        self.get_measured(path, limit).await.map(|(value, _)| value)
+    }
+
+    /// Ответ и его размер в байтах.
+    pub async fn get_measured(
+        &self,
+        path: &str,
+        limit: Duration,
+    ) -> Result<(Value, usize), HttpError> {
         self.json(self.request(Method::GET, path), limit).await
     }
 
@@ -187,11 +197,14 @@ impl Http {
     ) -> Result<Value, HttpError> {
         self.json(self.request(Method::POST, path).json(body), limit)
             .await
+            .map(|(value, _)| value)
     }
 
     /// `POST` без тела: прерывание схема описывает без него.
     pub async fn post_empty(&self, path: &str, limit: Duration) -> Result<Value, HttpError> {
-        self.json(self.request(Method::POST, path), limit).await
+        self.json(self.request(Method::POST, path), limit)
+            .await
+            .map(|(value, _)| value)
     }
 
     pub async fn patch(
@@ -202,6 +215,7 @@ impl Http {
     ) -> Result<Value, HttpError> {
         self.json(self.request(Method::PATCH, path).json(body), limit)
             .await
+            .map(|(value, _)| value)
     }
 
     pub async fn delete(
@@ -212,6 +226,7 @@ impl Http {
     ) -> Result<Value, HttpError> {
         self.json(self.request(Method::DELETE, path).query(query), limit)
             .await
+            .map(|(value, _)| value)
     }
 
     /// Сырые байты ответа, для сверки схемы.

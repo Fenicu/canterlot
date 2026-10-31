@@ -12,6 +12,8 @@ const READ_WAIT: Duration = Duration::from_secs(10);
 const PAGE_SIZE: usize = 100;
 /// Сверх этого хвост длинной сессии не читается: потерян может быть только её конец.
 const MAX_PAGES: usize = 20;
+/// Картинки лежат в сообщениях прямо в base64, поэтому страницы считаются ещё и по байтам.
+const MAX_TAIL_BYTES: usize = 256 * 1024 * 1024;
 
 /// Что известно о сессии после подписки.
 pub struct Snapshot {
@@ -44,10 +46,15 @@ fn id_of(item: &Value) -> Option<&str> {
 
 // Последний период и тот, что перед ним. Потерять можно только конец работы, а `idle`
 // отделяет периоды: второй с конца — граница, раньше него всё уже было прочитано живьём.
-async fn tail(http: &Http, session: &str) -> Result<(Vec<Value>, bool), HttpError> {
+pub async fn tail_within(
+    http: &Http,
+    session: &str,
+    budget: usize,
+) -> Result<(Vec<Value>, bool), HttpError> {
     let mut messages = Vec::new();
     let mut truncated = false;
     let mut idle = 0;
+    let mut spent = 0;
     let mut size = PAGE_SIZE;
     let mut cursor: Option<String> = None;
     let mut pages = 0;
@@ -57,7 +64,7 @@ async fn tail(http: &Http, session: &str) -> Result<(Vec<Value>, bool), HttpErro
             None => format!("limit={size}&order=desc"),
         };
         let path = format!("/api/session/{session}/message?{query}");
-        let reply = match http.get(&path, READ_WAIT).await {
+        let (reply, bytes) = match http.get_measured(&path, READ_WAIT).await {
             // Вложения и картинки лежат в сообщениях прямо в base64.
             Err(HttpError::TooLarge | HttpError::Decode) if size > 1 => {
                 size = (size / 4).max(1);
@@ -72,6 +79,7 @@ async fn tail(http: &Http, session: &str) -> Result<(Vec<Value>, bool), HttpErro
             other => other?,
         };
         pages += 1;
+        spent += bytes;
         let page = items(&reply);
         let last_page = page.len() < size;
         size = (size * 4).min(PAGE_SIZE);
@@ -91,6 +99,10 @@ async fn tail(http: &Http, session: &str) -> Result<(Vec<Value>, bool), HttpErro
             .filter(|_| !last_page)
             .map(str::to_owned);
         if cursor.is_none() {
+            break;
+        }
+        if spent >= budget {
+            truncated = true;
             break;
         }
     }
@@ -151,7 +163,7 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
             http.get(&format!("{path}/form"), READ_WAIT).await,
         )?));
     }
-    let (messages, truncated) = tail(http, session).await?;
+    let (messages, truncated) = tail_within(http, session, MAX_TAIL_BYTES).await?;
     // Ввод мог лечь уже после первого чтения: история его покажет, а тот ответ ещё нет.
     let running = running || is_running(http, session).await?;
     Ok(Snapshot {

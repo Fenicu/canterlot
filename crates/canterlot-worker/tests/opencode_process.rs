@@ -110,7 +110,7 @@ async fn hung_version_check_is_cut_off_with_its_group() {
 mod fake {
     use canterlot_worker::adapter::opencode::{
         http::Http,
-        orphans,
+        orphans, reconcile,
         replay::{Reply, Script},
     };
     use serde_json::{Value, json};
@@ -229,6 +229,32 @@ mod fake {
         let written: Value =
             serde_json::from_slice(&std::fs::read(journal.path()).unwrap()).unwrap();
         assert_eq!(written, json!([]), "the later snapshot stays");
+    }
+
+    // Бюджет хвоста считается по байтам: страница крупнее него больше не читается.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn tail_stops_at_its_byte_budget_and_says_so() {
+        let session = "ses_1";
+        let mut script = Script::default();
+        let page = Reply {
+            body: Some(json!({
+                "data": vec![json!({"id": "msg_1", "type": "assistant", "content": []}); 100],
+                "cursor": {"next": "next"},
+            })),
+            ..Default::default()
+        };
+        script.set_route(
+            "GET",
+            &format!("/api/session/{session}/message"),
+            vec![page.clone(), page],
+        );
+        let server = Server::start(&script);
+        let http = Http::new(server.url.clone(), PASSWORD.into())
+            .await
+            .unwrap();
+        let (messages, truncated) = reconcile::tail_within(&http, session, 1).await.unwrap();
+        assert_eq!(messages.len(), 100, "one page, the second is not read");
+        assert!(truncated);
     }
 
     #[test]
