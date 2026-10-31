@@ -2328,6 +2328,23 @@ async fn oversized_todo_list_is_cut_with_a_marker_and_the_stream_goes_on() {
 }
 
 #[tokio::test]
+async fn cancelled_todo_item_reaches_sj_with_its_status() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_todo(true).await;
+    let id = Uuid::now_v7();
+    let steps = script(r#"{"todo":[{"text":"снято","status":"cancelled"}]}"#);
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert_eq!(
+        todos(&bodies)[0].items[0].status,
+        TodoStatus::Cancelled as i32
+    );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
 async fn todo_is_dropped_once_with_a_diagnostic_without_todo_v1() {
     let _gate = e2e_gate::acquire().await;
     let mut harness = Harness::start(&[]).await;

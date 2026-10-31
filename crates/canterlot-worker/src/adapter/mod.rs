@@ -394,6 +394,7 @@ pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
+    Cancelled,
 }
 /// Пункт собственного списка задач харнесса; текст — данные сообщения.
 #[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

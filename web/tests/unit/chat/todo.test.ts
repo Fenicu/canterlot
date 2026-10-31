@@ -17,7 +17,33 @@ describe("screens/chat/todo", () => {
       pending: "ожидает",
       in_progress: "в работе",
       completed: "готово",
+      cancelled: "отменено",
     });
+  });
+
+  it("cancelled_item_leaves_the_progress_but_stays_in_the_list", () => {
+    const view = todoView(listOf(["completed", "cancelled", "in_progress"]));
+    expect(view).toMatchObject({ done: 1, total: 2, allDone: false, index: 1 });
+    expect(view.current?.text).toBe("пункт 3");
+    expect(view.stages.map((stage) => stage.label)).toEqual([
+      "пункт 1",
+      "пункт 3",
+      "Готово",
+    ]);
+  });
+
+  it("list_with_nothing_left_but_cancelled_items_is_finished", () => {
+    const view = todoView(listOf(["completed", "cancelled"]));
+    expect(view).toMatchObject({ done: 1, total: 1, allDone: true, index: 1 });
+    expect(view.headline).toBe("Все пункты выполнены");
+    expect(view.headlineStatus).toBe("completed");
+  });
+
+  it("fully_cancelled_list_says_so", () => {
+    const view = todoView(listOf(["cancelled", "cancelled"]));
+    expect(view).toMatchObject({ done: 0, total: 0, allDone: true, index: 0 });
+    expect(view.headline).toBe("Все пункты отменены");
+    expect(view.headlineStatus).toBe("cancelled");
   });
 
   it("progress_counts_finished_items_and_names_the_one_in_work", () => {

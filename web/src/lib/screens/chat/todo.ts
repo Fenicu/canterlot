@@ -4,7 +4,8 @@ import type { Stage } from '#lib/ui/stage-track.js';
 export const TODO_STATUS_LABEL: Record<TodoStatus, string> = {
 	pending: 'ожидает',
 	in_progress: 'в работе',
-	completed: 'готово'
+	completed: 'готово',
+	cancelled: 'отменено'
 };
 
 /** Столько точек дорожки помещается рядом со счётчиком и текстом на телефоне. */
@@ -24,17 +25,22 @@ export interface TodoView {
 }
 
 export function todoView(list: TodoList): TodoView {
-	const { items, omitted } = list;
+	const { omitted } = list;
+	// Отменённый пункт остаётся в списке, но работы по нему больше не будет.
+	const items = list.items.filter((item) => item.status !== 'cancelled');
 	const done = items.filter((item) => item.status === 'completed').length;
 	const total = items.length + omitted;
 	const allDone = done === total;
+	const allCancelled = total === 0 && list.items.length > 0;
 	const current =
 		items.find((item) => item.status === 'in_progress') ??
 		items.find((item) => item.status === 'pending') ??
 		null;
 	// Показанные пункты могут кончиться раньше списка: про отрезанный хвост ничего не известно.
-	const headline = current?.text ?? (allDone ? 'Все пункты выполнены' : 'Остальные пункты не поместились');
-	const headlineStatus = current?.status ?? (allDone ? 'completed' : 'pending');
+	const headline =
+		current?.text ??
+		(allCancelled ? 'Все пункты отменены' : allDone ? 'Все пункты выполнены' : 'Остальные пункты не поместились');
+	const headlineStatus = current?.status ?? (allCancelled ? 'cancelled' : allDone ? 'completed' : 'pending');
 	// Последняя точка — финиш: иначе дорожка считала бы последний пункт уже выполненным.
 	const points = [...items.map((item) => item.text), 'Готово'];
 	const start = Math.max(0, Math.min(done - 2, points.length - POINTS));

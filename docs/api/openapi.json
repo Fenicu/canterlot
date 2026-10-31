@@ -8391,7 +8391,8 @@
         "enum": [
           "pending",
           "in_progress",
-          "completed"
+          "completed",
+          "cancelled"
         ]
       },
       "UploadOffer": {

@@ -661,6 +661,7 @@ enum TodoStatus {
   TODO_STATUS_PENDING = 1;
   TODO_STATUS_IN_PROGRESS = 2;
   TODO_STATUS_COMPLETED = 3;
+  TODO_STATUS_CANCELLED = 4;
 }
 
 message TodoItem {

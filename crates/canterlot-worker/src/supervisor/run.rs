@@ -928,6 +928,7 @@ impl Supervisor {
                     TodoStatus::Pending => ProtoTodoStatus::Pending,
                     TodoStatus::InProgress => ProtoTodoStatus::InProgress,
                     TodoStatus::Completed => ProtoTodoStatus::Completed,
+                    TodoStatus::Cancelled => ProtoTodoStatus::Cancelled,
                 } as i32,
             })
             .collect();

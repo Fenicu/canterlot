@@ -37,6 +37,21 @@ async function boot(page: Page) {
 const panel = (page: Page) => page.getByRole('region', { name: 'Список задач агента' });
 const toggle = (page: Page) => panel(page).locator('.toggle');
 
+test('cancelled_item_is_named_in_words_and_leaves_the_progress', async ({ page }) => {
+	const { api, id } = await boot(page);
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('.screen[data-ready]')).toBeVisible();
+
+	api.pushTodo(id, [...PLAN, { text: 'Снятый пункт', status: 'cancelled' as const }]);
+	await expect(panel(page)).toContainText('1 из 3');
+	if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
+	const item = panel(page).locator('.item[data-status="cancelled"]');
+	await expect(item).toContainText('Снятый пункт');
+	const word = item.locator('.word');
+	await expect(word).toHaveText('отменено');
+	await expect(word).toHaveCSS('color', 'rgb(231, 191, 132)');
+});
+
 test('panel_is_absent_without_a_list_and_appears_with_the_first_one', async ({ page }) => {
 	const { api, id } = await boot(page);
 	await page.goto(`/c/${id}`);

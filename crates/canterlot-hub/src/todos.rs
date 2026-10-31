@@ -21,6 +21,7 @@ pub enum TodoStatus {
     Pending,
     InProgress,
     Completed,
+    Cancelled,
 }
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
@@ -68,6 +69,7 @@ fn item_view(text: &str, status: i32) -> TodoItemView {
         status: match FactStatus::try_from(status) {
             Ok(FactStatus::InProgress) => TodoStatus::InProgress,
             Ok(FactStatus::Completed) => TodoStatus::Completed,
+            Ok(FactStatus::Cancelled) => TodoStatus::Cancelled,
             _ => TodoStatus::Pending,
         },
     }

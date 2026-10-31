@@ -834,7 +834,7 @@ export interface TodoUpdated {
     revision: number;
     items: {
       text: string;
-      status: "pending" | "in_progress" | "completed";
+      status: "pending" | "in_progress" | "completed" | "cancelled";
     }[];
     omitted: number;
   };

@@ -1788,7 +1788,7 @@ export interface components {
             revision: number;
         };
         /** @enum {string} */
-        TodoStatus: "pending" | "in_progress" | "completed";
+        TodoStatus: "pending" | "in_progress" | "completed" | "cancelled";
         UploadOffer: {
             /** Format: int64 */
             offset: number;
