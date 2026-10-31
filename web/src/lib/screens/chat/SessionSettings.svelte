@@ -259,7 +259,7 @@
 	}
 </script>
 
-<div class="settings" class:desktop>
+<div class="settings" class:desktop data-sheet-flush>
 	{#if desktop}
 		<header class="pane-bar">
 			<div class="titles">
@@ -385,6 +385,8 @@
 
 <style>
 	.settings {
+		/* Нижний отступ несёт сама подпись сохранения: под ней прокручиваемому тексту не из чего просвечивать. */
+		--end: calc(var(--s8) + env(safe-area-inset-bottom));
 		display: flex;
 		flex-direction: column;
 		min-width: 0;
@@ -420,9 +422,10 @@
 		gap: var(--s6);
 		min-height: 0;
 	}
+	.settings.desktop { --end: var(--s6); }
 	.desktop .settings-body {
 		overflow-y: auto;
-		padding: var(--s3) var(--gutter) var(--s6);
+		padding: var(--s3) var(--gutter) var(--s0);
 	}
 	.card {
 		--field-bg: var(--selected);
@@ -494,13 +497,23 @@
 		min-width: 0;
 	}
 	.footer-action {
+		--fade: var(--surface);
 		display: flex;
 		flex-direction: column;
 		gap: var(--s3);
 		position: sticky;
 		bottom: var(--s0);
 		margin-top: auto;
-		padding-block: var(--s4);
-		background: var(--chat-bg);
+		padding-block: var(--s4) calc(var(--s4) + var(--end));
+		background: var(--fade);
 	}
+	.footer-action::before {
+		content: '';
+		position: absolute;
+		inset: auto 0 100%;
+		height: var(--s8);
+		background: linear-gradient(to bottom, var(--transparent), var(--fade));
+		pointer-events: none;
+	}
+	.desktop .footer-action { --fade: var(--chat-bg); }
 </style>

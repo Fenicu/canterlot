@@ -303,6 +303,31 @@ test.describe('листы и панели', () => {
     await expect(scope.getByRole('button', { name: 'Закрыть' })).toHaveCount(1);
   });
 
+  test('settings_sheet_keeps_its_title_in_view_and_the_save_area_blends_into_the_surface', async ({ page, isMobile }) => {
+    test.skip(!isMobile, 'только телефон');
+    await boot(page);
+    await openMenu(page, 'Настройки сессии');
+    const dialog = page.getByRole('dialog', { name: 'Настройки сессии' });
+    const body = dialog.locator('.body');
+    const title = dialog.getByRole('heading', { name: 'Настройки сессии' });
+    const footer = dialog.locator('.footer-action');
+    const top = (await title.boundingBox())!.y;
+    await body.evaluate((node) => { node.scrollTop = node.scrollHeight; });
+    expect((await title.boundingBox())!.y).toBe(top);
+    const paint = await footer.evaluate((node) => {
+      const sheet = getComputedStyle(node.closest('dialog')!).backgroundColor;
+      return { same: getComputedStyle(node).backgroundColor === sheet, fade: getComputedStyle(node, '::before').backgroundImage };
+    });
+    expect(paint.same).toBe(true);
+    expect(paint.fade).toContain('linear-gradient');
+    const last = (await dialog.locator('#resume').boundingBox())!;
+    const save = (await footer.getByRole('button', { name: /Сохранить настройки/ }).boundingBox())!;
+    expect(last.y + last.height).toBeLessThanOrEqual(save.y + 1);
+    const sheet = (await dialog.boundingBox())!;
+    const foot = (await footer.boundingBox())!;
+    expect(Math.abs(foot.y + foot.height - (sheet.y + sheet.height))).toBeLessThanOrEqual(1);
+  });
+
   test('desktop_keeps_the_chat_visible_settings_open_in_the_pane_and_sheets_have_no_handle', async ({ page, isMobile }) => {
     test.skip(isMobile, 'только рабочий стол');
     await boot(page);
