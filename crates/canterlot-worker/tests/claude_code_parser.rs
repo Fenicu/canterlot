@@ -437,6 +437,28 @@ fn streamed_subagent_text_is_not_repeated_by_its_whole_frame() {
 }
 
 #[test]
+fn failed_tool_result_is_marked_in_its_summary() {
+    let lines = fixtures::replay_fixture("subagent_live");
+    let mut parser = Parser::new();
+    let parsed = feed_all(&mut parser, &lines);
+    let results: Vec<Uuid> = started(&parsed)
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::ToolResult))
+        .map(|b| b.id)
+        .collect();
+    let marks: Vec<Option<&str>> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockFinal {
+                block_id, summary, ..
+            }) if results.contains(block_id) => Some(summary.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, [None, None, None, Some("error")]);
+}
+
+#[test]
 fn unknown_and_non_json_lines_never_end_the_stream() {
     let replay = fixtures::replay_evidence("resume");
     let mut lifecycles = 0;

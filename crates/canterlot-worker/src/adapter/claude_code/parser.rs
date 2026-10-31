@@ -13,6 +13,10 @@ use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoSta
 /// Summary of a tool call: tool name plus the identifying argument.
 const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
 
+/// Сводка результата, завершившегося ошибкой: у результата своей сводки нет, отметка
+/// доходит до ленты без новых полей в протоколе, журнале и истории.
+const TOOL_FAILED_SUMMARY: &str = "error";
+
 /// One open content block, keyed by stream index.
 struct OpenBlock {
     block_id: Uuid,
@@ -873,7 +877,7 @@ impl Parser {
             out.push(Parsed::Event(AdapterEvent::BlockFinal {
                 block_id,
                 text,
-                summary: None,
+                summary: is_error.then(|| TOOL_FAILED_SUMMARY.to_owned()),
             }));
             out.push(Parsed::ToolResult {
                 tool_use_id,
