@@ -582,3 +582,94 @@ async fn unknown_approved_by_mark_is_not_stored_or_broadcast(pool: PgPool) -> Te
     );
     Ok(())
 }
+
+// После падения новое исполнение читает хвост истории и шлёт те же идентификаторы. Хаб их не
+// задваивает, а результат инструмента садится под вызов прежнего исполнения: разговор один.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn resumed_execution_repeats_nothing_and_closes_the_old_call(pool: PgPool) -> TestResult {
+    let mut first = Run::new(&pool).await;
+    let text = Uuid::now_v7();
+    let call = Uuid::now_v7();
+    first
+        .send(vec![
+            start(text),
+            final_fact(text, 2, "готово"),
+            Body::BlockStarted(BlockStarted {
+                block_id: call.to_string(),
+                rev: 1,
+                kind: "tool_call".into(),
+                ..Default::default()
+            }),
+        ])
+        .await;
+    for (state, outcome) in [
+        (ExecutionState::OwnerLost, None),
+        (ExecutionState::Failed, Some("supervisor_died")),
+    ] {
+        executions::set_state(
+            &pool,
+            first.execution.execution_id,
+            state,
+            outcome,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    let before = events(&pool, text).await.len();
+    let execution = executions::start(
+        &pool,
+        first.seed.owner_id,
+        first.seed.conversation_id,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        executions::set_state(&pool, execution.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let mut second = Run {
+        seed: first.seed,
+        execution,
+        journal: Uuid::now_v7(),
+        ingest: Ingest::new(pool.clone()),
+        seq: 0,
+    };
+    let result = Uuid::now_v7();
+    second
+        .send(vec![
+            Body::JournalOpened(JournalOpened {
+                execution_id: second.execution.execution_id.to_string(),
+                generation: second.execution.generation as u64,
+                supervisor_protocol_version: 1,
+            }),
+            start(text),
+            final_fact(text, 2, "готово"),
+            Body::BlockStarted(BlockStarted {
+                block_id: result.to_string(),
+                rev: 1,
+                kind: "tool_result".into(),
+                parent_block_id: call.to_string(),
+                ..Default::default()
+            }),
+            final_fact(result, 2, "прерван"),
+        ])
+        .await;
+    assert_eq!(block(&pool, text).await.0, "готово");
+    assert_eq!(
+        events(&pool, text).await.len(),
+        before,
+        "nothing is repeated"
+    );
+    let parent: Option<Uuid> =
+        sqlx::query_scalar("select parent_block_id from blocks where block_id=$1")
+            .bind(result)
+            .fetch_optional(&pool)
+            .await?
+            .flatten();
+    assert_eq!(parent, Some(call), "the result is not lost");
+    assert_eq!(block(&pool, result).await.0, "прерван");
+    Ok(())
+}
