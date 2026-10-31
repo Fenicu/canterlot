@@ -331,6 +331,8 @@ message RunFinished {
   uint64 context_window_tokens = 5;
   uint64 duration_ms = 6;
   uint64 machine_time_ms = 7;
+  // Запуск без ввода, приписанный команде: расход добавляется к её законченному ходу.
+  bool adopted = 8;
 }
 
 message JournalClosed {

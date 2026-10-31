@@ -1071,6 +1071,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         input_command_id: "input".into(),
     };
     let new = RunFinished {
+        adopted: false,
         execution_id: old.execution_id.clone(),
         input_command_id: old.input_command_id.clone(),
         usage: vec![ModelUsage {

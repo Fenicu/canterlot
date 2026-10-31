@@ -448,6 +448,11 @@ pub enum AdapterEvent {
         block_id: Uuid,
         source: MediaSource,
     },
+    /// Агент работает без ввода (завершилась фоновая задача): для сопровождения это ход
+    /// последней команды, его можно прервать, а новый ввод ждёт его конца.
+    RunAdopted {
+        input_command_id: Uuid,
+    },
     RunFinished {
         input_command_id: Uuid,
         usage: Vec<ModelUsage>,
@@ -531,6 +536,10 @@ impl fmt::Debug for AdapterEvent {
                 .debug_struct("Media")
                 .field("block_id", block_id)
                 .field("source", source)
+                .finish(),
+            Self::RunAdopted { input_command_id } => f
+                .debug_struct("RunAdopted")
+                .field("input_command_id", input_command_id)
                 .finish(),
             Self::RunFinished {
                 input_command_id, ..

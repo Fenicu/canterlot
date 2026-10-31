@@ -66,6 +66,9 @@ pub async fn finish_in_tx(
     let changed=sqlx::query("update runs set finished_at=started_at+($2::bigint * interval '1 millisecond'),duration_ms=$2,context_tokens=$3,context_window_tokens=$4,weekly_after_permille=(select weekly_used_permille from provider_limits where provider=runs.provider),exact=exact and $5 where input_command_id=$1 and finished_at is null")
         .bind(command).bind(duration).bind(number(fact.context_tokens)?).bind(number(fact.context_window_tokens)?).bind(now - at <= EXACT_WINDOW).execute(&mut *conn).await?.rows_affected();
     if changed == 0 {
+        if fact.adopted {
+            add_adopted(conn, command, fact).await?;
+        }
         return Ok(());
     }
     for usage in &fact.usage {
@@ -74,6 +77,30 @@ pub async fn finish_in_tx(
     }
     if let Some(provider) = provider {
         refresh_overlap(conn, provider, started).await?;
+    }
+    Ok(())
+}
+
+// Ход уже закончен, а запуск без ввода тратит лимит дальше: его расход идёт к той же команде,
+// контекст обновляется, длительность хода остаётся.
+async fn add_adopted(
+    conn: &mut PgConnection,
+    command: Uuid,
+    fact: &RunFinished,
+) -> Result<(), sqlx::Error> {
+    if fact.context_tokens > 0 {
+        sqlx::query(
+            "update runs set context_tokens=$2,context_window_tokens=$3 where input_command_id=$1",
+        )
+        .bind(command)
+        .bind(number(fact.context_tokens)?)
+        .bind(number(fact.context_window_tokens)?)
+        .execute(&mut *conn)
+        .await?;
+    }
+    for usage in &fact.usage {
+        sqlx::query("insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens) values($1,$2,$3,$4,$5,$6,$7) on conflict(input_command_id,model,agent) do update set input_tokens=run_model_usage.input_tokens+excluded.input_tokens,output_tokens=run_model_usage.output_tokens+excluded.output_tokens,cache_read_tokens=run_model_usage.cache_read_tokens+excluded.cache_read_tokens,cache_write_tokens=run_model_usage.cache_write_tokens+excluded.cache_write_tokens")
+            .bind(command).bind(&usage.model).bind(if usage.agent.is_empty(){"main"}else{&usage.agent}).bind(number(usage.input_tokens)?).bind(number(usage.output_tokens)?).bind(number(usage.cache_read_tokens)?).bind(number(usage.cache_write_tokens)?).execute(&mut *conn).await?;
     }
     Ok(())
 }

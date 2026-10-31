@@ -143,6 +143,7 @@ pub fn accepted(command: Uuid, ms: i64) -> Body {
 }
 pub fn finished(r: &Run, command: Uuid, ms: i64) -> Body {
     Body::RunFinished(RunFinished {
+        adopted: false,
         execution_id: r.execution.execution_id.to_string(),
         input_command_id: command.to_string(),
         duration_ms: 1000,

@@ -157,6 +157,8 @@ struct Supervisor {
     cancel_marks: HashMap<Uuid, u32>,
     reported: HashSet<(Uuid, u32, &'static str)>,
     active_turn: Option<Uuid>,
+    /// Команда, которой приписан идущий запуск без ввода.
+    adopted_turn: Option<Uuid>,
     turn_started: Option<Instant>,
     pilot_v1: bool,
     todo_v1: bool,
@@ -281,6 +283,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         cancel_marks: HashMap::new(),
         reported: HashSet::new(),
         active_turn: None,
+        adopted_turn: None,
         turn_started: None,
         pilot_v1: false,
         todo_v1: false,
@@ -1640,12 +1643,27 @@ impl Supervisor {
                     summary: summary.unwrap_or_default(),
                 }))?;
             }
+            AdapterEvent::RunAdopted { input_command_id } => {
+                self.adopted_turn = Some(input_command_id);
+                if self.active_turn.is_none() && matches!(self.lifecycle, Lifecycle::Running) {
+                    self.active_turn = Some(input_command_id);
+                    self.turn_started = Some(Instant::now());
+                    self.ready = false;
+                    self.aborting_turn = false;
+                }
+            }
             AdapterEvent::RunFinished {
                 input_command_id,
                 usage,
                 context_tokens,
                 context_window_tokens,
             } => {
+                let adopted = self.adopted_turn == Some(input_command_id);
+                if adopted {
+                    self.adopted_turn = None;
+                }
+                // Конец приписанного запуска мог прийти, когда новый ввод уже передан.
+                let ours = !adopted || self.active_turn == Some(input_command_id);
                 let reason = if self.pending_interrupts.is_empty() {
                     "turn_ended"
                 } else {
@@ -1654,10 +1672,12 @@ impl Supervisor {
                 let open = self.sj.open_requests();
                 self.close_blocks(reason)?;
                 self.close_requests(reason)?;
-                let duration_ms = self.turn_started.take().map_or(0, |at| {
+                let started = if ours { self.turn_started.take() } else { None };
+                let duration_ms = started.map_or(0, |at| {
                     u64::try_from(at.elapsed().as_millis()).unwrap_or(u64::MAX)
                 });
                 self.record(Body::RunFinished(RunFinished {
+                    adopted,
                     execution_id: self.spec.execution_id.to_string(),
                     input_command_id: input_command_id.to_string(),
                     usage: usage
@@ -1676,7 +1696,9 @@ impl Supervisor {
                     duration_ms,
                     machine_time_ms: now_ms(),
                 }))?;
-                self.active_turn = None;
+                if ours {
+                    self.active_turn = None;
+                }
                 for ((command, _), input) in self.inputs.iter_mut() {
                     if *command == input_command_id && input.state == InputState::Transmitting {
                         input.state = InputState::Done;

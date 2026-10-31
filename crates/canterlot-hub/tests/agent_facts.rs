@@ -22,6 +22,58 @@ use support::*;
 use uuid::Uuid;
 type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+fn spent(input: i64, output: i64) -> ModelUsage {
+    ModelUsage {
+        model: "synthetic-large".into(),
+        agent: "main".into(),
+        input_tokens: input as u64,
+        output_tokens: output as u64,
+        cache_read_tokens: 1,
+        cache_write_tokens: 2,
+    }
+}
+
+// Запуск без ввода приписан законченной команде: его расход и контекст добавляются к ней,
+// а обычный повтор конца хода ничего не меняет.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn adopted_run_adds_its_usage_to_the_finished_command(pool: PgPool) -> TestResult {
+    let mut r = Run::new(&pool).await;
+    let i = r.input(&pool).await;
+    let ms = Utc::now().timestamp_millis();
+    r.send(vec![accepted(i.command_id, ms)]).await;
+    let Body::RunFinished(mut first) = finished(&r, i.command_id, ms + 1000) else {
+        unreachable!()
+    };
+    first.usage = vec![spent(10, 20)];
+    r.send(vec![Body::RunFinished(first.clone())]).await;
+    let mut repeat = first.clone();
+    repeat.usage = vec![spent(1000, 1000)];
+    r.send(vec![Body::RunFinished(repeat)]).await;
+    let row: (i64, i64, i64, i64) = sqlx::query_as(
+        "select input_tokens,output_tokens,cache_read_tokens,cache_write_tokens from run_model_usage",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row, (10, 20, 1, 2), "plain repeat changes nothing");
+    let mut adopted = first.clone();
+    adopted.adopted = true;
+    adopted.usage = vec![spent(5, 6)];
+    adopted.context_tokens = 777;
+    adopted.duration_ms = 40;
+    r.send(vec![Body::RunFinished(adopted)]).await;
+    let row: (i64, i64, i64, i64) = sqlx::query_as(
+        "select input_tokens,output_tokens,cache_read_tokens,cache_write_tokens from run_model_usage",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row, (15, 26, 2, 4));
+    let run: (i64, i64) = sqlx::query_as("select duration_ms,context_tokens from runs")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(run, (1000, 777), "the turn keeps its duration");
+    Ok(())
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool) {
     let mut r = Run::new(&pool).await;
