@@ -62,6 +62,7 @@
   });
   const streaming = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || entry.block.state === 'incomplete')));
+  const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
 
   function layout(list: Row[], top: number, viewport: number): void {
     ix.setCount(list.length);
@@ -323,7 +324,7 @@
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
           <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
         {:else if row.kind === 'answer'}
-          <AnswerCard entries={row.entries} all={chat.timeline.entries} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard entries={row.entries} all={chat.timeline.entries} {harness} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
       </div>
     {/each}

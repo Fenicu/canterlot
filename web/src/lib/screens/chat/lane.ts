@@ -1,4 +1,6 @@
+import { modelLabel } from "#lib/format/labels.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
+import { isMainAgent, toolTitle } from "#lib/timeline/present.js";
 
 export interface LaneModelResult {
   title: string;
@@ -15,13 +17,16 @@ export function laneModel(
   opts?: { machineName?: string },
 ): LaneModelResult {
   const root = blocks.find((b) => b.id === rootBlockId);
-  const agentName = root?.agent || "Explore";
-  const modelName = root?.model || "haiku";
+  const lead = blocks.find((block) => block.parentId === rootBlockId && !isMainAgent(block.agent));
+  const agentName = lead?.agent ?? (root && !isMainAgent(root.agent) ? root.agent : "Субагент");
+  const model = lead?.model || root?.model || "";
   const machine = opts?.machineName || "workstation";
-  const task = root?.summary ?? null;
+  const task = (root && toolTitle(root).argument) || null;
 
   const title = task || agentName;
-  const subtitle = `Субагент · ${agentName} · ${modelName} · ${machine}`;
+  const subtitle = ["Субагент", agentName === "Субагент" ? "" : agentName, model ? modelLabel(model) : "", machine]
+    .filter(Boolean)
+    .join(" · ");
   const breadcrumb = ["Оркестратор", agentName];
 
   let status = "Готово";

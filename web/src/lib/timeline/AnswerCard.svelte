@@ -3,7 +3,7 @@
   import { fmt } from '#lib/format/ru.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
-  import { toolTitle } from '#lib/timeline/present.js';
+  import { agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { childBlocks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
@@ -16,6 +16,7 @@
   let {
     entries,
     all,
+    harness,
     conversationId,
     now,
     onInfo,
@@ -23,6 +24,7 @@
   }: {
     entries: TimelineEntry[];
     all: TimelineEntry[];
+    harness?: { title?: string; provider?: string } | null;
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
@@ -38,7 +40,7 @@
   const active = $derived(blocks.findLast((block) => block.state === 'streaming'));
   const started = $derived(blocks.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
-  const agent = $derived(head?.agent ? head.agent[0]!.toLocaleUpperCase('ru-RU') + head.agent.slice(1) : 'Агент');
+  const agent = $derived(agentTitle(head?.agent ?? '', harness));
 </script>
 
 <article class="card">

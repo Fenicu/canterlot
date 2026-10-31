@@ -4,7 +4,9 @@
 	import { SvelteMap } from 'svelte/reactivity';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { delegation } from '#lib/api/client.js';
+	import { modelLabel } from '#lib/format/labels.js';
 	import { buildDelegation, type DelegationNode, subagentVerb } from '#lib/stores/delegation.js';
+	import { isMainAgent, toolTitle } from '#lib/timeline/present.js';
 
 	let {
 		chat,
@@ -89,12 +91,12 @@
 			>
 				<span class="branch">└</span>
 				<div class="grow node-info">
-					<span class="subagent-name">{node.subagent?.name || 'Субагент'}</span>
+					<span class="subagent-name">{node.subagent && !isMainAgent(node.subagent.name) ? node.subagent.name : 'Субагент'}</span>
 					{#if node.subagent?.model}
-						<span class="subagent-model">· {node.subagent.model}</span>
+						<span class="subagent-model">· {modelLabel(node.subagent.model)}</span>
 					{/if}
 					{#if node.task}
-						<small class="node-task"> · {node.task}</small>
+						<small class="node-task"> · {toolTitle({ toolName: node.tool_name, summary: node.task }).argument}</small>
 					{/if}
 				</div>
 				<span class={getNodeStateClass(node)}>{getNodeVerb(node)}</span>

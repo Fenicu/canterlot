@@ -1,3 +1,4 @@
+import { harnessLabel, modelLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import { utf8Length } from "#lib/stores/blocks.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
@@ -87,6 +88,21 @@ export function toolStatusText(opts: {
   return fmt.duration(shown);
 }
 
+const MAIN_AGENTS = new Set(["orchestrator", "main", ""]);
+
+/** `orchestrator` — внутренняя метка хаба и адаптеров, владелец видит название инструмента сессии. */
+export function isMainAgent(agent: string): boolean {
+  return MAIN_AGENTS.has(agent);
+}
+
+export function agentTitle(
+  agent: string,
+  harness: { title?: string; provider?: string } | null | undefined,
+): string {
+  if (isMainAgent(agent)) return harnessLabel(harness);
+  return agent.charAt(0).toLocaleUpperCase("ru-RU") + agent.slice(1);
+}
+
 export interface ToolTitle {
   name: string;
   server: string;
@@ -149,15 +165,19 @@ export function subagentCopy(
   call: BlockModel,
   children: BlockModel[],
 ): { title: string; detail: string } {
-  const first = children[0];
-  const name = first?.agent || call.agent || "агент";
-  const model = first?.model || call.model || "";
-  const verb = subagentVerb(first?.toolName ?? call.toolName);
-  const object = first?.summary || first?.toolName || "";
-  const task = call.summary ?? "";
+  const own = children.filter((child) => !isMainAgent(child.agent));
+  const lead = own[0];
+  const action = own.findLast((child) => child.toolName) ?? null;
+  const model = lead?.model || call.model;
+  const verb = subagentVerb(action?.toolName ?? (lead ? null : call.toolName));
+  const doing = action ? toolTitle(action) : null;
+  const object = doing?.argument || doing?.name || "";
+  const task = toolTitle(call).argument;
   const detail = [verb, object].filter((part) => part.length > 0).join(" ");
   return {
-    title: `Субагент · ${name} · ${model}`.replace(/\s·\s$/, ""),
+    title: ["Субагент", lead?.agent ?? "", model ? modelLabel(model) : ""]
+      .filter((part) => part.length > 0)
+      .join(" · "),
     detail: task ? `${detail} · ${task}` : detail,
   };
 }
