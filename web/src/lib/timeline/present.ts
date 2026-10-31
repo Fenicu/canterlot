@@ -171,6 +171,9 @@ export function agentTitle(
   return agent.charAt(0).toLocaleUpperCase("ru-RU") + agent.slice(1);
 }
 
+export const ASK_TOOL = "AskUserQuestion";
+const TOOL_NAMES: Record<string, string> = { [ASK_TOOL]: "Вопрос" };
+
 export interface ToolTitle {
   name: string;
   server: string;
@@ -186,13 +189,14 @@ function mcpServer(raw: string): string {
 export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): ToolTitle {
   const raw = block.toolName ?? "";
   const mcp = /^mcp__(.+?)__(.+)$/.exec(raw);
-  const name = mcp?.[2] ?? raw;
+  const name = mcp?.[2] ?? TOOL_NAMES[raw] ?? raw;
   const server = mcp ? mcpServer(mcp[1] ?? "") : "";
   let argument = block.summary ?? "";
   if (raw && argument === raw) argument = "";
   for (const joint of [": ", ", "])
     if (raw && argument.startsWith(raw + joint))
       argument = argument.slice(raw.length + joint.length);
+  if (raw === ASK_TOOL) argument = argument.replace(/^AskUserQuestion: /, "");
   return { name, server: name.includes(server) ? "" : server, argument };
 }
 

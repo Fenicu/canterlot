@@ -589,15 +589,14 @@ describe('PWA Request Cards', () => {
     expect(summaryRow!.textContent).toContain('Разрешено');
 
     // Clicking toggles expanded read-only view
-    summaryRow!.click();
+    summaryRow!.querySelector<HTMLElement>('.head')!.click();
     flushSync();
 
     expect(target.querySelector('[data-expanded="true"]')).toBeTruthy();
     expect(target.textContent).toContain('make check');
 
     // Clicking again collapses
-    const collapseBtn = target.querySelector<HTMLElement>('[data-toggle-collapse]');
-    collapseBtn?.click();
+    target.querySelector<HTMLElement>('[data-expanded="true"] .head')!.click();
     flushSync();
     expect(target.querySelector('[data-collapsed="true"]')).toBeTruthy();
 

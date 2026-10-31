@@ -22,11 +22,14 @@
   let {
     request,
     onDecision,
-    disabled = false
+    disabled = false,
+    readonly = false
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
     disabled?: boolean;
+    /** Решённый вопрос в ленте: история, а не форма. */
+    readonly?: boolean;
   } = $props();
 
   const uid = $props.id();
@@ -190,6 +193,32 @@
   }
 </script>
 
+{#snippet answered()}
+  <div class="answered">
+    {#each questions as q (q.id)}
+      {@const picked = q.multi_select ? (selectedMulti[q.id] ?? []) : [selectedSingle[q.id] ?? ''].filter(Boolean)}
+      {@const labels = (q.options ?? []).map(getOptionLabel)}
+      <section>
+        <p class="answered-text">{q.text}</p>
+        {#each q.options ?? [] as opt, optIdx (`${getOptionLabel(opt)}-${optIdx}`)}
+          {@const desc = getOptionDesc(opt)}
+          <p class="answered-option" data-chosen={picked.includes(getOptionLabel(opt)) ? '' : undefined}>
+            {getOptionLabel(opt)}{#if desc}<span>{desc}</span>{/if}
+          </p>
+        {/each}
+        {#if !q.is_secret}
+          {#each picked.filter((value) => !labels.includes(value)) as custom (custom)}
+            <p class="answered-option" data-chosen>{custom}</p>
+          {/each}
+        {/if}
+      </section>
+    {/each}
+  </div>
+{/snippet}
+
+{#if readonly}
+  {@render answered()}
+{:else}
 <div class="question-card" data-disabled={isDisabled ? '' : undefined}>
   <div class="card-head">
     <span class="meta">Вопрос от агента</span>
@@ -274,8 +303,16 @@
     </div>
   </form>
 </div>
+{/if}
 
 <style>
+  .answered { display: flex; flex-direction: column; gap: var(--s4); min-width: 0; }
+  .answered section { display: flex; flex-direction: column; gap: var(--s2); }
+  .answered-text { margin: var(--s0); color: var(--text); font-size: var(--fs-body); overflow-wrap: anywhere; }
+  .answered-option { display: flex; flex-direction: column; margin: var(--s0); color: var(--muted); font-size: var(--fs-meta); overflow-wrap: anywhere; }
+  .answered-option span { font-size: var(--fs-sm); }
+  .answered-option[data-chosen] { color: var(--accent-link); font-weight: var(--weight-medium); }
+  .answered-option[data-chosen] span { color: var(--secondary); font-weight: var(--weight-normal); }
   .question-card {
     display: flex;
     flex-direction: column;

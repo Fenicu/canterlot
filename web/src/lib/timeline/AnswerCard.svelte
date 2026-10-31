@@ -5,7 +5,7 @@
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import type { FeedFolds } from '#lib/timeline/folds.js';
-  import { agentTitle, toolTitle } from '#lib/timeline/present.js';
+  import { ASK_TOOL, agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
@@ -47,7 +47,9 @@
   const hollow = $derived(entries.filter((entry) => entry.kind === 'block' && !shownInCard(entry.block)).map((entry) => entry.key).join(' '));
   const blocks = $derived.by(() => {
     const empty = new Set(hollow.split(' '));
-    return entries.filter((entry) => !empty.has(entry.key));
+    const list = entries.filter((entry) => !empty.has(entry.key));
+    // Вопрос и ответ показывает его запрос, строка вызова их только повторяла бы.
+    return list.filter((entry, index) => !(entry.kind === 'block' && entry.block.toolName === ASK_TOOL && list[index + 1]?.kind === 'request'));
   });
   const head = $derived(all[0]);
   const streaming = $derived(all.some((block) => block.state === 'streaming'));
@@ -63,7 +65,7 @@
 
 {#snippet entryRow(entry: TimelineEntry)}
   {#if entry.kind === 'request'}
-    <RequestCard request={entry.request} onDecision={async () => undefined} />
+    <RequestCard request={entry.request} onDecision={async () => undefined} open={folds.isOpen(entry.key)} onToggle={() => folds.toggle(entry.key)} />
   {:else if entry.kind === 'block'}
     {@const block = entry.block}
     {#if isSubagentCall(block)}

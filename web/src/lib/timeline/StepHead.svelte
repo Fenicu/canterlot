@@ -17,7 +17,7 @@
     detail?: string;
     dir?: string;
     status?: string;
-    state?: 'running' | 'done' | 'error';
+    state?: 'running' | 'done' | 'error' | 'answer';
     open: boolean;
     ontoggle: () => void;
     badge?: Snippet;

@@ -129,12 +129,12 @@ test.describe('E2E Requests and Recovery', () => {
 
     // Card collapses into summary row on applied
     await expect(page.locator('[data-collapsed="true"]')).toBeVisible();
-    await expect(page.getByText('Ответ: Rebase and fast-forward')).toBeVisible();
+    await expect(page.locator('[data-collapsed="true"] .pill')).toHaveText('Rebase and fast-forward');
 
-    // Expand collapsed card to verify applied state on the track
-    await page.locator('[data-collapsed="true"]').click();
-    await expect(page.locator('.st-status')).toHaveText('применено');
-    await page.getByRole('button', { name: 'Свернуть' }).click();
+    // Решённый запрос раскрывается как история и сворачивается той же строкой
+    await page.locator('[data-collapsed="true"] .head').click();
+    await expect(page.locator('[data-expanded="true"] .answered')).toBeVisible();
+    await page.locator('[data-expanded="true"] .head').click();
     await expect(page.locator('[data-collapsed="true"]')).toBeVisible();
 
     // Turn completes: agent outputs text

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import StepHead from '#lib/timeline/StepHead.svelte';
   import StageTrack from '#lib/ui/StageTrack.svelte';
   import type { Stage, StageState } from '#lib/ui/stage-track.js';
   import PermissionCard from './PermissionCard.svelte';
@@ -8,10 +9,15 @@
 
   let {
     request,
-    onDecision
+    onDecision,
+    open,
+    onToggle
   }: {
     request: RequestItem;
     onDecision: (d: DecisionBody) => Promise<void>;
+    /** Лента хранит раскрытое сама: строка снимается с экрана и возвращается. */
+    open?: boolean;
+    onToggle?: () => void;
   } = $props();
 
   const stages: Stage[] = [
@@ -22,6 +28,12 @@
   ];
 
   let expanded = $state(false);
+  const shown = $derived(open ?? expanded);
+
+  function toggle() {
+    if (onToggle) onToggle();
+    else expanded = !expanded;
+  }
 
   function translateReason(reason?: string): string {
     if (!reason) return 'не применено';
@@ -87,7 +99,15 @@
 
   const showTrack = $derived(request.state !== 'open');
 
-  const summaryText = $derived.by(() => {
+  const subject = $derived.by(() => {
+    const payload = (request.payload ?? {}) as Record<string, unknown>;
+    if (request.kind === 'permission') return String(payload.tool_name ?? '');
+    const nested = payload.payload as Record<string, unknown> | undefined;
+    const first = ((payload.questions ?? nested?.questions) as Array<Record<string, unknown>> | undefined)?.[0];
+    return String(first?.text ?? first?.question ?? payload.text ?? payload.question ?? '');
+  });
+
+  const answerText = $derived.by(() => {
     const winner = request.winnerDecision as Record<string, unknown> | undefined;
     if (request.kind === 'permission') {
       if (winner?.behavior === 'allow') return 'Разрешено';
@@ -107,7 +127,7 @@
       questionsList.some((q) => Boolean(q.is_secret || q.isSecret));
 
     if (hasSecret) {
-      return 'Ответ: Ответ скрыт';
+      return 'Ответ скрыт';
     }
 
     const answers = winner?.answers as Record<string, unknown> | undefined;
@@ -121,64 +141,30 @@
         }
       }
       if (parts.length > 0) {
-        return `Ответ: ${parts.join('; ')}`;
+        return parts.join('; ');
       }
     }
 
     const single = winner?.answer;
     if (single !== undefined && single !== null && String(single).trim()) {
-      return `Ответ: ${String(single)}`;
+      return String(single);
     }
 
     return 'Ответ дан';
   });
 </script>
 
-{#if request.state === 'applied' && !expanded}
-  <div
-    class="card-root applied-collapsed"
-    data-collapsed="true"
-    role="button"
-    tabindex="0"
-    onclick={() => { expanded = true; }}
-    onkeydown={(e) => {
-      if (e.key === 'Enter' || e.key === ' ') {
-        e.preventDefault();
-        expanded = true;
-      }
-    }}
-  >
-    <div class="summary-line">
-      <span class="summary-badge">{summaryText}</span>
-      <span class="toggle-hint">Подробнее</span>
-    </div>
-  </div>
-{:else if request.state === 'applied' && expanded}
-  <div class="card-root applied-expanded" data-expanded="true">
-    <div class="card-top-bar">
-      <StageTrack
-        {stages}
-        index={trackIndex}
-        state={trackState}
-        form="compact"
-        label="Доставка решения"
-        status={trackStatus}
-        reason={trackReason}
-      />
-      <button
-        type="button"
-        class="collapse-btn"
-        data-toggle-collapse
-        onclick={() => { expanded = false; }}
-      >
-        Свернуть
-      </button>
-    </div>
-
-    {#if request.kind === 'permission'}
-      <PermissionCard {request} {onDecision} disabled={true} />
-    {:else}
-      <QuestionCard {request} {onDecision} disabled={true} />
+{#if request.state === 'applied'}
+  <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined}>
+    <StepHead name={request.kind === 'permission' ? 'Разрешение' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
+    {#if shown}
+      <div class="applied-body">
+        {#if request.kind === 'permission'}
+          <PermissionCard {request} {onDecision} disabled={true} />
+        {:else}
+          <QuestionCard {request} {onDecision} disabled={true} readonly />
+        {/if}
+      </div>
     {/if}
   </div>
 {:else}
@@ -244,69 +230,8 @@
     font-size: var(--fs-meta);
   }
 
-  .applied-collapsed {
-    justify-content: center;
-    min-height: var(--target);
-    padding: var(--s3) var(--s4);
-    cursor: pointer;
-    transition: background var(--duration-fast) var(--ease);
-  }
-
-  .applied-collapsed:hover {
-    background: var(--raised);
-  }
-
-  .applied-collapsed:focus-visible {
-    outline: var(--focus-width) solid var(--accent);
-    outline-offset: var(--s1);
-  }
-
-  .summary-line {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--s2);
-  }
-
-  .summary-badge {
-    font-size: var(--fs-body);
-    font-weight: var(--weight-medium);
-    color: var(--text);
-  }
-
-  .toggle-hint {
-    font-size: var(--fs-sm);
-    color: var(--secondary);
-  }
-
-  .card-top-bar {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    gap: var(--s3);
-    padding-bottom: var(--s2);
-  }
-
-  .collapse-btn {
-    min-height: var(--target);
-    padding: var(--s1) var(--s3);
-    border-radius: var(--radius-pill);
-    background: var(--raised);
-    color: var(--secondary);
-    font-size: var(--fs-sm);
-    cursor: pointer;
-    transition: background var(--duration-fast) var(--ease), color var(--duration-fast) var(--ease);
-  }
-
-  .collapse-btn:focus-visible {
-    outline: var(--focus-width) solid var(--accent);
-    outline-offset: var(--s1);
-  }
-
-  .collapse-btn:hover {
-    background: var(--hover);
-    color: var(--text);
-  }
+  .applied { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); background: var(--raised); }
+  .applied-body { padding: var(--s2) var(--s6) var(--s4); }
 
   .track-wrapper {
     padding-bottom: var(--s2);

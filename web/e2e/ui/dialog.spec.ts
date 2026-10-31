@@ -50,7 +50,7 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await expect(bash.locator('.name')).toHaveText('Bash');
       await expect(bash.locator('.summary')).toHaveText('sleep 90');
       await expect(toolRow(page, 'ToolSearch').locator('.summary')).toHaveCount(0);
-      await expect(toolRow(page, 'AskUserQuestion').locator('.pill')).toHaveText('43 с');
+      await expect(page.locator('.tool .name', { hasText: 'AskUserQuestion' })).toHaveCount(0);
     });
 
     test('empty_reasoning_takes_no_row_and_reasoning_with_text_stays', async ({ page }) => {
@@ -250,22 +250,38 @@ test('answered_question_stays_where_it_was_asked_live_and_after_reload', async (
     await expect(page.locator('[role="log"]')).not.toContainText('Продолжать проверку интерфейса?');
     await dock.getByText('Продолжить', { exact: true }).click();
     await dock.getByRole('button', { name: 'Ответить' }).click();
-    await expect(page.locator('[role="log"]')).toContainText('Ответ: Продолжить');
+    await expect(page.locator('[role="log"] .pill[data-state="answer"]')).toHaveText('Продолжить');
     await expect(dock).toHaveCount(0);
   });
-  const marks = ['AskUserQuestion', 'Ответ: Продолжить', 'Ответ получен'];
+  const marks = ['Вопрос', 'Ответ получен'];
   await expect(page.locator('[role="log"]')).toContainText('Ответ получен');
   const live = await feedOrder(page, marks);
   expect(live[0]).toBeGreaterThanOrEqual(0);
   expect([...live].sort((a, b) => a - b)).toEqual(live);
-  expect(new Set(live).size).toBe(3);
+  expect(new Set(live).size).toBe(2);
   api.histories.set(id, structuredClone(FIRST_DIALOG));
   await page.reload();
-  await expect(page.locator('[role="log"]')).toContainText('Ответ: Продолжить');
+  await expect(page.locator('[role="log"] .pill[data-state="answer"]')).toHaveText('Продолжить');
   await expect(page.locator('.request-cards-slot')).toHaveCount(0);
   const reloaded = await feedOrder(page, marks);
   expect([...reloaded].sort((a, b) => a - b)).toEqual(reloaded);
-  expect(new Set(reloaded).size).toBe(3);
+  expect(new Set(reloaded).size).toBe(2);
+});
+
+test('answered_question_reads_as_a_row_with_its_question_and_opens_as_history', async ({ page }) => {
+  await reloaded(page);
+  const row = page.locator('.applied');
+  await expect(row.locator('.name')).toHaveText('Вопрос');
+  await expect(row.locator('.summary')).toHaveText('Продолжать проверку интерфейса?');
+  await expect(row.locator('.pill')).toHaveText('Продолжить');
+  await row.locator('.head').click();
+  await expect(row.locator('.answered-option[data-chosen]')).toContainText('Выполнить sleep 90');
+  await expect(row.locator('.answered-option')).toHaveCount(2);
+  await expect(row.locator('input, form, [role="radio"]')).toHaveCount(0);
+  await expect(row.getByRole('button', { name: 'Ответить' })).toHaveCount(0);
+  await expect(row.locator('.st')).toHaveCount(0);
+  await row.locator('.head').click();
+  await expect(row.locator('.answered')).toHaveCount(0);
 });
 
 test('decided_permission_stays_where_it_was_asked', async ({ page }) => {
