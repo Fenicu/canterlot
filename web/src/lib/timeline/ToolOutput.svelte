@@ -6,10 +6,12 @@
 
   let {
     block,
+    caption = '',
     running = false,
     load
   }: {
     block: BlockModel;
+    caption?: string;
     running?: boolean;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
@@ -51,6 +53,7 @@
 </script>
 
 <div class="out">
+  {#if caption}<p class="caption">{caption}</p>{/if}
   {#if clean.trim() || full}
     <pre>{full ? cleanToolOutput(full) : tail}</pre>
     {#if more}
@@ -68,6 +71,7 @@
 <style>
   .out { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: var(--s4) var(--s6) var(--s2); border-radius: var(--radius-card); background: var(--code); }
   pre { width: 100%; margin: 0; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); }
+  .caption { margin: var(--s0) var(--s0) var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
   .none { margin: var(--s0); padding-bottom: var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
   button { min-height: var(--target); padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); text-align: left; }
 </style>

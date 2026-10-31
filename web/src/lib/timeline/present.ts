@@ -185,6 +185,24 @@ export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): Tool
   return { name, server: name.includes(server) ? "" : server, argument };
 }
 
+const FILE_TOOLS = new Set(["Read", "Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const COMMAND_TOOL = /bash|shell|exec|command/i;
+
+/** Строка вызова: у файла сначала имя, у команды только первая строка, и в старых сводках тоже. */
+export function toolLabel(title: ToolTitle): { text: string; dir: string } {
+  if (FILE_TOOLS.has(title.name)) {
+    const slash = title.argument.lastIndexOf("/");
+    if (slash > 0)
+      return { text: title.argument.slice(slash + 1), dir: title.argument.slice(0, slash) };
+  }
+  const first = title.argument.split("\n")[0] ?? "";
+  return { text: (first.split("<<")[0] ?? "").trimEnd(), dir: "" };
+}
+
+export function callCaption(block: Pick<BlockModel, "toolName">): string {
+  return COMMAND_TOOL.test(block.toolName ?? "") ? "Команда" : "Вызов";
+}
+
 export function takeToolPage(
   shown: string,
   page: string,

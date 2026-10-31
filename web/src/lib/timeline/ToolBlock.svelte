@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { toolError, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import { callCaption, toolError, toolLabel, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
@@ -29,8 +29,14 @@
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     viewing = index;
   }
-  const title = $derived(toolTitle(block));
-  const detail = $derived([title.server, title.argument].filter(Boolean).join(' · '));
+  // Сводка приходит с финалом блока и сама по себе не реактивна.
+  const title = $derived.by(() => {
+    void block.state;
+    return toolTitle(block);
+  });
+  const label = $derived(toolLabel(title));
+  const detail = $derived([title.server, label.text].filter(Boolean).join(' · '));
+  const called = $derived(block.kind === 'tool_call' && block.text.trim().length > 0);
   const timing = $derived(toolTiming(block, result, working));
   const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(toolError(block, result));
@@ -41,7 +47,7 @@
 </script>
 
 <div class="tool">
-  <StepHead name={title.name || 'Результат инструмента'} {detail} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
+  <StepHead name={title.name || 'Результат инструмента'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}
     {/snippet}
@@ -66,7 +72,8 @@
   {#if open}
     <div class="fold">
       <div class="body">
-        <ToolOutput block={result ?? block} running={timing.running} {load} />
+        {#if called}<ToolOutput {block} caption={callCaption(block)} {load} />{/if}
+        {#if result || !called}<ToolOutput block={result ?? block} running={timing.running} {load} />{/if}
       </div>
     </div>
   {/if}
@@ -87,7 +94,7 @@
     white-space: nowrap;
   }
   .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
-  .body { min-height: 0; overflow: hidden; padding-inline: var(--s2); }
+  .body { display: flex; flex-direction: column; gap: var(--s2); min-height: 0; overflow: hidden; padding-inline: var(--s2); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
   .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }

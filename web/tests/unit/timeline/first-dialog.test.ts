@@ -11,6 +11,7 @@ import {
   cleanToolOutput,
   subagentCopy,
   toolFailed,
+  toolLabel,
   toolStatusText,
   toolTiming,
   toolTitle,
@@ -210,6 +211,18 @@ describe("first dialog: tool titles", () => {
     expect(toolTitle({ toolName: "mcp__remnawave__users_get_users", summary: "mcp__remnawave__users_get_users" }))
       .toEqual({ name: "users_get_users", server: "remnawave", argument: "" });
     expect(toolTitle({ toolName: "mcp__plugin_context7_context7__query-docs", summary: null }).server).toBe("context7");
+  });
+});
+
+describe("first dialog: row labels", () => {
+  it("file_rows_lead_with_the_name", () => {
+    expect(toolLabel(toolTitle({ toolName: "Read", summary: "Read: /tmp/canterlot-check/note.txt" }))).toEqual({ text: "note.txt", dir: "/tmp/canterlot-check" });
+    expect(toolLabel(toolTitle({ toolName: "Read", summary: "Read: note.txt" }))).toEqual({ text: "note.txt", dir: "" });
+  });
+
+  it("old_command_summaries_lose_the_heredoc_and_other_lines", () => {
+    expect(toolLabel(toolTitle({ toolName: "Bash", summary: "Bash: cat > a <<'EOF'\nтело" })).text).toBe("cat > a");
+    expect(toolLabel(toolTitle({ toolName: "Bash", summary: "Bash: ls\nrm x" })).text).toBe("ls");
   });
 });
 

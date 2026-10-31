@@ -116,6 +116,33 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
   });
 }
 
+test('file_row_leads_with_the_name_and_the_full_command_opens_above_the_output', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = dialogConversation(api);
+  const items = structuredClone(FIRST_DIALOG);
+  const bash = items.find((item) => item.kind === 'block' && item.tool_name === 'Bash' && item.summary?.includes('mkdir'));
+  const full = `mkdir -p /tmp/canterlot-check\nprintf 'строка' > note.txt\n${'echo дальше\n'.repeat(12)}`;
+  if (bash?.kind === 'block') {
+    bash.content = full;
+    bash.content_bytes = full.length;
+  }
+  api.histories.set(id, items);
+  for (const item of items) if (item.kind === 'block') api.blocks.set(item.id, { text: item.content, rev: item.rev, state: item.state });
+  api.bindConversation(id);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  const read = namedRow(page, 'Read');
+  await expect(read.locator('.summary')).toContainText('note.txt');
+  await expect(read.locator('.dir')).toHaveText('/tmp/canterlot-check');
+  const row = toolRow(page, 'mkdir -p');
+  await row.locator('.head').click();
+  await expect(row.locator('.out')).toHaveCount(2);
+  await expect(row.locator('.out').first().locator('.caption')).toHaveText('Команда');
+  await expect(row.locator('.out').first().locator('pre')).toContainText('echo дальше');
+  await expect(row.locator('.out').last()).toHaveText('Вывода нет');
+});
+
 test('long_link_in_the_owner_message_wraps', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
