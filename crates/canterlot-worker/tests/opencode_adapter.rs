@@ -2312,6 +2312,36 @@ async fn refused_input_returns_the_previous_mode() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Период без ввода может начаться раньше следующего ввода: `bypass`, который хаб не принял,
+// не должен дождаться его на сервере.
+#[tokio::test]
+async fn refused_input_returns_the_previous_mode_at_once() {
+    let mut script = with_rules_route(ready(), vec![reply_204()]);
+    set_prompt_reply(&mut script, |reply| {
+        *reply = Reply {
+            status: 400,
+            body: Some(json!({"_tag": "InvalidRequestError"})),
+            ..Default::default()
+        };
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("read_only"));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
+    ));
+    let requests = bench.fake.requests();
+    let effects: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(|request| request["body"]["permissions"][0]["effect"].clone())
+        .collect();
+    assert_eq!(effects, [json!("deny"), json!("allow")]);
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn failed_run_shows_an_error_block_and_still_finishes() {
     let mut script = ready();

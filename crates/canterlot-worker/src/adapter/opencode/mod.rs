@@ -1646,7 +1646,7 @@ impl OpenCodeAdapter {
                     kind: input::PROOF_KIND,
                 })
             }
-            // Хаб новых настроек не применил: сервер возвращается к прежним перед вводом.
+            // Хаб новых настроек не применил: сервер возвращается к прежним.
             Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
                 self.delivery.active = None;
                 self.delivery.adopted = adopted;
@@ -1655,6 +1655,9 @@ impl OpenCodeAdapter {
                     translator.begin_run(adopted);
                 }
                 self.restore_settings(previous);
+                // Период без ввода не должен застать режим, который хаб не принял. Не вышло:
+                // правила остаются помеченными и ставятся перед следующим вводом.
+                let _ = self.apply_mode(&http, self.mode).await;
                 TransmitOutcome::Rejected(tag)
             }
             _ => {
