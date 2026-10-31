@@ -1169,6 +1169,14 @@ impl Supervisor {
                     detail,
                     "adapter start failed"
                 );
+                // Шаг запуска без текста разговора: иначе владелец увидит только «не запустилось».
+                if let Ok(Err(crate::adapter::AdapterError::StartFailed(reason))) = &other {
+                    self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                        execution_id: self.spec.execution_id.to_string(),
+                        kind: "start_failed".into(),
+                        event_type: safe_event_type(reason),
+                    }))?;
+                }
                 let cause = match other {
                     Ok(Err(crate::adapter::AdapterError::StartFailed("cli_too_old"))) => {
                         StopCause::CliIncompatible

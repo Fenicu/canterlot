@@ -72,4 +72,14 @@ describe("chat/diagnostics", () => {
     expect(report).not.toContain(SECRET_TOOL_ARG);
     expect(report).not.toContain(SECRET_FILENAME);
   });
+
+  it("adapter_diagnostic_names_its_reason_without_text", () => {
+    const report = buildDiagnosticsReport({
+      conversationId: "c1",
+      diagnosticEvents: [
+        { kind: "adapter_diagnostic", detail: "provider_quota", seq: "7" },
+      ],
+    });
+    expect(report).toContain("adapter_diagnostic: provider_quota");
+  });
 });

@@ -1140,6 +1140,34 @@ async fn compaction_during_a_turn_is_not_applicable() {
     env.fake().wait_gone().await;
 }
 
+// Отказ запуска без текста разговора: владелец видит, на каком шаге остановилось.
+#[tokio::test]
+async fn failed_start_names_its_step_in_a_diagnostic() {
+    let mut script = ready();
+    for step in &mut script.steps {
+        if let Step::Expect { path, reply, .. } = step
+            && path == "/api/session"
+        {
+            reply.status = 500;
+            reply.body = Some(json!({"_tag": "Internal"}));
+        }
+    }
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait("failed execution", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::ExecutionState(fact) if fact.state == "failed"))
+    })
+    .await;
+    assert!(env.bodies.iter().any(|body| matches!(
+        body,
+        Body::AdapterDiagnostic(fact)
+            if fact.kind == "start_failed" && fact.event_type == "session_create_failed"
+    )));
+    env.fake().wait_gone().await;
+}
+
 fn permission_turn() -> Script {
     Script::from_capture("permissions", None)
         .first_run()

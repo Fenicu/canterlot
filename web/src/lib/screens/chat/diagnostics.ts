@@ -23,6 +23,8 @@ export interface DiagnosticsData {
 	} | null;
 	diagnosticEvents?: Array<{
 		kind: string;
+		/** Причина от адаптера, без текста разговора. */
+		detail?: string;
 		correlation_id?: string;
 		seq?: string;
 	}>;
@@ -53,7 +55,7 @@ export function buildDiagnosticsReport(data: DiagnosticsData): string {
 			protocol: data.versions?.protocol ?? 1
 		},
 		diagnosticEvents: (data.diagnosticEvents ?? []).map((e) => ({
-			kind: e.kind,
+			kind: e.detail ? `${e.kind}: ${e.detail}` : e.kind,
 			correlation_id: e.correlation_id ?? null,
 			seq: e.seq ?? null
 		}))

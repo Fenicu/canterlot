@@ -14,7 +14,7 @@
 		kind?: string;
 		type?: string;
 		correlation_id?: string;
-		payload?: { correlation_id?: string };
+		payload?: { correlation_id?: string; event_type?: string };
 		seq?: string;
 		created_seq?: string;
 	}
@@ -57,6 +57,7 @@
 			const e = raw as DiagnosticEventLike;
 			return {
 				kind: e.kind || e.type || 'diagnostic',
+				detail: e.payload?.event_type,
 				correlation_id: e.correlation_id || e.payload?.correlation_id,
 				seq: e.seq || e.created_seq
 			};
@@ -138,6 +139,7 @@
 					{#each diagnosticEvents as ev, idx (idx)}
 						<div class="key-value">
 							<span class="event-kind">{diagnosticKindLabel(ev.kind)}</span>
+							{#if ev.detail}<code>{ev.detail}</code>{/if}
 							{#if ev.correlation_id}<code>{ev.correlation_id}</code>{/if}
 						</div>
 					{/each}
