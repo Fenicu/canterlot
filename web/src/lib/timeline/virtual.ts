@@ -120,7 +120,8 @@ export function viewAnchor(el: HTMLElement): ViewAnchor | null {
   let row: HTMLElement | null = null;
   for (const node of el.querySelectorAll<HTMLElement>('[data-key]')) {
     if (best && !best.contains(node)) break;
-    if (node.getBoundingClientRect().bottom <= edge) continue;
+    // Подпись дня стоит над старшей страницей, а не держит то, что под ней.
+    if (node.dataset.key?.startsWith('day:') || node.getBoundingClientRect().bottom <= edge) continue;
     best = node;
     row ??= node;
   }
