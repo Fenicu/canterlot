@@ -422,7 +422,7 @@ test('settings_sheet_changes_preset_from_next_turn_and_warns_about_restart', asy
 	await page.getByRole('button', { name: 'Меню сессии' }).click();
 	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
 	await expect(page.getByText('Сейчас: Без инструкций')).toBeVisible();
-	await expect(page.getByText('Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.')).toBeVisible();
+	await expect(page.getByText('Смена инструкций перезапускает агента между ходами с сохранением истории. Пока идёт фоновая работа, смена ждёт её конца: задачи не останавливаются.')).toBeVisible();
 	await page.getByRole('combobox', { name: 'Новые инструкции' }).selectOption('seed-executor');
 	await page.getByRole('button', { name: 'Сохранить настройки' }).click();
 	await expect.poll(() => bodies.find((body) => body.instruction_profile === 'seed-executor')).toBeDefined();

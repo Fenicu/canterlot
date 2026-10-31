@@ -1861,6 +1861,15 @@ impl Supervisor {
             AdapterEvent::BackgroundWork { tasks, wake_turn } => {
                 self.on_background(tasks, wake_turn)?
             }
+            AdapterEvent::DeferredRestartDue => {
+                if matches!(self.lifecycle, Lifecycle::Running)
+                    && !self.adapter_exited
+                    && self.active_turn.is_none()
+                    && let Some(adapter) = self.adapter.as_mut()
+                {
+                    adapter.apply_deferred(&*self.containment).await;
+                }
+            }
             AdapterEvent::SessionStuck => self.on_stuck()?,
             AdapterEvent::Compacted { ok } => {
                 if let Some((id, attempt)) = self.pending_compaction.take() {

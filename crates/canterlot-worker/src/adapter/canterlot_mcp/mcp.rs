@@ -109,7 +109,7 @@ fn preset_tool_description(mcp_name: &str) -> &'static str {
             "Create a preset (no `id`) or replace a saved preset's title, description and text (`id` + `base_revision` from the list); built-ins cannot be changed; saving never changes running sessions; the preset is marked as made by an agent."
         }
         "canterlot_preset_apply" => {
-            "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept and background tasks of this session stop; call it once, not in a loop."
+            "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."
         }
         _ => "Preset tool.",
     }

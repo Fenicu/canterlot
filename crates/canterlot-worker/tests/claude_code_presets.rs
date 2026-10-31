@@ -5,8 +5,8 @@
 
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterContext, AdapterEvent, InstructionMode, InstructionSpec, SettingsChange,
-        StartSpec, Transmission, TransmitOutcome,
+        Adapter, AdapterContext, AdapterEvent, BlockKind, InstructionMode, InstructionSpec,
+        SettingsChange, StartSpec, Transmission, TransmitOutcome,
         claude_code::process::{
             LaunchSpec, SessionArg, build_args, needs_restart, owner_instruction_excludes,
             owner_instruction_excludes_in, repository_root, settings_json, write_instructions_file,
@@ -393,6 +393,11 @@ for line in sys.stdin:
           'permissionMode': 'default',
           'mcp_servers': [{'name': 'canterlot', 'status': 'connected'}]})
     uid = v.get('uuid')
+    frames = d / 'frames.json'
+    if frames.exists():
+        for frame in json.loads(frames.read_text()):
+            emit(frame)
+        frames.unlink()
     emit({'type': 'result', 'subtype': 'success', 'session_id': sid, 'is_error': False,
           'user_message_uuids': [uid], 'modelUsage': usage, 'result': 'ok'})
 "#;
@@ -520,6 +525,158 @@ impl RestartHarness {
             .lines()
             .count()
     }
+}
+
+fn background_frames(h: &RestartHarness, tasks: serde_json::Value) {
+    let frames = serde_json::json!([
+        {"type": "system", "subtype": "background_tasks_changed", "tasks": tasks}
+    ]);
+    std::fs::write(h.dir.path().join("frames.json"), frames.to_string()).unwrap();
+}
+
+fn running_task() -> serde_json::Value {
+    serde_json::json!([{"task_id": "a1", "task_type": "local_agent", "description": "bg sub"}])
+}
+
+fn warnings(events: &[AdapterEvent]) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Warning,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+// Смена инструкций с работающей фоновой задачей: сообщение идёт сразу со старыми, CLI живёт.
+async fn deferred_change(h: &mut RestartHarness) {
+    background_frames(h, running_task());
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    assert_eq!(h.spawns().len(), 1, "background work keeps the process");
+    assert_eq!(
+        h.stdin_lines(h.old_pid),
+        2,
+        "the message reached the same CLI"
+    );
+    let events = h.until_finished().await;
+    assert_eq!(warnings(&events), 1, "the owner sees the wait");
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CliRestarted { .. }))
+    );
+}
+
+#[tokio::test]
+async fn instructions_change_waits_for_background_work_and_applies_when_the_list_empties() {
+    let mut h = RestartHarness::new().await;
+    deferred_change(&mut h).await;
+    background_frames(&h, serde_json::json!([]));
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(h.spawns().len(), 1, "the list emptied inside this turn");
+    h.until_finished().await;
+    loop {
+        let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+            .await
+            .expect("the deferred restart must fall due");
+        if matches!(event, AdapterEvent::DeferredRestartDue) {
+            break;
+        }
+    }
+    tokio::time::timeout(WAIT, h.adapter.apply_deferred(&h.group))
+        .await
+        .expect("restart deadline");
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "one restart expected: {spawns:?}");
+    let (new_pid, args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    assert!(args.iter().any(|a| a == "--resume"));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, h.adapter.next_event())
+            .await
+            .unwrap(),
+        AdapterEvent::CliRestarted { .. }
+    ));
+    let new_pid = *new_pid;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(
+        h.stdin_lines(new_pid),
+        1,
+        "the next input reaches the new CLI"
+    );
+    assert_eq!(h.spawns().len(), 2, "applied once");
+}
+
+#[tokio::test]
+async fn deferred_change_goes_ahead_of_the_next_input_when_the_work_has_ended() {
+    let mut h = RestartHarness::new().await;
+    deferred_change(&mut h).await;
+    background_frames(&h, serde_json::json!([]));
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(
+        h.spawns().len(),
+        2,
+        "restart before the input, none left over"
+    );
+}
+
+#[tokio::test]
+async fn later_settings_change_replaces_the_deferred_one() {
+    let mut h = RestartHarness::new().await;
+    deferred_change(&mut h).await;
+    let out = h.transmit(Some(change(preset_spec("новый текст")))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)));
+    assert_eq!(h.spawns().len(), 1);
+    let events = h.until_finished().await;
+    assert_eq!(warnings(&events), 0, "said once");
+    background_frames(&h, serde_json::json!([]));
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    loop {
+        let event = tokio::time::timeout(WAIT, h.adapter.next_event())
+            .await
+            .unwrap();
+        if matches!(event, AdapterEvent::DeferredRestartDue) {
+            break;
+        }
+    }
+    tokio::time::timeout(WAIT, h.adapter.apply_deferred(&h.group))
+        .await
+        .unwrap();
+    assert_eq!(h.spawns().len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(h.dir.path().join("exec/instructions.md")).unwrap(),
+        "новый текст",
+        "the latest change wins"
+    );
 }
 
 #[tokio::test]

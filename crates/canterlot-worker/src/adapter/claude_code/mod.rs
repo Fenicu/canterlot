@@ -64,6 +64,11 @@ pub struct ClaudeCodeAdapter {
     exited: bool,
     start_attempted: bool,
     relay_executable: Option<PathBuf>,
+    /// Смена, для которой нужен перезапуск CLI, ждёт конца фоновой работы: перезапуск убил бы её.
+    deferred: Option<SettingsChange>,
+    /// `DeferredRestartDue` уже отдан; сбрасывается новым кадром CLI.
+    deferred_due: bool,
+    background_changed: Option<Instant>,
 }
 
 impl ClaudeCodeAdapter {
@@ -102,6 +107,9 @@ impl ClaudeCodeAdapter {
             exited: false,
             start_attempted: false,
             relay_executable: None,
+            deferred: None,
+            deferred_due: false,
+            background_changed: None,
         }
     }
 
@@ -120,10 +128,14 @@ impl ClaudeCodeAdapter {
     }
 
     fn error_block(&mut self, text: String) {
+        self.notice(BlockKind::Error, text);
+    }
+
+    fn notice(&mut self, kind: BlockKind, text: String) {
         let block_id = Uuid::now_v7();
         self.events.push_back(AdapterEvent::BlockStarted {
             block_id,
-            kind: BlockKind::Error,
+            kind,
             input_command_id: self
                 .queue
                 .as_ref()
@@ -151,6 +163,7 @@ impl ClaudeCodeAdapter {
             StdoutLine::Eof => self.eof = true,
             StdoutLine::Oversized(_) => self.diagnostic("oversized_frame", false),
             StdoutLine::Line(line) => {
+                self.deferred_due = false;
                 // MCP status is launch metadata; the parser's Init contract stays unchanged.
                 if let Ok(value) = serde_json::from_str::<Value>(&line) {
                     if value["type"] == "system" && value["subtype"] == "init" {
@@ -271,6 +284,9 @@ impl ClaudeCodeAdapter {
                         for block in blocks {
                             self.flush_tool(block, None);
                         }
+                    }
+                    AdapterEvent::BackgroundWork { .. } => {
+                        self.background_changed = Some(Instant::now());
                     }
                     _ => {}
                 }
@@ -669,6 +685,41 @@ impl ClaudeCodeAdapter {
         }
     }
 
+    /// Перезапуск оборвал бы фоновую работу или ход, который CLI начал сам. Задача только что
+    /// закончилась: её пробуждающий ход начнётся через миллисекунды, кадра ещё может не быть.
+    fn background_busy(&self) -> bool {
+        self.parser.background_running() > 0
+            || self.parser.wake_turn_open()
+            || self
+                .background_changed
+                .is_some_and(|at| at.elapsed() < RESTART_SETTLE)
+    }
+
+    /// Запомнить смену до конца фоновой работы. Новая смена поверх отложенной: поля новой главнее.
+    fn defer_restart(&mut self, change: SettingsChange) {
+        match self.deferred.take() {
+            Some(known) => self.deferred = Some(merged(known, change)),
+            None => {
+                self.deferred = Some(change);
+                tracing::info!(
+                    kind = "instructions_restart_deferred",
+                    "instructions change waits for background work"
+                );
+                self.notice(BlockKind::Warning, DEFERRED_NOTICE.to_owned());
+            }
+        }
+    }
+
+    /// Отложенная смена дождалась своего часа и уходит вместе со сменой этого ввода, если она есть.
+    fn take_deferred(&mut self, own: Option<&SettingsChange>) -> Option<SettingsChange> {
+        let deferred = self.deferred.take()?;
+        let change = match own {
+            Some(own) => merged(deferred, own.clone()),
+            None => deferred,
+        };
+        process::needs_restart(&self.instructions, &change).then_some(change)
+    }
+
     /// Один проход доставки; `Undetermined` запоминается вызывающим.
     async fn transmit_once(
         &mut self,
@@ -681,14 +732,39 @@ impl ClaudeCodeAdapter {
         if let Err(reason) = self.validate_transmission(input) {
             return TransmitOutcome::Rejected(reason.into());
         }
-        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода.
-        if let Some(change) = input.settings.clone()
-            && process::needs_restart(&self.instructions, &change)
-            && let Err(reason) = self.restart_for_instructions(&change, group).await
+        // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода. Пока идёт
+        // фоновая работа, смена ждёт, а сообщение идёт сразу: CLI примет его и с задачами в фоне.
+        let own_restart = input
+            .settings
+            .as_ref()
+            .is_some_and(|change| process::needs_restart(&self.instructions, change));
+        let mut settings = input.settings.clone();
+        if self.background_busy() {
+            if own_restart {
+                self.defer_restart(settings.take().unwrap_or_default());
+            }
+        } else if let Some(change) = self
+            .take_deferred(input.settings.as_ref())
+            .or_else(|| input.settings.clone().filter(|_| own_restart))
         {
-            return TransmitOutcome::Rejected(reason.into());
+            let deferred = !own_restart;
+            if let Err(reason) = self.restart_for_instructions(&change, group).await {
+                if !deferred {
+                    return TransmitOutcome::Rejected(reason.into());
+                }
+                self.error_block(DEFERRED_FAILED.to_owned());
+                if self.cli.is_none() {
+                    return TransmitOutcome::Undetermined;
+                }
+            }
         }
-        self.queue.as_mut().unwrap().enqueue(input);
+        self.queue.as_mut().unwrap().enqueue(&Transmission {
+            command_id: input.command_id,
+            attempt: input.attempt,
+            text: input.text.clone(),
+            files: input.files.clone(),
+            settings,
+        });
         let mut limit = Instant::now() + self.deadline;
         let mut written = false;
         loop {
@@ -800,6 +876,23 @@ impl ClaudeCodeAdapter {
 
 /// Предел дочитывания stdout и ожидания выхода после SIGKILL при перезапуске.
 const KILL_DRAIN: Duration = Duration::from_secs(1);
+
+/// Сколько список задач должен не меняться, прежде чем останавливать CLI: между концом задачи
+/// и `system/init` её пробуждающего хода в записанных сессиях проходило меньше 50 мс.
+const RESTART_SETTLE: Duration = Duration::from_secs(2);
+
+const DEFERRED_NOTICE: &str = "Смена инструкций ждёт конца фоновой работы: перезапуск агента её бы остановил. Новые инструкции подействуют, как только задачи закончатся.";
+const DEFERRED_FAILED: &str =
+    "Отложенная смена инструкций не применилась: агент работает с прежними.";
+
+fn merged(older: SettingsChange, newer: SettingsChange) -> SettingsChange {
+    SettingsChange {
+        model: newer.model.or(older.model),
+        effort: newer.effort.or(older.effort),
+        permission_mode: newer.permission_mode.or(older.permission_mode),
+        instructions: newer.instructions.or(older.instructions),
+    }
+}
 
 /// Ранний выход CLI сразу после запуска: процесс не прожил и секунды.
 async fn exited_early(cli: &mut CliProcess) -> bool {
@@ -1106,7 +1199,30 @@ impl Adapter for ClaudeCodeAdapter {
             if let Some(event) = self.events.pop_front() {
                 return event;
             }
+            if self.deferred.is_some()
+                && !self.deferred_due
+                && !self.background_busy()
+                && self.queue.as_ref().is_some_and(|q| q.active().is_none())
+            {
+                self.deferred_due = true;
+                return AdapterEvent::DeferredRestartDue;
+            }
             self.pump().await;
+        }
+    }
+    async fn apply_deferred(&mut self, group: &dyn Containment) {
+        if self.background_busy()
+            || self.exited
+            || self.eof
+            || self.cli.is_none()
+            || self.queue.as_ref().is_none_or(|q| q.active().is_some())
+        {
+            return;
+        }
+        if let Some(change) = self.take_deferred(None)
+            && self.restart_for_instructions(&change, group).await.is_err()
+        {
+            self.error_block(DEFERRED_FAILED.to_owned());
         }
     }
     async fn close(

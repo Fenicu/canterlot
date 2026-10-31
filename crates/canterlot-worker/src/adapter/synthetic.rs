@@ -150,6 +150,7 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             };
             AdapterEvent::Media { block_id, source }
         }
+        "restart_due" => AdapterEvent::DeferredRestartDue,
         "background_work" => {
             let background = &value["background"];
             let tasks = background["tasks"]
@@ -768,6 +769,15 @@ impl Adapter for SyntheticAdapter {
                 })
                 .await;
         }
+    }
+
+    async fn apply_deferred(&mut self, _group: &dyn Containment) {
+        self.pending.push_back(AdapterEvent::Diagnostic {
+            kind: "deferred_restart_applied",
+            event_type: "deferred_restart_applied".into(),
+            required: false,
+            field_names: Vec::new(),
+        });
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {

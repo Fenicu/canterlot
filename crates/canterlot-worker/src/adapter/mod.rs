@@ -545,6 +545,9 @@ pub enum AdapterEvent {
         tasks: Vec<BackgroundTask>,
         wake_turn: bool,
     },
+    /// Отложенная смена настроек дождалась: фоновой работы нет, ход не идёт. Сопровождение
+    /// решает, можно ли останавливать CLI, и зовёт `apply_deferred`.
+    DeferredRestartDue,
     /// Один и тот же отказ подряд: владельцу предлагается сжать контекст, очередь встаёт.
     SessionStuck,
     /// Сжатие, запрошенное через `compact`, закончилось.
@@ -641,6 +644,7 @@ impl fmt::Debug for AdapterEvent {
                 .field("tasks", &tasks.len())
                 .field("wake_turn", wake_turn)
                 .finish(),
+            Self::DeferredRestartDue => f.write_str("DeferredRestartDue"),
             Self::SessionStuck => f.write_str("SessionStuck"),
             Self::Compacted { ok } => f.debug_struct("Compacted").field("ok", ok).finish(),
             Self::TodoUpdated { lane, items } => f
@@ -845,6 +849,8 @@ pub trait Adapter: Send {
         CompactOutcome::NotApplicable
     }
     async fn next_event(&mut self) -> AdapterEvent;
+    /// Применить смену настроек, отложенную до конца фоновой работы; см. `DeferredRestartDue`.
+    async fn apply_deferred(&mut self, _group: &dyn Containment) {}
     async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}
     /// Срок мягкой остановки из таймеров сопровождения: сколько `Graceful`
     /// close ждёт выхода после SIGTERM, прежде чем убить CLI.

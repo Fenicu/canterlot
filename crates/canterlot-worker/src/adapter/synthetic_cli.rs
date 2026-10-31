@@ -34,6 +34,8 @@
 //! список сверх всех потолков.
 //! {"background":{"tasks":[{"task_id":"a1","kind":"agent","state":"running",
 //! "description":"…"}],"wake_turn":false}} — фоновые задачи, как их сообщает адаптер.
+//! {"restart_due":true} — смена настроек дождалась конца фоновой работы; с "after_turn":true
+//! это приходит сразу после конца хода.
 //! {"wake_turn":true} после конца хода начинает ход без ввода, как Claude Code по завершении
 //! фоновой задачи: `run_adopted`, затем фаза; ход кончается по `interrupt`.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
@@ -152,6 +154,7 @@ struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
     late_request: Option<Value>,
     wake_turn: bool,
+    restart_due: bool,
     command: Uuid,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
@@ -319,6 +322,12 @@ fn run_steps<'a>(
                 phase(Phase::AwaitingPermission).await?;
             } else if let Some(payload) = step.get("late_request") {
                 turn.late_request = Some(payload.clone());
+            } else if step.get("restart_due").is_some() {
+                if step.get("after_turn").is_some() {
+                    turn.restart_due = true;
+                } else {
+                    emit(json!({"type":"restart_due"})).await?;
+                }
             } else if let Some(background) = step.get("background") {
                 emit(json!({"type":"background_work", "background":background})).await?;
             } else if step.get("wake_turn").is_some() {
@@ -647,6 +656,7 @@ async fn run_turn(
         decisions,
         late_request: None,
         wake_turn: false,
+        restart_due: false,
         command,
         files,
         instructions,
@@ -687,6 +697,7 @@ async fn run_turn(
     }
     let late_request = turn.late_request.take();
     let waking = turn.wake_turn;
+    let restart_due = turn.restart_due;
     let usage: Vec<_> = turn.usage.into_values().collect();
     for row in &usage {
         *context = context
@@ -701,6 +712,9 @@ async fn run_turn(
         emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
             .await?;
         phase(Phase::AwaitingPermission).await?;
+    }
+    if restart_due {
+        emit(json!({"type":"restart_due"})).await?;
     }
     if waking {
         wake_turn.set(Some(command));

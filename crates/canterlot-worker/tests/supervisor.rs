@@ -2429,6 +2429,43 @@ async fn cancelled_todo_item_reaches_sj_with_its_status() {
     harness.shutdown().await;
 }
 
+// Ход идёт: остановить CLI нельзя. Срок приходит снова, когда он закончится.
+#[tokio::test]
+async fn deferred_restart_runs_only_between_turns() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+    let applied = |bodies: &[Body]| {
+        bodies
+            .iter()
+            .filter(
+                |b| matches!(b, Body::AdapterDiagnostic(f) if f.event_type == "deferred_restart_applied"),
+            )
+            .count()
+    };
+    harness
+        .deliver(first, 1, &script(r#"{"restart_due":true}"#))
+        .await;
+    let bodies = harness
+        .wait_records("turn", |b| run_finished(b, first))
+        .await;
+    assert_eq!(applied(&bodies), 0, "a turn is running");
+    harness
+        .deliver(
+            second,
+            1,
+            &script(r#"{"restart_due":true,"after_turn":true}"#),
+        )
+        .await;
+    let bodies = harness
+        .wait_records("applied", |b| applied(b) > 0 && run_finished(b, second))
+        .await;
+    assert_eq!(applied(&bodies), 1);
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn background_work_reaches_the_journal_with_its_capability() {
     let _gate = e2e_gate::acquire().await;
