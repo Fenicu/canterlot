@@ -108,6 +108,7 @@
   }
   .bubble[data-state='rejected'] { background: var(--danger-soft); }
   p { margin: 0; overflow-wrap: anywhere; }
+  .text { white-space: pre-wrap; }
   .status, .reason { color: var(--secondary); font-size: var(--fs-sm); }
   [data-state='rejected'] .status { color: var(--danger); font-weight: var(--weight-medium); }
   [data-state='acceptance_unconfirmed'] .status { color: var(--warning); }
