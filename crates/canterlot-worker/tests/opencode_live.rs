@@ -11,8 +11,8 @@
 
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, CloseMode, InstructionMode, InstructionSpec, StartSpec,
-        opencode::OpenCodeAdapter,
+        Adapter, AdapterEvent, CloseMode, InstructionMode, InstructionSpec, ModelUsage, StartSpec,
+        Transmission, TransmitOutcome, opencode::OpenCodeAdapter,
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -28,6 +28,10 @@ use uuid::Uuid;
 
 #[path = "support/fake_exec.rs"]
 mod fake_exec;
+
+#[path = "support/opencode_stub.rs"]
+mod stub;
+use stub::{Reply, Stub};
 
 const WAIT: Duration = Duration::from_secs(60);
 
@@ -182,4 +186,161 @@ async fn real_server_passes_the_start_path() {
     adapter.close(CloseMode::Graceful, &group).await.unwrap();
     assert!(closing.elapsed() < Duration::from_secs(5));
     live.wait_gone().await;
+}
+
+fn input(text: &str) -> Transmission {
+    Transmission {
+        command_id: Uuid::now_v7(),
+        attempt: 1,
+        text: text.into(),
+        files: vec![],
+        settings: None,
+    }
+}
+
+struct Session {
+    live: Live,
+    group: TreeContainment,
+    adapter: OpenCodeAdapter,
+}
+
+impl Session {
+    async fn start(stub: &Stub, mode: &str) -> Self {
+        let live = Live::new(&stub.config());
+        let group = TreeContainment::new().unwrap();
+        let mut adapter = live.adapter();
+        let spec = live.spec("fake/fake-1", mode);
+        tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+            .await
+            .expect("start must finish")
+            .expect("start");
+        Self {
+            live,
+            group,
+            adapter,
+        }
+    }
+
+    async fn turn(&mut self, input: &Transmission) -> Vec<AdapterEvent> {
+        match tokio::time::timeout(WAIT, self.adapter.transmit(input, &self.group))
+            .await
+            .expect("transmit must finish")
+        {
+            TransmitOutcome::Accepted(proof) => {
+                assert_eq!(proof.kind, "opencode_inbox_admitted");
+            }
+            other => panic!("{other:?}"),
+        }
+        let mut events = Vec::new();
+        loop {
+            let event = tokio::time::timeout(WAIT, self.adapter.next_event())
+                .await
+                .expect("adapter event");
+            let done = matches!(
+                &event,
+                AdapterEvent::RunFinished { input_command_id, .. }
+                    if *input_command_id == input.command_id
+            );
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    }
+
+    async fn close(mut self) {
+        self.adapter
+            .close(CloseMode::Graceful, &self.group)
+            .await
+            .unwrap();
+        self.live.wait_gone().await;
+    }
+}
+
+fn finals(events: &[AdapterEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockFinal { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_turn_gives_blocks_usage_and_one_provider_request() {
+    let stub = Stub::start(vec![Reply::Text {
+        reasoning: "думаю".into(),
+        text: "Привет, мир".into(),
+    }])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("Скажи привет");
+    let events = session.turn(&turn).await;
+    assert_eq!(finals(&events), ["думаю", "Привет, мир"]);
+    let AdapterEvent::RunFinished {
+        usage,
+        context_tokens,
+        context_window_tokens,
+        ..
+    } = events.last().unwrap()
+    else {
+        unreachable!();
+    };
+    assert_eq!(
+        usage,
+        &vec![ModelUsage {
+            model: "fake/fake-1".into(),
+            agent: "orchestrator".into(),
+            input_tokens: 70,
+            output_tokens: 20,
+            cache_read_tokens: 30,
+            cache_write_tokens: 0,
+        }]
+    );
+    assert_eq!(*context_tokens, 100);
+    assert_eq!(*context_window_tokens, 200_000);
+    // Заголовок сессии задан: лишнего запроса к модели нет.
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1, "{requests:?}");
+    assert!(requests[0].to_string().contains("Скажи привет"));
+    session.close().await;
+}
+
+// Повтор уже доставленного ввода находится в истории, новый ход не начинается.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn delivered_input_is_found_in_the_history() {
+    let stub = Stub::start(vec![Reply::text("один")]).await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let mut turn = input("первый");
+    session.turn(&turn).await;
+    let mut last = tokio::time::timeout(WAIT, session.adapter.next_event()).await;
+    while !matches!(
+        last,
+        Ok(AdapterEvent::Phase {
+            phase: canterlot_worker::adapter::Phase::AwaitingInput,
+            ..
+        })
+    ) {
+        last = tokio::time::timeout(WAIT, session.adapter.next_event()).await;
+    }
+    turn.attempt = 2;
+    match session.adapter.transmit(&turn, &session.group).await {
+        TransmitOutcome::Accepted(proof) => assert_eq!(proof.kind, "opencode_history"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(stub.requests().len(), 1);
+    let unknown = input("такого ввода не было");
+    let mut retried = input("третий");
+    retried.command_id = unknown.command_id;
+    retried.attempt = 2;
+    let _ = session.adapter.next_event().await;
+    let _ = session.adapter.next_event().await;
+    assert!(matches!(
+        session.adapter.transmit(&retried, &session.group).await,
+        TransmitOutcome::Accepted(proof) if proof.kind == "opencode_inbox_admitted"
+    ));
+    session.close().await;
 }

@@ -39,7 +39,9 @@ use opencode::{Fake, find, path_of};
 const WAIT: Duration = Duration::from_secs(20);
 
 fn ready() -> Script {
-    Script::from_capture("start_stream", None).with_canterlot_mcp("connected")
+    Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
 }
 
 struct Env {
@@ -178,7 +180,6 @@ impl Env {
         self.send(self.start_command(mode)).await;
     }
 
-    #[allow(dead_code)]
     async fn deliver(&self, text: &str) -> Uuid {
         let id = Uuid::now_v7();
         self.send(self.command(
@@ -255,7 +256,6 @@ impl Env {
         .await;
     }
 
-    #[allow(dead_code)]
     async fn wait_finished(&mut self, command: Uuid) {
         self.wait("run finished", |bodies| {
             bodies.iter().any(|body| {
@@ -386,5 +386,54 @@ async fn dead_supervisor_releases_the_server_through_the_stdin_lease() {
         )
         .unwrap();
     }
+    env.fake().wait_gone().await;
+}
+
+// Сквозной ход по боевому пути: start_execution, ввод на кириллице, блоки и конец хода.
+#[tokio::test]
+async fn start_execution_to_a_finished_turn() {
+    let mut env = Env::new(Some(ready())).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("Скажи привет").await;
+    env.wait_finished(input).await;
+    let text: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockFinal(f) if f.text == "Hello world" => Some(f.block_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        text.len(),
+        1,
+        "{:?}",
+        env.bodies.iter().map(describe).collect::<Vec<_>>()
+    );
+    assert!(
+        env.bodies.iter().any(
+            |body| matches!(body, Body::InputAccepted(f) if f.command_id == input.to_string())
+        )
+    );
+    let Some(Body::RunFinished(run)) = env
+        .bodies
+        .iter()
+        .find(|body| matches!(body, Body::RunFinished(_)))
+    else {
+        unreachable!();
+    };
+    assert_eq!(run.usage[0].model, "fake/fake-1");
+    assert_eq!(run.usage[0].agent, "orchestrator");
+    assert_eq!(run.usage[0].input_tokens, 70);
+    assert_eq!(run.usage[0].output_tokens, 20);
+    assert_eq!(run.usage[0].cache_read_tokens, 30);
+    assert_eq!(run.context_tokens, 100);
+    assert_eq!(run.context_window_tokens, 200_000);
+    let requests = env.fake().requests();
+    let prompt = find(&requests, "POST", "/prompt").unwrap();
+    assert_eq!(prompt["body"]["text"], "Скажи привет");
+    assert_eq!(prompt["body"]["delivery"], "queue");
+    env.stop().await;
     env.fake().wait_gone().await;
 }

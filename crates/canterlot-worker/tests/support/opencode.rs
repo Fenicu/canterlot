@@ -55,6 +55,17 @@ impl Fake {
         }
     }
 
+    /// Ответ, известный только во время прогона: идентификаторы создаёт адаптер.
+    pub fn write_override(&self, method: &str, path: &str, body: &Value) {
+        let entry = serde_json::json!({"method": method, "path": path, "body": body});
+        let mut text =
+            fs::read_to_string(self.script.with_extension("overrides")).unwrap_or_default();
+        text.push_str(&format!("{entry}\n"));
+        let temporary = self.script.with_extension("overrides.tmp");
+        fs::write(&temporary, text).unwrap();
+        fs::rename(temporary, self.script.with_extension("overrides")).unwrap();
+    }
+
     /// Запрос и строка запуска из журнала двойника, в порядке прихода.
     pub fn entries(&self) -> Vec<Value> {
         fs::read_to_string(&self.log)

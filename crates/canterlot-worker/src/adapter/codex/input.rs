@@ -251,7 +251,7 @@ fn is_local_image(file: &LocalFile) -> bool {
 }
 
 // Файлового ввода у Codex нет: путь в тексте, агент читает сам.
-fn attachment_lines(files: &[LocalFile]) -> std::io::Result<String> {
+pub(crate) fn attachment_lines(files: &[LocalFile]) -> std::io::Result<String> {
     let mut list = String::new();
     for file in files {
         let path = std::path::absolute(&file.path)?;

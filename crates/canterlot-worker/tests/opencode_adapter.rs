@@ -6,8 +6,8 @@
 
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, CloseMode, InstructionMode, InstructionSpec,
-        StartSpec, Started,
+        Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, InstructionMode,
+        InstructionSpec, Phase, SettingsChange, StartSpec, Started, Transmission, TransmitOutcome,
         opencode::{
             OpenCodeAdapter,
             replay::{Reply, Script, Step},
@@ -58,7 +58,7 @@ impl Bench {
             ..Default::default()
         };
         change(&mut cfg);
-        let adapter = OpenCodeAdapter::new(cfg, exec_dir.clone(), Duration::from_secs(2))
+        let adapter = OpenCodeAdapter::new(cfg, exec_dir.clone(), Duration::from_millis(700))
             .with_relay_executable(PathBuf::from("/opt/relay"));
         let spec = StartSpec {
             execution_id: Uuid::now_v7(),
@@ -110,13 +110,121 @@ impl Bench {
             .expect("close");
     }
 
+    fn input(&self, text: &str) -> Transmission {
+        Transmission {
+            command_id: Uuid::now_v7(),
+            attempt: 1,
+            text: text.into(),
+            files: vec![],
+            settings: None,
+        }
+    }
+
+    async fn transmit(&mut self, input: &Transmission) -> TransmitOutcome {
+        tokio::time::timeout(WAIT, self.adapter.transmit(input, &self.group))
+            .await
+            .expect("transmit must finish")
+    }
+
+    async fn accepted(&mut self, input: &Transmission) {
+        match self.transmit(input).await {
+            TransmitOutcome::Accepted(proof) => {
+                assert_eq!(proof.command_id, input.command_id);
+                assert_eq!(proof.kind, "opencode_inbox_admitted");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn until_finished(&mut self, command: Uuid) -> Vec<AdapterEvent> {
+        let mut events = Vec::new();
+        loop {
+            let event = self.event().await;
+            let done = matches!(
+                &event,
+                AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command
+            );
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    }
+
     fn env(&self, key: &str) -> Option<String> {
         self.fake.boot()["env"][key].as_str().map(str::to_owned)
     }
 }
 
 fn ready() -> Script {
-    Script::from_capture("start_stream", None).with_canterlot_mcp("connected")
+    Script::from_capture("start_stream", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+}
+
+/// Запись `resume`: два хода подряд в одном процессе.
+fn two_turns() -> Script {
+    let mut script = Script::from_capture("resume", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models();
+    let third = script
+        .steps
+        .iter()
+        .enumerate()
+        .filter(|(_, step)| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .nth(2)
+        .map(|(index, _)| index)
+        .unwrap();
+    script.steps.truncate(third);
+    let agents = Script::from_capture("start_stream", None)
+        .route("GET", "/api/agent")
+        .unwrap()
+        .replies
+        .clone();
+    script.set_route("GET", "/api/agent", agents);
+    script
+}
+
+fn text_of(events: &[AdapterEvent], kind: &str) -> Vec<String> {
+    let ids: Vec<Uuid> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: found,
+                ..
+            } if format!("{found:?}") == kind => Some(*block_id),
+            _ => None,
+        })
+        .collect();
+    ids.iter()
+        .filter_map(|id| {
+            events.iter().find_map(|event| match event {
+                AdapterEvent::BlockFinal { block_id, text, .. } if block_id == id => {
+                    Some(text.clone())
+                }
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn set_prompt_reply(script: &mut Script, change: impl FnOnce(&mut Reply)) {
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    let Step::Expect { reply, .. } = &mut script.steps[position] else {
+        unreachable!();
+    };
+    change(reply);
 }
 
 /// Без `/prompt`: запись дальше шага создания сессии не нужна.
@@ -738,4 +846,580 @@ fn registry_builds_the_adapter_from_context_with_supervisor_paths() {
     };
     let adapter = registry_with("opencode", &context).unwrap();
     assert!(adapter.capabilities().interrupt_keeps_process);
+}
+
+#[tokio::test]
+async fn first_turn_runs_from_prompt_to_run_finished() {
+    let mut bench = Bench::new(ready());
+    let started = bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(text_of(&events, "Reasoning"), ["think more"]);
+    assert_eq!(text_of(&events, "Text"), ["Hello world"]);
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
+    let AdapterEvent::RunFinished {
+        usage,
+        context_tokens,
+        context_window_tokens,
+        ..
+    } = events.last().unwrap()
+    else {
+        unreachable!();
+    };
+    assert_eq!(usage[0].input_tokens, 70);
+    assert_eq!(usage[0].output_tokens, 20);
+    assert_eq!(*context_tokens, 100);
+    assert_eq!(*context_window_tokens, 200_000);
+    let requests = bench.fake.requests();
+    let prompt = find(&requests, "POST", "/prompt").unwrap();
+    assert_eq!(
+        path_of(prompt),
+        format!("/api/session/{}/prompt", started.native_conversation_id)
+    );
+    assert_eq!(
+        prompt["body"],
+        json!({
+            "id": format!("msg_{}", input.command_id.simple()),
+            "text": "say hello",
+            "delivery": "queue",
+            "metadata": {"canterlot_command": input.command_id.to_string()},
+        })
+    );
+    bench.close(CloseMode::Graceful).await;
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn two_turns_in_one_process_each_get_their_end() {
+    let mut bench = Bench::new(two_turns());
+    bench.start_ok().await;
+    let first = bench.input("remember");
+    bench.accepted(&first).await;
+    let events = bench.until_finished(first.command_id).await;
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, AdapterEvent::RunFinished { .. }))
+            .count(),
+        1
+    );
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            ..
+        }
+    ));
+    let second = bench.input("what did I say");
+    bench.accepted(&second).await;
+    bench.until_finished(second.command_id).await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn second_input_during_a_turn_is_rejected_not_steered() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .rposition(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    script.steps.insert(position, Step::Stall { ms: 300 });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("one");
+    bench.accepted(&first).await;
+    let second = bench.input("two");
+    assert!(matches!(
+        bench.transmit(&second).await,
+        TransmitOutcome::Rejected(reason) if reason == "turn_active"
+    ));
+    bench.until_finished(first.command_id).await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn refused_prompt_names_the_error_and_leaves_the_session_usable() {
+    for (status, tag) in [
+        (400, "InvalidRequestError"),
+        (409, "ConflictError"),
+        (404, "SessionNotFoundError"),
+    ] {
+        let mut script = ready();
+        set_prompt_reply(&mut script, |reply| {
+            *reply = Reply {
+                status,
+                body: Some(json!({"_tag": tag, "message": "текст для модели"})),
+                ..Default::default()
+            };
+        });
+        let position = script
+            .steps
+            .iter()
+            .position(|step| {
+                step.expected_path()
+                    .is_some_and(|path| path.ends_with("/prompt"))
+            })
+            .unwrap();
+        script.steps.truncate(position + 1);
+        let mut bench = Bench::new(script);
+        bench.start_ok().await;
+        let input = bench.input("x");
+        match bench.transmit(&input).await {
+            TransmitOutcome::Rejected(reason) => assert_eq!(reason, tag),
+            other => panic!("{other:?}"),
+        }
+        let next = bench.input("y");
+        assert!(!matches!(
+            bench.transmit(&next).await,
+            TransmitOutcome::Rejected(reason) if reason == "turn_active"
+        ));
+        bench.close(CloseMode::Graceful).await;
+    }
+}
+
+#[tokio::test]
+async fn foreign_id_in_the_reply_is_not_a_proof() {
+    let mut script = ready();
+    set_prompt_reply(&mut script, |reply| {
+        reply.body = Some(json!({"data": {"id": "msg_someone_else"}}));
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    bench.close(CloseMode::Force).await;
+}
+
+// 500 ничего не доказывает, а автоматического повтора нет (D-6): запись не найдена,
+// исполнение освобождается, ввод остаётся неподтверждённым.
+#[tokio::test]
+async fn server_error_on_prompt_stays_unconfirmed_and_frees_the_execution() {
+    let mut script = ready();
+    set_prompt_reply(&mut script, |reply| {
+        *reply = Reply {
+            status: 500,
+            body: Some(json!({"_tag": "UnknownError"})),
+            ..Default::default()
+        };
+    });
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    let mut bench = Bench::new(script);
+    let started = bench.start_ok().await;
+    let id = started.native_conversation_id;
+    let input = bench.input("x");
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::InputAccepted { .. }))
+    );
+    let requests = bench.fake.requests();
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| path_of(request).ends_with("/prompt"))
+            .count(),
+        1,
+        "no automatic resend"
+    );
+    assert!(find(&requests, "GET", &format!("{id}/inbox")).is_some());
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn timed_out_prompt_is_proven_late_by_the_event_stream() {
+    let mut script = ready();
+    set_prompt_reply(&mut script, |reply| reply.stall_ms = 30_000);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    let events = bench.until_finished(input.command_id).await;
+    let accepted = events
+        .iter()
+        .filter(|event| {
+            matches!(event, AdapterEvent::InputAccepted { command_id } if *command_id == input.command_id)
+        })
+        .count();
+    assert_eq!(accepted, 1, "{events:?}");
+    bench.close(CloseMode::Force).await;
+}
+
+// Потока нет, доказательство только в проекции.
+#[tokio::test]
+async fn timed_out_prompt_is_proven_late_by_the_inbox_projection() {
+    let mut script = ready();
+    set_prompt_reply(&mut script, |reply| reply.stall_ms = 30_000);
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    let mut bench = Bench::new(script);
+    let started = bench.start_ok().await;
+    let input = bench.input("x");
+    bench_route_inbox(&bench, &started.native_conversation_id, &input);
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Undetermined
+    ));
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::InputAccepted { command_id } if command_id == input.command_id
+    ));
+    bench.close(CloseMode::Force).await;
+}
+
+fn bench_route_inbox(bench: &Bench, session: &str, input: &Transmission) {
+    // Маршрут пишется в журнал двойника файлом: сценарий уже загружен.
+    let id = format!("msg_{}", input.command_id.simple());
+    let body = json!({"data": [{"id": id, "sessionID": session, "type": "user"}]});
+    bench
+        .fake
+        .write_override("GET", &format!("/api/session/{session}/inbox"), &body);
+}
+
+#[tokio::test]
+async fn repeated_attempt_checks_history_and_never_resends() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position);
+    let mut bench = Bench::new(script);
+    let started = bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.attempt = 2;
+    let session = &started.native_conversation_id;
+    let id = format!("msg_{}", input.command_id.simple());
+    bench.fake.write_override(
+        "GET",
+        &format!("/api/session/{session}/message/{id}"),
+        &json!({"data": {"id": id, "type": "user"}}),
+    );
+    match bench.transmit(&input).await {
+        TransmitOutcome::Accepted(proof) => assert_eq!(proof.kind, "opencode_history"),
+        other => panic!("{other:?}"),
+    }
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    assert!(find(&requests, "POST", "/prompt").is_none());
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn repeated_attempt_without_history_is_sent_once() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("say hello");
+    input.attempt = 2;
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn cyrillic_text_survives_the_stream_and_the_input() {
+    let mut script = ready();
+    for step in &mut script.steps {
+        let Step::Emit { events } = step else {
+            continue;
+        };
+        for event in events {
+            if let Some(delta) = event["data"].get_mut("delta")
+                && let Some(value) = delta.as_str()
+            {
+                *delta = value.replace("Hello ", "Привет, ").into();
+            }
+            if let Some(text) = event["data"].get_mut("text")
+                && let Some(value) = text.as_str()
+            {
+                *text = value.replace("Hello ", "Привет, ").into();
+            }
+        }
+    }
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("Скажи привет");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(text_of(&events, "Text"), ["Привет, world"]);
+    let requests = bench.fake.requests();
+    assert_eq!(
+        find(&requests, "POST", "/prompt").unwrap()["body"]["text"],
+        "Скажи привет"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn attachments_go_as_paths_in_the_text_until_their_slice() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("смотри");
+    input.files = vec![canterlot_worker::adapter::LocalFile {
+        path: "/tmp/отчёт.pdf".into(),
+        name: "отчёт.pdf".into(),
+        mime: "application/pdf".into(),
+        size: 5,
+        image: false,
+    }];
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    let body = &find(&requests, "POST", "/prompt").unwrap()["body"];
+    assert!(body["text"].as_str().unwrap().contains("/tmp/отчёт.pdf"));
+    assert!(body.get("files").is_none());
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn settings_change_is_refused_until_its_slice() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(SettingsChange {
+        model: Some("fake/other".into()),
+        ..Default::default()
+    });
+    assert_eq!(
+        bench.adapter.validate_transmission(&input),
+        Err("settings_unavailable")
+    );
+    let mut same = bench.input("x");
+    same.settings = Some(SettingsChange {
+        model: Some("fake/fake-1".into()),
+        effort: Some("high".into()),
+        permission_mode: Some("bypass".into()),
+        instructions: None,
+    });
+    assert_eq!(bench.adapter.validate_transmission(&same), Ok(()));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn failed_run_shows_an_error_block_and_still_finishes() {
+    let mut script = ready();
+    for step in &mut script.steps {
+        let Step::Emit { events } = step else {
+            continue;
+        };
+        for event in events {
+            if event["type"] == "session.execution.succeeded" {
+                event["type"] = "session.execution.failed".into();
+                event["data"]["error"] =
+                    json!({"type": "provider.internal", "message": "упал провайдер"});
+            }
+        }
+    }
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let errors = text_of(&events, "Error");
+    assert_eq!(errors.len(), 1);
+    assert!(errors[0].contains("упал провайдер"));
+    assert!(errors[0].contains("provider.internal"));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::BlockStarted { kind: BlockKind::Error, input_command_id, .. }
+            if *input_command_id == Some(input.command_id)
+    )));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn unknown_event_does_not_stop_the_turn() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .rposition(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    script.steps.insert(
+        position,
+        Step::Emit {
+            events: vec![
+                json!({"type": "session.brand.new", "data": {"sessionID": "ses_x"}}),
+                json!({"type": "brand.new", "data": {}}),
+            ],
+        },
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic { kind: "unknown_event", required: false, event_type }
+            if event_type == "brand.new"
+    )));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn garbled_terminal_frame_stops_the_execution() {
+    let mut script = ready();
+    script.steps.push(Step::Frame {
+        raw: "data: {\"type\":\"session.execution.succ\n\n".into(),
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    loop {
+        match bench.event().await {
+            AdapterEvent::Diagnostic { kind, required, .. } => {
+                assert_eq!(kind, "unparsed_event");
+                assert!(required);
+                break;
+            }
+            AdapterEvent::Phase { .. } => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn lost_stream_stops_the_server_instead_of_waiting_forever() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::DropSse);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let mut lost = false;
+    loop {
+        match bench.event().await {
+            AdapterEvent::Diagnostic {
+                kind: "event_stream_lost",
+                ..
+            } => lost = true,
+            AdapterEvent::ProcessExited { code, .. } => {
+                assert_eq!(code, Some(130));
+                break;
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(lost);
+    assert!(matches!(
+        bench.transmit(&bench.input("y")).await,
+        TransmitOutcome::Undetermined
+    ));
+    bench.close(CloseMode::Graceful).await;
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
+async fn server_death_during_a_turn_keeps_the_last_events() {
+    let mut script = ready();
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::Die {
+        code: 3,
+        kill: true,
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let mut finished = false;
+    loop {
+        match bench.event().await {
+            AdapterEvent::RunFinished { .. } => finished = true,
+            AdapterEvent::ProcessExited { signal, .. } => {
+                assert_eq!(signal, Some(9));
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(
+        finished,
+        "the stream tail reaches the journal before the exit"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn next_event_is_cancel_safe() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let mut events = Vec::new();
+    while !events
+        .iter()
+        .any(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+    {
+        if let Ok(event) =
+            tokio::time::timeout(Duration::from_millis(1), bench.adapter.next_event()).await
+        {
+            events.push(event);
+        }
+    }
+    assert_eq!(text_of(&events, "Text"), ["Hello world"]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn debug_of_events_hides_the_conversation() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let shown = format!("{events:?}");
+    assert!(!shown.contains("Hello"), "{shown}");
+    assert!(!shown.contains("think more"), "{shown}");
+    bench.close(CloseMode::Graceful).await;
 }

@@ -1,7 +1,10 @@
 //! Адаптер OpenCode 2: сервер `opencode serve --stdio` на исполнение, HTTP и SSE по loopback.
 //! Харнесс спрятан за таблицей `[opencode]`: без неё не показывается и не запускается.
 
+pub mod catalog;
+pub mod events;
 pub mod http;
+pub mod input;
 pub mod instructions;
 pub mod mcp;
 pub mod permissions;
@@ -12,6 +15,7 @@ pub mod sse;
 pub mod version;
 
 use self::{
+    events::{RunFailure, RunOutcome, Translated, Translator},
     http::{Http, HttpError},
     mcp::McpState,
     permissions::PermissionMode,
@@ -20,9 +24,9 @@ use self::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, AgentCallResult, Capabilities, CloseMode,
-        DecisionOutcome, HarnessCatalog, InterruptOutcome, StartSpec, Started, Support,
-        Transmission, TransmitOutcome,
+        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
+        DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec, InterruptOutcome, Phase,
+        Proof, SettingsChange, StartSpec, Started, Support, Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
     },
@@ -33,7 +37,7 @@ use canterlot_proto::requests::DecisionPayload;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -55,6 +59,7 @@ const STREAM_BUFFER: usize = 4096;
 /// Хвост событий после выхода сервера.
 const EXIT_DRAIN: Duration = Duration::from_millis(500);
 const SESSION_TITLE: &str = "canterlot";
+const ERROR_TEXT_BYTES: usize = 4096;
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
 const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
@@ -153,6 +158,35 @@ fn session_id() -> String {
     format!("ses_{}", Uuid::now_v7().simple())
 }
 
+// Ход сервера закрывает одно терминальное событие: поддерживается строго один ввод.
+#[derive(Default)]
+struct Delivery {
+    /// Ввод, чей конец хода ждём; ставится до запроса, события могут обогнать ответ.
+    active: Option<Uuid>,
+    /// Доказательства нет, супервизору сказано `Undetermined`.
+    unconfirmed: Option<Uuid>,
+}
+
+/// Чтение проекций после `Undetermined`. Отдельная задача: итог ждёт в `self`, а не на
+/// стеке `next_event`, который супервизор бросает.
+struct Lookup {
+    command: Uuid,
+    task: tokio::task::JoinHandle<bool>,
+}
+
+impl Drop for Lookup {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn lookup_done(lookup: &mut Option<Lookup>) -> bool {
+    match lookup {
+        Some(pending) => (&mut pending.task).await.unwrap_or(false),
+        None => std::future::pending().await,
+    }
+}
+
 struct EventStream {
     items: mpsc::Receiver<StreamItem>,
     task: tokio::task::JoinHandle<()>,
@@ -167,6 +201,7 @@ impl Drop for EventStream {
 pub struct OpenCodeAdapter {
     cfg: OpenCodeConfig,
     exec_dir: PathBuf,
+    deadline: Duration,
     stop_grace: Duration,
     ready_wait: Duration,
     relay_executable: Option<PathBuf>,
@@ -176,18 +211,25 @@ pub struct OpenCodeAdapter {
     stream: Option<EventStream>,
     broker: Option<Broker>,
     events: VecDeque<AdapterEvent>,
+    translator: Option<Translator>,
+    delivery: Delivery,
+    lookup: Option<Lookup>,
     session: String,
     mode: PermissionMode,
+    model: String,
+    effort: String,
+    instructions: InstructionSpec,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
     exited: bool,
 }
 
 impl OpenCodeAdapter {
-    pub fn new(cfg: OpenCodeConfig, exec_dir: PathBuf, _deadline: Duration) -> Self {
+    pub fn new(cfg: OpenCodeConfig, exec_dir: PathBuf, deadline: Duration) -> Self {
         Self {
             cfg,
             exec_dir,
+            deadline,
             stop_grace: Duration::from_secs(5),
             ready_wait: READY_WAIT,
             relay_executable: None,
@@ -197,8 +239,20 @@ impl OpenCodeAdapter {
             stream: None,
             broker: None,
             events: VecDeque::new(),
+            translator: None,
+            delivery: Delivery::default(),
+            lookup: None,
             session: String::new(),
             mode: PermissionMode::Owner,
+            model: String::new(),
+            effort: String::new(),
+            instructions: InstructionSpec {
+                mode: InstructionMode::Owner,
+                text: String::new(),
+                preset_id: None,
+                revision: 0,
+                title: String::new(),
+            },
             exit: None,
             exited: false,
         }
@@ -411,6 +465,18 @@ impl OpenCodeAdapter {
         }
     }
 
+    // Окно контекста не приходит в событиях. Без каталога ход всё равно работает.
+    async fn context_windows(&mut self) -> HashMap<String, u64> {
+        match self.http {
+            Some(ref http) => http
+                .get("/api/model", REQUEST_WAIT)
+                .await
+                .map(|models| catalog::context_windows(&models))
+                .unwrap_or_default(),
+            None => HashMap::new(),
+        }
+    }
+
     async fn start_inner(
         &mut self,
         spec: &StartSpec,
@@ -467,6 +533,11 @@ impl OpenCodeAdapter {
         };
         self.wait_mcp().await?;
         self.wait_agents().await?;
+        self.model = spec.model.clone();
+        self.effort = spec.effort.clone();
+        self.instructions = spec.instructions.clone();
+        let windows = self.context_windows().await;
+        self.translator = Some(Translator::new(&self.session, windows));
         let proc = self
             .proc
             .as_ref()
@@ -521,9 +592,208 @@ impl OpenCodeAdapter {
         }
     }
 
+    fn error_block(&mut self, failure: &RunFailure, command: Uuid) {
+        let mut text = format!("Ошибка OpenCode ({}): {}", failure.kind, failure.message);
+        text.truncate(text.floor_char_boundary(ERROR_TEXT_BYTES));
+        let block_id = Uuid::now_v7();
+        self.events.push_back(AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::Error,
+            input_command_id: Some(command),
+            parent: None,
+            agent: "orchestrator".into(),
+            model: self.model.clone(),
+            tool_name: None,
+            summary: None,
+            approved_by: None,
+        });
+        self.events.push_back(AdapterEvent::BlockFinal {
+            block_id,
+            text,
+            summary: None,
+        });
+    }
+
+    fn awaiting_input(&mut self) {
+        self.events.push_back(AdapterEvent::Phase {
+            phase: Phase::AwaitingInput,
+            tool_name: None,
+            summary: None,
+        });
+    }
+
+    fn on_run_ended(&mut self, outcome: RunOutcome) {
+        let Some(command) = self.delivery.active.take() else {
+            // Запуски без ввода разбирает свой срез: здесь только готовность к вводу.
+            self.awaiting_input();
+            return;
+        };
+        if self.delivery.unconfirmed == Some(command) {
+            self.delivery.unconfirmed = None;
+            self.lookup = None;
+        }
+        if let RunOutcome::Failed(failure) = &outcome {
+            self.error_block(failure, command);
+        }
+        if let Some(translator) = self.translator.as_mut() {
+            self.events.push_back(translator.finish_run(command));
+        }
+        self.awaiting_input();
+    }
+
+    // Ввод закрыт без хода: конца хода от сервера не будет.
+    fn finish_without_turn(&mut self, command: Uuid) {
+        self.delivery.active = None;
+        self.events.push_back(AdapterEvent::RunFinished {
+            input_command_id: command,
+            usage: Vec::new(),
+            context_tokens: 0,
+            context_window_tokens: 0,
+        });
+        self.awaiting_input();
+    }
+
+    fn prove_late(&mut self, command: Uuid) {
+        self.delivery.unconfirmed = None;
+        self.lookup = None;
+        self.events.push_back(AdapterEvent::InputAccepted {
+            command_id: command,
+        });
+    }
+
+    fn on_translated(&mut self, item: Translated) {
+        match item {
+            Translated::Event(event) => self.events.push_back(event),
+            Translated::InboxSeen(id) => {
+                if let Some(command) = self.delivery.unconfirmed
+                    && input::message_id(command) == id
+                {
+                    self.prove_late(command);
+                }
+            }
+            Translated::RunEnded(outcome) => self.on_run_ended(outcome),
+        }
+    }
+
+    fn on_lookup(&mut self, found: bool) {
+        let Some(lookup) = self.lookup.take() else {
+            return;
+        };
+        if self.delivery.unconfirmed != Some(lookup.command) {
+            return;
+        }
+        if found {
+            self.prove_late(lookup.command);
+        } else {
+            // Записи нет, но и доказательства отказа нет: ввод остаётся неподтверждённым.
+            self.delivery.unconfirmed = None;
+            self.finish_without_turn(lookup.command);
+        }
+    }
+
+    fn start_lookup(&mut self, command: Uuid) {
+        self.delivery.unconfirmed = Some(command);
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let task = tokio::spawn(input::reconcile(
+            http,
+            self.session.clone(),
+            input::message_id(command),
+        ));
+        self.lookup = Some(Lookup { command, task });
+    }
+
+    // Смена настроек на ходу приходит со своими срезами: молча её терять нельзя.
+    fn settings_error(&self, change: &SettingsChange) -> Option<&'static str> {
+        let differs = |wanted: &Option<String>, current: &str| {
+            wanted.as_deref().is_some_and(|wanted| wanted != current)
+        };
+        let unsupported = differs(&change.model, &self.model)
+            || differs(&change.effort, &self.effort)
+            || change
+                .permission_mode
+                .as_deref()
+                .is_some_and(|mode| PermissionMode::parse(mode) != Some(self.mode))
+            || change
+                .instructions
+                .as_ref()
+                .is_some_and(|next| !next.same_effect(&self.instructions));
+        unsupported.then_some("settings_unavailable")
+    }
+
+    async fn transmit_inner(&mut self, input: &Transmission) -> TransmitOutcome {
+        let command = input.command_id;
+        if self.delivery.active.is_some() {
+            return TransmitOutcome::Rejected("turn_active".into());
+        }
+        if let Some(reason) = input
+            .settings
+            .as_ref()
+            .and_then(|change| self.settings_error(change))
+        {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        let body = match input::prompt_body(input) {
+            Ok(body) => body,
+            Err(reason) => return TransmitOutcome::Rejected(reason.into()),
+        };
+        let Some(http) = self.http.clone() else {
+            return TransmitOutcome::Undetermined;
+        };
+        let id = input::message_id(command);
+        if input.attempt > 1 {
+            match input::find_input(&http, &self.session, &id).await {
+                Ok(true) => {
+                    self.finish_without_turn(command);
+                    return TransmitOutcome::Accepted(Proof {
+                        command_id: command,
+                        kind: input::PROOF_KIND_HISTORY,
+                    });
+                }
+                Ok(false) => {}
+                // Повтор вслепую мог бы разбудить пустой период: исход решает владелец.
+                Err(_) => {
+                    self.finish_without_turn(command);
+                    return TransmitOutcome::Undetermined;
+                }
+            }
+        }
+        self.delivery.active = Some(command);
+        if let Some(translator) = self.translator.as_mut() {
+            translator.begin_run(command);
+        }
+        let path = format!("/api/session/{}/prompt", self.session);
+        match http.post(&path, &body, self.deadline).await {
+            Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                TransmitOutcome::Accepted(Proof {
+                    command_id: command,
+                    kind: input::PROOF_KIND,
+                })
+            }
+            Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
+                self.delivery.active = None;
+                TransmitOutcome::Rejected(tag)
+            }
+            _ => {
+                self.start_lookup(command);
+                TransmitOutcome::Undetermined
+            }
+        }
+    }
+
     fn on_stream(&mut self, item: Option<StreamItem>) {
         match item {
-            Some(StreamItem::Event(_)) => {}
+            Some(StreamItem::Event(event)) => {
+                let items = self
+                    .translator
+                    .as_mut()
+                    .map(|translator| translator.feed(&event))
+                    .unwrap_or_default();
+                for item in items {
+                    self.on_translated(item);
+                }
+            }
             Some(StreamItem::Undecodable { required }) => {
                 self.diagnostic("unparsed_event", required);
             }
@@ -586,10 +856,12 @@ impl OpenCodeAdapter {
                 None => std::future::pending().await,
             }
         };
+        let lookup = &mut self.lookup;
         tokio::select! {
             biased;
             item = item => self.on_stream(item),
             event = broker.next() => self.on_broker(event),
+            found = lookup_done(lookup) => self.on_lookup(found),
             status = proc.wait() => {
                 if self.stream.is_none() {
                     self.finish_exit(status);
@@ -605,7 +877,7 @@ impl OpenCodeAdapter {
 impl Adapter for OpenCodeAdapter {
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            streaming: Support::Unavailable("opencode_turns"),
+            streaming: Support::Supported,
             resume: Support::Supported,
             interrupt: Support::Unavailable("opencode_interrupt"),
             approvals: Support::Unavailable("opencode_permissions"),
@@ -631,12 +903,26 @@ impl Adapter for OpenCodeAdapter {
         result
     }
 
+    fn validate_transmission(&self, input: &Transmission) -> Result<(), &'static str> {
+        match input
+            .settings
+            .as_ref()
+            .and_then(|change| self.settings_error(change))
+        {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        }
+    }
+
     async fn transmit(
         &mut self,
-        _input: &Transmission,
+        input: &Transmission,
         _group: &dyn Containment,
     ) -> TransmitOutcome {
-        TransmitOutcome::Undetermined
+        if self.exited || self.exit.is_some() || self.stream.is_none() {
+            return TransmitOutcome::Undetermined;
+        }
+        self.transmit_inner(input).await
     }
 
     async fn deliver_decision(

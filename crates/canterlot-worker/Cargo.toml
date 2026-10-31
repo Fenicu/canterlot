@@ -40,7 +40,7 @@ tonic = { version = "0.14.6", features = ["tls-ring"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["fmt", "env-filter"] }
 url = "2.5.8"
-uuid = { version = "1.29.0", features = ["v7", "serde"] }
+uuid = { version = "1.29.0", features = ["v5", "v7", "serde"] }
 
 [dev-dependencies]
 canterlot-hub = { path = "../canterlot-hub", features = ["testkit"] }

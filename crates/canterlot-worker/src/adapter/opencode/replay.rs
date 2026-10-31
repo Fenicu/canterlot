@@ -229,6 +229,16 @@ impl Script {
         self
     }
 
+    /// `GET /api/model` из записи с каталогом: `start_stream` его не читал.
+    pub fn with_recorded_models(mut self) -> Self {
+        let models = Self::from_capture("models", None)
+            .route("GET", "/api/model")
+            .and_then(|route| route.replies.first().cloned())
+            .expect("recorded /api/model");
+        self.set_route("GET", "/api/model", vec![models]);
+        self
+    }
+
     pub fn push_route(&mut self, method: &str, path: &str, reply: Reply) {
         match self
             .routes
@@ -281,6 +291,8 @@ struct Shared {
     password: String,
     version: String,
     pid: u32,
+    /// Ответы, которые тест дописывает на ходу: идентификаторы создаёт адаптер.
+    overrides: Option<PathBuf>,
 }
 
 impl State {
@@ -499,6 +511,13 @@ fn built_in(shared: &Shared, request: &Request) -> Reply {
             ..Default::default()
         };
     }
+    // Пустая очередь и неизвестное сообщение, как у живого сервера.
+    if request.method == "GET" && request.path.ends_with("/inbox") {
+        return Reply {
+            body: Some(json!({"data": []})),
+            ..Default::default()
+        };
+    }
     Reply {
         status: 404,
         body: Some(json!({"_tag": "NotFoundError", "message": "no scripted reply"})),
@@ -506,8 +525,27 @@ fn built_in(shared: &Shared, request: &Request) -> Reply {
     }
 }
 
-/// Ответ на обычный запрос: шаг сценария, затем маршрут, затем встроенный.
+fn override_reply(shared: &Shared, request: &Request) -> Option<Reply> {
+    let text = std::fs::read_to_string(shared.overrides.as_ref()?).ok()?;
+    text.lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .find(|entry| entry["method"] == request.method && entry["path"] == request.path)
+        .map(|entry| Reply {
+            body: Some(entry["body"].clone()),
+            ..Default::default()
+        })
+}
+
+/// Ответ на обычный запрос: добавка теста, шаг сценария, маршрут, встроенный.
 fn plan_reply(shared: &Shared, request: &Request) -> (Reply, Vec<u8>, bool) {
+    if let Some(reply) = override_reply(shared, request) {
+        let bytes = reply
+            .body
+            .as_ref()
+            .map(|body| body.to_string().into_bytes())
+            .unwrap_or_default();
+        return (reply, bytes, false);
+    }
     let mut state = shared.state.lock().unwrap();
     let table = state.table.clone();
     let matched = match state.steps.get(state.pos) {
@@ -615,24 +653,25 @@ fn boot_entry(args: &[String]) -> Value {
     })
 }
 
-fn load(args: &[String]) -> Option<(Script, Vec<String>)> {
+fn load(args: &[String]) -> Option<(Script, Option<PathBuf>, Vec<String>)> {
     let position = args.iter().position(|arg| arg == "--script");
     let Some(position) = position else {
-        return Some((Script::default(), args.to_vec()));
+        return Some((Script::default(), None, args.to_vec()));
     };
     let path = args.get(position + 1)?;
     let script = serde_json::from_slice(&std::fs::read(path).ok()?).ok()?;
+    let overrides = Path::new(path).with_extension("overrides");
     let rest = args
         .iter()
         .enumerate()
         .filter(|(index, _)| *index != position && *index != position + 1)
         .map(|(_, arg)| arg.clone())
         .collect();
-    Some((script, rest))
+    Some((script, Some(overrides), rest))
 }
 
 pub async fn main(args: Vec<String>) -> ExitCode {
-    let Some((script, rest)) = load(&args) else {
+    let Some((script, overrides, rest)) = load(&args) else {
         eprintln!("fake-opencode: bad --script");
         return ExitCode::from(2);
     };
@@ -690,6 +729,7 @@ pub async fn main(args: Vec<String>) -> ExitCode {
         password: password.to_string_lossy().into_owned(),
         version: script.version,
         pid: std::process::id(),
+        overrides,
     });
     // Обработчики раньше строки готовности: сигнал сразу после неё иначе убил бы процесс.
     use tokio::signal::unix::{SignalKind, signal};
