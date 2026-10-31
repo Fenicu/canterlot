@@ -5420,3 +5420,63 @@ async fn hung_server_does_not_hold_the_worker_past_the_deadline() {
     assert!(started.elapsed() < Duration::from_secs(5));
     fake.wait_gone().await;
 }
+
+// Правила потомкам уходят разом: зависший ответ одного не умножается на их число.
+#[tokio::test]
+async fn children_get_their_rules_at_once() {
+    let capture = two_turns();
+    let session = session_of(&capture);
+    let mut script = with_rules_route(capture, vec![reply_204()]);
+    let children: Vec<String> = (0..3).map(|n| format!("ses_child{n}")).collect();
+    let slow = Reply {
+        status: 204,
+        stall_ms: 400,
+        ..Default::default()
+    };
+    for child in &children {
+        script.set_route(
+            "PATCH",
+            &format!("/api/session/{child}"),
+            vec![slow.clone()],
+        );
+    }
+    let created = script
+        .steps
+        .iter()
+        .position(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    script.steps.insert(
+        created,
+        Step::Emit {
+            events: children
+                .iter()
+                .map(|child| {
+                    json!({"type": "session.created",
+                        "data": {"sessionID": child, "parentID": session}})
+                })
+                .collect(),
+        },
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("раз");
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let mut second = bench.input("два");
+    second.settings = Some(mode_change("read_only"));
+    let started = std::time::Instant::now();
+    bench.accepted(&second).await;
+    assert!(
+        started.elapsed() < Duration::from_millis(1000),
+        "{:?}",
+        started.elapsed()
+    );
+    let patched = bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .count();
+    assert_eq!(patched, 4, "the session and every child");
+    bench.close(CloseMode::Graceful).await;
+}

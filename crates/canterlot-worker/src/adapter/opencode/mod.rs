@@ -72,6 +72,7 @@ const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER: usize = 4096;
+const PATCH_BATCH: usize = 16;
 /// Паузы перед подпиской заново. Сервер живёт отдельно от потока: обычно хватает первой.
 const RECONNECT_DELAYS: [Duration; 4] = [
     Duration::from_millis(0),
@@ -369,14 +370,20 @@ async fn subscribe(http: &Http, wait: Duration) -> Option<EventStream> {
 }
 
 // Правила потомку ставятся отдельно: завершённого уже нет, остальной сохранил бы прежние.
+// Пачками, а не по одному: это ждёт цикл супервизора, а с ним решения и остановка.
 async fn patch_children(http: &Http, children: &[String], body: &Value) -> Result<(), HttpError> {
-    for child in children {
-        match http
-            .patch(&format!("/api/session/{child}"), body, REQUEST_WAIT)
-            .await
-        {
-            Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
-            Err(error) => return Err(error),
+    for batch in children.chunks(PATCH_BATCH) {
+        let mut patches = JoinSet::new();
+        for child in batch {
+            let (http, body) = (http.clone(), body.clone());
+            let path = format!("/api/session/{child}");
+            patches.spawn(async move { http.patch(&path, &body, REQUEST_WAIT).await });
+        }
+        while let Some(done) = patches.join_next().await {
+            match done.map_err(|_| HttpError::Lost)? {
+                Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
