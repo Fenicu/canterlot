@@ -69,6 +69,8 @@ export function sanitizeRendered(html: string, kind: 'markdown' | 'highlight'): 
     ALLOWED_TAGS: kind === 'highlight' ? ['span'] : ALLOWED_TAGS,
     ALLOWED_ATTR: kind === 'highlight' ? ['class'] : ALLOWED_ATTR,
     ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|#)/i,
+    // DOMPurify проверяет этим выражением значения всех атрибутов, кроме безопасных, а номер списка не ссылка.
+    ADD_URI_SAFE_ATTR: ['start'],
     ALLOW_DATA_ATTR: false,
     ALLOW_ARIA_ATTR: false
   });
