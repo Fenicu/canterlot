@@ -456,17 +456,110 @@ async fn archiving_with_active_crunch_or_schedule_answers_409_unless_forced(pool
         0
     );
     assert_eq!(sqlx::query_scalar::<_,i64>("select count(*) from events where scope=$1 and kind='scheduled_changed' and payload->>'state'='cancelled'").bind(format!("conversation:{id}")).fetch_one(&f.pool).await.unwrap(),1);
-    let live = f.create(json!({"start":true})).await;
+}
+
+async fn set_phase(f: &Fixture, id: Uuid, phase: &str) {
+    sqlx::query("update executions set state='running',phase=$2 where conversation_id=$1")
+        .bind(id)
+        .bind(phase)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+
+async fn archive_refusal(f: &Fixture, id: Uuid) -> Value {
+    let path = format!("/api/v1/conversations/{id}");
     let r = f
-        .request(
-            Method::PATCH,
-            &format!("/api/v1/conversations/{live}"),
-            Some(json!({"archived":true})),
-            409,
-        )
+        .request(Method::PATCH, &path, Some(json!({"archived":true})), 409)
         .await;
-    assert_eq!(r["error"]["details"]["reasons"], json!(["live_execution"]));
-    f.patch(live, json!({"archived":true,"force":true})).await;
+    assert_eq!(r["error"]["code"], "archive_active");
+    r["error"]["details"]["reasons"].clone()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn idle_process_archives_without_a_warning_and_stays_alive(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.create(json!({"start":true})).await;
+    set_phase(&f, id, "awaiting_input").await;
+    let archived = f.patch(id, json!({"archived":true})).await;
+    assert_eq!(archived["archived"], true);
+    let state: String = sqlx::query_scalar("select state from executions where conversation_id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(state, "running");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_turn_in_progress_still_asks_before_archiving(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    for phase in [
+        "generating",
+        "running_tool",
+        "context_maintenance",
+        "awaiting_permission",
+        "awaiting_answer",
+    ] {
+        let id = f.create(json!({"start":true})).await;
+        set_phase(&f, id, phase).await;
+        assert_eq!(
+            archive_refusal(&f, id).await,
+            json!(["live_execution"]),
+            "{phase}"
+        );
+        f.patch(id, json!({"archived":true,"force":true})).await;
+    }
+    let held = f.create(json!({"start":true})).await;
+    set_phase(&f, held, "awaiting_input").await;
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2 where conversation_id=$1",
+    )
+    .bind(held)
+    .bind(Uuid::now_v7())
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(archive_refusal(&f, held).await, json!(["live_execution"]));
+    let asked = f.create(json!({"start":true})).await;
+    set_phase(&f, asked, "awaiting_input").await;
+    sqlx::query(
+        "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload)
+         select $1,$2,e.id,e.generation,'question','archive','open','{}' from executions e where e.conversation_id=$2",
+    )
+    .bind(Uuid::now_v7())
+    .bind(asked)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(archive_refusal(&f, asked).await, json!(["live_execution"]));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_lost_owner_is_no_turn_and_a_repeated_archive_answers_the_same(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.create(json!({"start":true})).await;
+    sqlx::query(
+        "update executions set state='owner_lost',phase='generating' where conversation_id=$1",
+    )
+    .bind(id)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let path = format!("/api/v1/conversations/{id}");
+    let key = Uuid::now_v7().to_string();
+    let body = json!({"archived":true});
+    let first = f
+        .client
+        .send(Method::PATCH, &path, Some(&key), Some(body.clone()))
+        .await;
+    let second = f
+        .client
+        .send(Method::PATCH, &path, Some(&key), Some(body))
+        .await;
+    assert_eq!(first.status.as_u16(), 200);
+    assert_eq!(second.status.as_u16(), 200);
+    assert_eq!(first.body, second.body);
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn title_search_is_case_insensitive_and_escapes_like_wildcards(pool: PgPool) {

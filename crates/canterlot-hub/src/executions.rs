@@ -452,6 +452,28 @@ pub async fn live(
     .transpose()
 }
 
+/// Идёт ли ход: живой процесс, который ждёт ввода, никакой работы не ведёт.
+pub async fn turn_in_progress(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(
+           select 1 from executions e
+           join queue_state q on q.conversation_id = e.conversation_id
+           where e.conversation_id = $1
+             and e.state not in ('stopped', 'failed', 'owner_lost')
+             and (q.run_slot <> 'free'
+                  or e.phase in ('generating', 'running_tool', 'context_maintenance',
+                                 'awaiting_permission', 'awaiting_answer')
+                  or exists(select 1 from requests r
+                            where r.execution_id = e.id and r.state = 'open')))",
+    )
+    .bind(conversation_id)
+    .fetch_one(conn)
+    .await
+}
+
 fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&str>) -> bool {
     use ExecutionState::*;
     matches!(

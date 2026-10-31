@@ -1169,7 +1169,7 @@ async fn update_attributes_in_tx(
         if !jobs.is_empty() {
             reasons.push("scheduled");
         }
-        if executions::live(conn, id).await?.is_some() {
+        if executions::turn_in_progress(conn, id).await? {
             reasons.push("live_execution");
         }
         if !attrs.force && !reasons.is_empty() {
