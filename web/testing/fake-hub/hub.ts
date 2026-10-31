@@ -35,10 +35,10 @@ export class FakeHub {
     return state;
   }
   private id(): string { return `00000000-0000-4000-8000-${(++this.uuid).toString(16).padStart(12, '0')}`; }
-  append(scope: string, ev: { kind: string; payload: unknown; conversation_id?: string; execution_id?: string }): HubEvent {
+  append(scope: string, ev: { kind: string; payload: unknown; conversation_id?: string; execution_id?: string; at?: string }): HubEvent {
     const state = this.journal(scope); state.head = seq.inc(state.head);
     const hidden = !clientKinds.has(ev.kind);
-    const time = new Date(this.clock.now()).toISOString();
+    const time = ev.at ?? new Date(this.clock.now()).toISOString();
     const event = {
       v: 1, id: this.id(), correlation_id: this.id(), scope, scope_seq: state.head, scope_seq_from: state.head,
       committed_at: time, committed_at_from: time, kind: hidden ? 'hidden' : ev.kind,
