@@ -1220,6 +1220,146 @@ async fn oversized_answer_final_is_checksum_only() {
     harness.shutdown().await;
 }
 
+/// Что хаб соберёт по блоку из журнала: дельты подряд от ревизии старта и сам финал.
+struct Shipped {
+    deltas: String,
+    biggest_delta: usize,
+    contiguous: bool,
+    fin: canterlot_proto::worker::v1::BlockFinal,
+}
+
+fn shipped(bodies: &[Body], block: &str) -> Shipped {
+    let mut rev = None;
+    let mut deltas = String::new();
+    let mut biggest_delta = 0;
+    let mut contiguous = true;
+    let mut fin = None;
+    for body in bodies {
+        match body {
+            Body::BlockStarted(f) if f.block_id == block => rev = Some(f.rev),
+            Body::BlockDelta(f) if f.block_id == block => {
+                contiguous &= Some(f.base_rev) == rev && f.rev == f.base_rev + 1;
+                rev = Some(f.rev);
+                biggest_delta = biggest_delta.max(f.append.len());
+                deltas.push_str(&f.append);
+            }
+            Body::BlockFinal(f) if f.block_id == block => {
+                contiguous &= Some(f.rev) == rev.map(|rev| rev + 1);
+                fin = Some(f.clone());
+            }
+            _ => {}
+        }
+    }
+    Shipped {
+        deltas,
+        biggest_delta,
+        contiguous,
+        fin: fin.expect("block without a final"),
+    }
+}
+
+fn result_blocks(bodies: &[Body]) -> Vec<String> {
+    bodies
+        .iter()
+        .filter_map(|b| match b {
+            Body::BlockStarted(f) if f.kind == "tool_result" => Some(f.block_id.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+async fn run_whole_result(harness: &mut Harness, spec: &str) -> (Vec<Body>, String) {
+    let id = Uuid::now_v7();
+    harness
+        .deliver(id, 1, &script(&format!(r#"{{"whole_result":{spec}}}"#)))
+        .await;
+    let bodies = harness
+        .wait_records("run finished", |b| run_finished(b, id))
+        .await;
+    let block = result_blocks(&bodies).pop().expect("result block");
+    (bodies, block)
+}
+
+#[tokio::test]
+async fn result_delivered_as_one_record_reaches_the_hub_through_deltas() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    // Порог финала 65 536 байт: на нём и вокруг него текст идёт по-разному.
+    let mut problems = Vec::new();
+    for (unit, times) in [
+        ("a", 65_535),
+        ("a", 65_536),
+        ("a", 65_537),
+        ("я", 32_768),
+        ("я", 32_769),
+        ("я", 100_000),
+        ("😀", 50_001),
+    ] {
+        let text = unit.repeat(times);
+        let (bodies, block) = run_whole_result(
+            &mut harness,
+            &format!(r#"{{"repeat":"{unit}","times":{times}}}"#),
+        )
+        .await;
+        let sent = shipped(&bodies, &block);
+        let label = format!("{times} x {unit} ({} bytes)", text.len());
+        let omitted = text.len() > 65_536;
+        if sent.fin.checksum != sha(&text) || sent.fin.text_omitted != omitted {
+            problems.push(format!("{label}: final {:?}", sent.fin.text_omitted));
+        } else if omitted && (sent.deltas != text || !sent.fin.text.is_empty()) {
+            problems.push(format!(
+                "{label}: final carries no text and deltas hold {} of {} bytes",
+                sent.deltas.len(),
+                text.len()
+            ));
+        } else if !omitted && (!sent.deltas.is_empty() || sent.fin.text != text) {
+            problems.push(format!("{label}: inline final changed"));
+        }
+        if sent.biggest_delta > 16_384 || !sent.contiguous {
+            problems.push(format!(
+                "{label}: biggest delta {}, contiguous {}",
+                sent.biggest_delta, sent.contiguous
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn late_tail_continues_the_streamed_prefix_and_never_replaces_it() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+
+    let text = "я".repeat(100_000);
+    let prefix = "я".repeat(35_000);
+    let (bodies, block) = run_whole_result(
+        &mut harness,
+        &format!(r#"{{"repeat":"я","times":100000,"streamed":"{prefix}"}}"#),
+    )
+    .await;
+    let sent = shipped(&bodies, &block);
+    assert_eq!(sent.deltas.len(), text.len(), "the prefix is not repeated");
+    assert!(sent.deltas == text && sent.contiguous && sent.biggest_delta <= 16_384);
+    assert!(sent.fin.text_omitted && sent.fin.checksum == sha(&text));
+
+    // Начало, которого нет в финале, дописывать нечем: хаб увидит расхождение сумм.
+    let other = "ж".repeat(50_000);
+    let (bodies, block) = run_whole_result(
+        &mut harness,
+        &format!(r#"{{"repeat":"я","times":100000,"streamed":"{other}"}}"#),
+    )
+    .await;
+    let sent = shipped(&bodies, &block);
+    assert_eq!(sent.deltas, other, "nothing is added to a diverging stream");
+    assert!(sent.fin.text_omitted && sent.fin.checksum == sha(&text));
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn detach_waits_for_supervisor_to_drain_sj_acks() {
     let root = TempDir::new().unwrap();

@@ -346,6 +346,20 @@ fn run_steps<'a>(
                     json!({"tool_name":spec["tool_name"],"input":{"file_path":"/tmp/x","content":text},"tool_use_id":"toolu_large"})
                 };
                 turn.request("permission", &payload, lane).await?;
+            } else if let Some(spec) = step.get("whole_result") {
+                // Результат одной записью, как отдают CLI без потоковых кадров: дельт нет
+                // или только заданное начало, а весь текст лежит в финале.
+                let text = spec["repeat"]
+                    .as_str()
+                    .unwrap_or("x")
+                    .repeat(spec["times"].as_u64().unwrap_or(0) as usize);
+                let id = Uuid::now_v7();
+                turn.begin(id, BlockKind::ToolResult, lane, None, None)
+                    .await?;
+                if let Some(streamed) = spec["streamed"].as_str() {
+                    delta(id, streamed).await?;
+                }
+                finish(id, &text, None).await?;
             } else if let Some(text) = step["delta"].as_str() {
                 text_delta(turn, lane, text).await?;
             } else if step["echo_instructions"].as_bool() == Some(true) {

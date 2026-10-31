@@ -629,6 +629,53 @@ fn completed(item: Value) -> String {
     )
 }
 
+// Вывод команды и результат MCP приходят в завершённом элементе целиком, без потоковых
+// дельт. Финал крупнее порога хаб собирает только из дельт, поэтому адаптер отдаёт полный
+// текст, а режет его на дельты супервизор (см. `supervisor.rs`).
+#[tokio::test]
+async fn large_codex_results_arrive_whole_in_one_final_without_deltas() {
+    let output = "вывод команды\n".repeat(8 * 1024);
+    let reply = "ответ сервера: всё в порядке\n".repeat(8 * 1024);
+    assert!(output.len() > canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES);
+    assert!(reply.len() > canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES);
+    let mcp = |status: &str| {
+        json!({"id": "mcp-1", "type": "mcpToolCall", "server": "s", "tool": "t",
+            "arguments": {}, "status": status,
+            "result": {"content": [{"type": "text", "text": reply}]}})
+    };
+    let mut fake = Fake::new(tool_turn(vec![
+        started(command_item("exec-1", "inProgress", None)),
+        completed(command_item("exec-1", "completed", Some(&output))),
+        started(mcp("inProgress")),
+        completed(mcp("completed")),
+    ]));
+    fake.start().await;
+    let (_, events) = fake.send("go").await;
+    let results: Vec<(uuid::Uuid, &str)> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockFinal { block_id, text, .. }
+                if text.len() > canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES =>
+            {
+                Some((*block_id, text.as_str()))
+            }
+            _ => None,
+        })
+        .collect();
+    let texts: Vec<&str> = results.iter().map(|(_, text)| *text).collect();
+    assert_eq!(texts, [output.as_str(), reply.as_str()]);
+    for (block, _) in &results {
+        assert!(
+            !events.iter().any(|event| matches!(
+                event,
+                AdapterEvent::BlockDelta { block_id, .. } if block_id == block
+            )),
+            "the result has no deltas: {events:?}"
+        );
+    }
+    fake.close().await;
+}
+
 #[tokio::test]
 async fn silent_command_shows_at_once_when_no_cli_mark_is_possible() {
     let mut lines = handshake("thread-mini");
