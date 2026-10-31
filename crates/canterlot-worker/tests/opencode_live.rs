@@ -1370,12 +1370,12 @@ async fn real_stream_cut_over_the_end_of_the_turn_finishes_it() {
     session.close().await;
 }
 
-// Запрос родился без потока: карточка из проекции, решение доходит, инструмент работает.
+// Поток рвётся сразу после приёма ввода: запрос рождается в разрыве или сразу за ним. Карточка
+// одна, откуда бы она ни пришла, решение доходит, инструмент работает.
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
-async fn real_permission_asked_during_a_cut_reaches_the_owner() {
+async fn real_permission_around_a_cut_reaches_the_owner_once() {
     let stub = Stub::start(vec![
-        paced(&["сейчас "], 400),
         Reply::tool(
             "shell",
             json!({"command": "echo разрешено", "description": "x"}),
@@ -1386,36 +1386,34 @@ async fn real_permission_asked_during_a_cut_reaches_the_owner() {
     let mut session = Session::start(&stub, "ask").await;
     let turn = input("запусти");
     session.transmit(&turn).await;
-    session
-        .until(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
-        .await;
     session.adapter.cut_stream();
-    let _ = stub.requests();
-    session.close_after_turn_with_prompt(turn.command_id).await;
-}
-
-impl Session {
-    // У `paced` нет вызова инструмента, поэтому ход кончается сам: второй ввод идёт с запросом.
-    async fn close_after_turn_with_prompt(mut self, command: Uuid) {
-        self.until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
-            .await;
-        let turn = input("теперь запусти");
-        self.transmit(&turn).await;
-        let (request, payload) = self.until_request().await;
-        assert_eq!(payload["command"], "echo разрешено");
-        let outcome = self
-            .adapter
-            .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
-            .await;
-        assert!(
-            matches!(outcome, DecisionOutcome::Applied(_)),
-            "{outcome:?}"
-        );
-        let command = turn.command_id;
-        self.until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
-            .await;
-        self.close().await;
-    }
+    let (request, payload) = session.until_request().await;
+    assert_eq!(payload["command"], "echo разрешено");
+    let outcome = session
+        .adapter
+        .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
+        .await;
+    assert!(
+        matches!(outcome, DecisionOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let command = turn.command_id;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RequestOpened { .. })),
+        "{events:?}"
+    );
+    assert!(
+        finals(&events)
+            .iter()
+            .any(|text| text.contains("разрешено"))
+    );
+    assert_eq!(stub.requests().len(), 2);
+    session.close().await;
 }
 
 impl Live {

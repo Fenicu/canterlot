@@ -17,7 +17,7 @@ use std::{
 use tempfile::TempDir;
 
 #[path = "fake_exec.rs"]
-mod fake_exec;
+pub mod fake_exec;
 
 pub struct Fake {
     pub dir: TempDir,

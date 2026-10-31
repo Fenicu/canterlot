@@ -25,7 +25,8 @@ use canterlot_hub::{
 use canterlot_journal::{Journal, JournalOptions};
 use canterlot_proto::worker::v1::{InterruptState, RecordBody, command, record_body::Body};
 use canterlot_worker::{
-    config::{ExecutionConfig, SupervisorTimers, WorkerConfig, WorkerTimers},
+    adapter::opencode::replay::Script,
+    config::{ExecutionConfig, OpenCodeConfig, SupervisorTimers, WorkerConfig, WorkerTimers},
     fault_injection::{SessionProbe, StoreProbe},
     session::{SessionState, Worker, WorkerError},
     store::WorkerStore,
@@ -45,8 +46,9 @@ use uuid::Uuid;
 
 #[path = "support/e2e_gate.rs"]
 mod e2e_gate;
-#[path = "support/fake_exec.rs"]
-mod fake_exec;
+#[path = "support/opencode.rs"]
+mod opencode;
+use opencode::fake_exec;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -244,6 +246,17 @@ impl Fixture {
         long_dir: bool,
         auto_start: bool,
     ) -> Self {
+        Self::new_full(pool, profile, env, long_dir, auto_start, None).await
+    }
+
+    async fn new_full(
+        pool: &PgPool,
+        profile: &str,
+        env: &[(&str, &str)],
+        long_dir: bool,
+        auto_start: bool,
+        opencode: Option<OpenCodeConfig>,
+    ) -> Self {
         let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
         let root = tempfile::tempdir().unwrap();
         let guard = Arc::new(ProcessGuard::new(root.path()));
@@ -320,7 +333,7 @@ impl Fixture {
                     ..Default::default()
                 },
             },
-            opencode: None,
+            opencode,
         };
         let owner = hub.installation.owner_id;
         let conversation = testkit::seed_conversation(pool, owner, machine.machine_id).await;
@@ -1939,5 +1952,92 @@ async fn wave_w_spawning_ownership_reports_owner_lost_from_created(pool: PgPool)
     fixture.start_worker().await;
     fixture.wait_state("owner_lost").await;
     assert!(fixture.guard.members().is_empty());
+    fixture.finish().await;
+}
+
+// Весь путь до PostgreSQL: разрыв потока и перезапуск воркера посреди хода OpenCode. Хаб хранит
+// каждый блок один раз, текст целиком, без расхождений ревизий, а ввод ушёл один раз.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn opencode_stream_cut_and_worker_restart_reach_the_hub_once(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let script = Script::from_capture("recovery", Some("cut_midturn"))
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let fake = opencode::Fake::new(script);
+    let mut fixture = Fixture::new_full(
+        &pool,
+        "opencode",
+        &[],
+        false,
+        false,
+        Some(OpenCodeConfig {
+            executable: fake.exe.clone(),
+            owner_config: Some(fake.dir.path().join("owner-config")),
+            providers: vec!["fake".into()],
+            ..Default::default()
+        }),
+    )
+    .await;
+    sqlx::query("update conversations set model = 'fake/fake-1', effort = 'high' where id = $1")
+        .bind(fixture.conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    fixture.execution = started.execution_id;
+    fixture.start_command = started.command_id;
+    fixture.wait_state("running").await;
+    fixture.submit("начни".into()).await;
+    until("first block", async || {
+        fixture.event_count("block_started").await >= 1
+    })
+    .await;
+    fixture.stop_worker().await;
+    fixture.start_worker().await;
+    let texts = async || -> Vec<(String, String)> {
+        sqlx::query_as(
+            "select state, coalesce(content, '') from blocks where execution_id = $1
+             order by coalesce(content, '')",
+        )
+        .bind(fixture.execution)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    until("every block final", async || {
+        let blocks = texts().await;
+        blocks.len() == 5 && blocks.iter().all(|(state, _)| state == "final")
+    })
+    .await;
+    let contents: Vec<String> = texts().await.into_iter().map(|(_, text)| text).collect();
+    assert_eq!(
+        contents,
+        [
+            "echo из разрыва",
+            "думаю ",
+            "из разрыва\n",
+            "первый кусок",
+            "после разрыва"
+        ]
+    );
+    let bad: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind in
+         ('block_revision_gap','block_conflicting_final','journal_record_mismatch')",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(bad, 0);
+    let prompts = fake
+        .requests()
+        .iter()
+        .filter(|request| {
+            request["method"] == "POST" && opencode::path_of(request).ends_with("/prompt")
+        })
+        .count();
+    assert_eq!(prompts, 1, "no prompt is sent twice");
     fixture.finish().await;
 }
