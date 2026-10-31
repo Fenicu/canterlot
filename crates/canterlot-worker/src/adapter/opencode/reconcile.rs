@@ -101,19 +101,19 @@ async fn children_of(
     session: &str,
     known: Vec<String>,
 ) -> Result<Vec<String>, HttpError> {
-    let reply = http
-        .get(
-            &format!("/api/session?parentID={session}&limit={PAGE_SIZE}"),
-            READ_WAIT,
-        )
-        .await;
     let mut children: HashSet<String> = known.into_iter().collect();
-    children.extend(
-        items(&missing_is_empty(reply)?)
-            .iter()
-            .filter_map(id_of)
-            .map(str::to_owned),
-    );
+    let mut query = format!("parentID={session}&limit={PAGE_SIZE}");
+    for _ in 0..MAX_PAGES {
+        let reply = http.get(&format!("/api/session?{query}"), READ_WAIT).await;
+        let reply = missing_is_empty(reply)?;
+        let page = items(&reply);
+        children.extend(page.iter().filter_map(id_of).map(str::to_owned));
+        let next = reply.pointer("/cursor/next").and_then(Value::as_str);
+        let (true, Some(cursor)) = (page.len() == PAGE_SIZE, next) else {
+            break;
+        };
+        query = format!("limit={PAGE_SIZE}&cursor={cursor}");
+    }
     Ok(children.into_iter().collect())
 }
 

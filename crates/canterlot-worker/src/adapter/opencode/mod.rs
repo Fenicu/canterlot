@@ -337,6 +337,20 @@ async fn subscribe(http: &Http, wait: Duration) -> Option<EventStream> {
     matches!(connected, Ok(true)).then_some(stream)
 }
 
+// Правила потомку ставятся отдельно: завершённого уже нет, остальной сохранил бы прежние.
+async fn patch_children(http: &Http, children: &[String], body: &Value) -> Result<(), HttpError> {
+    for child in children {
+        match http
+            .patch(&format!("/api/session/{child}"), body, REQUEST_WAIT)
+            .await
+        {
+            Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
 // Подписка раньше чтения: иначе событие между ними потеряно навсегда.
 async fn resubscribe(http: Http, session: String, children: Vec<String>) -> Option<Resynced> {
     for delay in RECONNECT_DELAYS {
@@ -1357,6 +1371,12 @@ impl OpenCodeAdapter {
         let snapshot = reconcile::read(self.http()?, &self.session, Vec::new())
             .await
             .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
+        // Субагент продолжает старого потомка по `sessionID`, а копию правил тот получил при
+        // создании: без этого он обошёл бы режим возобновления.
+        let rules = json!({"permissions": self.mode.session_rules()});
+        patch_children(self.http()?, &snapshot.children, &rules)
+            .await
+            .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
         if let Some(translator) = self.translator.as_mut() {
             for child in &snapshot.children {
                 translator.add_child(child.clone());
@@ -1468,15 +1488,9 @@ impl OpenCodeAdapter {
         http.patch(&path, &body, REQUEST_WAIT)
             .await
             .map_err(|_| "settings_unavailable")?;
-        for child in children {
-            match http
-                .patch(&format!("/api/session/{child}"), &body, REQUEST_WAIT)
-                .await
-            {
-                Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
-                Err(_) => return Err("settings_unavailable"),
-            }
-        }
+        patch_children(http, &children, &body)
+            .await
+            .map_err(|_| "settings_unavailable")?;
         self.mode = wanted;
         self.rules_dirty = false;
         Ok(())

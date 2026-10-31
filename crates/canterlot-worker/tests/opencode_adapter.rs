@@ -1189,6 +1189,101 @@ async fn resume_in_owner_mode_clears_the_rules_of_the_session() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Потомок копирует правила один раз, при создании, а субагент продолжает его по `sessionID`:
+// без этого запрос после возобновления обошёл бы `read_only` по старым правилам потомка.
+#[tokio::test]
+async fn resume_reapplies_rules_to_old_children() {
+    let (mut script, id) = resume_script(true);
+    script.set_route(
+        "GET",
+        "/api/session",
+        vec![Reply {
+            body: Some(json!({"data": [{"id": "ses_child"}, {"id": "ses_gone"}]})),
+            ..Default::default()
+        }],
+    );
+    script.set_route("PATCH", "/api/session/ses_child", vec![reply_204()]);
+    script.set_route(
+        "PATCH",
+        "/api/session/ses_gone",
+        vec![Reply {
+            status: 404,
+            body: Some(json!({"_tag": "SessionNotFoundError"})),
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(id);
+    bench.spec.permission_mode = "read_only".into();
+    bench.start_ok().await;
+    let requests = bench.fake.requests();
+    let patch = find(&requests, "PATCH", "ses_child").expect("rules of the child");
+    assert_eq!(patch["body"]["permissions"][0]["effect"], "deny");
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn resume_fails_when_a_child_keeps_its_old_rules() {
+    let (mut script, id) = resume_script(true);
+    script.set_route(
+        "GET",
+        "/api/session",
+        vec![Reply {
+            body: Some(json!({"data": [{"id": "ses_child"}]})),
+            ..Default::default()
+        }],
+    );
+    script.set_route(
+        "PATCH",
+        "/api/session/ses_child",
+        vec![Reply {
+            status: 500,
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(id);
+    assert_eq!(bench.fail_reason().await, "resume_failed");
+    bench.fake.wait_gone().await;
+}
+
+// У корневой сессии могут быть сотни потомков, а старый продолжается и с дальней страницы.
+#[tokio::test]
+async fn children_are_read_past_the_first_page() {
+    let (mut script, id) = resume_script(true);
+    let first: Vec<Value> = (0..100)
+        .map(|n| json!({"id": format!("ses_{n}")}))
+        .collect();
+    script.set_route(
+        "GET",
+        "/api/session",
+        vec![
+            Reply {
+                body: Some(json!({"data": first, "cursor": {"next": "page2"}})),
+                ..Default::default()
+            },
+            Reply {
+                body: Some(json!({"data": [{"id": "ses_far"}], "cursor": {"next": "page3"}})),
+                ..Default::default()
+            },
+        ],
+    );
+    script.set_route("PATCH", "/api/session/ses_far", vec![reply_204()]);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(id);
+    bench.start_ok().await;
+    let requests = bench.fake.requests();
+    let queries: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "GET" && path_of(request) == "/api/session")
+        .map(|request| request["query"].as_str().unwrap())
+        .collect();
+    assert_eq!(queries.len(), 2, "{queries:?}");
+    assert_eq!(queries[1], "limit=100&cursor=page2");
+    assert!(find(&requests, "PATCH", "ses_far").is_some());
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn resume_of_a_lost_session_fails_the_start() {
     let (script, id) = resume_script(false);
