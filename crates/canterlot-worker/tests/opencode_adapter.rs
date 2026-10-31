@@ -2061,6 +2061,62 @@ async fn discover_lists_go_and_the_enabled_providers() {
     );
 }
 
+/// Настоящий ответ `GET /api/model`, пока плагины владельца не активировались:
+/// `evidence/opencode/live/plugins_503.jsonl`. Сервер ждёт их 5 с и отвечает этим.
+fn plugins_activating() -> Reply {
+    Reply {
+        status: 503,
+        body: Some(json!({
+            "_tag": "ServiceUnavailableError",
+            "message": "Location plugins did not finish activating",
+            "service": "plugin",
+        })),
+        ..Default::default()
+    }
+}
+
+// Смоук: перезапуск воркера с плагином владельца убрал харнесс из каталога до следующего старта.
+#[tokio::test]
+async fn discover_waits_out_the_activation_of_plugins() {
+    let mut script = verified_cli();
+    script.set_route(
+        "GET",
+        "/api/model",
+        vec![
+            plugins_activating(),
+            catalog_reply(Value::Array(recorded_catalog())),
+        ],
+    );
+    let models = discovered(script, &[]).await.unwrap();
+    assert_eq!(models.len(), 3);
+}
+
+// Иначе ход идёт без окна контекста, вариантов и признака картинок, и молча.
+#[tokio::test]
+async fn start_waits_out_the_activation_of_plugins_for_the_model_list() {
+    let mut script = ready();
+    let models = script.route("GET", "/api/model").unwrap().replies.clone();
+    script.set_route(
+        "GET",
+        "/api/model",
+        [vec![plugins_activating()], models].concat(),
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("say hello");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let AdapterEvent::RunFinished {
+        context_window_tokens,
+        ..
+    } = events.last().unwrap()
+    else {
+        unreachable!();
+    };
+    assert_eq!(*context_window_tokens, 200_000);
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Без подписки каталог пуст, но харнесс виден: `[opencode]` настроен.
 #[tokio::test]
 async fn discover_without_available_models_is_not_a_failure() {

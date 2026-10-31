@@ -187,6 +187,20 @@ async fn discover_inner(
     Ok(OpenCodeCatalog { version, models })
 }
 
+// Сервер ждёт активации плагинов 5 с и отвечает 503: это «ещё нет», а не отказ. Плагины
+// владельца на холодном старте дольше этого срока.
+async fn models_reply(http: &Http, path: &str, limit: Duration) -> Result<Value, HttpError> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match http.get(path, REQUEST_WAIT).await {
+            Err(HttpError::Status { status: 503, .. }) if Instant::now() < deadline => {
+                tokio::time::sleep(POLL_EVERY).await;
+            }
+            reply => return reply,
+        }
+    }
+}
+
 // Список моделей зависит от учётных данных и конфигурации, поэтому его отдаёт сам сервер.
 // Запуск короткий и без сессий, на общей базе canterlot это безопасно.
 async fn probe_models(
@@ -202,7 +216,9 @@ async fn probe_models(
     let models = async {
         let base = proc.ready_url(READY_WAIT).await.map_err(drop)?;
         let http = Http::new(base, password).await.map_err(drop)?;
-        let models = http.get("/api/model", REQUEST_WAIT).await.map_err(drop)?;
+        let models = models_reply(&http, "/api/model", DISCOVER_WAIT)
+            .await
+            .map_err(drop)?;
         let default = http.get("/api/model/default", REQUEST_WAIT).await.ok();
         Ok(catalog::entries(&models, default.as_ref(), &cfg.providers))
     }
@@ -734,8 +750,7 @@ impl OpenCodeAdapter {
     // Окно контекста не приходит в событиях. Без каталога ход всё равно работает.
     async fn model_list(&mut self) -> Value {
         match self.http {
-            Some(ref http) => http
-                .get("/api/model", REQUEST_WAIT)
+            Some(ref http) => models_reply(http, "/api/model", self.ready_wait)
                 .await
                 .unwrap_or(Value::Null),
             None => Value::Null,
