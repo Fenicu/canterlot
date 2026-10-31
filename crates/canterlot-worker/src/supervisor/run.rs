@@ -209,6 +209,26 @@ fn snake<T: serde::Serialize>(value: &T) -> String {
         .unwrap_or_default()
 }
 
+/// Настоящее имя кадра хранится только там, где адаптер кладёт его в `event_type`.
+fn diagnostic_event_type(kind: &str, event_type: &str) -> String {
+    safe_event_type(
+        if matches!(
+            kind,
+            "unknown_event"
+                | "provider_failure"
+                | "unknown_notification"
+                | "unsupported_server_request"
+                | "unsupported_elicitation"
+                | "unparsed_event"
+        ) && !event_type.is_empty()
+        {
+            event_type
+        } else {
+            kind
+        },
+    )
+}
+
 fn safe_event_type(raw: &str) -> String {
     raw.chars()
         .take(64)
@@ -1794,13 +1814,7 @@ impl Supervisor {
                         "unknown_optional_event"
                     }
                     .into(),
-                    event_type: safe_event_type(
-                        if matches!(kind, "unknown_event" | "provider_failure") {
-                            &event_type
-                        } else {
-                            kind
-                        },
-                    ),
+                    event_type: diagnostic_event_type(kind, &event_type),
                 }))?;
                 if required {
                     self.begin_stop(
@@ -2280,5 +2294,39 @@ impl Supervisor {
         };
         tracing::info!(kind = "execution_closed", outcome, "execution closed");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn real_name_survives_for_kinds_that_carry_one() {
+        for (kind, name, stored) in [
+            (
+                "unknown_notification",
+                "thread/futureThing",
+                "thread_futureThing",
+            ),
+            ("unsupported_server_request", "item/new/ask", "item_new_ask"),
+            ("unsupported_elicitation", "openai/form", "openai_form"),
+            ("unparsed_event", "permission.asked", "permission_asked"),
+            ("unknown_event", "session.new", "session_new"),
+            ("provider_failure", "rate_limit", "rate_limit"),
+        ] {
+            assert_eq!(diagnostic_event_type(kind, name), stored, "{kind}");
+        }
+    }
+
+    #[test]
+    fn kinds_without_a_name_keep_their_own_label() {
+        for kind in ["oversized_frame", "todo_lane_unknown", "unparsed_line"] {
+            assert_eq!(diagnostic_event_type(kind, ""), kind);
+        }
+        assert_eq!(
+            diagnostic_event_type("codex_warning", "codex_warning"),
+            "codex_warning"
+        );
     }
 }
