@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import { toolFailed, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
@@ -30,7 +30,7 @@
   const detail = $derived([title.server, title.argument].filter(Boolean).join(' · '));
   const timing = $derived(toolTiming(block, result, working));
   const running = $derived(timing.running || block.state === 'stale');
-  const error = $derived(block.state === 'incomplete' || block.kind === 'error');
+  const error = $derived(block.state === 'incomplete' || block.kind === 'error' || toolFailed(result ?? (block.kind === 'tool_result' ? block : null)));
   const status = $derived(toolStatusText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));

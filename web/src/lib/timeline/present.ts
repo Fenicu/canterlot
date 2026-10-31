@@ -11,6 +11,9 @@ export const REVEAL_LAG_MS = 600;
 const TOOL_MS_BELOW = 100;
 /** У Claude Code между началом и финалом вызова только запись в журнал: дольше живут вызовы, которые считают время сами. */
 const TOOL_OWN_TIME_MIN_MS = 100;
+/** Так воркер помечает сводку результата, завершившегося ошибкой. */
+const TOOL_FAILED_MARK = "error";
+const CLI_ERROR_OPEN = "<tool_use_error>";
 
 export function deliveryLabel(
   state: InputUiState,
@@ -119,6 +122,17 @@ export function toolTiming(
     startedAt,
     finishedAt: null,
   };
+}
+
+export function toolFailed(result: BlockModel | null): boolean {
+  if (!result) return false;
+  return result.summary === TOOL_FAILED_MARK || result.text.startsWith(CLI_ERROR_OPEN);
+}
+
+/** Обёртку CLI вокруг текста ошибки владельцу показывать незачем. */
+export function cleanToolOutput(text: string): string {
+  const inner = /^<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/.exec(text);
+  return inner ? (inner[1] ?? "") : text;
 }
 
 const MAIN_AGENTS = new Set(["orchestrator", "main", ""]);

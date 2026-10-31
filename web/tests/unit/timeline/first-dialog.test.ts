@@ -7,7 +7,9 @@ import type { BlockModel } from "#lib/stores/blocks.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import {
   agentTitle,
+  cleanToolOutput,
   subagentCopy,
+  toolFailed,
   toolStatusText,
   toolTiming,
   toolTitle,
@@ -174,5 +176,25 @@ describe("first dialog: reasoning", () => {
     const reasoning = [...chat.blocks.values()].filter((block) => block.kind === "reasoning");
     expect(reasoning.filter(shownInCard)).toHaveLength(2);
     expect(reasoning).toHaveLength(5);
+  });
+});
+
+describe("first dialog: failed tool", () => {
+  it("is_recognised_by_the_old_wrapper_and_by_the_new_mark", () => {
+    const chat = loaded();
+    const links = blockLinks(chat.timeline.entries);
+    const blocked = links.result(calls(chat, "Bash").at(-2)!.id)!;
+    expect(toolFailed(blocked)).toBe(true);
+    expect(toolFailed(links.result(calls(chat, "Bash").at(-1)!.id))).toBe(false);
+    expect(toolFailed(null)).toBe(false);
+    blocked.summary = "error";
+    blocked.body = "File does not exist.";
+    blocked.text = blocked.body;
+    expect(toolFailed(blocked)).toBe(true);
+  });
+
+  it("output_loses_the_wrapper", () => {
+    expect(cleanToolOutput("<tool_use_error>Blocked: standalone sleep 90.</tool_use_error>")).toBe("Blocked: standalone sleep 90.");
+    expect(cleanToolOutput("plain <b>text</b>")).toBe("plain <b>text</b>");
   });
 });
