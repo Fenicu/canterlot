@@ -77,6 +77,23 @@ it('limits_history_queries_rfc3339_midnights_for_seven_local_days', () => {
 });
 
 
+it('journal_stops_name_their_scope_and_ask_for_an_update', () => {
+  expect(machineWarnings(['cj_journal_stopped', 'sj_journal_stopped'])).toEqual([
+    'Хаб не принимает журнал машины: все её сессии и команды стоят, пока не обновлён хаб или воркер',
+    'Хаб не принимает журнал сессии: её события не доставляются, пока не обновлён хаб или воркер'
+  ]);
+});
+it('journal_stop_event_replaces_only_journal_warnings', () => {
+  const id = '00000000-0000-4000-8000-000000000001';
+  const store = new MachinesStore({ api: { snapshot: vi.fn(), events: vi.fn() }, connection: {} as never, clock: { now: () => 0 } });
+  store.applier.applySnapshot({ items: [{ id, name: 'Машина', os: null, availability: 'available', warnings: ['limits_mismatch', 'sj_journal_stopped'], metrics: null, harnesses: [] }] }, '0');
+  const stops = (stopped: string[]) => store.applier.applyEvents([{ event: { kind: 'machine_journal_stops_changed', committed_at: '2026-10-31T00:00:00Z', payload: { machine_id: id, stopped } } }] as never);
+  stops(['cj']);
+  expect(store.items.get(id)?.warnings).toEqual(['limits_mismatch', 'cj_journal_stopped']);
+  stops([]);
+  expect(store.items.get(id)?.warnings).toEqual(['limits_mismatch']);
+  expect(store.unknownKinds).toBe(0);
+});
 it('fresh_machine_metrics_clear_the_snapshot_stale_warning', () => {
   const hub = new FakeHub();
   const id = '00000000-0000-4000-8000-000000000001';

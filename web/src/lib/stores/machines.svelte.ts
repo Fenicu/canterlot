@@ -121,6 +121,13 @@ export class MachinesStore {
 			this.items.set(machine.id, { ...machine });
 			return;
 		}
+		if (kind === 'machine_journal_stops_changed' && event.kind === 'machine_journal_stops_changed') {
+			const machine = this.items.get(event.payload.machine_id);
+			if (!machine) return;
+			const kept = machine.warnings.filter(warning => !warning.endsWith('_journal_stopped'));
+			this.items.set(machine.id, { ...machine, warnings: [...kept, ...event.payload.stopped.map(kind => `${kind}_journal_stopped`)] });
+			return;
+		}
 		if (kind !== 'hidden') this.unknownKinds += 1;
 	}
 }
