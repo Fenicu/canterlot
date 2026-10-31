@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { toolStatusText } from '#lib/timeline/present.js';
+  import { toolStatusText, toolTitle } from '#lib/timeline/present.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
@@ -22,6 +22,8 @@
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
     viewing = index;
   }
+  const title = $derived(toolTitle(block));
+  const detail = $derived([title.server, title.argument].filter(Boolean).join(' · '));
   const running = $derived(block.state === 'streaming' || block.state === 'stale');
   const error = $derived(block.state === 'incomplete' || block.kind === 'error');
   const status = $derived(toolStatusText({
@@ -44,8 +46,8 @@
 <div class="tool" data-open={open ? '' : undefined}>
   <button type="button" class="head" aria-expanded={open} onclick={() => { open = !open; }}>
     <span class="chevron"><Icon name="chevron" /></span>
-    <span class="name">{block.toolName || 'инструмент'}</span>
-    <span class="summary">{block.summary || ''}</span>
+    <span class="name">{title.name || 'инструмент'}</span>
+    {#if detail}<span class="summary">{detail}</span>{/if}
     {#if isCliPolicy}
       <span class="policy-badge">Разрешено правилами CLI</span>
     {/if}
@@ -77,7 +79,7 @@
   {/if}
 </div>
 {#if viewing !== null && Viewer}
-  <Viewer shots={readyShots} start={viewing} title={block.summary || block.toolName || 'инструмент'} onclose={() => { viewing = null; }} />
+  <Viewer shots={readyShots} start={viewing} title={title.argument || title.name || 'инструмент'} onclose={() => { viewing = null; }} />
 {/if}
 
 <style>

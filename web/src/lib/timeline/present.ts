@@ -87,6 +87,31 @@ export function toolStatusText(opts: {
   return fmt.duration(shown);
 }
 
+export interface ToolTitle {
+  name: string;
+  server: string;
+  argument: string;
+}
+
+function mcpServer(raw: string): string {
+  const plugin = /^plugin_(.+)_\1$/.exec(raw);
+  return plugin?.[1] ?? raw.replace(/^plugin_/, "");
+}
+
+/** Сводка воркера начинается с имени инструмента, а имя MCP несёт служебный префикс: в строке всё это по одному разу. */
+export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): ToolTitle {
+  const raw = block.toolName ?? "";
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(raw);
+  const name = mcp?.[2] ?? raw;
+  const server = mcp ? mcpServer(mcp[1] ?? "") : "";
+  let argument = block.summary ?? "";
+  if (raw && argument === raw) argument = "";
+  for (const joint of [": ", ", "])
+    if (raw && argument.startsWith(raw + joint))
+      argument = argument.slice(raw.length + joint.length);
+  return { name, server: name.includes(server) ? "" : server, argument };
+}
+
 export function takeToolPage(
   shown: string,
   page: string,

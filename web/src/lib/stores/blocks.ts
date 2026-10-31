@@ -279,7 +279,8 @@ function applyFinal(
   const block = ensure(blocks, payload.block_id);
   block.finishedAt = at(ev);
   block.checksum = payload.checksum;
-  if (payload.summary !== undefined) block.summary = payload.summary;
+  // Хаб оставляет сводку начала блока, если финал своей не принёс.
+  block.summary = payload.summary ?? block.summary;
   if (payload.text_omitted) {
     block.rev = payload.rev;
     if (block.sawGap || block.state === "stale") {

@@ -3,6 +3,7 @@
   import { fmt } from '#lib/format/ru.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
+  import { toolTitle } from '#lib/timeline/present.js';
   import { childBlocks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
@@ -66,7 +67,7 @@
     <button type="button" class="more" onclick={() => { expanded = true; }}>Показать ещё {hidden} {fmt.plural(hidden, ['блок', 'блока', 'блоков'])}</button>
   {/if}
   {#if streaming && head}
-    <LiveLine {phase} tool={active?.toolName ?? ''} startedAt={started} {now} />
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
   {/if}
 </article>
 
