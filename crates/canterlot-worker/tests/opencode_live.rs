@@ -2125,3 +2125,94 @@ async fn real_server_schema_matches_the_manifest() {
         "scripts/opencode-schema-check.sh"
     );
 }
+
+fn user_messages(request: &Value) -> Vec<String> {
+    request["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|message| message["role"] == "user")
+        .map(|message| message["content"].to_string())
+        .collect()
+}
+
+fn mode_input(text: &str, mode: &str) -> Transmission {
+    let mut next = input(text);
+    next.settings = Some(SettingsChange {
+        permission_mode: Some(mode.into()),
+        ..Default::default()
+    });
+    next
+}
+
+// Сервер сам вставляет в историю `<system-update>` с Code Mode при возврате инструментов;
+// напоминание о прямых вызовах идёт в первом вводе после выхода и больше нигде.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_leaving_read_only_reminds_the_model_once() {
+    let stub = Stub::start(vec![
+        Reply::text("раз"),
+        Reply::text("два"),
+        Reply::text("три"),
+        Reply::text("четыре"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("первый")).await;
+    session.turn(&mode_input("второй", "read_only")).await;
+    session.turn(&mode_input("третий", "owner")).await;
+    session.turn(&input("четвёртый")).await;
+    let requests = stub.requests();
+    let noted = |index: usize| {
+        user_messages(&requests[index])
+            .iter()
+            .filter(|text| text.contains("Read-only mode is over"))
+            .count()
+    };
+    assert_eq!(noted(1), 0);
+    assert_eq!(noted(2), 1, "{:?}", user_messages(&requests[2]));
+    assert_eq!(
+        noted(3),
+        1,
+        "the note stays in history, but is not repeated"
+    );
+    session.close().await;
+}
+
+// Режим мог смениться, пока исполнение стояло: заметно по правилам, оставшимся в сессии.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_resume_out_of_read_only_reminds_the_model() {
+    let stub = Stub::start(vec![Reply::text("раз"), Reply::text("два")]).await;
+    let mut session = Session::start(&stub, "read_only").await;
+    session.turn(&input("первый")).await;
+    let native = session.adapter.native_session().to_owned();
+    let Session {
+        live,
+        group,
+        mut adapter,
+    } = session;
+    adapter.close(CloseMode::Graceful, &group).await.unwrap();
+    live.wait_gone().await;
+    let mut second = live.second_execution();
+    let mut spec = live.spec("fake/fake-1", "owner");
+    spec.native_conversation_id = Some(native);
+    tokio::time::timeout(WAIT, second.start(&spec, &group))
+        .await
+        .expect("start must finish")
+        .expect("resume");
+    let mut session = Session {
+        live,
+        group,
+        adapter: second,
+    };
+    session.turn(&input("второй")).await;
+    let texts = user_messages(&stub.requests()[1]);
+    assert!(
+        texts
+            .iter()
+            .any(|text| text.contains("Read-only mode is over")),
+        "{texts:?}"
+    );
+    session.close().await;
+}

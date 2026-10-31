@@ -2269,6 +2269,84 @@ async fn same_mode_sends_no_rules() {
     bench.close(CloseMode::Graceful).await;
 }
 
+fn prompt_texts(requests: &[Value]) -> Vec<String> {
+    requests
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/prompt"))
+        .map(|request| request["body"]["text"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+// Сервер при выходе из `read_only` сам присылает модели `<system-update>` с Code Mode, и она
+// перестаёт звать `shell` напрямую: первый ввод после выхода несёт напоминание, один раз.
+#[tokio::test]
+async fn leaving_read_only_adds_a_note_to_the_first_input_only() {
+    let mut bench = Bench::new(with_rules_route(two_turns(), vec![reply_204()]));
+    bench.spec.permission_mode = "read_only".into();
+    bench.start_ok().await;
+    let mut first = bench.input("раз");
+    first.settings = Some(mode_change("bypass"));
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let second = bench.input("два");
+    bench.accepted(&second).await;
+    let texts = prompt_texts(&bench.fake.requests());
+    assert!(texts[0].ends_with("\n\nраз"), "{}", texts[0]);
+    assert!(texts[0].contains("`shell`") && texts[0].contains("`question`"));
+    assert!(texts[0].starts_with("<system-reminder>"), "{}", texts[0]);
+    assert_eq!(texts[1], "два");
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn other_mode_changes_leave_the_input_as_typed() {
+    let mut bench = Bench::new(with_rules_route(
+        two_turns(),
+        vec![reply_204(), reply_204()],
+    ));
+    bench.start_ok().await;
+    let mut first = bench.input("раз");
+    first.settings = Some(mode_change("read_only"));
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let second = bench.input("два");
+    bench.accepted(&second).await;
+    assert_eq!(prompt_texts(&bench.fake.requests()), ["раз", "два"]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Хаб нового режима не принял: выход из `read_only` не состоялся, напоминание ждёт повтора.
+#[tokio::test]
+async fn refused_input_keeps_the_note_owed_to_the_next_one() {
+    let mut script = with_rules_route(ready(), vec![reply_204(), reply_204(), reply_204()]);
+    set_prompt_reply(&mut script, |reply| {
+        *reply = Reply {
+            status: 400,
+            body: Some(json!({"_tag": "InvalidRequestError"})),
+            ..Default::default()
+        };
+    });
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "read_only".into();
+    bench.start_ok().await;
+    let mut input = bench.input("раз");
+    input.settings = Some(mode_change("bypass"));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(_)
+    ));
+    let mut again = bench.input("раз");
+    again.settings = Some(mode_change("bypass"));
+    let _ = bench.transmit(&again).await;
+    let texts = prompt_texts(&bench.fake.requests());
+    assert_eq!(texts.len(), 2, "{texts:?}");
+    assert!(
+        texts.iter().all(|text| text.contains("`shell`")),
+        "{texts:?}"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Потомок получает копию правил при создании: `read_only` родителя его не трогает сам.
 #[tokio::test]
 async fn mode_change_reaches_the_live_children() {

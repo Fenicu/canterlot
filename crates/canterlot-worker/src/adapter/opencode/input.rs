@@ -68,6 +68,19 @@ pub fn prompt_body(input: &Transmission, images: bool) -> Result<Value, &'static
     Ok(body)
 }
 
+/// Напоминание модели после выхода из `read_only`. Лежит только в тексте для сервера: лента,
+/// журнал и хаб хранят ввод как набран.
+pub const READ_ONLY_EXIT_NOTE: &str = "<system-reminder>\nRead-only mode is over. Your tools `shell`, `question`, `write`, `edit` and the others are available again and are called directly by name, not through `execute`. Ignore any Code Mode wording that says tools cannot be called directly: it applies only to the tools listed in its catalog.\n</system-reminder>";
+
+pub fn add_note(body: &mut Value, note: &str) {
+    let text = body["text"].as_str().unwrap_or_default();
+    body["text"] = if text.is_empty() {
+        note.into()
+    } else {
+        format!("{note}\n\n{text}").into()
+    };
+}
+
 pub fn accepted_id(reply: &Value) -> Option<&str> {
     reply.pointer("/data/id").and_then(Value::as_str)
 }
