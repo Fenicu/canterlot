@@ -85,6 +85,37 @@ test('header_shows_subtitle_state_chip_and_pending_setting_indicator', async ({ 
 	).toBeVisible();
 });
 
+test('phone_chat_touch_scroll_does_not_move_document_and_header_and_composer_stay_in_viewport', async ({ page }) => {
+	test.skip(test.info().project.name !== 'phone', 'проверка телефонной раскладки');
+	await bootChat(page);
+	await page.evaluate(() => {
+		const tall = document.createElement('div');
+		tall.style.cssText = 'position:absolute;top:0;left:0;width:1px;height:300vh';
+		document.body.append(tall);
+	});
+	const cdp = await page.context().newCDPSession(page);
+	const size = page.viewportSize()!;
+	const x = Math.round(size.width / 2);
+	const from = Math.round(size.height * 0.75);
+	for (let swipe = 0; swipe < 6; swipe += 1) {
+		await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y: from }] });
+		for (let move = 1; move <= 10; move += 1) {
+			await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x, y: from - move * 40 }] });
+		}
+		await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
+	}
+	await page.waitForTimeout(300);
+	const state = await page.evaluate(() => ({
+		scrollTop: (document.scrollingElement as HTMLElement).scrollTop,
+		innerHeight: window.innerHeight,
+		header: document.querySelector('.chat-header')!.getBoundingClientRect(),
+		composer: document.querySelector('[data-composer]')!.getBoundingClientRect()
+	}));
+	expect(state.scrollTop).toBe(0);
+	expect(state.header.top).toBeGreaterThanOrEqual(0);
+	expect(state.composer.bottom).toBeLessThanOrEqual(state.innerHeight);
+});
+
 test('settings_sheet_lists_catalog_values_and_marks_a_pending_change_for_the_next_turn', async ({ page }) => {
 	await bootChat(page);
 

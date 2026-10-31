@@ -166,7 +166,7 @@
   });
 </script>
 
-<div class="shell" data-layout={laidOut ? mode : undefined}>
+<div class="shell" data-layout={laidOut ? mode : undefined} data-harness={harness ? '' : undefined}>
   {#snippet banner()}
     <ConnectionBanner
       phase={runtime?.connection.status.phase ?? 'connecting'}
@@ -217,11 +217,17 @@
 
 <style>
   .shell {
-    height: 100dvh;
+    position: fixed;
+    inset: var(--s0);
     min-width: 0;
     min-height: 0;
     display: flex;
     flex-direction: column;
+  }
+
+  .shell[data-harness] {
+    position: static;
+    height: 100dvh;
   }
 
   .page {
