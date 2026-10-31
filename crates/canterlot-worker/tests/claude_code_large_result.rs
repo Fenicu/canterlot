@@ -170,8 +170,6 @@ stop_retry = "300ms"
 
 [claude_code]
 executable = "{fake}"
-credentials_path = "{root}/absent-credentials.json"
-oauth_poll_interval_s = 1800
 allow_paid_model_poll = false
 "#,
         root = root.display(),

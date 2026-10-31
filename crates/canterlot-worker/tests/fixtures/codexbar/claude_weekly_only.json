@@ -1,0 +1,47 @@
+[
+  {
+    "pace": {
+      "secondary": {
+        "stage": "farBehind",
+        "expectedUsedPercent": 70,
+        "summary": "16% in reserve | Expected 70% used | Lasts until reset",
+        "willLastToReset": true,
+        "deltaPercent": -16
+      }
+    },
+    "provider": "claude",
+    "usage": {
+      "primary": {
+        "usedPercent": 54,
+        "windowMinutes": 10080,
+        "resetsAt": "2026-11-03T01:00:00Z",
+        "resetDescription": "Nov 3 at 4:00AM"
+      },
+      "tertiary": null,
+      "extraRateWindows": [
+        {
+          "title": "Fable only",
+          "window": {
+            "windowMinutes": 10080,
+            "resetsAt": "2026-11-03T01:00:00Z",
+            "resetDescription": "Nov 3 at 4:00AM",
+            "usedPercent": 0
+          },
+          "id": "claude-weekly-scoped-fable"
+        }
+      ],
+      "secondary": {
+        "usedPercent": 54,
+        "windowMinutes": 10080,
+        "resetsAt": "2026-11-03T01:00:00Z",
+        "resetDescription": "Nov 3 at 4:00AM"
+      },
+      "updatedAt": "2026-10-31T21:49:19Z"
+    },
+    "source": "oauth",
+    "rateWindowLabels": {
+      "primary": "Session",
+      "secondary": "Weekly"
+    }
+  }
+]

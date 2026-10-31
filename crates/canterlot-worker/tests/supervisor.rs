@@ -1037,7 +1037,7 @@ while True:
     let exe = tools.path().join("fake-cli");
     fake_exec::write_executable(&exe, STUBBORN, 0o700);
     let spec = format!(
-        "[claude_code]\nexecutable = \"{}\"\noauth_poll_interval_s = 1800\nallow_paid_model_poll = false\n",
+        "[claude_code]\nexecutable = \"{}\"\nallow_paid_model_poll = false\n",
         exe.display()
     );
     let mut harness = Harness::start_with(&[], "60s", &spec).await;

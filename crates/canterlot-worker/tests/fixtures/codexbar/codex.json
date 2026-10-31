@@ -1,0 +1,46 @@
+[
+  {
+    "version": "0.164.0",
+    "usage": {
+      "updatedAt": "2026-10-31T21:49:21Z",
+      "secondary": {
+        "resetsAt": "2026-11-04T06:36:41Z",
+        "windowMinutes": 10080,
+        "resetDescription": "Nov 4 at 9:36 AM",
+        "usedPercent": 97
+      },
+      "tertiary": null,
+      "dataConfidence": "exact",
+      "primary": {
+        "resetsAt": "2026-11-01T02:49:21Z",
+        "windowMinutes": 300,
+        "resetDescription": "5:49 AM",
+        "usedPercent": 0
+      },
+      "providerCost": {
+        "updatedAt": "2026-10-31T21:49:21Z",
+        "period": "Extra usage",
+        "used": 0,
+        "currencyCode": "Credits",
+        "limit": 0,
+        "balanceUpdatedAt": "2026-10-31T21:49:21Z"
+      }
+    },
+    "rateWindowLabels": {
+      "primary": "Session",
+      "secondary": "Weekly"
+    },
+    "source": "oauth",
+    "pace": {
+      "secondary": {
+        "deltaPercent": 45,
+        "expectedUsedPercent": 52,
+        "willLastToReset": false,
+        "etaSeconds": 9710,
+        "summary": "45% in deficit | Expected 52% used | Runs out in 2h 42m",
+        "stage": "farAhead"
+      }
+    },
+    "provider": "codex"
+  }
+]

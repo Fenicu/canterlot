@@ -427,29 +427,31 @@ impl Worker {
         let mut idle_ticker = crate::machine::limits::IdleTicker::default();
         let mut routes: HashMap<String, Arc<dyn crate::machine::limits::LimitsSource>> =
             HashMap::new();
-        if let Some(claude) = &config.claude_code {
-            idle_ticker.register("claude", claude.oauth_poll_interval());
-            routes.insert(
-                "claude".into(),
-                Arc::new(crate::machine::limits::ClaudeOAuthLimitsSource::new(
-                    claude,
-                    live_limits.clone(),
-                )),
-            );
+        let codexbar_path = config.machine.codexbar_path.clone();
+        let limits_interval = config.machine.limits_poll_interval();
+        let codexbar = |fallback: Option<Arc<dyn crate::machine::limits::LimitsSource>>| {
+            Arc::new(crate::machine::codexbar::CodexBarLimitsSource::new(
+                codexbar_path.clone(),
+                limits_interval,
+                fallback,
+            )) as Arc<dyn crate::machine::limits::LimitsSource>
+        };
+        if config.claude_code.is_some() {
+            idle_ticker.register("claude", limits_interval);
+            routes.insert("claude".into(), codexbar(None));
         }
         if let Some(codex) = &config.codex {
-            idle_ticker.register("codex", crate::machine::limits::CODEX_IDLE_TICK_INTERVAL);
+            idle_ticker.register("codex", limits_interval);
             let cache_for_hub = limits_cache.clone();
             let hub_age: crate::machine::limits::HubLimitsAge =
                 Arc::new(move |provider| cache_for_hub.get(provider).map(|c| c.received_at));
-            routes.insert(
-                "codex".into(),
+            let probe: Arc<dyn crate::machine::limits::LimitsSource> =
                 Arc::new(crate::machine::limits::CodexRateLimitsSource::new(
                     codex,
                     live_limits.clone(),
                     hub_age,
-                )),
-            );
+                ));
+            routes.insert("codex".into(), codexbar(Some(probe)));
         }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
