@@ -347,7 +347,7 @@
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
-          <AnswerCard cardKey={row.key} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
       </div>
     {/each}

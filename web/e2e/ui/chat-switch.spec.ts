@@ -61,7 +61,7 @@ test('lane_route_follows_the_conversation_id_on_same_route_navigation', async ({
   const lane = page.locator('.lane-screen[data-ready]');
   await expect(lane).toBeVisible({ timeout: 15_000 });
   await expect(lane.getByRole('heading', { level: 1 })).toHaveText('задача альфы');
-  await expect(lane.getByRole('link', { name: 'К оркестратору' })).toHaveAttribute('href', `/c/${a}`);
+  await expect(lane.getByRole('link', { name: 'Назад к сессии' })).toHaveAttribute('href', `/c/${a}`);
 
   // Ссылка внутри приложения: роутер SvelteKit переводит на тот же маршрут без нового монтирования.
   await page.locator('#main').evaluate((main, href) => {
@@ -73,7 +73,7 @@ test('lane_route_follows_the_conversation_id_on_same_route_navigation', async ({
   await page.getByRole('link', { name: 'к бете' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${b}/lane/${second.id}$`));
   await expect(lane.getByRole('heading', { level: 1 })).toHaveText('задача беты');
-  await expect(lane.getByRole('link', { name: 'К оркестратору' })).toHaveAttribute('href', `/c/${b}`);
+  await expect(lane.getByRole('link', { name: 'Назад к сессии' })).toHaveAttribute('href', `/c/${b}`);
 });
 
 test('waiting_activity_without_a_request_shows_a_notice_not_an_answer_form', async ({ page }) => {

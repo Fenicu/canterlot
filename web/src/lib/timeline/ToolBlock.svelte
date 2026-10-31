@@ -1,7 +1,8 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { callCaption, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import { stripAnsi } from '#lib/render/ansi.js';
+  import { callCaption, firstLine, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
@@ -35,7 +36,8 @@
     return toolTitle(block);
   });
   const label = $derived(toolLabel(title));
-  const detail = $derived([title.server, label.text].filter(Boolean).join(' · '));
+  // Результат без своего вызова: имени нет, строку объясняет начало вывода.
+  const detail = $derived(title.name ? [title.server, label.text].filter(Boolean).join(' · ') : firstLine(stripAnsi(block.text)));
   const called = $derived(block.kind === 'tool_call' && block.text.trim().length > 0);
   const timing = $derived(toolTiming(block, result, working));
   const running = $derived(timing.running || block.state === 'stale');
@@ -47,7 +49,7 @@
 </script>
 
 <div class="tool">
-  <StepHead name={title.name || 'Результат инструмента'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
+  <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}
     {/snippet}

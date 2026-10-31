@@ -77,7 +77,7 @@
 
 	<div class="tree">
 		<div class="tree-root">
-			{sessionTitle} <span class="meta">· оркестратор</span>
+			{sessionTitle}
 		</div>
 
 		{#each combinedNodes as node (node.block_id)}

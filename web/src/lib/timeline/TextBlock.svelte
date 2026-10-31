@@ -5,7 +5,7 @@
   import { StreamingMarkdown } from '#lib/render/streamingMarkdown.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
 
-  let { block }: { block: BlockModel } = $props();
+  let { block }: { block: Pick<BlockModel, 'id' | 'text' | 'state'> } = $props();
   const engine = new StreamingMarkdown(createMarkdown());
 
   const streaming = $derived(block.state === 'streaming' || block.state === 'stale');

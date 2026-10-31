@@ -25,8 +25,16 @@
 	const blocks = $derived([...chat.blocks.values()]);
 	const machineName = $derived((chat.detail?.machine as { name?: string })?.name || 'workstation');
 
+	const links = $derived(blockLinks(chat.timeline.entries));
+	const working = $derived(chat.activity?.state === 'working' || chat.activity?.state === 'waiting_for_user');
 	const model = $derived(
-		laneModel(blocks, rootBlockId, { machineName, children: blockLinks(chat.timeline.entries).children(rootBlockId) })
+		laneModel(blocks, rootBlockId, {
+			machineName,
+			children: links.children(rootBlockId),
+			harness: chat.detail?.harness as { title?: string; provider?: string } | undefined,
+			result: links.result(rootBlockId),
+			working
+		})
 	);
 </script>
 
@@ -36,12 +44,12 @@
 			<a
 				class="icon-button"
 				href={resolve(`c/${chat.id}`)}
-				aria-label="К оркестратору"
+				aria-label="Назад к сессии"
 			><Icon name="back" /></a>
 
 			<div class="header-info">
 				<div class="title-row">
-					<span class="mark"></span>
+					<span class="mark" class:running={model.running}></span>
 					<h1 class="header-title">{model.title}</h1>
 				</div>
 				<div class="subtitle">{model.subtitle}</div>
@@ -68,7 +76,7 @@
 
 	{#if model.task}
 		<div class="lane-intro">
-			<strong>Задача от оркестратора</strong>
+			<strong>Задача</strong>
 			<p>{model.task}</p>
 		</div>
 	{/if}
@@ -85,7 +93,7 @@
 	<TodoPanel {chat} lane={rootBlockId} />
 
 	<footer class="lane-footer">
-		<p class="pending-line">Результат вернётся в основную сессию</p>
+		{#if model.running}<p class="pending-line">Результат вернётся в основную сессию</p>{/if}
 		{#if !embedded}
 			<a class="return-link" href={resolve(`c/${chat.id}`)}>К основной сессии</a>
 		{/if}
@@ -137,8 +145,11 @@
 		width: var(--mark-large);
 		height: var(--mark-large);
 		border-radius: var(--radius-round);
-		background: var(--accent);
+		background: var(--muted);
 		flex-shrink: 0;
+	}
+	.mark.running {
+		background: var(--accent);
 	}
 	.subtitle {
 		font-size: var(--fs-sm);
@@ -147,11 +158,17 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 	}
+	.breadcrumb, .lane-intro, .lane-footer {
+		box-sizing: border-box;
+		width: calc(100% - 2 * var(--gutter));
+		max-width: calc(var(--reading-max) - 2 * var(--gutter));
+		margin-inline: auto;
+	}
 	.breadcrumb {
 		display: flex;
 		flex-direction: column;
 		gap: var(--s1);
-		margin: var(--s0) var(--gutter) var(--s4);
+		margin-block: var(--s0) var(--s4);
 		padding: var(--s2) var(--s6) var(--s4);
 		border-radius: var(--radius-card);
 		background: var(--surface);
@@ -191,7 +208,7 @@
 		background: var(--accent);
 	}
 	.lane-intro {
-		margin: var(--s0) var(--gutter) var(--s3);
+		margin-block: var(--s0) var(--s3);
 		padding: var(--s5) var(--s6);
 		border-radius: var(--radius-card);
 		background: var(--accent-soft);
@@ -216,7 +233,7 @@
 		flex-direction: column;
 		align-items: stretch;
 		gap: var(--s3);
-		padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom));
+		padding-block: var(--s3) max(var(--s4), env(safe-area-inset-bottom));
 	}
 	.pending-line {
 		margin: 0;

@@ -66,7 +66,7 @@ test.describe('stack: features and security', () => {
       const lane = page.locator('.lane-screen[data-ready]');
       await expect(lane).toContainText('нашёл три');
       await expect(page.getByRole('textbox', { name: 'Сообщение' })).toHaveCount(0);
-      await page.getByRole('link', { name: 'К оркестратору' }).click();
+      await page.getByRole('link', { name: 'Назад к сессии' }).click();
       await expect(page).toHaveURL(new RegExp(`/c/${id}$`));
     }
   });

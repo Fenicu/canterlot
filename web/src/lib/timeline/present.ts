@@ -200,6 +200,16 @@ export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): Tool
   return { name, server: name.includes(server) ? "" : server, argument };
 }
 
+/** Отчёт субагента без служебной рамки CLI: она адресована модели, а не владельцу. */
+export function handBackText(text: string): string {
+  const frame = /^\[Subagent hand-back\][\s\S]*?The report follows:\n/.exec(text);
+  return frame ? text.slice(frame[0].length).replace(/^ {2}/gm, "") : text;
+}
+
+export function firstLine(text: string): string {
+  return cleanToolOutput(text).split("\n").find((line) => line.trim().length > 0)?.trim() ?? "";
+}
+
 const FILE_TOOLS = new Set(["Read", "Edit", "MultiEdit", "Write", "NotebookEdit"]);
 const COMMAND_TOOL = /bash|shell|exec|command/i;
 

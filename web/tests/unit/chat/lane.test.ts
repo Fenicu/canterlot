@@ -23,7 +23,7 @@ describe("laneModel", () => {
     let model = laneModel(blocks, "agent-tool-1");
     expect(model.title).toBe("Поиск дедупликации");
     expect(model.subtitle).toBe("Субагент · Explore · haiku · workstation");
-    expect(model.breadcrumb).toEqual(["Оркестратор", "Explore"]);
+    expect(model.breadcrumb).toEqual(["Агент", "Explore"]);
     expect(model.task).toBe("Поиск дедупликации");
     expect(model.status).toBe("Работает параллельно с основным агентом");
     expect(model.running).toBe(true);

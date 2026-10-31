@@ -1,11 +1,11 @@
 <script lang="ts">
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
-  import type { BlockPage } from '#lib/stores/blocks.js';
+  import type { BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import type { FeedFolds } from '#lib/timeline/folds.js';
-  import { ASK_TOOL, agentTitle, toolTitle } from '#lib/timeline/present.js';
+  import { ASK_TOOL, agentTitle, handBackText, isMainAgent, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import { foldSteps } from '#lib/timeline/steps.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
@@ -19,6 +19,7 @@
 
   let {
     cardKey,
+    laneRoot,
     entries,
     folds,
     links,
@@ -30,6 +31,7 @@
     load
   }: {
     cardKey: string;
+    laneRoot?: string;
     entries: TimelineEntry[];
     folds: FeedFolds;
     links: BlockLinks;
@@ -59,7 +61,8 @@
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
   const live = $derived(working || streaming);
-  const items = $derived(foldSteps(blocks, { links, working, live, folds }));
+  const report = (block: BlockModel) => block.parentId === laneRoot && block.kind === 'tool_result' && isMainAgent(block.agent);
+  const items = $derived(foldSteps(blocks, { links, working, live, folds, stays: report }));
   const view = $derived(folds.view(cardKey, items, live));
 </script>
 
@@ -68,7 +71,12 @@
     <RequestCard request={entry.request} onDecision={async () => undefined} open={folds.isOpen(entry.key)} onToggle={() => folds.toggle(entry.key)} />
   {:else if entry.kind === 'block'}
     {@const block = entry.block}
-    {#if isSubagentCall(block)}
+    {#if laneRoot && report(block)}
+      <section class="report">
+        <h3>Итог</h3>
+        <TextBlock block={{ id: block.id, text: handBackText(block.text), state: 'final' }} />
+      </section>
+    {:else if isSubagentCall(block)}
       <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} {working} {now} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
       <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
@@ -124,6 +132,8 @@
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   header :global(button) { color: var(--secondary); }
   .entry { min-width: 0; }
+  .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
+  h3 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); }
   .incomplete { margin: 0; color: var(--warning); font-size: var(--fs-sm); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); color: var(--accent-link); font-size: var(--fs-sm); }
 </style>

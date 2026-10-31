@@ -1,6 +1,6 @@
-import { modelLabel } from "#lib/format/labels.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
-import { isMainAgent, toolTitle } from "#lib/timeline/present.js";
+import { harnessLabel, modelLabel } from "#lib/format/labels.js";
+import { isMainAgent, toolFailed, toolTitle } from "#lib/timeline/present.js";
 
 export interface LaneModelResult {
   title: string;
@@ -14,7 +14,14 @@ export interface LaneModelResult {
 export function laneModel(
   blocks: BlockModel[],
   rootBlockId: string,
-  opts?: { machineName?: string; children?: BlockModel[] },
+  opts?: {
+    machineName?: string;
+    children?: BlockModel[];
+    harness?: { title?: string; provider?: string } | null;
+    /** Результат вызова субагента; пока его нет и ход идёт, субагент работает. */
+    result?: BlockModel | null;
+    working?: boolean;
+  },
 ): LaneModelResult {
   const root = blocks.find((b) => b.id === rootBlockId);
   const children = opts?.children ?? blocks.filter((block) => block.parentId === rootBlockId);
@@ -28,7 +35,7 @@ export function laneModel(
   const subtitle = ["Субагент", agentName === "Субагент" ? "" : agentName, model ? modelLabel(model) : "", machine]
     .filter(Boolean)
     .join(" · ");
-  const breadcrumb = ["Оркестратор", agentName];
+  const breadcrumb = [harnessLabel(opts?.harness), agentName];
 
   let status = "Готово";
   let running = false;
@@ -36,13 +43,17 @@ export function laneModel(
   if (root) {
     const isStreaming =
       root.state === "streaming" ||
-      blocks.some((b) => b.parentId === rootBlockId && b.state === "streaming");
+      blocks.some((b) => b.parentId === rootBlockId && b.state === "streaming") ||
+      (opts?.working === true && !opts.result);
 
     if (isStreaming) {
       status = "Работает параллельно с основным агентом";
       running = true;
     } else if (root.state === "incomplete" || root.state === "stale") {
       status = "Прервано";
+      running = false;
+    } else if (toolFailed(opts?.result ?? null)) {
+      status = "Ошибка";
       running = false;
     } else {
       status = "Готово";

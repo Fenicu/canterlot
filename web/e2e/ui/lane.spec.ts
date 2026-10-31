@@ -1,6 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { FIRST_DIALOG, seedFirstDialog } from '../../testing/fixtures/first-dialog';
 import { seedMockup05, seedMockup11 } from '../../testing/fixtures/mockup-chat';
 import { expect, test } from './fixtures';
 
@@ -101,7 +102,7 @@ test('desktop_delegation_panel_lists_nodes_with_state_labels_and_selects_a_lane'
 	// Click node to open its lane in pane
 	await panel.getByText('Explore').first().click();
 	await expect(panel.locator('.selected-lane')).toBeVisible();
-	await expect(panel.getByText('Результат вернётся в основную сессию')).toBeVisible();
+	await expect(panel.locator('.selected-lane .live-line')).toBeVisible();
 });
 
 test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }) => {
@@ -146,4 +147,26 @@ test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }
 	// Measure scroll after closing pane
 	const finalScroll = await stream.evaluate((node) => node.scrollTop);
 	expect(finalScroll).toBe(initialScroll);
+});
+
+test('finished_lane_reads_as_done_with_named_steps_and_the_report_open', async ({ page }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedFirstDialog(api);
+	await installChatRoutes(page, hub, api);
+	const agent = FIRST_DIALOG.find((item) => item.kind === 'block' && item.tool_name === 'Agent');
+	await page.goto(`/c/${id}/lane/${agent?.id}`);
+	await expect(page.locator('.lane-screen[data-ready]')).toBeVisible();
+	await expect(page.locator('.tool .name').first()).toHaveText('Шаг');
+	await expect(page.locator('.tool .summary').first()).toHaveText('/tmp/canterlot-check/note.txt');
+	await expect(page.locator('.report h3')).toHaveText('Итог');
+	await expect(page.locator('.report')).toContainText('проверка кириллицы');
+	await expect(page.locator('[role="log"]')).not.toContainText('Subagent hand-back');
+	await expect(page.locator('.lane-screen')).not.toContainText('Результат инструмента');
+	await expect(page.locator('.lane-screen')).not.toContainText('Результат вернётся');
+	await expect(page.locator('.lane-screen')).not.toContainText('ркестратор');
+	await expect(page.locator('.path')).toContainText('Claude');
+	await expect(page.locator('.live-line')).toContainText('Готово');
+	await expect(page.locator('.live-dot')).not.toHaveClass(/active/);
+	await expect(page.locator('.lane-screen .mark')).not.toHaveClass(/running/);
 });
