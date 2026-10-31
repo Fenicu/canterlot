@@ -34,6 +34,9 @@ pub struct Script {
     pub steps: Vec<Step>,
     /// Журнал запросов и запуска: тесты сверяют, что адаптер прислал на самом деле.
     pub log: Option<PathBuf>,
+    /// Зависший сервер: EOF stdin и SIGTERM не завершают.
+    pub ignore_eof: bool,
+    pub ignore_term: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -206,6 +209,24 @@ impl Script {
             script.steps.push(Step::Emit { events });
         }
         script
+    }
+
+    /// Статус canterlot в `/api/mcp`: записанный `pending`, затем `status`.
+    /// Запись `connected` есть только в выводе прогона, тело то же с другим статусом.
+    pub fn with_canterlot_mcp(mut self, status: &str) -> Self {
+        let pending = Self::from_capture("mcp", Some("mcp"))
+            .route("GET", "/api/mcp")
+            .and_then(|route| route.replies.first().cloned())
+            .expect("recorded /api/mcp");
+        let mut settled = pending.clone();
+        if let Some(body) = settled.body.as_mut() {
+            body["data"][0]["status"] = match status {
+                "failed" => json!({"status": "failed", "error": "spawn failed"}),
+                other => json!({"status": other}),
+            };
+        }
+        self.set_route("GET", "/api/mcp", vec![pending, settled]);
+        self
     }
 
     pub fn push_route(&mut self, method: &str, path: &str, reply: Reply) {
@@ -678,12 +699,17 @@ pub async fn main(args: Vec<String>) -> ExitCode {
     ) else {
         return ExitCode::from(1);
     };
+    let ignore_term = script.ignore_term;
     tokio::spawn(async move {
-        tokio::select! {
-            _ = term.recv() => {}
-            _ = interrupt.recv() => {}
+        loop {
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = interrupt.recv() => {}
+            }
+            if !ignore_term {
+                std::process::exit(130);
+            }
         }
-        std::process::exit(130);
     });
     if !script.ready.silent {
         let line = script
@@ -693,11 +719,14 @@ pub async fn main(args: Vec<String>) -> ExitCode {
         println!("{line}");
     }
     tokio::spawn(run_steps(shared.clone()));
-    tokio::spawn(async {
+    let ignore_eof = script.ignore_eof;
+    tokio::spawn(async move {
         let mut stdin = tokio::io::stdin();
         let mut sink = [0u8; 256];
         while matches!(stdin.read(&mut sink).await, Ok(count) if count > 0) {}
-        std::process::exit(0);
+        if !ignore_eof {
+            std::process::exit(0);
+        }
     });
     loop {
         let Ok((stream, _)) = listener.accept().await else {

@@ -7,6 +7,9 @@ publish.workspace = true
 
 [features]
 synthetic-adapter = []
+# Настоящий `opencode` с локальной заглушкой провайдера (L2). Тесты помечены `ignore`:
+# `--all-features` их собирает, но check.sh не запускает, см. README.
+opencode-live = ["synthetic-adapter"]
 fault-injection = ["canterlot-hub/fault-injection"]
 
 [[bin]]

@@ -1,0 +1,390 @@
+#![forbid(unsafe_code)]
+#![cfg(feature = "synthetic-adapter")]
+
+//! Боевой путь запуска OpenCode: конфигурация воркера из TOML, `ExecutionManager` с
+//! `configure_adapters`, настоящий супервизор, спека на диске с `deny_unknown_fields`
+//! и `fake-opencode` как CLI. Именно этот путь не исполнялся тестами, когда
+//! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
+
+use canterlot_proto::worker::v1::{
+    Command, ContentBlock, DeliverInput, Instructions, StartExecution, StopExecution, TextBlock,
+    command::Kind, content_block, record_body::Body,
+};
+use canterlot_worker::{
+    adapter::opencode::replay::Script,
+    config::WorkerConfig,
+    exec::{ExecutionManager, SjRelay},
+    session_store::StoreThread,
+    store::{Accept, WorkerStore},
+};
+use rustix::process::{Pid, Signal, kill_process};
+use std::{
+    collections::{HashMap, HashSet},
+    fs,
+    path::PathBuf,
+    time::Duration,
+};
+use tempfile::TempDir;
+use tokio::{sync::mpsc, time::timeout};
+use uuid::Uuid;
+
+#[path = "support/process_guard.rs"]
+mod process_guard;
+use process_guard::ProcessGuard;
+
+#[path = "support/opencode.rs"]
+mod opencode;
+use opencode::{Fake, find, path_of};
+
+const WAIT: Duration = Duration::from_secs(20);
+
+fn ready() -> Script {
+    Script::from_capture("start_stream", None).with_canterlot_mcp("connected")
+}
+
+struct Env {
+    guard: ProcessGuard,
+    fake: Option<Fake>,
+    root: TempDir,
+    work: PathBuf,
+    thread: Option<StoreThread>,
+    manager: Option<ExecutionManager>,
+    relay: mpsc::Receiver<SjRelay>,
+    bodies: Vec<Body>,
+    seen: HashSet<(Uuid, u64)>,
+    committed: HashMap<Uuid, u64>,
+    execution: Uuid,
+    conversation: Uuid,
+}
+
+impl Drop for Env {
+    fn drop(&mut self) {
+        drop(self.manager.take());
+    }
+}
+
+fn worker_toml(root: &std::path::Path, work: &std::path::Path, table: &str) -> String {
+    let id = Uuid::now_v7();
+    format!(
+        r#"
+hub_url = "https://hub.test"
+ca_cert = "{root}/ca.pem"
+token_file = "{root}/token"
+machine_id = "{id}"
+installation_id = "{id}"
+restore_generation = "{id}"
+data_dir = "{root}/store"
+
+[execution]
+allowed_workdir_roots = ["{work}"]
+supervisor_exe = "{exe}"
+spawn_timeout = "10s"
+
+[execution.supervisor]
+stop_grace = "1s"
+stop_retry = "200ms"
+
+{table}
+"#,
+        root = root.display(),
+        work = work.display(),
+        exe = env!("CARGO_BIN_EXE_canterlot-worker"),
+    )
+}
+
+impl Env {
+    async fn new(script: Option<Script>) -> Self {
+        let root = TempDir::new().unwrap();
+        let work = root.path().join("work");
+        fs::create_dir(&work).unwrap();
+        let fake = script.map(Fake::new);
+        let table = fake.as_ref().map_or(String::new(), |fake| {
+            format!("[opencode]\nexecutable = \"{}\"\n", fake.exe.display())
+        });
+        let config: WorkerConfig =
+            toml::from_str(&worker_toml(root.path(), &work, &table)).unwrap();
+        let thread = StoreThread::new(WorkerStore::open(&root.path().join("store")).unwrap());
+        let (sender, relay) = mpsc::channel(64);
+        let manager = ExecutionManager::new(config.execution.clone(), thread.client(), sender);
+        manager.configure_adapters(config.claude_code, config.codex, config.opencode);
+        Self {
+            guard: ProcessGuard::new(root.path()),
+            fake,
+            root,
+            work,
+            thread: Some(thread),
+            manager: Some(manager),
+            relay,
+            bodies: Vec::new(),
+            seen: HashSet::new(),
+            committed: HashMap::new(),
+            execution: Uuid::now_v7(),
+            conversation: Uuid::now_v7(),
+        }
+    }
+
+    fn fake(&self) -> &Fake {
+        self.fake.as_ref().unwrap()
+    }
+
+    fn manager(&self) -> &ExecutionManager {
+        self.manager.as_ref().unwrap()
+    }
+
+    fn command(&self, id: Uuid, kind: Kind) -> Command {
+        Command {
+            command_id: id.to_string(),
+            dispatch_attempt: 1,
+            execution_id: self.execution.to_string(),
+            execution_generation: 1,
+            kind: Some(kind),
+        }
+    }
+
+    async fn send(&self, command: Command) {
+        let copy = command.clone();
+        let accept = self
+            .thread
+            .as_ref()
+            .unwrap()
+            .call(move |store| Ok(store.as_mut().unwrap().accept_command(&copy)?))
+            .await
+            .unwrap();
+        assert!(matches!(accept, Accept::Stored { .. }), "{accept:?}");
+        self.manager().handle(command, accept).await.unwrap();
+    }
+
+    fn start_command(&self, mode: &str) -> Command {
+        self.command(
+            Uuid::now_v7(),
+            Kind::StartExecution(StartExecution {
+                conversation_id: self.conversation.to_string(),
+                harness: "opencode".into(),
+                workdir: self.work.to_string_lossy().into_owned(),
+                model: "fake/fake-1".into(),
+                effort: "high".into(),
+                permission_mode: mode.into(),
+                instructions: Some(Instructions {
+                    mode: "clean".into(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+        )
+    }
+
+    async fn start(&mut self, mode: &str) {
+        self.manager().on_hub_session(self.committed.clone());
+        self.send(self.start_command(mode)).await;
+    }
+
+    #[allow(dead_code)]
+    async fn deliver(&self, text: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        self.send(self.command(
+            id,
+            Kind::DeliverInput(DeliverInput {
+                input_id: Uuid::now_v7().to_string(),
+                conversation_id: self.conversation.to_string(),
+                content: vec![ContentBlock {
+                    block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
+                }],
+                ..Default::default()
+            }),
+        ))
+        .await;
+        id
+    }
+
+    async fn pump(&mut self, within: Duration) -> bool {
+        match timeout(within, self.relay.recv()).await {
+            Ok(Some(batch)) => {
+                let mut last = 0;
+                for record in batch.records {
+                    last = last.max(record.seq);
+                    if self.seen.insert((batch.journal_id, record.seq)) {
+                        self.bodies.push(record.body.unwrap().body.unwrap());
+                    }
+                }
+                let entry = self.committed.entry(batch.journal_id).or_default();
+                *entry = (*entry).max(last);
+                self.manager().on_sj_ack(batch.journal_id, last);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    async fn wait(&mut self, what: &str, wanted: impl Fn(&[Body]) -> bool) {
+        let outcome = timeout(WAIT, async {
+            loop {
+                if wanted(&self.bodies) {
+                    return true;
+                }
+                if !self.pump(Duration::from_secs(5)).await {
+                    return wanted(&self.bodies);
+                }
+            }
+        })
+        .await;
+        assert!(
+            outcome.unwrap_or(false),
+            "timed out waiting for: {what}; bodies: {:?}; logs: {}",
+            self.bodies.iter().map(describe).collect::<Vec<_>>(),
+            self.logs()
+        );
+    }
+
+    fn logs(&self) -> String {
+        let mut text = String::new();
+        if let Ok(entries) = fs::read_dir(self.root.path().join("store/executions")) {
+            for entry in entries.flatten() {
+                text +=
+                    &fs::read_to_string(entry.path().join("supervisor.log")).unwrap_or_default();
+            }
+        }
+        text
+    }
+
+    async fn wait_running(&mut self) {
+        self.wait("running", |bodies| {
+            bodies
+                .iter()
+                .any(|body| matches!(body, Body::ExecutionState(f) if f.state == "running"))
+        })
+        .await;
+    }
+
+    #[allow(dead_code)]
+    async fn wait_finished(&mut self, command: Uuid) {
+        self.wait("run finished", |bodies| {
+            bodies.iter().any(|body| {
+                matches!(body, Body::RunFinished(f) if f.input_command_id == command.to_string())
+            })
+        })
+        .await;
+    }
+
+    fn exec_dir(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("store/executions")
+            .join(self.execution.to_string())
+    }
+
+    async fn stop(&mut self) {
+        let stop = self.command(
+            Uuid::now_v7(),
+            Kind::StopExecution(StopExecution { force: false }),
+        );
+        self.send(stop).await;
+        self.wait("closed", |bodies| {
+            bodies
+                .iter()
+                .any(|body| matches!(body, Body::JournalClosed(_)))
+        })
+        .await;
+    }
+}
+
+fn describe(body: &Body) -> String {
+    match body {
+        Body::ExecutionState(f) => format!("execution_state({},{})", f.state, f.outcome),
+        Body::AcceptanceUnconfirmed(f) => format!("acceptance_unconfirmed({})", f.reason),
+        Body::AdapterDiagnostic(f) => format!("adapter_diagnostic({})", f.event_type),
+        Body::PhaseChanged(f) => format!("phase({})", f.phase),
+        Body::BlockStarted(f) => format!("block_started({})", f.kind),
+        Body::BlockFinal(_) => "block_final".into(),
+        Body::BlockDelta(_) => "block_delta".into(),
+        Body::RunFinished(_) => "run_finished".into(),
+        Body::InputAccepted(_) => "input_accepted".into(),
+        Body::InputRejected(f) => format!("input_rejected({})", f.reason),
+        Body::JournalClosed(_) => "journal_closed".into(),
+        _ => "other".into(),
+    }
+}
+
+#[tokio::test]
+async fn start_without_the_table_is_refused_by_the_worker() {
+    let mut env = Env::new(None).await;
+    env.start("bypass").await;
+    let thread = env.thread.as_ref().unwrap();
+    timeout(WAIT, async {
+        loop {
+            let rejected = thread
+                .call(|store| {
+                    Ok(store
+                        .as_ref()
+                        .unwrap()
+                        .cj_records_from(1, usize::MAX)?
+                        .into_iter()
+                        .filter_map(|record| record.body.and_then(|body| body.body))
+                        .any(|body| {
+                            matches!(body, Body::CommandRejected(f) if f.reason == "harness_unavailable")
+                        }))
+                })
+                .await
+                .unwrap();
+            if rejected {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("harness_unavailable");
+    env.guard.cleanup();
+}
+
+#[tokio::test]
+async fn start_execution_reaches_running_through_a_real_supervisor() {
+    let mut script = ready();
+    let prompt = script
+        .steps
+        .iter()
+        .rposition(|step| step.expected_path().is_some())
+        .unwrap();
+    script.steps.truncate(prompt);
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let spec = fs::read_to_string(env.exec_dir().join("spec.toml")).unwrap();
+    assert!(spec.contains("[opencode]"), "{spec}");
+    let requests = env.fake().requests();
+    let create = find(&requests, "POST", "/api/session").expect("session.create");
+    assert_eq!(
+        create["body"]["location"]["directory"],
+        env.work.to_str().unwrap()
+    );
+    assert_eq!(path_of(&requests[0]), "/api/event");
+    assert_eq!(
+        env.fake().boot()["env"]["OPENCODE_CONFIG_DIR"],
+        env.exec_dir().join("opencode-config").to_str().unwrap()
+    );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Смерть супервизора закрывает stdin, и сервер уходит сам.
+#[tokio::test]
+async fn dead_supervisor_releases_the_server_through_the_stdin_lease() {
+    let mut script = ready();
+    let prompt = script
+        .steps
+        .iter()
+        .rposition(|step| step.expected_path().is_some())
+        .unwrap();
+    script.steps.truncate(prompt);
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    assert!(!env.fake().pids().is_empty());
+    for member in env.guard.members() {
+        kill_process(
+            Pid::from_raw(i32::try_from(member.0).unwrap()).unwrap(),
+            Signal::KILL,
+        )
+        .unwrap();
+    }
+    env.fake().wait_gone().await;
+}
