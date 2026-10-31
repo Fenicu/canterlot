@@ -109,6 +109,9 @@
       "$ref": "#/$defs/todo_updated"
     },
     {
+      "$ref": "#/$defs/background_work_changed"
+    },
+    {
       "$ref": "#/$defs/machine_availability_changed"
     },
     {
@@ -4222,6 +4225,150 @@
       ],
       "additionalProperties": false
     },
+    "background_work_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "background_work_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "tasks": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "task_id": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "agent",
+                      "bash"
+                    ]
+                  },
+                  "block_id": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/Uuid"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  },
+                  "parent_task_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "description": {
+                    "type": "string"
+                  },
+                  "state": {
+                    "enum": [
+                      "running",
+                      "completed",
+                      "failed",
+                      "stopped"
+                    ]
+                  },
+                  "started_at": {
+                    "$ref": "#/$defs/Time"
+                  },
+                  "ended_at": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/$defs/Time"
+                      },
+                      {
+                        "type": "null"
+                      }
+                    ]
+                  }
+                },
+                "required": [
+                  "task_id",
+                  "kind",
+                  "block_id",
+                  "parent_task_id",
+                  "description",
+                  "state",
+                  "started_at",
+                  "ended_at"
+                ],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": [
+            "tasks"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "machine_availability_changed": {
       "type": "object",
       "properties": {
@@ -4805,6 +4952,9 @@
                 },
                 {
                   "$ref": "#/$defs/todo_updated"
+                },
+                {
+                  "$ref": "#/$defs/background_work_changed"
                 },
                 {
                   "$ref": "#/$defs/machine_availability_changed"

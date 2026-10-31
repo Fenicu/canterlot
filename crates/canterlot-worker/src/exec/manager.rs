@@ -963,6 +963,7 @@ impl Actor {
                 pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
                 todo_v1: start.capabilities.iter().any(|c| c == "todo_v1"),
                 compact_v1: start.capabilities.iter().any(|c| c == "compact_v1"),
+                background_v1: start.capabilities.iter().any(|c| c == "background_v1"),
             }))
             .await;
         Ok(())

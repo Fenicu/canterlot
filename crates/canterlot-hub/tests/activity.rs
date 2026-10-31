@@ -47,8 +47,44 @@ fn inputs() -> ActivityInputs {
         link: LinkState::Available,
         awaiting_attachments: false,
         background_work: None,
+        wake_turn: false,
         question_summary: None,
     }
+}
+
+#[test]
+fn activity_idle_carries_background_work_count() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.background_work = Some(2);
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Idle);
+    assert!(matches!(
+        activity.evidence,
+        E::Idle {
+            background_work: Some(2),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn wake_turn_without_a_slot_is_working() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.wake_turn = true;
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Working);
+    assert!(matches!(activity.evidence, E::Working { ref phase, .. } if phase == "generating"));
+}
+
+#[test]
+fn wake_turn_of_a_stopped_execution_is_not_working() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.wake_turn = true;
+    i.execution.as_mut().unwrap().state = ExecutionState::Stopped;
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Stopped);
 }
 
 #[test]

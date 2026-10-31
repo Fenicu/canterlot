@@ -39,6 +39,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "workdir_suggest_v1",
     "todo_v1",
     "compact_v1",
+    "background_v1",
 ];
 
 #[derive(Clone)]

@@ -6,6 +6,7 @@ export type Tone = "accent" | "default" | "warning" | "danger";
 export interface ActivityEvidence {
   kind?: string;
   last_turn_at?: string | null;
+  background_work?: number | null;
   phase?: string;
   phase_since?: string | null;
   summary?: string | null;
@@ -37,12 +38,20 @@ export function activityLine(
 ): { text: string; tone: Tone; live: boolean } {
   const evidence = activity.evidence ?? {};
   switch (activity.state) {
-    case "idle":
+    case "idle": {
+      const background = evidence.background_work ?? 0;
+      if (background > 0)
+        return {
+          text: `Ожидает сообщения · ${background} ${fmt.plural(background, ["фоновая", "фоновые", "фоновых"])}`,
+          tone: "accent",
+          live: true,
+        };
       return {
         text: evidence.last_turn_at ? "Ожидает сообщения" : "Новая сессия",
         tone: "default",
         live: false,
       };
+    }
     case "working":
       return working(evidence, activity.since, ctx.now);
     case "waiting_for_user": {

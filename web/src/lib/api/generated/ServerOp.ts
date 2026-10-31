@@ -44,6 +44,7 @@ export type ServerOp =
         | RequestDecided
         | RequestTransmitting
         | TodoUpdated
+        | BackgroundWorkChanged
         | MachineAvailabilityChanged
         | MachineReportUpdated
         | MachineMetrics
@@ -880,6 +881,31 @@ export interface TodoUpdated {
       status: "pending" | "in_progress" | "completed" | "cancelled";
     }[];
     omitted: number;
+  };
+}
+export interface BackgroundWorkChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "background_work_changed";
+  payload: {
+    tasks: {
+      task_id: string;
+      kind: "agent" | "bash";
+      block_id: Uuid | null;
+      parent_task_id: string | null;
+      description: string;
+      state: "running" | "completed" | "failed" | "stopped";
+      started_at: Time;
+      ended_at: Time | null;
+    }[];
   };
 }
 export interface MachineAvailabilityChanged {

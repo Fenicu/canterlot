@@ -420,6 +420,38 @@ impl fmt::Debug for TodoItem {
             .finish()
     }
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundKind {
+    Agent,
+    Bash,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackgroundState {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+/// Фоновая задача агента; описание — данные сообщения.
+#[derive(Clone, PartialEq, Eq)]
+pub struct BackgroundTask {
+    pub task_id: String,
+    pub kind: BackgroundKind,
+    /// Блок вызова Agent или Bash.
+    pub block_id: Option<Uuid>,
+    pub parent_task_id: Option<String>,
+    pub description: String,
+    pub state: BackgroundState,
+}
+impl fmt::Debug for BackgroundTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackgroundTask")
+            .field("task_id", &self.task_id)
+            .field("kind", &self.kind)
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
 #[derive(Clone)]
 pub enum AdapterEvent {
     RequestOpened {
@@ -506,6 +538,12 @@ pub enum AdapterEvent {
     TodoUpdated {
         lane: Option<Uuid>,
         items: Vec<TodoItem>,
+    },
+    /// Все работающие фоновые задачи и закончившиеся с прошлого события; `wake_turn` — идёт
+    /// ход, который агент начал сам.
+    BackgroundWork {
+        tasks: Vec<BackgroundTask>,
+        wake_turn: bool,
     },
     /// Один и тот же отказ подряд: владельцу предлагается сжать контекст, очередь встаёт.
     SessionStuck,
@@ -598,6 +636,11 @@ impl fmt::Debug for AdapterEvent {
                 .field("call_id", call_id)
                 .field("tool", tool)
                 .finish_non_exhaustive(),
+            Self::BackgroundWork { tasks, wake_turn } => f
+                .debug_struct("BackgroundWork")
+                .field("tasks", &tasks.len())
+                .field("wake_turn", wake_turn)
+                .finish(),
             Self::SessionStuck => f.write_str("SessionStuck"),
             Self::Compacted { ok } => f.debug_struct("Compacted").field("ok", ok).finish(),
             Self::TodoUpdated { lane, items } => f

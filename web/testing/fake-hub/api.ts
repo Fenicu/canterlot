@@ -173,6 +173,11 @@ export class FakeHubApi {
 		const open_requests = [...this.requestRows(id).values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
 		);
+		const background = new Map<string, BackgroundTask>();
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind !== 'background_work_changed') continue;
+			for (const task of (ev.payload as { tasks: BackgroundTask[] }).tasks) background.set(task.task_id, task);
+		}
 		const todos = new Map<string | null, TodoList>();
 		for (const ev of this.hub.log(`conversation:${id}`)) {
 			if (ev.kind !== 'todo_updated') continue;
@@ -192,7 +197,8 @@ export class FakeHubApi {
 			history: this.page(id, {}),
 			scheduled: [],
 			open_requests,
-			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null))
+			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null)),
+			background: [...background.values()]
 		};
 	}
 
@@ -205,6 +211,15 @@ export class FakeHubApi {
 			kind: 'todo_updated',
 			conversation_id: id,
 			payload: { lane_block_id: lane, revision: known + 1, items, omitted }
+		});
+	}
+
+	/** Как `background_work_changed` хаба: только изменившиеся задачи. */
+	pushBackground(id: string, tasks: BackgroundTask[]): HubEvent {
+		return this.hub.append(`conversation:${id}`, {
+			kind: 'background_work_changed',
+			conversation_id: id,
+			payload: { tasks }
 		});
 	}
 
@@ -412,6 +427,8 @@ export class FakeHubApi {
 		return info;
 	}
 }
+
+type BackgroundTask = components['schemas']['BackgroundTaskView'];
 
 function seqOf(item: HistoryItem): string {
 	return item.kind === 'input' ? item.feed_seq || item.created_seq : item.created_seq;

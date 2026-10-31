@@ -4,7 +4,7 @@ export interface ChatStateLine {
 	text: string;
 	tone: Tone;
 	live: boolean;
-	/** Простой сессии не занимает строку шапки: там остаётся подпись с агентом и машиной. */
+	/** Простой сессии не занимает строку шапки: там остаётся подпись с агентом и машиной. Фоновая работа — не простой. */
 	quiet: boolean;
 }
 
@@ -18,7 +18,7 @@ export function chatStateLine(
 	const line = activityLine(effective, { now });
 	// Вопрос целиком стоит в карточке прямо под шапкой, повторять его негде.
 	const text = effective.state === 'waiting_for_user' ? 'Ждёт ответа' : line.text;
-	return { ...line, text, quiet: effective.state === 'idle' };
+	return { ...line, text, quiet: effective.state === 'idle' && !line.live };
 }
 
 function effectiveActivity(

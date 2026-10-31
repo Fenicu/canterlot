@@ -171,6 +171,7 @@ fn to_proto_with_capability(
             crate::session::CAPABILITY_PILOT_V1,
             crate::session::CAPABILITY_TODO_V1,
             crate::session::CAPABILITY_COMPACT_V1,
+            crate::session::CAPABILITY_BACKGROUND_V1,
         ]
         .into_iter()
         .filter(|capability| has(capability))

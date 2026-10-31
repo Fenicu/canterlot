@@ -5,7 +5,8 @@
 //! tests/fixtures/claude_code/ (see its README.md).
 
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, Phase, TodoItem, TodoStatus,
+    AdapterEvent, BackgroundKind, BackgroundState, BackgroundTask, BlockKind, Phase, TodoItem,
+    TodoStatus,
     claude_code::parser::{Parsed, Parser},
 };
 use serde_json::{Value, json};
@@ -1244,4 +1245,187 @@ fn usage_of_an_overlapped_wake_turn_stays_for_the_result_of_the_message() {
         result(own) - result(first),
         "both the wake turn and the message, nothing lost"
     );
+}
+
+// --- фоновые задачи ---
+
+fn background(parsed: &[Parsed]) -> Vec<(Vec<BackgroundTask>, bool)> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BackgroundWork { tasks, wake_turn }) => {
+                Some((tasks.clone(), *wake_turn))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn states(tasks: &[BackgroundTask]) -> Vec<(String, BackgroundState)> {
+    tasks.iter().map(|t| (t.task_id.clone(), t.state)).collect()
+}
+
+fn running(lists: &[(Vec<BackgroundTask>, bool)]) -> Vec<usize> {
+    lists
+        .iter()
+        .map(|(tasks, _)| {
+            tasks
+                .iter()
+                .filter(|t| t.state == BackgroundState::Running)
+                .count()
+        })
+        .collect()
+}
+
+#[test]
+fn background_tasks_changed_yields_full_list_and_empty_list_clears() {
+    let mut parser = Parser::new();
+    let one = parser.feed(
+        &json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+            {"task_id":"a1","run_id":"r1","task_type":"local_agent","subagent_type":"general-purpose","description":"bg sub"},
+            {"task_id":"b1","run_id":"r2","task_type":"local_bash","description":"sleep","parent_task_id":"a1"},
+        ]})
+        .to_string(),
+    );
+    let lists = background(&one);
+    assert_eq!(lists.len(), 1);
+    let (tasks, wake) = &lists[0];
+    assert!(!wake);
+    assert_eq!(tasks.len(), 2);
+    assert_eq!(tasks[0].kind, BackgroundKind::Agent);
+    assert_eq!(tasks[0].description, "bg sub");
+    assert_eq!(tasks[1].kind, BackgroundKind::Bash);
+    assert_eq!(tasks[1].parent_task_id.as_deref(), Some("a1"));
+    let repeat = parser.feed(
+        &json!({"type":"system","subtype":"background_tasks_changed","tasks":[
+            {"task_id":"a1","run_id":"r1","task_type":"local_agent","description":"bg sub"},
+            {"task_id":"b1","run_id":"r2","task_type":"local_bash","description":"sleep","parent_task_id":"a1"},
+        ]})
+        .to_string(),
+    );
+    assert!(
+        background(&repeat).is_empty(),
+        "the same list is not a change"
+    );
+    let empty = parser.feed(
+        &json!({"type":"system","subtype":"background_tasks_changed","tasks":[]}).to_string(),
+    );
+    let lists = background(&empty);
+    assert_eq!(lists.len(), 1);
+    assert_eq!(running(&lists), vec![0]);
+    assert!(parser.background_running() == 0);
+}
+
+#[test]
+fn task_started_then_notification_tracks_agent_by_task_id() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    let call = parsed
+        .iter()
+        .find_map(|p| match p {
+            Parsed::ToolCallComplete {
+                block_id,
+                tool_name,
+                ..
+            } if tool_name == "Agent" => Some(*block_id),
+            _ => None,
+        })
+        .unwrap();
+    let bash = parsed
+        .iter()
+        .find_map(|p| match p {
+            Parsed::ToolCallComplete {
+                block_id,
+                tool_name,
+                input,
+                ..
+            } if tool_name == "Bash" && input["run_in_background"] == true => Some(*block_id),
+            _ => None,
+        })
+        .unwrap();
+    let lists = background(&parsed);
+    let linked = |task: &str, block: Uuid| {
+        lists
+            .iter()
+            .flat_map(|(tasks, _)| tasks)
+            .any(|t| t.task_id == task && t.block_id == Some(block))
+    };
+    assert!(
+        linked("aeabb0e8a25014c71", call),
+        "agent linked to its call"
+    );
+    assert!(linked("bua6b6bsw", bash), "bash linked to its call");
+    let ended: Vec<(String, BackgroundState)> = lists
+        .iter()
+        .flat_map(|(tasks, _)| states(tasks))
+        .filter(|(_, state)| *state != BackgroundState::Running)
+        .collect();
+    assert_eq!(
+        ended,
+        vec![
+            ("aeabb0e8a25014c71".into(), BackgroundState::Completed),
+            ("bua6b6bsw".into(), BackgroundState::Completed),
+        ],
+        "each end is reported once"
+    );
+    assert_eq!(parser.background_running(), 0);
+}
+
+#[test]
+fn agent_restarted_with_new_run_id_is_running_again() {
+    let rows = fixtures::replay_fixture_rows("background_race");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    let agent: Vec<BackgroundState> = background(&parsed)
+        .iter()
+        .flat_map(|(tasks, _)| tasks)
+        .filter(|t| t.task_id == "a846b262645919640")
+        .map(|t| t.state)
+        .collect();
+    let ended = agent
+        .iter()
+        .position(|s| *s == BackgroundState::Completed)
+        .unwrap();
+    assert!(agent[ended + 1..].contains(&BackgroundState::Running));
+    assert_eq!(agent.last(), Some(&BackgroundState::Completed));
+}
+
+#[test]
+fn foreground_subagent_bash_is_not_a_background_task() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    assert!(
+        !background(&parsed)
+            .iter()
+            .flat_map(|(tasks, _)| tasks)
+            .any(|t| t.task_id == "bjfz79vpv"),
+        "owned_by_subagent, is_backgrounded: false"
+    );
+}
+
+#[test]
+fn background_task_of_a_subagent_counts_and_links_to_its_call() {
+    let rows = fixtures::replay_fixture_rows("background_race");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    assert!(
+        background(&parsed)
+            .iter()
+            .flat_map(|(tasks, _)| tasks)
+            .any(|t| t.task_id == "bersyh001" && t.block_id.is_some()),
+        "owned_by_subagent, is_backgrounded: true, listed by the CLI"
+    );
+}
+
+#[test]
+fn wake_turn_is_reported_while_it_is_open() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    let flags: Vec<bool> = background(&parsed).iter().map(|(_, wake)| *wake).collect();
+    assert!(flags.contains(&true));
+    assert_eq!(flags.last(), Some(&false), "closed with the last wake turn");
+    assert!(!parser.wake_turn_open());
 }

@@ -4618,6 +4618,57 @@
           }
         }
       },
+      "BackgroundTaskView": {
+        "type": "object",
+        "required": [
+          "task_id",
+          "kind",
+          "description",
+          "state",
+          "started_at"
+        ],
+        "properties": {
+          "block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid",
+            "description": "Блок вызова Agent или Bash."
+          },
+          "description": {
+            "type": "string"
+          },
+          "ended_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`agent` или `bash`."
+          },
+          "parent_task_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "type": "string",
+            "description": "`running`, `completed`, `failed` или `stopped`."
+          },
+          "task_id": {
+            "type": "string"
+          }
+        }
+      },
       "BinaryContent": {
         "type": "string",
         "format": "binary",
@@ -5128,9 +5179,16 @@
           "history",
           "scheduled",
           "open_requests",
-          "todos"
+          "todos",
+          "background"
         ],
         "properties": {
+          "background": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BackgroundTaskView"
+            }
+          },
           "detail": {
             "$ref": "#/components/schemas/ConversationDetail"
           },
@@ -8145,9 +8203,16 @@
               "history",
               "scheduled",
               "open_requests",
-              "todos"
+              "todos",
+              "background"
             ],
             "properties": {
+              "background": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/BackgroundTaskView"
+                }
+              },
               "detail": {
                 "$ref": "#/components/schemas/ConversationDetail"
               },

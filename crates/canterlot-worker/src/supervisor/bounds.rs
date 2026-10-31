@@ -3,7 +3,7 @@
 
 use canterlot_proto::{
     limits::MAX_EVENT_BATCH_BYTES,
-    worker::v1::{AdapterDiagnostic, TodoItem, record_body::Body},
+    worker::v1::{AdapterDiagnostic, BackgroundTask, TodoItem, record_body::Body},
 };
 use prost::Message;
 use serde_json::Value;
@@ -18,6 +18,10 @@ pub(super) const MAX_REQUEST_ID_BYTES: usize = 1024;
 const MAX_TODO_BYTES: usize = MAX_REQUEST_PAYLOAD_BYTES;
 const MAX_TODO_ITEMS: usize = 256;
 const MAX_TODO_TEXT_BYTES: usize = 4_096;
+
+/// Потолки списка фоновых задач: они короче списка задач агента, а запись идёт часто.
+const MAX_BACKGROUND_TASKS: usize = 128;
+const MAX_BACKGROUND_TEXT_BYTES: usize = 512;
 
 /// Потолок записи: остаток пакета уходит на его обвязку.
 const MAX_RECORD_BYTES: usize = MAX_EVENT_BATCH_BYTES - 1024;
@@ -87,6 +91,18 @@ pub(super) fn bounded_todo(mut items: Vec<TodoItem>) -> (Vec<TodoItem>, u32) {
     }
     items.truncate(kept);
     (items, u32::try_from(total - kept).unwrap_or(u32::MAX))
+}
+
+/// Список фоновых задач в пределах потолка; второе значение — сколько задач отброшено.
+pub(super) fn bounded_background(mut tasks: Vec<BackgroundTask>) -> (Vec<BackgroundTask>, u32) {
+    let omitted = tasks.len().saturating_sub(MAX_BACKGROUND_TASKS);
+    tasks.truncate(MAX_BACKGROUND_TASKS);
+    for task in &mut tasks {
+        clip(&mut task.description, MAX_BACKGROUND_TEXT_BYTES);
+        clip(&mut task.task_id, MAX_BACKGROUND_TEXT_BYTES);
+        clip(&mut task.parent_task_id, MAX_BACKGROUND_TEXT_BYTES);
+    }
+    (tasks, u32::try_from(omitted).unwrap_or(u32::MAX))
 }
 
 /// JSON карточки в пределах потолка. Крупная карточка заменяется превью с меткой

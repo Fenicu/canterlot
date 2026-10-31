@@ -150,6 +150,41 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             };
             AdapterEvent::Media { block_id, source }
         }
+        "background_work" => {
+            let background = &value["background"];
+            let tasks = background["tasks"]
+                .as_array()
+                .ok_or(AdapterError::Protocol)?;
+            AdapterEvent::BackgroundWork {
+                tasks: tasks
+                    .iter()
+                    .map(|task| {
+                        Ok(BackgroundTask {
+                            task_id: task["task_id"].as_str().unwrap_or_default().to_owned(),
+                            kind: if task["kind"] == "agent" {
+                                BackgroundKind::Agent
+                            } else {
+                                BackgroundKind::Bash
+                            },
+                            block_id: None,
+                            parent_task_id: None,
+                            description: task["description"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_owned(),
+                            state: match task["state"].as_str() {
+                                Some("running") => BackgroundState::Running,
+                                Some("completed") => BackgroundState::Completed,
+                                Some("failed") => BackgroundState::Failed,
+                                Some("stopped") => BackgroundState::Stopped,
+                                _ => return Err(AdapterError::Protocol),
+                            },
+                        })
+                    })
+                    .collect::<Result<_, _>>()?,
+                wake_turn: background["wake_turn"].as_bool().unwrap_or(false),
+            }
+        }
         "run_adopted" => AdapterEvent::RunAdopted {
             input_command_id: uuid("input_command_id")?,
         },

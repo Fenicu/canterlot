@@ -421,6 +421,7 @@ fn kind(body: &Body) -> &'static str {
         Body::BlockFinal(_) => "block_final",
         Body::RunFinished(_) => "run_finished",
         Body::DispatchDeferred(_) => "dispatch_deferred",
+        Body::BackgroundWorkChanged(_) => "background_work_changed",
         Body::JournalClosed(_) => "journal_closed",
         Body::CommandStored(_) => "command_stored",
         _ => "other",

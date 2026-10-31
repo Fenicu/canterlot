@@ -64,7 +64,8 @@ async fn worker_without_exec_capability_echo_rejects_start() {
             "instructions_v1",
             "workdir_suggest_v1",
             "todo_v1",
-            "compact_v1"
+            "compact_v1",
+            "background_v1"
         ]
     );
     hub.send(ControlDown {

@@ -16,9 +16,10 @@ use canterlot_proto::{
             control_to_supervisor as down, supervisor_to_control as up,
         },
         v1::{
-            AdapterDiagnostic, BlockDelta, BlockFinal, BlockIncomplete, BlockMedia, BlockStarted,
-            CompactionState, CompactionStatus, DecisionApplied, DecisionNotApplied,
-            DecisionTransmissionStarted, DecisionUnconfirmed, DeliverDecision,
+            AdapterDiagnostic, BackgroundTask as ProtoBackgroundTask, BackgroundTaskKind,
+            BackgroundTaskState, BackgroundWorkChanged, BlockDelta, BlockFinal, BlockIncomplete,
+            BlockMedia, BlockStarted, CompactionState, CompactionStatus, DecisionApplied,
+            DecisionNotApplied, DecisionTransmissionStarted, DecisionUnconfirmed, DeliverDecision,
             InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost, InputCancelWon,
             InputDispatchDeferred, InputRejected, InputTransmissionStarted, InputWithdrawn,
             InterruptState, InterruptStatus, JournalClosed, JournalOpened, PhaseChanged,
@@ -38,16 +39,18 @@ use uuid::Uuid;
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
     blocks::{OpenBlock, delta_chunks},
-    bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record, bounded_todo},
+    bounds::{
+        MAX_REQUEST_ID_BYTES, bounded_background, bounded_json, bounded_record, bounded_todo,
+    },
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
     sj::Sj,
 };
 use crate::{
     adapter::{
-        Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, CompactOutcome,
-        DecisionOutcome, InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource,
-        Phase, SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, frame_names,
-        registry_with,
+        Adapter, AdapterContext, AdapterEvent, AgentCallResult, BackgroundKind, BackgroundState,
+        BackgroundTask, CloseMode, CompactOutcome, DecisionOutcome, InstructionSpec,
+        InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase, SettingsChange, StartSpec,
+        TodoStatus, Transmission, TransmitOutcome, frame_names, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -166,6 +169,8 @@ struct Supervisor {
     pilot_v1: bool,
     todo_v1: bool,
     compact_v1: bool,
+    background_v1: bool,
+    background_drop_reported: bool,
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
     provider: String,
@@ -326,6 +331,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         pilot_v1: false,
         todo_v1: false,
         compact_v1: false,
+        background_v1: false,
+        background_drop_reported: false,
         todo_drop_reported: false,
         provider: String::new(),
         open_blocks: BTreeMap::new(),
@@ -989,6 +996,54 @@ impl Supervisor {
         Ok(())
     }
 
+    fn on_background(
+        &mut self,
+        tasks: Vec<BackgroundTask>,
+        wake_turn: bool,
+    ) -> Result<(), SupervisorError> {
+        if !self.background_v1 {
+            if !std::mem::replace(&mut self.background_drop_reported, true) {
+                self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                    execution_id: self.spec.execution_id.to_string(),
+                    kind: "capability_missing".into(),
+                    event_type: "background_dropped".into(),
+                    ..Default::default()
+                }))?;
+            }
+            return Ok(());
+        }
+        let tasks = tasks
+            .into_iter()
+            .map(|task| ProtoBackgroundTask {
+                task_id: task.task_id,
+                kind: match task.kind {
+                    BackgroundKind::Agent => BackgroundTaskKind::Agent,
+                    BackgroundKind::Bash => BackgroundTaskKind::Bash,
+                } as i32,
+                block_id: task.block_id.map(|id| id.to_string()).unwrap_or_default(),
+                parent_task_id: task.parent_task_id.unwrap_or_default(),
+                description: task.description,
+                state: match task.state {
+                    BackgroundState::Running => BackgroundTaskState::Running,
+                    BackgroundState::Completed => BackgroundTaskState::Completed,
+                    BackgroundState::Failed => BackgroundTaskState::Failed,
+                    BackgroundState::Stopped => BackgroundTaskState::Stopped,
+                } as i32,
+            })
+            .collect();
+        let (tasks, omitted) = bounded_background(tasks);
+        self.record(Body::BackgroundWorkChanged(BackgroundWorkChanged {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            revision: self.sj.next_seq(),
+            machine_time_ms: now_ms(),
+            tasks,
+            omitted,
+            wake_turn,
+        }))?;
+        Ok(())
+    }
+
     fn on_media(&mut self, block_id: Uuid, source: MediaSource) -> Result<(), SupervisorError> {
         if !self.pilot_v1 {
             self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
@@ -1148,6 +1203,7 @@ impl Supervisor {
         self.pilot_v1 = start.pilot_v1;
         self.todo_v1 = start.todo_v1;
         self.compact_v1 = start.compact_v1;
+        self.background_v1 = start.background_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
@@ -1802,6 +1858,9 @@ impl Supervisor {
             }
             AdapterEvent::Media { block_id, source } => self.on_media(block_id, source)?,
             AdapterEvent::TodoUpdated { lane, items } => self.on_todo(lane, items)?,
+            AdapterEvent::BackgroundWork { tasks, wake_turn } => {
+                self.on_background(tasks, wake_turn)?
+            }
             AdapterEvent::SessionStuck => self.on_stuck()?,
             AdapterEvent::Compacted { ok } => {
                 if let Some((id, attempt)) = self.pending_compaction.take() {

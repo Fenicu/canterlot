@@ -237,6 +237,23 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> T
             }),
         ),
         (
+            "background_work_changed",
+            Body::BackgroundWorkChanged(BackgroundWorkChanged {
+                execution_id: id.clone(),
+                generation: run.execution.generation as u64,
+                revision: 1,
+                machine_time_ms: 1_793_000_000_000,
+                tasks: vec![BackgroundTask {
+                    task_id: "ta\0sk".into(),
+                    description: "опи\0сание".into(),
+                    state: 99,
+                    kind: 99,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+        ),
+        (
             "journal_closed",
             Body::JournalClosed(JournalClosed {
                 execution_id: id,

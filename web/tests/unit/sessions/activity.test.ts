@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
+import { chatStateLine } from "#lib/screens/chat/stateLine.js";
 import {
   activityLine,
+  turnRunning,
   type Activity,
 } from "#lib/screens/sessions/activityText.js";
 
@@ -195,5 +197,34 @@ describe("sessions/activity", () => {
         { now },
       ).text,
     );
+  });
+});
+
+describe("background work", () => {
+  const idle = (count: number | null): Activity => ({
+    state: "idle",
+    evidence: { kind: "idle", last_turn_at: "2026-11-01T00:00:00.000Z", background_work: count },
+  });
+
+  it("idle_with_background_work_is_a_live_accent_line", () => {
+    expect(line(idle(2))).toEqual({
+      text: "Ожидает сообщения · 2 фоновые",
+      tone: "accent",
+      live: true,
+    });
+    expect(line(idle(1)).text).toBe("Ожидает сообщения · 1 фоновая");
+    expect(line(idle(5)).text).toBe("Ожидает сообщения · 5 фоновых");
+  });
+
+  it("idle_with_nothing_running_stays_quiet", () => {
+    for (const count of [0, null]) {
+      expect(line(idle(count))).toEqual({ text: "Ожидает сообщения", tone: "default", live: false });
+      expect(chatStateLine(idle(count), null, "running", 0).quiet).toBe(true);
+    }
+  });
+
+  it("header_shows_background_work_and_the_session_still_accepts_messages", () => {
+    expect(chatStateLine(idle(2), null, "running", 0).quiet).toBe(false);
+    expect(turnRunning(idle(2))).toBe(false);
   });
 });

@@ -251,6 +251,18 @@ impl fmt::Debug for crate::worker::v1::TodoUpdated {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::BackgroundTask {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BackgroundTask")
+            .field("task_id", &self.task_id)
+            .field("kind", &self.kind)
+            .field("block_id", &self.block_id)
+            .field("description_bytes", &self.description.len())
+            .field("state", &self.state)
+            .finish_non_exhaustive()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::DecisionApplied {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DecisionApplied")

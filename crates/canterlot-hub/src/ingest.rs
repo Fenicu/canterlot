@@ -893,6 +893,7 @@ fn touches_activity(body: &Body) -> bool {
             | Body::DecisionApplied(_)
             | Body::DecisionNotApplied(_)
             | Body::TodoUpdated(_)
+            | Body::BackgroundWorkChanged(_)
             | Body::SessionStuck(_)
             | Body::CompactionStatus(_)
     )
@@ -1547,6 +1548,7 @@ async fn apply_body(
         | Body::PhaseChanged(_)
         | Body::JournalOpened(_)
         | Body::TodoUpdated(_)
+        | Body::BackgroundWorkChanged(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
     }
     Ok(false)
@@ -2176,6 +2178,7 @@ async fn apply_journal_body(
             | Body::DecisionNotApplied(_)
             | Body::DecisionUnconfirmed(_)
             | Body::TodoUpdated(_)
+            | Body::BackgroundWorkChanged(_)
             | Body::SessionStuck(_)
     ) {
         return Ok(None);
@@ -2237,6 +2240,15 @@ async fn apply_journal_body(
             return Err(IngestError::ForeignExecution);
         }
         return crate::todos::apply(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(pilot_error);
+    }
+    if let Body::BackgroundWorkChanged(fact) = body {
+        if parse_id(&fact.execution_id)? != run.execution_id {
+            return Err(IngestError::ForeignExecution);
+        }
+        return crate::background_tasks::apply(conn, &run, fact, correlation_id)
             .await
             .map(Some)
             .map_err(pilot_error);

@@ -32,6 +32,7 @@ import {
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { RequestsModel, isDocked } from "./requests.svelte";
+import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -133,6 +134,7 @@ export interface SnapshotData {
   scheduled?: ScheduledMessage[];
   open_requests?: unknown[];
   todos?: TodoList[];
+  background?: BackgroundTask[];
 }
 
 export type RunSlot =
@@ -194,6 +196,7 @@ export class ChatStore {
   readonly timeline = new TimelineModel();
   readonly requests: RequestsModel;
   readonly todos = new TodosModel();
+  readonly background = new BackgroundModel();
   readonly diagnostics: unknown[] = [];
   readonly queue = $state({
     pause_reasons: [] as unknown[],
@@ -342,6 +345,7 @@ export class ChatStore {
     this.attachments.clear();
     this.requests.items.clear();
     this.todos.clear();
+    this.background.clear();
     this.diagnostics.length = 0;
     this.#held = [];
     this.detail = null;
@@ -436,6 +440,10 @@ export class ChatStore {
     // Лента держит события, пока читают старое; панели задач ждать нечего, порядок даёт ревизия.
     if (event.kind === "todo_updated") {
       this.todos.apply(event.payload);
+      return;
+    }
+    if (event.kind === "background_work_changed") {
+      this.background.apply(event.payload.tasks);
       return;
     }
     if (this.#hold || this.timeline.tailDetached) {
@@ -857,6 +865,7 @@ export class ChatStore {
     if (data.scheduled) this.scheduled = data.scheduled;
     if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
+    if (data.background) this.background.ingestSnapshot(data.background);
     if (data.history)
       this.timeline.hasOlder = Boolean(data.history.next_before);
     const items = data.history?.items ?? [];

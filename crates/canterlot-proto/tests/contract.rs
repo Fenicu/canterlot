@@ -1232,6 +1232,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         pilot_v1: true,
         todo_v1: true,
         compact_v1: true,
+        background_v1: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1593,4 +1594,41 @@ fn adapter_diagnostic_field_names_are_additive() {
     assert_roundtrip(new.clone());
     // Новое поле четвёртое: старый разбор пропускает его, а старые записи читаются без него.
     assert_eq!(&new.encode_to_vec()[..old_wire.len()], old_wire.as_slice());
+}
+
+// Новое поле `RecordBody` читается только согласованным хабом: номер и форма неизменны.
+#[test]
+fn background_work_changed_keeps_its_wire_shape() {
+    use canterlot_proto::worker::v1::{
+        BackgroundTask, BackgroundTaskKind, BackgroundTaskState, BackgroundWorkChanged, RecordBody,
+        record_body,
+    };
+    use prost::Message;
+    let fact = BackgroundWorkChanged {
+        execution_id: "execution".into(),
+        generation: 2,
+        revision: 3,
+        machine_time_ms: 4,
+        tasks: vec![BackgroundTask {
+            task_id: "a1".into(),
+            kind: BackgroundTaskKind::Agent as i32,
+            block_id: "block".into(),
+            parent_task_id: "parent".into(),
+            description: "секретное описание".into(),
+            state: BackgroundTaskState::Running as i32,
+        }],
+        omitted: 1,
+        wake_turn: true,
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::BackgroundWorkChanged(fact.clone())),
+    };
+    assert_eq!(body.encode_to_vec()[..2], [0xAA, 0x02], "field 37");
+    assert_eq!(RecordBody::decode(&body.encode_to_vec()[..]).unwrap(), body);
+    assert_eq!(BackgroundTaskState::Stopped as i32, 4);
+    assert_eq!(BackgroundTaskKind::Bash as i32, 2);
+    assert!(
+        !format!("{fact:?}").contains("секретное"),
+        "the description is message-level data"
+    );
 }

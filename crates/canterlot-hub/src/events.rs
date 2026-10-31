@@ -260,6 +260,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "request_decided",
     "request_transmitting",
     "todo_updated",
+    "background_work_changed",
     "machine_availability_changed",
     "machine_report_updated",
     "machine_metrics",

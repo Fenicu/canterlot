@@ -162,6 +162,8 @@ pub struct ActivityInputs {
     pub link: LinkState,
     pub awaiting_attachments: bool,
     pub background_work: Option<u32>,
+    /// Идёт ход, который CLI начал сам: места в очереди у него нет.
+    pub wake_turn: bool,
     pub question_summary: Option<String>,
 }
 
@@ -314,7 +316,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             },
         };
     }
-    if !matches!(i.queue.slot, RunSlot::Free) {
+    if !matches!(i.queue.slot, RunSlot::Free) || i.wake_turn {
         if i.link != LinkState::Available {
             return working("no_link");
         }
@@ -432,8 +434,10 @@ pub async fn load_inputs(
     let latest=sqlx::query("select * from executions where conversation_id=$1 order by (state in ('created','starting','running','stopping')) desc,generation desc limit 1").bind(conversation_id).fetch_optional(&mut *conn).await?;
     let mut process = None;
     let mut last_event_at = None;
+    let mut wake_turn = false;
     let execution = if let Some(e) = latest {
         let id: Uuid = e.try_get("id")?;
+        wake_turn = e.try_get("wake_turn")?;
         last_event_at = e
             .try_get::<Option<DateTime<Utc>>, _>("last_event_at")?
             .or(Some(e.try_get("updated_at")?));
@@ -511,6 +515,11 @@ pub async fn load_inputs(
             .unwrap_or(crate::requests::RequestKind::Question);
         extract_request_summary(kind, payload)
     });
+    let background_work =
+        match crate::background_tasks::running(&mut *conn, conversation_id).await? {
+            0 => None,
+            running => Some(running),
+        };
     Ok(ActivityInputs {
         now,
         execution,
@@ -530,7 +539,8 @@ pub async fn load_inputs(
             _ => LinkState::Unavailable,
         },
         awaiting_attachments,
-        background_work: None,
+        background_work,
+        wake_turn,
         question_summary,
     })
 }

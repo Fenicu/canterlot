@@ -839,6 +839,24 @@ export interface components {
         AuthView: {
             logout_url?: string | null;
         };
+        BackgroundTaskView: {
+            /**
+             * Format: uuid
+             * @description Блок вызова Agent или Bash.
+             */
+            block_id?: string | null;
+            description: string;
+            /** Format: date-time */
+            ended_at?: string | null;
+            /** @description `agent` или `bash`. */
+            kind: string;
+            parent_task_id?: string | null;
+            /** Format: date-time */
+            started_at: string;
+            /** @description `running`, `completed`, `failed` или `stopped`. */
+            state: string;
+            task_id: string;
+        };
         /**
          * Format: binary
          * @description Двоичное содержимое файла.
@@ -980,6 +998,7 @@ export interface components {
             unread_count: number;
         };
         ConversationSnapshot: {
+            background: components["schemas"]["BackgroundTaskView"][];
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
             /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
@@ -1726,6 +1745,7 @@ export interface components {
         Snapshot_ConversationSnapshot: {
             cursor: string;
             data: {
+                background: components["schemas"]["BackgroundTaskView"][];
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
                 /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */

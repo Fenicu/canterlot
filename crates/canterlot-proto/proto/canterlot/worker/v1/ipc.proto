@@ -71,6 +71,7 @@ message StartCli {
   canterlot.worker.v1.Instructions instructions = 9;
   bool todo_v1 = 10;
   bool compact_v1 = 11;
+  bool background_v1 = 12;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

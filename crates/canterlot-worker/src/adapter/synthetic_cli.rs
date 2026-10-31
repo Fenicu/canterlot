@@ -32,6 +32,8 @@
 //! {"todo":[{"text":"…","status":"in_progress"}]} — полный список задач; внутри субагента
 //! идёт в его дорожку. {"large_todo":{"repeat":"щ","times":3000,"count":1000}} — такой же
 //! список сверх всех потолков.
+//! {"background":{"tasks":[{"task_id":"a1","kind":"agent","state":"running",
+//! "description":"…"}],"wake_turn":false}} — фоновые задачи, как их сообщает адаптер.
 //! {"wake_turn":true} после конца хода начинает ход без ввода, как Claude Code по завершении
 //! фоновой задачи: `run_adopted`, затем фаза; ход кончается по `interrupt`.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
@@ -317,6 +319,8 @@ fn run_steps<'a>(
                 phase(Phase::AwaitingPermission).await?;
             } else if let Some(payload) = step.get("late_request") {
                 turn.late_request = Some(payload.clone());
+            } else if let Some(background) = step.get("background") {
+                emit(json!({"type":"background_work", "background":background})).await?;
             } else if step.get("wake_turn").is_some() {
                 turn.wake_turn = true;
             } else if let Some(items) = step.get("todo") {

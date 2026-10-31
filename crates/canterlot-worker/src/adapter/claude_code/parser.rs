@@ -6,12 +6,15 @@
 //! diagnostic per name, lines that are not JSON become an `unparsed_line`
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use super::super::frame_names::object_field_names;
 use super::super::labels::{command_label, path_tail};
-use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoStatus};
+use super::super::{
+    AdapterEvent, BackgroundKind, BackgroundState, BackgroundTask, BlockKind, ModelUsage, Phase,
+    TodoItem, TodoStatus,
+};
 
 /// Summary of a tool call: tool name plus the identifying argument.
 const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
@@ -28,12 +31,9 @@ const MAX_TYPE_CHARS: usize = 64;
 /// записи в `docs/stage0/evidence/claude-code` и фикстуры воркера; новое имя
 /// сюда добавляют только по записанному кадру.
 const IGNORED_FRAMES: [&str; 1] = ["command_lifecycle"];
-const IGNORED_SYSTEM: [&str; 7] = [
+const IGNORED_SYSTEM: [&str; 4] = [
     "api_retry",
-    "background_tasks_changed",
-    "task_notification",
     "task_progress",
-    "task_started",
     "task_updated",
     "thinking_tokens",
 ];
@@ -108,6 +108,17 @@ struct MessageUsage {
     input: u64,
     cache_read: u64,
     cache_write: u64,
+}
+
+/// Фоновая задача CLI. Ключ — `task_id`: завершившийся субагент может запуститься снова
+/// с тем же `task_id` и новым `run_id`, последнее событие главнее.
+struct TrackedTask {
+    kind: BackgroundKind,
+    parent_task_id: Option<String>,
+    description: String,
+    state: BackgroundState,
+    /// Конец ещё не сообщён хабу.
+    ended_unsent: bool,
 }
 
 /// Parsed output of one NDJSON line; several events may come out of order.
@@ -246,6 +257,12 @@ pub struct Parser {
     wake: Option<Uuid>,
     /// CLI начал ход без ввода, первого кадра модели ещё могло не быть.
     cli_turn: bool,
+    background: BTreeMap<String, TrackedTask>,
+    /// Вызов каждой задачи: `tool_use_id` есть только в `task_started`, а задача, ушедшая
+    /// в фон на ходу, попадает в список позже него.
+    task_calls: HashMap<String, String>,
+    /// Последнее сообщённое: работающие задачи и признак пробуждающего хода.
+    background_sent: (Vec<BackgroundTask>, bool),
 }
 
 impl Default for Parser {
@@ -272,6 +289,9 @@ impl Parser {
             command_open: false,
             wake: None,
             cli_turn: false,
+            background: BTreeMap::new(),
+            task_calls: HashMap::new(),
+            background_sent: (Vec::new(), false),
         }
     }
 
@@ -324,12 +344,152 @@ impl Parser {
         out.push(Parsed::Event(AdapterEvent::RunAdopted {
             input_command_id: command,
         }));
+        self.report_background(out);
+    }
+
+    /// Сколько фоновых задач работает по последнему списку CLI.
+    pub fn background_running(&self) -> usize {
+        self.background
+            .values()
+            .filter(|task| task.state == BackgroundState::Running)
+            .count()
+    }
+
+    fn background_view(&self, task_id: &str, task: &TrackedTask) -> BackgroundTask {
+        BackgroundTask {
+            task_id: task_id.to_owned(),
+            kind: task.kind,
+            block_id: self
+                .task_calls
+                .get(task_id)
+                .and_then(|call| self.tool_blocks.get(call))
+                .copied(),
+            parent_task_id: task.parent_task_id.clone(),
+            description: task.description.clone(),
+            state: task.state,
+        }
+    }
+
+    fn report_background(&mut self, out: &mut Vec<Parsed>) {
+        let tasks: Vec<BackgroundTask> = self
+            .background
+            .iter()
+            .filter(|(_, task)| task.state == BackgroundState::Running || task.ended_unsent)
+            .map(|(id, task)| self.background_view(id, task))
+            .collect();
+        let running: Vec<BackgroundTask> = tasks
+            .iter()
+            .filter(|task| task.state == BackgroundState::Running)
+            .cloned()
+            .collect();
+        let wake_turn = self.wake.is_some();
+        let ended = tasks.len() != running.len();
+        if !ended && self.background_sent == (running.clone(), wake_turn) {
+            return;
+        }
+        for task in self.background.values_mut() {
+            task.ended_unsent = false;
+        }
+        self.background_sent = (running, wake_turn);
+        out.push(Parsed::Event(AdapterEvent::BackgroundWork {
+            tasks,
+            wake_turn,
+        }));
+    }
+
+    /// Полный список CLI. Задача, пропавшая из него без уведомления, остановлена;
+    /// уведомление, если придёт позже, уточнит состояние.
+    fn feed_background_list(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let list = value
+            .get("tasks")
+            .and_then(serde_json::Value::as_array)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let mut listed = HashSet::new();
+        for task in list {
+            let Some(id) = task.get("task_id").and_then(serde_json::Value::as_str) else {
+                continue;
+            };
+            listed.insert(id.to_owned());
+            self.background.insert(
+                id.to_owned(),
+                TrackedTask {
+                    kind: task_kind(task),
+                    parent_task_id: task
+                        .get("parent_task_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    description: task
+                        .get("description")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    state: BackgroundState::Running,
+                    ended_unsent: false,
+                },
+            );
+        }
+        for (id, task) in &mut self.background {
+            if task.state == BackgroundState::Running && !listed.contains(id) {
+                task.state = BackgroundState::Stopped;
+                task.ended_unsent = true;
+            }
+        }
+        self.report_background(out);
+    }
+
+    /// `task_started` есть и у синхронного субагента, и у обычной команды: в набор идёт
+    /// только `is_backgrounded`, в том числе задача субагента, её CLI тоже считает.
+    fn feed_task_started(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let text = |key: &str| value.get(key).and_then(serde_json::Value::as_str);
+        let Some(id) = text("task_id") else {
+            return;
+        };
+        if let Some(call) = text("tool_use_id") {
+            self.task_calls.insert(id.to_owned(), call.to_owned());
+        }
+        if value
+            .get("is_backgrounded")
+            .and_then(serde_json::Value::as_bool)
+            != Some(true)
+        {
+            return;
+        }
+        let task = TrackedTask {
+            kind: task_kind(value),
+            parent_task_id: text("parent_task_id").map(str::to_owned),
+            description: text("description").unwrap_or_default().to_owned(),
+            state: BackgroundState::Running,
+            ended_unsent: false,
+        };
+        self.background.insert(id.to_owned(), task);
+        self.report_background(out);
+    }
+
+    fn feed_task_notification(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let Some(task) = value
+            .get("task_id")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|id| self.background.get_mut(id))
+        else {
+            return;
+        };
+        task.state = match value.get("status").and_then(serde_json::Value::as_str) {
+            Some("completed") => BackgroundState::Completed,
+            Some("failed") => BackgroundState::Failed,
+            _ => BackgroundState::Stopped,
+        };
+        task.ended_unsent = true;
+        self.report_background(out);
     }
 
     pub fn reset_process(&mut self) {
         self.command_open = false;
         self.wake = None;
         self.cli_turn = false;
+        self.background.clear();
+        self.task_calls.clear();
+        self.background_sent = (Vec::new(), false);
         self.prev_usage.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
@@ -516,6 +676,24 @@ impl Parser {
                         summary: None,
                     }));
                 } else {
+                    out.push(Parsed::Ignored);
+                }
+            }
+            Some("background_tasks_changed") => {
+                self.feed_background_list(value, out);
+                if out.is_empty() {
+                    out.push(Parsed::Ignored);
+                }
+            }
+            Some("task_started") => {
+                self.feed_task_started(value, out);
+                if out.is_empty() {
+                    out.push(Parsed::Ignored);
+                }
+            }
+            Some("task_notification") => {
+                self.feed_task_notification(value, out);
+                if out.is_empty() {
                     out.push(Parsed::Ignored);
                 }
             }
@@ -1107,6 +1285,7 @@ impl Parser {
                 });
             }
         }
+        self.report_background(out);
     }
 
     fn turn_usage(&mut self, value: &serde_json::Value) -> Vec<ModelUsage> {
@@ -1257,6 +1436,13 @@ fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
     };
     summary.truncate(summary.floor_char_boundary(TOOL_CALL_SUMMARY_LIMIT));
     summary
+}
+
+fn task_kind(task: &serde_json::Value) -> BackgroundKind {
+    match task.get("task_type").and_then(serde_json::Value::as_str) {
+        Some("local_agent") => BackgroundKind::Agent,
+        _ => BackgroundKind::Bash,
+    }
 }
 
 fn subagent_name(input: &serde_json::Value) -> String {

@@ -453,6 +453,7 @@ fn kind(body: &Body) -> &'static str {
         Body::RunFinished(_) => "run_finished",
         Body::AdapterDiagnostic(_) => "adapter_diagnostic",
         Body::DispatchDeferred(_) => "dispatch_deferred",
+        Body::BackgroundWorkChanged(_) => "background_work_changed",
         Body::JournalClosed(_) => "journal_closed",
         _ => "other",
     }
@@ -2077,6 +2078,24 @@ impl Harness {
             .await;
     }
 
+    async fn start_cli_background(&mut self, background_v1: bool) {
+        let workdir = self._root.path().to_string_lossy().into_owned();
+        self.send(down::Msg::StartCli(StartCli {
+            profile: "synthetic".into(),
+            workdir,
+            pilot_v1: true,
+            background_v1,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+        self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+            .await;
+    }
+
     async fn start_cli_pilot(&mut self, pilot_v1: bool) {
         let workdir = self._root.path().to_string_lossy().into_owned();
         self.send(down::Msg::StartCli(StartCli {
@@ -2407,6 +2426,59 @@ async fn cancelled_todo_item_reaches_sj_with_its_status() {
         todos(&bodies)[0].items[0].status,
         TodoStatus::Cancelled as i32
     );
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_work_reaches_the_journal_with_its_capability() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_background(true).await;
+    let id = Uuid::now_v7();
+    let steps = script(
+        r#"{"background":{"tasks":[{"task_id":"a1","kind":"agent","state":"running","description":"sub"}],"wake_turn":true}}"#,
+    );
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    let fact = bodies
+        .iter()
+        .find_map(|b| match b {
+            Body::BackgroundWorkChanged(fact) => Some(fact),
+            _ => None,
+        })
+        .expect("background record");
+    assert_eq!(fact.tasks.len(), 1);
+    assert_eq!(fact.tasks[0].task_id, "a1");
+    assert_eq!(fact.tasks[0].description, "sub");
+    assert!(fact.wake_turn);
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn background_work_is_dropped_once_with_a_diagnostic_without_capability() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli_background(false).await;
+    let id = Uuid::now_v7();
+    let steps =
+        script(r#"{"background":{"tasks":[]}},{"background":{"tasks":[],"wake_turn":true}}"#);
+    harness.deliver(id, 1, &steps).await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| matches!(b, Body::BackgroundWorkChanged(_)))
+    );
+    let drops = bodies
+        .iter()
+        .filter(|b| {
+            matches!(b, Body::AdapterDiagnostic(f)
+                if f.kind == "capability_missing" && f.event_type == "background_dropped")
+        })
+        .count();
+    assert_eq!(drops, 1);
     harness.shutdown().await;
 }
 
