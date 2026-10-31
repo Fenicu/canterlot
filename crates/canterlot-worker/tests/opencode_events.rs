@@ -5,7 +5,7 @@
 
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase,
+    AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus,
     opencode::{
         catalog,
         events::{RunOutcome, Translated, Translator, block_id},
@@ -1044,4 +1044,164 @@ fn background_child_keeps_its_open_blocks_over_the_end_of_the_run() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].kind, "ToolResult");
     assert_eq!(result[0].agent, "general");
+}
+
+type Lists = Vec<(Option<Uuid>, Vec<TodoItem>)>;
+
+fn todo_lists(out: &[AdapterEvent]) -> Lists {
+    out.iter()
+        .filter_map(|event| match event {
+            AdapterEvent::TodoUpdated { lane, items } => Some((*lane, items.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+fn todo(text: &str, status: TodoStatus) -> TodoItem {
+    TodoItem {
+        text: text.into(),
+        status,
+    }
+}
+
+#[test]
+fn recorded_todo_list_comes_whole_with_every_status() {
+    let events = stream("todo");
+    let (mut translator, _) = translator(&events);
+    let out = flat_events(feed_all(&mut translator, &events));
+    assert_eq!(
+        todo_lists(&out),
+        vec![
+            (
+                None,
+                vec![
+                    todo("first", TodoStatus::InProgress),
+                    todo("second", TodoStatus::Pending)
+                ]
+            ),
+            (
+                None,
+                vec![
+                    todo("first", TodoStatus::Completed),
+                    todo("second", TodoStatus::Cancelled)
+                ]
+            ),
+        ]
+    );
+}
+
+// Придуманный кадр: у потомка живьём `todowrite` не снимался, форма взята у основного агента.
+fn child_todo(session: &str) -> Vec<Value> {
+    vec![
+        json!({"type": "session.tool.input.started", "data": {
+            "sessionID": session, "assistantMessageID": "msg_9", "id": "call_9",
+            "name": "todowrite"}}),
+        json!({"type": "session.tool.success", "data": {
+            "sessionID": session, "assistantMessageID": "msg_9", "id": "call_9",
+            "content": [{"type": "text", "text": "Todos updated"}],
+            "metadata": {"todos": [{"content": "дочерний", "status": "in_progress"}]}}}),
+    ]
+}
+
+#[test]
+fn child_list_goes_to_the_lane_of_its_call() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": "ses_a", "parentID": root, "agent": "general"}}));
+    translator.feed(&json!({"type": "session.tool.progress", "data": {
+        "sessionID": root, "assistantMessageID": "msg_1", "id": "call_1",
+        "metadata": {"sessionID": "ses_a", "status": "running"}}}));
+    let out = flat_events(feed_all(&mut translator, &child_todo("ses_a")));
+    assert_eq!(
+        todo_lists(&out),
+        vec![(
+            Some(block_id(root, "msg_1", "tool", "call_1")),
+            vec![todo("дочерний", TodoStatus::InProgress)]
+        )]
+    );
+}
+
+#[test]
+fn child_list_without_a_lane_is_diagnosed_and_never_replaces_the_main_list() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.add_child("ses_a".to_owned());
+    let out = flat_events(feed_all(&mut translator, &child_todo("ses_a")));
+    assert!(todo_lists(&out).is_empty());
+    assert!(out.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic { kind: "todo_lane_unknown", required: false, .. }
+    )));
+}
+
+#[test]
+fn list_seen_live_is_not_sent_again_by_the_projection() {
+    let events = stream("todo");
+    let (mut translator, _) = translator(&events);
+    let first = flat_events(feed_all(&mut translator, &events));
+    assert_eq!(todo_lists(&first).len(), 2);
+    let message = json!({
+        "id": "msg_18fa0106b001eWObIIGakHcjOm", "type": "assistant",
+        "content": [{"type": "tool", "id": "call_0_1793410994313", "name": "todowrite",
+            "state": {"status": "completed", "input": {},
+                "metadata": {"todos": [{"content": "first", "status": "pending"}]}}}]});
+    let again = flat_events(translator.replay(&[message], false, true));
+    assert!(todo_lists(&again).is_empty(), "{again:?}");
+}
+
+#[test]
+fn list_lost_in_a_gap_comes_from_the_projection() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let message = json!({
+        "id": "msg_1", "type": "assistant",
+        "content": [{"type": "tool", "id": "call_1", "name": "todowrite",
+            "state": {"status": "completed", "input": {},
+                "metadata": {"todos": [{"content": "пункт", "status": "completed"}]}}}]});
+    let out = flat_events(translator.replay(&[message], false, true));
+    assert_eq!(
+        todo_lists(&out),
+        vec![(None, vec![todo("пункт", TodoStatus::Completed)])]
+    );
+}
+
+#[test]
+fn failed_todo_call_and_other_tools_change_nothing() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let events = vec![
+        json!({"type": "session.tool.input.started", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_1",
+            "name": "todowrite"}}),
+        json!({"type": "session.tool.failed", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_1",
+            "error": {"type": "tool.execution", "message": "нет"},
+            "metadata": {"todos": [{"content": "x", "status": "pending"}]}}}),
+        json!({"type": "session.tool.input.started", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_2",
+            "name": "shell"}}),
+        json!({"type": "session.tool.success", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_2", "content": [],
+            "metadata": {"todos": [{"content": "x", "status": "pending"}]}}}),
+    ];
+    let out = flat_events(feed_all(&mut translator, &events));
+    assert!(todo_lists(&out).is_empty());
+}
+
+#[test]
+fn unknown_todo_status_is_pending_and_an_item_without_text_is_skipped() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let events = vec![
+        json!({"type": "session.tool.input.started", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_1",
+            "name": "todowrite"}}),
+        json!({"type": "session.tool.success", "data": {
+            "sessionID": "ses_root", "assistantMessageID": "msg_1", "id": "call_1", "content": [],
+            "metadata": {"todos": [
+                {"content": "новый статус", "status": "blocked"}, {"status": "pending"}]}}}),
+    ];
+    let out = flat_events(feed_all(&mut translator, &events));
+    assert_eq!(
+        todo_lists(&out),
+        vec![(None, vec![todo("новый статус", TodoStatus::Pending)])]
+    );
 }

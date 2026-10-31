@@ -234,7 +234,7 @@ impl Env {
                     mode: "clean".into(),
                     ..Default::default()
                 }),
-                capabilities: vec!["pilot_v1".into()],
+                capabilities: vec!["pilot_v1".into(), "todo_v1".into()],
                 ..Default::default()
             }),
         )
@@ -1005,6 +1005,40 @@ async fn subagent_blocks_reach_the_journal_in_their_lanes() {
         .find(|line| line.agent == "general")
         .expect("usage of the child");
     assert_eq!(general.input_tokens, 140);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Список задач по боевому пути: запись журнала с отменённым пунктом и включённый флаг.
+#[tokio::test]
+async fn todo_list_reaches_the_journal_and_the_flag_reaches_the_server() {
+    let script = Script::from_capture("todo", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("plan").await;
+    env.wait_finished(input).await;
+    let lists: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::TodoUpdated(fact) => Some(fact),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists.len(), 2, "{}", env.logs());
+    assert_eq!(lists[1].lane_block_id, "");
+    assert_eq!(
+        lists[1].items[1].status,
+        canterlot_proto::worker::v1::TodoStatus::Cancelled as i32
+    );
+    let boot = env.fake().boot();
+    let config: Value =
+        serde_json::from_str(boot["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
+    assert_eq!(config["experimental"]["todo"], true);
     env.stop().await;
     env.fake().wait_gone().await;
 }

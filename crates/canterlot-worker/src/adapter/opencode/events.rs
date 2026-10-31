@@ -2,7 +2,7 @@
 //! события чужих сессий отбрасываются, неизвестный тип даёт одну диагностику.
 
 use super::{
-    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase},
+    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus},
     requests::GLOBAL_SESSION,
 };
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
@@ -14,6 +14,7 @@ use std::{
 use uuid::Uuid;
 
 const MAIN_AGENT: &str = "orchestrator";
+const TODO_TOOL: &str = "todowrite";
 /// Потомок из списка сессий: как его зовут, скажет его первый шаг.
 const UNNAMED_CHILD: &str = "subagent";
 const MAX_UNKNOWN_TYPES: usize = 64;
@@ -322,6 +323,27 @@ fn pictures(data: &Value) -> Vec<String> {
             Some(encoded.to_owned())
         })
         .collect()
+}
+
+// Своего события у списка нет: полный список лежит в результате `todowrite`.
+fn todo_items(data: &Value) -> Option<Vec<TodoItem>> {
+    let items = data.pointer("/metadata/todos")?.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| {
+                Some(TodoItem {
+                    text: item.get("content")?.as_str()?.to_owned(),
+                    status: match item.get("status").and_then(Value::as_str) {
+                        Some("in_progress") => TodoStatus::InProgress,
+                        Some("completed") => TodoStatus::Completed,
+                        Some("cancelled") => TodoStatus::Cancelled,
+                        _ => TodoStatus::Pending,
+                    },
+                })
+            })
+            .collect(),
+    )
 }
 
 // Финал крупнее порога хаб собирает только из дельт: без них блок останется пустым.
@@ -967,7 +989,33 @@ impl Translator {
             Some(code) => format!("exit {code}"),
             None => "completed".to_owned(),
         };
-        self.finish_tool(data, content_text(data), &status)
+        let list = self.todo_update(data);
+        let mut out = self.finish_tool(data, content_text(data), &status);
+        out.extend(list);
+        out
+    }
+
+    fn todo_update(&self, data: &Value) -> Option<Translated> {
+        let key = tool_key(
+            string_field(data, "assistantMessageID"),
+            string_field(data, "id"),
+        );
+        if self.tool_finished(data) || self.tools.get(&key)?.name != TODO_TOOL {
+            return None;
+        }
+        let items = todo_items(data)?;
+        let lane = match self.children.get(string_field(data, "sessionID")) {
+            None => None,
+            Some(child) if child.lane.is_some() => child.lane,
+            Some(_) => {
+                return Some(Self::diagnostic(
+                    "todo_lane_unknown",
+                    "todo_lane_unknown",
+                    false,
+                ));
+            }
+        };
+        Some(Translated::Event(AdapterEvent::TodoUpdated { lane, items }))
     }
 
     fn on_tool_failed(&mut self, data: &Value) -> Vec<Translated> {
