@@ -127,11 +127,15 @@ async fn children_of(
     Ok(children.into_iter().collect())
 }
 
-pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snapshot, HttpError> {
+async fn is_running(http: &Http, session: &str) -> Result<bool, HttpError> {
     let active = http.get("/api/session/active", READ_WAIT).await?;
-    let running = active
+    Ok(active
         .get("data")
-        .is_some_and(|data| data.get(session).is_some());
+        .is_some_and(|data| data.get(session).is_some()))
+}
+
+pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snapshot, HttpError> {
+    let running = is_running(http, session).await?;
     let inbox = http
         .get(&format!("/api/session/{session}/inbox"), READ_WAIT)
         .await?;
@@ -148,6 +152,8 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
         )?));
     }
     let (messages, truncated) = tail(http, session).await?;
+    // Ввод мог лечь уже после первого чтения: история его покажет, а тот ответ ещё нет.
+    let running = running || is_running(http, session).await?;
     Ok(Snapshot {
         running,
         inbox: items(&inbox)

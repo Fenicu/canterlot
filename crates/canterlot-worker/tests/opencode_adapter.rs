@@ -4883,6 +4883,29 @@ async fn lone_surrogate_in_history_does_not_stop_a_resume() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Ввод, лёгший между чтениями снимка, виден в истории, но не в первом ответе `active`:
+// без второго чтения идущий ход закрылся бы как прерванный.
+#[tokio::test]
+async fn snapshot_reads_the_active_sessions_again_after_the_history() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    bench.adapter.cut_stream();
+    let input = bench.input("Привет");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    let reads: Vec<&str> = requests
+        .iter()
+        .map(path_of)
+        .filter(|path| path.ends_with("/active") || path.ends_with("/message"))
+        .collect();
+    assert!(
+        reads.len() >= 2 && reads[reads.len() - 1].ends_with("/active"),
+        "{reads:?}"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Ввод, пришедший в разрыв, не ждёт и не пропадает: сервер жив, события добирает сверка.
 #[tokio::test]
 async fn input_during_a_reconnect_goes_through() {
