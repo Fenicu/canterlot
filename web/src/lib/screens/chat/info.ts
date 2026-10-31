@@ -51,10 +51,10 @@ export function summarizeRun(
         maximumFractionDigits: 1,
       },
     );
-    const text = `≈ ${pct}% недели`;
+    const text = info.limit.weekly_delta_permille < 1 ? "меньше 0,1% недели" : `≈ ${pct}% недели`;
     const note =
       info.limit.exact === false
-        ? "Параллельная работа: расход нельзя разделить точно"
+        ? "Оценка приблизительная"
         : "Оценка по изменению квоты";
     limit = { text, note };
   }

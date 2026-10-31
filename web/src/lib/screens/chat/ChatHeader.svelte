@@ -125,11 +125,13 @@
 
 <div class="chat-header" role="region" aria-label="Шапка чата">
 	<div class="topbar">
-		<a
-			class="icon-button back"
-			href={resolve('sessions')}
-			aria-label="Все сессии"
-		><Icon name="back" /></a>
+		{#if !pane.desktop}
+			<a
+				class="icon-button back"
+				href={resolve('sessions')}
+				aria-label="Все сессии"
+			><Icon name="back" /></a>
+		{/if}
 
 		<div class="header-info">
 			<div class="title-row">
@@ -296,6 +298,7 @@
 		align-items: center;
 		gap: var(--s3);
 		min-width: 0;
+		padding-left: calc(var(--mark-large) + var(--s3));
 	}
 	.subtitle {
 		flex: 1 1 0;
@@ -350,9 +353,7 @@
 		max-width: calc(100% - 2 * var(--gutter));
 	}
 	.menu-divider {
-		height: var(--hairline);
-		background: var(--control-line);
-		margin: var(--s2) var(--s4);
+		height: var(--s4);
 	}
 	.confirm-box {
 		padding: var(--s4);

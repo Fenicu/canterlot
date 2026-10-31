@@ -132,6 +132,7 @@
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   header :global(button) { color: var(--secondary); }
   .entry { min-width: 0; }
+  .entry:has(> :global(.text)) { margin-block: var(--s2); }
   .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }
   h3 { margin: var(--s0); font-size: var(--fs-body); font-weight: var(--weight-semibold); }
   .incomplete { margin: 0; color: var(--warning); font-size: var(--fs-sm); }

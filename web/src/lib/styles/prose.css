@@ -13,7 +13,7 @@
 .prose li::marker { color: var(--muted); }
 .prose hr { height: var(--hairline); margin-block: var(--s8); border: var(--s0); background: var(--line); }
 .prose code { font-size: var(--fs-meta); }
-.prose :not(pre) > code { padding-inline: var(--s2); border-radius: var(--radius-sm); background: var(--raised); }
+.prose :not(pre) > code { padding-inline: var(--s1); border-radius: var(--radius-sm); background: var(--raised); -webkit-box-decoration-break: clone; box-decoration-break: clone; }
 .prose pre { max-width: 100%; padding: var(--s5) var(--s6); overflow-x: auto; overflow-wrap: normal; border-radius: var(--radius-sm); background: var(--code); }
 .prose pre code { font-size: inherit; overflow-wrap: normal; }
 .prose blockquote { margin-inline: var(--s0); padding: var(--s4) var(--s6); border-radius: var(--radius-sm); background: var(--raised); color: var(--secondary); }

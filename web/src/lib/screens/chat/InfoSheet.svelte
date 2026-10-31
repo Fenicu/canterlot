@@ -238,9 +238,7 @@
 		font-size: var(--fs-meta);
 	}
 	.rule {
-		height: var(--hairline);
-		background: var(--line);
-		margin: var(--s2) 0;
+		height: var(--s4);
 	}
 	.accent {
 		color: var(--accent);

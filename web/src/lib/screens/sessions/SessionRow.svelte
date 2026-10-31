@@ -55,7 +55,7 @@
       {/if}
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
-    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}</span>
+    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if item.unread_count > 0 && stamp} · {stamp}{/if}</span>
   </a>
   <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={() => onopen(item.id)}>
     <Icon name="more" />
@@ -65,6 +65,7 @@
 <style>
   .row { display: flex; align-items: flex-start; gap: var(--s2); margin-inline: var(--s3); padding: var(--s4) var(--s3) var(--s4) var(--s6); border-radius: var(--radius-card); }
   .row.current { background: var(--selected); }
+  .row.current .count { background: var(--surface); }
   @media (hover: hover) and (pointer: fine) {
     .row:not(.current):hover { background: var(--hover); }
     .row:not(.current):not(:hover):not(:focus-within) button { opacity: 0; }
@@ -80,7 +81,6 @@
   .side { display: inline-flex; align-items: center; justify-content: flex-end; height: calc(var(--fs-body) * var(--lh-body)); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .meta, .activity { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: var(--secondary); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
-  .activity { color: var(--text); }
   .activity[data-tone='accent'] { color: var(--accent-link); }
   .activity[data-tone='warning'] { color: var(--warning); }
   .activity[data-tone='danger'] { color: var(--danger); }

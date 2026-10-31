@@ -317,17 +317,19 @@ test('decided_permission_stays_where_it_was_asked', async ({ page }) => {
   expect(new Set(order).size).toBe(3);
 });
 
-test('header_is_flat_and_its_controls_line_up_with_the_content', async ({ page }) => {
+test('header_is_flat_and_its_controls_line_up_with_the_content', async ({ page, isMobile }) => {
   await reloaded(page);
   const bar = page.locator('.topbar');
   await expect(bar).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
   await expect(bar).toHaveCSS('border-top-left-radius', '0px');
   const card = (await page.locator('article.card').first().boundingBox())!;
-  const back = (await page.getByRole('link', { name: 'Все сессии' }).locator('svg').boundingBox())!;
+  const backLink = page.getByRole('link', { name: 'Все сессии' });
   const theme = (await page.locator('[data-theme-toggle]').first().locator('svg').boundingBox())!;
-  expect(Math.abs(back.x - card.x)).toBeLessThanOrEqual(1);
+  // На рабочем столе список виден всегда, и кнопка назад вела бы в никуда.
+  if (isMobile) expect(Math.abs((await backLink.locator('svg').boundingBox())!.x - card.x)).toBeLessThanOrEqual(1);
+  else await expect(backLink).toHaveCount(0);
   expect(Math.abs(theme.x + theme.width - (card.x + card.width))).toBeLessThanOrEqual(1);
-  for (const control of [page.getByRole('link', { name: 'Все сессии' }), page.getByRole('button', { name: 'Меню сессии' }), page.locator('[data-theme-toggle]').first()]) {
+  for (const control of [...(isMobile ? [backLink] : []), page.getByRole('button', { name: 'Меню сессии' }), page.locator('[data-theme-toggle]').first()]) {
     const box = (await control.boundingBox())!;
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);

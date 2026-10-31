@@ -263,11 +263,7 @@
       <Icon name="send" />
     </button>
   </div>
-  <p class="hint">
-    {touch
-      ? 'Enter: новая строка. Отправка кнопкой'
-      : 'Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже'}
-  </p>
+  {#if !touch}<p class="hint">Enter: отправить · Shift+Enter: новая строка · Ctrl+Shift+Enter: отправить позже</p>{/if}
   <SendLater
     open={later}
     now={clock.serverNow()}

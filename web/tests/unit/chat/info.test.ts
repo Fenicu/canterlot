@@ -99,7 +99,7 @@ describe("summarizeRun", () => {
 
     const summary = summarizeRun(info);
     expect(summary.limit?.note).toBe(
-      "Параллельная работа: расход нельзя разделить точно",
+      "Оценка приблизительная",
     );
     expect(summary.limit?.text).toBe("≈ 1,0% недели");
   });
