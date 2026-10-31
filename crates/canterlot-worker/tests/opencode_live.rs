@@ -1675,7 +1675,10 @@ async fn real_subagent_runs_in_the_lane_of_its_call() {
     let Some(AdapterEvent::RunFinished { usage, .. }) = events.last() else {
         panic!("run must finish");
     };
-    assert!(usage.iter().any(|line| line.agent == "general"), "{usage:?}");
+    assert!(
+        usage.iter().any(|line| line.agent == "general"),
+        "{usage:?}"
+    );
     assert!(
         usage.iter().any(|line| line.agent == "orchestrator"),
         "{usage:?}"

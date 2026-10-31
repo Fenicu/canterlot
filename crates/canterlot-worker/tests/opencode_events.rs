@@ -1131,7 +1131,11 @@ fn child_list_without_a_lane_is_diagnosed_and_never_replaces_the_main_list() {
     assert!(todo_lists(&out).is_empty());
     assert!(out.iter().any(|event| matches!(
         event,
-        AdapterEvent::Diagnostic { kind: "todo_lane_unknown", required: false, .. }
+        AdapterEvent::Diagnostic {
+            kind: "todo_lane_unknown",
+            required: false,
+            ..
+        }
     )));
 }
 
@@ -1204,4 +1208,182 @@ fn unknown_todo_status_is_pending_and_an_item_without_text_is_skipped() {
         todo_lists(&out),
         vec![(None, vec![todo("новый статус", TodoStatus::Pending)])]
     );
+}
+
+fn outcomes(translated: &[Translated]) -> Vec<&RunOutcome> {
+    translated
+        .iter()
+        .filter_map(|item| match item {
+            Translated::RunEnded(outcome) => Some(outcome),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn scheduled_retry_shows_the_attempt_and_ends_no_turn() {
+    let events = stream("service_failure");
+    let (mut translator, _) = translator(&events);
+    let retries: Vec<Value> = events
+        .iter()
+        .filter(|event| event["type"] == "session.retry.scheduled")
+        .cloned()
+        .collect();
+    assert!(!retries.is_empty());
+    let out = feed_all(&mut translator, &retries);
+    assert!(outcomes(&out).is_empty());
+    let summaries: Vec<_> = adapter_events(out)
+        .into_iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Phase {
+                phase: Phase::Generating,
+                summary,
+                ..
+            } => summary,
+            _ => None,
+        })
+        .collect();
+    assert_eq!(summaries.len(), retries.len());
+    assert_eq!(summaries[0], "retry 2");
+    assert!(summaries.iter().all(|text| !text.contains("slow down")));
+}
+
+#[test]
+fn retry_of_a_child_is_not_a_phase_of_the_main_agent() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    translator.add_child("ses_a".to_owned());
+    let out = translator.feed(&json!({"type": "session.retry.scheduled", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "attempt": 2, "at": 1,
+        "error": {"type": "provider.internal", "message": "boom"}}}));
+    assert!(out.is_empty());
+}
+
+#[test]
+fn failure_keeps_its_kind_and_the_wait_of_the_provider() {
+    let events = capture_events("real_free_model", None);
+    let mut translator = Translator::new(&session_of(&events), HashMap::new());
+    let out = feed_all(&mut translator, &events);
+    let RunOutcome::Failed(failure) = outcomes(&out)[0] else {
+        panic!("failed run");
+    };
+    assert_eq!(failure.kind, "provider.free-limit");
+    assert_eq!(failure.retry_after_ms, Some(80_814_000));
+    assert!(!failure.overflow);
+}
+
+#[test]
+fn quota_without_a_wait_has_no_reset() {
+    let events = stream("service_failure");
+    let (mut translator, _) = translator(&events);
+    let out = feed_all(&mut translator, &events);
+    let failures: Vec<_> = outcomes(&out)
+        .into_iter()
+        .filter_map(|outcome| match outcome {
+            RunOutcome::Failed(failure) if failure.kind == "provider.quota" => Some(failure),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures[0].retry_after_ms, Some(3_600_000));
+    assert_eq!(failures[1].retry_after_ms, None);
+}
+
+// Придуманный кадр: `execution.failed` с переполнением. Форма та же, что у записанного
+// `provider.invalid-request`, текст взят из шаблонов переполнения OpenCode 2.1.4.
+fn failed_with(message: &str, body: &str) -> Value {
+    json!({"type": "session.execution.failed", "data": {
+        "sessionID": "ses_root",
+        "error": {"type": "provider.invalid-request", "message": message, "status": 400,
+                  "response": {"body": body}}}})
+}
+
+#[test]
+fn overflow_text_is_recognised_in_the_message_and_in_the_body() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let overflow = |out: Vec<Translated>| match outcomes(&out)[0] {
+        RunOutcome::Failed(failure) => failure.overflow,
+        other => panic!("{other:?}"),
+    };
+    assert!(overflow(
+        translator.feed(&failed_with("prompt is too long: 900000 tokens", ""))
+    ));
+    assert!(overflow(translator.feed(&failed_with(
+        "bad",
+        r#"{"code":"context_length_exceeded"}"#
+    ))));
+    let invalid = "The request contains invalid parameters. Check the request body for any errors or inconsistencies.";
+    assert!(!overflow(translator.feed(&failed_with(invalid, ""))));
+}
+
+#[test]
+fn compaction_is_context_maintenance_and_its_tokens_are_counted() {
+    let events = capture_events("compaction", Some("overflow"));
+    let (mut translator, command) = translator(&events);
+    let tail: Vec<Value> = events
+        .iter()
+        .skip_while(|event| event["type"] != "session.compaction.started")
+        .take_while(|event| event["type"] != "session.step.started")
+        .cloned()
+        .collect();
+    let out = feed_all(&mut translator, &tail);
+    assert!(
+        out.iter()
+            .any(|item| matches!(item, Translated::CompactionEnded { failed: None, .. }))
+    );
+    let phases: Vec<_> = adapter_events(out)
+        .into_iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Phase { phase, .. } => Some(format!("{phase:?}")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(phases, ["ContextMaintenance", "Generating"]);
+    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(command) else {
+        panic!("run must finish");
+    };
+    assert_eq!(usage[0].input_tokens, 70);
+    assert_eq!(usage[0].agent, "orchestrator");
+}
+
+// Придуманный кадр: в записях отказа сжатия нет, форма из схемы `SessionEvent.Compaction.Failed`.
+fn compaction_failed(error_type: &str, message: &str) -> Value {
+    json!({"type": "session.compaction.failed", "data": {
+        "sessionID": "ses_root", "reason": "manual", "inputID": "msg_1",
+        "error": {"type": error_type, "message": message},
+        "tokens": {"input": 5, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}}})
+}
+
+#[test]
+fn failed_compaction_names_an_overflow_only_when_the_provider_said_so() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    let plain = translator.feed(&compaction_failed(
+        "compaction.failed",
+        "Compaction produced no summary",
+    ));
+    assert!(plain.iter().any(|item| matches!(
+        item,
+        Translated::CompactionEnded {
+            failed: Some(false),
+            manual: true
+        }
+    )));
+    let overflow = translator.feed(&compaction_failed(
+        "provider.invalid-request",
+        "prompt is too long",
+    ));
+    assert!(overflow.iter().any(|item| matches!(
+        item,
+        Translated::CompactionEnded {
+            failed: Some(true),
+            ..
+        }
+    )));
+}
+
+#[test]
+fn compaction_of_a_child_is_not_reported() {
+    let mut translator = Translator::new("ses_root", HashMap::new());
+    translator.add_child("ses_a".to_owned());
+    let mut event = compaction_failed("compaction.failed", "x");
+    event["data"]["sessionID"] = "ses_a".into();
+    assert!(translator.feed(&event).is_empty());
 }

@@ -1762,11 +1762,13 @@ impl Supervisor {
                         "unknown_optional_event"
                     }
                     .into(),
-                    event_type: safe_event_type(if kind == "unknown_event" {
-                        &event_type
-                    } else {
-                        kind
-                    }),
+                    event_type: safe_event_type(
+                        if matches!(kind, "unknown_event" | "provider_failure") {
+                            &event_type
+                        } else {
+                            kind
+                        },
+                    ),
                 }))?;
                 if required {
                     self.begin_stop(

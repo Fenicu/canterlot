@@ -3,6 +3,7 @@
 
 use super::{
     super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus},
+    failure,
     requests::GLOBAL_SESSION,
 };
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
@@ -15,6 +16,8 @@ use uuid::Uuid;
 
 const MAIN_AGENT: &str = "orchestrator";
 const TODO_TOOL: &str = "todowrite";
+/// Сводка фазы при повторе запроса: дальше номер попытки, подпись строит PWA.
+pub const RETRY_SUMMARY: &str = "retry";
 /// Потомок из списка сессий: как его зовут, скажет его первый шаг.
 const UNNAMED_CHILD: &str = "subagent";
 const MAX_UNKNOWN_TYPES: usize = 64;
@@ -38,16 +41,12 @@ const KNOWN: &[&str] = &[
     "server.connected",
     "session.agent.selected",
     "session.compaction.delta",
-    "session.compaction.ended",
-    "session.compaction.failed",
-    "session.compaction.started",
     "session.created",
     "session.deleted",
     "session.inbox.cancelled",
     "session.instructions.updated",
     "session.model.selected",
     "session.permissions",
-    "session.retry.scheduled",
     "session.step.streamed",
     "session.synthetic",
     "session.tool.input.ended",
@@ -69,6 +68,33 @@ pub fn block_id(session: &str, message: &str, kind: &str, part: &str) -> Uuid {
 pub struct RunFailure {
     pub kind: String,
     pub message: String,
+    /// Сколько просил подождать провайдер.
+    pub retry_after_ms: Option<u64>,
+    /// Провайдер отверг запрос как слишком длинный: свой повтор со сжатием сервер уже сделал.
+    pub overflow: bool,
+}
+
+impl RunFailure {
+    /// `error` из `session.execution.failed` и из проекции: одна форма `SessionError`.
+    pub fn from_error(error: Option<&Value>) -> Self {
+        let field = |pointer: &str| {
+            error
+                .and_then(|error| error.pointer(pointer))
+                .and_then(Value::as_str)
+        };
+        let kind = field("/type").unwrap_or("unknown").to_owned();
+        let message = field("/message").unwrap_or_default().to_owned();
+        let overflow =
+            failure::is_overflow(&kind, &message, field("/response/body").unwrap_or_default());
+        Self {
+            kind,
+            message,
+            retry_after_ms: error
+                .and_then(|error| error.get("retryAfterMs"))
+                .and_then(Value::as_u64),
+            overflow,
+        }
+    }
 }
 
 impl fmt::Debug for RunFailure {
@@ -136,6 +162,12 @@ pub enum Translated {
     Request(PendingRequest),
     /// Сервер закрыл запрос с этим идентификатором.
     RequestSettled(String),
+    /// Сжатие контекста закончилось. `failed`: отказ, в значении признак переполнения.
+    /// `manual`: запрошено через `POST .../compact`, а не самим сервером.
+    CompactionEnded {
+        failed: Option<bool>,
+        manual: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -196,6 +228,17 @@ struct Tally {
     output: u64,
     cache_read: u64,
     cache_write: u64,
+}
+
+impl Tally {
+    // `input` уже без кэша, `output` без рассуждений: так их записывает сервер.
+    fn add(&mut self, tokens: &Value) {
+        let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+        self.input += count("/input");
+        self.output += count("/output") + count("/reasoning");
+        self.cache_read += count("/cache/read");
+        self.cache_write += count("/cache/write");
+    }
 }
 
 pub struct Translator {
@@ -599,18 +642,9 @@ impl Translator {
                 vec![Translated::RunEnded(RunOutcome::Interrupted)]
             }
             "session.execution.failed" => {
-                vec![Translated::RunEnded(RunOutcome::Failed(RunFailure {
-                    kind: data
-                        .pointer("/error/type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    message: data
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                }))]
+                vec![Translated::RunEnded(RunOutcome::Failed(
+                    RunFailure::from_error(data.get("error")),
+                ))]
             }
             "session.execution.started" => vec![Translated::RunStarted],
             "session.inbox.enqueued" | "session.inbox.delivered" => {
@@ -618,6 +652,11 @@ impl Translator {
                     id: string_field(data, "inboxID").to_owned(),
                     delivered: kind == "session.inbox.delivered",
                 }]
+            }
+            "session.retry.scheduled" => Self::on_retry(data),
+            "session.compaction.started" => vec![Self::phase(Phase::ContextMaintenance, None)],
+            "session.compaction.ended" | "session.compaction.failed" => {
+                self.on_compaction_ended(kind, data)
             }
             "shell.created" => vec![Translated::ShellStarted],
             _ if KNOWN.contains(&kind) => Vec::new(),
@@ -648,6 +687,48 @@ impl Translator {
             "session.tool.failed" => self.on_tool_failed(data),
             _ => return None,
         })
+    }
+
+    fn phase(phase: Phase, summary: Option<String>) -> Translated {
+        Translated::Event(AdapterEvent::Phase {
+            phase,
+            tool_name: None,
+            summary,
+        })
+    }
+
+    // Запрос к модели повторяет сам сервер, ввод не отправляется заново. Подпись строит PWA.
+    fn on_retry(data: &Value) -> Vec<Translated> {
+        let attempt = data.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+        vec![Self::phase(
+            Phase::Generating,
+            Some(format!("{RETRY_SUMMARY} {attempt}")),
+        )]
+    }
+
+    // Сжатие тратит токены отдельно от шагов. Придуманный кадр: `session.compaction.failed`
+    // в записях нет, форма из `SessionEvent.Compaction.Failed`.
+    fn on_compaction_ended(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
+        if let Some(tokens) = data.get("tokens").filter(|tokens| tokens.is_object()) {
+            let model = data
+                .get("model")
+                .and_then(model_label)
+                .unwrap_or_else(|| self.model.clone());
+            let tally = self
+                .usage
+                .entry((model, MAIN_AGENT.to_owned()))
+                .or_default();
+            tally.add(tokens);
+        }
+        let failed = (kind == "session.compaction.failed")
+            .then(|| RunFailure::from_error(data.get("error")).overflow);
+        vec![
+            Self::phase(Phase::Generating, None),
+            Translated::CompactionEnded {
+                failed,
+                manual: string_field(data, "reason") == "manual",
+            },
+        ]
     }
 
     fn is_child(&self, data: &Value) -> bool {
@@ -748,7 +829,6 @@ impl Translator {
         })]
     }
 
-    // `input` уже без кэша, `output` без рассуждений: так их записывает сервер.
     fn on_step_finished(&mut self, data: &Value) -> Vec<Translated> {
         let child = self.is_child(data);
         let model = self.model_of(data);
@@ -762,15 +842,12 @@ impl Translator {
         if !self.counted.insert(step.to_owned()) {
             return Vec::new();
         }
-        let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
         let (_, agent) = self.lane_of(data);
-        let tally = self.usage.entry((model, agent)).or_default();
-        tally.input += count("/input");
-        tally.output += count("/output") + count("/reasoning");
-        tally.cache_read += count("/cache/read");
-        tally.cache_write += count("/cache/write");
+        self.usage.entry((model, agent)).or_default().add(tokens);
         // У потомка своё окно: контекст разговора считает только основной агент.
         if !child {
+            let count =
+                |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
             self.context_tokens = count("/input") + count("/cache/read") + count("/cache/write");
         }
         Vec::new()

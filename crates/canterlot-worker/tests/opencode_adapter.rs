@@ -8,8 +8,8 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode,
-        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, Phase, SettingsChange,
-        StartSpec, Started, Transmission, TransmitOutcome,
+        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
+        LimitWindow, Phase, SettingsChange, StartSpec, Started, Transmission, TransmitOutcome,
         opencode::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
@@ -3831,10 +3831,11 @@ async fn autonomous_run_is_attributed_to_the_last_command() {
         .iter()
         .position(|event| matches!(event, AdapterEvent::RunAdopted { .. }))
         .unwrap();
+    // До запуска родителя работает только фоновый потомок: его блоки в дорожке вызова.
     assert!(
         events[..adopted]
             .iter()
-            .all(|event| matches!(event, AdapterEvent::Phase { .. })),
+            .all(|event| !matches!(event, AdapterEvent::BlockStarted { parent: None, .. })),
         "{events:?}"
     );
     for event in &events {
@@ -5020,5 +5021,235 @@ async fn resume_stops_the_shell_journalled_by_the_dead_server() {
     stopped.await.expect("the orphan is stopped");
     let _ = orphan.wait();
     assert!(!journal.exists());
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Записанный ход, конец которого заменён отказом.
+fn failing_turn(error: Value) -> Script {
+    let mut script = ready();
+    for step in &mut script.steps {
+        let Step::Emit { events } = step else {
+            continue;
+        };
+        for event in events {
+            if event["type"] == "session.execution.succeeded" {
+                event["type"] = "session.execution.failed".into();
+                event["data"]["error"] = error.clone();
+            }
+        }
+    }
+    script
+}
+
+async fn failed_turn(error: Value) -> (Bench, Vec<AdapterEvent>) {
+    let mut bench = Bench::new(failing_turn(error));
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    (bench, events)
+}
+
+impl Bench {
+    async fn until(&mut self, wanted: impl Fn(&AdapterEvent) -> bool) -> Vec<AdapterEvent> {
+        let mut events = Vec::new();
+        loop {
+            let event = self.event().await;
+            let done = wanted(&event);
+            events.push(event);
+            if done {
+                return events;
+            }
+        }
+    }
+}
+
+fn limit_of(events: &[AdapterEvent]) -> Option<LimitFact> {
+    events.iter().find_map(|event| match event {
+        AdapterEvent::Limit(fact) => Some(fact.clone()),
+        _ => None,
+    })
+}
+
+fn reset_in(fact: &LimitFact, wait: u64) -> bool {
+    let LimitFact::Reached {
+        resets_at_ms: Some(at),
+        ..
+    } = fact
+    else {
+        return false;
+    };
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    at.abs_diff(now + wait) < 60_000
+}
+
+#[tokio::test]
+async fn go_quota_is_a_reached_limit_recorded_inside_the_turn() {
+    let (mut bench, events) = failed_turn(json!({
+        "type": "provider.quota", "message": "Go usage limit reached", "status": 429,
+        "retryAfterMs": 3_600_000}))
+    .await;
+    let fact = limit_of(&events).expect("limit fact");
+    assert!(matches!(
+        fact,
+        LimitFact::Reached {
+            window: LimitWindow::FiveHour,
+            ..
+        }
+    ));
+    assert!(reset_in(&fact, 3_600_000), "{fact:?}");
+    assert_eq!(text_of(&events, "Error").len(), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn free_limit_waits_in_the_long_window() {
+    let (mut bench, events) = failed_turn(json!({
+        "type": "provider.free-limit", "message": "Free usage limit reached",
+        "status": 429, "retryAfterMs": 80_814_000}))
+    .await;
+    assert!(matches!(
+        limit_of(&events),
+        Some(LimitFact::Reached {
+            window: LimitWindow::Weekly,
+            ..
+        })
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn other_failures_are_no_limit_and_name_only_their_kind() {
+    let (mut bench, events) = failed_turn(json!({
+        "type": "provider.internal", "message": "секрет провайдера"}))
+    .await;
+    assert_eq!(limit_of(&events), None);
+    let more = bench
+        .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "provider_failure"))
+        .await;
+    let Some(AdapterEvent::Diagnostic {
+        event_type,
+        required,
+        ..
+    }) = more.last()
+    else {
+        panic!("diagnostic");
+    };
+    assert_eq!(event_type, "provider.internal");
+    assert!(!required);
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn rejected_credentials_stop_the_session_with_their_reason() {
+    let (mut bench, events) = failed_turn(json!({
+        "type": "provider.auth", "message": "invalid api key", "status": 401}))
+    .await;
+    assert_eq!(
+        text_of(&events, "Error").len(),
+        1,
+        "the owner sees the text"
+    );
+    let more = bench
+        .until(|event| matches!(event, AdapterEvent::Diagnostic { kind, .. } if *kind == "auth_required"))
+        .await;
+    assert!(matches!(
+        more.last(),
+        Some(AdapterEvent::Diagnostic { required: true, .. })
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn overflow_the_server_could_not_recover_is_context_exhausted() {
+    let (mut bench, _) = failed_turn(json!({
+        "type": "provider.invalid-request", "message": "prompt is too long", "status": 400}))
+    .await;
+    bench
+        .until(|event| matches!(event, AdapterEvent::ContextExhausted))
+        .await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn failed_compaction_with_an_overflow_exhausts_the_context_after_the_turn() {
+    let mut script = failing_turn(json!({"type": "unknown", "message": "после сжатия"}));
+    let position = script
+        .steps
+        .iter()
+        .rposition(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    let session = session_of(&script);
+    if let Step::Emit { events } = &mut script.steps[position] {
+        // Придуманный кадр: отказа автоматического сжатия нет в записях.
+        let last = events.len() - 1;
+        events.insert(
+            last,
+            json!({"type": "session.compaction.failed", "data": {
+                "sessionID": session, "reason": "auto",
+                "error": {"type": "provider.invalid-request", "message": "prompt is too long"}}}),
+        );
+    }
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::ContextExhausted))
+    );
+    bench
+        .until(|event| matches!(event, AdapterEvent::ContextExhausted))
+        .await;
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запрос к модели повторяет сервер: со стороны адаптера это фаза, ввод уходит один раз.
+#[tokio::test]
+async fn retry_of_the_server_sends_no_second_prompt() {
+    let mut script = ready();
+    let session = session_of(&script);
+    let position = script
+        .steps
+        .iter()
+        .rposition(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    if let Step::Emit { events } = &mut script.steps[position] {
+        let end = events
+            .iter()
+            .position(|event| event["type"] == "session.execution.succeeded")
+            .unwrap();
+        events.insert(
+            end,
+            json!({"type": "session.retry.scheduled", "data": {
+                "sessionID": session, "assistantMessageID": "msg_1", "attempt": 2, "at": 1,
+                "error": {"type": "provider.rate-limit", "message": "slow down", "status": 429}}}),
+        );
+    }
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase { summary: Some(summary), .. } if summary == "retry 2"
+    )));
+    assert!(text_of(&events, "Error").is_empty());
+    let prompts = bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| path_of(request).ends_with("/prompt"))
+        .count();
+    assert_eq!(prompts, 1);
     bench.close(CloseMode::Graceful).await;
 }

@@ -3,6 +3,7 @@
 
 pub mod catalog;
 pub mod events;
+pub mod failure;
 pub mod http;
 pub mod input;
 pub mod instructions;
@@ -230,6 +231,14 @@ fn random_password() -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 fn session_id() -> String {
     format!("ses_{}", Uuid::now_v7().simple())
 }
@@ -438,6 +447,8 @@ pub struct OpenCodeAdapter {
     applied: InstructionSpec,
     /// Спека запуска: перезапуск повторяет её с той же сессией.
     spec: Option<StartSpec>,
+    /// Сжатие в этом периоде отказало из-за переполнения: сервер больше ничего не сделает.
+    overflowed: bool,
     version: Option<CliVersion>,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
@@ -482,6 +493,7 @@ impl OpenCodeAdapter {
             instructions: owner_instructions(),
             applied: owner_instructions(),
             spec: None,
+            overflowed: false,
             version: None,
             exit: None,
             kill_at: None,
@@ -982,13 +994,42 @@ impl OpenCodeAdapter {
         });
     }
 
+    // Лимит пишется внутри хода: хаб привязывает его к текущему вводу. Остальное идёт за концом
+    // хода, чтобы расход и блок ошибки успели попасть в журнал до остановки.
+    fn judge(&mut self, outcome: &RunOutcome) -> Vec<AdapterEvent> {
+        let overflowed = std::mem::take(&mut self.overflowed);
+        let RunOutcome::Failed(failure) = outcome else {
+            return Vec::new();
+        };
+        if let Some(fact) = failure::limit_fact(failure, now_ms()) {
+            self.events.push_back(AdapterEvent::Limit(fact));
+        }
+        let mut follow = vec![AdapterEvent::Diagnostic {
+            kind: "provider_failure",
+            event_type: failure.kind.clone(),
+            required: false,
+        }];
+        if failure.kind == failure::AUTH_FAILURE {
+            follow.push(AdapterEvent::Diagnostic {
+                kind: "auth_required",
+                event_type: "auth_required".into(),
+                required: true,
+            });
+        } else if failure.overflow || overflowed {
+            follow.push(AdapterEvent::ContextExhausted);
+        }
+        follow
+    }
+
     fn on_run_ended(&mut self, outcome: RunOutcome) {
         self.held.release_all(&mut self.events);
         self.asked.clear();
         self.requests.drop_session(&self.session);
+        let follow = self.judge(&outcome);
         let Some(command) = self.delivery.active.or(self.delivery.adopted) else {
             // Запуск без единой команды: приписать некому, блоков хода нет.
             self.awaiting_input();
+            self.events.extend(follow);
             return;
         };
         if let RunOutcome::Failed(failure) = &outcome {
@@ -1002,6 +1043,7 @@ impl OpenCodeAdapter {
             && !interrupted
         {
             self.delivery.foreign = false;
+            self.events.extend(follow);
             return;
         }
         self.delivery.active = None;
@@ -1015,6 +1057,7 @@ impl OpenCodeAdapter {
             self.events.push_back(translator.finish_run(command));
         }
         self.awaiting_input();
+        self.events.extend(follow);
         if interrupted {
             self.list_shells(command);
         }
@@ -1182,6 +1225,9 @@ impl OpenCodeAdapter {
             Translated::RunEnded(_) if std::mem::take(&mut self.delivery.stale_terminal) => {}
             Translated::RunEnded(outcome) => self.on_run_ended(outcome),
             Translated::ShellStarted => self.journal_shells(),
+            Translated::CompactionEnded { failed, .. } => {
+                self.overflowed |= failed == Some(true);
+            }
         }
     }
 
@@ -1261,16 +1307,9 @@ impl OpenCodeAdapter {
         let outcome = reconcile::last_outcome(&snapshot.messages, input.as_deref());
         let outcome = match outcome.and_then(|idle| idle.get("outcome")?.as_str()) {
             Some("succeeded") => RunOutcome::Succeeded,
-            Some("failed") => RunOutcome::Failed(events::RunFailure {
-                kind: outcome
-                    .and_then(|idle| idle.pointer("/error/type")?.as_str())
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                message: outcome
-                    .and_then(|idle| idle.pointer("/error/message")?.as_str())
-                    .unwrap_or_default()
-                    .to_owned(),
-            }),
+            Some("failed") => RunOutcome::Failed(RunFailure::from_error(
+                outcome.and_then(|idle| idle.get("error")),
+            )),
             // Сервер жив и не работает, а итога нет: ход не закрыть иначе.
             _ => RunOutcome::Interrupted,
         };
