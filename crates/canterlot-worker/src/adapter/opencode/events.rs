@@ -245,6 +245,8 @@ pub struct Translator {
     root: String,
     children: HashMap<String, Child>,
     command: Option<Uuid>,
+    /// Фоновый потомок работает и между ходами: его блоки приписаны последней команде.
+    last_command: Option<Uuid>,
     /// Модель шага: `session.step.started` единственный источник.
     steps: HashMap<String, Step>,
     model: String,
@@ -417,6 +419,7 @@ impl Translator {
             root: root.to_owned(),
             children: HashMap::new(),
             command: None,
+            last_command: None,
             steps: HashMap::new(),
             model: String::new(),
             open: HashMap::new(),
@@ -573,6 +576,7 @@ impl Translator {
     /// ввод, считается вместе с ним.
     pub fn begin_run(&mut self, command: Option<Uuid>) {
         self.command = command;
+        self.last_command = command.or(self.last_command);
     }
 
     pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
@@ -740,6 +744,14 @@ impl Translator {
         match self.children.get(string_field(data, "sessionID")) {
             Some(child) => (child.lane, child.agent.clone()),
             None => (None, MAIN_AGENT.to_owned()),
+        }
+    }
+
+    fn command_of(&self, data: &Value) -> Option<Uuid> {
+        if self.is_child(data) {
+            self.command.or(self.last_command)
+        } else {
+            self.command
         }
     }
 
@@ -948,7 +960,7 @@ impl Translator {
     fn open_tool(&mut self, data: &Value, out: &mut Vec<Translated>) {
         let model = self.model_of(data);
         let (parent, agent) = self.lane_of(data);
-        let command = self.command;
+        let command = self.command_of(data);
         let (item, state) = self.tool_of(data);
         if std::mem::replace(&mut state.open, true) {
             return;
@@ -1032,7 +1044,7 @@ impl Translator {
         out.push(Translated::Event(AdapterEvent::BlockStarted {
             block_id: result,
             kind: BlockKind::ToolResult,
-            input_command_id: self.command,
+            input_command_id: self.command_of(data),
             parent: Some(state.block),
             agent,
             model,
@@ -1140,7 +1152,7 @@ impl Translator {
             out.push(Translated::Event(AdapterEvent::BlockStarted {
                 block_id,
                 kind: kind.block(),
-                input_command_id: self.command,
+                input_command_id: self.command_of(data),
                 parent,
                 agent,
                 model: self.model_of(data),
