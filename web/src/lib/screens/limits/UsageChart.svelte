@@ -4,7 +4,7 @@
   import { styleProperty } from '#lib/ui/style-property.js';
   let { series, days, zone }: { series: components['schemas']['ProviderSeries'][]; days: string[]; zone: string } = $props();
   const model = $derived(chartModel(series, days, zone));
-  const summary = $derived(`Дневные снимки лимитов. ${model.map(p => {
+  const summary = $derived(`Дневные снимки лимитов, осталось. ${model.map(p => {
     const range = (values: (number | null)[]) => {
       const known = values.filter((v): v is number => v !== null);
       return known.length ? `от ${Math.min(...known).toLocaleString('ru-RU')} до ${Math.max(...known).toLocaleString('ru-RU')}%` : 'нет данных';
@@ -26,7 +26,7 @@
     </div><small>{Number(day.slice(-2))}</small></div>{/each}
   </div></div>
 </div>
-<div class="sr-only"><table aria-label="Дневные снимки лимитов"><thead><tr><th>День</th><th>Провайдер</th><th>5 часов</th><th>Неделя</th></tr></thead><tbody>
+<div class="sr-only"><table aria-label="Дневные снимки лимитов"><thead><tr><th>День</th><th>Провайдер</th><th>5 часов, осталось</th><th>Неделя, осталось</th></tr></thead><tbody>
   {#each model as provider (provider.provider)}{#each provider.days as day (day.day)}<tr><th>{day.day}</th><td>{providerName(provider.provider)}</td><td>{day.five === null ? 'Нет данных' : `${day.five.toLocaleString('ru-RU')}%`}</td><td>{day.weekly === null ? 'Нет данных' : `${day.weekly.toLocaleString('ru-RU')}%`}</td></tr>{/each}{/each}
 </tbody></table></div>
 <style>

@@ -40,13 +40,13 @@
     <h2>История лимитов</h2>
     {#if loading}<p>Загружаю историю лимитов…</p>{:else if error}<p class="error">{error}</p><button type="button" onclick={load}>Повторить</button>
     {:else}
-      <p class="note">{fmt.dayRange(days[0], days.at(-1))} · использованная доля квоты</p>
+      <p class="note">{fmt.dayRange(days[0], days.at(-1))} · остаток квоты</p>
       <UsageChart {series} {days} {zone} />
       <p class="note">Снимок в конце дня · сегодня по последним данным хаба</p>
       {#if !series.some(p => p.five_hour.length || p.weekly.length)}<p>Снимков лимитов за эти дни ещё нет</p>{/if}
       <div class="current">{#each runtime?.list.limits ?? [] as provider (provider.provider)}
         {@const view = limitView(provider, now, thresholds)}
-        <section data-tone={view.tone}><p class="note">{providerName(provider.provider)} сейчас</p><strong>{provider.five_hour ? view.fiveHour : 'Нет данных'} / 5ч</strong><p>{provider.weekly ? `${view.weekly} недели` : 'Нет данных недели'}</p>{#if view.resets.weekly}<small>сброс {view.resets.weekly.toLocaleLowerCase('ru-RU')}</small>{/if}{#if view.stale}<p class="note">данные устарели</p>{/if}</section>
+        <section data-tone={view.tone}><p class="note">{providerName(provider.provider)} сейчас · осталось</p><strong>{view.five.text} / 5ч</strong><p>{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{#if view.week.reset}<small>{view.week.reset}</small>{/if}{#if view.stale}<p class="note">данные устарели</p>{/if}</section>
       {/each}</div>
       <UsageTable {rows} />
     {/if}
@@ -58,4 +58,5 @@
   strong { font-size: var(--fs-heading); }
   small { color: var(--muted); }
   [data-tone='warning'] > p:not(.note), [data-tone='reserve'] > p:not(.note) { color: var(--warning); }
+  [data-tone='danger'] > p:not(.note) { color: var(--danger); }
 </style>

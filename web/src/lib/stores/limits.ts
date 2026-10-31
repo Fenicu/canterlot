@@ -20,34 +20,103 @@ export interface LimitThresholds {
   weekly_reserve_pct: number;
 }
 
+export type MeterTone = "normal" | "warning" | "danger";
+
+/** Остаток ниже этих долей окрашивает полосу: предупреждение и тревога. */
+export const WARN_REMAINING_PCT = 20;
+export const DANGER_REMAINING_PCT = 5;
+
+export const NO_LIMIT_DATA = "нет данных";
+export const STALE_DATA = "устарело";
+
+export interface MeterView {
+  /** Хаб знает это окно. */
+  known: boolean;
+  /** Остаток для полоски, 0..100. */
+  fill: number;
+  /** «46%», «<1%», «нет данных» или «устарело». */
+  text: string;
+  tone: MeterTone;
+  /** Сброс окна уже прошёл или показание старше порога. */
+  stale: boolean;
+  /** «сброс 19:20» или «сброс вт 04:00»; у устаревшего окна пусто. */
+  reset: string;
+  observedAt: number;
+}
+
 export interface LimitView {
-  fiveHour: string;
-  weekly: string;
-  tone: "default" | "warning" | "reserve";
-  hot: { fiveHour: boolean; weekly: boolean };
-  resets: { fiveHour: string; weekly: string };
+  five: MeterView;
+  week: MeterView;
+  tone: "default" | "warning" | "danger" | "reserve";
   stale: boolean;
 }
 
-export const NO_LIMIT_DATA = "нет данных";
+export function remainingPct(usedPermille: number): number {
+  return Math.min(100, Math.max(0, 100 - usedPermille / 10));
+}
+
+export function remainingText(usedPermille: number): string {
+  const remaining = remainingPct(usedPermille);
+  if (remaining > 0 && remaining < 1) return "<1%";
+  return `${Math.round(remaining)}%`;
+}
+
+export function meterTone(remaining: number): MeterTone {
+  if (remaining < DANGER_REMAINING_PCT) return "danger";
+  if (remaining < WARN_REMAINING_PCT) return "warning";
+  return "normal";
+}
+
+const weekdayFormat = new Intl.DateTimeFormat("ru-RU", { weekday: "short" });
+
+export function shortWeekday(ts: number): string {
+  return weekdayFormat.format(ts).replace(".", "").toLocaleLowerCase("ru-RU");
+}
+
+function sameDay(a: number, b: number): boolean {
+  return new Date(a).toDateString() === new Date(b).toDateString();
+}
+
+/** Время без даты в тот же день, иначе с днём недели. */
+export function dayClock(ts: number, now: number): string {
+  return sameDay(ts, now)
+    ? fmt.clock(ts)
+    : `${shortWeekday(ts)} ${fmt.clock(ts)}`;
+}
+
+const ABSENT: MeterView = {
+  known: false,
+  fill: 0,
+  text: NO_LIMIT_DATA,
+  tone: "normal",
+  stale: false,
+  reset: "",
+  observedAt: Number.NaN,
+};
 
 export function windowText(
   window: LimitWindow | null | undefined,
   now: number,
-  options?: { staleAfterMs?: number; warnPct?: number },
-): { pct: string; reset: string; stale: boolean; hot: boolean } {
-  if (!window)
-    return { pct: NO_LIMIT_DATA, reset: "", stale: false, hot: false };
-  const observed = Date.parse(window.observed_at);
+  options?: { staleAfterMs?: number },
+): MeterView {
+  if (!window) return ABSENT;
+  const observedAt = Date.parse(window.observed_at);
   const staleAfterMs = options?.staleAfterMs ?? 180_000;
-  const warnPct = options?.warnPct ?? 80;
+  const resetAt = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
+  const stale =
+    Number.isNaN(observedAt) ||
+    now - observedAt > staleAfterMs ||
+    (Number.isFinite(resetAt) && resetAt <= now);
+  const remaining = remainingPct(window.used_permille);
   return {
-    pct: fmt.pct(window.used_permille),
-    reset: window.resets_at
-      ? fmt.resetAt(Date.parse(window.resets_at), now)
-      : "",
-    stale: Number.isNaN(observed) || now - observed > staleAfterMs,
-    hot: window.used_permille / 10 >= warnPct,
+    known: true,
+    fill: remaining,
+    text: stale ? STALE_DATA : remainingText(window.used_permille),
+    tone: stale ? "normal" : meterTone(remaining),
+    stale,
+    reset:
+      !stale && Number.isFinite(resetAt) ? `сброс ${dayClock(resetAt, now)}` : "",
+    observedAt,
   };
 }
 
@@ -56,25 +125,12 @@ export function limitView(
   now: number,
   cfg: LimitThresholds,
 ): LimitView {
-  const warn = Math.min(...cfg.warn_pcts);
-  const staleMs = cfg.stale_after_secs * 1000;
-  const five = windowText(provider.five_hour, now, {
-    staleAfterMs: staleMs,
-    warnPct: warn,
-  });
-  const week = windowText(provider.weekly, now, {
-    staleAfterMs: staleMs,
-    warnPct: warn,
-  });
+  const options = { staleAfterMs: cfg.stale_after_secs * 1000 };
+  const five = windowText(provider.five_hour, now, options);
+  const week = windowText(provider.weekly, now, options);
   let tone: LimitView["tone"] = "default";
   if (provider.weekly_reserve_active) tone = "reserve";
-  else if (five.hot || week.hot) tone = "warning";
-  return {
-    fiveHour: five.pct,
-    weekly: week.pct,
-    tone,
-    hot: { fiveHour: five.hot, weekly: week.hot },
-    resets: { fiveHour: five.reset, weekly: week.reset },
-    stale: five.stale || week.stale,
-  };
+  else if (five.tone === "danger" || week.tone === "danger") tone = "danger";
+  else if (five.tone === "warning" || week.tone === "warning") tone = "warning";
+  return { five, week, tone, stale: five.stale || week.stale };
 }

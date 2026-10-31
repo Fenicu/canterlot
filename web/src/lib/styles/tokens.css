@@ -106,6 +106,7 @@
   --ease-expand: cubic-bezier(.22, 1, .36, 1);
   --ease-caret: step-end;
   --opacity-low: .3;
+  --opacity-dim: .5;
   --opacity-high: 1;
   --bar-8: 8%; --bar-9: 9%; --bar-12: 12%; --bar-15: 15%;
   --bar-18: 18%; --bar-21: 21%; --bar-24: 24%; --bar-27: 27%;

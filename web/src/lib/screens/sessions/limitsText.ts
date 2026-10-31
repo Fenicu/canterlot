@@ -1,30 +1,33 @@
 import { providerLabel as label } from "#lib/format/labels.js";
-import { fmt } from "#lib/format/ru.js";
 import {
+  dayClock,
   limitView,
-  NO_LIMIT_DATA,
   type LimitThresholds,
+  type MeterView,
   type ProviderLimits,
 } from "#lib/stores/limits.js";
 
 export interface LimitRow {
+  provider: string;
   label: string;
-  fiveHour: string;
-  weekly: string;
-  hot: { fiveHour: boolean; weekly: boolean };
+  five: MeterView;
+  week: MeterView;
   /** Хаб не знает ни одного окна: строка сводится к «нет данных». */
   empty: boolean;
-  /** Провайдер на недельном резерве: это дополнение к цифрам, а не замена им. */
+  /** Провайдер на недельном резерве: это дополнение к остаткам, а не замена им. */
   reserve: boolean;
 }
 
 export interface LimitStrip {
-  summary: string;
   rows: LimitRow[];
-  details: string;
-  tone: "default" | "warning" | "reserve";
-  staleNote: string;
+  tone: "default" | "warning" | "danger" | "reserve";
+  /** «обновлено 17:44»: время самого свежего показания любого окна. */
+  updated: string;
+  /** То же время числом для сравнения; 0, пока показаний нет. */
+  updatedAt: number;
 }
+
+const TONE_RANK = { default: 0, warning: 1, danger: 2, reserve: 3 } as const;
 
 export function limitStrip(
   providers: ProviderLimits[],
@@ -39,58 +42,27 @@ export function limitStrip(
     provider,
     view: limitView(provider, now, cfg),
   }));
-  const summary = views
-    .map(({ provider, view }) =>
-      empty(provider)
-        ? `${label(provider.provider)} · ${NO_LIMIT_DATA}`
-        : `${label(provider.provider)} 5ч ${view.fiveHour} · неделя ${view.weekly}`,
-    )
-    .join("  ");
-  const details = views
-    .map(({ provider }) => {
-      if (empty(provider)) return `${label(provider.provider)}: ${NO_LIMIT_DATA}`;
-      const five = provider.five_hour?.resets_at
-        ? fmt.clock(Date.parse(provider.five_hour.resets_at))
-        : "";
-      const weekAt = provider.weekly?.resets_at
-        ? Date.parse(provider.weekly.resets_at)
-        : Number.NaN;
-      const week = Number.isFinite(weekAt)
-        ? `${weekday(weekAt)}, ${fmt.clock(weekAt)}`
-        : "";
-      const fivePart = provider.five_hour ? `5ч до ${five}` : `5ч ${NO_LIMIT_DATA}`;
-      const weekPart = provider.weekly ? `неделя до ${week}` : `неделя ${NO_LIMIT_DATA}`;
-      return `${label(provider.provider)}: ${fivePart} · ${weekPart}`;
-    })
-    .join("\n");
   let tone: LimitStrip["tone"] = "default";
-  if (views.some((item) => item.view.tone === "reserve")) tone = "reserve";
-  else if (views.some((item) => item.view.tone === "warning")) tone = "warning";
-  const staleAt = views
-    .map((item) => observed(item.provider))
-    .filter(
-      (stamp) =>
-        Number.isFinite(stamp) && now - stamp > cfg.stale_after_secs * 1000,
-    )
-    .sort((a, b) => a - b)[0];
+  for (const { view } of views) {
+    if (TONE_RANK[view.tone] > TONE_RANK[tone]) tone = view.tone;
+  }
+  const seen = views
+    .flatMap(({ view }) => [view.five.observedAt, view.week.observedAt])
+    .filter((stamp) => Number.isFinite(stamp));
+  const latest = seen.length ? Math.max(...seen) : 0;
   return {
-    summary,
     rows: views.map(({ provider, view }) => ({
+      provider: provider.provider,
       label: label(provider.provider),
-      fiveHour: view.fiveHour,
-      weekly: view.weekly,
-      hot: view.hot,
-      empty: empty(provider),
+      five: view.five,
+      week: view.week,
+      empty: !provider.five_hour && !provider.weekly,
       reserve: provider.weekly_reserve_active,
     })),
-    details,
     tone,
-    staleNote: staleAt !== undefined ? `данные от ${fmt.clock(staleAt)}` : "",
+    updated: latest ? `обновлено ${dayClock(latest, now)}` : "",
+    updatedAt: latest,
   };
-}
-
-function empty(provider: ProviderLimits): boolean {
-  return !provider.five_hour && !provider.weekly;
 }
 
 function rank(provider: string, prefer?: string): number {
@@ -98,18 +70,4 @@ function rank(provider: string, prefer?: string): number {
   if (provider === "claude") return 1;
   if (provider === "codex") return 2;
   return 3;
-}
-
-function weekday(ts: number): string {
-  return new Intl.DateTimeFormat("ru-RU", { weekday: "short" })
-    .format(ts)
-    .replace(".", "")
-    .toLocaleLowerCase("ru-RU");
-}
-
-function observed(provider: ProviderLimits): number {
-  const stamps = [provider.five_hour?.observed_at, provider.weekly?.observed_at]
-    .map((value) => (value ? Date.parse(value) : Number.NaN))
-    .filter((value) => Number.isFinite(value));
-  return stamps.length ? Math.min(...stamps) : Number.NaN;
 }
