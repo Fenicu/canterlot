@@ -861,3 +861,160 @@ fn call_block_carries_the_whole_input() {
     let (_, text) = tool_final("Read", json!({"file_path": "/tmp/a"}));
     assert_eq!(text, json!({"file_path": "/tmp/a"}).to_string());
 }
+
+fn unknown_names(parsed: &[Parsed]) -> Vec<String> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::Diagnostic {
+                kind: "unknown_event",
+                event_type,
+                required: false,
+                ..
+            }) => Some(event_type.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn stream(event: Value) -> String {
+    json!({"type": "stream_event", "event": event}).to_string()
+}
+
+fn stems(dir: &str) -> Vec<String> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(dir);
+    let mut names: Vec<String> = std::fs::read_dir(path)
+        .unwrap()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            (path.extension()? == "jsonl").then(|| path.file_stem()?.to_str().map(str::to_owned))?
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+#[test]
+fn recorded_frames_raise_no_unknown_diagnostics() {
+    let mut checked = 0;
+    for name in stems("../../docs/stage0/evidence/claude-code") {
+        let mut parser = Parser::new();
+        let parsed = feed_all(&mut parser, &fixtures::replay_evidence(&name).out);
+        assert_eq!(
+            unknown_names(&parsed),
+            Vec::<String>::new(),
+            "evidence {name}"
+        );
+        checked += 1;
+    }
+    for name in stems("tests/fixtures/claude_code") {
+        let mut parser = Parser::new();
+        let parsed = feed_all(&mut parser, &fixtures::replay_fixture(&name));
+        assert_eq!(
+            unknown_names(&parsed),
+            Vec::<String>::new(),
+            "fixture {name}"
+        );
+        checked += 1;
+    }
+    assert!(checked > 15, "replayed {checked} files");
+}
+
+#[test]
+fn unknown_top_level_type_is_diagnosed_once() {
+    let mut parser = Parser::new();
+    let frame = r#"{"type":"future_frame","payload":1}"#;
+    assert_eq!(unknown_names(&parser.feed(frame)), ["future_frame"]);
+    assert_eq!(unknown_names(&parser.feed(frame)), Vec::<String>::new());
+    assert_eq!(
+        unknown_names(&parser.feed(r#"{"type":"other_frame"}"#)),
+        ["other_frame"]
+    );
+    parser.reset_process();
+    assert_eq!(unknown_names(&parser.feed(frame)), Vec::<String>::new());
+}
+
+#[test]
+fn unknown_system_subtype_is_diagnosed_once() {
+    let mut parser = Parser::new();
+    let frame = r#"{"type":"system","subtype":"future_notice"}"#;
+    assert_eq!(unknown_names(&parser.feed(frame)), ["system/future_notice"]);
+    assert_eq!(unknown_names(&parser.feed(frame)), Vec::<String>::new());
+    let known = r#"{"type":"system","subtype":"task_started"}"#;
+    assert_eq!(unknown_names(&parser.feed(known)), Vec::<String>::new());
+}
+
+#[test]
+fn unknown_protocol_kinds_inside_a_stream_are_diagnosed() {
+    let mut parser = Parser::new();
+    let cases = [
+        (
+            stream(json!({"type": "future_event"})),
+            "stream_event/future_event",
+        ),
+        (
+            stream(json!({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "future_block"}})),
+            "content_block/future_block",
+        ),
+        (
+            stream(json!({"type": "content_block_delta", "index": 0,
+                "delta": {"type": "future_delta"}})),
+            "delta/future_delta",
+        ),
+    ];
+    for (line, name) in cases {
+        assert_eq!(unknown_names(&parser.feed(&line)), [name], "{name}");
+        assert_eq!(unknown_names(&parser.feed(&line)), Vec::<String>::new());
+    }
+    for known in [
+        stream(json!({"type": "message_stop"})),
+        stream(json!({"type": "content_block_delta", "index": 0,
+            "delta": {"type": "signature_delta", "signature": ""}})),
+    ] {
+        assert_eq!(unknown_names(&parser.feed(&known)), Vec::<String>::new());
+    }
+}
+
+#[test]
+fn unknown_blocks_of_whole_frames_are_diagnosed() {
+    let mut parser = Parser::new();
+    parser.feed(&stream(
+        json!({"type": "message_start", "message": {"id": "m"}}),
+    ));
+    let subagent = json!({"type": "assistant", "parent_tool_use_id": "toolu_1",
+        "message": {"id": "m1", "content": [
+            {"type": "text", "text": "ok"},
+            {"type": "redacted_thinking", "data": "x"}]}})
+    .to_string();
+    assert_eq!(
+        unknown_names(&parser.feed(&subagent)),
+        ["assistant_block/redacted_thinking"]
+    );
+    let user =
+        |kind: &str| json!({"type": "user", "message": {"content": [{"type": kind}]}}).to_string();
+    assert_eq!(
+        unknown_names(&parser.feed(&user("document"))),
+        ["user_block/document"]
+    );
+    for known in ["text", "image"] {
+        assert_eq!(
+            unknown_names(&parser.feed(&user(known))),
+            Vec::<String>::new()
+        );
+    }
+}
+
+#[test]
+fn unknown_type_names_are_bounded() {
+    let mut parser = Parser::new();
+    let long = "x".repeat(500);
+    let names = unknown_names(&parser.feed(&json!({"type": long}).to_string()));
+    assert_eq!(names, ["x".repeat(64)]);
+    let mut reported = 1;
+    for n in 0..200 {
+        reported +=
+            unknown_names(&parser.feed(&json!({"type": format!("t{n}")}).to_string())).len();
+    }
+    assert_eq!(reported, 64);
+}

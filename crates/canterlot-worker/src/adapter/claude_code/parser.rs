@@ -1,8 +1,9 @@
 //! Stream-JSON CLI output: NDJSON frames, tool input assembler, phases,
 //! per-model usage deltas and subagent attribution.
 //!
-//! Never panics on unknown input and never ends the session: unknown frames
-//! are `Ignored`, lines that are not JSON become an `unparsed_line`
+//! Never panics on unknown input and never ends the session: known frames
+//! without a reaction are `Ignored`, unknown ones leave one non-required
+//! diagnostic per name, lines that are not JSON become an `unparsed_line`
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
 use std::collections::{HashMap, HashSet};
@@ -17,6 +18,26 @@ const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
 /// Сводка результата, завершившегося ошибкой: у результата своей сводки нет, отметка
 /// доходит до ленты без новых полей в протоколе, журнале и истории.
 const TOOL_FAILED_SUMMARY: &str = "error";
+
+/// Потолки диагностик неизвестных кадров те же, что у OpenCode.
+const MAX_UNKNOWN_TYPES: usize = 64;
+const MAX_TYPE_CHARS: usize = 64;
+
+/// Кадры, которые CLI шлёт на самом деле и которым реакция не нужна. Источник:
+/// записи в `docs/stage0/evidence/claude-code` и фикстуры воркера; новое имя
+/// сюда добавляют только по записанному кадру.
+const IGNORED_FRAMES: [&str; 1] = ["command_lifecycle"];
+const IGNORED_SYSTEM: [&str; 6] = [
+    "api_retry",
+    "background_tasks_changed",
+    "task_notification",
+    "task_started",
+    "task_updated",
+    "thinking_tokens",
+];
+const IGNORED_STREAM_EVENTS: [&str; 1] = ["message_stop"];
+const IGNORED_DELTAS: [&str; 1] = ["signature_delta"];
+const IGNORED_USER_BLOCKS: [&str; 2] = ["text", "image"];
 
 /// One open content block, keyed by stream index.
 struct OpenBlock {
@@ -215,6 +236,8 @@ pub struct Parser {
     streamed_messages: HashSet<String>,
     assembler: ToolInputAssembler,
     last_usage: Option<MessageUsage>,
+    /// Имена уже названных неизвестных кадров: на исполнение один раз на имя.
+    unknown: HashSet<String>,
 }
 
 impl Default for Parser {
@@ -237,7 +260,27 @@ impl Parser {
             streamed_messages: HashSet::new(),
             assembler: ToolInputAssembler::default(),
             last_usage: None,
+            unknown: HashSet::new(),
         }
+    }
+
+    /// Неизвестное имя кадра: одна необязательная диагностика на имя, не больше
+    /// `MAX_UNKNOWN_TYPES` имён, сессию и ход это не трогает.
+    fn note_unknown(&mut self, out: &mut Vec<Parsed>, scope: &str, kind: Option<&str>) {
+        let name = match kind.filter(|kind| !kind.is_empty()) {
+            Some(kind) if scope.is_empty() => kind.to_owned(),
+            Some(kind) => format!("{scope}/{kind}"),
+            None => scope.to_owned(),
+        };
+        let name: String = name.chars().take(MAX_TYPE_CHARS).collect();
+        if self.unknown.len() >= MAX_UNKNOWN_TYPES || !self.unknown.insert(name.clone()) {
+            return;
+        }
+        out.push(Parsed::Event(AdapterEvent::Diagnostic {
+            kind: "unknown_event",
+            event_type: name,
+            required: false,
+        }));
     }
 
     pub fn set_input_command(&mut self, id: Uuid) {
@@ -388,6 +431,12 @@ impl Parser {
                 }
             }
             Some("control_response") => self.feed_control_response(&value, &mut out),
+            Some(kind) if !IGNORED_FRAMES.contains(&kind) => {
+                self.note_unknown(&mut out, "", Some(kind));
+                if out.is_empty() {
+                    out.push(Parsed::Ignored);
+                }
+            }
             _ => out.push(Parsed::Ignored),
         }
         out
@@ -423,6 +472,12 @@ impl Parser {
                         summary: None,
                     }));
                 } else {
+                    out.push(Parsed::Ignored);
+                }
+            }
+            Some(kind) if !IGNORED_SYSTEM.contains(&kind) => {
+                self.note_unknown(out, "system", Some(kind));
+                if out.is_empty() {
                     out.push(Parsed::Ignored);
                 }
             }
@@ -520,7 +575,7 @@ impl Parser {
                             summary: None,
                         }));
                     }
-                    _ => {}
+                    other => self.note_unknown(out, "content_block", other),
                 }
             }
             Some("content_block_delta") => {
@@ -569,7 +624,8 @@ impl Parser {
                             self.assembler.push(index, fragment);
                         }
                     }
-                    _ => {}
+                    Some(kind) if IGNORED_DELTAS.contains(&kind) => {}
+                    other => self.note_unknown(out, "delta", other),
                 }
             }
             Some("content_block_stop") => {
@@ -642,7 +698,8 @@ impl Parser {
                     self.note_usage(usage, parent);
                 }
             }
-            _ => {}
+            Some(kind) if IGNORED_STREAM_EVENTS.contains(&kind) => {}
+            other => self.note_unknown(out, "stream_event", other),
         }
     }
 
@@ -702,7 +759,7 @@ impl Parser {
                 Some("thinking") => {
                     self.subagent_text(lane, BlockKind::Reasoning, text("thinking"), out);
                 }
-                _ => {}
+                other => self.note_unknown(out, "assistant_block", other),
             }
         }
     }
@@ -843,7 +900,11 @@ impl Parser {
             _ => Vec::new(),
         };
         for block in blocks {
-            if block.get("type").and_then(serde_json::Value::as_str) != Some("tool_result") {
+            let kind = block.get("type").and_then(serde_json::Value::as_str);
+            if kind != Some("tool_result") {
+                if !kind.is_some_and(|kind| IGNORED_USER_BLOCKS.contains(&kind)) {
+                    self.note_unknown(out, "user_block", kind);
+                }
                 continue;
             }
             let tool_use_id = block
