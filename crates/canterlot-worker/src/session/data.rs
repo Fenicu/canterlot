@@ -224,7 +224,7 @@ async fn ship(
     ),
 ) -> Result<(), WorkerError> {
     let (cursors, pilot, diagnostics, live_limits) = session;
-    let mut withheld = std::collections::HashSet::new();
+    let mut withheld = diagnostics.parked();
     let mut pending: VecDeque<Range> = VecDeque::new();
     let mut sent = cursors.clone();
     let mut acknowledged = cursors;
@@ -235,7 +235,16 @@ async fn ship(
         tokio::select! {
             result = active.changed() => { result.map_err(|_| WorkerError::Transport)?; }
             message = inbound.message() => {
-                let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
+                let message = match message {
+                    Ok(message) => message.ok_or(WorkerError::Transport)?,
+                    Err(status) => {
+                        // Хаб отвечает строго по порядку: отказ относится к старейшему диапазону.
+                        if refused_record(status.message()) && let Some(head) = pending.front() {
+                            diagnostics.refused(head.journal, status.message());
+                        }
+                        return Err(status_error(status));
+                    }
+                };
                 let Some(data_down::Msg::SjAck(ack)) = message.msg else { return Err(WorkerError::Protocol); };
                 let journal = Uuid::parse_str(&ack.journal_id).map_err(|_| WorkerError::Protocol)?;
                 if ack.up_to_seq > sent.get(&journal).copied().unwrap_or(0) { return Err(WorkerError::Protocol); }

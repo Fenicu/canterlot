@@ -73,8 +73,26 @@ impl LimitsCache {
 #[derive(Clone, Default)]
 pub(super) struct JournalDiagnostics(
     std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
 );
 impl JournalDiagnostics {
+    /// Журнал, чью запись хаб не принимает, ждёт нового сеанса: новая версия хаба или воркера
+    /// начинает именно его. Диапазон не подтверждён и остаётся в журнале.
+    pub(super) fn refused(&self, journal: Uuid, reason: &str) {
+        if self
+            .1
+            .lock()
+            .expect("journal diagnostics lock")
+            .insert(journal)
+        {
+            tracing::error!(journal_id=%journal,kind="journal_refused",reason,"hub refused a journal record; journal parked until the next session");
+        }
+    }
+
+    pub(super) fn parked(&self) -> std::collections::HashSet<Uuid> {
+        self.1.lock().expect("journal diagnostics lock").clone()
+    }
+
     pub(super) fn withheld(&self, journal: Uuid) {
         if self
             .0

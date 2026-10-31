@@ -336,6 +336,113 @@ async fn stale_post_reattach_batch_cannot_jump_the_committed_cursor() {
     assert_eq!(first, 3, "stale batch skipped the committed prefix");
 }
 
+async fn fail_shipped_batch(status: Status) -> (Vec<String>, Result<(), WorkerError>) {
+    let (mut hub, store) = ProtocolHub::start(Behavior {
+        sj_ack: false,
+        ..Default::default()
+    })
+    .await;
+    let thread = StoreThread::new(store);
+    let (sender, mut relay) = mpsc::channel(8);
+    let manager = ExecutionManager::new(Default::default(), thread.client(), sender.clone());
+    let diagnostics = JournalDiagnostics::default();
+    let (_active, mut active) = watch::channel(true);
+    let timers = WorkerTimers::default();
+    let session = || {
+        (
+            HashMap::new(),
+            true,
+            diagnostics.clone(),
+            LiveLimits::default(),
+        )
+    };
+    let (first, second) = (Uuid::now_v7(), Uuid::now_v7());
+    let relayed = |journal_id| SjRelay {
+        journal_id,
+        records: vec![record(1, 0)],
+    };
+
+    let (tx, mut inbound) = link(&hub).await;
+    sender.send(relayed(first)).await.unwrap();
+    let failed = {
+        let ship = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &timers,
+            &mut active,
+            session(),
+        );
+        tokio::pin!(ship);
+        loop {
+            tokio::select! {
+                result = &mut ship => panic!("ship ended early: {result:?}"),
+                event = hub.event() => if let Observed::Data(_) = event { break },
+            }
+        }
+        hub.fail_data(status).await;
+        ship.await
+    };
+
+    let (tx, mut inbound) = link(&hub).await;
+    sender.send(relayed(first)).await.unwrap();
+    sender.send(relayed(second)).await.unwrap();
+    let mut shipped = Vec::new();
+    {
+        let ship = ship(
+            &tx,
+            &mut inbound,
+            &manager,
+            &mut relay,
+            &timers,
+            &mut active,
+            session(),
+        );
+        tokio::pin!(ship);
+        timeout(Duration::from_secs(3), async {
+            while !shipped.contains(&second.to_string()) {
+                tokio::select! {
+                    result = &mut ship => panic!("ship ended early: {result:?}"),
+                    event = hub.event() => if let Observed::Data(DataUp {
+                        msg: Some(data_up::Msg::SjRecords(batch)),
+                    }) = event {
+                        shipped.push(batch.journal_id);
+                    },
+                }
+            }
+        })
+        .await
+        .unwrap();
+    }
+    manager.shutdown().await;
+    drop(sender);
+    thread.close().await.unwrap();
+    let first = first.to_string();
+    (
+        shipped.into_iter().filter(|id| *id == first).collect(),
+        failed,
+    )
+}
+
+// Поток общий: журнал, который хаб не принимает, не должен рвать его заново на каждом подключении.
+#[tokio::test]
+async fn refused_journal_stays_parked_after_reattach_while_others_keep_shipping() {
+    let (resent, failed) = fail_shipped_batch(Status::invalid_argument("unknown_record")).await;
+    assert!(matches!(
+        failed,
+        Err(WorkerError::Hub { code: tonic::Code::InvalidArgument, ref message })
+            if message == "unknown_record"
+    ));
+    assert_eq!(resent, Vec::<String>::new());
+}
+
+#[tokio::test]
+async fn database_failure_does_not_park_the_journal() {
+    let (resent, _) = fail_shipped_batch(Status::internal("database")).await;
+    assert_eq!(resent.len(), 1);
+}
+
 #[tokio::test]
 async fn pilot_sj_is_withheld_while_other_sj_ships_and_allowed_prefix_is_contiguous() {
     let (mut hub, store) = ProtocolHub::start(Behavior::default()).await;
