@@ -296,7 +296,7 @@ pub async fn request_compaction(
                     reason: "run_in_progress",
                 });
             }
-            let Some((execution_id, generation, _)) =
+            let Some((execution_id, generation, ExecutionState::Running)) =
                 executions::live(&mut *conn, conversation_id).await?
             else {
                 return Err(ControlError::InvalidRequest {

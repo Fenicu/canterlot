@@ -291,3 +291,38 @@ async fn dead_execution_releases_a_requested_compaction(pool: PgPool) {
             .contains(&stuck(Some(CompactionProgress::Failed)))
     );
 }
+
+// Без согласованной возможности старый воркер получил бы команду, которой не знает.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn command_goes_only_to_a_session_that_agreed_to_it(pool: PgPool) {
+    use canterlot_hub::{
+        config::HubTimers,
+        grpc::KNOWN_OPTIONAL_CAPABILITIES,
+        outbox::{self, CommandRow, OutboxError},
+        session::Registry,
+    };
+    use canterlot_proto::worker::v1::command;
+    assert!(KNOWN_OPTIONAL_CAPABILITIES.contains(&"compact_v1"));
+    let mut run = Run::start(&pool).await;
+    run.stuck(&pool).await;
+    let id = id_of(run.compact(&pool, KEY).await.unwrap());
+    let row: CommandRow = sqlx::query_as("select * from commands where id = $1")
+        .bind(id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let registry = Registry::new(HubTimers::default());
+    let old = testkit::fake_session(&registry, row.machine_id, &["pilot_v1"], true);
+    assert!(matches!(
+        outbox::to_proto_for_session(&row, &registry),
+        Err(OutboxError::CapabilityMissing)
+    ));
+    drop(old);
+    let registry = Registry::new(HubTimers::default());
+    let _new = testkit::fake_session(&registry, row.machine_id, &["compact_v1"], true);
+    let command = outbox::to_proto_for_session(&row, &registry).unwrap();
+    assert!(matches!(
+        command.kind,
+        Some(command::Kind::CompactSession(_))
+    ));
+}
