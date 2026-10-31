@@ -163,10 +163,10 @@ pub enum Translated {
     Request(PendingRequest),
     /// Сервер закрыл запрос с этим идентификатором.
     RequestSettled(String),
-    /// Сжатие контекста закончилось. `failed`: отказ, в значении признак переполнения.
+    /// Сжатие контекста закончилось. `failed`: отказ.
     /// `manual`: запрошено через `POST .../compact`, а не самим сервером.
     CompactionEnded {
-        failed: Option<bool>,
+        failed: Option<RunFailure>,
         manual: bool,
     },
 }
@@ -713,8 +713,7 @@ impl Translator {
         )]
     }
 
-    // Сжатие тратит токены отдельно от шагов. `session.compaction.failed` в записях нет, форма
-    // из `SessionEvent.Compaction.Failed`, L2 проверяет её на настоящем сервере.
+    // Сжатие тратит токены отдельно от шагов. Форма кадров: `live/compaction.jsonl`.
     fn on_compaction_ended(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
         if let Some(tokens) = data.get("tokens").filter(|tokens| tokens.is_object()) {
             let model = data
@@ -728,7 +727,7 @@ impl Translator {
             tally.add(tokens);
         }
         let failed = (kind == "session.compaction.failed")
-            .then(|| RunFailure::from_error(data.get("error")).overflow);
+            .then(|| RunFailure::from_error(data.get("error")));
         vec![
             Self::phase(Phase::Generating, None),
             Translated::CompactionEnded {

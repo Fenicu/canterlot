@@ -69,6 +69,7 @@ const MCP_SETTLE: Duration = Duration::from_millis(250);
 /// Замер: 100 мс после записи мало, 200 мс хватает. Промах виден только на первом шаге.
 const INSTRUCTIONS_SETTLE: Duration = Duration::from_millis(400);
 const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
+const ABORTED: &str = "aborted";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER: usize = 4096;
@@ -991,18 +992,18 @@ impl OpenCodeAdapter {
         }
     }
 
-    fn error_block(&mut self, failure: &RunFailure, command: Uuid) {
+    fn error_block(&mut self, failure: &RunFailure, command: Option<Uuid>) {
         let mut text = format!("Ошибка OpenCode ({}): {}", failure.kind, failure.message);
         text.truncate(text.floor_char_boundary(ERROR_TEXT_BYTES));
         self.text_block(BlockKind::Error, command, text);
     }
 
-    fn text_block(&mut self, kind: BlockKind, command: Uuid, text: String) {
+    fn text_block(&mut self, kind: BlockKind, command: Option<Uuid>, text: String) {
         let block_id = Uuid::now_v7();
         self.events.push_back(AdapterEvent::BlockStarted {
             block_id,
             kind,
-            input_command_id: Some(command),
+            input_command_id: command,
             parent: None,
             agent: "orchestrator".into(),
             model: self.model.clone(),
@@ -1057,9 +1058,9 @@ impl OpenCodeAdapter {
                 self.stuck.reset();
                 return Vec::new();
             }
-            // Период сжатия снят: кадра отказа может и не быть, а карточка ждёт итог.
+            // Кадр отказа идёт раньше терминала, но мог выпасть в разрыв, а карточка ждёт итог.
             RunOutcome::Interrupted => {
-                self.on_compaction_ended(Some(false), true);
+                self.on_compaction_ended(Some(RunFailure::from_error(None)), true);
                 return Vec::new();
             }
         };
@@ -1090,16 +1091,25 @@ impl OpenCodeAdapter {
         follow
     }
 
-    fn on_compaction_ended(&mut self, failed: Option<bool>, manual: bool) {
-        self.overflowed |= failed == Some(true);
+    fn on_compaction_ended(&mut self, failed: Option<RunFailure>, manual: bool) {
+        self.overflowed |= failed.as_ref().is_some_and(|failure| failure.overflow);
         if failed.is_none() {
             self.stuck.reset();
         }
-        if manual && self.compaction.take().is_some() {
-            self.events.push_back(AdapterEvent::Compacted {
-                ok: failed.is_none(),
-            });
+        if !manual || self.compaction.take().is_none() {
+            return;
         }
+        // Период сжатия кончается успешным терминалом: блока ошибки хода не будет, а отмена
+        // владельцем ошибкой не считается.
+        if let Some(failure) = failed
+            .as_ref()
+            .filter(|failure| failure.kind != ABORTED && !failure.message.is_empty())
+        {
+            self.error_block(failure, self.delivery.adopted.or(self.delivery.last));
+        }
+        self.events.push_back(AdapterEvent::Compacted {
+            ok: failed.is_none(),
+        });
     }
 
     // Итог ручного сжатия мог выпасть в разрыв: сообщение сжатия лежит в проекции.
@@ -1107,14 +1117,18 @@ impl OpenCodeAdapter {
         let Some(id) = self.compaction.as_deref() else {
             return;
         };
-        let status = snapshot
+        let Some(message) = snapshot
             .messages
             .iter()
             .find(|message| message["id"].as_str() == Some(id))
-            .and_then(|message| message["status"].as_str());
-        match status {
+        else {
+            return;
+        };
+        match message["status"].as_str() {
             Some("completed") => self.on_compaction_ended(None, true),
-            Some("failed") => self.on_compaction_ended(Some(false), true),
+            Some("failed") => {
+                self.on_compaction_ended(Some(RunFailure::from_error(message.get("error"))), true)
+            }
             _ => {}
         }
     }
@@ -1131,7 +1145,7 @@ impl OpenCodeAdapter {
             return;
         };
         if let RunOutcome::Failed(failure) = &outcome {
-            self.error_block(failure, command);
+            self.error_block(failure, Some(command));
         }
         let interrupted = matches!(outcome, RunOutcome::Interrupted);
         // Конец чужого периода, а наш ввод ещё в очереди: его ход впереди, расход пойдёт к нему.
@@ -1183,7 +1197,7 @@ impl OpenCodeAdapter {
         if !commands.is_empty() {
             self.text_block(
                 BlockKind::Warning,
-                pending.command,
+                Some(pending.command),
                 shells::notice(&commands),
             );
         }
@@ -1546,23 +1560,7 @@ impl OpenCodeAdapter {
 
     // Команды старого исполнения хаб не примет: блок без привязки к вводу.
     fn resume_notice(&mut self, text: String) {
-        let block_id = Uuid::now_v7();
-        self.events.push_back(AdapterEvent::BlockStarted {
-            block_id,
-            kind: BlockKind::Warning,
-            input_command_id: None,
-            parent: None,
-            agent: "orchestrator".into(),
-            model: self.model.clone(),
-            tool_name: None,
-            summary: None,
-            approved_by: None,
-        });
-        self.events.push_back(AdapterEvent::BlockFinal {
-            block_id,
-            text,
-            summary: None,
-        });
+        self.text_block(BlockKind::Warning, None, text);
     }
 
     fn on_lookup(&mut self, found: bool) {

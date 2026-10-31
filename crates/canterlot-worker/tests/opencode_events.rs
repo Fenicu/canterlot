@@ -8,7 +8,7 @@ use canterlot_worker::adapter::{
     AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus,
     opencode::{
         VERIFIED_OPENAPI_SHA256, catalog,
-        events::{RunOutcome, Translated, Translator, block_id},
+        events::{RunFailure, RunOutcome, Translated, Translator, block_id},
         replay::capture_lines,
         version,
     },
@@ -1367,26 +1367,27 @@ fn compaction_is_context_maintenance_and_its_tokens_are_counted() {
     assert_eq!(usage[0].agent, "orchestrator");
 }
 
-// Придуманный кадр: в записях отказа сжатия нет, форма из схемы `SessionEvent.Compaction.Failed`,
-// настоящий кадр проверяет L2 `real_compaction_without_a_summary_is_reported`.
+// Форма кадра: `live/compaction.jsonl`, `live/invalid_request_stuck.jsonl`.
 fn compaction_failed(error_type: &str, message: &str) -> Value {
     json!({"type": "session.compaction.failed", "data": {
         "sessionID": "ses_root", "reason": "manual", "inputID": "msg_1",
-        "error": {"type": error_type, "message": message},
-        "tokens": {"input": 5, "output": 1, "reasoning": 0, "cache": {"read": 0, "write": 0}}}})
+        "error": {"type": error_type, "message": message}}})
 }
 
 #[test]
 fn failed_compaction_names_an_overflow_only_when_the_provider_said_so() {
     let mut translator = Translator::new("ses_root", HashMap::new());
     let plain = translator.feed(&compaction_failed(
-        "compaction.failed",
-        "Compaction produced no summary",
+        "compaction.unavailable",
+        "Nothing to compact yet",
     ));
     assert!(plain.iter().any(|item| matches!(
         item,
         Translated::CompactionEnded {
-            failed: Some(false),
+            failed: Some(RunFailure {
+                overflow: false,
+                ..
+            }),
             manual: true
         }
     )));
@@ -1397,7 +1398,7 @@ fn failed_compaction_names_an_overflow_only_when_the_provider_said_so() {
     assert!(overflow.iter().any(|item| matches!(
         item,
         Translated::CompactionEnded {
-            failed: Some(true),
+            failed: Some(RunFailure { overflow: true, .. }),
             ..
         }
     )));

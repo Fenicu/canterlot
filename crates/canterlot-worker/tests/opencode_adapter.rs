@@ -5425,7 +5425,8 @@ async fn server_refusal_of_compaction_is_reported_at_once() {
     bench.close(CloseMode::Force).await;
 }
 
-// Придуманный кадр: `session.compaction.failed` ручного сжатия.
+// Настоящая последовательность `live/invalid_request_stuck.jsonl`: отказ сжатия закрывает период
+// как успешный, блока ошибки хода нет, текст провайдера показывает только сжатие.
 #[tokio::test]
 async fn failed_manual_compaction_is_reported_and_the_session_stays() {
     let mut script = ready();
@@ -5447,10 +5448,13 @@ async fn failed_manual_compaction_is_reported_and_the_session_stays() {
                 "sessionID": session, "reason": "manual", "inputID": recorded}}),
             json!({"type": "session.compaction.failed", "data": {
                 "sessionID": session, "reason": "manual", "inputID": recorded,
-                "error": {"type": "compaction.failed", "message": "no summary"}}}),
-            json!({"type": "session.execution.failed", "data": {
-                "sessionID": session,
-                "error": {"type": "compaction.failed", "message": "no summary"}}}),
+                "error": {
+                    "type": "provider.invalid-request",
+                    "message": "Upstream request failed: Model is unavailable.",
+                    "status": 400,
+                    "response": {"body": "{\"error\":{\"type\":\"server_error\",\"message\":\"Upstream request failed: Model is unavailable.\"}}"},
+                }}}),
+            json!({"type": "session.execution.succeeded", "data": {"sessionID": session}}),
         ],
     });
     let mut bench = Bench::new(script);
@@ -5462,15 +5466,20 @@ async fn failed_manual_compaction_is_reported_and_the_session_stays() {
         bench.compact(Uuid::now_v7()).await,
         CompactOutcome::Accepted
     );
-    let events = bench
+    let mut events = bench
         .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
         .await;
     assert!(matches!(
         events.last(),
         Some(AdapterEvent::Compacted { ok: false })
     ));
-    let events = bench.until_finished(input.command_id).await;
-    assert_eq!(text_of(&events, "Error").len(), 1);
+    events.extend(bench.until_finished(input.command_id).await);
+    assert_eq!(
+        text_of(&events, "Error"),
+        [
+            "Ошибка OpenCode (provider.invalid-request): Upstream request failed: Model is unavailable."
+        ]
+    );
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -5552,8 +5561,8 @@ async fn children_get_their_rules_at_once() {
     bench.close(CloseMode::Graceful).await;
 }
 
-// Придуманный кадр: прерывание периода сжатия без `session.compaction.failed`. Карточка не
-// должна ждать итог вечно.
+// Настоящая запись `live/compaction.jsonl`: прерывание даёт отказ `aborted`, затем терминал.
+// Это решение владельца, а не ошибка: блока нет, карточка сообщает итог.
 #[tokio::test]
 async fn interrupted_compaction_is_reported_as_failed() {
     let mut script = ready();
@@ -5573,6 +5582,9 @@ async fn interrupted_compaction_is_reported_as_failed() {
             json!({"type": "session.execution.started", "data": {"sessionID": session}}),
             json!({"type": "session.compaction.started", "data": {
                 "sessionID": session, "reason": "manual", "inputID": recorded}}),
+            json!({"type": "session.compaction.failed", "data": {
+                "sessionID": session, "reason": "manual", "inputID": recorded,
+                "error": {"type": "aborted", "message": "Compaction cancelled"}}}),
             json!({"type": "session.execution.interrupted", "data": {
                 "sessionID": session, "reason": "user"}}),
         ],
@@ -5586,12 +5598,14 @@ async fn interrupted_compaction_is_reported_as_failed() {
         bench.compact(Uuid::now_v7()).await,
         CompactOutcome::Accepted
     );
-    let events = bench
+    let mut events = bench
         .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
         .await;
     assert!(matches!(
         events.last(),
         Some(AdapterEvent::Compacted { ok: false })
     ));
+    events.extend(bench.until_finished(input.command_id).await);
+    assert!(text_of(&events, "Error").is_empty());
     bench.close(CloseMode::Graceful).await;
 }
