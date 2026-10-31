@@ -930,7 +930,6 @@ export class ChatStore {
         ready: shot.ready !== false,
       }));
     }
-    block.lineCount = item.line_count ?? block.lineCount;
     block.truncated = item.content_truncated;
     block.contentBytes = item.content_bytes;
     if (
@@ -948,6 +947,8 @@ export class ChatStore {
           ? (item.summary ?? "")
           : item.content;
     }
+    // Счёт хаба идёт по всему тексту, а в истории лежит только его начало.
+    block.lineCount = item.line_count ?? block.lineCount;
     if (
       item.state === "final" ||
       item.state === "incomplete" ||

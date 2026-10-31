@@ -7,10 +7,12 @@
 
   let {
     block,
+    result = null,
     now,
     load
   }: {
     block: BlockModel;
+    result?: BlockModel | null;
     now: number;
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
@@ -73,7 +75,7 @@
   {#if open}
     <div class="fold">
       <div class="body">
-        <ToolOutput {block} {load} />
+        <ToolOutput block={result ?? block} {running} {load} />
       </div>
     </div>
   {/if}

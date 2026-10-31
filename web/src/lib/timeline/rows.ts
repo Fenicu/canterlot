@@ -16,12 +16,36 @@ export function dayStart(ts: number): number {
   return new Date(ts).setHours(0, 0, 0, 0);
 }
 
+export interface BlockLinks {
+  children(id: string): BlockModel[];
+  /** Результат вызова инструмента: вывод и конец работы лежат в нём. */
+  result(id: string): BlockModel | null;
+}
+
+export function blockLinks(entries: TimelineEntry[]): BlockLinks {
+  const children = new Map<string, BlockModel[]>();
+  for (const entry of entries) {
+    if (entry.kind !== "block") continue;
+    const block = entry.block;
+    if (!block.parentId) continue;
+    const list = children.get(block.parentId);
+    if (list) list.push(block);
+    else children.set(block.parentId, [block]);
+  }
+  return {
+    children: (id) => children.get(id) ?? [],
+    result: (id) =>
+      children.get(id)?.find((child) => child.kind === "tool_result") ?? null,
+  };
+}
+
 export function buildRows(
   entries: TimelineEntry[],
-  opts?: { laneRoot?: string; now?: number },
+  opts?: { laneRoot?: string; now?: number; links?: BlockLinks },
 ): Row[] {
+  const links = opts?.links ?? blockLinks(entries);
   const source = opts?.laneRoot
-    ? descendants(entries, opts.laneRoot)
+    ? descendants(entries, opts.laneRoot, links)
     : entries.filter(
         (entry) => entry.kind === "input" || entry.block.parentId === null,
       );
@@ -70,35 +94,28 @@ export function buildRows(
   return rows;
 }
 
-function descendants(entries: TimelineEntry[], root: string): TimelineEntry[] {
-  const children = new Map<string, string[]>();
-  for (const entry of entries) {
-    if (entry.kind !== "block" || !entry.block.parentId) continue;
-    const list = children.get(entry.block.parentId) ?? [];
-    list.push(entry.block.id);
-    children.set(entry.block.parentId, list);
-  }
+function descendants(
+  entries: TimelineEntry[],
+  root: string,
+  links: BlockLinks,
+): TimelineEntry[] {
   const keep = new Set<string>();
   const walk = (id: string): void => {
-    for (const child of children.get(id) ?? []) {
-      keep.add(child);
-      walk(child);
+    for (const child of links.children(id)) {
+      keep.add(child.id);
+      walk(child.id);
     }
   };
   walk(root);
+  // Результат вызова показывает строка самого вызова.
+  const folded = (block: BlockModel): boolean =>
+    block.kind === "tool_result" &&
+    block.parentId !== null &&
+    block.parentId !== root;
   return entries.filter(
-    (entry) => entry.kind === "block" && keep.has(entry.block.id),
+    (entry) =>
+      entry.kind === "block" &&
+      keep.has(entry.block.id) &&
+      !folded(entry.block),
   );
-}
-
-export function childBlocks(
-  entries: TimelineEntry[],
-  parentId: string,
-): BlockModel[] {
-  const found: BlockModel[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "block" && entry.block.parentId === parentId)
-      found.push(entry.block);
-  }
-  return found;
 }

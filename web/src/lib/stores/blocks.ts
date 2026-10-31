@@ -117,7 +117,7 @@ export class BlockModel {
   }
   set text(value: string) {
     this.#text.set(value);
-    this.lineCount = value.length === 0 ? 0 : value.split("\n").length;
+    this.lineCount = countLines(value);
   }
   get rev(): number {
     return this.#rev.get();
@@ -149,6 +149,13 @@ export class BlockModel {
   set media(value: BlockMedia[]) {
     this.#media.set(value);
   }
+}
+
+/** Как `str::lines` хаба: перевод строки в конце новой строки не открывает. */
+function countLines(value: string): number {
+  if (value.length === 0) return 0;
+  const breaks = value.split("\n").length;
+  return value.endsWith("\n") ? breaks - 1 : breaks;
 }
 
 function display(block: BlockModel): string {

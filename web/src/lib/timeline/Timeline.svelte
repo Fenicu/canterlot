@@ -8,7 +8,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { buildRows, dayStart, type Row } from '#lib/timeline/rows.js';
+  import { blockLinks, buildRows, dayStart, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
@@ -48,7 +48,8 @@
   const PIN_PX = 48;
 
   const today = $derived(dayStart(now));
-  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot }));
+  const links = $derived(blockLinks(chat.timeline.entries));
+  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot, links }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   let seenRows: string | null = null;
@@ -324,7 +325,7 @@
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
           <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
         {:else if row.kind === 'answer'}
-          <AnswerCard entries={row.entries} all={chat.timeline.entries} {harness} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard entries={row.entries} {links} {harness} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
       </div>
     {/each}

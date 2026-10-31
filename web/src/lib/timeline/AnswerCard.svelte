@@ -4,7 +4,7 @@
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
-  import { childBlocks } from '#lib/timeline/rows.js';
+  import type { BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
@@ -15,7 +15,7 @@
 
   let {
     entries,
-    all,
+    links,
     harness,
     conversationId,
     now,
@@ -23,7 +23,7 @@
     load
   }: {
     entries: TimelineEntry[];
-    all: TimelineEntry[];
+    links: BlockLinks;
     harness?: { title?: string; provider?: string } | null;
     conversationId: string;
     now: number;
@@ -52,9 +52,9 @@
   {/if}
   {#each shown as block (block.id)}
     {#if block.toolName === 'Agent'}
-      <SubagentRow call={block} nodes={childBlocks(all, block.id)} {conversationId} />
+      <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} {now} {load} />
+      <ToolBlock {block} result={links.result(block.id)} {now} {load} />
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}
