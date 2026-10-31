@@ -4,7 +4,7 @@
 //! копятся до конца строки.
 
 use serde_json::Value;
-use std::time::Duration;
+use std::{fmt, time::Duration};
 use tokio::sync::mpsc;
 
 /// Самый крупный законный кадр — картинка в результате инструмента: 20 МиБ в base64.
@@ -12,10 +12,20 @@ pub const MAX_FRAME_BYTES: usize = 64 * 1024 * 1024;
 /// Сервер шлёт пульс раз в 15 с: три пропуска значат зависшую связь.
 const SILENCE_LIMIT: Duration = Duration::from_secs(45);
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub enum Frame {
     Data(Vec<u8>),
     Oversized,
+}
+
+// Кадры несут текст разговора: в отладке только размер.
+impl fmt::Debug for Frame {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Data(bytes) => f.debug_tuple("Data").field(&bytes.len()).finish(),
+            Self::Oversized => f.write_str("Oversized"),
+        }
+    }
 }
 
 pub struct Parser {
@@ -101,7 +111,6 @@ impl Parser {
     }
 }
 
-#[derive(Debug)]
 pub enum StreamItem {
     Event(Value),
     /// Кадр не разобран; `required` — по байтам видно, что это конец периода работы.
@@ -110,6 +119,23 @@ pub enum StreamItem {
     },
     Oversized,
     Ended,
+}
+
+impl fmt::Debug for StreamItem {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Event(event) => f
+                .debug_struct("Event")
+                .field("type", &event.get("type"))
+                .finish_non_exhaustive(),
+            Self::Undecodable { required } => f
+                .debug_struct("Undecodable")
+                .field("required", required)
+                .finish(),
+            Self::Oversized => f.write_str("Oversized"),
+            Self::Ended => f.write_str("Ended"),
+        }
+    }
 }
 
 fn decode(frame: Frame) -> StreamItem {
@@ -204,6 +230,20 @@ mod tests {
         parser.push(&[b'y'; 64], &mut out);
         parser.push(b"\n\ndata: ok\n\n", &mut out);
         assert_eq!(out, vec![Frame::Oversized, Frame::Data(b"ok".to_vec())]);
+    }
+
+    #[test]
+    fn debug_shows_no_conversation_text() {
+        let frame = Frame::Data("секрет".as_bytes().to_vec());
+        assert!(!format!("{frame:?}").contains("секрет"));
+        let item = decode(Frame::Data(
+            r#"{"type":"session.text.delta","data":{"delta":"секрет"}}"#
+                .as_bytes()
+                .to_vec(),
+        ));
+        let shown = format!("{item:?}");
+        assert!(shown.contains("session.text.delta"), "{shown}");
+        assert!(!shown.contains("секрет"), "{shown}");
     }
 
     #[test]

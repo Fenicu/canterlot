@@ -239,6 +239,17 @@ impl Script {
         self
     }
 
+    /// `GET /api/agent` из записи запуска: пустой список, затем заполненный.
+    pub fn with_recorded_agents(mut self) -> Self {
+        let agents = Self::from_capture("start_stream", None)
+            .route("GET", "/api/agent")
+            .expect("recorded /api/agent")
+            .replies
+            .clone();
+        self.set_route("GET", "/api/agent", agents);
+        self
+    }
+
     pub fn push_route(&mut self, method: &str, path: &str, reply: Reply) {
         match self
             .routes

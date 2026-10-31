@@ -437,3 +437,33 @@ async fn start_execution_to_a_finished_turn() {
     env.stop().await;
     env.fake().wait_gone().await;
 }
+
+// Инструменты по боевому пути: блоки, статус выхода и пометка в журнале.
+#[tokio::test]
+async fn tools_reach_the_journal_with_exit_status_and_mark() {
+    let script = Script::from_capture("tools", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("owner").await;
+    env.wait_running().await;
+    let input = env.deliver("run tools").await;
+    env.wait_finished(input).await;
+    let tools: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockStarted(f) if f.kind == "tool_call" => Some(f),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(tools.len(), 7);
+    assert!(tools.iter().all(|tool| tool.approved_by == "cli_policy"));
+    assert!(env.bodies.iter().any(|body| matches!(
+        body,
+        Body::BlockFinal(f) if f.summary == "shell: exit 3, exit 3"
+    )));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}

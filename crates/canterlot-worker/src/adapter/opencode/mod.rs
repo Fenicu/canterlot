@@ -15,7 +15,7 @@ pub mod sse;
 pub mod version;
 
 use self::{
-    events::{RunFailure, RunOutcome, Translated, Translator},
+    events::{PendingRequest, RequestKind, RunFailure, RunOutcome, Translated, Translator},
     http::{Http, HttpError},
     mcp::McpState,
     permissions::PermissionMode,
@@ -29,6 +29,7 @@ use crate::{
         Proof, SettingsChange, StartSpec, Started, Support, Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
+        held_tool::HeldTools,
     },
     config::OpenCodeConfig,
     containment::Containment,
@@ -37,13 +38,13 @@ use canterlot_proto::requests::DecisionPayload;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::OsString,
     path::{Path, PathBuf},
     process::ExitStatus,
     time::Duration,
 };
-use tokio::{sync::mpsc, time::Instant};
+use tokio::{sync::mpsc, task::JoinSet, time::Instant};
 use uuid::Uuid;
 
 /// Строка готовности и ожидание MCP: на проверенной версии доли секунды.
@@ -60,6 +61,9 @@ const STREAM_BUFFER: usize = 4096;
 const EXIT_DRAIN: Duration = Duration::from_millis(500);
 const SESSION_TITLE: &str = "canterlot";
 const ERROR_TEXT_BYTES: usize = 4096;
+/// Текст отказа уходит модели: без него сервер оборвал бы весь ход.
+const REFUSAL_MESSAGE: &str =
+    "This request cannot be answered in this session. Continue without it.";
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
 const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
@@ -214,6 +218,10 @@ pub struct OpenCodeAdapter {
     translator: Option<Translator>,
     delivery: Delivery,
     lookup: Option<Lookup>,
+    held: HeldTools,
+    /// Вызовы, по которым был запрос: пометки CLI у них нет.
+    asked: HashSet<String>,
+    refusals: JoinSet<()>,
     session: String,
     mode: PermissionMode,
     model: String,
@@ -221,6 +229,8 @@ pub struct OpenCodeAdapter {
     instructions: InstructionSpec,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
+    /// Поток потерян, сервер получил SIGTERM: срок до SIGKILL.
+    kill_at: Option<Instant>,
     exited: bool,
 }
 
@@ -242,6 +252,9 @@ impl OpenCodeAdapter {
             translator: None,
             delivery: Delivery::default(),
             lookup: None,
+            held: HeldTools::default(),
+            asked: HashSet::new(),
+            refusals: JoinSet::new(),
             session: String::new(),
             mode: PermissionMode::Owner,
             model: String::new(),
@@ -254,6 +267,7 @@ impl OpenCodeAdapter {
                 title: String::new(),
             },
             exit: None,
+            kill_at: None,
             exited: false,
         }
     }
@@ -623,6 +637,8 @@ impl OpenCodeAdapter {
     }
 
     fn on_run_ended(&mut self, outcome: RunOutcome) {
+        self.held.release_all(&mut self.events);
+        self.asked.clear();
         let Some(command) = self.delivery.active.take() else {
             // Запуски без ввода разбирает свой срез: здесь только готовность к вводу.
             self.awaiting_input();
@@ -661,9 +677,61 @@ impl OpenCodeAdapter {
         });
     }
 
+    /// Пометка «Разрешено правилами CLI»: вызов прошёл без запроса при режиме не `bypass`.
+    fn cli_mark(&self, item: &str) -> Option<&'static str> {
+        (self.mode != PermissionMode::Bypass && !self.asked.contains(item)).then_some("cli_policy")
+    }
+
+    fn release_tool(&mut self, item: &str) {
+        let mark = self.cli_mark(item);
+        self.held.release(item, mark, &mut self.events);
+    }
+
+    // Карточек пока нет: без ответа запрос держал бы ход вечно, поэтому отказ сразу и
+    // всегда с сообщением. `always` не отправляется: он пишет правило на весь проект.
+    fn refuse(&mut self, request: PendingRequest) {
+        if let Some(item) = &request.item {
+            self.asked.insert(item.clone());
+            self.held.release(item, None, &mut self.events);
+        }
+        self.diagnostic("opencode_request_refused", false);
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        while self.refusals.try_join_next().is_some() {}
+        self.refusals.spawn(async move {
+            let (session, id) = (&request.session, &request.id);
+            let _ = match request.kind {
+                RequestKind::Permission => {
+                    let path = format!("/api/session/{session}/permission/{id}/reply");
+                    let body = json!({"decision": "reject", "message": REFUSAL_MESSAGE});
+                    http.post(&path, &body, REQUEST_WAIT).await
+                }
+                RequestKind::Form => {
+                    let path = format!("/api/session/{session}/form/{id}");
+                    http.delete(&path, &[("message", REFUSAL_MESSAGE)], REQUEST_WAIT)
+                        .await
+                }
+            };
+        });
+    }
+
     fn on_translated(&mut self, item: Translated) {
         match item {
-            Translated::Event(event) => self.events.push_back(event),
+            Translated::Event(event) => {
+                if let Some(event) = self.held.capture(event) {
+                    self.events.push_back(event);
+                }
+            }
+            Translated::ToolCall { item, block, event } => {
+                if self.mode == PermissionMode::Bypass {
+                    self.events.push_back(event);
+                } else {
+                    self.held.hold(item, block, event);
+                }
+            }
+            Translated::ToolRunning(item) | Translated::ToolDone(item) => self.release_tool(&item),
+            Translated::Request(request) => self.refuse(request),
             Translated::InboxSeen(id) => {
                 if let Some(command) = self.delivery.unconfirmed
                     && input::message_id(command) == id
@@ -811,8 +879,10 @@ impl OpenCodeAdapter {
             return;
         }
         self.diagnostic("event_stream_lost", false);
-        if let Some(proc) = self.proc.as_ref() {
+        if let Some(proc) = self.proc.as_mut() {
+            proc.close_stdin();
             proc.signal(rustix::process::Signal::TERM);
+            self.kill_at = Some(Instant::now() + TERM_GRACE);
         }
     }
 
@@ -857,11 +927,22 @@ impl OpenCodeAdapter {
             }
         };
         let lookup = &mut self.lookup;
+        let kill_at = self.kill_at;
+        let escalate = async {
+            match kill_at {
+                Some(at) => tokio::time::sleep_until(at).await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             biased;
             item = item => self.on_stream(item),
             event = broker.next() => self.on_broker(event),
             found = lookup_done(lookup) => self.on_lookup(found),
+            () = escalate => {
+                self.kill_at = None;
+                proc.signal(rustix::process::Signal::KILL);
+            }
             status = proc.wait() => {
                 if self.stream.is_none() {
                     self.finish_exit(status);

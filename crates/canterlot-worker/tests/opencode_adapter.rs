@@ -179,13 +179,109 @@ fn two_turns() -> Script {
         .map(|(index, _)| index)
         .unwrap();
     script.steps.truncate(third);
-    let agents = Script::from_capture("start_stream", None)
-        .route("GET", "/api/agent")
-        .unwrap()
-        .replies
-        .clone();
-    script.set_route("GET", "/api/agent", agents);
+    script.with_recorded_agents()
+}
+
+fn tools() -> Script {
+    Script::from_capture("tools", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+struct Call {
+    tool: String,
+    approved_by: Option<String>,
+}
+
+fn calls(events: &[AdapterEvent]) -> Vec<Call> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolCall,
+                tool_name,
+                approved_by,
+                ..
+            } => Some(Call {
+                tool: tool_name.clone().unwrap_or_default(),
+                approved_by: approved_by.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn session_of(script: &Script) -> String {
     script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()?
+                .pointer("/data/id")?
+                .as_str()
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap()
+}
+
+/// Сценарий с записанным началом вызова: шаг, вход и запрос разрешения.
+fn tool_prefix(script: &Script) -> Vec<Value> {
+    let events: Vec<Value> = script
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    let position = events
+        .iter()
+        .position(|event| event["type"] == "session.tool.called")
+        .unwrap();
+    events[..=position].to_vec()
+}
+
+fn tool_events(script: &Script, kinds: &[&str]) -> Vec<Value> {
+    script
+        .steps
+        .iter()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events.clone()),
+            _ => None,
+        })
+        .flatten()
+        .filter(|event| kinds.contains(&event["type"].as_str().unwrap_or_default()))
+        .collect()
+}
+
+// Шаги записи до первого `tool.called`, дальше события подаёт тест.
+fn replace_events_after_prompt(script: &mut Script, events: Vec<Step>) {
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    script.steps.extend(events);
+}
+
+fn finish(session: &str) -> Value {
+    json!({"type": "session.execution.succeeded", "data": {"sessionID": session}})
+}
+
+fn reply_204() -> Reply {
+    Reply {
+        status: 204,
+        ..Default::default()
+    }
 }
 
 fn text_of(events: &[AdapterEvent], kind: &str) -> Vec<String> {
@@ -1361,6 +1457,36 @@ async fn lost_stream_stops_the_server_instead_of_waiting_forever() {
 }
 
 #[tokio::test]
+async fn lost_stream_escalates_when_the_server_ignores_the_signal() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::DropSse);
+    script.ignore_eof = true;
+    script.ignore_term = true;
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    loop {
+        if let AdapterEvent::ProcessExited { signal, .. } = bench.event().await {
+            assert_eq!(signal, Some(9));
+            break;
+        }
+    }
+    bench.close(CloseMode::Graceful).await;
+    bench.fake.wait_gone().await;
+}
+
+#[tokio::test]
 async fn server_death_during_a_turn_keeps_the_last_events() {
     let mut script = ready();
     script.steps.push(Step::Stall { ms: 100 });
@@ -1421,5 +1547,300 @@ async fn debug_of_events_hides_the_conversation() {
     let shown = format!("{events:?}");
     assert!(!shown.contains("Hello"), "{shown}");
     assert!(!shown.contains("think more"), "{shown}");
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn bypass_shows_tools_without_a_mark() {
+    let mut bench = Bench::new(tools());
+    bench.start_ok().await;
+    let input = bench.input("run tools");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let calls = calls(&events);
+    assert_eq!(calls.len(), 7);
+    assert!(calls.iter().all(|call| call.approved_by.is_none()));
+    assert_eq!(text_of(&events, "ToolResult").len(), 7);
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn owner_mode_marks_tools_that_ran_without_a_prompt() {
+    let mut bench = Bench::new(tools());
+    bench.spec.permission_mode = "owner".into();
+    bench.start_ok().await;
+    let input = bench.input("run tools");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let calls = calls(&events);
+    assert_eq!(calls.len(), 7);
+    for call in &calls {
+        assert_eq!(
+            call.approved_by.as_deref(),
+            Some("cli_policy"),
+            "{}",
+            call.tool
+        );
+    }
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запрос разрешения снимает удержание без пометки: решал не CLI.
+#[tokio::test]
+async fn tool_with_a_permission_prompt_gets_no_mark() {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let mut prefix = tool_prefix(&capture);
+    prefix.extend(
+        tool_events(&capture, &["permission.asked"])
+            .into_iter()
+            .take(1),
+    );
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: prefix },
+            Step::Stall { ms: 200 },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    let request = tool_events(&capture, &["permission.asked"])[0]["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/permission/{request}/reply"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let calls = calls(&events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].approved_by, None);
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "opencode_request_refused",
+            required: false,
+            ..
+        }
+    )));
+    // Отказ всегда с сообщением: без него ход кончается, а `always` пишет правило навсегда.
+    let requests = bench.fake.requests();
+    let reply = find(&requests, "POST", "/reply").expect("permission reply");
+    assert_eq!(reply["body"]["decision"], "reject");
+    assert!(
+        reply["body"]["message"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Команда пошла без запроса: вызов виден сразу, с пометкой, а не после конца команды.
+#[tokio::test]
+async fn progress_releases_a_long_tool_before_it_ends() {
+    let capture = Script::from_capture("tools", None);
+    let session = session_of(&capture);
+    let prefix = tool_prefix(&capture);
+    let progress = tool_events(&capture, &["session.tool.progress"]);
+    let mut script = tools();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: prefix },
+            Step::Emit {
+                events: progress[..1].to_vec(),
+            },
+            Step::Stall { ms: 3000 },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "owner".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let started = std::time::Instant::now();
+    loop {
+        if let AdapterEvent::BlockStarted {
+            kind: BlockKind::ToolCall,
+            approved_by,
+            ..
+        } = bench.event().await
+        {
+            assert_eq!(approved_by.as_deref(), Some("cli_policy"));
+            break;
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(2));
+    bench.close(CloseMode::Force).await;
+}
+
+// Ход кончился без решения: вызов не теряется и остаётся без пометки.
+#[tokio::test]
+async fn end_of_a_turn_releases_held_tools_without_a_mark() {
+    let capture = Script::from_capture("tools", None);
+    let session = session_of(&capture);
+    let prefix = tool_prefix(&capture);
+    let mut script = tools();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: prefix },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "owner".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    let calls = calls(&events);
+    assert_eq!(calls.len(), 1);
+    assert_eq!(calls[0].approved_by, None);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Без ответа ход висел бы вечно: форма снимается с сообщением, ход продолжается.
+#[tokio::test]
+async fn question_form_is_cancelled_with_a_message_until_its_slice() {
+    let capture = Script::from_capture("question", None);
+    let form = tool_events(&capture, &["form.created"]).remove(0);
+    let session = form["data"]["form"]["sessionID"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let id = form["data"]["form"]["id"].as_str().unwrap().to_owned();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: vec![form] },
+            Step::Stall { ms: 200 },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    script.set_route(
+        "DELETE",
+        &format!("/api/session/{session}/form/{id}"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    let cancel = find(&requests, "DELETE", &id).expect("form cancel");
+    assert!(cancel["query"].as_str().unwrap().contains("message="));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запрос потомка отвечается на его путь.
+#[tokio::test]
+async fn request_of_a_child_session_goes_to_the_child_path() {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let child = "ses_child00000000000000000000000".to_owned();
+    let mut asked = tool_events(&capture, &["permission.asked"]).remove(0);
+    asked["data"]["sessionID"] = child.clone().into();
+    let request = asked["data"]["id"].as_str().unwrap().to_owned();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit {
+                events: vec![
+                    json!({"type": "session.created",
+                        "data": {"sessionID": child, "parentID": session}}),
+                    asked,
+                ],
+            },
+            Step::Stall { ms: 200 },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{child}/permission/{request}/reply"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    assert!(
+        find(
+            &requests,
+            "POST",
+            &format!("{child}/permission/{request}/reply")
+        )
+        .is_some()
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn refused_request_outside_our_sessions_is_ignored() {
+    let capture = Script::from_capture("permissions", None);
+    let session = session_of(&capture);
+    let mut asked = tool_events(&capture, &["permission.asked"]).remove(0);
+    asked["data"]["sessionID"] = "ses_stranger".into();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit {
+                events: vec![asked],
+            },
+            Step::Emit {
+                events: vec![finish(&session)],
+            },
+        ],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert!(find(&bench.fake.requests(), "POST", "/reply").is_none());
     bench.close(CloseMode::Graceful).await;
 }

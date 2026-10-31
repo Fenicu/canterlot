@@ -11,19 +11,19 @@ use uuid::Uuid;
 
 const MAIN_AGENT: &str = "orchestrator";
 const MAX_UNKNOWN_TYPES: usize = 64;
+const MAX_TYPE_CHARS: usize = 64;
+const SUMMARY_BYTES: usize = 240;
 const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c04e_91f7);
 
 // Служебные события и то, что разбирают следующие срезы адаптера.
 const KNOWN: &[&str] = &[
     "agent.updated",
     "form.cancelled",
-    "form.created",
     "form.replied",
     "integration.updated",
     "mcp.resources.changed",
     "mcp.status.changed",
     "mcp.tools.changed",
-    "permission.asked",
     "permission.replied",
     "plugin.updated",
     "project.updated",
@@ -44,12 +44,7 @@ const KNOWN: &[&str] = &[
     "session.retry.scheduled",
     "session.step.streamed",
     "session.synthetic",
-    "session.tool.called",
-    "session.tool.failed",
     "session.tool.input.ended",
-    "session.tool.input.started",
-    "session.tool.progress",
-    "session.tool.success",
     "session.usage.updated",
     "shell.created",
     "shell.deleted",
@@ -84,12 +79,37 @@ pub enum RunOutcome {
     Interrupted,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestKind {
+    Permission,
+    Form,
+}
+
+/// Запрос сервера. Ответ идёт на путь его сессии: у потомка она своя.
+#[derive(Debug)]
+pub struct PendingRequest {
+    pub kind: RequestKind,
+    pub id: String,
+    pub session: String,
+    pub item: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum Translated {
     Event(AdapterEvent),
     /// Ввод с этим идентификатором записан сервером.
     InboxSeen(String),
     RunEnded(RunOutcome),
+    /// Начало вызова: адаптер решает, ждать ли пометку «Разрешено правилами CLI».
+    ToolCall {
+        item: String,
+        block: Uuid,
+        event: AdapterEvent,
+    },
+    /// Инструмент уже работает: запроса разрешения по нему больше не будет.
+    ToolRunning(String),
+    ToolDone(String),
+    Request(PendingRequest),
 }
 
 #[derive(Clone, Copy)]
@@ -114,6 +134,14 @@ impl TextKind {
     }
 }
 
+/// Имя есть только у `session.tool.input.started`, вход — у `session.tool.called`.
+struct ToolState {
+    name: String,
+    block: Uuid,
+    input: Value,
+    open: bool,
+}
+
 #[derive(Default)]
 struct Tally {
     input: u64,
@@ -130,6 +158,8 @@ pub struct Translator {
     steps: HashMap<String, String>,
     model: String,
     open: HashSet<Uuid>,
+    /// `id` вызова уникален только в шаге, поэтому ключ — пара с сообщением.
+    tools: HashMap<String, ToolState>,
     usage: BTreeMap<String, Tally>,
     context_tokens: u64,
     windows: HashMap<String, u64>,
@@ -144,6 +174,50 @@ fn model_label(model: &Value) -> Option<String> {
     let provider = model.get("providerID")?.as_str()?;
     let id = model.get("id")?.as_str()?;
     Some(format!("{provider}/{id}"))
+}
+
+pub fn tool_key(message: &str, id: &str) -> String {
+    format!("{message}/{id}")
+}
+
+fn tool_summary(name: &str, input: &Value) -> String {
+    let argument = [
+        "command",
+        "path",
+        "filePath",
+        "pattern",
+        "query",
+        "url",
+        "description",
+    ]
+    .iter()
+    .find_map(|key| input.get(key).and_then(Value::as_str));
+    let mut summary = match argument {
+        Some(argument) if !argument.is_empty() => format!("{name}: {argument}"),
+        _ => name.to_owned(),
+    };
+    summary.truncate(summary.floor_char_boundary(SUMMARY_BYTES));
+    summary
+}
+
+// Текст вызова: команда как есть, остальное сырым входом.
+fn call_text(input: &Value) -> String {
+    match input.get("command").and_then(Value::as_str) {
+        Some(command) => command.to_owned(),
+        None if input.is_null() => String::new(),
+        None => input.to_string(),
+    }
+}
+
+// Картинки из результата разбирает срез вложений.
+fn content_text(data: &Value) -> String {
+    data.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|part| part.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn ordinal(data: &Value) -> String {
@@ -162,6 +236,7 @@ impl Translator {
             steps: HashMap::new(),
             model: String::new(),
             open: HashSet::new(),
+            tools: HashMap::new(),
             usage: BTreeMap::new(),
             context_tokens: 0,
             windows,
@@ -184,6 +259,7 @@ impl Translator {
         self.command = None;
         self.steps.clear();
         self.open.clear();
+        self.tools.clear();
         let usage = std::mem::take(&mut self.usage)
             .into_iter()
             .map(|(model, tally)| ModelUsage {
@@ -212,6 +288,12 @@ impl Translator {
         if kind == "session.created" {
             self.on_created(data);
             return Vec::new();
+        }
+        if kind == "permission.asked" {
+            return self.on_permission(data);
+        }
+        if kind == "form.created" {
+            return self.on_form(data);
         }
         let session = data.get("sessionID").and_then(Value::as_str);
         let terminal = kind.starts_with("session.execution.");
@@ -255,6 +337,11 @@ impl Translator {
             "session.reasoning.started" => self.on_started(TextKind::Reasoning, data),
             "session.reasoning.delta" => self.on_delta(TextKind::Reasoning, data),
             "session.reasoning.ended" => self.on_ended(TextKind::Reasoning, data),
+            "session.tool.input.started" => self.on_tool_declared(data),
+            "session.tool.called" => self.on_tool_called(data),
+            "session.tool.progress" => self.on_tool_progress(data),
+            "session.tool.success" => self.on_tool_success(data),
+            "session.tool.failed" => self.on_tool_failed(data),
             _ if KNOWN.contains(&kind) => Vec::new(),
             _ if terminal => vec![Self::diagnostic("unknown_event", kind, true)],
             _ => self.on_unknown(kind),
@@ -270,10 +357,11 @@ impl Translator {
     }
 
     fn on_unknown(&mut self, kind: &str) -> Vec<Translated> {
-        if self.unknown.len() >= MAX_UNKNOWN_TYPES || !self.unknown.insert(kind.to_owned()) {
+        let name: String = kind.chars().take(MAX_TYPE_CHARS).collect();
+        if self.unknown.len() >= MAX_UNKNOWN_TYPES || !self.unknown.insert(name.clone()) {
             return Vec::new();
         }
-        vec![Self::diagnostic("unknown_event", kind, false)]
+        vec![Self::diagnostic("unknown_event", &name, false)]
     }
 
     fn on_created(&mut self, data: &Value) {
@@ -317,6 +405,187 @@ impl Translator {
         tally.cache_write += count("/cache/write");
         self.context_tokens = count("/input") + count("/cache/read") + count("/cache/write");
         Vec::new()
+    }
+
+    fn on_permission(&mut self, data: &Value) -> Vec<Translated> {
+        let session = string_field(data, "sessionID");
+        if !self.owns(session) {
+            return Vec::new();
+        }
+        let item = data.get("source").map(|source| {
+            tool_key(
+                string_field(source, "messageID"),
+                string_field(source, "id"),
+            )
+        });
+        vec![Translated::Request(PendingRequest {
+            kind: RequestKind::Permission,
+            id: string_field(data, "id").to_owned(),
+            session: session.to_owned(),
+            item,
+        })]
+    }
+
+    fn on_form(&mut self, data: &Value) -> Vec<Translated> {
+        let empty = Value::Null;
+        let form = data.get("form").unwrap_or(&empty);
+        let session = string_field(form, "sessionID");
+        if !self.owns(session) {
+            return Vec::new();
+        }
+        let item = form
+            .pointer("/metadata/tool")
+            .map(|tool| tool_key(string_field(tool, "messageID"), string_field(tool, "id")));
+        vec![Translated::Request(PendingRequest {
+            kind: RequestKind::Form,
+            id: string_field(form, "id").to_owned(),
+            session: session.to_owned(),
+            item,
+        })]
+    }
+
+    fn tool_of(&mut self, data: &Value) -> (String, &mut ToolState) {
+        let message = string_field(data, "assistantMessageID");
+        let id = string_field(data, "id");
+        let key = tool_key(message, id);
+        let block = block_id(&self.root, message, "tool", id);
+        let state = self.tools.entry(key.clone()).or_insert_with(|| ToolState {
+            name: "tool".to_owned(),
+            block,
+            input: Value::Null,
+            open: false,
+        });
+        (key, state)
+    }
+
+    fn on_tool_declared(&mut self, data: &Value) -> Vec<Translated> {
+        let (_, state) = self.tool_of(data);
+        if let Some(name) = data.get("name").and_then(Value::as_str) {
+            state.name = name.to_owned();
+        }
+        Vec::new()
+    }
+
+    // Начало блока ждёт входа: сводка без него пуста.
+    fn open_tool(&mut self, data: &Value, out: &mut Vec<Translated>) {
+        let model = self
+            .steps
+            .get(string_field(data, "assistantMessageID"))
+            .unwrap_or(&self.model)
+            .clone();
+        let command = self.command;
+        let (item, state) = self.tool_of(data);
+        if std::mem::replace(&mut state.open, true) {
+            return;
+        }
+        let block = state.block;
+        let event = AdapterEvent::BlockStarted {
+            block_id: block,
+            kind: BlockKind::ToolCall,
+            input_command_id: command,
+            parent: None,
+            agent: MAIN_AGENT.into(),
+            model,
+            tool_name: Some(state.name.clone()),
+            summary: Some(tool_summary(&state.name, &state.input)),
+            approved_by: None,
+        };
+        out.push(Translated::ToolCall { item, block, event });
+    }
+
+    fn on_tool_called(&mut self, data: &Value) -> Vec<Translated> {
+        let (_, state) = self.tool_of(data);
+        state.input = data.get("input").cloned().unwrap_or(Value::Null);
+        let (name, summary) = (state.name.clone(), tool_summary(&state.name, &state.input));
+        let mut out = Vec::new();
+        self.open_tool(data, &mut out);
+        out.push(Translated::Event(AdapterEvent::Phase {
+            phase: Phase::RunningTool,
+            tool_name: Some(name),
+            summary: Some(summary),
+        }));
+        out
+    }
+
+    fn on_tool_progress(&mut self, data: &Value) -> Vec<Translated> {
+        let (item, _) = self.tool_of(data);
+        vec![Translated::ToolRunning(item)]
+    }
+
+    fn finish_tool(&mut self, data: &Value, text: String, status: &str) -> Vec<Translated> {
+        let mut out = Vec::new();
+        self.open_tool(data, &mut out);
+        let model = self
+            .steps
+            .get(string_field(data, "assistantMessageID"))
+            .unwrap_or(&self.model)
+            .clone();
+        let message = string_field(data, "assistantMessageID");
+        let id = string_field(data, "id");
+        let item = tool_key(message, id);
+        let result = block_id(&self.root, message, "tool_result", id);
+        let Some(state) = self.tools.remove(&item) else {
+            return out;
+        };
+        out.push(Translated::ToolDone(item));
+        out.push(Translated::Event(AdapterEvent::BlockStarted {
+            block_id: result,
+            kind: BlockKind::ToolResult,
+            input_command_id: self.command,
+            parent: Some(state.block),
+            agent: MAIN_AGENT.into(),
+            model,
+            tool_name: None,
+            summary: None,
+            approved_by: None,
+        }));
+        out.push(Translated::Event(AdapterEvent::BlockFinal {
+            block_id: result,
+            text,
+            summary: None,
+        }));
+        let mut summary = tool_summary(&state.name, &state.input);
+        summary.push_str(", ");
+        summary.push_str(status);
+        out.push(Translated::Event(AdapterEvent::BlockFinal {
+            block_id: state.block,
+            text: call_text(&state.input),
+            summary: Some(summary),
+        }));
+        out.push(Translated::Event(AdapterEvent::Phase {
+            phase: Phase::Generating,
+            tool_name: None,
+            summary: None,
+        }));
+        out
+    }
+
+    // Упавшая команда приходит как `success` с `metadata.exit`.
+    fn on_tool_success(&mut self, data: &Value) -> Vec<Translated> {
+        let status = match data.pointer("/metadata/exit").and_then(Value::as_i64) {
+            Some(code) => format!("exit {code}"),
+            None => "completed".to_owned(),
+        };
+        self.finish_tool(data, content_text(data), &status)
+    }
+
+    fn on_tool_failed(&mut self, data: &Value) -> Vec<Translated> {
+        let status = match data.pointer("/error/type").and_then(Value::as_str) {
+            Some("permission.rejected") => "declined",
+            Some("aborted") => "interrupted",
+            _ => "failed",
+        };
+        let message = data
+            .pointer("/error/message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let content = content_text(data);
+        let text = if content.is_empty() {
+            message.to_owned()
+        } else {
+            format!("{content}\n{message}")
+        };
+        self.finish_tool(data, text, status)
     }
 
     fn id_of(&self, kind: TextKind, data: &Value) -> Uuid {

@@ -395,3 +395,268 @@ fn context_windows_come_from_the_recorded_catalog() {
     assert!(windows.keys().all(|model| model.contains('/')));
     assert!(windows.values().all(|window| *window > 0));
 }
+
+struct ToolView {
+    name: String,
+    summary: String,
+    call: Uuid,
+    result_text: Option<String>,
+    final_summary: Option<String>,
+}
+
+fn tools_of(translated: Vec<Translated>) -> Vec<ToolView> {
+    let events: Vec<AdapterEvent> = translated
+        .into_iter()
+        .filter_map(|item| match item {
+            Translated::ToolCall { event, .. } | Translated::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    let mut tools = Vec::new();
+    for event in &events {
+        let AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::ToolCall,
+            tool_name,
+            summary,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        let result = events.iter().find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id: result,
+                kind: BlockKind::ToolResult,
+                parent,
+                ..
+            } if *parent == Some(*block_id) => Some(*result),
+            _ => None,
+        });
+        let final_of = |wanted: Uuid| {
+            events.iter().find_map(|event| match event {
+                AdapterEvent::BlockFinal {
+                    block_id,
+                    text,
+                    summary,
+                } if *block_id == wanted => Some((text.clone(), summary.clone())),
+                _ => None,
+            })
+        };
+        tools.push(ToolView {
+            name: tool_name.clone().unwrap_or_default(),
+            summary: summary.clone().unwrap_or_default(),
+            call: *block_id,
+            result_text: result.and_then(final_of).map(|(text, _)| text),
+            final_summary: final_of(*block_id).and_then(|(_, summary)| summary),
+        });
+    }
+    tools
+}
+
+#[test]
+fn recorded_tools_pair_with_their_results() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let tools = tools_of(feed_all(&mut translator, &events));
+    let names: Vec<_> = tools.iter().map(|tool| tool.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["shell", "read", "shell", "read", "write", "edit", "shell"]
+    );
+    assert_eq!(tools[0].summary, "shell: echo hi; echo err >&2");
+    assert_eq!(tools[0].result_text.as_deref(), Some("hi\nerr\n"));
+    assert_eq!(tools[1].summary, "read: note.txt");
+    assert!(tools[1].result_text.as_deref().unwrap().contains("alpha"));
+    assert!(tools.iter().all(|tool| tool.result_text.is_some()));
+    assert!(tools.iter().all(|tool| !tool.call.is_nil()));
+}
+
+// `success` с ненулевым выходом для показа — упавшая команда.
+#[test]
+fn shell_exit_status_reaches_the_summary() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let tools = tools_of(feed_all(&mut translator, &events));
+    assert_eq!(
+        tools[0].final_summary.as_deref(),
+        Some("shell: echo hi; echo err >&2, exit 0")
+    );
+    assert_eq!(
+        tools[2].final_summary.as_deref(),
+        Some("shell: exit 3, exit 3")
+    );
+    assert_eq!(
+        tools[1].final_summary.as_deref(),
+        Some("read: note.txt, completed")
+    );
+}
+
+// Сосед завершился раньше первого вызова шага: связь идёт по паре (сообщение, id).
+#[test]
+fn parallel_failure_before_its_sibling_keeps_each_result_in_place() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let tools = tools_of(feed_all(&mut translator, &events));
+    assert_eq!(
+        tools[3].final_summary.as_deref(),
+        Some("read: missing.txt, failed")
+    );
+    assert_eq!(
+        tools[3].result_text.as_deref(),
+        Some("File not found: missing.txt")
+    );
+    assert!(
+        tools[2]
+            .result_text
+            .as_deref()
+            .unwrap()
+            .contains("Exited with code 3")
+    );
+}
+
+#[test]
+fn rejection_and_interruption_are_named() {
+    let translated = |name: &str| {
+        let events = stream(name);
+        let session = events
+            .iter()
+            .find(|event| event["type"] == "session.tool.failed")
+            .and_then(|event| event["data"]["sessionID"].as_str())
+            .unwrap()
+            .to_owned();
+        let mut translator = Translator::new(&session, HashMap::new());
+        translator.begin_run(Uuid::now_v7());
+        tools_of(feed_all(&mut translator, &events))
+    };
+    let summaries: Vec<_> = translated("permissions")
+        .into_iter()
+        .filter_map(|tool| tool.final_summary)
+        .collect();
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.ends_with(", declined")),
+        "{summaries:?}"
+    );
+    let summaries: Vec<_> = translated("interrupt")
+        .into_iter()
+        .filter_map(|tool| tool.final_summary)
+        .collect();
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.ends_with(", interrupted")),
+        "{summaries:?}"
+    );
+}
+
+#[test]
+fn running_tool_phase_names_the_tool() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let out = adapter_events(feed_all(&mut translator, &events));
+    assert!(out.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase { phase: Phase::RunningTool, tool_name: Some(name), .. } if name == "shell"
+    )));
+}
+
+#[test]
+fn tool_events_carry_the_item_for_the_mark() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let out = feed_all(&mut translator, &events);
+    let calls = out
+        .iter()
+        .filter(|item| matches!(item, Translated::ToolCall { .. }))
+        .count();
+    let done = out
+        .iter()
+        .filter(|item| matches!(item, Translated::ToolDone(_)))
+        .count();
+    let running = out
+        .iter()
+        .filter(|item| matches!(item, Translated::ToolRunning(_)))
+        .count();
+    assert_eq!((calls, done, running), (7, 7, 3));
+}
+
+// Имя есть только у `input.started`; вызов без него не теряет ни блок, ни результат.
+#[test]
+fn result_without_a_start_still_opens_the_call() {
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    translator.begin_run(Uuid::now_v7());
+    let out = translator.feed(&json!({"type": "session.tool.failed", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+        "error": {"type": "tool.execution", "message": "Ошибка инструмента"}}}));
+    let tools = tools_of(out);
+    assert_eq!(tools.len(), 1);
+    assert_eq!(tools[0].result_text.as_deref(), Some("Ошибка инструмента"));
+}
+
+#[test]
+fn long_cyrillic_command_is_cut_on_a_character_boundary() {
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    translator.begin_run(Uuid::now_v7());
+    translator.feed(&json!({"type": "session.tool.input.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1", "name": "shell"}}));
+    let command = "э".repeat(4000);
+    let out = translator.feed(&json!({"type": "session.tool.called", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_1", "id": "call_1",
+        "input": {"command": command}}}));
+    let tools = tools_of(out);
+    assert!(tools[0].summary.len() <= 256);
+    assert!(tools[0].summary.ends_with('э'));
+}
+
+#[test]
+fn permission_and_form_requests_name_their_session_and_call() {
+    let events = stream("permissions");
+    let session = events
+        .iter()
+        .find(|event| event["type"] == "permission.asked")
+        .and_then(|event| event["data"]["sessionID"].as_str())
+        .unwrap()
+        .to_owned();
+    let mut translator = Translator::new(&session, HashMap::new());
+    translator.begin_run(Uuid::now_v7());
+    let request = feed_all(&mut translator, &events)
+        .into_iter()
+        .find_map(|item| match item {
+            Translated::Request(request) => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    assert!(request.id.starts_with("per_"));
+    assert_eq!(request.session, session);
+    assert!(request.item.is_some());
+
+    let events = stream("question");
+    let session = events
+        .iter()
+        .find(|event| event["type"] == "form.created")
+        .and_then(|event| event["data"]["form"]["sessionID"].as_str())
+        .unwrap()
+        .to_owned();
+    let mut translator = Translator::new(&session, HashMap::new());
+    translator.begin_run(Uuid::now_v7());
+    let request = feed_all(&mut translator, &events)
+        .into_iter()
+        .find_map(|item| match item {
+            Translated::Request(request) => Some(request),
+            _ => None,
+        })
+        .unwrap();
+    assert!(request.id.starts_with("frm_"));
+    assert_eq!(request.session, session);
+}
+
+#[test]
+fn debug_of_tool_events_hides_arguments_and_output() {
+    let events = stream("tools");
+    let (mut translator, _) = translator(&events);
+    let shown = format!("{:?}", feed_all(&mut translator, &events));
+    assert!(!shown.contains("echo hi"), "{shown}");
+    assert!(!shown.contains("alpha"), "{shown}");
+}

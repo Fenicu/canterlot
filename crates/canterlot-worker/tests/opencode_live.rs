@@ -11,13 +11,14 @@
 
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, CloseMode, InstructionMode, InstructionSpec, ModelUsage, StartSpec,
-        Transmission, TransmitOutcome, opencode::OpenCodeAdapter,
+        Adapter, AdapterEvent, BlockKind, CloseMode, InstructionMode, InstructionSpec, ModelUsage,
+        StartSpec, Transmission, TransmitOutcome, opencode::OpenCodeAdapter,
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
 };
 use rustix::process::{Pid, Signal, kill_process};
+use serde_json::{Value, json};
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -343,4 +344,133 @@ async fn delivered_input_is_found_in_the_history() {
         TransmitOutcome::Accepted(proof) if proof.kind == "opencode_inbox_admitted"
     ));
     session.close().await;
+}
+
+fn summaries(events: &[AdapterEvent]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockFinal { summary, .. } => summary.clone(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn marks(events: &[AdapterEvent]) -> Vec<Option<String>> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind: BlockKind::ToolCall,
+                approved_by,
+                ..
+            } => Some(approved_by.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+// Заодно проверка `snapshots: false`: запись файла работает без хранилища снимков.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_tools_report_exit_status_and_write_with_snapshots_off() {
+    let stub = Stub::start(vec![
+        Reply::tool("shell", json!({"command": "echo привет; exit 3"})),
+        Reply::tool(
+            "write",
+            json!({"path": "заметка.txt", "content": "текст\n"}),
+        ),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "owner").await;
+    let turn = input("выполни");
+    let events = session.turn(&turn).await;
+    let summaries = summaries(&events);
+    assert!(
+        summaries
+            .iter()
+            .any(|summary| summary.ends_with(", exit 3")),
+        "{summaries:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(session.live.workdir.join("заметка.txt")).unwrap(),
+        "текст\n"
+    );
+    assert_eq!(
+        marks(&events),
+        [Some("cli_policy".to_owned()), Some("cli_policy".to_owned())]
+    );
+    assert!(finals(&events).iter().any(|text| text.contains("привет")));
+    assert!(finals(&events).iter().any(|text| text == "готово"));
+    session.close().await;
+}
+
+// Режим `ask`: запрос приходит настоящий, отказ с сообщением не кончает ход.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_permission_prompt_is_refused_and_the_turn_goes_on() {
+    let stub = Stub::start(vec![
+        Reply::tool("write", json!({"path": "нельзя.txt", "content": "x"})),
+        Reply::text("понял"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("запиши");
+    let events = session.turn(&turn).await;
+    assert_eq!(marks(&events), [None]);
+    assert!(
+        summaries(&events)
+            .iter()
+            .any(|summary| summary.ends_with(", declined")),
+        "{:?}",
+        summaries(&events)
+    );
+    assert!(!session.live.workdir.join("нельзя.txt").exists());
+    assert_eq!(
+        stub.requests().len(),
+        2,
+        "the model saw the refusal and went on"
+    );
+    session.close().await;
+}
+
+// Запрещённый инструмент режима `read_only` модели просто не предлагается.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn read_only_rules_reach_the_provider_request() {
+    let stub = Stub::start(vec![Reply::text("ок")]).await;
+    let mut session = Session::start(&stub, "read_only").await;
+    session.turn(&input("читай")).await;
+    let request = &stub.requests()[0];
+    let tools: Vec<_> = request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .collect();
+    assert!(tools.contains(&"read"), "{tools:?}");
+    assert!(!tools.contains(&"shell"), "{tools:?}");
+    assert!(!tools.contains(&"write"), "{tools:?}");
+    session.close().await;
+}
+
+// Инструмент MCP виден в первом запросе после холодного старта.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn canterlot_tool_is_in_the_first_provider_request() {
+    for _ in 0..3 {
+        let stub = Stub::start(vec![Reply::text("ок")]).await;
+        let mut session = Session::start(&stub, "bypass").await;
+        session.turn(&input("лимиты")).await;
+        let request = &stub.requests()[0];
+        let tools: Vec<_> = request["tools"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+            .collect();
+        assert!(tools.contains(&"canterlot_canterlot_limits"), "{tools:?}");
+        session.close().await;
+    }
 }
