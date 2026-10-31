@@ -67,5 +67,5 @@
   .count { display: inline-block; min-width: var(--s9); margin-left: var(--s1); padding-inline: var(--s3); border-radius: var(--radius-pill); background: var(--chip); color: var(--chip-text); font-size: var(--fs-sm); }
   button[aria-selected='true'] { background: var(--tab-selected); color: var(--accent-link); font-weight: var(--weight-medium); }
   :global([data-pane='list']) .tabs { flex-wrap: wrap; overflow-x: visible; }
-  :global([data-pane='list']) button { flex-shrink: 1; min-width: 0; max-width: 100%; overflow-wrap: anywhere; white-space: normal; }
+  :global([data-pane='list']) button { flex: 0 1 auto; min-width: 0; max-width: 100%; padding-inline: var(--s4); overflow-wrap: anywhere; white-space: normal; }
 </style>

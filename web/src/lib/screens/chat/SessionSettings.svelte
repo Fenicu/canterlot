@@ -398,9 +398,7 @@
 		justify-content: space-between;
 		gap: var(--s4);
 		margin: var(--s5) var(--gutter) var(--s3);
-		padding: var(--s2) var(--s3) var(--s2) var(--s8);
-		border-radius: var(--radius-pill);
-		background: var(--surface);
+		padding-block: var(--s2);
 	}
 	.titles {
 		min-width: 0;
@@ -499,7 +497,10 @@
 		display: flex;
 		flex-direction: column;
 		gap: var(--s3);
+		position: sticky;
+		bottom: var(--s0);
 		margin-top: auto;
-		padding-top: var(--s4);
+		padding-block: var(--s4);
+		background: var(--chat-bg);
 	}
 </style>

@@ -46,6 +46,16 @@ test('group_tabs_are_a_tablist_with_arrow_navigation_and_stay_inside_the_pill', 
   expect(metrics.page).toBeLessThanOrEqual((page.viewportSize()?.width ?? metrics.page) + 1);
 });
 
+test('tabs_of_the_desktop_list_stay_compact_and_left_aligned', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефон листает вкладки');
+  await page.setViewportSize({ width: 1707, height: 960 });
+  await boot(page);
+  const boxes = await page.getByRole('tab').evaluateAll((tabs) => tabs.map((tab) => tab.getBoundingClientRect()).map((box) => ({ width: box.width, top: box.top })));
+  expect(Math.max(...boxes.map((box) => box.width))).toBeLessThan(220);
+  const list = await page.locator('[data-pane="list"]').boundingBox();
+  expect(boxes[0]!.width).toBeLessThan((list?.width ?? 0) / 2);
+});
+
 test('sections_collapse_and_remember_state', async ({ page }) => {
   await boot(page);
   const section = page.getByRole('button', { name: /bookshelf 4/ });
