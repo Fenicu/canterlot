@@ -14,7 +14,7 @@ use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, DecisionOutcome,
         InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, MediaSource, ModelUsage,
-        SettingsChange, StartSpec, Transmission, TransmitOutcome,
+        SettingsChange, StartSpec, TodoItem, TodoStatus, Transmission, TransmitOutcome,
         opencode::{OpenCodeAdapter, discover},
     },
     config::OpenCodeConfig,
@@ -1624,4 +1624,102 @@ async fn real_stdin_lease_keeps_the_partial_text_for_the_next_execution() {
     assert_eq!(stub.requests().len(), 1);
     second.close(CloseMode::Graceful, &group).await.unwrap();
     live.wait_gone().await;
+}
+
+// Субагент на настоящем сервере: связь с вызовом, имя агента и расход потомка. Последний
+// ответ заглушки уходит родителю, потому что потомок завершает свой шаг раньше.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_subagent_runs_in_the_lane_of_its_call() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "subagent",
+            json!({"agent": "general", "description": "проба", "prompt": "сделай"}),
+        ),
+        Reply::text("готово у потомка"),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("делегируй")).await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                tool_name: Some(name),
+                ..
+            } if name == "subagent" => Some(*block_id),
+            _ => None,
+        })
+        .expect("subagent call");
+    let lane: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                parent,
+                agent,
+                kind: BlockKind::Text,
+                ..
+            } => Some((*parent, agent.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lane,
+        vec![
+            (Some(call), "general".to_owned()),
+            (None, "orchestrator".to_owned())
+        ]
+    );
+    let Some(AdapterEvent::RunFinished { usage, .. }) = events.last() else {
+        panic!("run must finish");
+    };
+    assert!(usage.iter().any(|line| line.agent == "general"), "{usage:?}");
+    assert!(
+        usage.iter().any(|line| line.agent == "orchestrator"),
+        "{usage:?}"
+    );
+    session.close().await;
+}
+
+// Флаг `experimental.todo` на настоящем сервере: инструмент есть и отдаёт полный список.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_todo_list_comes_whole_with_a_cancelled_item() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "todowrite",
+            json!({"todos": [
+                {"content": "сделано", "status": "completed"},
+                {"content": "снято", "status": "cancelled"},
+            ]}),
+        ),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("составь план")).await;
+    let lists: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::TodoUpdated { lane, items } => Some((*lane, items.clone())),
+            _ => None,
+        })
+        .collect();
+    let todo = |text: &str, status| TodoItem {
+        text: text.into(),
+        status,
+    };
+    assert_eq!(
+        lists,
+        vec![(
+            None,
+            vec![
+                todo("сделано", TodoStatus::Completed),
+                todo("снято", TodoStatus::Cancelled)
+            ]
+        )]
+    );
+    session.close().await;
 }
