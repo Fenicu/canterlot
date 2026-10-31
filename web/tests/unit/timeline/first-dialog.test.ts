@@ -10,6 +10,7 @@ import {
   agentTitle,
   cleanToolOutput,
   subagentCopy,
+  toolBackground,
   toolFailed,
   toolLabel,
   toolStatusText,
@@ -60,6 +61,15 @@ describe("first dialog: durations", () => {
     expect(pill(chat, calls(chat, "ToolSearch")[0]!)).toBe("26 мс");
     expect(pill(chat, calls(chat, "AskUserQuestion")[0]!)).toBe("43 с");
     expect(pill(chat, calls(chat, "Bash")[0]!)).toBe("0,1 с");
+  });
+
+  it("a_command_that_started_in_the_background_says_so_and_a_blocked_one_does_not", () => {
+    const chat = loaded();
+    const links = blockLinks(chat.timeline.entries);
+    const [blocked, launched] = calls(chat, "Bash").slice(-2);
+    expect(toolBackground(links.result(launched!.id))).toBe(true);
+    expect(toolBackground(links.result(blocked!.id))).toBe(false);
+    expect(toolBackground(null)).toBe(false);
   });
 
   it("background_sleep_is_as_short_as_the_tool_call_really_was", () => {

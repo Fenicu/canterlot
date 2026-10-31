@@ -1,5 +1,5 @@
 <script lang="ts">
-  let { state, text }: { state: 'running' | 'done' | 'error' | 'answer'; text: string } = $props();
+  let { state, text }: { state: 'running' | 'done' | 'error' | 'answer' | 'background'; text: string } = $props();
 </script>
 
 <span class="pill" data-state={state}>{text}</span>

@@ -105,6 +105,14 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await expect(blocked.locator('.out')).not.toContainText('tool_use_error');
     });
 
+    test('background_launch_is_named_instead_of_timed', async ({ page }) => {
+      await open(page);
+      const launched = toolRow(page, 'sleep 90').last();
+      await expect(launched.locator('.pill')).toHaveText('В фоне');
+      await expect(launched.locator('.pill')).toHaveAttribute('data-state', 'background');
+      await expect(toolRow(page, 'sleep 90').first().locator('.pill')).toHaveText('Ошибка');
+    });
+
     test('owner_message_keeps_its_line_breaks', async ({ page }) => {
       await open(page);
       const bubble = page.locator('.bubble .text').filter({ hasText: 'Это проверка интерфейса' });
