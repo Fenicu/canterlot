@@ -1769,15 +1769,18 @@ pub(crate) async fn auto_title_in_tx(
         .collect::<Vec<_>>()
         .join(" ");
     let mut title: String = text.chars().take(60).collect();
+    let cut = text.chars().nth(60).is_some();
     if text.chars().nth(60).is_some_and(|c| !c.is_whitespace())
         && let Some(i) = title.rfind(char::is_whitespace)
     {
         title.truncate(i);
     }
     let title = if title.trim().is_empty() {
-        "Новая сессия"
+        "Новая сессия".to_owned()
+    } else if cut {
+        format!("{}…", title.trim())
     } else {
-        title.trim()
+        title.trim().to_owned()
     };
-    Ok(sqlx::query("update conversations set title=$3,updated_at=clock_timestamp() where id=$1 and owner_id=$2 and title_source='auto'").bind(id).bind(owner).bind(title).execute(conn).await?.rows_affected() == 1)
+    Ok(sqlx::query("update conversations set title=$3,updated_at=clock_timestamp() where id=$1 and owner_id=$2 and title_source='auto'").bind(id).bind(owner).bind(&title).execute(conn).await?.rows_affected() == 1)
 }

@@ -1255,13 +1255,24 @@ async fn auto_title_is_cut_at_a_word_boundary_and_collapses_whitespace(pool: PgP
     let cases = [
         (
             format!("{} {}", "а".repeat(50), "б".repeat(20)),
-            "а".repeat(50),
+            format!("{}…", "а".repeat(50)),
         ),
         (
             format!("{} {} {}", "ж".repeat(10), "в".repeat(49), "г".repeat(5)),
-            format!("{} {}", "ж".repeat(10), "в".repeat(49)),
+            format!("{} {}…", "ж".repeat(10), "в".repeat(49)),
         ),
-        (format!("{} {}", "д".repeat(70), "е"), "д".repeat(60)),
+        (
+            format!("{} {}", "д".repeat(70), "е"),
+            format!("{}…", "д".repeat(60)),
+        ),
+        (
+            format!("{} {}", "з".repeat(58), "и"),
+            format!("{} {}", "з".repeat(58), "и"),
+        ),
+        (
+            format!("{} {}", "к".repeat(60), "л"),
+            format!("{}…", "к".repeat(60)),
+        ),
         (
             "первая\n\nвторая   строка".to_owned(),
             "первая вторая строка".to_owned(),
