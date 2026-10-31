@@ -73,6 +73,13 @@ test('textarea_has_enterkeyhint_enter_and_no_form_submission_path', async ({ pag
   await expect(page.getByRole('button', { name: 'Отправить', exact: true })).toHaveAttribute('type', 'button');
 });
 
+test('enter_hint_is_shown_on_desktop_and_hidden_on_touch', async ({ page }, info) => {
+  await boot(page);
+  const hint = page.getByText('Enter: отправить · Shift+Enter: новая строка');
+  if (info.project.name === 'desktop') await expect(hint).toBeVisible();
+  else await expect(hint).toHaveCount(0);
+});
+
 test('desktop_enter_sends_and_shift_enter_inserts_newline', async ({ page }, info) => {
   test.skip(info.project.name !== 'desktop', 'мышь');
   await boot(page);
