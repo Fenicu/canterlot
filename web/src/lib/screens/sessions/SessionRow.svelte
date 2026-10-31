@@ -21,6 +21,7 @@
 
   const line = $derived(activityLine(item.activity as Activity, { now }));
   const stamp = $derived(item.last_activity_at ? fmt.clock(Date.parse(item.last_activity_at)) : '');
+  const tail = $derived(item.unread_count > 0 && stamp ? ` · ${stamp}` : '');
   let timer = 0;
   let held = false;
 
@@ -55,7 +56,7 @@
       {/if}
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
-    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{#if item.unread_count > 0 && stamp} · {stamp}{/if}</span>
+    <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{tail}</span>
   </a>
   <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={() => onopen(item.id)}>
     <Icon name="more" />
