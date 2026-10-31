@@ -1,0 +1,7 @@
+{"t_ms": 0, "dir": "note", "data": "item 6: isolated real server with a plugin that activates for 8 s; GET /api/model waits 5 s and refuses, /api/agent does not wait"}
+{"t_ms": 0, "dir": "http_out", "data": {"method": "GET", "path": "/api/model"}}
+{"t_ms": 5100, "dir": "http_in", "data": {"status": 503, "body": {"_tag": "ServiceUnavailableError", "message": "Location plugins did not finish activating", "service": "plugin"}}}
+{"t_ms": 5100, "dir": "http_out", "data": {"method": "GET", "path": "/api/agent"}}
+{"t_ms": 5105, "dir": "http_in", "data": {"status": 200, "note": "agents listed without waiting"}}
+{"t_ms": 5110, "dir": "http_out", "data": {"method": "GET", "path": "/api/model/default"}}
+{"t_ms": 8620, "dir": "http_in", "data": {"status": 200, "note": "activation finished, settings left out"}}
