@@ -275,6 +275,10 @@ pub struct ModelView {
     pub id: String,
     pub title: String,
     pub efforts: Vec<String>,
+    /// Модель принимает картинки; `null`: у харнесса это не свойство модели.
+    pub images: Option<bool>,
+    /// Окно контекста модели в токенах, если харнесс его знает.
+    pub context_window: Option<u64>,
 }
 #[derive(ToSchema)]
 pub struct MetricsView {

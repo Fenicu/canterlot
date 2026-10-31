@@ -446,6 +446,8 @@ message ModelInfo {
   string id = 1;
   string title = 2;
   repeated string efforts = 3;
+  optional bool images = 4;
+  optional uint64 context_window = 5;
 }
 
 message MachineMetrics {

@@ -2,9 +2,10 @@
 //! события чужих сессий отбрасываются, неизвестный тип даёт одну диагностику.
 
 use super::{
-    super::{AdapterEvent, BlockKind, ModelUsage, Phase},
+    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase},
     requests::GLOBAL_SESSION,
 };
+use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -235,7 +236,6 @@ fn call_text(input: &Value) -> String {
     }
 }
 
-// Картинки из результата разбирает срез вложений.
 fn content_text(data: &Value) -> String {
     data.get("content")
         .and_then(Value::as_array)
@@ -244,6 +244,36 @@ fn content_text(data: &Value) -> String {
         .filter_map(|part| part.get("text").and_then(Value::as_str))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+// Байты лежат прямо в событии; декодирует подготовка картинки, а не цикл супервизора.
+fn pictures(data: &Value) -> Vec<String> {
+    data.get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|part| part.get("type").and_then(Value::as_str) == Some("file"))
+        .filter_map(|part| part.get("uri")?.as_str())
+        .filter_map(|uri| {
+            let (_, encoded) = uri.strip_prefix("data:image/")?.split_once(";base64,")?;
+            Some(encoded.to_owned())
+        })
+        .collect()
+}
+
+// Финал крупнее порога хаб собирает только из дельт: без них блок останется пустым.
+fn finish_block(block_id: Uuid, text: String, summary: Option<String>, out: &mut Vec<Translated>) {
+    if text.len() > BLOCK_FINAL_INLINE_MAX_BYTES {
+        out.push(Translated::Event(AdapterEvent::BlockDelta {
+            block_id,
+            append: text.clone(),
+        }));
+    }
+    out.push(Translated::Event(AdapterEvent::BlockFinal {
+        block_id,
+        text,
+        summary,
+    }));
 }
 
 fn ordinal(data: &Value) -> String {
@@ -590,6 +620,12 @@ impl Translator {
             return out;
         };
         out.push(Translated::ToolDone(item));
+        out.extend(pictures(data).into_iter().map(|encoded| {
+            Translated::Event(AdapterEvent::Media {
+                block_id: state.block,
+                source: MediaSource::Base64(encoded),
+            })
+        }));
         out.push(Translated::Event(AdapterEvent::BlockStarted {
             block_id: result,
             kind: BlockKind::ToolResult,
@@ -601,19 +637,16 @@ impl Translator {
             summary: None,
             approved_by: None,
         }));
-        out.push(Translated::Event(AdapterEvent::BlockFinal {
-            block_id: result,
-            text,
-            summary: None,
-        }));
+        finish_block(result, text, None, &mut out);
         let mut summary = tool_summary(&state.name, &state.input);
         summary.push_str(", ");
         summary.push_str(status);
-        out.push(Translated::Event(AdapterEvent::BlockFinal {
-            block_id: state.block,
-            text: call_text(&state.input),
-            summary: Some(summary),
-        }));
+        finish_block(
+            state.block,
+            call_text(&state.input),
+            Some(summary),
+            &mut out,
+        );
         out.push(Translated::Event(AdapterEvent::Phase {
             phase: Phase::Generating,
             tool_name: None,

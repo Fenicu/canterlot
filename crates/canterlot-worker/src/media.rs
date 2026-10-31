@@ -166,6 +166,20 @@ pub fn prepare(
             }
             Box::new(io::Cursor::new(bytes))
         }
+        MediaSource::Base64(text) => {
+            use base64::Engine as _;
+            // Размер виден по длине: большую строку незачем декодировать.
+            if text.len() as u64 / 4 * 3 > MAX_MEDIA_BYTES + 3 {
+                return Err(Skip::TooLarge);
+            }
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .map_err(|_| Skip::Unsupported)?;
+            if bytes.len() as u64 > MAX_MEDIA_BYTES {
+                return Err(Skip::TooLarge);
+            }
+            Box::new(io::Cursor::new(bytes))
+        }
         MediaSource::Path(path) => {
             // FIFO или устройство не должны блокировать чтение: принимаем только обычный файл.
             let file = fs::OpenOptions::new()
@@ -352,6 +366,34 @@ mod tests {
         bytes.extend(height.to_be_bytes());
         bytes.extend([8, 6, 0, 0, 0, 0, 0, 0, 0]);
         bytes
+    }
+
+    // Картинка из результата инструмента: размер виден до декодирования.
+    #[test]
+    fn encoded_picture_is_bounded_before_decoding() {
+        use base64::Engine as _;
+        let dir = tempfile::TempDir::new().unwrap();
+        let encode = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        let source = MediaSource::Base64(encode(&png(3, 2)));
+        assert!(format!("{source:?}").contains("Base64"));
+        let prepared = prepare(dir.path(), Uuid::now_v7(), Uuid::now_v7(), source).unwrap();
+        assert_eq!(prepared.mime, "image/png");
+        assert_eq!((prepared.width, prepared.height), (3, 2));
+        let broken = MediaSource::Base64("не base64".into());
+        assert_eq!(
+            prepare(dir.path(), Uuid::now_v7(), Uuid::now_v7(), broken),
+            Err(Skip::Unsupported)
+        );
+        let too_long = "A".repeat(usize::try_from(MAX_MEDIA_BYTES / 3 * 4).unwrap() + 8);
+        assert_eq!(
+            prepare(
+                dir.path(),
+                Uuid::now_v7(),
+                Uuid::now_v7(),
+                MediaSource::Base64(too_long)
+            ),
+            Err(Skip::TooLarge)
+        );
     }
 
     #[test]

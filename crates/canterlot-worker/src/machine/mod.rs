@@ -44,6 +44,8 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
                         id: m.id.clone(),
                         title: m.title.clone(),
                         efforts: m.efforts.to_vec(),
+                        images: m.images,
+                        context_window: m.context_window,
                     })
                     .collect(),
             })

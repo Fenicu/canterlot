@@ -13,8 +13,8 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, DecisionOutcome,
-        InstructionMode, InstructionSpec, InterruptOutcome, ModelUsage, SettingsChange, StartSpec,
-        Transmission, TransmitOutcome,
+        InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, MediaSource, ModelUsage,
+        SettingsChange, StartSpec, Transmission, TransmitOutcome,
         opencode::{OpenCodeAdapter, discover},
     },
     config::OpenCodeConfig,
@@ -857,6 +857,22 @@ fn preset(text: &str, revision: u64) -> InstructionSpec {
 }
 
 impl Session {
+    async fn with_config(config: &str) -> Self {
+        let live = Live::new(config);
+        let group = TreeContainment::new().unwrap();
+        let mut adapter = live.adapter();
+        let spec = live.spec("fake/fake-1", "bypass");
+        tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+            .await
+            .expect("start must finish")
+            .expect("start");
+        Self {
+            live,
+            group,
+            adapter,
+        }
+    }
+
     async fn start_as(
         stub: &Stub,
         instructions: InstructionSpec,
@@ -1150,5 +1166,105 @@ async fn real_modes_treat_the_preset_tools_by_their_effect() {
             .iter()
             .any(|tool| tool == "canterlot_canterlot_preset_save")
     );
+    session.close().await;
+}
+
+const PNG: [u8; 67] = [
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1f, 0x15, 0xc4,
+    0x89, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x44, 0x41, 0x54, 0x78, 0xda, 0x63, 0x64, 0xf8, 0xcf, 0x50,
+    0x0f, 0x00, 0x03, 0x86, 0x01, 0x80, 0x5a, 0x34, 0x7d, 0x6b, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+    0x4e, 0x44, 0xae,
+];
+
+// Картинка, на которую посмотрел агент: те же байты, что в файле.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_picture_the_agent_read_becomes_media() {
+    use base64::Engine as _;
+    let stub = Stub::start(vec![
+        Reply::tool("read", json!({"path": "картинка.png"})),
+        Reply::text("вижу"),
+    ])
+    .await;
+    let mut session = Session::start_as(&stub, clean(), |live| {
+        let mut bytes = PNG.to_vec();
+        bytes.extend([0x42, 0x60, 0x82]);
+        fs::write(live.workdir.join("картинка.png"), bytes).unwrap();
+    })
+    .await;
+    let events = session.turn(&input("посмотри")).await;
+    let source = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::Media { source, .. } => Some(source.clone()),
+            _ => None,
+        })
+        .expect("media");
+    let MediaSource::Base64(encoded) = source else {
+        panic!("{source:?}");
+    };
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(encoded)
+        .unwrap();
+    assert_eq!(
+        decoded,
+        fs::read(session.live.workdir.join("картинка.png")).unwrap()
+    );
+    session.close().await;
+}
+
+fn attachment(live: &Live, name: &str, mime: &str, image: bool) -> LocalFile {
+    let dir = live.exec_dir.join("вложения");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(name);
+    let mut bytes = PNG.to_vec();
+    bytes.extend([0x42, 0x60, 0x82]);
+    fs::write(&path, &bytes).unwrap();
+    LocalFile {
+        path,
+        name: name.into(),
+        mime: mime.into(),
+        size: bytes.len() as u64,
+        image,
+    }
+}
+
+// Модель с картинками получает файл вложением, настоящий сервер читает кириллический путь.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_image_attachment_reaches_a_vision_model_as_an_image() {
+    let stub = Stub::start(vec![Reply::text("вижу")]).await;
+    let mut session = Session::with_config(&stub.config_with_input(&["text", "image"])).await;
+    let mut turn = input("посмотри");
+    turn.files = vec![attachment(&session.live, "кот.png", "image/png", true)];
+    session.turn(&turn).await;
+    let seen = stub.requests()[0].to_string();
+    assert!(seen.contains("image_url"), "{seen}");
+    assert!(seen.contains("data:image/png;base64"), "{seen}");
+    session.close().await;
+}
+
+// Модель без картинок и двоичный файл: только путь в тексте, вложения серверу нет.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_model_without_pictures_gets_paths() {
+    let stub = Stub::start(vec![Reply::text("понял")]).await;
+    let mut session = Session::with_config(&stub.config_with_input(&["text"])).await;
+    let mut turn = input("посмотри");
+    turn.files = vec![
+        attachment(&session.live, "кот.png", "image/png", true),
+        attachment(
+            &session.live,
+            "данные.bin",
+            "application/octet-stream",
+            false,
+        ),
+    ];
+    session.turn(&turn).await;
+    let seen = stub.requests()[0].to_string();
+    assert!(!seen.contains("image_url"), "{seen}");
+    assert!(seen.contains("кот.png"), "{seen}");
+    assert!(seen.contains("данные.bin"), "{seen}");
     session.close().await;
 }

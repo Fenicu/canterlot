@@ -87,7 +87,8 @@ impl OpenCodeCatalog {
             harness: "opencode",
             provider: "opencode",
             title: "OpenCode",
-            images: false,
+            // Картинку примет любая сессия: модель без такого ввода получит путь к файлу.
+            images: true,
             settings_midsession: true,
             settings_midsession_effort: true,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
@@ -98,6 +99,8 @@ impl OpenCodeCatalog {
                     id: entry.id.clone(),
                     title: entry.title.clone(),
                     efforts: entry.efforts.clone(),
+                    images: entry.images,
+                    context_window: entry.context_window,
                 })
                 .collect(),
         }
@@ -329,6 +332,8 @@ pub struct OpenCodeAdapter {
     model_dirty: bool,
     /// Варианты доступных моделей: сервер принимает неизвестный и падает только на ходе.
     variants: HashMap<String, Vec<String>>,
+    /// Какие модели принимают картинки.
+    image_models: HashMap<String, bool>,
     /// Инструкции, которые считает действующими хаб.
     instructions: InstructionSpec,
     /// Инструкции на сервере: после отказа во вводе расходятся с `instructions`.
@@ -373,6 +378,7 @@ impl OpenCodeAdapter {
             effort: String::new(),
             model_dirty: false,
             variants: HashMap::new(),
+            image_models: HashMap::new(),
             instructions: owner_instructions(),
             applied: owner_instructions(),
             spec: None,
@@ -696,6 +702,7 @@ impl OpenCodeAdapter {
         self.spec = Some(spec.clone());
         let models = self.model_list().await;
         self.variants = catalog::variants(&models);
+        self.image_models = catalog::image_support(&models);
         self.translator = Some(Translator::new(
             &self.session,
             catalog::context_windows(&models),
@@ -1235,7 +1242,14 @@ impl OpenCodeAdapter {
         {
             return TransmitOutcome::Rejected(reason.into());
         }
-        let body = match input::prompt_body(input) {
+        // Вложение читает модель этого ввода, а не прежняя.
+        let model = input
+            .settings
+            .as_ref()
+            .and_then(|change| change.model.as_deref())
+            .unwrap_or(&self.model);
+        let images = self.image_models.get(model).copied().unwrap_or(false);
+        let body = match input::prompt_body(input, images) {
             Ok(body) => body,
             Err(reason) => return TransmitOutcome::Rejected(reason.into()),
         };

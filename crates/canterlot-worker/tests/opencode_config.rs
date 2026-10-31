@@ -128,6 +128,8 @@ fn catalog_shows_the_harness_only_with_a_probe_result() {
             id: "opencode-go/muse-spark".into(),
             title: "Muse Spark".into(),
             efforts: vec!["low".into(), "high".into()],
+            images: Some(true),
+            context_window: Some(1_048_576),
         }],
     };
     let entries = adapter::catalog_with(None, None, None, Some(&catalog));

@@ -15,6 +15,8 @@ pub struct ModelEntry {
     pub id: String,
     pub title: String,
     pub efforts: Vec<String>,
+    pub images: Option<bool>,
+    pub context_window: Option<u64>,
 }
 
 /// Окно контекста по идентификатору `provider/model`; в событиях его нет.
@@ -47,6 +49,25 @@ fn qualified(model: &Value) -> Option<String> {
     let provider = model.get("providerID")?.as_str()?;
     let id = model.get("id")?.as_str()?;
     Some(format!("{provider}/{id}"))
+}
+
+// `None`: ответ не говорит о вводе модели, это не то же, что запрет.
+fn accepts_images(model: &Value) -> Option<bool> {
+    model
+        .pointer("/capabilities/input")?
+        .as_array()
+        .map(|input| input.iter().any(|kind| kind == "image"))
+}
+
+/// Какие модели принимают картинки: остальным файл уходит путём в тексте.
+pub fn image_support(models: &Value) -> HashMap<String, bool> {
+    models
+        .get("data")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|model| Some((qualified(model)?, accepts_images(model)?)))
+        .collect()
 }
 
 /// Варианты всех доступных моделей: сервер принимает неизвестный вариант и падает на ходе.
@@ -93,7 +114,13 @@ pub fn entries(models: &Value, default: Option<&Value>, providers: &[String]) ->
             if efforts.is_empty() {
                 efforts.push(NO_VARIANT.to_owned());
             }
-            Some(ModelEntry { id, title, efforts })
+            Some(ModelEntry {
+                id,
+                title,
+                efforts,
+                images: accepts_images(model),
+                context_window: model.pointer("/limit/context").and_then(Value::as_u64),
+            })
         })
         .collect();
     entries.sort_by_key(|entry| Some(&entry.id) != default.as_ref());
@@ -154,6 +181,25 @@ mod tests {
         plain["variants"] = json!([]);
         let found = entries(&json!({"data": [plain]}), None, &[]);
         assert_eq!(found[0].efforts, [NO_VARIANT]);
+    }
+
+    #[test]
+    fn pictures_and_the_context_window_are_per_model() {
+        let mut vision = model("opencode-go", "vision");
+        vision["capabilities"] = json!({"input": ["text", "image"]});
+        let mut plain = model("opencode-go", "plain");
+        plain["capabilities"] = json!({"input": ["text"]});
+        let list = json!({"data": [vision, plain]});
+        let found = entries(&list, None, &[]);
+        assert_eq!(found[0].images, Some(true));
+        assert_eq!(found[0].context_window, Some(1000));
+        assert_eq!(found[1].images, Some(false));
+        let silent = entries(&json!({"data": [model("opencode-go", "old")]}), None, &[]);
+        assert_eq!(silent[0].images, None, "the reply says nothing");
+        let support = image_support(&list);
+        assert_eq!(support.get("opencode-go/vision"), Some(&true));
+        assert_eq!(support.get("opencode-go/plain"), Some(&false));
+        assert_eq!(support.get("opencode-go/unknown"), None);
     }
 
     #[test]

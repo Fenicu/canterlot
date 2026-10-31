@@ -176,6 +176,7 @@ impl Env {
                     mode: "clean".into(),
                     ..Default::default()
                 }),
+                capabilities: vec!["pilot_v1".into()],
                 ..Default::default()
             }),
         )
@@ -500,6 +501,89 @@ async fn relay_from_the_boot_config_reaches_the_broker_of_the_supervisor() {
     );
     drop(stdin);
     relay.wait().unwrap();
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+fn recorded(scenario: &str) -> Script {
+    Script::from_capture("recovery", Some(scenario))
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+// Картинка из результата инструмента проходит подготовку супервизора: копия в каталоге
+// исполнения, тип по сигнатуре, байты не в журнале.
+#[tokio::test]
+async fn picture_the_agent_read_reaches_the_media_directory() {
+    let mut env = Env::new(Some(recorded("image_read"))).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let command = env.deliver("look").await;
+    env.wait_finished(command).await;
+    let media = env.exec_dir().join("media");
+    let deadline = std::time::Instant::now() + WAIT;
+    let copy = loop {
+        let found = fs::read_dir(&media)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|entry| !entry.file_name().to_string_lossy().starts_with('.'));
+        if let Some(found) = found {
+            break found.path();
+        }
+        assert!(std::time::Instant::now() < deadline, "{}", env.logs());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    assert!(fs::read(copy).unwrap().starts_with(b"\x89PNG"));
+    assert!(!env.logs().contains("iVBORw0KGgo"));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Длинный вывод инструмента с кириллицей: дельты режутся по границам букв, а хаб собирает
+// из них тот же текст, что в контрольной сумме финала.
+#[tokio::test]
+async fn long_tool_output_survives_the_block_limits() {
+    let text = "вывод команды\n".repeat(16 * 1024);
+    let mut script = Script::from_capture("tools", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let event = script
+        .steps
+        .iter_mut()
+        .filter_map(|step| match step {
+            Step::Emit { events } => Some(events),
+            _ => None,
+        })
+        .flatten()
+        .find(|event| event["type"] == "session.tool.success")
+        .unwrap();
+    // Запись настоящая, заменён только текст результата: столько в захвате нет.
+    event["data"]["content"] = json!([{"type": "text", "text": text}]);
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let command = env.deliver("x").await;
+    env.wait_finished(command).await;
+    let block = env
+        .bodies
+        .iter()
+        .find_map(|body| match body {
+            Body::BlockFinal(block) if block.text_omitted => Some(block.block_id.clone()),
+            _ => None,
+        })
+        .expect("omitted final");
+    let joined: String = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockDelta(delta) if delta.block_id == block => Some(delta.append.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(joined, text);
     env.stop().await;
     env.fake().wait_gone().await;
 }

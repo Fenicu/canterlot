@@ -61,6 +61,7 @@ impl CodexCatalog {
                 id: entry.id,
                 title: entry.title,
                 efforts: entry.efforts,
+                ..Default::default()
             })
             .collect()
     }

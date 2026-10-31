@@ -857,6 +857,8 @@ fn pilot_records_roundtrip() {
                 id: "model".into(),
                 title: "Модель".into(),
                 efforts: vec!["high".into()],
+                images: Some(true),
+                context_window: Some(1_048_576),
             }],
         }],
         max_attachment_bytes: 104_857_600,

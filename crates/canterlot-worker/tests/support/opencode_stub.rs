@@ -190,6 +190,13 @@ impl Stub {
         self.shared.lock().unwrap().requests.clone()
     }
 
+    /// То же с явным вводом модели: без него сервер считает, что картинки она принимает.
+    pub fn config_with_input(&self, input: &[&str]) -> String {
+        let mut config: Value = serde_json::from_str(&self.config()).unwrap();
+        config["providers"]["fake"]["models"]["fake-1"]["capabilities"]["input"] = json!(input);
+        config.to_string()
+    }
+
     /// `opencode.json` с единственной моделью `fake/fake-1` на этой заглушке.
     pub fn config(&self) -> String {
         json!({

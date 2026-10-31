@@ -182,11 +182,13 @@ pub fn report() -> MachineReport {
                     id: "synthetic-small".into(),
                     title: "Малая".into(),
                     efforts: vec!["low".into()],
+                    ..Default::default()
                 },
                 ModelInfo {
                     id: "synthetic-large".into(),
                     title: "Большая".into(),
                     efforts: vec!["high".into()],
+                    ..Default::default()
                 },
             ],
             ..Default::default()

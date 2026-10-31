@@ -10,6 +10,7 @@ import {
   executionStateLabel,
   permissionHint,
   permissionLabel,
+  modelImagesNote,
   permissionValue,
   presetChangeNote,
   providerLabel,
@@ -129,5 +130,14 @@ describe("presetChangeNote", () => {
     expect(presetChangeNote("codex")).toContain("перезапускает агента между ходами");
     expect(presetChangeNote("opencode")).toContain("без перезапуска");
     expect(presetChangeNote("opencode")).toContain("«Как у владельца»");
+  });
+});
+
+describe("modelImagesNote", () => {
+  it("speaks only about a model that takes no pictures", () => {
+    expect(modelImagesNote(false)).toContain("путём к файлу");
+    expect(modelImagesNote(true)).toBe("");
+    expect(modelImagesNote(null)).toBe("");
+    expect(modelImagesNote(undefined)).toBe("");
   });
 });

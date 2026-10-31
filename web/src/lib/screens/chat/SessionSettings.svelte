@@ -28,6 +28,7 @@
 		modelLabel,
 		permissionHint,
 		permissionLabel,
+		modelImagesNote,
 		permissionValue,
 		presetChangeNote
 	} from '#lib/format/labels.js';
@@ -307,6 +308,7 @@
 				error={effortError ?? undefined}
 			/>
 		</div>
+		{#if modelImagesNote(currentModelRecord?.images)}<p class="note">{modelImagesNote(currentModelRecord?.images)}</p>{/if}
 
 		<div class="card">
 			<h3>Режим разрешений</h3>

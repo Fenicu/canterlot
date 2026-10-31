@@ -1461,6 +1461,7 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
                 id: "synthetic-small".into(),
                 title: "Модель".into(),
                 efforts: vec!["high".into()],
+                ..Default::default()
             }],
             ..Default::default()
         }],
@@ -1483,6 +1484,53 @@ async fn catalog_changes_publish_new_harness_attributes_in_both_conversation_sco
         .unwrap(),
         1
     );
+}
+
+// Картинки и окно контекста у OpenCode свои у каждой модели: отчёт доходит до формы как есть.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machine_report_keeps_the_per_model_facts(pool: PgPool) {
+    use canterlot_proto::worker::v1::{HarnessInfo, MachineReport, ModelInfo};
+    let f = Fixture::new(pool).await;
+    let report = MachineReport {
+        worker_version: "updated".into(),
+        allowed_roots: vec!["/tmp".into()],
+        os: "linux".into(),
+        max_attachment_bytes: canterlot_proto::limits::MAX_ATTACHMENT_BYTES,
+        max_attachments_per_input: canterlot_proto::limits::MAX_ATTACHMENTS_PER_INPUT as u32,
+        harnesses: vec![HarnessInfo {
+            harness: "opencode".into(),
+            provider: "opencode".into(),
+            title: "OpenCode".into(),
+            images: true,
+            models: vec![
+                ModelInfo {
+                    id: "opencode-go/text".into(),
+                    title: "Текст".into(),
+                    efforts: vec!["default".into()],
+                    images: Some(false),
+                    context_window: Some(262_144),
+                },
+                ModelInfo {
+                    id: "opencode-go/old".into(),
+                    title: "Без сведений".into(),
+                    efforts: vec!["default".into()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    canterlot_hub::machine_info::apply_report(&f.pool, f.owner, f.machine, &report, Uuid::now_v7())
+        .await
+        .unwrap();
+    let path = format!("/api/v1/machines/{}", f.machine);
+    let machine = f.request(Method::GET, &path, None, 200).await;
+    let models = &machine["harnesses"][0]["models"];
+    assert_eq!(models[0]["images"], false);
+    assert_eq!(models[0]["context_window"], 262_144);
+    assert!(models[1]["images"].is_null());
+    assert!(models[1]["context_window"].is_null());
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

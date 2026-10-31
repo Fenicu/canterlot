@@ -574,6 +574,7 @@ pub async fn seed_catalog(pool: &PgPool, machine_id: Uuid) {
                     id: id.into(),
                     title: "Тестовая модель".into(),
                     efforts: vec!["low".into(), "high".into()],
+                    ..Default::default()
                 })
                 .collect(),
         }],

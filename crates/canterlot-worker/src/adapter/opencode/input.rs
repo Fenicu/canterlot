@@ -3,7 +3,7 @@
 //! в идущий ход. Повторной отправки нет (D-6): она к тому же будит пустой период работы.
 
 use super::http::{Http, HttpError};
-use crate::adapter::{Transmission, codex::input::attachment_lines};
+use crate::adapter::{LocalFile, Transmission, codex::input::attachment_lines};
 use canterlot_proto::limits::MAX_INPUT_TEXT_BYTES;
 use serde_json::{Value, json};
 use std::time::Duration;
@@ -11,6 +11,8 @@ use uuid::Uuid;
 
 pub const PROOF_KIND: &str = "opencode_inbox_admitted";
 pub const PROOF_KIND_HISTORY: &str = "opencode_history";
+/// Сервер отвергает вложение крупнее.
+const MAX_NATIVE_FILE_BYTES: u64 = 20 * 1024 * 1024;
 const LOOKUP_WAIT: Duration = Duration::from_secs(5);
 /// Паузы перед чтением проекций: запрос мог ещё обрабатываться.
 const LOOKUP_DELAYS: [Duration; 4] = [
@@ -24,8 +26,16 @@ pub fn message_id(command_id: Uuid) -> String {
     format!("msg_{}", command_id.simple())
 }
 
-/// Вложения пока идут путями в тексте: двоичный файл в `files` молча исчезает.
-pub fn prompt_body(input: &Transmission) -> Result<Value, &'static str> {
+fn native(file: &LocalFile) -> Result<Value, &'static str> {
+    let path = std::path::absolute(&file.path).map_err(|_| "input_build_failed")?;
+    let uri = url::Url::from_file_path(path).map_err(|()| "input_build_failed")?;
+    Ok(json!({"uri": uri.as_str(), "name": file.name}))
+}
+
+/// Путь в тексте есть у каждого файла: агент работает с ним инструментами. Картинка в пределах
+/// модели вдобавок идёт вложением. Только вложением нельзя: двоичный файл в `files` молча
+/// исчезает, а картинка у модели без такого ввода становится текстом ошибки.
+pub fn prompt_body(input: &Transmission, images: bool) -> Result<Value, &'static str> {
     let mut parts = Vec::new();
     if !input.text.is_empty() {
         parts.push(input.text.clone());
@@ -37,12 +47,25 @@ pub fn prompt_body(input: &Transmission) -> Result<Value, &'static str> {
     if text.len() > MAX_INPUT_TEXT_BYTES {
         return Err("input_too_long");
     }
-    Ok(json!({
+    let mut body = json!({
         "id": message_id(input.command_id),
         "text": text,
         "delivery": "queue",
         "metadata": {"canterlot_command": input.command_id.to_string()},
-    }))
+    });
+    let attached: Vec<&LocalFile> = input
+        .files
+        .iter()
+        .filter(|file| images && file.image && file.size <= MAX_NATIVE_FILE_BYTES)
+        .collect();
+    if !attached.is_empty() {
+        body["files"] = attached
+            .into_iter()
+            .map(native)
+            .collect::<Result<Vec<_>, _>>()?
+            .into();
+    }
+    Ok(body)
 }
 
 pub fn accepted_id(reply: &Value) -> Option<&str> {
@@ -94,6 +117,7 @@ pub fn is_rejection(status: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     fn input(text: String) -> Transmission {
         Transmission {
@@ -108,8 +132,79 @@ mod tests {
     #[test]
     fn input_over_the_limit_is_refused_before_the_request() {
         assert_eq!(
-            prompt_body(&input("я".repeat(MAX_INPUT_TEXT_BYTES))),
+            prompt_body(&input("я".repeat(MAX_INPUT_TEXT_BYTES)), true),
             Err("input_too_long")
+        );
+    }
+
+    fn file(name: &str, mime: &str, size: u64, image: bool) -> LocalFile {
+        LocalFile {
+            path: Path::new("/data/вложения").join(name),
+            name: name.into(),
+            mime: mime.into(),
+            size,
+            image,
+        }
+    }
+
+    fn with_files(files: Vec<LocalFile>) -> Transmission {
+        let mut input = input("смотри".into());
+        input.files = files;
+        input
+    }
+
+    // Картинка в пределах модели идёт вложением, путь с кириллицей кодируется как URI.
+    #[test]
+    fn picture_within_the_model_goes_as_a_file() {
+        let body = prompt_body(
+            &with_files(vec![file("кот.png", "image/png", 10, true)]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            body["files"],
+            json!([{
+                "uri": "file:///data/%D0%B2%D0%BB%D0%BE%D0%B6%D0%B5%D0%BD%D0%B8%D1%8F/%D0%BA%D0%BE%D1%82.png",
+                "name": "кот.png",
+            }])
+        );
+    }
+
+    // Вложением идёт только то, что модель прочитает; путь в тексте есть всегда.
+    #[test]
+    fn everything_else_goes_only_as_a_path_in_the_text() {
+        for (model_sees_pictures, attached) in [
+            (false, file("кот.png", "image/png", 10, true)),
+            (
+                true,
+                file("большой.png", "image/png", MAX_NATIVE_FILE_BYTES + 1, true),
+            ),
+            (true, file("отчёт.pdf", "application/pdf", 10, false)),
+        ] {
+            let name = attached.name.clone();
+            let body = prompt_body(&with_files(vec![attached]), model_sees_pictures).unwrap();
+            assert!(body.get("files").is_none(), "{name}");
+            let text = body["text"].as_str().unwrap();
+            assert!(text.starts_with("смотри\n\n"), "{text}");
+            assert!(text.contains(&format!("/data/вложения/{name}")), "{text}");
+        }
+    }
+
+    #[test]
+    fn mixed_input_attaches_only_the_picture() {
+        let body = prompt_body(
+            &with_files(vec![
+                file("кот.png", "image/png", 10, true),
+                file("данные.bin", "application/octet-stream", 10, false),
+            ]),
+            true,
+        )
+        .unwrap();
+        assert_eq!(body["files"].as_array().unwrap().len(), 1);
+        let text = body["text"].as_str().unwrap();
+        assert!(
+            text.contains("кот.png") && text.contains("данные.bin"),
+            "{text}"
         );
     }
 

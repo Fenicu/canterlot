@@ -3,8 +3,9 @@
 
 //! Перевод событий OpenCode (L0) на записях этапа 0.
 
+use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use canterlot_worker::adapter::{
-    AdapterEvent, BlockKind, ModelUsage, Phase,
+    AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase,
     opencode::{
         catalog,
         events::{RunOutcome, Translated, Translator, block_id},
@@ -17,6 +18,14 @@ use uuid::Uuid;
 
 fn stream(name: &str) -> Vec<Value> {
     capture_lines(name, None)
+        .into_iter()
+        .filter(|line| line["dir"] == "sse")
+        .map(|line| line["data"].clone())
+        .collect()
+}
+
+fn capture_events(name: &str, scenario: Option<&str>) -> Vec<Value> {
+    capture_lines(name, scenario)
         .into_iter()
         .filter(|line| line["dir"] == "sse")
         .map(|line| line["data"].clone())
@@ -659,4 +668,96 @@ fn debug_of_tool_events_hides_arguments_and_output() {
     let shown = format!("{:?}", feed_all(&mut translator, &events));
     assert!(!shown.contains("echo hi"), "{shown}");
     assert!(!shown.contains("alpha"), "{shown}");
+}
+
+// Запись настоящего сервера: картинка лежит в результате инструмента `read` как `data:` URI.
+#[test]
+fn picture_in_a_tool_result_goes_to_the_call_block() {
+    let events = capture_events("recovery", Some("image_read"));
+    let (mut translator, command) = translator(&events);
+    translator.begin_run(Some(command));
+    let translated = feed_all(&mut translator, &events);
+    let call = translated
+        .iter()
+        .find_map(|item| match item {
+            Translated::ToolCall { block, .. } => Some(*block),
+            _ => None,
+        })
+        .unwrap();
+    let translated = adapter_events(translated);
+    let media: Vec<_> = translated
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Media { block_id, source } => Some((*block_id, source.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(media.len(), 1);
+    assert_eq!(media[0].0, call);
+    assert!(
+        matches!(&media[0].1, MediaSource::Base64(text) if text.starts_with("iVBORw0KGgo")),
+        "{:?}",
+        media[0].1
+    );
+    let texts: Vec<_> = translated
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockFinal { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        texts.iter().all(|text| !text.contains("base64")),
+        "{texts:?}"
+    );
+}
+
+fn tool_result(content: Value) -> Vec<Value> {
+    let session = "ses_1";
+    vec![
+        json!({"type": "session.tool.input.started", "data": {
+            "sessionID": session, "assistantMessageID": "msg_1", "id": "call_1", "name": "read"}}),
+        json!({"type": "session.tool.called", "data": {
+            "sessionID": session, "assistantMessageID": "msg_1", "id": "call_1", "input": {}}}),
+        json!({"type": "session.tool.success", "data": {
+            "sessionID": session, "assistantMessageID": "msg_1", "id": "call_1", "content": content}}),
+    ]
+}
+
+// Только картинки: PDF в `read` приходит той же формой, а показать его негде.
+#[test]
+fn other_files_in_a_tool_result_are_not_pictures() {
+    let events = tool_result(json!([
+        {"type": "file", "uri": "data:application/pdf;base64,AAAA", "mime": "application/pdf"},
+        {"type": "file", "uri": "file:///tmp/x.png", "mime": "image/png"},
+    ]));
+    let mut translator = Translator::new("ses_1", Default::default());
+    let translated = adapter_events(feed_all(&mut translator, &events));
+    assert!(
+        !translated
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Media { .. }))
+    );
+}
+
+// Текст крупнее финала доходит до хаба только дельтами, иначе блок останется пустым.
+#[test]
+fn long_tool_output_goes_as_a_delta_before_the_final() {
+    let text = "я".repeat(BLOCK_FINAL_INLINE_MAX_BYTES);
+    let events = tool_result(json!([{"type": "text", "text": text}]));
+    let mut translator = Translator::new("ses_1", Default::default());
+    let translated = adapter_events(feed_all(&mut translator, &events));
+    let delta = translated.iter().find_map(|event| match event {
+        AdapterEvent::BlockDelta { append, .. } => Some(append.clone()),
+        _ => None,
+    });
+    assert_eq!(delta.as_deref(), Some(text.as_str()));
+    let short = tool_result(json!([{"type": "text", "text": "коротко"}]));
+    let mut translator = Translator::new("ses_1", Default::default());
+    let translated = adapter_events(feed_all(&mut translator, &short));
+    assert!(
+        !translated
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
+    );
 }

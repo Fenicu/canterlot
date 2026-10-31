@@ -57,6 +57,13 @@ const PRESET_CHANGE_NOTE =
 const PRESET_CHANGE_NOTE_OPENCODE =
   "Смена инструкций действует со следующего хода без перезапуска, фоновые задачи продолжат работать. Переход на «Как у владельца» и обратно перезапускает агента и останавливает их.";
 
+/** Хаб принимает картинку для любой сессии OpenCode: модель без такого ввода получает путь. */
+export function modelImagesNote(images: boolean | null | undefined): string {
+  return images === false
+    ? "Модель не принимает картинки: вложение придёт ей путём к файлу."
+    : "";
+}
+
 export function presetChangeNote(provider: Value): string {
   return provider === "opencode" ? PRESET_CHANGE_NOTE_OPENCODE : PRESET_CHANGE_NOTE;
 }

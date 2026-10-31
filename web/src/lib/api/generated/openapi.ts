@@ -1402,8 +1402,15 @@ export interface components {
             output_tokens: number;
         };
         ModelView: {
+            /**
+             * Format: int64
+             * @description Окно контекста модели в токенах, если харнесс его знает.
+             */
+            context_window?: number | null;
             efforts: string[];
             id: string;
+            /** @description Модель принимает картинки; `null`: у харнесса это не свойство модели. */
+            images?: boolean | null;
             title: string;
         };
         NewAttachment: {

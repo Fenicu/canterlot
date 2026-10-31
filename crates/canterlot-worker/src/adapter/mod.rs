@@ -373,6 +373,8 @@ impl fmt::Debug for LocalFile {
 pub enum MediaSource {
     Bytes(Vec<u8>),
     Path(PathBuf),
+    /// Картинка в base64: декодирует подготовка вне цикла сопровождения.
+    Base64(String),
 }
 impl fmt::Debug for MediaSource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -382,6 +384,7 @@ impl fmt::Debug for MediaSource {
                 .field("bytes", &bytes.len())
                 .finish(),
             Self::Path(_) => f.write_str("Path"),
+            Self::Base64(text) => f.debug_struct("Base64").field("len", &text.len()).finish(),
         }
     }
 }
@@ -602,10 +605,15 @@ impl fmt::Debug for AgentCallResult {
         }
     }
 }
+#[derive(Default)]
 pub struct ModelCatalog {
     pub id: String,
     pub title: String,
     pub efforts: Vec<String>,
+    /// Модель принимает картинки; `None`: у харнесса это не свойство модели.
+    pub images: Option<bool>,
+    /// Окно контекста модели в токенах, если харнесс его знает.
+    pub context_window: Option<u64>,
 }
 pub struct HarnessCatalog {
     pub harness: &'static str,
@@ -658,6 +666,7 @@ pub fn catalog_with(
                         .into_iter()
                         .map(str::to_owned)
                         .collect(),
+                    ..Default::default()
                 })
                 .collect(),
         });
@@ -705,11 +714,13 @@ pub fn catalog_with(
                         .into_iter()
                         .map(str::to_owned)
                         .collect(),
+                    ..Default::default()
                 },
                 ModelCatalog {
                     id: "synthetic-small".into(),
                     title: "Малая синтетическая".into(),
                     efforts: ["low", "medium"].into_iter().map(str::to_owned).collect(),
+                    ..Default::default()
                 },
             ],
         }),

@@ -17,7 +17,7 @@ export interface MachineRecord {
 	sessions?: components['schemas']['SessionView'][];
 	warnings: string[];
 	metrics: MachineMetrics | null;
-	harnesses: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[] }[]; permission_modes: string[] }[];
+	harnesses: { id: string; title: string; provider: string; models: { id: string; title: string; efforts: string[]; images?: boolean | null; context_window?: number | null }[]; permission_modes: string[] }[];
 	worker_version?: string | null;
 	capabilities?: string[];
 	limits_ok?: boolean;

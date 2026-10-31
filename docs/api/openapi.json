@@ -6891,6 +6891,15 @@
           "efforts"
         ],
         "properties": {
+          "context_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Окно контекста модели в токенах, если харнесс его знает.",
+            "minimum": 0
+          },
           "efforts": {
             "type": "array",
             "items": {
@@ -6899,6 +6908,13 @@
           },
           "id": {
             "type": "string"
+          },
+          "images": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Модель принимает картинки; `null`: у харнесса это не свойство модели."
           },
           "title": {
             "type": "string"

@@ -1702,7 +1702,7 @@ async fn live_smoke() {
     eprintln!(
         "CONFIRMED: set_model accepted between turns; Read image source={}",
         match media {
-            adapter::MediaSource::Bytes(_) => "received bytes",
+            adapter::MediaSource::Bytes(_) | adapter::MediaSource::Base64(_) => "received bytes",
             adapter::MediaSource::Path(_) => "path fallback",
         }
     );
