@@ -14,10 +14,11 @@ export interface LaneModelResult {
 export function laneModel(
   blocks: BlockModel[],
   rootBlockId: string,
-  opts?: { machineName?: string },
+  opts?: { machineName?: string; children?: BlockModel[] },
 ): LaneModelResult {
   const root = blocks.find((b) => b.id === rootBlockId);
-  const lead = blocks.find((block) => block.parentId === rootBlockId && !isMainAgent(block.agent));
+  const children = opts?.children ?? blocks.filter((block) => block.parentId === rootBlockId);
+  const lead = children.find((block) => !isMainAgent(block.agent));
   const agentName = lead?.agent ?? (root && !isMainAgent(root.agent) ? root.agent : "Субагент");
   const model = lead?.model || root?.model || "";
   const machine = opts?.machineName || "workstation";

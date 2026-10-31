@@ -40,7 +40,7 @@
 <div class="tool" data-open={open ? '' : undefined}>
   <button type="button" class="head" aria-expanded={open} onclick={() => { open = !open; }}>
     <span class="chevron"><Icon name="chevron" /></span>
-    <span class="name">{title.name || 'инструмент'}</span>
+    <span class="name">{title.name || 'Результат инструмента'}</span>
     {#if detail}<span class="summary">{detail}</span>{/if}
     {#if isCliPolicy}
       <span class="policy-badge">Разрешено правилами CLI</span>

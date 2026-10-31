@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { blockLinks } from '#lib/timeline/rows.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
 	import TodoPanel from './TodoPanel.svelte';
@@ -25,7 +26,7 @@
 	const machineName = $derived((chat.detail?.machine as { name?: string })?.name || 'workstation');
 
 	const model = $derived(
-		laneModel(blocks, rootBlockId, { machineName })
+		laneModel(blocks, rootBlockId, { machineName, children: blockLinks(chat.timeline.entries).children(rootBlockId) })
 	);
 </script>
 

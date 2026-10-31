@@ -1,6 +1,7 @@
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { fmt } from "#lib/format/ru.js";
 import type { TimelineEntry } from "#lib/stores/timeline.js";
+import { isMainAgent } from "./present";
 import type { RowKind } from "./virtual";
 
 export type { RowKind };
@@ -20,22 +21,42 @@ export interface BlockLinks {
   children(id: string): BlockModel[];
   /** Результат вызова инструмента: вывод и конец работы лежат в нём. */
   result(id: string): BlockModel | null;
+  /** Родитель с учётом результатов субагента из старых строк, где вызова нет. */
+  parent(block: BlockModel): string | null;
+}
+
+const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
+
+export function isSubagentCall(block: BlockModel): boolean {
+  return block.kind === "tool_call" && SUBAGENT_TOOLS.has(block.toolName ?? "");
 }
 
 export function blockLinks(entries: TimelineEntry[]): BlockLinks {
   const children = new Map<string, BlockModel[]>();
+  const adopted = new Map<string, string>();
+  const calls = new Map<string | null, string>();
   for (const entry of entries) {
     if (entry.kind !== "block") continue;
     const block = entry.block;
-    if (!block.parentId) continue;
-    const list = children.get(block.parentId);
+    if (isSubagentCall(block)) calls.set(block.inputCommandId, block.id);
+    const lane =
+      block.parentId === null &&
+      block.kind === "tool_result" &&
+      !isMainAgent(block.agent)
+        ? calls.get(block.inputCommandId)
+        : undefined;
+    if (lane) adopted.set(block.id, lane);
+    const parent = block.parentId ?? lane;
+    if (!parent) continue;
+    const list = children.get(parent);
     if (list) list.push(block);
-    else children.set(block.parentId, [block]);
+    else children.set(parent, [block]);
   }
   return {
     children: (id) => children.get(id) ?? [],
     result: (id) =>
       children.get(id)?.find((child) => child.kind === "tool_result") ?? null,
+    parent: (block) => block.parentId ?? adopted.get(block.id) ?? null,
   };
 }
 
@@ -47,7 +68,7 @@ export function buildRows(
   const source = opts?.laneRoot
     ? descendants(entries, opts.laneRoot, links)
     : entries.filter(
-        (entry) => entry.kind === "input" || entry.block.parentId === null,
+        (entry) => entry.kind === "input" || links.parent(entry.block) === null,
       );
   const rows: Row[] = [];
   let card: Row | null = null;

@@ -12,7 +12,7 @@ import {
   toolTiming,
   toolTitle,
 } from "#lib/timeline/present.js";
-import { blockLinks } from "#lib/timeline/rows.js";
+import { blockLinks, buildRows } from "#lib/timeline/rows.js";
 import { FIRST_DIALOG, firstDialogBlock } from "../../../testing/fixtures/first-dialog";
 
 const CONV = "01a19179-9c91-73e5-bfc8-f4cb774a303d";
@@ -85,6 +85,36 @@ describe("first dialog: durations", () => {
     const call = calls(chat, "Read")[0]!;
     call.approvedBy = "cli_policy";
     expect(pill(chat, call)).toBe("");
+  });
+});
+
+describe("first dialog: orphan results", () => {
+  const orphan = (block: HistoryBlock) => block.block_kind === "tool_result" && block.agent === "Explore";
+
+  it("leave_the_main_feed_for_the_lane_of_the_subagent", () => {
+    const chat = loaded();
+    const main = buildRows(chat.timeline.entries).flatMap((row) => row.entries);
+    const shown = main.flatMap((entry) => (entry.kind === "block" ? [entry.block.id] : []));
+    expect(shown).not.toContain(firstDialogBlock(orphan).id);
+    const agent = calls(chat, "Agent")[0]!;
+    const lane = buildRows(chat.timeline.entries, { laneRoot: agent.id })
+      .flatMap((row) => row.entries)
+      .flatMap((entry) => (entry.kind === "block" ? [entry.block.id] : []));
+    expect(lane).toContain(firstDialogBlock(orphan).id);
+  });
+
+  it("name_the_subagent_on_its_row", () => {
+    const chat = loaded();
+    const links = blockLinks(chat.timeline.entries);
+    const agent = calls(chat, "Agent")[0]!;
+    expect(subagentCopy(agent, links.children(agent.id)).title).toBe("Субагент · Explore · Opus 5.5");
+  });
+
+  it("without_a_subagent_call_stay_visible", () => {
+    const result = firstDialogBlock(orphan);
+    const chat = loaded([{ ...result, agent: "orchestrator" }]);
+    const rows = buildRows(chat.timeline.entries);
+    expect(rows.some((row) => row.kind === "answer")).toBe(true);
   });
 });
 

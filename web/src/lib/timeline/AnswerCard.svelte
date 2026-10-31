@@ -4,7 +4,7 @@
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
-  import type { BlockLinks } from '#lib/timeline/rows.js';
+  import { isSubagentCall, type BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
@@ -55,7 +55,7 @@
     </header>
   {/if}
   {#each shown as block (block.id)}
-    {#if block.toolName === 'Agent'}
+    {#if isSubagentCall(block)}
       <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
       <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
