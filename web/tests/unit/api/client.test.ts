@@ -7,7 +7,7 @@ import {
   patchScheduled,
   postInput,
   setConversationGroups,
-  startExecution,
+  resume,
 } from "#lib/api/client.js";
 import { uploadLimits, loadConfig } from "#lib/api/config.js";
 
@@ -120,13 +120,13 @@ describe("api/client", () => {
       }),
     );
     await setConversationGroups("c/1", { group_ids: ["g"] } as never, "k1");
-    await startExecution("c 1", "k2");
+    await resume("c 1", { continue_queue: false }, "k2");
     await patchScheduled("s/1", { text: "later" } as never, "k3");
     const media = await getMedia("m/1");
     const file = await getAttachmentContent("a/1");
     expect(urls).toEqual([
       "/api/v1/conversations/c%2F1/groups",
-      "/api/v1/conversations/c%201/executions",
+      "/api/v1/conversations/c%201/resume",
       "/api/v1/scheduled/s%2F1",
       "/api/v1/media/m%2F1",
       "/api/v1/attachments/a%2F1/content",

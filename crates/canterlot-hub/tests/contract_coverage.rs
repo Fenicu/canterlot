@@ -307,6 +307,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         .unwrap();
     testkit::seed_catalog(&pool, machine).await;
     let id = testkit::seed_conversation(&pool, owner, machine).await;
+    let doomed = testkit::seed_conversation(&pool, owner, machine).await;
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
     sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
         .bind(id)
@@ -599,6 +600,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::DELETE,
             "/api/v1/attachments/{id}",
             format!("/api/v1/attachments/{to_cancel}"),
+            None,
+            None,
+        ),
+        case(
+            Method::DELETE,
+            "/api/v1/conversations/{id}",
+            format!("/api/v1/conversations/{doomed}"),
             None,
             None,
         ),

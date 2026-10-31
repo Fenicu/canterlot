@@ -47,6 +47,7 @@
 | Разговор | `block_conflicting_final` | Повторный финал блока с другим содержимым |
 | Разговор | `block_media_attached` | Картинка, на которую смотрел агент, опубликована и прикреплена к блоку |
 | Разговор, список | `conversation_updated` | Атрибуты разговора; в списке также `counts` |
+| Список | `conversation_deleted` | Разговор удалён: `id`, `counts` |
 | Разговор | `conversation_settings_changed` | Настройки следующего хода и их применение |
 | Разговор | `crunch_changed` | Настройки «кранча» и переопределение резерва |
 | Разговор | `crunch_held` | Удержание по лимиту |
@@ -132,6 +133,8 @@
 | `group_not_found` | 404 | `browser` | `never` | Группа не найдена |
 | `group_name_taken` | 409 | `browser` | `never` | Группа с таким именем уже существует |
 | `archive_active` | 409 | `browser` | `never` | В сессии есть активная работа |
+| `conversation_deleted` | 404 | `browser` | `never` | Сессия удалена |
+| `conversation_live` | 409 | `browser` | `after_condition` | Сначала остановите сессию |
 | `attachment_not_ready` | 409 | `browser` | `after_condition` | Вложение ещё не готово |
 | `attachment_not_uploadable` | 409 | `browser` | `never` | Загрузка вложения уже завершена или прекращена |
 | `attachment_unsupported` | 422 | `browser` | `never` | Харнесс не принимает такое вложение |
@@ -188,6 +191,7 @@
 | `GET /api/v1/conversations` | `items`, `next_cursor`, `counts` |
 | `GET /api/v1/conversations/{id}` | Атрибуты, проекция активности, настройки, кранч, живое исполнение и удержания |
 | `PATCH /api/v1/conversations/{id}` | Изменение `title`, `color`, `pinned`, `archived`; `force` допускается при архивировании |
+| `DELETE /api/v1/conversations/{id}` | 204; удаление остановленной сессии, см. «Удаление разговора» |
 | `PUT /api/v1/conversations/{id}/groups` | Замена набора `group_ids` |
 | `PUT /api/v1/conversations/{id}/crunch` | Сохранение `enabled` и `resume_text` |
 | `POST /api/v1/conversations/{id}/spend-reserve` | 200, `continued`, `already_continued` или `not_held`; продолжение этой сессии за счёт недельного резерва |
@@ -201,19 +205,30 @@
 | `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
 | `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
 | `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
-| `GET /api/v1/machines` | Каталоги, ОС, доступность, метрики, сессии, предупреждения |
+| `GET /api/v1/machines` | Каталоги, ОС, домашний каталог `home_dir` (`null` у воркера без этого поля), доступность, метрики, сессии, предупреждения |
 | `GET /api/v1/machines/{id}` | Та же структура одной машины |
 | `GET /api/v1/machines/{id}/workdirs/recent` | `workdirs`, последние 3 каталога этой машины, свежие первыми |
+| `GET /api/v1/machines/{id}/workdirs/suggest?path=...` | `workdirs`, полные пути существующих каталогов по введённому пути, до 30, по имени; спрашивает живой воркер, ждёт не больше 3 с. Машина вне сети, воркер без `workdir_suggest_v1`, срок вышел, путь длиннее 2048 байт: `200` с пустым списком, а не ошибка. Подробности отбора в [streams.md](streams.md#1-сеанс-потоков-воркерхаб-84-86) |
 | `GET /api/v1/limits` | Лимиты провайдеров: пятичасовое и недельное окна, `weekly_reserve_active`, `weekly_reserve_resets_at` |
 | `GET /api/v1/limits/history` | `usage` по дню, сессии, модели и агенту; `series` с обоими окнами |
 
-Создание проверяет сохранённый каталог машины, `pilot_v1`, модель, усилие, режим разрешений, пресет инструкций, разрешённый корень и группы. Путь длиннее 2048 байт отклоняется как `workdir_not_allowed`: он входит в ключ `machine_workdirs`. Проверенный каталог запоминается в `machine_workdirs` (upsert метки `last_used_at`, хранится не больше 20 на машину); `workdirs/recent` отдаёт последние 3 свежими первыми. Удалённый на воркере каталог из списка не пропадает, хаб файловую систему воркера не проверяет. Пустой режим разрешений наследуется от владельца, пресет по умолчанию `clean` («Без инструкций»). Без `start` машина может быть недоступна. При `start=true` запись разговора, очереди, исполнения, команды, события и ключа фиксируется одной транзакцией. Текст по умолчанию для кранча копируется из `[limits].default_resume_text` при включении. Пока действует недельный резерв провайдера, новая сессия создаётся с удержанием `weekly_reserve` (см. ниже).
+Создание проверяет сохранённый каталог машины, `pilot_v1`, модель, усилие, режим разрешений, пресет инструкций, разрешённый корень и группы. Режим разрешений по умолчанию `bypass`; сессия с пустым режимом, созданная раньше, сохраняет его и запускается как `owner`. Путь длиннее 2048 байт отклоняется как `workdir_not_allowed`: он входит в ключ `machine_workdirs`. Проверенный каталог запоминается в `machine_workdirs` (upsert метки `last_used_at`, хранится не больше 20 на машину); `workdirs/recent` отдаёт последние 3 свежими первыми. Удалённый на воркере каталог из списка не пропадает, хаб файловую систему воркера не проверяет. Пустой режим разрешений наследуется от владельца, пресет по умолчанию `clean` («Без инструкций»). Без `start` машина может быть недоступна. При `start=true` запись разговора, очереди, исполнения, команды, события и ключа фиксируется одной транзакцией. Текст по умолчанию для кранча копируется из `[limits].default_resume_text` при включении. Пока действует недельный резерв провайдера, новая сессия создаётся с удержанием `weekly_reserve` (см. ниже).
 
 Список принимает `filter=all|pinned|archived|group:<uuid>`, `q`, `cursor`, `limit` от 1 до 200 (по умолчанию 50). `all`, `pinned` и группы скрывают архив. Счётчики не зависят от поиска: `all`, `pinned`, `archived`, `groups:[{id,count}]`, группы считают только неархивные разговоры. Поиск подстроки использует ICU, `%`, `_` и обратный слеш считаются буквальными символами. Сортировка: закрепление, время закрепления по убыванию, активность по убыванию (NULL в конце), UUID по возрастанию. Непрозрачный base64url-курсор содержит четыре ключа, фильтр, поисковую строку и уже показанные UUID; перемещение показанной строки ниже границы не создаёт повторов. Курсор нельзя переносить между фильтрами или владельцами. Изменения выше уже пройденной границы требуют обновления списка.
 
 `ListItem.machine` содержит только `id` и `name`. Атрибуты публикуются в `conversation_created` (полный элемент списка) и `conversation_updated` (атрибуты без проекции); оба события несут актуальные `counts`. Изменение атрибутов сначала публикуется в области разговора, затем в списке. Удаление группы публикует изменения всех её бывших участников (сначала все области разговоров по UUID), затем `group_changed` с новым списком групп и `counts`. В `derived_changed` приходят только изменяемые проектором поля. Доступность машины принадлежит области `machines`.
 
 Архивирование активной сессии возвращает `archive_active` с `details.reasons` из `crunch`, `scheduled`, `live_execution`. `force=true` выключает кранч, как `PUT …/crunch` с `enabled=false`, и отменяет ожидающие сообщения и пробуждения; если планировщик уже захватил задание, операция откатывается и возвращает `scheduled`. Само живое исполнение при принудительном архивировании продолжается.
+
+### Удаление разговора
+
+`DELETE /api/v1/conversations/{id}` требует `Idempotency-Key` и удаляет разговор одной транзакцией. Пока исполнение не перешло в `stopped` или `failed` (включая `owner_lost`), ответ `conversation_live`, и ничего не меняется. Чужой или неизвестный идентификатор даёт `not_found`, уже удалённый разговор `conversation_deleted`, повтор с тем же ключом снова 204. Ссылка из другого разговора останавливает транзакцию: `invalid_state`, данные не тронуты.
+
+Удаляются разговор, исполнения, вводы, команды, блоки, запросы, ходы и расход по ним, отложенные сообщения, вложения и картинки, членство в группах, производное состояние, очередь и ключи идемпотентности. Журнал области разговора исчезает вместе со счётчиком. В журналах владельца строки разговора остаются скрытыми заглушками без содержимого, чтобы нумерация шла без пропусков. Снимки лимитов теряют ссылку на исполнение, пресеты, созданные из разговора, ссылку на него; сами они остаются. Файлы вложений и картинок адресуются своим ID и удаляются сразу после commit; занятый файл подберёт сборщик.
+
+Остаётся только надгробие `conversation_tombstones`: идентификатор разговора, владелец, машина, максимальное поколение и идентификаторы исполнений, без текста и бессрочно (§14.1). Курсор журнала удалённого исполнения теряет ссылку на него и получает `discarded`: поздние записи подтверждаются без применения, а факт `JournalOpened` по надгробию не считается чужим, поэтому воркер отпускает повтор и не блокирует поток данных машины (AT-F-19). Событие `conversation_deleted` хранит идентификатор положенные 7 дней.
+
+На машине остаются каталог исполнения (журналы и копии вложений) и нативная история CLI: команда `delete_conversation_local` из [recovery.md](recovery.md) R6 пока не реализована, поэтому пилот не обещает AT-F-18 и AT-F-20.
 
 У машины `availability_since` соответствует `machines.availability_at`, `heartbeat_age_ms` берётся из Registry (при отсутствии соединения `null`). Предупреждения: `disk_usage_high` при использовании диска не ниже `[machines].disk_warn_pct`, `metrics_stale` при отсутствии или возрасте метрик не меньше `[machines].metrics_stale_after`, `limits_mismatch` при расхождении лимитов вложений.
 
@@ -256,9 +271,11 @@
 | `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome` |
 | `POST /api/v1/conversations/{id}/queue/continue` | - | `ContinueOutcome` |
 | `PATCH /api/v1/conversations/{id}/settings` | `model?`, `effort?`, `permission_mode?`, `instruction_profile?` | `{effective, pending, rev}` |
-| `POST /api/v1/conversations/{id}/executions` | - | 201, первый запуск |
-| `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение с последним `native_conversation_id`; с `continue_queue` снятие паузы в той же транзакции |
+| `POST /api/v1/conversations/{id}/executions` | - | 201, новое исполнение; остаётся для старых клиентов и ведёт себя как `resume` без `continue_queue` |
+| `POST /api/v1/conversations/{id}/resume` | `continue_queue?` | 201, новое исполнение; с `continue_queue` снятие паузы в той же транзакции |
 | `POST /api/v1/conversations/{id}/requests/{request_id}/decision` | `DecisionBody` | 200 `DecisionOutcomeView`, первый ответ побеждает |
+
+Запуск всегда решает сам: если записан принятый ход, исполнение продолжает беседу по последнему `native_conversation_id`, иначе начинает новую. То же значение отдаёт `turn_recorded` карточки разговора, поэтому PWA показывает одно действие: «Запустить» без записанного хода, «Возобновить» с ним. Устаревший клиент любым из двух запросов не запустит CLI без контекста.
 
 Доменные функции отмены, остановки, продолжения и ввода сами ведут ключ идемпотентности; `settings`, `executions` и `resume` оборачивает `idempotency::run_in_tx`. Чужой идентификатор даёт `404 not_found`. После фиксации транзакции маршрут будит диспетчер разговора.
 
@@ -371,7 +388,7 @@ Worker при подготовке исполнения синхронизиру
 
 Ответ диапазона показывает `head` из той же транзакции, что и события. Курсор ниже сохранённого журнала получает `cursor_too_old`, курсор выше головы `cursor_ahead`; `oldest_available_seq` является десятичной строкой (при пустом журнале это `head+1`). Клиент загружает новый снимок и начинает хвост после его `cursor`. До 256 исходных событий проходят через единую `events::project_for_client`; неизвестный вид становится `hidden` с `payload:{}`, `conversation_id:null`, `execution_id:null`. Соседние заглушки одной области с последовательными номерами объединяются: начальные `id`, `correlation_id`, `committed_at_from`, `scope_seq_from` сохраняются, конечные `scope_seq`, `committed_at` берутся из последнего события. Через разрыв, видимое событие или другую область объединение не проходит.
 
-Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `todo_updated`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
+Клиентские виды и формы событий опубликованы в [events.schema.json](../api/events.schema.json), JSON Schema 2020-12. Полный набор: `input_queued`, `input_state_changed`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `execution_state_changed`, `phase_changed`, `run_finished`, `interrupt_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `adapter_diagnostic`, `state_divergence`, `block_revision_gap`, `block_checksum_mismatch`, `block_conflicting_final`, `block_media_attached`, `conversation_created`, `conversation_updated`, `conversation_settings_changed`, `crunch_changed`, `crunch_held`, `crunch_woken`, `derived_changed`, `group_changed`, `instruction_preset_changed`, `scheduled_changed`, `limits_changed`, `limit_reached`, `attachment_state_changed`, `request_opened`, `request_closed`, `request_decided`, `request_transmitting`, `todo_updated`, `conversation_deleted`, `machine_availability_changed`, `machine_report_updated`, `machine_metrics`, `hidden`, `oversized`. `journal_closed`, `execution_fact_rejected`, `journal_record_mismatch`, `local_state_reset` и неизвестные будущие виды скрыты. Схема содержит также `ClientOp` и `ServerOp`: subscribe/unsubscribe/ping, subscribed/event/resync_required/lagged/unsubscribed/pong/error/close. Транспорт WSS реализуется в задаче 7b; формы зарезервированных payload уточняются вместе с их производителями в задачах 8, 9 и плане 1.3c.
 
 ### Метаданные фактов агента
 
@@ -431,7 +448,7 @@ Pump читает журнал только при доступной ёмкос
 | 3 | Закрепление, цвет, название, архив, синхронно между устройствами (§3) | `PATCH /api/v1/conversations/{id}` | `conversation_updated` | 6a |
 | 4 | Поиск по названиям (§3, ТЗ §12.1) | `GET /api/v1/conversations` (`q`) | – | 6a |
 | 5 | Строка лимитов и история расхода по дням, сессиям, моделям и агентам (§3, §7) | `GET /api/v1/limits`, `GET /api/v1/limits/history` (`provider`, `from`, `to`, `tz`); лимиты в снимке списка | `limits_changed` | 3, 6a, 7a, 8 |
-| 6 | Создание сессии: машина, каталог под разрешёнными корнями и недавние папки, агент, модель, усилие, пресет инструкций, режим разрешений, «кранч» и текст продолжения (§4) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}/workdirs/recent`, `POST /api/v1/conversations`, `POST /api/v1/conversations/{id}/executions` | `conversation_created`, `execution_state_changed` | 2, 3, 6a, 6b |
+| 6 | Создание сессии: машина, каталог под разрешёнными корнями, домашний каталог по умолчанию, подсказки и недавние папки, агент, модель, усилие, пресет инструкций, режим разрешений, «кранч» и текст продолжения (§4) | `GET /api/v1/machines`, `GET /api/v1/machines/{id}/workdirs/recent`, `GET /api/v1/machines/{id}/workdirs/suggest`, `POST /api/v1/conversations`, `POST /api/v1/conversations/{id}/executions` | `conversation_created`, `execution_state_changed` | 2, 3, 6a, 6b |
 | 7 | Лента: пузыри с отметками «сохранено» и «принято», карточки ответа, блоки инструментов с картинками, на которые смотрел агент, потоковый текст, полный вывод по запросу (§5.1, §5.7) | `GET /api/v1/conversations/{id}/snapshot`, `GET /api/v1/conversations/{id}/history` (`before`, `after`, `limit`), `GET /api/v1/conversations/{id}/blocks/{block_id}` (`offset`, `limit`), `GET /api/v1/media/{id}`, `GET /api/v1/events` (диапазон разрыва) | `input_queued`, `input_state_changed`, `block_started`, `block_delta`, `block_final`, `block_incomplete`, `block_media_attached`, `run_finished`, `phase_changed`, `hidden` | 3, 7a, 7b, 10d |
 | 8 | Строки и ленты субагентов, дерево делегирования на десктопе (§6) | поля блока `agent`, `model`, `parent_block_id`; `GET /api/v1/conversations/{id}/delegation` | `block_started` | 2, 3, 7a |
 | 9 | Поле ввода: отправка, вложение, прерывание, «отправить позже» (§5.2) | `POST /api/v1/conversations/{id}/inputs`, `POST /api/v1/conversations/{id}/interrupt`, вложения (строка 16), `POST /api/v1/conversations/{id}/scheduled` | `input_queued`, `queue_state_changed`, `queue_paused`, `queue_resumed`, `interrupt_state_changed` | 5, 6b, 9 |
@@ -449,7 +466,8 @@ Pump читает журнал только при доступной ёмкос
 | 21 | Основания межсессионных инструментов (§12): вычисляемое состояние с доказательствами и контракт подписок | активность (строка 15) и области WSS (строка 20) | `derived_changed` | 5, 7b |
 | 22 | Лимиты, видимые модели (§7): только путь данных; инструмент MCP и пометка 80/90/95 % в планах 2a/2b | – (`ControlDown.limits_snapshot` для сеансов `pilot_v1`) | `limits_changed` | 1, 2, 3 |
 | 23 | Пресеты инструкций: список без текста, создание и правка с контролем версий, стартовый пресет исполнителя, мягкое удаление; выбор при создании и смена посреди сессии (план 2c, задачи 2, 3, 8) | `GET /api/v1/presets`, `POST /api/v1/presets`, `GET /api/v1/presets/{id}`, `PATCH /api/v1/presets/{id}`, `DELETE /api/v1/presets/{id}`; сводки в снимке списка | `instruction_preset_changed` | 2c-2 |
-| 24 | Туду-лист агента: живая панель с пунктами, состоянием и прогрессом в чате и в ленте субагента (§12.2) | `todos` в снимке разговора | `todo_updated` | 12.2 |
+| 24 | Удаление остановленной сессии с подтверждением, синхронно между устройствами (ТЗ §14.1) | `DELETE /api/v1/conversations/{id}` | `conversation_deleted` | пилот |
+| 25 | Туду-лист агента: живая панель с пунктами, состоянием и прогрессом в чате и в ленте субагента (§12.2) | `todos` в снимке разговора | `todo_updated` | 12.2 |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.
 

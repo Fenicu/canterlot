@@ -2,15 +2,16 @@ use super::{
     AppState,
     auth::Owner,
     error::{ApiError, ErrorCode},
-    extract::ApiPath,
+    extract::{ApiPath, ApiQuery},
 };
 use crate::conversations;
 use axum::{Json, extract::State};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{PgConnection, Row};
-use utoipa::ToSchema;
+use std::time::Duration;
+use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::{router::OpenApiRouter, routes};
 use uuid::Uuid;
 pub fn routes() -> OpenApiRouter<AppState> {
@@ -18,7 +19,11 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(list))
         .routes(routes!(get))
         .routes(routes!(recent))
+        .routes(routes!(suggest))
 }
+
+/// Дольше воркера: его собственный срок 2 с, ответ о пустом списке ещё должен дойти.
+const SUGGEST_WAIT: Duration = Duration::from_secs(3);
 #[derive(Serialize, ToSchema)]
 pub struct MachineView {
     pub id: Uuid,
@@ -29,6 +34,7 @@ pub struct MachineView {
     pub capabilities: Vec<String>,
     pub os: Option<String>,
     pub allowed_roots: Vec<String>,
+    pub home_dir: Option<String>,
     pub worker_version: Option<String>,
     pub containment: Option<String>,
     pub limits_ok: bool,
@@ -67,6 +73,10 @@ pub enum MachineWarning {
 #[derive(Serialize, ToSchema)]
 pub struct Workdirs {
     pub workdirs: Vec<String>,
+}
+#[derive(Deserialize, IntoParams)]
+pub struct SuggestParams {
+    pub path: String,
 }
 pub(crate) async fn load_stored(
     conn: &mut PgConnection,
@@ -146,6 +156,7 @@ pub(crate) async fn load_stored(
         capabilities: r.try_get("capabilities")?,
         os: r.try_get("os")?,
         allowed_roots: roots.0,
+        home_dir: r.try_get("home_dir")?,
         worker_version: r.try_get("worker_version")?,
         containment: r.try_get("containment")?,
         limits_ok,
@@ -223,18 +234,40 @@ async fn recent(
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<Workdirs>, ApiError> {
     let mut conn = s.pool.acquire().await?;
-    let owned: bool =
-        sqlx::query_scalar("select exists(select 1 from machines where id=$1 and owner_id=$2)")
-            .bind(id)
-            .bind(o.owner_id)
-            .fetch_one(&mut *conn)
-            .await?;
-    if !owned {
-        return Err(ApiError::new(ErrorCode::NotFound));
-    }
+    require_owned(&mut conn, o.owner_id, id).await?;
     Ok(Json(Workdirs {
         workdirs: conversations::recent_workdirs(&mut conn, o.owner_id, id, 3).await?,
     }))
+}
+#[utoipa::path(get,path="/api/v1/machines/{id}/workdirs/suggest",tag="machines",params(("id"=Uuid,Path),SuggestParams),responses((status=200,description="Существующие каталоги машины по введённому пути; пустой список, если машина не ответила",body=Workdirs)))]
+async fn suggest(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    ApiQuery(p): ApiQuery<SuggestParams>,
+) -> Result<Json<Workdirs>, ApiError> {
+    let mut conn = s.pool.acquire().await?;
+    require_owned(&mut conn, o.owner_id, id).await?;
+    drop(conn);
+    if p.path.len() > conversations::MAX_WORKDIR_BYTES {
+        return Ok(Json(Workdirs { workdirs: vec![] }));
+    }
+    Ok(Json(Workdirs {
+        workdirs: s.registry.suggest_workdirs(id, &p.path, SUGGEST_WAIT).await,
+    }))
+}
+async fn require_owned(conn: &mut PgConnection, owner: Uuid, id: Uuid) -> Result<(), ApiError> {
+    let owned: bool =
+        sqlx::query_scalar("select exists(select 1 from machines where id=$1 and owner_id=$2)")
+            .bind(id)
+            .bind(owner)
+            .fetch_one(conn)
+            .await?;
+    if owned {
+        Ok(())
+    } else {
+        Err(ApiError::new(ErrorCode::NotFound))
+    }
 }
 
 #[derive(ToSchema)]

@@ -37,6 +37,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.Instructions",
             ".canterlot.worker.v1.AgentCallRequest",
             ".canterlot.worker.v1.AgentCallResponse",
+            ".canterlot.worker.v1.SuggestWorkdirs",
+            ".canterlot.worker.v1.WorkdirSuggestions",
         ])
         .build_server(true)
         .build_client(true)

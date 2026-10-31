@@ -94,6 +94,35 @@ fn owner_preset_args_keep_owner_configuration() {
 }
 
 #[test]
+fn one_million_variant_reaches_the_cli_unchanged_on_resume() {
+    let td = TempDir::new().unwrap();
+    let exec_dir = td.path().join("exec");
+    fs::create_dir_all(&exec_dir).unwrap();
+    let workdir = td.path().join("work");
+    fs::create_dir_all(&workdir).unwrap();
+    let owner = owner_instructions();
+    let spec = LaunchSpec {
+        executable: Path::new("/usr/bin/claude"),
+        exec_dir: &exec_dir,
+        workdir: &workdir,
+        session: SessionArg::Resume("native".into()),
+        model: "opus[1m]",
+        effort: "medium",
+        permission_mode: "owner",
+        instructions: &owner,
+    };
+    let args = build_args(&spec, &cfg()).unwrap();
+    let s: Vec<String> = args
+        .iter()
+        .map(|o| o.to_string_lossy().to_string())
+        .collect();
+    let model = s.iter().position(|x| x == "--model").unwrap();
+    assert_eq!(s[model + 1], "opus[1m]");
+    let resume = s.iter().position(|x| x == "--resume").unwrap();
+    assert_eq!(s[resume + 1], "native");
+}
+
+#[test]
 fn no_preset_passes_bare_setting_sources_or_strict_mcp() {
     let td = TempDir::new().unwrap();
     let exec_dir = td.path().join("exec");

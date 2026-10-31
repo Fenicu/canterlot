@@ -1,9 +1,10 @@
 use axum::http::Method;
 use canterlot_hub::{
     http::{self, AppState},
+    model::ExecutionState,
     testkit::{self, TestClient},
 };
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -240,6 +241,235 @@ async fn resume_carries_the_last_native_conversation_id(pool: PgPool) {
         .await
         .unwrap();
     assert_eq!(payload["native_conversation_id"], "native-id");
+}
+
+/// Сессия с завершившимся исполнением и клиент владельца; третий элемент держит каталог хаба.
+async fn ended_session(
+    pool: &PgPool,
+    state: ExecutionState,
+    outcome: &str,
+    native: Option<&str>,
+    turn: bool,
+) -> (Uuid, TestClient, impl Sized) {
+    let (deps, dir) = testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(pool)
+        .await
+        .unwrap();
+    let id = testkit::seed_conversation(pool, owner, machine).await;
+    let started = canterlot_hub::executions::start(pool, owner, id, Uuid::now_v7())
+        .await
+        .unwrap();
+    sqlx::query("update executions set native_conversation_id=$2 where id=$1")
+        .bind(started.execution_id)
+        .bind(native)
+        .execute(pool)
+        .await
+        .unwrap();
+    if turn {
+        testkit::seed_recorded_turn(pool, id).await;
+    }
+    if state == ExecutionState::Stopped {
+        sqlx::query("update executions set state='stopping' where id=$1")
+            .bind(started.execution_id)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    canterlot_hub::executions::set_state(
+        pool,
+        started.execution_id,
+        state,
+        Some(outcome),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    (id, client, dir)
+}
+
+async fn started_payload(pool: &PgPool, r: &canterlot_hub::testkit::TestResponse) -> Value {
+    assert_eq!(r.status, 201, "{}", String::from_utf8_lossy(&r.body));
+    let command: Uuid = r.json::<Value>()["command_id"]
+        .as_str()
+        .unwrap()
+        .parse()
+        .unwrap();
+    sqlx::query_scalar("select payload from commands where id=$1")
+        .bind(command)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stale_start_cannot_drop_the_context_of_a_recorded_turn(pool: PgPool) {
+    let (id, client, _dir) = ended_session(
+        &pool,
+        ExecutionState::Stopped,
+        "user_stop",
+        Some("native-id"),
+        true,
+    )
+    .await;
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/executions"),
+            Some("stale-start"),
+            None,
+        )
+        .await;
+    let payload = started_payload(&pool, &r).await;
+    assert_eq!(payload["native_conversation_id"], "native-id");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_start_without_a_recorded_turn_begins_a_new_native_conversation(pool: PgPool) {
+    let (id, client, _dir) = ended_session(
+        &pool,
+        ExecutionState::Stopped,
+        "user_stop",
+        Some("never-used"),
+        false,
+    )
+    .await;
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/executions"),
+            Some("first-start"),
+            None,
+        )
+        .await;
+    let payload = started_payload(&pool, &r).await;
+    assert_eq!(payload["native_conversation_id"], Value::Null);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn detail_says_whether_a_turn_was_recorded(pool: PgPool) {
+    let (fresh, client, _dir) = ended_session(
+        &pool,
+        ExecutionState::Stopped,
+        "user_stop",
+        Some("n"),
+        false,
+    )
+    .await;
+    let body: Value = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{fresh}"),
+            None,
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(body["turn_recorded"], false);
+    let (used, client, _dir) =
+        ended_session(&pool, ExecutionState::Stopped, "user_stop", Some("n"), true).await;
+    let body: Value = client
+        .send(
+            Method::GET,
+            &format!("/api/v1/conversations/{used}"),
+            None,
+            None,
+        )
+        .await
+        .json();
+    assert_eq!(body["turn_recorded"], true);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_single_action_clears_a_failed_start_and_starts_an_execution(pool: PgPool) {
+    let (id, client, _dir) =
+        ended_session(&pool, ExecutionState::Failed, "start_rejected", None, false).await;
+    let before: (Value, Value) = sqlx::query_as(
+        "select pause_reasons, hold_reasons from queue_state where conversation_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before.0, json!([{"reason":"fatal_error"}]));
+    assert!(
+        before
+            .1
+            .as_array()
+            .unwrap()
+            .contains(&json!({"reason":"no_live_execution"})),
+        "{}",
+        before.1
+    );
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/resume"),
+            Some("after-failure"),
+            Some(json!({"continue_queue":true})),
+        )
+        .await;
+    let payload = started_payload(&pool, &r).await;
+    assert_eq!(payload["native_conversation_id"], Value::Null);
+    let after: (Value, Value) = sqlx::query_as(
+        "select pause_reasons, hold_reasons from queue_state where conversation_id=$1",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after.0, json!([]));
+    assert!(
+        !after
+            .1
+            .as_array()
+            .unwrap()
+            .contains(&json!({"reason":"no_live_execution"})),
+        "{}",
+        after.1
+    );
+    let live: i64 = sqlx::query_scalar(
+        "select count(*) from executions where conversation_id=$1 and state='created'",
+    )
+    .bind(id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(live, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn the_single_action_clears_an_exited_process_and_keeps_the_context(pool: PgPool) {
+    let (id, client, _dir) = ended_session(
+        &pool,
+        ExecutionState::Stopped,
+        "normal_exit",
+        Some("native-id"),
+        true,
+    )
+    .await;
+    let r = client
+        .send(
+            Method::POST,
+            &format!("/api/v1/conversations/{id}/resume"),
+            Some("after-exit"),
+            Some(json!({"continue_queue":true})),
+        )
+        .await;
+    let payload = started_payload(&pool, &r).await;
+    assert_eq!(payload["native_conversation_id"], "native-id");
+    let pauses: Value =
+        sqlx::query_scalar("select pause_reasons from queue_state where conversation_id=$1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(pauses, json!([]));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

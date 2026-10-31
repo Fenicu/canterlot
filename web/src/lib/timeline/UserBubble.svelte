@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getRuntime } from '#lib/app/runtime.js';
+  import { rejectionLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import Button from '#lib/ui/Button.svelte';
   import Icon from '#lib/ui/Icon.svelte';
@@ -74,7 +75,7 @@
     </div>
   {/if}
   {#if input.state === 'rejected'}
-    {#if input.rejection}<p class="reason">{input.rejection}</p>{/if}
+    {#if input.rejection}<p class="reason">{rejectionLabel(input.rejection)}</p>{/if}
     <div class="actions">
       <Button
         onclick={() =>

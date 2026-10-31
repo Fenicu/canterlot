@@ -17,7 +17,7 @@ use uuid::Uuid;
 pub fn routes() -> OpenApiRouter<AppState> {
     OpenApiRouter::new()
         .routes(routes!(create, list))
-        .routes(routes!(get, update))
+        .routes(routes!(get, update, remove))
         .routes(routes!(set_groups))
         .routes(routes!(set_crunch))
         .routes(routes!(read))
@@ -31,6 +31,24 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(start_execution))
         .routes(routes!(resume))
 }
+/// Удалённый разговор отвечает своим кодом: клиент не ждёт его возвращения и не отправляет ввод.
+pub(super) async fn deleted_or<T>(
+    s: &AppState,
+    owner: Uuid,
+    id: Uuid,
+    result: Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    match result {
+        Err(error)
+            if error.code == ErrorCode::NotFound
+                && crate::deletion::tombstoned(&s.pool, owner, id).await? =>
+        {
+            Err(ApiError::new(ErrorCode::ConversationDeleted))
+        }
+        other => other,
+    }
+}
+
 /// Живой сеанс без `instructions_v1` запустил бы не-владельческий пресет как «Как у
 /// владельца»; без сеанса проверку повторяет outbox перед отправкой старта.
 async fn require_instructions_capability(
@@ -83,7 +101,9 @@ async fn start_execution(
         #[cfg(feature = "fault-injection")]
         &s.scheduler.faults,
     )
-    .await?;
+    .await
+    .map_err(ApiError::from);
+    let value = deleted_or(&s, o.owner_id, id, value).await?;
     s.dispatcher.trigger(id);
     Ok((StatusCode::CREATED, Json(value)))
 }
@@ -107,7 +127,9 @@ async fn resume(
         #[cfg(feature = "fault-injection")]
         &s.scheduler.faults,
     )
-    .await?;
+    .await
+    .map_err(ApiError::from);
+    let value = deleted_or(&s, o.owner_id, id, value).await?;
     s.dispatcher.trigger(id);
     Ok((StatusCode::CREATED, Json(value)))
 }
@@ -141,7 +163,9 @@ async fn submit(
         },
         c,
     )
-    .await?;
+    .await
+    .map_err(ApiError::from);
+    let result = deleted_or(&s, o.owner_id, id, result).await?;
     s.dispatcher.trigger(id);
     Ok((StatusCode::CREATED, Json(result)))
 }
@@ -702,7 +726,7 @@ async fn get(
     o: Owner,
     ApiPath(id): ApiPath<Uuid>,
 ) -> Result<Json<ConversationDetail>, ApiError> {
-    let mut d = crate::db::in_tx(&s.pool, move |conn| {
+    let d = crate::db::in_tx(&s.pool, move |conn| {
         Box::pin(async move {
             sqlx::query("set transaction isolation level repeatable read read only")
                 .execute(&mut *conn)
@@ -712,7 +736,8 @@ async fn get(
                 .ok_or_else(|| ApiError::new(ErrorCode::NotFound))
         })
     })
-    .await?;
+    .await;
+    let mut d = deleted_or(&s, o.owner_id, id, d).await?;
     if !s.registry.is_reconciled(d.attributes.machine.id) {
         d.holds.push(crate::model::HoldView::MachineNotReconciled);
     }
@@ -749,6 +774,25 @@ async fn update(
     Ok(Json(
         conversations::update_attributes(&s.pool, o.owner_id, id, &key, b, c).await?,
     ))
+}
+#[utoipa::path(
+    delete, path="/api/v1/conversations/{id}", tag="conversations",
+    params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),
+    responses(
+        (status=204,description="Сессия удалена; повтор с тем же ключом даёт тот же ответ"),
+        (status=404,description="not_found или conversation_deleted",body=super::error::ErrorEnvelope),
+        (status=409,description="conversation_live: исполнение не остановлено",body=super::error::ErrorEnvelope)
+    )
+)]
+async fn remove(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<StatusCode, ApiError> {
+    crate::deletion::delete(&s.pool, &*s.blobs, o.owner_id, id, &key, c).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 #[utoipa::path(put,path="/api/v1/conversations/{id}/groups",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=GroupsBody,responses((status=200,description="Группы изменены",body=ConversationDetail)))]
 async fn set_groups(

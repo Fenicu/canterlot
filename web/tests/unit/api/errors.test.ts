@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, it, expect } from "vitest";
-import { describeError, type ErrorAction } from "#lib/api/errors.js";
+import { describeError, errorText, type ErrorAction } from "#lib/api/errors.js";
 import { ApiError, AuthRequired, NetworkError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -45,6 +45,8 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "group_not_found",
   "group_name_taken",
   "archive_active",
+  "conversation_deleted",
+  "conversation_live",
   "attachment_not_ready",
   "attachment_not_uploadable",
   "attachment_unsupported",
@@ -98,7 +100,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(51);
+    expect(ALL_ERROR_CODES.length).toBe(53);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(
@@ -164,5 +166,12 @@ describe("api/errors", () => {
     const retried = describeError(unknown);
     expect(retried.action).toBe("retry_same_key");
     expect(retried.correlationId).toBe("corr-retry");
+  });
+
+  it("error_text_never_shows_a_latin_code_to_the_owner", () => {
+    expect(errorText(new NetworkError("timeout"), "Не вышло")).toBe("Нет связи с хабом");
+    expect(errorText(new Error("empty_conversation"), "Не вышло")).toBe("Не вышло");
+    expect(errorText(new Error("Загрузка отменена"), "Не вышло")).toBe("Загрузка отменена");
+    expect(errorText("строка", "Не вышло")).toBe("Не вышло");
   });
 });

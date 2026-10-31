@@ -174,6 +174,14 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Группа с таким именем уже существует",
   },
+  conversation_deleted: {
+    action: "none",
+    message: "Сессия удалена",
+  },
+  conversation_live: {
+    action: "stop_process",
+    message: "Сначала остановите сессию",
+  },
   archive_active: {
     action: "stop_process",
     message: "В сессии есть активная работа",
@@ -241,6 +249,13 @@ export interface DescribedError {
   actionLabel: string | null;
   message: string;
   correlationId?: string;
+}
+
+/** Текст для экрана: сообщения хаба и клиента уже по-русски, а коды латиницей владельцу не показываем. */
+export function errorText(err: unknown, fallback: string): string {
+  if (err instanceof ApiError) return err.message;
+  if (err instanceof Error && /[А-Яа-яЁё]/.test(err.message)) return err.message;
+  return err instanceof NetworkError ? "Нет связи с хабом" : fallback;
 }
 
 export function describeError(err: ApiError | unknown): DescribedError {

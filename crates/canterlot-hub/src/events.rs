@@ -243,6 +243,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "block_media_attached",
     "conversation_created",
     "conversation_updated",
+    "conversation_deleted",
     "conversation_settings_changed",
     "crunch_changed",
     "crunch_held",

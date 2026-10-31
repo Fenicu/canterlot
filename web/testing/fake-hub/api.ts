@@ -57,8 +57,10 @@ export class FakeHubApi {
 	readonly delegations = new Map<string, DelegationNode[]>();
 	readonly runs = new Map<string, RunInfo>();
 	readonly machines = new Map<string, MachineRecord>();
+	directories = ['/home/owner', '/home/owner/projects', '/srv/canterlot', '/srv/canterlot/web', '/srv/canterlot/.git', '/srv/notes'];
 	readonly reads: { id: string; seq: string }[] = [];
 	readonly decisions = new Map<string, { winnerId: string; decision: unknown; key: string }>();
+	readonly deleted = new Set<string>();
 	groups: ListSnapshot['groups'] = [];
 	counts: Counts = { all: 0, pinned: 0, archived: 0, groups: [] };
 	limits: ProviderLimits[] = [];
@@ -71,6 +73,32 @@ export class FakeHubApi {
 	constructor(readonly hub: FakeHub) {
 		this.hub.setSnapshot('conversations', () => this.listData());
 		this.hub.setSnapshot('machines', () => ({ items: [...this.machines.values()] }));
+	}
+
+	/** Как настоящий хаб: строки исчезают, список узнаёт из `conversation_deleted`. */
+	deleteConversation(id: string): void {
+		const row = this.list.get(id);
+		this.list.delete(id);
+		this.details.delete(id);
+		this.histories.delete(id);
+		this.deleted.add(id);
+		const rows = [...this.list.values()];
+		this.counts = {
+			all: rows.filter((item) => !item.archived).length,
+			pinned: rows.filter((item) => item.pinned && !item.archived).length,
+			archived: rows.filter((item) => item.archived).length,
+			groups: this.groups.map((group) => ({
+				id: group.id,
+				count: rows.filter((item) => item.groups.includes(group.id) && !item.archived).length
+			}))
+		};
+		if (!row) return;
+		this.hub.append('conversations', {
+			kind: 'conversation_deleted',
+			conversation_id: id,
+			payload: { id, counts: this.counts }
+		});
+		this.hub.flush();
 	}
 
 	id(): string {
@@ -325,6 +353,18 @@ export class FakeHubApi {
 	async listSnapshot(): Promise<{ cursor: string; data: ListSnapshot }> {
 		const snap = this.hub.snapshot('conversations');
 		return { cursor: snap.cursor, data: (snap.data as ListSnapshot | null) ?? this.listData() };
+	}
+
+	/** Те же правила, что у воркера: только каталоги родителя, скрытые по префиксу с точкой. */
+	suggestWorkdirs(path: string): { workdirs: string[] } {
+		const cut = path.lastIndexOf('/') + 1;
+		const [parent, prefix] = [path.slice(0, cut), path.slice(cut)];
+		const workdirs = this.directories.filter((dir) => {
+			if (!dir.startsWith(path)) return false;
+			const name = dir.slice(parent.length);
+			return !name.includes('/') && (prefix.startsWith('.') || !name.startsWith('.'));
+		});
+		return { workdirs: workdirs.sort().slice(0, 30) };
 	}
 
 	async machinesSnapshot(): Promise<{ cursor: string; data: { items: MachineRecord[] } }> {

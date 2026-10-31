@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '#lib/api/errors.js';
   import { page } from '$app/state';
   import { goto } from '$app/navigation';
   import { resolve } from '$app/paths';
@@ -6,16 +7,16 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
-  import { effortLabel } from '#lib/screens/chat/settingsLabels.js';
+  import { DEFAULT_PERMISSION_MODE, effortLabel, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
-  import Field from '#lib/ui/Field.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
-  import { onMount } from 'svelte';
-  import { machineProblem, NewSessionModel } from './newSessionModel';
+  import { onMount, untrack } from 'svelte';
+  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
+  import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
   const touch = isTouchPrimary();
@@ -26,6 +27,7 @@
   let harness = $state('');
   let modelId = $state('');
   let effort = $state('');
+  let permission = $state('');
   let profile = $state('clean');
   let crunch = $state(false);
   let resume = $state('');
@@ -34,9 +36,11 @@
 
   const machines = $derived(runtime ? [...runtime.machines.items.values()] : []);
   const machine = $derived(machines.find((item) => item.id === machineId));
+  const home = $derived(machine?.home_dir ?? '');
   const harnesses = $derived(machine?.harnesses ?? []);
   const models = $derived(harnesses.find((item) => item.id === harness)?.models ?? []);
   const efforts = $derived(models.find((item) => item.id === modelId)?.efforts ?? []);
+  const permissions = $derived(harnesses.find((item) => item.id === harness)?.permission_modes ?? []);
   const BUILTIN_PRESETS: PresetSummaryLike[] = [
     {
       id: 'clean',
@@ -73,6 +77,8 @@
   const modelOptions = $derived([{ value: '', label: 'Выберите модель' }, ...models.map((item) => ({ value: item.id, label: item.title }))]);
   const effortOptions = $derived([{ value: '', label: 'Выберите усилие' }, ...efforts.map((item) => ({ value: item, label: effortLabel(item) }))]);
   const presetOptions = $derived(presets.map((item) => ({ value: item.id, label: item.title })));
+  const permissionOptions = $derived(permissions.map((value) => ({ value, label: permissionLabel(value) })));
+  const provider = $derived(harnesses.find((item) => item.id === harness)?.provider ?? 'claude');
   const gate = $derived.by(() => {
     if (!model) return { ok: false as const, reason: 'Открываю форму' };
     model.machineId = machineId;
@@ -80,6 +86,7 @@
     model.harness = harness;
     model.model = modelId;
     model.effort = effort;
+    model.permission = permission;
     model.profile = profile;
     model.crunch = crunch;
     model.resumeText = resume;
@@ -104,6 +111,13 @@
     };
   });
 
+  // Другой агент может не знать выбранный режим: тогда снова действует значение по умолчанию.
+  $effect(() => {
+    const modes = permissions;
+    if (modes.length === 0 || modes.includes(permission)) return;
+    permission = modes.includes(DEFAULT_PERMISSION_MODE) ? DEFAULT_PERMISSION_MODE : (modes[0] ?? '');
+  });
+
   $effect(() => {
     const current = model;
     const id = machineId;
@@ -111,6 +125,28 @@
     current.machineId = id;
     void current.refreshRecent().then(() => {
       recent = current.recent;
+    });
+  });
+
+  // Каталог приходит позже формы: подбор живёт в эффектах и срабатывает, когда данные появятся.
+  $effect(() => {
+    const only = soleMachine(machines);
+    if (only && !machineId) machineId = only;
+  });
+
+  let prefilled = '';
+  $effect(() => {
+    const next = home;
+    untrack(() => {
+      path = prefillWorkdir(path, prefilled, next);
+    });
+    prefilled = next;
+  });
+
+  $effect(() => {
+    const list = models;
+    untrack(() => {
+      modelId = defaultModelId(list, modelId);
     });
   });
 
@@ -123,7 +159,7 @@
       if (share) await goto(resolve(`/share?id=${encodeURIComponent(share)}&conversation=${encodeURIComponent(created.conversationId)}` as '/share'));
       else await goto(resolve(`/c/${created.conversationId}` as '/'));
     } catch (err) {
-      error = err instanceof Error ? err.message : 'Не удалось создать сессию';
+      error = errorText(err, 'Не удалось создать сессию');
     }
   }
 </script>
@@ -139,14 +175,15 @@
         {/each}
       </div>
     {/if}
-    <Field label="Рабочая папка">
-      {#snippet children({ id })}<input {id} aria-label="Рабочая папка" bind:value={path} placeholder="/home/user/project" autocomplete="off" autocapitalize="off" spellcheck={false} />{/snippet}
-    </Field>
+    <WorkdirField {machineId} bind:value={path} />
     <Segmented name="harness" label="Агент" options={harnesses.map((item) => ({ value: item.id, label: item.title }))} bind:value={harness} />
     <div class="pair">
       <Select label="Модель" options={modelOptions} bind:value={modelId} />
       <Select label="Усилие" options={effortOptions} bind:value={effort} />
     </div>
+    {#if permissionOptions.length > 0}
+      <Select label="Режим разрешений" options={permissionOptions} bind:value={permission} hint={permissionHint(permission, provider)} />
+    {/if}
     <Select label="Инструкции" options={presetOptions} bind:value={profile} hint={selectedPreset?.description} />
     <Toggle block label="Кранч" bind:checked={crunch} />
     {#if crunch}<Textarea label="Текст продолжения" bind:value={resume} />{/if}

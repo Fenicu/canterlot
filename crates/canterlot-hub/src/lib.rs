@@ -13,6 +13,7 @@ pub mod conversations;
 pub mod crunch;
 pub mod db;
 pub mod dberr;
+pub mod deletion;
 pub mod delivery;
 pub mod dispatcher;
 pub mod events;

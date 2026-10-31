@@ -270,7 +270,7 @@ test('interrupt_pill_shows_only_while_a_turn_runs_and_reports_progress', async (
       unread_count: 0,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: AT,
-      settings: { model: 'opus', effort: 'medium', permission_mode: 'default' },
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
       crunch: { enabled: false }
     }
   });
@@ -302,7 +302,7 @@ test('interrupt_label_ends_on_every_terminal_status_with_its_own_text', async ({
       unread_count: 0,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: AT,
-      settings: { model: 'opus', effort: 'medium', permission_mode: 'default' },
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
       crunch: { enabled: false }
     }
   });

@@ -168,6 +168,19 @@ export function deleteGroup(
   );
 }
 
+export function deleteConversation(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["delete__api_v1_conversations__id_"]>>> {
+  return http(
+    "DELETE",
+    `/api/v1/conversations/${id(conversationId)}`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function listMachines(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_machines"]>>> {
@@ -179,6 +192,21 @@ export function getMachine(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_machines__id_"]>>> {
   return http("GET", `/api/v1/machines/${id(machineId)}`, undefined, opts);
+}
+
+export function suggestWorkdirs(
+  machineId: string,
+  path: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_machines__id__workdirs_suggest"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/machines/${id(machineId)}/workdirs/suggest`, { path }),
+    undefined,
+    opts,
+  );
 }
 
 export function recentWorkdirs(
@@ -564,21 +592,6 @@ export function setConversationGroups(
     "PUT",
     `/api/v1/conversations/${id(conversationId)}/groups`,
     body,
-    keyed(key, opts),
-  );
-}
-
-export function startExecution(
-  conversationId: string,
-  key: string,
-  opts?: RequestOptions,
-): Promise<
-  HttpResponse<Ok<operations["post__api_v1_conversations__id__executions"]>>
-> {
-  return http(
-    "POST",
-    `/api/v1/conversations/${id(conversationId)}/executions`,
-    undefined,
     keyed(key, opts),
   );
 }

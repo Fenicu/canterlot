@@ -22,6 +22,7 @@ export interface MachineRecord {
 	capabilities?: string[];
 	limits_ok?: boolean;
 	allowed_roots?: string[];
+	home_dir?: string | null;
 }
 
 export class MachinesStore {
@@ -101,6 +102,7 @@ export class MachinesStore {
 			machine.worker_version = event.payload.worker_version;
 			machine.capabilities = event.payload.capabilities;
 			machine.limits_ok = event.payload.limits_ok;
+			machine.home_dir = event.payload.home_dir ?? null;
 			this.items.set(machine.id, { ...machine });
 			return;
 		}

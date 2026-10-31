@@ -118,6 +118,8 @@ error_codes! {
     GroupNotFound => "group_not_found", 404, Browser, Never, "Группа не найдена";
     GroupNameTaken => "group_name_taken", 409, Browser, Never, "Группа с таким именем уже существует";
     ArchiveActive => "archive_active", 409, Browser, Never, "В сессии есть активная работа";
+    ConversationDeleted => "conversation_deleted", 404, Browser, Never, "Сессия удалена";
+    ConversationLive => "conversation_live", 409, Browser, AfterCondition, "Сначала остановите сессию";
     AttachmentNotReady => "attachment_not_ready", 409, Browser, AfterCondition, "Вложение ещё не готово";
     AttachmentNotUploadable => "attachment_not_uploadable", 409, Browser, Never, "Загрузка вложения уже завершена или прекращена";
     AttachmentUnsupported => "attachment_unsupported", 422, Browser, Never, "Харнесс не принимает такое вложение";
@@ -385,6 +387,20 @@ impl From<ControlError> for ApiError {
             ControlError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             ControlError::InvalidRequest { .. } => ApiError::new(ErrorCode::InvalidRequest),
             ControlError::Db(error) => error.into(),
+        }
+    }
+}
+
+impl From<crate::deletion::DeleteError> for ApiError {
+    fn from(error: crate::deletion::DeleteError) -> Self {
+        use crate::deletion::DeleteError;
+        match error {
+            DeleteError::NotFound => ApiError::new(ErrorCode::NotFound),
+            DeleteError::Deleted => ApiError::new(ErrorCode::ConversationDeleted),
+            DeleteError::Live => ApiError::new(ErrorCode::ConversationLive),
+            DeleteError::Referenced => ApiError::new(ErrorCode::InvalidState),
+            DeleteError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
+            DeleteError::Db(error) => error.into(),
         }
     }
 }

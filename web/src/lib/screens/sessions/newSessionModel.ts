@@ -1,4 +1,5 @@
 import { recentWorkdirs } from "#lib/api/client.js";
+import { DEFAULT_PERMISSION_MODE, availabilityLabel } from "#lib/format/labels.js";
 import { ApiError } from "#lib/api/http.js";
 import type { components } from "#lib/api/generated/openapi.js";
 import type { OpJournal } from "#lib/ops/journal.js";
@@ -52,6 +53,33 @@ export function workdirProblem(path: string): string | null {
   return null;
 }
 
+export function soleMachine(machines: { id: string }[]): string | null {
+  return machines.length === 1 ? (machines[0]?.id ?? null) : null;
+}
+
+/** Путь, введённый владельцем, остаётся; подставленный ранее следует за машиной. */
+export function prefillWorkdir(
+  current: string,
+  prefilled: string,
+  home: string,
+): string {
+  return current === "" || current === prefilled ? home : current;
+}
+
+/** Каталог перечисляет модели от выбора по умолчанию, как и у Codex. */
+export function defaultModelId(
+  models: { id: string }[],
+  current: string,
+): string {
+  return models.some((item) => item.id === current)
+    ? current
+    : (models[0]?.id ?? "");
+}
+
+function submittedWorkdir(path: string): string {
+  return path.trim().replace(/(?<=.)\/+$/, "");
+}
+
 export function machineProblem(
   machine: MachineRecord | undefined,
 ): string | null {
@@ -60,7 +88,7 @@ export function machineProblem(
     machine.availability === "unavailable" ||
     machine.availability === "degraded"
   ) {
-    return `Машина недоступна: ${machine.availability}`;
+    return `Машина недоступна: ${availabilityLabel(machine.availability).toLocaleLowerCase("ru-RU")}`;
   }
   if (!(machine.capabilities ?? []).includes("pilot_v1"))
     return "Машина не готова к пилоту";
@@ -73,6 +101,7 @@ export class NewSessionModel {
   harness = "";
   model = "";
   effort = "";
+  permission = "";
   profile = "clean";
   crunch = false;
   resumeText: string;
@@ -97,6 +126,7 @@ export class NewSessionModel {
       this.harness,
       this.model,
       this.effort,
+      this.permission,
       this.profile,
     ]);
   }
@@ -120,6 +150,23 @@ export class NewSessionModel {
     return (
       harness?.models.find((item) => item.id === this.model)?.efforts ?? []
     );
+  }
+
+  get permissions(): string[] {
+    const machine = this.machines.items.get(this.machineId);
+    return (
+      machine?.harnesses.find((item) => item.id === this.harness)
+        ?.permission_modes ?? []
+    );
+  }
+
+  /** Выбор владельца, а пока его нет, режим по умолчанию из каталога машины. */
+  get permissionMode(): string {
+    const modes = this.permissions;
+    if (modes.includes(this.permission)) return this.permission;
+    return modes.includes(DEFAULT_PERMISSION_MODE)
+      ? DEFAULT_PERMISSION_MODE
+      : (modes[0] ?? "");
   }
 
   get canSubmit(): SendGate {
@@ -153,11 +200,13 @@ export class NewSessionModel {
       "create_conversation",
       {
         machine_id: this.machineId,
-        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой.
-        workdir: this.workdir.trim(),
+        // Пробел с клавиатуры телефона дал бы сессию с несуществующей папкой, а косая
+        // черта после выбранной подсказки завела бы вторую запись в недавних папках.
+        workdir: submittedWorkdir(this.workdir),
         harness: this.harness,
         model: this.model,
         effort: this.effort,
+        ...(this.permissionMode ? { permission_mode: this.permissionMode } : {}),
         instruction_profile: this.profile || "clean",
         crunch: {
           enabled: this.crunch,

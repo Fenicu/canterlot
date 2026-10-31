@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import { onMount } from 'svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { getRun } from '#lib/api/client.js';
@@ -35,7 +36,7 @@
 			info = res.data as RunInfo;
 			loading = false;
 		} catch (err: unknown) {
-			error = err instanceof Error ? err.message : 'Не удалось загрузить сведения о ходе';
+			error = errorText(err, 'Не удалось загрузить сведения о ходе');
 			loading = false;
 		}
 	}

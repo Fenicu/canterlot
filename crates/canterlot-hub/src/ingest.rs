@@ -213,6 +213,9 @@ impl Ingest {
                 .iter()
                 .find(|(execution_id, _, _, _)| execution_id == id);
             let Some((_, _, hub_generation, hub_state)) = known else {
+                if crate::deletion::execution_tombstoned(&mut *conn, machine_id, *id).await? {
+                    continue;
+                }
                 events::append(&mut *conn, NewEvent {
                     scope: Scope::Conversations { owner_id }, kind: "state_divergence",
                     conversation_id: None, execution_id: None,
@@ -338,6 +341,58 @@ impl Ingest {
         (result, prefix)
     }
 
+    /// Журнал удалённого разговора: записи подтверждаются без применения, и воркер отпускает
+    /// повтор. Иначе отказ в одной записи остановил бы поток данных всей машины (AT-F-19).
+    async fn discard_deleted(
+        &self,
+        machine_id: Uuid,
+        journal_id: Uuid,
+        batch: &JournalRecords,
+    ) -> Result<Option<u64>, IngestError> {
+        let discarded: bool = sqlx::query_scalar(
+            "select exists(select 1 from journal_cursors where journal_id=$1 and discarded)",
+        )
+        .bind(journal_id)
+        .fetch_one(&self.pool)
+        .await?;
+        let opened = batch.records.iter().find_map(|record| {
+            match record.body.as_ref().and_then(|body| body.body.as_ref()) {
+                Some(Body::JournalOpened(fact)) if record.seq == 1 => {
+                    Uuid::parse_str(&fact.execution_id).ok()
+                }
+                _ => None,
+            }
+        });
+        let tombstoned = match opened {
+            Some(execution) => {
+                let mut conn = self.pool.acquire().await?;
+                crate::deletion::execution_tombstoned(&mut conn, machine_id, execution).await?
+            }
+            None => false,
+        };
+        if !discarded && !tombstoned {
+            return Ok(None);
+        }
+        let last = batch.records.iter().map(|record| record.seq).max();
+        let last = i64::try_from(last.unwrap_or(0)).map_err(|_| IngestError::InvalidRecord)?;
+        let committed: i64 = sqlx::query_scalar(
+            "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,closed,discarded)
+             values($1,$2,'sj',$3,true,true)
+             on conflict(machine_id,journal_id) do update
+               set committed_seq=greatest(journal_cursors.committed_seq,excluded.committed_seq),
+                   closed=true, discarded=true, updated_at=clock_timestamp()
+             returning committed_seq",
+        )
+        .bind(machine_id)
+        .bind(journal_id)
+        .bind(last)
+        .fetch_one(&self.pool)
+        .await?;
+        u64::try_from(committed)
+            .map(Some)
+            .map_err(|_| IngestError::Database)
+    }
+
     async fn apply_batch_inner(
         &self,
         machine_id: Uuid,
@@ -371,6 +426,9 @@ impl Ingest {
         .await?;
         let (mut up_to_seq, mut last_digest) = checked_cursor(machine_id, kind, rows)?;
         if kind == JournalKind::Sj {
+            if let Some(up_to_seq) = self.discard_deleted(machine_id, journal_id, batch).await? {
+                return Ok(IngestOutcome::Committed { up_to_seq });
+            }
             let outcome = self
                 .apply_sj_batch(
                     machine_id,

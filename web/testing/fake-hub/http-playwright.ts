@@ -22,6 +22,14 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const kind = parts[5] ?? '';
     const headers = { 'X-Server-Time-Ms': String(Date.now()) };
     if (route.request().method() === 'GET' && kind === 'snapshot') {
+      if (api.deleted.has(id)) {
+        await route.fulfill({
+          status: 404,
+          headers,
+          json: { error: { code: 'conversation_deleted', message: 'Сессия удалена', scope: 'browser', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e5' } }
+        });
+        return;
+      }
       await route.fulfill({ json: hub.snapshot(`conversation:${id}`), headers });
       return;
     }
@@ -231,7 +239,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         await route.fulfill({ status: 201, headers: headers(), json: prior });
         return;
       }
-      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string };
+      const body = route.request().postDataJSON() as { machine_id?: string; workdir?: string; harness?: string; model?: string; effort?: string; permission_mode?: string };
       const id = api.id();
       const created = { conversation_id: id };
       if (key) keys.set(key, created);
@@ -249,7 +257,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         created_at: new Date().toISOString(),
         model: body.model ?? '',
         effort: body.effort ?? '',
-        permission_mode: 'default',
+        permission_mode: body.permission_mode ?? 'bypass',
         activity: { state: 'idle' as const, evidence: {}, since: new Date().toISOString() },
         unread_count: 0,
         queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
@@ -265,7 +273,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fallback();
   });
 
+  const deletions = new Map<string, string>();
+  const refuse = (status: number, code: string, message: string) => ({
+    status,
+    headers: headers(),
+    json: { error: { code, message, scope: 'browser', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e4' } }
+  });
   await page.route('**/api/v1/conversations/*', async (route) => {
+    if (route.request().method() === 'DELETE') {
+      const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+      const key = route.request().headers()['idempotency-key'] ?? '';
+      if (deletions.get(key) === id) return route.fulfill({ status: 204, headers: headers() });
+      if (api.deleted.has(id)) return route.fulfill(refuse(404, 'conversation_deleted', 'Сессия удалена'));
+      if (!api.list.has(id)) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+      const execution = api.details.get(id)?.execution as { state?: string } | null | undefined;
+      if (execution && !['stopped', 'failed'].includes(execution.state ?? '')) {
+        return route.fulfill({ ...refuse(409, 'conversation_live', 'Сначала остановите сессию'), status: 409 });
+      }
+      deletions.set(key, id);
+      api.deleteConversation(id);
+      await route.fulfill({ status: 204, headers: headers() });
+      return;
+    }
     if (route.request().method() !== 'PATCH') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const body = route.request().postDataJSON() as { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean };
@@ -433,7 +462,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     const effective = {
       model: row?.model ?? body.model ?? 'opus-5.5',
       effort: row?.effort ?? body.effort ?? 'medium',
-      permission_mode: row?.permission_mode ?? body.permission_mode ?? 'default',
+      permission_mode: row?.permission_mode ?? body.permission_mode ?? 'owner',
       instruction_profile: effectiveRef,
       instruction_preset: appliedPreset(effectiveRef)
     };
@@ -546,7 +575,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
     const body = route.request().postDataJSON() as { continue_queue?: boolean } | null;
-    void body;
+    const held = hub.log(`conversation:${id}`).findLast((event) => event.kind === 'queue_state_changed')?.payload as { pause_reasons?: unknown[] } | undefined;
 
     hub.append(`conversation:${id}`, {
       kind: 'execution_state_changed',
@@ -557,7 +586,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       kind: 'queue_state_changed',
       conversation_id: id,
       payload: {
-        pause_reasons: [],
+        pause_reasons: body?.continue_queue ? [] : (held?.pause_reasons ?? []),
         hold_reasons: [],
         run_slot: 'free'
       }
@@ -778,6 +807,11 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
 
   await page.route('**/api/v1/machines/*/workdirs/recent', async (route) => {
     await route.fulfill({ headers: headers(), json: { workdirs: ['/srv/canterlot', '/srv/notes'] } });
+  });
+
+  await page.route('**/api/v1/machines/*/workdirs/suggest?*', async (route) => {
+    const path = new URL(route.request().url()).searchParams.get('path') ?? '';
+    await route.fulfill({ headers: headers(), json: api.suggestWorkdirs(path) });
   });
 
   const decisions = api.decisions;

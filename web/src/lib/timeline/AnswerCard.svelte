@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
@@ -58,7 +59,7 @@
     {:else}
       {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
       <TextBlock {block} />
-      {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{block.incompleteReason}</p>{/if}
+      {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
     {/if}
   {/each}
   {#if !expanded && blocks.length > 60}

@@ -2,6 +2,7 @@ import type { CanterlotDb } from "#lib/storage/idb.js";
 import type { DraftAttachment } from "#lib/drafts/store.js";
 import { uploadLimits } from "#lib/api/config.js";
 import type { PatchSender } from "#lib/uploads/patch.js";
+import { errorText } from "#lib/api/errors.js";
 import { ApiError } from "#lib/api/http.js";
 import {
   uploadFile,
@@ -197,6 +198,12 @@ export class UploadManager {
     return this.#resumeAll();
   }
 
+  /** Вложения удалённой сессии: загрузка прекращается, локальная копия файла не остаётся. */
+  async cancelConversation(conversationId: string): Promise<void> {
+    const ids = this.list(conversationId).map((item) => item.id);
+    await Promise.all(ids.map((id) => this.cancel(id).catch(() => undefined)));
+  }
+
   async cancel(id: string): Promise<void> {
     const upload = this.#views.get(id);
     const record = this.#records.get(id);
@@ -297,7 +304,7 @@ export class UploadManager {
       view.phase = "failed";
       view.error = {
         code: err instanceof ApiError ? err.code : "upload",
-        message: err instanceof Error ? err.message : "Загрузка не удалась",
+        message: errorText(err, "Загрузка не удалась"),
         retryable,
       };
       record.phase = "failed";

@@ -1,10 +1,13 @@
 <script lang="ts" module>
+	import { settingKeyLabel } from '#lib/format/labels.js';
+
 	export function formatRejectedSettings(rejected: { keys: string[]; reason: string }): string {
-		return `Настройка недоступна и сброшена: ${rejected.keys.join(', ')}`;
+		return `Настройка недоступна и сброшена: ${rejected.keys.map(settingKeyLabel).join(', ')}`;
 	}
 </script>
 
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
@@ -17,7 +20,14 @@
 	import Select from '#lib/ui/Select.svelte';
 	import Textarea from '#lib/ui/Textarea.svelte';
 	import Toggle from '#lib/ui/Toggle.svelte';
-	import { effortLabel, permissionLabel } from './settingsLabels';
+	import {
+		PERMISSION_MODES,
+		effortLabel,
+		modelLabel,
+		permissionHint,
+		permissionLabel,
+		permissionValue
+	} from '#lib/format/labels.js';
 
 	type AppliedPreset = components['schemas']['AppliedPreset'];
 	type PresetSummary = components['schemas']['PresetSummary'];
@@ -41,6 +51,7 @@
 
 	// Harness and catalog lookup
 	const harnessId = $derived((chat.detail?.harness as { id?: string })?.id ?? 'claude');
+	const provider = $derived((chat.detail?.harness as { provider?: string })?.provider ?? 'claude');
 	const harness = $derived(machine?.harnesses?.find((h) => h.id === harnessId));
 
 	// Effective settings
@@ -48,7 +59,7 @@
 		(chat.settings?.effective as { model?: string; effort?: string; permission_mode?: string } & PresetSettings) ?? {
 			model: (chat.detail?.model as string) ?? 'opus',
 			effort: (chat.detail?.effort as string) ?? 'medium',
-			permission_mode: (chat.detail?.permission_mode as string) ?? 'default'
+			permission_mode: (chat.detail?.permission_mode as string) ?? ''
 		}
 	);
 
@@ -101,7 +112,7 @@
 	// Local form state
 	let selectedModel = $state('opus');
 	let selectedEffort = $state('medium');
-	let selectedPermission = $state('default');
+	let selectedPermission = $state('owner');
 	let selectedPreset = $state('clean');
 	let crunchEnabled = $state(false);
 	let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
@@ -118,7 +129,7 @@
 	$effect(() => {
 		selectedModel = pending?.model ?? effective.model ?? 'opus';
 		selectedEffort = pending?.effort ?? effective.effort ?? 'medium';
-		selectedPermission = pending?.permission_mode ?? effective.permission_mode ?? 'default';
+		selectedPermission = permissionValue(pending?.permission_mode ?? effective.permission_mode);
 		selectedPreset = (pending as PresetSettings | null)?.instruction_profile ?? effectiveRef;
 		crunchEnabled = chat.crunch.enabled;
 		if (chat.crunch.resume_text) resumeText = chat.crunch.resume_text;
@@ -150,7 +161,7 @@
 
 	// Available permission modes
 	const availablePermissionModes = $derived(
-		harness?.permission_modes ?? ['default', 'ask', 'auto_edit', 'full_access']
+		harness?.permission_modes ?? [...PERMISSION_MODES]
 	);
 
 	const modelOptions = $derived(availableModels.map((m) => ({ value: m.id, label: m.title || m.id })));
@@ -180,7 +191,7 @@
 			const patch: SettingsPatch = {};
 			if (selectedModel !== shown.model) patch.model = selectedModel;
 			if (selectedEffort !== shown.effort) patch.effort = selectedEffort;
-			if (selectedPermission !== shown.permission_mode) patch.permission_mode = selectedPermission;
+			if (selectedPermission !== permissionValue(shown.permission_mode)) patch.permission_mode = selectedPermission;
 			if (selectedPreset !== shown.instruction_profile) patch.instruction_profile = selectedPreset;
 			if (Object.keys(patch).length > 0) await updateSettings(chat.id, patch);
 
@@ -206,8 +217,8 @@
 				} else {
 					generalError = err.message || 'Ошибка валидации настроек';
 				}
-			} else if (err instanceof Error) {
-				generalError = err.message;
+			} else {
+				generalError = errorText(err, 'Не удалось сохранить настройки');
 			}
 		} finally {
 			saving = false;
@@ -224,8 +235,8 @@
 		} catch (err) {
 			if (err instanceof ApiError && err.code === 'profile_unknown') {
 				presetError = 'Инструкции не найдены';
-			} else if (err instanceof Error) {
-				generalError = err.message;
+			} else {
+				generalError = errorText(err, 'Не удалось сохранить настройки');
 			}
 		} finally {
 			saving = false;
@@ -272,7 +283,7 @@
 				options={modelOptions}
 				bind:value={selectedModel}
 				disabled={locked}
-				hint={pending?.model ? `${effective.model} → ${pending.model} со следующего хода` : undefined}
+				hint={pending?.model ? `${modelLabel(effective.model ?? '')} → ${modelLabel(pending.model)} со следующего хода` : undefined}
 				error={!midsessionSupported ? 'Настройка посреди сессии не поддерживается' : (modelError ?? undefined)}
 			/>
 			<Select
@@ -289,7 +300,7 @@
 
 		<div class="card">
 			<h3>Режим разрешений</h3>
-			<p class="note">Сейчас: <strong>{effective.permission_mode ? permissionLabel(effective.permission_mode) : 'По умолчанию'}</strong></p>
+			<p class="note">Сейчас: <strong>{permissionLabel(effective.permission_mode)}</strong></p>
 			<Select
 				id="permission"
 				name="permission"
@@ -297,7 +308,7 @@
 				options={permissionOptions}
 				bind:value={selectedPermission}
 				disabled={locked}
-				hint={pending?.permission_mode ? 'Применится со следующего хода' : undefined}
+				hint={[permissionHint(selectedPermission, provider), pending?.permission_mode ? 'Применится со следующего хода' : ''].filter(Boolean).join(' ')}
 				error={permissionError ?? undefined}
 			/>
 		</div>

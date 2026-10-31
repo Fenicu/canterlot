@@ -108,4 +108,50 @@ describe("sessions/limits", () => {
     expect(crunch.tone).toBe("reserve");
     expect(crunch.crunchLabel).toBe("Кранч · недельный резерв");
   });
+  const cfg = { stale_after_secs: 1800, warn_pcts: [80], weekly_reserve_pct: 95 };
+
+  it("absent_windows_say_no_data_instead_of_zero", () => {
+    const now = new Date(2026, 9, 29, 12, 0).getTime();
+    const strip = limitStrip(
+      [{ provider: "claude", weekly_reserve_active: false, five_hour: null, weekly: null }],
+      now,
+      cfg,
+    );
+    expect(strip.summary).toBe("Claude · нет данных");
+    expect(strip.rows[0]).toMatchObject({ label: "Claude", empty: true });
+    expect(strip.details).toBe("Claude: нет данных");
+    expect(JSON.stringify(strip)).not.toContain("0%");
+  });
+
+  it("one_absent_window_says_no_data_and_the_other_keeps_its_value", () => {
+    const now = new Date(2026, 9, 29, 12, 0).getTime();
+    const observed = new Date(now - 60_000).toISOString();
+    const strip = limitStrip(
+      [
+        {
+          provider: "codex",
+          weekly_reserve_active: false,
+          five_hour: { used_permille: 340, resets_at: at(14, 30), observed_at: observed },
+          weekly: null,
+        },
+      ],
+      now,
+      cfg,
+    );
+    expect(strip.summary).toBe("Codex 5ч 34% · неделя нет данных");
+    expect(strip.rows[0]).toMatchObject({ fiveHour: "34%", weekly: "нет данных", empty: false });
+    expect(strip.details).toContain("неделя нет данных");
+  });
+
+  it("a_real_zero_stays_zero", () => {
+    const now = new Date(2026, 9, 29, 12, 0).getTime();
+    const observed = new Date(now - 60_000).toISOString();
+    const strip = limitStrip(
+      [provider("claude", 0, 0, at(14, 30), at(18, 0), observed)],
+      now,
+      cfg,
+    );
+    expect(strip.summary).toBe("Claude 5ч 0% · неделя 0%");
+    expect(strip.rows[0]).toMatchObject({ fiveHour: "0%", weekly: "0%", empty: false });
+  });
 });

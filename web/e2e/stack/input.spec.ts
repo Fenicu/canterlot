@@ -242,7 +242,7 @@ test.describe('stack: input and queue', () => {
     await expect(page.locator('.strip').getByRole('button', { name: 'Отменить' })).toHaveCount(1, { timeout: 15_000 });
 
     await page.getByRole('button', { name: 'Прервать', exact: true }).click();
-    const resume = page.getByRole('button', { name: 'Возобновить сессию и очередь', exact: true });
+    const resume = page.getByRole('button', { name: 'Возобновить', exact: true });
     await expect(resume).toBeVisible({ timeout: 40_000 });
     await resume.click();
 

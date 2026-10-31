@@ -22,7 +22,7 @@ use crate::{
     installation::Installation,
     session::{
         CAPABILITY_EXEC_V1, CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, CAPABILITY_TODO_V1,
-        Registry,
+        CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
     },
 };
 
@@ -41,6 +41,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_PILOT_V1,
     CAPABILITY_INSTRUCTIONS_V1,
     CAPABILITY_TODO_V1,
+    CAPABILITY_WORKDIR_SUGGEST_V1,
 ];
 
 #[tonic::async_trait]

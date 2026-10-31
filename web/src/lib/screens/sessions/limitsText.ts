@@ -1,6 +1,8 @@
+import { providerLabel as label } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import {
   limitView,
+  NO_LIMIT_DATA,
   type LimitThresholds,
   type ProviderLimits,
 } from "#lib/stores/limits.js";
@@ -10,6 +12,8 @@ export interface LimitRow {
   fiveHour: string;
   weekly: string;
   hot: { fiveHour: boolean; weekly: boolean };
+  /** Хаб не знает ни одного окна: строка сводится к «нет данных». */
+  empty: boolean;
 }
 
 export interface LimitStrip {
@@ -35,13 +39,15 @@ export function limitStrip(
     view: limitView(provider, now, cfg),
   }));
   const summary = views
-    .map(
-      ({ provider, view }) =>
-        `${label(provider.provider)} 5ч ${view.fiveHour} · неделя ${view.weekly}`,
+    .map(({ provider, view }) =>
+      empty(provider)
+        ? `${label(provider.provider)} · ${NO_LIMIT_DATA}`
+        : `${label(provider.provider)} 5ч ${view.fiveHour} · неделя ${view.weekly}`,
     )
     .join("  ");
   const details = views
     .map(({ provider }) => {
+      if (empty(provider)) return `${label(provider.provider)}: ${NO_LIMIT_DATA}`;
       const five = provider.five_hour?.resets_at
         ? fmt.clock(Date.parse(provider.five_hour.resets_at))
         : "";
@@ -51,7 +57,9 @@ export function limitStrip(
       const week = Number.isFinite(weekAt)
         ? `${weekday(weekAt)}, ${fmt.clock(weekAt)}`
         : "";
-      return `${label(provider.provider)}: 5ч до ${five} · неделя до ${week}`;
+      const fivePart = provider.five_hour ? `5ч до ${five}` : `5ч ${NO_LIMIT_DATA}`;
+      const weekPart = provider.weekly ? `неделя до ${week}` : `неделя ${NO_LIMIT_DATA}`;
+      return `${label(provider.provider)}: ${fivePart} · ${weekPart}`;
     })
     .join("\n");
   let tone: LimitStrip["tone"] = "default";
@@ -72,6 +80,7 @@ export function limitStrip(
       fiveHour: view.fiveHour,
       weekly: view.weekly,
       hot: view.hot,
+      empty: empty(provider),
     })),
     details,
     tone,
@@ -80,17 +89,15 @@ export function limitStrip(
   };
 }
 
+function empty(provider: ProviderLimits): boolean {
+  return !provider.five_hour && !provider.weekly;
+}
+
 function rank(provider: string, prefer?: string): number {
   if (prefer && provider === prefer) return 0;
   if (provider === "claude") return 1;
   if (provider === "codex") return 2;
   return 3;
-}
-
-function label(provider: string): string {
-  if (provider === "claude") return "Claude";
-  if (provider === "codex") return "Codex";
-  return provider;
 }
 
 function weekday(ts: number): string {

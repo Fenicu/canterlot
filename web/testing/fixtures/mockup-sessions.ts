@@ -137,7 +137,7 @@ export function seedMockupSessions(api: FakeHubApi): MockupSessions {
 				title: 'Claude Code',
 				provider: 'claude',
 				models: [{ id: 'opus', title: 'opus-5.5', efforts: ['medium', 'high'] }],
-				permission_modes: ['default']
+				permission_modes: ['owner', 'ask', 'bypass', 'read_only']
 			}
 		]
 	};

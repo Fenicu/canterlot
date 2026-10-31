@@ -863,6 +863,7 @@ fn pilot_records_roundtrip() {
         max_attachments_per_input: 10,
         containment: "process_group".into(),
         os: "Debian 13 · 6.12".into(),
+        home_dir: "/home/owner".into(),
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -1169,6 +1170,34 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
     };
     assert_eq!(report.encode_to_vec()[0], 8 << 3 | 2);
     assert_roundtrip(report);
+    let report = MachineReport {
+        home_dir: "/home/owner".into(),
+        ..Default::default()
+    };
+    assert_eq!(report.encode_to_vec()[0], 9 << 3 | 2);
+    assert_roundtrip(report);
+    let suggest = SuggestWorkdirs {
+        request_id: "request".into(),
+        path: "/home/owner/private-name".into(),
+    };
+    assert_roundtrip(suggest.clone());
+    assert!(!format!("{suggest:?}").contains("private-name"));
+    let message = ControlDown {
+        msg: Some(control_down::Msg::SuggestWorkdirs(suggest)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 7 << 3 | 2);
+    assert_roundtrip(message);
+    let suggestions = WorkdirSuggestions {
+        request_id: "request".into(),
+        directories: vec!["/home/owner/private-name".into()],
+    };
+    assert_roundtrip(suggestions.clone());
+    assert!(!format!("{suggestions:?}").contains("private-name"));
+    let message = ControlUp {
+        msg: Some(control_up::Msg::WorkdirSuggestions(suggestions)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 8 << 3 | 2);
+    assert_roundtrip(message);
     let snapshot = LimitsSnapshot {
         provider: "claude".into(),
         current: vec![LimitObservation {

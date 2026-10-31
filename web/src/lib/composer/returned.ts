@@ -40,6 +40,11 @@ export async function returnToComposer(
 export async function returnRefused(op: Op, drafts: DraftStore): Promise<void> {
   if (!op.conversationId) return;
   if (op.kind !== "input" && op.kind !== "scheduled") return;
+  // Удалённая сессия: возвращать некуда, а текст не должен пережить её на устройстве.
+  if (op.refusal?.code === "conversation_deleted") {
+    await drafts.clear(op.conversationId);
+    return;
+  }
   const { text, attachmentIds } = inputOfBody(op.body);
   const reason = op.refusal?.message ?? "отклонено хабом";
   await returnToComposer(

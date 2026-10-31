@@ -28,6 +28,7 @@ export type ServerOp =
         | BlockMediaAttached
         | ConversationCreated
         | ConversationUpdated
+        | ConversationDeleted
         | ConversationSettingsChanged
         | CrunchChanged
         | CrunchHeld
@@ -539,6 +540,23 @@ export interface ConversationUpdated {
     counts: Counts;
   };
 }
+export interface ConversationDeleted {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "conversation_deleted";
+  payload: {
+    id: Uuid;
+    counts: Counts;
+  };
+}
 export interface ConversationSettingsChanged {
   v: 1;
   id: Uuid;
@@ -894,6 +912,7 @@ export interface MachineReportUpdated {
     worker_version: string;
     capabilities: string[];
     limits_ok: boolean;
+    home_dir?: string | null;
   };
 }
 export interface MachineMetrics {

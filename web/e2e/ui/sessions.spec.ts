@@ -141,6 +141,154 @@ test('archive_with_active_crunch_asks_for_confirmation_and_retries_with_force', 
   expect(bodies[0]?.key).not.toBe(bodies[1]?.key);
 });
 
+test('session_menu_closes_on_tab_change', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: вкладки под ним недоступны');
+  await boot(page);
+  const tablist = page.getByRole('tablist', { name: 'Группы сессий' });
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await tablist.getByRole('tab', { name: /Закреплённые/ }).click();
+  await expect(menu).toHaveCount(0);
+  await tablist.getByRole('tab', { name: /Все/ }).click();
+  await expect(menu).toHaveCount(0);
+});
+
+test('session_menu_closes_when_the_search_changes_or_the_route_changes', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: поиск и переход под ним недоступны');
+  await boot(page);
+  await page.getByRole('button', { name: 'Поиск', exact: true }).click();
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('очередь');
+  await expect(menu).toHaveCount(0);
+  await page.getByRole('textbox', { name: 'Поиск сессий' }).fill('');
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  await page.getByRole('link', { name: 'Новая сессия' }).click();
+  await expect(page).toHaveURL(/\/new$/);
+  await expect(menu).toHaveCount(0);
+});
+
+test('session_menu_closes_when_the_session_leaves_the_list_from_another_device', async ({ page }) => {
+  const { hub, api, ids } = await boot(page);
+  const menu = page.getByRole('switch', { name: 'Закрепить' });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(menu).toBeVisible();
+  const row = api.list.get(ids.plain);
+  hub.append('conversations', {
+    kind: 'conversation_updated',
+    conversation_id: ids.plain,
+    payload: {
+      id: ids.plain,
+      title: row?.title,
+      title_source: 'user',
+      color: row?.color ?? null,
+      pinned: false,
+      archived: true,
+      groups: row?.groups ?? [],
+      machine: row?.machine,
+      harness: row?.harness,
+      workdir: row?.workdir,
+      created_at: row?.created_at,
+      counts: api.counts
+    }
+  });
+  hub.flush();
+  await expect(menu).toHaveCount(0);
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+});
+
+test('delete_asks_for_confirmation_naming_the_session_and_removes_it_only_after_the_hub_confirms', async ({ page }) => {
+  const { ids } = await boot(page);
+  const row = page.locator(`[data-session="${ids.plain}"]`);
+  const keys: string[] = [];
+  let release = () => {};
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  await page.route(`**/api/v1/conversations/${ids.plain}`, async (route) => {
+    if (route.request().method() !== 'DELETE') return route.fallback();
+    keys.push(route.request().headers()['idempotency-key'] ?? '');
+    await held;
+    await route.fallback();
+  });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await expect(dialog).toContainText('Повторная доставка ввода');
+  await expect(dialog).toContainText('Это нельзя отменить');
+  await expect(dialog).toContainText('История CLI');
+  await dialog.getByRole('button', { name: 'Отмена' }).click();
+  await expect(row).toBeVisible();
+  expect(keys).toEqual([]);
+
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  await expect.poll(() => keys.length).toBe(1);
+  await expect(row).toBeVisible();
+  release();
+  await expect(row).toHaveCount(0);
+  await expect(page.getByRole('switch', { name: 'Закрепить' })).toHaveCount(0);
+  expect(keys[0]).not.toBe('');
+});
+
+test('delete_while_live_shows_the_refusal_and_keeps_the_session', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  const detail = api.details.get(ids.plain);
+  if (detail) detail.execution = { state: 'running', generation: 1 };
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible();
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toBeVisible();
+});
+
+test('a_session_deleted_on_another_device_disappears_from_the_list_and_the_counts', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await expect(page.getByRole('switch', { name: 'Закрепить' })).toBeVisible();
+  const before = api.counts.all;
+  api.deleteConversation(ids.plain);
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+  await expect(page.getByRole('switch', { name: 'Закрепить' })).toHaveCount(0);
+  await expect(page.getByRole('tab', { name: new RegExp(`Все ${before - 1}`) })).toBeVisible();
+});
+
+test('an_open_chat_of_a_deleted_session_ends_on_a_sensible_screen', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  await page.goto(`/c/${ids.plain}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  api.deleteConversation(ids.plain);
+  await expect(page.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible();
+  await page.getByRole('link', { name: 'К списку сессий' }).click();
+  await expect(page).toHaveURL(/\/sessions$/);
+});
+
+test('opening_a_deleted_session_does_not_retry_forever', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  api.deleteConversation(ids.plain);
+  let snapshots = 0;
+  page.on('request', (request) => {
+    if (request.url().endsWith(`/conversations/${ids.plain}/snapshot`)) snapshots += 1;
+  });
+  await page.goto(`/c/${ids.plain}`);
+  await expect(page.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible({ timeout: 15_000 });
+  await page.waitForTimeout(1500);
+  expect(snapshots).toBe(1);
+});
+
+test('delete_from_the_open_chat_returns_to_the_list', async ({ page }) => {
+  const { ids } = await boot(page);
+  await page.goto(`/c/${ids.plain}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await page.getByRole('button', { name: 'Меню сессии' }).click();
+  await page.getByRole('menuitem', { name: 'Название, цвет и группы' }).click();
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  await expect(page).toHaveURL(/\/sessions$/);
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+});
+
 test('unread_dot_and_counts_update_from_events', async ({ page }) => {
   const { hub, api, ids } = await boot(page);
   const row = api.list.get(ids.plain);
@@ -153,7 +301,7 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
       unread_count: 3,
       queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: '2026-10-28T12:00:00.000Z',
-      settings: { model: row?.model ?? 'opus', effort: 'medium', permission_mode: 'default' },
+      settings: { model: row?.model ?? 'opus', effort: 'medium', permission_mode: 'owner' },
       crunch: { enabled: false }
     }
   });
@@ -213,7 +361,7 @@ test('limits_strip_warns_at_80_and_shows_the_reserve_variant', async ({ page }) 
       unread_count: row?.unread_count ?? 0,
       queue: row?.queue ?? { queued: 0, pause_reasons: [], hold_reasons: [] },
       last_activity_at: row?.last_activity_at ?? null,
-      settings: { model: row?.model ?? 'opus', effort: row?.effort ?? 'medium', permission_mode: row?.permission_mode ?? 'default' },
+      settings: { model: row?.model ?? 'opus', effort: row?.effort ?? 'medium', permission_mode: row?.permission_mode ?? 'owner' },
       crunch: { enabled: true }
     }
   });

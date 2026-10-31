@@ -1,16 +1,19 @@
 <script lang="ts">
+	import { errorText } from '#lib/api/errors.js';
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { Activity } from '#lib/screens/sessions/activityText.js';
 	import StateChip from './StateChip.svelte';
 	import { chatStateLine } from './stateLine';
+	import { modelLabel } from '#lib/format/labels.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import Menu from '#lib/ui/Menu.svelte';
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
-	import { stopSession, resumeSession, continueSessionQueue, startSessionExecution } from './controls';
+	import { stopSession, resumeSession, continueSessionQueue } from './controls';
+	import { runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 
@@ -62,8 +65,8 @@
 	const machineName = $derived(detail?.machine?.name || 'workstation');
 	const provider = $derived(detail?.harness?.provider || 'claude');
 
-	const effectiveModel = $derived(settings?.effective?.model || detail?.model || 'opus-5.5');
-	const pendingModel = $derived(settings?.pending?.model);
+	const effectiveModel = $derived(modelLabel(settings?.effective?.model || detail?.model || 'opus-5.5'));
+	const pendingModel = $derived(settings?.pending?.model && modelLabel(settings.pending.model));
 
 	const subtitle = $derived(
 		pendingModel
@@ -76,7 +79,7 @@
 		: false);
 
 	const hasUserStop = $derived(chat.queue.pause_reasons.some((p) => (p as { reason?: string })?.reason === 'user_stop'));
-	const hasNoLiveExecution = $derived(chat.queue.hold_reasons.some((h) => (h as { reason?: string })?.reason === 'no_live_execution'));
+	const ownerLost = $derived((chat.execution as { state?: string } | null)?.state === 'owner_lost');
 
 	async function handleStop(force = false) {
 		actionError = null;
@@ -85,17 +88,17 @@
 			menuOpen = false;
 			confirmingForce = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось остановить сессию';
+			actionError = errorText(err, 'Не удалось остановить сессию');
 		}
 	}
 
-	async function handleResume() {
+	async function handleRun() {
 		actionError = null;
 		try {
-			await resumeSession(chat.id);
+			await resumeSession(chat.id, { continue_queue: chat.queue.pause_reasons.length > 0 });
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось возобновить сессию';
+			actionError = errorText(err, 'Не удалось запустить сессию');
 		}
 	}
 
@@ -105,7 +108,7 @@
 			await continueSessionQueue(chat.id);
 			menuOpen = false;
 		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось продолжить очередь';
+			actionError = errorText(err, 'Не удалось продолжить очередь');
 		}
 	}
 
@@ -116,16 +119,6 @@
 		menuOpen = false;
 		confirmingForce = false;
 		menuButton?.focus();
-	}
-
-	async function handleStart() {
-		actionError = null;
-		try {
-			await startSessionExecution(chat.id);
-			menuOpen = false;
-		} catch (err: unknown) {
-			actionError = err instanceof Error ? err.message : 'Не удалось запустить сессию';
-		}
 	}
 </script>
 
@@ -243,11 +236,8 @@
 							</div>
 						</div>
 					{/if}
-				{:else}
-					<MenuItem onclick={() => void handleResume()}>Возобновить сессию</MenuItem>
-					{#if hasNoLiveExecution && chat.queue.queued === 0}
-						<MenuItem onclick={() => void handleStart()}>Запустить</MenuItem>
-					{/if}
+				{:else if !ownerLost}
+					<MenuItem onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
 				{/if}
 
 				{#if isLive && hasUserStop}

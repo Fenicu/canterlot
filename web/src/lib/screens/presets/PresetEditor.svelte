@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { errorText } from '#lib/api/errors.js';
   import { createPreset, getPreset, patchPreset } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
   import type { components } from '#lib/api/generated/openapi.js';
@@ -99,7 +100,7 @@
       else titleError = message;
       return;
     }
-    textError = err instanceof Error ? err.message : 'Не удалось сохранить инструкцию';
+    textError = errorText(err, 'Не удалось сохранить инструкцию');
   }
 
   async function save(): Promise<void> {

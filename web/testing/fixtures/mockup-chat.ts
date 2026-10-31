@@ -107,7 +107,7 @@ export function seedMockup08(api: FakeHubApi): string {
     title: 'Восстановление воркера',
     model: 'opus-5.5',
     effort: 'medium',
-    permission_mode: 'default',
+    permission_mode: 'owner',
     activity: {
       state: 'quota_paused',
       evidence: { reason: 'weekly_reserve' },

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { blockEndLabel } from '#lib/format/labels.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
   import Icon from '#lib/ui/Icon.svelte';
   let { block }: { block: BlockModel } = $props();
@@ -7,9 +8,9 @@
 
 <aside class="notice" data-kind={block.kind}>
   <p class="title"><Icon name="warning" />{title}</p>
-  <p>{block.text || block.incompleteReason || title}</p>
+  <p>{block.text || (block.incompleteReason ? blockEndLabel(block.incompleteReason) : title)}</p>
   {#if block.state === 'incomplete' && block.incompleteReason}
-    <p>Неполный ответ: {block.incompleteReason}</p>
+    <p>Неполный ответ: {blockEndLabel(block.incompleteReason).toLocaleLowerCase('ru-RU')}</p>
   {/if}
 </aside>
 

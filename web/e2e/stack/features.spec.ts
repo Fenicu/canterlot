@@ -1,5 +1,8 @@
 import { test, expect, type Page } from '@playwright/test';
 import { randomUUID } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { PNG } from 'pngjs';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
@@ -220,13 +223,12 @@ test.describe('stack: features and security', () => {
     const stack = getStack();
     const hub = createHubClient(stack);
     const id = await hub.createConversation({ harness: 'synthetic' });
-    await hub.postInput(id, synthetic.script([
+    await hub.postAndFinish(id, synthetic.script([
       synthetic.limitObserved('five_hour', 120, 3 * 3_600_000),
       synthetic.limitObserved('weekly', 450, 3 * 86_400_000),
       synthetic.usage({ model: 'synthetic-large', agent: 'main', input: 4000, output: 600 }),
       synthetic.delta('снимок лимитов')
     ]));
-    await hub.waitIdle(id);
 
     await page.goto(`${stack.baseUrl}/limits`);
     const main = page.locator('main');
@@ -289,6 +291,42 @@ test.describe('stack: features and security', () => {
     await context.close();
   });
 
+  test('delete_is_refused_while_live_and_reaches_every_open_screen', tag, async ({ browser }) => {
+    test.setTimeout(120_000);
+    const stack = getStack();
+    const hub = createHubClient(stack);
+    const title = `Удаление-${randomUUID().slice(0, 6)}`;
+    const id = await hub.createConversation({ title, start: true });
+    await expect.poll(async () => (await hub.json<{ execution: { state: string } | null }>(`/api/v1/conversations/${id}`)).execution?.state, { timeout: 30_000 }).toBe('running');
+
+    const context = await browser.newContext();
+    const list = await context.newPage();
+    const chat = await context.newPage();
+    await list.goto(`${stack.baseUrl}/sessions`);
+    await expect(list.locator(`[data-session="${id}"]`)).toBeVisible({ timeout: 20_000 });
+    await chat.goto(`${stack.baseUrl}/c/${id}`);
+    await expect(chat.locator('[data-ready]')).toBeVisible({ timeout: 20_000 });
+
+    await list.getByRole('button', { name: `Действия: ${title}` }).click();
+    await list.getByRole('button', { name: /^Удалить/ }).click();
+    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+    await expect(list.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible({ timeout: 20_000 });
+    await expect(list.locator(`[data-session="${id}"]`)).toBeVisible();
+
+    await hub.json(`/api/v1/conversations/${id}/stop`, { method: 'POST', body: JSON.stringify({}) });
+    await expect.poll(async () => (await hub.json<{ execution: unknown }>(`/api/v1/conversations/${id}`)).execution, { timeout: 30_000 }).toBeNull();
+
+    await list.getByRole('button', { name: /^Удалить/ }).click();
+    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+    await expect(list.locator(`[data-session="${id}"]`)).toHaveCount(0, { timeout: 20_000 });
+    await expect(chat.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible({ timeout: 20_000 });
+
+    const gone = await hub.fetch(`/api/v1/conversations/${id}`);
+    expect(gone.status).toBe(404);
+    expect(((await gone.json()) as { error: { code: string } }).error.code).toBe('conversation_deleted');
+    await context.close();
+  });
+
   test('settings_change_midsession_applies_with_the_next_turn', tag, async ({ page }) => {
     test.setTimeout(90_000);
     const stack = getStack();
@@ -343,6 +381,26 @@ test.describe('stack: features and security', () => {
     await expect(page.getByRole('progressbar', { name: 'notes.txt' })).toBeVisible({ timeout: 20_000 });
     await expect.poll(async () => Number(await page.getByRole('progressbar', { name: 'notes.txt' }).getAttribute('aria-valuenow')), { timeout: 20_000 }).toBe(Buffer.byteLength('содержимое файла'));
     await expect(page.getByRole('textbox', { name: 'Сообщение' })).toHaveValue(/Сверь с кодом/);
+  });
+
+  test('new_session_gets_home_and_suggestions_from_the_real_worker', tag, async ({ page }) => {
+    const stack = getStack();
+    mkdirSync(join(stack.workRoot, 'suggest-alpha', 'inner'), { recursive: true });
+    writeFileSync(join(stack.workRoot, 'suggest-file.txt'), 'файл');
+    await page.goto(`${stack.baseUrl}/new`);
+    await expect(page.locator('[data-new-session]')).toBeVisible({ timeout: 15_000 });
+    const field = page.getByRole('textbox', { name: 'Рабочая папка' });
+    await expect(page.getByRole('combobox', { name: 'Машина' })).not.toHaveValue('');
+    await expect(field).toHaveValue(homedir());
+    await field.fill(`${stack.workRoot}/suggest`);
+    await expect(page.getByRole('option', { name: `${stack.workRoot}/suggest-alpha`, exact: true })).toBeVisible();
+    await expect(page.getByRole('listbox', { name: 'Подсказки папок' }).getByRole('option')).toHaveCount(1);
+    await field.press('ArrowDown');
+    await field.press('Enter');
+    await expect(field).toHaveValue(`${stack.workRoot}/suggest-alpha/`);
+    await expect(page.getByRole('option', { name: `${stack.workRoot}/suggest-alpha/inner`, exact: true })).toBeVisible();
+    await field.fill('/etc/');
+    await expect(page.getByRole('listbox', { name: 'Подсказки папок' })).toHaveCount(0);
   });
 
   test('edge_proxy_strips_client_remote_headers', tag, async ({ page }) => {

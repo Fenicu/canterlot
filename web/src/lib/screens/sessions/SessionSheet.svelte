@@ -1,12 +1,14 @@
 <script lang="ts">
   import { ApiError } from '#lib/api/http.js';
-  import { getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
+  import { deleteConversation, getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
+  import { errorText } from '#lib/api/errors.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
-  import { effortLabel, permissionLabel } from '#lib/screens/chat/settingsLabels.js';
+  import { PERMISSION_MODES, effortLabel, permissionHint, permissionLabel, permissionValue } from '#lib/format/labels.js';
   import { onMount, untrack } from 'svelte';
   import Button from '#lib/ui/Button.svelte';
   import ChipToggle from '#lib/ui/ChipToggle.svelte';
   import ColorSwatches from '#lib/ui/ColorSwatches.svelte';
+  import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
   import Disclosure from '#lib/ui/Disclosure.svelte';
   import Field from '#lib/ui/Field.svelte';
   import Icon from '#lib/ui/Icon.svelte';
@@ -26,7 +28,8 @@
     touch = isTouchPrimary(),
     anchor = 0,
     ongroups,
-    onclose
+    onclose,
+    ondeleted
   }: {
     item: ListRow;
     groups: { id: string; name: string }[];
@@ -35,6 +38,7 @@
     anchor?: number;
     ongroups?: () => void;
     onclose: () => void;
+    ondeleted?: (id: string) => void;
   } = $props();
 
   const seed = untrack(() => item);
@@ -44,10 +48,14 @@
   let members = $state(seed.groups.slice());
   let model = $state(seed.model ?? 'opus');
   let effort = $state(seed.effort ?? 'medium');
-  let permission = $state(seed.permission_mode ?? 'default');
+  let permission = $state(permissionValue(seed.permission_mode));
   let crunch = $state(seed.crunch?.enabled ?? false);
   let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
   let reasons = $state<string[]>([]);
+  let confirmingDelete = $state(false);
+  let deleteError = $state('');
+  // Ключ живёт, пока сессия не удалена: повторное нажатие после обрыва повторяет ту же операцию.
+  const deleteKey = crypto.randomUUID();
   let sentPin = seed.pinned;
   let sentCrunch = seed.crunch?.enabled ?? false;
   // В строке списка текста продолжения нет, а хаб заменил бы сохранённый текст присланным.
@@ -73,7 +81,7 @@
   const known = (values: string[], current: string) => (values.includes(current) ? values : [current, ...values]);
   const modelOptions = $derived(known(harness?.models.map((entry) => entry.id) ?? [], model).map((value) => ({ value, label: harness?.models.find((entry) => entry.id === value)?.title || value })));
   const effortOptions = $derived(known(harness?.models.find((entry) => entry.id === model)?.efforts ?? ['low', 'medium', 'high'], effort).map((value) => ({ value, label: effortLabel(value) })));
-  const permissionOptions = $derived(known(harness?.permission_modes ?? ['default', 'ask', 'auto_edit', 'full_access'], permission).map((value) => ({ value, label: permissionLabel(value) })));
+  const permissionOptions = $derived(known(harness?.permission_modes ?? [...PERMISSION_MODES], permission).map((value) => ({ value, label: permissionLabel(value) })));
   const swatches = COLOR_KEYS.map((key) => ({ key, name: COLOR_NAMES[key] }));
 
   let panel = $state<HTMLElement | null>(null);
@@ -141,6 +149,18 @@
     await setConversationGroups(item.id, { group_ids: members }, crypto.randomUUID());
   }
 
+  async function remove() {
+    deleteError = '';
+    const id = item.id;
+    try {
+      await deleteConversation(id, deleteKey);
+      onclose();
+      ondeleted?.(id);
+    } catch (err) {
+      deleteError = errorText(err, 'Не удалось удалить сессию');
+    }
+  }
+
   async function archive(force = false) {
     try {
       await patch({ archived: true, force: force || undefined });
@@ -148,7 +168,7 @@
       if (force) onclose();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'archive_active') {
-        reasons = (err.details?.reasons ?? []).map((reason) => reasonText[reason] ?? reason);
+        reasons = (err.details?.reasons ?? []).map((reason) => reasonText[reason] ?? 'активная работа');
         return;
       }
       throw err;
@@ -190,7 +210,7 @@
             <Select id="sheet-model" label="Модель" options={modelOptions} bind:value={model} onchange={() => void saveModel(model)} />
             <Select id="sheet-effort" label="Усилие" options={effortOptions} bind:value={effort} onchange={() => void saveEffort(effort)} />
           </div>
-          <Select id="sheet-permission" label="Режим разрешений" options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
+          <Select id="sheet-permission" label="Режим разрешений" hint={permissionHint(permission, harness?.provider ?? item.harness?.provider)} options={permissionOptions} bind:value={permission} onchange={() => void savePermission(permission)} />
           <Toggle block label="Автопродолжение после лимитов" bind:checked={crunch} />
           {#if crunch}
             <Textarea id="sheet-resume" label="Текст продолжения" rows={2} bind:value={resumeText} onblur={() => void saveCrunch()} />
@@ -205,10 +225,25 @@
       <p class="note">Сначала подтвердите: {reasons.join(', ')}</p>
       <Button onclick={() => void archive(true)}>Всё равно архивировать</Button>
     {/if}
+    <button type="button" class="archive remove" onclick={() => { deleteError = ''; confirmingDelete = true; }}>
+      <Icon name="trash" /><span>Удалить</span><small>Без возможности вернуть</small>
+    </button>
+    {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
   </div>
 {/snippet}
 
-<svelte:window onkeydown={(event) => { if (!touch && event.key === 'Escape') dismiss(); }} />
+{#if confirmingDelete}
+  <ConfirmDialog
+    title="Удалить сессию?"
+    body={`Сессия «${item.title}» будет удалена вместе с историей и вложениями. Это нельзя отменить. История CLI на машине останется: её удаляют средствами самого агента.`}
+    confirmLabel="Удалить"
+    danger
+    onconfirm={() => { confirmingDelete = false; void remove(); }}
+    onclose={() => { confirmingDelete = false; }}
+  />
+{/if}
+
+<svelte:window onkeydown={(event) => { if (!touch && !confirmingDelete && event.key === 'Escape') dismiss(); }} />
 
 {#if touch}
   <Sheet open title="Меню сессии" {onclose}>{@render fields()}</Sheet>
@@ -245,4 +280,6 @@
   .note { margin: 0; color: var(--muted); font-size: var(--fs-sm); }
   .archive { display: flex; align-items: center; gap: var(--s6); width: 100%; min-height: var(--target); padding: var(--s2) var(--s6); border-radius: var(--radius-pill); background: var(--raised); color: var(--text); text-align: left; }
   .archive span { flex: 1; }
+  .remove { background: var(--danger-soft); color: var(--danger); }
+  .error { margin: 0; color: var(--danger); font-size: var(--fs-sm); }
 </style>

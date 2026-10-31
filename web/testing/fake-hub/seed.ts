@@ -24,7 +24,7 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 		created_at: '2026-10-28T12:00:00.000Z',
 		model: 'opus',
 		effort: 'medium',
-		permission_mode: 'default',
+		permission_mode: 'owner',
 		activity: idle,
 		unread_count: 0,
 		queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
@@ -135,13 +135,14 @@ export function seedMachine(api: FakeHubApi, patch: Partial<MachineRecord> = {})
 		os: patch.os ?? 'linux',
 		warnings: patch.warnings ?? [],
 		metrics: patch.metrics ?? { observed_at: '2026-10-28T12:00:00.000Z' },
+		home_dir: patch.home_dir ?? null,
 		harnesses: patch.harnesses ?? [
 			{
 				id: 'claude',
 				title: 'Claude',
 				provider: 'anthropic',
 				models: [{ id: 'opus', title: 'Opus', efforts: ['low', 'medium'] }],
-				permission_modes: ['default']
+				permission_modes: ['owner']
 			}
 		],
 	};

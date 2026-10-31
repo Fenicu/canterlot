@@ -1,0 +1,946 @@
+#[path = "support/task9.rs"]
+mod support;
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use axum::http::Method;
+use canterlot_hub::{
+    events::{self, NewEvent, Scope},
+    executions,
+    ingest::{Ingest, IngestOutcome, JournalKind},
+    machines,
+    model::ExecutionState,
+    testkit::{self, TestResponse},
+};
+use canterlot_proto::worker::v1::*;
+use serde_json::{Value, json};
+use sqlx::PgPool;
+use support::*;
+use uuid::Uuid;
+
+/// Разговор со строками во всех таблицах, которые на него ссылаются.
+struct Seeded {
+    conversation: Uuid,
+    execution: Uuid,
+    journal: Uuid,
+    command: Uuid,
+    /// Команда ввода на машине: её квитанция может прийти после удаления.
+    stored_command: Uuid,
+    attachments: Vec<Uuid>,
+    media: Uuid,
+    /// Всё, по чему строку можно связать с разговором.
+    needles: Vec<String>,
+}
+
+async fn exec(pool: &PgPool, sql: &'static str, ids: &[Uuid]) {
+    let mut query = sqlx::query(sql);
+    for id in ids {
+        query = query.bind(*id);
+    }
+    query.execute(pool).await.unwrap();
+}
+
+async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: Uuid) -> Seeded {
+    let (pool, owner) = (&f.pool, f.owner);
+    let (execution, journal, command, stored_command) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    let (cancel, input, retry, block, child, request, job, media) = (
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+        Uuid::now_v7(),
+    );
+    exec(
+        pool,
+        "insert into conversation_derived(conversation_id) values($1) on conflict do nothing",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into executions(id,conversation_id,generation,state,outcome,native_conversation_id)
+         values($1,$2,1,'stopped','user_stop','native-'||$2::text)",
+        &[execution, conversation],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,1,'deliver_input','{}','completed')",
+        &[command, machine, conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,1,'deliver_input','{}','stored_on_machine')",
+        &[stored_command, machine, conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state,target_command_id)
+         values($1,$2,$3,$4,1,'cancel_input','{}','completed',$5)",
+        &[cancel, machine, conversation, execution, command],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,command_id,received_at)
+         values($1,$2,$3,1,'seed-input','[]','accepted',$4,now())",
+        &[input, conversation, owner, command],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into inputs(id,conversation_id,owner_id,input_seq,idempotency_key,content,state,command_id,received_at,retry_of)
+         values($1,$2,$3,2,'seed-retry','[]','on_machine',$4,now(),$5)",
+        &[retry, conversation, owner, stored_command, input],
+    )
+    .await;
+    let linked = f
+        .ready_in(conversation, "a.txt", "text/plain", &content(64, 1))
+        .await;
+    let scheduled = f
+        .ready_in(conversation, "b.txt", "text/plain", &content(64, 2))
+        .await;
+    exec(
+        pool,
+        "insert into input_attachments(input_id,attachment_id,position) values($1,$2,0)",
+        &[input, linked],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,input_command_id)
+         values($1,$2,$3,'text','final',1,$4)",
+        &[block, execution, conversation, command],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into blocks(block_id,execution_id,conversation_id,kind,state,rev,input_command_id,parent_block_id)
+         values($1,$2,$3,'text','final',1,$4,$5)",
+        &[child, execution, conversation, command, block],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into block_chunks(block_id,seq,text) values($1,1,'chunk')",
+        &[block],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into block_media(id,execution_id,conversation_id,block_id,mime,size_bytes,sha256)
+         values($1,$2,$3,$4,'image/png',1,repeat('a',64))",
+        &[media, execution, conversation, block],
+    )
+    .await;
+    let path = f.blob_path(media);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"x").unwrap();
+    exec(
+        pool,
+        "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload)
+         values($1,$2,$3,1,'permission','native-request','closed_without_decision','{}')",
+        &[request, conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into runs(input_command_id,execution_id,conversation_id) values($1,$2,$3)",
+        &[command, execution, conversation],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into run_model_usage(input_command_id,model,agent,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens)
+         values($1,'opus','main',1,1,0,0)",
+        &[command],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'message',$2,$3,now()+interval '1 day','{}')",
+        &[job, owner, conversation],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into scheduled_job_attachments(job_id,attachment_id) values($1,$2)",
+        &[job, scheduled],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into conversation_group_members(group_id,conversation_id) values($1,$2)",
+        &[group, conversation],
+    )
+    .await;
+    sqlx::query(
+        "insert into idempotency_keys(owner_id,key,operation,request_hash,response,conversation_id)
+         values($1,$2,'seed',''::bytea,'{}',$3)",
+    )
+    .bind(owner)
+    .bind(format!("seed-{conversation}"))
+    .bind(conversation)
+    .execute(pool)
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "insert into limit_snapshots(provider,window_kind,used_permille,observed_at,source,machine_id,execution_id)
+         values('claude','weekly',1,now(),'session',$1,$2)",
+        &[machine, execution],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,execution_id)
+         values($1,$2,'sj',2,$3)",
+        &[machine, journal, execution],
+    )
+    .await;
+    let preset = Uuid::now_v7();
+    sqlx::query(
+        "insert into instruction_presets(id,owner_id,title,revision,origin,origin_conversation_id)
+         values($1,$2,$3,1,'agent',$4)",
+    )
+    .bind(preset)
+    .bind(owner)
+    .bind(format!("preset-{preset}"))
+    .bind(conversation)
+    .execute(pool)
+    .await
+    .unwrap();
+    exec(
+        pool,
+        "insert into instruction_preset_revisions(preset_id,revision,text,edited_by,edited_conversation_id)
+         values($1,1,'text','agent',$2)",
+        &[preset, conversation],
+    )
+    .await;
+    let mut conn = pool.acquire().await.unwrap();
+    for (scope, kind, payload) in [
+        (
+            Scope::Conversation { id: conversation },
+            "input_queued",
+            json!({"input_id": input}),
+        ),
+        (
+            Scope::Conversations { owner_id: owner },
+            "conversation_updated",
+            json!({"id": conversation, "title": format!("секретный заголовок {conversation}")}),
+        ),
+        (
+            Scope::Conversations { owner_id: owner },
+            "state_divergence",
+            json!({"execution_id": execution, "reason": "unknown_execution"}),
+        ),
+    ] {
+        events::append(
+            &mut conn,
+            NewEvent {
+                scope,
+                kind,
+                conversation_id: matches!(scope, Scope::Conversation { .. })
+                    .then_some(conversation),
+                execution_id: None,
+                payload,
+                correlation_id: Uuid::now_v7(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+    let needles = [
+        conversation,
+        execution,
+        command,
+        stored_command,
+        cancel,
+        input,
+        retry,
+        block,
+        child,
+        request,
+        job,
+        media,
+        linked,
+        scheduled,
+    ]
+    .iter()
+    .map(Uuid::to_string)
+    .chain([
+        format!("native-{conversation}"),
+        format!("секретный заголовок {conversation}"),
+    ])
+    .collect();
+    Seeded {
+        conversation,
+        execution,
+        journal,
+        command,
+        stored_command,
+        attachments: vec![linked, scheduled],
+        media,
+        needles,
+    }
+}
+
+async fn tables(pool: &PgPool) -> Vec<String> {
+    sqlx::query_scalar(
+        "select tablename::text from pg_tables
+         where schemaname='public' and tablename <> '_sqlx_migrations' order by 1",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+/// Таблицы, из которых цепочка внешних ключей приводит к conversations.
+async fn fk_chain(pool: &PgPool) -> BTreeSet<String> {
+    sqlx::query_scalar::<_, String>(
+        "with recursive refs(tbl) as (
+            select 'conversations'::regclass
+            union
+            select c.conrelid::regclass from pg_constraint c
+              join refs r on c.confrelid = r.tbl where c.contype = 'f'
+         ) select tbl::text from refs",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap()
+    .into_iter()
+    .collect()
+}
+
+/// Строки таблиц, текст которых содержит любой из идентификаторов.
+async fn mentions(pool: &PgPool, needles: &[String]) -> BTreeMap<String, Vec<String>> {
+    let mut found = BTreeMap::new();
+    for table in tables(pool).await {
+        let rows: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+            r#"select t::text from "{table}" t
+               where exists(select 1 from unnest($1::text[]) n where t::text like '%'||n||'%')
+               order by 1"#
+        )))
+        .bind(needles)
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        if !rows.is_empty() {
+            found.insert(table, rows);
+        }
+    }
+    found
+}
+
+async fn group(f: &Fixture) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("insert into conversation_groups(id,owner_id,name) values($1,$2,'группа')")
+        .bind(id)
+        .bind(f.owner)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    id
+}
+
+async fn delete(f: &Fixture, id: Uuid, key: &str) -> TestResponse {
+    f.client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{id}"),
+            Some(key),
+            None,
+        )
+        .await
+}
+
+fn code(response: &TestResponse) -> String {
+    response.json::<Value>()["error"]["code"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+async fn live_in(f: &Fixture, conversation: Uuid, state: &str) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query("insert into executions(id,conversation_id,generation,state) values($1,$2,9,$3)")
+        .bind(id)
+        .bind(conversation)
+        .bind(state)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let groups = group(&f).await;
+    let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
+    let other = f.conversation().await;
+    let bystander = seed_everything(&f, other, f.machine, groups).await;
+
+    let seeded = mentions(&f.pool, &victim.needles).await;
+    for table in fk_chain(&f.pool).await {
+        if matches!(table.as_str(), "instruction_preset_revisions") {
+            continue;
+        }
+        assert!(
+            seeded.contains_key(&table),
+            "seed misses {table}: the test must cover every table reaching conversations"
+        );
+    }
+    let revisions: i64 = sqlx::query_scalar(
+        "select count(*) from instruction_preset_revisions where edited_conversation_id=$1",
+    )
+    .bind(victim.conversation)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(revisions, 1);
+    let untouched = mentions(&f.pool, &bystander.needles).await;
+
+    let response = delete(&f, victim.conversation, "delete-1").await;
+    assert_eq!(response.status, 204, "{:?}", response.body);
+
+    let mut left = mentions(&f.pool, &victim.needles).await;
+    let tombstones = left.remove("conversation_tombstones").unwrap_or_default();
+    assert_eq!(tombstones.len(), 1, "exactly one tombstone");
+    assert!(!tombstones[0].contains("секретный"));
+    let announced = left.remove("events").unwrap_or_default();
+    assert_eq!(announced.len(), 1, "only the deletion event: {announced:?}");
+    assert!(announced[0].contains("conversation_deleted"));
+    assert!(left.is_empty(), "rows still reference it: {left:?}");
+
+    assert_eq!(
+        mentions(&f.pool, &bystander.needles).await,
+        untouched,
+        "the neighbour must not change at all"
+    );
+    let snapshots: i64 = sqlx::query_scalar("select count(*) from limit_snapshots")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(snapshots, 2, "shared limit history stays");
+    let presets: i64 =
+        sqlx::query_scalar("select count(*) from instruction_presets where title like 'preset-%'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(presets, 2, "a preset outlives the session that created it");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_frees_the_files_of_the_session_and_no_others(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let groups = group(&f).await;
+    let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
+    let other = f.conversation().await;
+    let bystander = seed_everything(&f, other, f.machine, groups).await;
+    let staged = {
+        let bytes = content(64, 3);
+        let response = f
+            .create_in(victim.conversation, "c.txt", "text/plain", &bytes)
+            .await;
+        let id = id_of(&response);
+        let half = bytes.len() / 2;
+        f.patch_bytes(id, 0, &bytes[..half]).await;
+        id
+    };
+    let files = |seeded: &Seeded| {
+        let mut ids = seeded.attachments.clone();
+        ids.push(seeded.media);
+        ids
+    };
+    for id in files(&victim).into_iter().chain(files(&bystander)) {
+        assert!(f.blob_path(id).exists(), "{id}");
+    }
+    assert!(f.staging_path(staged).exists());
+
+    let response = delete(&f, victim.conversation, "delete-files").await;
+    assert_eq!(response.status, 204, "{:?}", response.body);
+
+    for id in files(&victim) {
+        assert!(!f.blob_path(id).exists(), "{id} must be freed");
+    }
+    assert!(!f.staging_path(staged).exists(), "staging must be freed");
+    for id in files(&bystander) {
+        assert!(f.blob_path(id).exists(), "{id} belongs to a neighbour");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn retry_replays_and_a_new_request_gets_a_clear_not_found(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.conversation;
+    assert_eq!(delete(&f, id, "same").await.status, 204);
+    assert_eq!(delete(&f, id, "same").await.status, 204, "same key replays");
+    let again = delete(&f, id, "other").await;
+    assert_eq!(again.status, 404);
+    assert_eq!(code(&again), "conversation_deleted");
+    let unknown = delete(&f, Uuid::now_v7(), "unknown").await;
+    assert_eq!(unknown.status, 404);
+    assert_eq!(code(&unknown), "not_found");
+    let events: i64 =
+        sqlx::query_scalar("select count(*) from events where kind='conversation_deleted'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(events, 1);
+    let tombstones: i64 = sqlx::query_scalar("select count(*) from conversation_tombstones")
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(tombstones, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_key_of_another_request_is_a_conflict(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let other = f.conversation().await;
+    assert_eq!(delete(&f, f.conversation, "shared").await.status, 204);
+    let response = delete(&f, other, "shared").await;
+    assert_eq!(response.status, 409);
+    assert_eq!(code(&response), "idempotency_conflict");
+    let alive: bool = sqlx::query_scalar("select exists(select 1 from conversations where id=$1)")
+        .bind(other)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(alive);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn every_live_state_refuses_and_changes_nothing(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    for state in ["created", "starting", "running", "stopping", "owner_lost"] {
+        let id = f.conversation().await;
+        live_in(&f, id, state).await;
+        let needles = [id.to_string()];
+        let before = mentions(&f.pool, &needles).await;
+        let response = delete(&f, id, &format!("live-{state}")).await;
+        assert_eq!(response.status, 409, "{state}");
+        assert_eq!(code(&response), "conversation_live", "{state}");
+        assert_eq!(mentions(&f.pool, &needles).await, before, "{state}");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_conversation_of_another_owner_is_invisible(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let stranger = Uuid::now_v7();
+    exec(&f.pool, "insert into owners(id) values($1)", &[stranger]).await;
+    let machine = Uuid::now_v7();
+    exec(
+        &f.pool,
+        "insert into machines(id,owner_id,name) values($1,$2,'чужая')",
+        &[machine, stranger],
+    )
+    .await;
+    let foreign = testkit::seed_conversation(&f.pool, stranger, machine).await;
+    let response = delete(&f, foreign, "foreign").await;
+    assert_eq!(response.status, 404);
+    assert_eq!(code(&response), "not_found");
+    let alive: bool = sqlx::query_scalar("select exists(select 1 from conversations where id=$1)")
+        .bind(foreign)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert!(alive);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_reference_from_a_neighbour_refuses_the_whole_delete(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let groups = group(&f).await;
+    let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
+    let other = f.conversation().await;
+    let neighbour = seed_everything(&f, other, f.machine, groups).await;
+    let input: Uuid = sqlx::query_scalar("select id from inputs where command_id=$1")
+        .bind(neighbour.command)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    exec(
+        &f.pool,
+        "insert into input_attachments(input_id,attachment_id,position) values($1,$2,7)",
+        &[input, victim.attachments[0]],
+    )
+    .await;
+    let before = mentions(&f.pool, &victim.needles).await;
+    let response = delete(&f, victim.conversation, "shared-reference").await;
+    assert_eq!(response.status, 409, "{:?}", response.body);
+    assert_eq!(code(&response), "invalid_state");
+    assert_eq!(mentions(&f.pool, &victim.needles).await, before);
+    assert!(f.blob_path(victim.attachments[0]).exists());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let groups = group(&f).await;
+    let victim = seed_everything(&f, f.conversation, f.machine, groups).await;
+    let other = f.conversation().await;
+    let scope = Scope::Conversations { owner_id: f.owner }.key();
+    let head: i64 = sqlx::query_scalar("select last_seq from scope_counters where scope=$1")
+        .bind(&scope)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(delete(&f, victim.conversation, "evented").await.status, 204);
+
+    let page: Value = f
+        .client
+        .send(
+            Method::GET,
+            "/api/v1/events?scope=conversations&after=0&limit=100",
+            None,
+            None,
+        )
+        .await
+        .json();
+    let events = page["events"].as_array().unwrap();
+    let last = events.last().unwrap();
+    assert_eq!(last["kind"], "conversation_deleted");
+    assert_eq!(last["conversation_id"], victim.conversation.to_string());
+    assert_eq!(last["payload"]["id"], victim.conversation.to_string());
+    assert_eq!(last["payload"]["counts"]["all"], 1);
+    assert_eq!(last["scope_seq"], (head + 1).to_string());
+    assert!(
+        events[..events.len() - 1]
+            .iter()
+            .all(|event| event["kind"] == "hidden"),
+        "the old rows lose their content but keep the sequence: {events:?}"
+    );
+    assert_eq!(events[0]["scope_seq_from"], "1");
+
+    let list: Value = f
+        .client
+        .send(Method::GET, "/api/v1/snapshot/conversations", None, None)
+        .await
+        .json();
+    let ids: Vec<&str> = list["data"]["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| item["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, [other.to_string().as_str()]);
+    let scope_row: bool = sqlx::query_scalar(
+        "select exists(select 1 from scope_counters where scope=$1 or scope like $2)",
+    )
+    .bind(format!("conversation:{}", victim.conversation))
+    .bind(format!("%{}%", victim.conversation))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(!scope_row);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_deleted_conversation_answers_conversation_deleted_everywhere(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let id = f.conversation;
+    assert_eq!(delete(&f, id, "gone").await.status, 204);
+    for (method, path, body) in [
+        (Method::GET, format!("/api/v1/conversations/{id}"), None),
+        (
+            Method::GET,
+            format!("/api/v1/conversations/{id}/snapshot"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/inputs"),
+            Some(json!({"content":[{"type":"text","text":"поздно"}]})),
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/executions"),
+            None,
+        ),
+        (
+            Method::POST,
+            format!("/api/v1/conversations/{id}/resume"),
+            Some(json!({})),
+        ),
+    ] {
+        let key = (method != Method::GET).then(|| Uuid::now_v7().to_string());
+        let response = f.client.send(method, &path, key.as_deref(), body).await;
+        assert_eq!(response.status, 404, "{path}: {:?}", response.body);
+        assert_eq!(code(&response), "conversation_deleted", "{path}");
+    }
+    let revived: i64 = sqlx::query_scalar("select count(*) from conversations where id=$1")
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(revived, 0);
+}
+
+/// Машина с действующим токеном и разговором на ней; исполнение остановлено.
+async fn machine_with_session(f: &Fixture) -> (machines::NewMachine, Vec<u8>, Seeded) {
+    use sha2::Digest as _;
+    let machine = machines::add(&f.pool, f.owner, "worker").await.unwrap();
+    let digest = sha2::Sha256::digest(machine.token.as_bytes()).to_vec();
+    let conversation = testkit::seed_conversation(&f.pool, f.owner, machine.machine_id).await;
+    let groups = group(f).await;
+    let seeded = seed_everything(f, conversation, machine.machine_id, groups).await;
+    (machine, digest, seeded)
+}
+
+fn journal(id: Uuid, first: u64, bodies: Vec<record_body::Body>) -> JournalRecords {
+    JournalRecords {
+        journal_id: id.to_string(),
+        records: bodies
+            .into_iter()
+            .enumerate()
+            .map(|(i, body)| JournalRecord {
+                seq: first + i as u64,
+                body: Some(RecordBody { body: Some(body) }),
+            })
+            .collect(),
+    }
+}
+
+fn delta(block: Uuid) -> record_body::Body {
+    record_body::Body::BlockDelta(BlockDelta {
+        block_id: block.to_string(),
+        base_rev: 1,
+        rev: 2,
+        append: "поздний текст".into(),
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_journal_records_are_acknowledged_and_change_nothing(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (machine, digest, seeded) = machine_with_session(&f).await;
+    assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
+    let ingest = Ingest::new(f.pool.clone());
+    let outcome = ingest
+        .apply_batch(
+            machine.machine_id,
+            &digest,
+            JournalKind::Sj,
+            &journal(seeded.journal, 3, vec![delta(Uuid::now_v7())]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 3 });
+    let replay = ingest
+        .apply_batch(
+            machine.machine_id,
+            &digest,
+            JournalKind::Sj,
+            &journal(seeded.journal, 1, vec![delta(Uuid::now_v7())]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        replay,
+        IngestOutcome::Committed { up_to_seq: 3 },
+        "a replay from the start stops at the cursor"
+    );
+    let needles = [seeded.conversation.to_string()];
+    let left = mentions(&f.pool, &needles).await;
+    assert_eq!(
+        left.keys().collect::<Vec<_>>(),
+        ["conversation_tombstones", "events"]
+    );
+    let conversation_events: i64 =
+        sqlx::query_scalar("select count(*) from events where scope like 'conversation:%'")
+            .fetch_one(&f.pool)
+            .await
+            .unwrap();
+    assert_eq!(conversation_events, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_journal_first_seen_after_delete_is_acknowledged(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (machine, digest, seeded) = machine_with_session(&f).await;
+    assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
+    let unseen = Uuid::now_v7();
+    let opened = record_body::Body::JournalOpened(JournalOpened {
+        execution_id: seeded.execution.to_string(),
+        generation: 1,
+        supervisor_protocol_version: 1,
+    });
+    let outcome = Ingest::new(f.pool.clone())
+        .apply_batch(
+            machine.machine_id,
+            &digest,
+            JournalKind::Sj,
+            &journal(unseen, 1, vec![opened, delta(Uuid::now_v7())]),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 2 });
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_journal_of_a_truly_unknown_execution_is_still_refused(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (machine, digest, seeded) = machine_with_session(&f).await;
+    assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
+    let opened = record_body::Body::JournalOpened(JournalOpened {
+        execution_id: Uuid::now_v7().to_string(),
+        generation: 1,
+        supervisor_protocol_version: 1,
+    });
+    let outcome = Ingest::new(f.pool.clone())
+        .apply_batch(
+            machine.machine_id,
+            &digest,
+            JournalKind::Sj,
+            &journal(Uuid::now_v7(), 1, vec![opened]),
+        )
+        .await;
+    assert!(outcome.is_err(), "{outcome:?}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn late_control_facts_are_acknowledged(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (machine, digest, seeded) = machine_with_session(&f).await;
+    assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
+    let facts = vec![
+        record_body::Body::CommandStored(CommandStored {
+            machine_time_ms: 0,
+            command_id: seeded.stored_command.to_string(),
+            dispatch_attempt: 1,
+        }),
+        record_body::Body::InputRejected(InputRejected {
+            command_id: seeded.stored_command.to_string(),
+            dispatch_attempt: 1,
+            reason: "generation_closed".into(),
+        }),
+        record_body::Body::ExecutionState(canterlot_proto::worker::v1::ExecutionState {
+            execution_id: seeded.execution.to_string(),
+            generation: 1,
+            state: "stopped".into(),
+            outcome: "user_stop".into(),
+            ..Default::default()
+        }),
+    ];
+    let outcome = Ingest::new(f.pool.clone())
+        .apply_batch(
+            machine.machine_id,
+            &digest,
+            JournalKind::Cj,
+            &journal(Uuid::now_v7(), 1, facts),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 3 });
+    let command: i64 = sqlx::query_scalar("select count(*) from commands where id=$1")
+        .bind(seeded.command)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(command, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reconcile_is_quiet_about_a_deleted_execution(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (machine, _, seeded) = machine_with_session(&f).await;
+    assert_eq!(delete(&f, seeded.conversation, "late").await.status, 204);
+    Ingest::new(f.pool.clone())
+        .reconcile(
+            machine.machine_id,
+            &ReconcileReport {
+                executions: vec![ExecutionObservation {
+                    execution_id: seeded.execution.to_string(),
+                    generation: 1,
+                    state: "stopped".into(),
+                    outcome: "user_stop".into(),
+                    supervisor_attached: false,
+                    sj_journal_id: seeded.journal.to_string(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+    let divergences: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind='state_divergence' and payload::text like $1",
+    )
+    .bind(format!("%{}%", seeded.execution))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(divergences, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_racing_a_start_never_loses_either_side(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    for round in 0..20 {
+        let id = f.conversation().await;
+        let (delete_key, start_key) = (
+            format!("race-delete-{round}"),
+            format!("race-start-{round}"),
+        );
+        let path = format!("/api/v1/conversations/{id}/resume");
+        let (deleted, started) = tokio::join!(
+            delete(&f, id, &delete_key),
+            f.client
+                .send(Method::POST, &path, Some(&start_key), Some(json!({}))),
+        );
+        let conversations: i64 =
+            sqlx::query_scalar("select count(*) from conversations where id=$1")
+                .bind(id)
+                .fetch_one(&f.pool)
+                .await
+                .unwrap();
+        let live = sqlx::query_scalar::<_, i64>(
+            "select count(*) from executions where conversation_id=$1 and state='created'",
+        )
+        .bind(id)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+        match (deleted.status.as_u16(), started.status.as_u16()) {
+            (204, 404) => assert_eq!((conversations, live), (0, 0)),
+            (409, 201) => assert_eq!((conversations, live), (1, 1)),
+            other => panic!("unexpected race outcome {other:?}"),
+        }
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_stopped_session_with_a_real_execution_can_be_deleted(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let started = executions::start(&f.pool, f.owner, f.conversation, Uuid::now_v7())
+        .await
+        .unwrap();
+    assert_eq!(
+        code(&delete(&f, f.conversation, "while-live").await),
+        "conversation_live"
+    );
+    executions::set_state(
+        &f.pool,
+        started.execution_id,
+        ExecutionState::Failed,
+        Some("start_rejected"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(delete(&f, f.conversation, "after-stop").await.status, 204);
+}

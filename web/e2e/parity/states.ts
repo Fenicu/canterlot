@@ -35,7 +35,7 @@ const WORKSTATION = {
         { id: 'sonnet-5', title: 'sonnet-5', efforts: ['low', 'medium'] },
         { id: 'haiku', title: 'haiku', efforts: ['low'] }
       ],
-      permission_modes: ['default', 'ask', 'auto_edit', 'full_access']
+      permission_modes: ['owner', 'ask', 'bypass', 'read_only']
     }
   ]
 };
@@ -58,7 +58,7 @@ async function chat(page: Page, seeder: (api: FakeHubApi) => string, afterOpen?:
   }
   if (detail) {
     detail.effort = detail.effort || 'medium';
-    detail.permission_mode = detail.permission_mode || 'default';
+    detail.permission_mode = detail.permission_mode || 'owner';
   }
   await installChatRoutes(page, hub, api, OWNER);
   await page.goto(`/c/${id}`);

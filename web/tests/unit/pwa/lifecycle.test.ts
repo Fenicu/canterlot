@@ -37,7 +37,10 @@ test("signout_does_not_restore_a_draft_from_an_inflight_read", async () => {
 test("browser_runtime_rebinds_cleanup_after_an_owner_change_during_startup", async () => {
   vi.stubGlobal("indexedDB", new IDBFactory());
   vi.stubGlobal("IDBKeyRange", IDBKeyRange);
-  const runtime = { db: await openDb("bob") };
+  const runtime = {
+    db: await openDb("bob"),
+    list: { onDeleted: () => () => undefined },
+  };
   let current: typeof runtime | null = null;
   vi.doMock("#lib/app/runtime.js", () => ({
     getRuntime: () => {

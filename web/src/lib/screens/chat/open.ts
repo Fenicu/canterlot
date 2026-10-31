@@ -28,6 +28,22 @@ const opening = new Map<string, Promise<ChatStore>>();
 const holds = new Map<string, number>();
 let uploads: UploadManager | null = null;
 let cleanupBound = false;
+let deletionBound: Runtime | null = null;
+
+/** Удалённая сессия: открытый экран покажет это, а тёплая копия и загрузки исчезают сразу. */
+function bindDeletion(runtime: Runtime): void {
+  if (deletionBound === runtime) return;
+  deletionBound = runtime;
+  runtime.list.onDeleted((id) => {
+    const chat = chats.get(id);
+    chat?.markDeleted();
+    if (chat && !holds.has(id)) {
+      chats.delete(id);
+      chat.dispose();
+    }
+    void uploads?.cancelConversation(id);
+  });
+}
 
 function bindCleanup(): void {
   if (cleanupBound) return;
@@ -40,6 +56,7 @@ function bindCleanup(): void {
     uploads?.dispose();
     uploads = null;
     pending = null;
+    deletionBound = null;
     resetConfig();
     cleanupBound = false;
   });
@@ -57,7 +74,9 @@ export function sessionUploads(): UploadManager {
 export function browserRuntime(): Promise<Runtime> {
   bindCleanup();
   try {
-    return Promise.resolve(getRuntime());
+    const runtime = getRuntime();
+    bindDeletion(runtime);
+    return Promise.resolve(runtime);
   } catch {
     pending ??= createRuntime({
       fetch: globalThis.fetch.bind(globalThis),
@@ -72,6 +91,7 @@ export function browserRuntime(): Promise<Runtime> {
     return pending
       .then((runtime) => {
         bindCleanup();
+        bindDeletion(runtime);
         return runtime;
       })
       .catch((error) => {
@@ -101,7 +121,12 @@ export function leaseChatSession(id: string): ChatLease {
         return;
       }
       holds.delete(id);
-      chats.get(id)?.close();
+      const chat = chats.get(id);
+      chat?.close();
+      if (chat?.deleted) {
+        chats.delete(id);
+        chat.dispose();
+      }
       trimChats();
     },
   };
