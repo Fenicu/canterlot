@@ -1251,8 +1251,10 @@ impl OpenCodeAdapter {
         let input = self.delivery.active.map(input::message_id);
         if let Some(id) = &input {
             let queued = snapshot.inbox.iter().any(|item| item == id);
-            // Ввод ещё в очереди или снимок старше запроса: его ход впереди.
-            if queued || !reconcile::delivered(&snapshot.messages, id) {
+            // Ввод ещё в очереди или снимок старше запроса: его ход впереди. В оборванном хвосте
+            // ввода может просто не быть, а конец хода уже не придёт.
+            let unseen = !reconcile::delivered(&snapshot.messages, id) && !snapshot.truncated;
+            if queued || unseen {
                 return;
             }
         }
@@ -1278,6 +1280,9 @@ impl OpenCodeAdapter {
 
     // Единственный путь сверки на живом сервере: потерянное приходит теми же обработчиками.
     fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        if snapshot.truncated {
+            self.diagnostic("history_unreadable", false);
+        }
         let Some(translator) = self.translator.as_mut() else {
             return;
         };
@@ -1377,6 +1382,9 @@ impl OpenCodeAdapter {
         patch_children(self.http()?, &snapshot.children, &rules)
             .await
             .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
+        if snapshot.truncated {
+            self.diagnostic("history_unreadable", false);
+        }
         if let Some(translator) = self.translator.as_mut() {
             for child in &snapshot.children {
                 translator.add_child(child.clone());

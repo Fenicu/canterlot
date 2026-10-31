@@ -22,6 +22,8 @@ pub struct Snapshot {
     pub forms: Vec<Value>,
     /// Хвост истории, старое раньше.
     pub messages: Vec<Value>,
+    /// Хвост оборван на сообщении, которое не прочитать; раньше него история неизвестна.
+    pub truncated: bool,
 }
 
 fn items(reply: &Value) -> Vec<Value> {
@@ -42,8 +44,9 @@ fn id_of(item: &Value) -> Option<&str> {
 
 // Последний период и тот, что перед ним. Потерять можно только конец работы, а `idle`
 // отделяет периоды: второй с конца — граница, раньше него всё уже было прочитано живьём.
-async fn tail(http: &Http, session: &str) -> Result<Vec<Value>, HttpError> {
+async fn tail(http: &Http, session: &str) -> Result<(Vec<Value>, bool), HttpError> {
     let mut messages = Vec::new();
+    let mut truncated = false;
     let mut idle = 0;
     let mut size = PAGE_SIZE;
     let mut cursor: Option<String> = None;
@@ -56,21 +59,28 @@ async fn tail(http: &Http, session: &str) -> Result<Vec<Value>, HttpError> {
         let path = format!("/api/session/{session}/message?{query}");
         let reply = match http.get(&path, READ_WAIT).await {
             // Вложения и картинки лежат в сообщениях прямо в base64.
-            Err(HttpError::TooLarge) if size > 1 => {
+            Err(HttpError::TooLarge | HttpError::Decode) if size > 1 => {
                 size = (size / 4).max(1);
                 continue;
+            }
+            // Курсор приходит только в ответе, поэтому мимо этого сообщения не пройти. Сессия
+            // важнее: хвост короче, но без него ход не запустить и сообщение не уйдёт из него.
+            Err(HttpError::TooLarge | HttpError::Decode) => {
+                truncated = true;
+                break;
             }
             other => other?,
         };
         pages += 1;
         let page = items(&reply);
         let last_page = page.len() < size;
+        size = (size * 4).min(PAGE_SIZE);
         for item in page {
             if kind(&item) == "idle" {
                 idle += 1;
                 if idle == 2 {
                     messages.reverse();
-                    return Ok(messages);
+                    return Ok((messages, false));
                 }
             }
             messages.push(item);
@@ -85,7 +95,7 @@ async fn tail(http: &Http, session: &str) -> Result<Vec<Value>, HttpError> {
         }
     }
     messages.reverse();
-    Ok(messages)
+    Ok((messages, truncated))
 }
 
 fn missing_is_empty(reply: Result<Value, HttpError>) -> Result<Value, HttpError> {
@@ -137,6 +147,7 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
             http.get(&format!("{path}/form"), READ_WAIT).await,
         )?));
     }
+    let (messages, truncated) = tail(http, session).await?;
     Ok(Snapshot {
         running,
         inbox: items(&inbox)
@@ -147,7 +158,8 @@ pub async fn read(http: &Http, session: &str, known: Vec<String>) -> Result<Snap
         children,
         permissions,
         forms,
-        messages: tail(http, session).await?,
+        messages,
+        truncated,
     })
 }
 

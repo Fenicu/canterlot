@@ -4636,6 +4636,154 @@ async fn projection_over_the_body_cap_is_read_in_smaller_pages() {
     bench.close(CloseMode::Graceful).await;
 }
 
+fn resume_with_history(replies: Vec<Reply>) -> Script {
+    let mut script = recorded("kill_mid_tool");
+    let path = format!("/api/session/{RECORDED_SESSION}/message");
+    script.set_route("GET", &path, replies);
+    for (method, tail) in [("PATCH", ""), ("POST", "/model")] {
+        script.set_route(
+            method,
+            &format!("/api/session/{RECORDED_SESSION}{tail}"),
+            vec![reply_204()],
+        );
+    }
+    script
+}
+
+fn history_reads(bench: &Bench) -> Vec<String> {
+    bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| path_of(request).ends_with("/message"))
+        .map(|request| request["query"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+async fn sees_unreadable_history(bench: &mut Bench) -> bool {
+    for _ in 0..8 {
+        let event = bench.event().await;
+        if matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "history_unreadable",
+                required: false,
+                ..
+            }
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+// Сообщение крупнее потолка не прочитать и страницей из одного: иначе resume_failed навсегда,
+// ход не запустить, и оно не уйдёт из хвоста.
+#[tokio::test]
+async fn message_over_the_body_cap_does_not_stop_a_resume() {
+    let script = resume_with_history(vec![Reply {
+        raw: Some(" ".repeat(65 * 1024 * 1024)),
+        ..Default::default()
+    }]);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    assert_eq!(
+        history_reads(&bench),
+        [
+            "limit=100&order=desc",
+            "limit=25&order=desc",
+            "limit=6&order=desc",
+            "limit=1&order=desc"
+        ]
+    );
+    assert!(sees_unreadable_history(&mut bench).await);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// То же с сообщением, которое не разбирается: например, глубже предела рекурсии разбора.
+#[tokio::test]
+async fn message_that_does_not_parse_does_not_stop_a_resume() {
+    let script = resume_with_history(vec![Reply {
+        raw: Some("{".to_owned()),
+        ..Default::default()
+    }]);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    assert_eq!(history_reads(&bench).len(), 4);
+    assert!(sees_unreadable_history(&mut bench).await);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Разрыв потока с таким сообщением в хвосте не снимает сервер посреди хода.
+#[tokio::test]
+async fn unreadable_message_does_not_end_a_stream_recovery() {
+    let mut script = ready();
+    let session = session_of(&script);
+    script.set_route(
+        "GET",
+        &format!("/api/session/{session}/message"),
+        vec![Reply {
+            raw: Some("{".to_owned()),
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    bench.adapter.cut_stream();
+    let input = bench.input("Привет");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        !events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "event_stream_lost",
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert_eq!(subscriptions(&bench), 2);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Страница мельче после картинки не должна остаться мелкой: двадцать страниц по одному
+// сообщению не дошли бы до начала хода.
+#[tokio::test]
+async fn history_follows_the_cursor_and_the_page_grows_back() {
+    let page = |count: usize, next: &str| Reply {
+        body: Some(json!({
+            "data": (0..count)
+                .map(|n| json!({"type": "user", "id": format!("msg_{next}_{n}")}))
+                .collect::<Vec<_>>(),
+            "cursor": {"next": next},
+        })),
+        ..Default::default()
+    };
+    let script = resume_with_history(vec![
+        Reply {
+            raw: Some(" ".repeat(65 * 1024 * 1024)),
+            ..Default::default()
+        },
+        page(25, "second"),
+        page(3, "end"),
+    ]);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    assert_eq!(
+        history_reads(&bench),
+        [
+            "limit=100&order=desc",
+            "limit=25&order=desc",
+            "limit=100&cursor=second"
+        ]
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Кадр больше потолка потерян, как при разрыве: инструмент закрывается по проекции.
 #[tokio::test]
 async fn oversized_frame_is_recovered_from_the_projection() {
