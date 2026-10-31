@@ -62,7 +62,7 @@
 
 <style>
   .out { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: var(--s4) var(--s6) var(--s2); border-radius: var(--radius-card); background: var(--code); }
-  pre { width: 100%; margin: 0; overflow-x: auto; max-width: 100%; border-radius: var(--radius-sm); white-space: pre; font-family: var(--font-mono); }
+  pre { width: 100%; margin: 0; overflow-x: auto; max-width: 100%; white-space: pre; font-family: var(--font-mono); }
   .none { margin: var(--s0); padding-bottom: var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
   button { min-height: var(--target); padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); text-align: left; }
 </style>
