@@ -140,6 +140,7 @@ export function toolError(block: BlockModel, result: BlockModel | null): boolean
 
 /** Обёртку CLI вокруг текста ошибки владельцу показывать незачем. */
 export function cleanToolOutput(text: string): string {
+  if (/^\(\w+ completed with no output\)\s*$/.test(text)) return "";
   const inner = /^<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/.exec(text);
   return inner ? (inner[1] ?? "") : text;
 }

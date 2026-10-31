@@ -64,17 +64,19 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await expect(page.locator('.prose ol[start="3"]')).toHaveCount(1);
     });
 
-    test('expanded_row_shows_the_real_output_and_a_true_line_count', async ({ page }) => {
+    test('complete_short_output_offers_nothing_more_and_wraps_inside_the_row', async ({ page }) => {
       await open(page);
       const echo = toolRow(page, 'echo "Это длинная');
       await echo.locator('.head').click();
       await expect(echo.locator('.out pre')).toContainText('Это длинная проверочная строка');
-      await expect(echo.locator('.out')).toContainText('1 строка');
+      await expect(echo.locator('.out')).not.toContainText('строка ·');
+      await expect(echo.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
+      await expect(echo.locator('.out pre')).toHaveCSS('white-space', 'pre-wrap');
+      expect(await echo.locator('.out pre').evaluate((node) => node.scrollWidth <= node.clientWidth)).toBe(true);
       const read = namedRow(page, 'Read');
       await read.locator('.head').click();
       await expect(read.locator('.out pre')).toContainText('проверка кириллицы');
-      await read.getByRole('button', { name: /Показать полностью/ }).click();
-      await expect(read.locator('.out pre')).toContainText('проверка кириллицы');
+      await expect(read.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
       await expect(page.locator('[role="log"]')).not.toContainText('0 строк');
     });
 
@@ -84,6 +86,13 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
       await search.locator('.head').click();
       await expect(search.locator('.out')).toHaveText('Вывода нет');
       await expect(search.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
+    });
+
+    test('cli_note_about_an_empty_output_reads_as_no_output', async ({ page }) => {
+      await open(page);
+      const mkdir = toolRow(page, 'mkdir -p /tmp/canterlot-check');
+      await mkdir.locator('.head').click();
+      await expect(mkdir.locator('.out')).toHaveText('Вывода нет');
     });
 
     test('failed_tool_is_named_and_its_wrapper_is_gone', async ({ page }) => {

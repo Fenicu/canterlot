@@ -227,7 +227,9 @@ test('render_budget_during_long_stream_has_no_long_tasks', async ({ page, browse
 
 test('tool_blocks_are_collapsed_by_default_and_full_output_loads_lazily', async ({ page }) => {
   const { api, id } = await boot(page, 0);
-  api.histories.set(id, [toolBlock(api, 'строка\n'.repeat(8))]);
+  const tool = toolBlock(api, 'строка\n'.repeat(8));
+  tool.content_truncated = true;
+  api.histories.set(id, [tool]);
   api.bindConversation(id);
   const hits: string[] = [];
   page.on('request', (request) => { if (request.url().includes('/blocks/')) hits.push(request.url()); });
@@ -239,6 +241,20 @@ test('tool_blocks_are_collapsed_by_default_and_full_output_loads_lazily', async 
   expect(hits).toEqual([]);
   await page.getByRole('button', { name: /Показать полностью/ }).click();
   await expect.poll(() => hits.length).toBeGreaterThan(0);
+});
+
+test('full_output_action_appears_only_when_there_is_more_to_show', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  const long = toolBlock(api, Array.from({ length: 30 }, (_, line) => `строка ${line}`).join('\n'));
+  long.line_count = 30;
+  api.histories.set(id, [long]);
+  api.bindConversation(id);
+  await page.reload();
+  await page.locator('.head').click();
+  await expect(page.getByRole('button', { name: 'Показать полностью · 30 строк' })).toBeVisible();
+  await page.getByRole('button', { name: /Показать полностью/ }).click();
+  await expect(page.locator('.out pre')).toContainText('строка 0');
+  await expect(page.getByRole('button', { name: /Показать полностью/ })).toHaveCount(0);
 });
 
 test('pending_strip_shows_queue_and_scheduled_apart_from_the_live_line', async ({ page }) => {

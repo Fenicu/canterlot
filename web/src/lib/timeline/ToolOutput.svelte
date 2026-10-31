@@ -17,11 +17,14 @@
   let capped = $state(false);
   let offset = $state(0);
   let busy = $state(false);
+  const TAIL_LINES = 20;
   const clean = $derived(cleanToolOutput(stripAnsi(block.text)));
-  const tail = $derived(clean.split('\n').slice(-20).join('\n'));
+  const shownLines = $derived(clean.split('\n'));
+  const tail = $derived(shownLines.slice(-TAIL_LINES).join('\n'));
   const lines = $derived(block.lineCount ?? 0);
+  const more = $derived(!full && (block.truncated || shownLines.length > TAIL_LINES));
 
-  async function more(): Promise<void> {
+  async function loadMore(): Promise<void> {
     if (busy || capped) return;
     busy = true;
     try {
@@ -50,9 +53,11 @@
 <div class="out">
   {#if clean.trim() || full}
     <pre>{full ? cleanToolOutput(full) : tail}</pre>
-    <button type="button" onclick={more} aria-busy={busy}>Показать полностью{#if lines > 0}{` · ${lines} ${fmt.plural(lines, ['строка', 'строки', 'строк'])}`}{/if}</button>
+    {#if more}
+      <button type="button" onclick={loadMore} aria-busy={busy}>Показать полностью{#if lines > 0}{` · ${lines} ${fmt.plural(lines, ['строка', 'строки', 'строк'])}`}{/if}</button>
+    {/if}
     {#if full && offset < (block.contentBytes ?? Number.MAX_SAFE_INTEGER)}
-      <button type="button" onclick={more}>Показать ещё</button>
+      <button type="button" onclick={loadMore}>Показать ещё</button>
     {/if}
     {#if capped}<button type="button" onclick={save}>Сохранить файлом</button>{/if}
   {:else}
@@ -62,7 +67,7 @@
 
 <style>
   .out { display: flex; flex-direction: column; align-items: flex-start; min-width: 0; padding: var(--s4) var(--s6) var(--s2); border-radius: var(--radius-card); background: var(--code); }
-  pre { width: 100%; margin: 0; overflow-x: auto; max-width: 100%; white-space: pre; font-family: var(--font-mono); }
+  pre { width: 100%; margin: 0; max-width: 100%; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--font-mono); }
   .none { margin: var(--s0); padding-bottom: var(--s2); color: var(--secondary); font-size: var(--fs-sm); }
   button { min-height: var(--target); padding: var(--s0); border-radius: var(--radius-sm); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); text-align: left; }
 </style>
