@@ -1,7 +1,10 @@
 //! Перевод `/api/event` в события адаптера. Переводчик синхронен и не паникует;
 //! события чужих сессий отбрасываются, неизвестный тип даёт одну диагностику.
 
-use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase};
+use super::{
+    super::{AdapterEvent, BlockKind, ModelUsage, Phase},
+    requests::GLOBAL_SESSION,
+};
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
@@ -447,7 +450,8 @@ impl Translator {
         if session.is_empty() || id.is_empty() {
             return vec![Self::diagnostic("unparsed_event", event, true)];
         }
-        if !self.owns(session) {
+        let global = kind == RequestKind::Form && session == GLOBAL_SESSION;
+        if !global && !self.owns(session) {
             return Vec::new();
         }
         vec![Translated::Request(PendingRequest {

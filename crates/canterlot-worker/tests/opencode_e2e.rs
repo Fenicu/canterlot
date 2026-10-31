@@ -716,3 +716,79 @@ async fn mode_change_from_the_hub_reaches_the_server_before_the_input() {
     env.stop().await;
     env.fake().wait_gone().await;
 }
+
+fn question_turn() -> Script {
+    Script::from_capture("question", None)
+        .first_run()
+        .without_replies(409)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+fn answer() -> Value {
+    json!({"kind": "question", "answers": {"q0": "Blue", "q1": ["A", "B"]}})
+}
+
+// Вопрос по боевому пути: карточка, ответ и фаза ожидания в журнале.
+#[tokio::test]
+async fn question_goes_through_the_supervisor_once() {
+    let mut env = Env::new(Some(question_turn())).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("спроси").await;
+    let (request, payload) = env.wait_request().await;
+    assert_eq!(payload["questions"][1]["multi_select"], true);
+    env.wait("awaiting answer", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::PhaseChanged(f) if f.phase == "awaiting_answer"))
+    })
+    .await;
+    env.send(env.decide(&request, "question", &answer())).await;
+    env.wait_finished(input).await;
+    env.send(env.decide(&request, "question", &answer())).await;
+    env.wait("second answer refused", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::DecisionNotApplied(f)
+                if f.reason == "already_transmitted" || f.reason == "request_closed")
+        })
+    })
+    .await;
+    let replies = env.replies();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(
+        replies[0]["body"],
+        json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}})
+    );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Вопрос больше потолка журнала: подписи вариантов целы, ответ сверяется по ним.
+#[tokio::test]
+async fn oversized_question_keeps_labels_in_the_preview() {
+    let mut script = question_turn();
+    let huge = "щ".repeat(300_000);
+    for step in &mut script.steps {
+        if let Step::Emit { events } = step {
+            for event in events {
+                if event["type"] == "form.created" {
+                    event["data"]["form"]["fields"][0]["description"] = huge.clone().into();
+                }
+            }
+        }
+    }
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("спроси").await;
+    let (request, payload) = env.wait_request().await;
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["questions"][0]["options"][0]["label"], "Blue");
+    env.send(env.decide(&request, "question", &answer())).await;
+    env.wait_finished(input).await;
+    assert_eq!(env.replies().len(), 1);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}

@@ -9,7 +9,7 @@
 //! cargo test -p canterlot-worker --features opencode-live --test opencode_live -- --ignored --test-threads=1
 //! ```
 
-use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
@@ -566,6 +566,76 @@ async fn read_only_rules_reach_the_provider_request() {
     assert!(tools.contains(&"read"), "{tools:?}");
     assert!(!tools.contains(&"shell"), "{tools:?}");
     assert!(!tools.contains(&"write"), "{tools:?}");
+    session.close().await;
+}
+
+fn question_call() -> Reply {
+    Reply::tool(
+        "question",
+        json!({"questions": [
+            {"question": "Какой цвет?", "header": "Цвет",
+             "options": [{"label": "Синий", "description": "холодный"}]},
+            {"question": "Что ещё?", "header": "Ещё", "multiple": true,
+             "options": [{"label": "А", "description": "а"}, {"label": "Б", "description": "б"}]},
+        ]}),
+    )
+}
+
+// Настоящая форма: ответ доходит до модели целиком, без "Unanswered".
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_question_is_answered_through_the_card() {
+    let stub = Stub::start(vec![question_call(), Reply::text("понял")]).await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("спроси");
+    session.transmit(&turn).await;
+    let (request, payload) = session.until_request().await;
+    assert_eq!(payload["questions"][0]["text"], "Какой цвет?");
+    let decision = DecisionPayload::Question {
+        answers: [
+            ("q0".to_owned(), AnswerValue::Single("Свой ответ".into())),
+            (
+                "q1".to_owned(),
+                AnswerValue::Multiple(vec!["А".into(), "Б".into()]),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    };
+    let outcome = session.adapter.deliver_decision(&request, &decision).await;
+    assert!(
+        matches!(outcome, DecisionOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let command = turn.command_id;
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    let seen = stub.requests()[1].to_string();
+    assert!(seen.contains("Свой ответ"), "{seen}");
+    assert!(!seen.contains("Unanswered"), "{seen}");
+    session.close().await;
+}
+
+// Отказ с текстом: модель получает его и идёт дальше, ход не обрывается.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_question_refused_with_a_message_lets_the_model_go_on() {
+    let stub = Stub::start(vec![question_call(), Reply::text("понял")]).await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("спроси");
+    session.transmit(&turn).await;
+    let (request, _) = session.until_request().await;
+    session
+        .adapter
+        .refuse_request(&request, "Owner is away, continue without it")
+        .await;
+    let command = turn.command_id;
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    assert_eq!(stub.requests().len(), 2, "the model went on");
+    assert!(stub.requests()[1].to_string().contains("Owner is away"));
     session.close().await;
 }
 

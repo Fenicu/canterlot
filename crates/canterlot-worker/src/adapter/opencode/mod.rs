@@ -1053,7 +1053,7 @@ impl Adapter for OpenCodeAdapter {
             resume: Support::Supported,
             interrupt: Support::Unavailable("opencode_interrupt"),
             approvals: Support::Supported,
-            questions: Support::Unavailable("opencode_questions"),
+            questions: Support::Supported,
             background_work: Support::Unavailable("opencode_interrupt"),
             interrupt_keeps_process: true,
         }
@@ -1138,6 +1138,13 @@ impl Adapter for OpenCodeAdapter {
             }) => {
                 self.requests.forget(request_id);
                 DecisionOutcome::NotApplied("request_not_pending".into())
+            }
+            Err(HttpError::Status { status: 400, .. }) => {
+                self.requests.reopen(request_id);
+                if let Some(reply) = self.requests.refuse(request_id, requests::REFUSED) {
+                    self.send_refusal(reply);
+                }
+                DecisionOutcome::NotApplied("decision_invalid".into())
             }
             Err(_) => DecisionOutcome::Undetermined,
         }

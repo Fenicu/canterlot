@@ -2,17 +2,25 @@
 //! один раз, а адрес ответа берётся из запроса: у потомка своя сессия.
 
 use super::{
-    super::{AdapterEvent, DecisionProof, Phase},
+    super::{AdapterEvent, DecisionProof, Phase, valid_decision},
     events::{PendingRequest, RequestKind},
     http::{Http, HttpError},
 };
-use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
-use std::{collections::HashMap, fmt, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fmt,
+    time::Duration,
+};
 
 const REPLY_WAIT: Duration = Duration::from_secs(5);
 /// Отказ без текста кончает ход, поэтому текст есть всегда.
 const DECLINED: &str = "The owner declined this action. Continue without it.";
+/// Столько вопросов показывает карточка и принимает `valid_decision`.
+const MAX_QUESTIONS: usize = 4;
+/// Сессия форм MCP: их сервер не связывает с сессией разговора.
+pub const GLOBAL_SESSION: &str = "global";
 pub const REFUSED: &str = "This request cannot be answered in this session. Continue without it.";
 
 /// Ответ серверу. Адрес и тело не попадают в журнал: тело несёт текст владельца.
@@ -42,10 +50,28 @@ impl Reply {
     }
 }
 
+/// Подпись видит владелец, сервер ждёт значение.
+struct Question {
+    id: String,
+    options: Vec<(String, String)>,
+}
+
+impl Question {
+    fn value(&self, answer: &str) -> String {
+        self.options
+            .iter()
+            .find(|(label, _)| label == answer)
+            .map_or_else(|| answer.to_owned(), |(_, value)| value.clone())
+    }
+}
+
 struct Pending {
     kind: RequestKind,
     session: String,
     item: Option<String>,
+    /// Карточка вопроса: по ней сверяется ответ. У разрешения не нужна.
+    payload: Value,
+    questions: Vec<Question>,
     answered: bool,
 }
 
@@ -134,6 +160,84 @@ pub fn permission_payload(request: &PendingRequest) -> Value {
     payload
 }
 
+fn question(field: &Value) -> Option<(Value, Question)> {
+    let id = field.get("key")?.as_str().filter(|id| !id.is_empty())?;
+    let kind = field.get("type")?.as_str()?;
+    if !matches!(kind, "string" | "multiselect") {
+        return None;
+    }
+    let raw = field.get("options").and_then(Value::as_array);
+    let mut options = Vec::new();
+    let mut shown = Vec::new();
+    for option in raw.into_iter().flatten() {
+        let label = option.get("label")?.as_str()?;
+        let value = option.get("value")?.as_str()?;
+        options.push((label.to_owned(), value.to_owned()));
+        shown.push(json!({
+            "label": label,
+            "description": option.get("description").cloned().unwrap_or(Value::Null),
+        }));
+    }
+    let custom = field.get("custom").and_then(Value::as_bool) == Some(true) || options.is_empty();
+    let header = field.get("title").cloned().unwrap_or(Value::Null);
+    let shown_question = json!({
+        "id": id,
+        "text": field.get("description").unwrap_or(&header),
+        "header": header,
+        "options": shown,
+        "multi_select": kind == "multiselect",
+        "allow_custom": custom,
+        "is_secret": false,
+    });
+    Some((
+        shown_question,
+        Question {
+            id: id.to_owned(),
+            options,
+        },
+    ))
+}
+
+/// Форма инструмента `question`. Формы MCP и всё, что карточка не соберёт, сюда не проходят:
+/// сервер принял бы неполный ответ, а без ответа вызов ждал бы вечно.
+fn question_payload(request: &PendingRequest) -> Option<(Value, Vec<Question>)> {
+    let raw = &request.raw;
+    if request.session == GLOBAL_SESSION
+        || raw.pointer("/metadata/kind").and_then(Value::as_str) != Some("question")
+    {
+        return None;
+    }
+    let fields = raw.get("fields")?.as_array()?;
+    if fields.is_empty() || fields.len() > MAX_QUESTIONS {
+        return None;
+    }
+    let (shown, questions): (Vec<Value>, Vec<Question>) =
+        fields.iter().map(question).collect::<Option<_>>()?;
+    let tool_use_id = raw.pointer("/metadata/tool/id").cloned();
+    let payload = json!({
+        "questions": shown,
+        "tool_use_id": tool_use_id.unwrap_or(Value::Null),
+        "agent": request.agent(),
+    });
+    Some((payload, questions))
+}
+
+fn answer_body(questions: &[Question], answers: &BTreeMap<String, AnswerValue>) -> Value {
+    let mut out = serde_json::Map::new();
+    for question in questions {
+        let value = match answers.get(&question.id) {
+            Some(AnswerValue::Single(answer)) => question.value(answer).into(),
+            Some(AnswerValue::Multiple(values)) => values
+                .iter()
+                .map(|answer| Value::from(question.value(answer)))
+                .collect(),
+            None => continue,
+        };
+        out.insert(question.id.clone(), value);
+    }
+    json!({"answer": out})
+}
+
 fn cancel_path(session: &str, id: &str) -> String {
     format!("/api/session/{session}/form/{id}")
 }
@@ -160,30 +264,41 @@ impl Requests {
         if self.pending.contains_key(&request.id) {
             return Intake::Duplicate;
         }
-        let pending = Pending {
+        let mut pending = Pending {
             kind: request.kind,
             session: request.session.clone(),
             item: request.item.clone(),
+            payload: Value::Null,
+            questions: Vec::new(),
             answered: false,
         };
-        match request.kind {
-            RequestKind::Permission => {
-                let payload = permission_payload(&request);
-                self.pending.insert(request.id.clone(), pending);
-                Intake::Open(
-                    AdapterEvent::RequestOpened {
-                        request_id: request.id,
-                        kind: "permission".into(),
-                        payload,
-                    },
-                    Phase::AwaitingPermission,
-                )
-            }
-            RequestKind::Form => Intake::Refuse(
-                refusal(&pending, &request.id, REFUSED),
-                "opencode_form_refused",
+        let (kind, phase, payload) = match request.kind {
+            RequestKind::Permission => (
+                "permission",
+                Phase::AwaitingPermission,
+                permission_payload(&request),
             ),
-        }
+            RequestKind::Form => {
+                let Some((payload, questions)) = question_payload(&request) else {
+                    return Intake::Refuse(
+                        refusal(&pending, &request.id, REFUSED),
+                        "opencode_form_refused",
+                    );
+                };
+                pending.payload = payload.clone();
+                pending.questions = questions;
+                ("question", Phase::AwaitingAnswer, payload)
+            }
+        };
+        self.pending.insert(request.id.clone(), pending);
+        Intake::Open(
+            AdapterEvent::RequestOpened {
+                request_id: request.id,
+                kind: kind.into(),
+                payload,
+            },
+            phase,
+        )
     }
 
     pub fn has_open(&self) -> bool {
@@ -219,10 +334,25 @@ impl Requests {
                     body,
                 }
             }
+            (RequestKind::Form, DecisionPayload::Question { answers })
+                if valid_decision("question", &pending.payload, decision) =>
+            {
+                Reply::Post {
+                    path: format!("{}/reply", cancel_path(&pending.session, request_id)),
+                    body: answer_body(&pending.questions, answers),
+                }
+            }
             _ => return Err("decision_invalid"),
         };
         pending.answered = true;
         Ok(reply)
+    }
+
+    /// Сервер отверг ответ: запрос жив, и вызов будет ждать, пока ему не откажут.
+    pub fn reopen(&mut self, request_id: &str) {
+        if let Some(pending) = self.pending.get_mut(request_id) {
+            pending.answered = false;
+        }
     }
 
     /// Отказ без участия владельца; уже отвеченный запрос не трогается.
@@ -318,6 +448,40 @@ mod tests {
         let mut child = request(json!({"action": "shell", "resources": ["ls"]}));
         child.child = true;
         assert_eq!(permission_payload(&child)["agent"], "subagent");
+    }
+
+    fn field(value: Value) -> PendingRequest {
+        PendingRequest {
+            kind: RequestKind::Form,
+            id: "frm_1".into(),
+            session: "ses_1".into(),
+            item: None,
+            child: false,
+            raw: json!({"metadata": {"kind": "question"}, "fields": [value]}),
+        }
+    }
+
+    #[test]
+    fn free_text_question_needs_no_options() {
+        let (payload, _) = question_payload(&field(
+            json!({"key": "q0", "type": "string", "title": "Имя"}),
+        ))
+        .unwrap();
+        assert_eq!(payload["questions"][0]["allow_custom"], true);
+        assert_eq!(payload["questions"][0]["text"], "Имя");
+    }
+
+    #[test]
+    fn fields_a_card_cannot_collect_are_refused() {
+        for kind in ["boolean", "number", "integer", "external"] {
+            assert!(question_payload(&field(json!({"key": "q0", "type": kind}))).is_none());
+        }
+        assert!(question_payload(&field(json!({"key": "", "type": "string"}))).is_none());
+        let empty = PendingRequest {
+            raw: json!({"metadata": {"kind": "question"}, "fields": []}),
+            ..field(Value::Null)
+        };
+        assert!(question_payload(&empty).is_none());
     }
 
     #[test]

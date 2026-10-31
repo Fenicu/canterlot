@@ -4,7 +4,7 @@
 //! Адаптер OpenCode на двойнике `fake-opencode` (L1): настоящий процесс, HTTP и SSE.
 //! Сценарии собраны из записей этапа 0.
 
-use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, DecisionOutcome,
@@ -2357,11 +2357,175 @@ async fn end_of_a_turn_releases_held_tools_without_a_mark() {
 }
 
 // Без ответа ход висел бы вечно: форма снимается с сообщением, ход продолжается.
+/// Первый ход записи вопросов: два вопроса, ответ, конец хода.
+fn question_turn() -> Script {
+    Script::from_capture("question", None)
+        .first_run()
+        .without_replies(409)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+fn answers(items: &[(&str, AnswerValue)]) -> DecisionPayload {
+    DecisionPayload::Question {
+        answers: items
+            .iter()
+            .map(|(id, value)| ((*id).to_owned(), value.clone()))
+            .collect(),
+    }
+}
+
+fn single(text: &str) -> AnswerValue {
+    AnswerValue::Single(text.into())
+}
+
+fn multiple(values: &[&str]) -> AnswerValue {
+    AnswerValue::Multiple(values.iter().map(|value| (*value).to_owned()).collect())
+}
+
+fn edit_form(script: &mut Script, change: impl Fn(&mut Value)) {
+    for step in &mut script.steps {
+        if let Step::Emit { events } = step {
+            for event in events {
+                if event["type"] == "form.created" {
+                    change(&mut event["data"]["form"]);
+                }
+            }
+        }
+    }
+}
+
+// Вопрос доходит карточкой, а ответ идёт по ключам формы.
 #[tokio::test]
-async fn question_form_is_cancelled_with_a_message_until_its_slice() {
+async fn question_reaches_the_owner_and_the_answer_goes_by_keys() {
+    let mut bench = Bench::new(question_turn());
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, payload, _) = bench.until_request().await;
+    assert!(request.starts_with("frm_"), "{request}");
+    assert_eq!(payload["agent"], "orchestrator");
+    assert!(
+        payload["tool_use_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("call_")
+    );
+    let questions = payload["questions"].as_array().unwrap();
+    assert_eq!(questions.len(), 2);
+    assert_eq!(questions[0]["id"], "q0");
+    assert_eq!(questions[0]["text"], "Pick a colour?");
+    assert_eq!(questions[0]["header"], "Colour");
+    assert_eq!(
+        questions[0]["options"],
+        json!([
+            {"label": "Blue", "description": "cold"},
+            {"label": "Red", "description": "warm"},
+        ])
+    );
+    assert_eq!(questions[0]["multi_select"], false);
+    assert_eq!(questions[0]["allow_custom"], true);
+    assert_eq!(questions[1]["multi_select"], true);
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Phase {
+            phase: Phase::AwaitingAnswer,
+            ..
+        }
+    ));
+    let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A", "B"]))]);
+    assert!(matches!(
+        bench.deliver(&request, &decision).await,
+        DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(
+        bench.replies()[0]["body"],
+        json!({"answer": {"q0": "Blue", "q1": ["A", "B"]}})
+    );
+    bench.until_finished(input.command_id).await;
+    let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
+        panic!("second answer");
+    };
+    assert_eq!(reason, "request_not_pending");
+    assert_eq!(bench.replies().len(), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер принял бы неполный ответ и подставил модели "Unanswered".
+#[tokio::test]
+async fn partial_answer_stops_before_the_server() {
+    let mut bench = Bench::new(question_turn());
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    let DecisionOutcome::NotApplied(reason) = bench
+        .deliver(&request, &answers(&[("q0", single("Blue"))]))
+        .await
+    else {
+        panic!("partial answer");
+    };
+    assert_eq!(reason, "decision_invalid");
+    assert!(bench.replies().is_empty());
+    let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &allow()).await else {
+        panic!("permission on a question");
+    };
+    assert_eq!(reason, "decision_invalid");
+    assert!(matches!(
+        bench
+            .deliver(
+                &request,
+                &answers(&[("q0", single("Свой ответ")), ("q1", multiple(&["Другое"]))]),
+            )
+            .await,
+        DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(
+        bench.replies()[0]["body"],
+        json!({"answer": {"q0": "Свой ответ", "q1": ["Другое"]}})
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Подпись видит владелец, значение ждёт сервер. Кадр выдуман: инструмент `question` кладёт
+// в оба поля одно и то же, различать их разрешает схема `Form.Option`.
+#[tokio::test]
+async fn answer_is_sent_as_the_value_of_the_option() {
+    let mut script = question_turn();
+    edit_form(&mut script, |form| {
+        form["fields"][0]["options"][0]["label"] = "Синий".into();
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, payload, _) = bench.until_request().await;
+    assert_eq!(payload["questions"][0]["options"][0]["label"], "Синий");
+    let decision = answers(&[("q0", single("Синий")), ("q1", multiple(&["A"]))]);
+    assert!(matches!(
+        bench.deliver(&request, &decision).await,
+        DecisionOutcome::Applied(_)
+    ));
+    assert_eq!(bench.replies()[0]["body"]["answer"]["q0"], "Blue");
+    bench.close(CloseMode::Graceful).await;
+}
+
+async fn cancelled_form(script: Script) -> (Bench, Vec<AdapterEvent>) {
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    (bench, events)
+}
+
+fn form_cancel_script(change: impl Fn(&mut Value)) -> (Script, String) {
     let capture = Script::from_capture("question", None);
-    let form = tool_events(&capture, &["form.created"]).remove(0);
-    let session = form["data"]["form"]["sessionID"]
+    let mut form = tool_events(&capture, &["form.created"]).remove(0);
+    change(&mut form["data"]["form"]);
+    let session = session_of(&capture);
+    let owner = form["data"]["form"]["sessionID"]
         .as_str()
         .unwrap()
         .to_owned();
@@ -2381,19 +2545,171 @@ async fn question_form_is_cancelled_with_a_message_until_its_slice() {
             },
         ],
     );
-    script.set_route(
-        "DELETE",
-        &format!("/api/session/{session}/form/{id}"),
-        vec![reply_204()],
+    let path = format!("/api/session/{owner}/form/{id}");
+    script.set_route("DELETE", &path, vec![reply_204()]);
+    (script, path)
+}
+
+fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], tail: &str) {
+    assert!(
+        events
+            .iter()
+            .all(|event| !matches!(event, AdapterEvent::RequestOpened { .. }))
+    );
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "opencode_form_refused",
+            required: false,
+            ..
+        }
+    )));
+    let requests = bench.fake.requests();
+    let cancel = find(&requests, "DELETE", tail).expect("form cancel");
+    assert!(cancel["query"].as_str().unwrap().contains("message="));
+}
+
+// Больше четырёх вопросов карточка не показывает, без ответа ход завис бы. Кадр выдуман
+// из записанного: сценарий с пятью вопросами не прогонялся.
+#[tokio::test]
+async fn form_with_too_many_questions_is_cancelled_with_a_message() {
+    let (script, path) = form_cancel_script(|form| {
+        let field = form["fields"][0].clone();
+        let list = form["fields"].as_array_mut().unwrap();
+        for index in 2..5 {
+            let mut field = field.clone();
+            field["key"] = format!("q{index}").into();
+            list.push(field);
+        }
+    });
+    let (mut bench, events) = cancelled_form(script).await;
+    assert_cancelled(&bench, &events, path.rsplit('/').next().unwrap());
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Формы MCP не вопросы: полей карточка не соберёт. Кадр выдуман по схеме `Form.Info`,
+// `sessionID: "global"` из исходников `form-location.ts`.
+#[tokio::test]
+async fn elicitation_form_is_cancelled_with_a_message() {
+    let (script, path) = form_cancel_script(|form| {
+        form["sessionID"] = "global".into();
+        form["metadata"] = json!({"kind": "elicitation"});
+    });
+    let (mut bench, events) = cancelled_form(script).await;
+    assert!(path.contains("/session/global/form/"));
+    assert_cancelled(&bench, &events, path.rsplit('/').next().unwrap());
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Отказ без текста кончил бы ход: `DELETE` всегда с сообщением.
+#[tokio::test]
+async fn refused_question_carries_a_message() {
+    let (mut script, path) = form_cancel_script(|_| {});
+    let tail = path.rsplit('/').next().unwrap().to_owned();
+    script
+        .steps
+        .retain(|step| !matches!(step, Step::Stall { .. }));
+    let finish = script.steps.pop().unwrap();
+    script.steps.push(Step::Stall { ms: 300 });
+    script.steps.push(finish);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    bench
+        .adapter
+        .refuse_request(&request, "The turn has ended")
+        .await;
+    bench.until_finished(input.command_id).await;
+    let requests = bench.fake.requests();
+    let cancel = find(&requests, "DELETE", &tail).expect("form cancel");
+    assert!(
+        cancel["query"]
+            .as_str()
+            .unwrap()
+            .contains("message=The+turn+has+ended")
+    );
+    assert!(bench.replies().is_empty());
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер снял форму сам: карточка закрывается по `form.cancelled`.
+#[tokio::test]
+async fn form_cancelled_by_the_server_closes_the_card() {
+    let capture = Script::from_capture("question", None);
+    let form = tool_events(&capture, &["form.created"]).remove(0);
+    let session = session_of(&capture);
+    let id = form["data"]["form"]["id"].as_str().unwrap().to_owned();
+    let mut script = capture
+        .clone()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    replace_events_after_prompt(
+        &mut script,
+        vec![
+            Step::Emit { events: vec![form] },
+            Step::Stall { ms: 200 },
+            Step::Emit {
+                events: vec![
+                    json!({"type": "form.cancelled", "data": {"id": id, "sessionID": session}}),
+                    finish(&session),
+                ],
+            },
+        ],
     );
     let mut bench = Bench::new(script);
     bench.start_ok().await;
     let input = bench.input("x");
     bench.accepted(&input).await;
-    bench.until_finished(input.command_id).await;
-    let requests = bench.fake.requests();
-    let cancel = find(&requests, "DELETE", &id).expect("form cancel");
-    assert!(cancel["query"].as_str().unwrap().contains("message="));
+    let (request, ..) = bench.until_request().await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::RequestClosed { request_id, reason }
+            if *request_id == request && reason == "cli_cancelled"
+    )));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер отверг ответ: без отмены инструмент ждал бы вечно.
+#[tokio::test]
+async fn invalid_answer_cancels_the_form_with_a_message() {
+    let mut script = question_turn();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| step.expected_path().is_some_and(|p| p.ends_with("/reply")))
+        .unwrap();
+    let Step::Expect { reply, path, .. } = &mut script.steps[position] else {
+        unreachable!();
+    };
+    *reply = Reply {
+        status: 400,
+        body: Some(json!({"_tag": "FormInvalidAnswerError", "message": "bad"})),
+        ..Default::default()
+    };
+    let cancel = path.trim_end_matches("/reply").to_owned();
+    script.set_route("DELETE", &cancel, vec![reply_204()]);
+    let tail = cancel.rsplit('/').next().unwrap().to_owned();
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    let (request, ..) = bench.until_request().await;
+    let decision = answers(&[("q0", single("Blue")), ("q1", multiple(&["A"]))]);
+    let DecisionOutcome::NotApplied(reason) = bench.deliver(&request, &decision).await else {
+        panic!("400 is a proven miss");
+    };
+    assert_eq!(reason, "decision_invalid");
+    tokio::time::timeout(WAIT, async {
+        while find(&bench.fake.requests(), "DELETE", &tail).is_none() {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("form cancel");
     bench.close(CloseMode::Graceful).await;
 }
 
