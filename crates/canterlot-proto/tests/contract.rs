@@ -1230,6 +1230,11 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         instructions: None,
         pilot_v1: true,
         todo_v1: true,
+        compact_v1: true,
+    });
+    assert_roundtrip(ipc::CompactRequest {
+        command_id: "command".into(),
+        dispatch_attempt: 2,
     });
     assert_roundtrip(PhaseChanged {
         execution_id: "execution".into(),
@@ -1528,4 +1533,42 @@ fn todo_updated_roundtrips_as_record_34_and_debug_hides_the_text() {
         assert!(!debug.contains(marker), "{debug}");
     }
     assert!(format!("{fact:?}").contains("items: 1"));
+}
+
+#[test]
+fn compaction_records_keep_their_numbers() {
+    use canterlot_proto::worker::v1::{
+        CompactSession, CompactionState, CompactionStatus, SessionStuck, TodoStatus, command,
+    };
+    assert_roundtrip(SessionStuck {
+        execution_id: "execution".into(),
+        generation: 3,
+    });
+    assert_roundtrip(CompactionStatus {
+        command_id: "command".into(),
+        dispatch_attempt: 1,
+        state: CompactionState::SentToAgent as i32,
+    });
+    for (number, name) in [
+        "UNSPECIFIED",
+        "SENT_TO_AGENT",
+        "COMPLETED",
+        "FAILED",
+        "NOT_APPLICABLE",
+        "SUPERSEDED",
+        "REJECTED_STALE",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(
+            CompactionState::try_from(number as i32)
+                .unwrap()
+                .as_str_name(),
+            format!("COMPACTION_STATE_{name}")
+        );
+    }
+    assert_eq!(TodoStatus::Cancelled as i32, 4);
+    let debug = format!("{:?}", command::Kind::CompactSession(CompactSession {}));
+    assert!(debug.starts_with("CompactSession"));
 }

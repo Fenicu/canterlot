@@ -492,6 +492,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             json!({"target_command_id":target, "target_dispatch_attempt":7}),
         ),
         ("interrupt", json!({})),
+        ("compact_session", json!({})),
         ("stop_execution", json!({"force":true})),
     ];
     for (kind, payload) in cases {
@@ -521,6 +522,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
                 assert_eq!(value.target_dispatch_attempt, 7);
             }
             command::Kind::Interrupt(_) => assert_eq!(kind, "interrupt"),
+            command::Kind::CompactSession(_) => assert_eq!(kind, "compact_session"),
             command::Kind::StopExecution(value) => assert!(value.force),
             command::Kind::DeliverDecision(_) => panic!("unexpected decision command"),
         }
