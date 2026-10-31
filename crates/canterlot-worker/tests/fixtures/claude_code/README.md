@@ -6,7 +6,9 @@ smoke**: each follows a recorded frame shape, the sources are given per file.
 The second list was captured from the live smoke and replaces constructed
 files where the live CLI reached the behaviour.
 
-- `subagent.jsonl` — constructed, confirm in live smoke. Shape sources:
+- `subagent.jsonl` — constructed before the live capture (`subagent_live.jsonl`
+  below shows the real frames); kept for a CLI that streams the subagent, so its
+  text must not double. Shape sources:
   the recorded `Task` entry in `system/init` `tools` (`tools.jsonl:14`),
   the Anthropic `Task` tool input (`description`, `subagent_type`, `prompt`),
   and stream frames echoing the subagent turn's `parent_tool_use_id`
@@ -63,6 +65,16 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   `{"type":"image","source":{"type":"base64","media_type":"image/png","data":…}}`
   block; in mode `ask` the CLI allows `Read` inside the workdir itself, so
   the tool block carries `approved_by: "cli_policy"`.
+- `subagent_live.jsonl` — `Agent` (`Explore`, haiku) through `claude -p`, bypass
+  mode, no MCP servers, with `Bash` and `Read` inside the subagent, then a `Read`
+  of a missing file by the main agent. Replaces the assumption of
+  `subagent.jsonl`: a subagent has no `stream_event` frames at all. Its
+  `tool_use`, `text` and `thinking` arrive only as whole `assistant` frames with
+  `parent_tool_use_id` set to the `Agent` call, interleaved with the stream of
+  the main agent, and its `tool_result` as `user` frames with the same parent.
+  `is_error: true` comes on the `tool_result` block of the failed `Read`.
+  Scrubbed: paths, ids, signatures, `rate_limit_event`, and `system` frames down
+  to what the parser reads.
 - `todo_write.jsonl` — `TodoWrite` through `claude -p` (not the live smoke),
   bypass mode, no MCP servers, with `CLAUDE_CODE_ENABLE_TODO_TOOLS=true` and
   `CLAUDE_CODE_ENABLE_TASKS=false`. The same prompt without those variables got
@@ -71,6 +83,4 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   `TodoWrite` is deferred, so `ToolSearch` comes first. Scrubbed: ids, hook,
   thinking and rate limit frames, and `system/init` down to what the parser
   reads. The list arrives whole in the `user` frame as
-  `tool_use_result.newTodos`, the same frame for both lanes. A subagent's
-  frames are not recorded; `assistant` and `user` frames with a non-null
-  `parent_tool_use_id` are read from the CLI binary.
+  `tool_use_result.newTodos`, the same frame for both lanes.
