@@ -159,7 +159,7 @@
 
 	// Available efforts for selected model
 	const currentModelRecord = $derived(availableModels.find((m) => m.id === selectedModel));
-	const availableEfforts = $derived(currentModelRecord?.efforts ?? ['low', 'medium', 'high']);
+	const availableEfforts = $derived(currentModelRecord?.efforts ?? availableModels[0]?.efforts ?? ['low', 'medium', 'high']);
 
 	$effect(() => {
 		const efforts = availableEfforts;
@@ -173,7 +173,13 @@
 		harness?.permission_modes ?? [...PERMISSION_MODES]
 	);
 
-	const modelOptions = $derived(availableModels.map((m) => ({ value: m.id, label: m.title || m.id })));
+	// Модель сессии могли убрать из каталога: она остаётся видна, пока владелец не выберет другую.
+	const modelOptions = $derived([
+		...availableModels.map((m) => ({ value: m.id, label: m.title || m.id })),
+		...(effective.model && !availableModels.some((m) => m.id === effective.model)
+			? [{ value: effective.model, label: modelLabel(effective.model) }]
+			: [])
+	]);
 	const effortOptions = $derived(availableEfforts.map((value) => ({ value, label: effortLabel(value) })));
 	const permissionOptions = $derived(availablePermissionModes.map((value) => ({ value, label: permissionLabel(value) })));
 	const presetSelectOptions = $derived(presetOptions.map((option) => ({ value: option.id, label: option.title })));

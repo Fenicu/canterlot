@@ -198,9 +198,6 @@ fn catalog_lists_claude_code_with_canterlot_permission_modes_when_configured() {
             ("opus[1m]", "Opus 1M"),
             ("sonnet[1m]", "Sonnet 1M"),
             ("fable[1m]", "Fable 1M"),
-            ("opus", "Opus"),
-            ("sonnet", "Sonnet"),
-            ("fable", "Fable"),
             ("haiku", "Haiku"),
         ]
     );

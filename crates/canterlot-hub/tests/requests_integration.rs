@@ -146,7 +146,10 @@ async fn request_keeps_its_place_in_history_among_the_blocks(pool: PgPool) -> Te
     assert_eq!(view.request_kind, "question");
     assert_eq!(view.state, "decision_applied");
     assert_eq!(view.request_payload, question);
-    assert_eq!(view.decision_payload.as_ref().unwrap()["answers"]["q1"], "Да");
+    assert_eq!(
+        view.decision_payload.as_ref().unwrap()["answers"]["q1"],
+        "Да"
+    );
     Ok(())
 }
 

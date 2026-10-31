@@ -626,14 +626,12 @@ pub struct HarnessCatalog {
     pub models: Vec<ModelCatalog>,
 }
 // Первая модель харнесса — выбор формы по умолчанию. `haiku[1m]` CLI отказывает в
-// `set_model`, поэтому у Haiku варианта 1M нет.
+// `set_model`, поэтому у Haiku варианта 1M нет. Обычные варианты убраны из каталога,
+// но сессии на них продолжают работать: каталог ограничивает только новый выбор.
 const CLAUDE_MODELS: &[(&str, &str)] = &[
     ("opus[1m]", "Opus 1M"),
     ("sonnet[1m]", "Sonnet 1M"),
     ("fable[1m]", "Fable 1M"),
-    ("opus", "Opus"),
-    ("sonnet", "Sonnet"),
-    ("fable", "Fable"),
     ("haiku", "Haiku"),
 ];
 
