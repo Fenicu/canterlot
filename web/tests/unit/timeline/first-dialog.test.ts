@@ -110,7 +110,7 @@ describe("first dialog: orphan results", () => {
     const chat = loaded();
     const links = blockLinks(chat.timeline.entries);
     const agent = calls(chat, "Agent")[0]!;
-    expect(subagentCopy(agent, links.children(agent.id)).title).toBe("Субагент · Explore · Opus 5.5");
+    expect(subagentCopy(agent, links.children(agent.id), { result: null, working: false }).title).toBe("Субагент · Explore · Opus 5.5");
   });
 
   it("without_a_subagent_call_stay_visible", () => {
@@ -135,11 +135,47 @@ describe("first dialog: names", () => {
     const chat = loaded();
     const agent = calls(chat, "Agent")[0]!;
     const handBack = [...chat.blocks.values()].find((block) => block.parentId === agent.id)!;
-    expect(subagentCopy(agent, [handBack]).title).toBe("Субагент · Opus 5.5");
+    expect(subagentCopy(agent, [handBack], { result: null, working: false }).title).toBe("Субагент · Opus 5.5");
     const explore = [...chat.blocks.values()].find((block) => block.agent === "Explore")!;
-    const copy = subagentCopy(agent, [handBack, explore]);
+    const copy = subagentCopy(agent, [handBack, explore], { result: null, working: true });
     expect(copy.title).toBe("Субагент · Explore · Opus 5.5");
     expect(copy.detail).toBe("Работает · Find note.txt in check dir");
+    expect(copy.state).toBe("running");
+  });
+
+  it("finished_subagent_says_done_with_the_real_duration", () => {
+    const chat = loaded();
+    const links = blockLinks(chat.timeline.entries);
+    const agent = calls(chat, "Agent")[0]!;
+    const result = links.result(agent.id);
+    expect(result?.agent).toBe("orchestrator");
+    const copy = subagentCopy(agent, links.children(agent.id), { result, working: false });
+    expect(copy.detail).toBe("Готово · Find note.txt in check dir");
+    expect(copy.state).toBe("done");
+    expect(toolStatusText({ ...toolTiming(agent, result, false), error: false, now: 0 })).toBe("3 с");
+  });
+
+  it("a_step_of_the_subagent_is_not_its_result", () => {
+    const chat = loaded(FIRST_DIALOG.filter((item) => !(item.kind === "block" && item.block_kind === "tool_result" && item.agent === "orchestrator" && item.created_seq === "167")));
+    const links = blockLinks(chat.timeline.entries);
+    const agent = calls(chat, "Agent")[0]!;
+    expect(links.result(agent.id)).toBeNull();
+    const copy = subagentCopy(agent, links.children(agent.id), { result: null, working: true });
+    expect(copy.state).toBe("running");
+  });
+
+  it("failed_subagent_says_so_and_a_lost_one_does_not_claim_success", () => {
+    const chat = loaded();
+    const links = blockLinks(chat.timeline.entries);
+    const agent = calls(chat, "Agent")[0]!;
+    const result = links.result(agent.id)!;
+    result.summary = "error";
+    const failed = subagentCopy(agent, links.children(agent.id), { result, working: false });
+    expect(failed.detail).toBe("Ошибка · Find note.txt in check dir");
+    expect(failed.state).toBe("error");
+    const lost = subagentCopy(agent, [], { result: null, working: false });
+    expect(lost.detail).toBe("Прервано · Find note.txt in check dir");
+    expect(lost.state).toBe("stopped");
   });
 
   it("answer_sheet_names_the_harness_and_the_model_for_people", () => {

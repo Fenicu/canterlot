@@ -2,6 +2,7 @@
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { toolFailed, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import StatusPill from '#lib/timeline/StatusPill.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
   import Icon from '#lib/ui/Icon.svelte';
 
@@ -45,7 +46,7 @@
     {#if isCliPolicy}
       <span class="policy-badge">Разрешено правилами CLI</span>
     {/if}
-    {#if status}<span class="pill" data-state={error ? 'error' : running ? 'running' : 'done'}>{status}</span>{/if}
+    {#if status}<StatusPill state={error ? 'error' : running ? 'running' : 'done'} text={status} />{/if}
   </button>
   {#if shots.length > 0}
     <div class="shots">
@@ -104,18 +105,6 @@
     font-size: var(--fs-xs);
     white-space: nowrap;
   }
-  .pill {
-    flex: none;
-    margin-left: auto;
-    padding: var(--s1) var(--s4);
-    border-radius: var(--radius-pill);
-    background: var(--chip);
-    color: var(--chip-text);
-    font-size: var(--fs-sm);
-    white-space: nowrap;
-  }
-  .pill[data-state='error'] { background: var(--danger-soft); color: var(--danger); }
-  .pill[data-state='running'] { background: var(--accent-soft); color: var(--accent-link); }
   .fold { display: grid; grid-template-rows: 1fr; animation: fold var(--duration-expand) var(--ease-expand); }
   .body { min-height: 0; overflow: hidden; padding-inline: var(--s2); }
   .body > :global(:last-child) { margin-bottom: var(--s2); }

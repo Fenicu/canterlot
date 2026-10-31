@@ -208,24 +208,41 @@ export function revealedText(
   return parts.slice(0, last + 1).join("");
 }
 
+const SUBAGENT_END = { done: "Готово", error: "Ошибка", stopped: "Прервано" };
+
+export type SubagentState = "running" | "done" | "error" | "stopped";
+
 export function subagentCopy(
   call: BlockModel,
   children: BlockModel[],
-): { title: string; detail: string } {
+  end: { result: BlockModel | null; working: boolean },
+): { title: string; detail: string; state: SubagentState } {
   const own = children.filter((child) => !isMainAgent(child.agent));
   const lead = own[0];
   const action = own.findLast((child) => child.toolName) ?? null;
   const model = lead?.model || call.model;
-  const verb = subagentVerb(action?.toolName ?? (lead ? null : call.toolName));
+  const running = toolTiming(call, end.result, end.working).running;
+  const state: SubagentState = toolFailed(end.result)
+    ? "error"
+    : running
+      ? "running"
+      : end.result
+        ? "done"
+        : "stopped";
   const doing = action ? toolTitle(action) : null;
   const object = doing?.argument || doing?.name || "";
   const task = toolTitle(call).argument;
-  const detail = [verb, object].filter((part) => part.length > 0).join(" ");
+  const verb = subagentVerb(action?.toolName ?? (lead ? null : call.toolName));
+  const line =
+    state === "running"
+      ? [verb, object].filter((part) => part.length > 0).join(" ")
+      : SUBAGENT_END[state];
   return {
     title: ["Субагент", lead?.agent ?? "", model ? modelLabel(model) : ""]
       .filter((part) => part.length > 0)
       .join(" · "),
-    detail: task ? `${detail} · ${task}` : detail,
+    detail: task ? `${line} · ${task}` : line,
+    state,
   };
 }
 

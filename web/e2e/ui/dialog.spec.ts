@@ -42,7 +42,9 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
         await expect(page.locator('.tool .head, .card header, .sub')).not.toContainText([leak]);
       }
       await expect(page.locator('.sub .title')).toHaveText('Субагент · Explore · Opus 5.5');
-      await expect(page.locator('.sub .status')).toContainText('Find note.txt in check dir');
+      await expect(page.locator('.sub .status')).toHaveText('Готово · Find note.txt in check dir');
+      await expect(page.locator('.sub .status')).toHaveAttribute('data-state', 'done');
+      await expect(page.locator('.sub .pill')).toHaveText('3 с');
       const bash = toolRow(page, 'sleep 90').last();
       await expect(bash.locator('.name')).toHaveText('Bash');
       await expect(bash.locator('.summary')).toHaveText('sleep 90');

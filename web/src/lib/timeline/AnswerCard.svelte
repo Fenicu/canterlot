@@ -69,7 +69,7 @@
     {:else if entry.kind === 'block'}
       {@const block = entry.block}
       {#if isSubagentCall(block)}
-        <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
+        <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} {working} {now} {conversationId} />
       {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
         <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
       {:else if block.kind === 'warning' || block.kind === 'error'}

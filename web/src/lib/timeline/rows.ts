@@ -55,8 +55,11 @@ export function blockLinks(entries: TimelineEntry[]): BlockLinks {
   }
   return {
     children: (id) => children.get(id) ?? [],
-    result: (id) =>
-      children.get(id)?.find((child) => child.kind === "tool_result") ?? null,
+    // У субагента в детях лежат и его шаги: результат вызова тот, что вернулся основному агенту.
+    result: (id) => {
+      const own = children.get(id)?.filter((child) => child.kind === "tool_result" && child.parentId === id) ?? [];
+      return own.find((child) => isMainAgent(child.agent)) ?? own[0] ?? null;
+    },
     parent: (block) => block.parentId ?? adopted.get(block.id) ?? null,
   };
 }

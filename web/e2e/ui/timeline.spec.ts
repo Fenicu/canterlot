@@ -299,12 +299,18 @@ test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) =>
   child.model = 'haiku';
   child.tool_name = 'Read';
   child.summary = 'README';
+  const run = api.id();
+  call.input_command_id = run;
+  child.input_command_id = run;
   api.histories.set(id, [call, child]);
   api.bindConversation(id);
+  const detail = api.details.get(id);
+  if (detail) detail.activity = { state: 'working', evidence: { phase: 'running_tool' }, since: AT };
   await page.reload();
   const link = page.getByRole('link', { name: /Субагент/ });
   await expect(link).toHaveAttribute('href', `/c/${id}/lane/${call.id}`);
   await expect(link).toContainText('Читает');
+  await expect(link.locator('.status')).toHaveAttribute('data-state', 'running');
 });
 
 test('user_bubble_marks_follow_input_state', async ({ page }) => {
