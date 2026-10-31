@@ -232,15 +232,89 @@ test('delete_asks_for_confirmation_naming_the_session_and_removes_it_only_after_
   expect(keys[0]).not.toBe('');
 });
 
-test('delete_while_live_shows_the_refusal_and_keeps_the_session', async ({ page }) => {
+function idleProcess(api: FakeHubApi, id: string): void {
+  const row = api.list.get(id);
+  if (row) row.activity = { state: 'idle', evidence: { last_turn_at: '2026-10-28T19:00:00.000Z' }, since: '2026-10-28T19:00:00.000Z' };
+  const detail = api.details.get(id);
+  if (detail) {
+    detail.activity = row?.activity;
+    detail.execution = { state: 'running', generation: 1 };
+  }
+}
+
+function turnRunning(api: FakeHubApi, id: string): void {
+  idleProcess(api, id);
+  const activity = { state: 'working', evidence: { phase: 'running_tool', summary: 'cargo test', phase_since: '2026-10-28T19:00:00.000Z' }, since: '2026-10-28T19:00:00.000Z' };
+  const row = api.list.get(id);
+  if (row) row.activity = activity;
+  const detail = api.details.get(id);
+  if (detail) detail.activity = activity;
+}
+
+test('delete_of_a_session_refused_by_the_hub_shows_the_refusal_and_keeps_it', async ({ page }) => {
   const { api, ids } = await boot(page);
-  const detail = api.details.get(ids.plain);
-  if (detail) detail.execution = { state: 'running', generation: 1 };
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
   await page.getByRole('button', { name: /^Удалить/ }).click();
-  await page.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
+  const dialog = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await expect(dialog).toBeVisible();
+  const detail = api.details.get(ids.plain);
+  if (detail) detail.execution = { state: 'running', generation: 1 };
+  await dialog.getByRole('button', { name: 'Удалить', exact: true }).click();
   await expect(page.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible();
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toBeVisible();
+});
+
+test('delete_of_an_idle_session_stops_its_process_first_and_says_so', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  idleProcess(api, ids.plain);
+  const calls: string[] = [];
+  page.on('request', (request) => {
+    if (!request.url().includes(ids.plain)) return;
+    if (request.url().endsWith('/stop')) calls.push(`stop:${request.headers()['idempotency-key'] ?? ''}`);
+    if (request.method() === 'DELETE') calls.push('delete');
+  });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  const dialog = page.getByRole('dialog', { name: 'Остановить и удалить сессию?' });
+  await expect(dialog).toContainText('Процесс агента на машине workstation будет остановлен');
+  await expect(dialog).toContainText('Это нельзя отменить');
+  await dialog.getByRole('button', { name: 'Остановить и удалить' }).click();
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+  expect(calls).toHaveLength(2);
+  expect(calls[0]).toMatch(/^stop:.+/);
+  expect(calls[1]).toBe('delete');
+});
+
+test('delete_during_a_turn_is_blocked_and_names_what_is_running', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  turnRunning(api, ids.plain);
+  const calls: string[] = [];
+  page.on('request', (request) => {
+    if (request.url().includes(ids.plain) && (request.url().endsWith('/stop') || request.method() === 'DELETE')) calls.push(request.url());
+  });
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /^Удалить/ }).click();
+  await expect(page.getByRole('alert').filter({ hasText: 'Сначала остановите работу: выполняет cargo test' })).toBeVisible();
+  await expect(page.getByRole('dialog', { name: /сессию\?/ })).toHaveCount(0);
+  expect(calls).toEqual([]);
+});
+
+test('idle_session_with_a_live_process_archives_without_a_warning', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  idleProcess(api, ids.plain);
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /В архив/ }).click();
+  await expect(page.locator(`[data-session="${ids.plain}"]`)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Всё равно архивировать' })).toHaveCount(0);
+});
+
+test('archive_warning_says_what_is_running', async ({ page }) => {
+  const { api, ids } = await boot(page);
+  turnRunning(api, ids.plain);
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /В архив/ }).click();
+  await expect(page.getByText('Сначала подтвердите: выполняет cargo test')).toBeVisible();
+  await expect(page.getByText('идёт исполнение')).toHaveCount(0);
 });
 
 test('session_menu_opens_whole_and_above_the_row_at_any_list_position', async ({ page, isMobile }) => {
@@ -271,6 +345,26 @@ test('session_menu_opens_whole_and_above_the_row_at_any_list_position', async ({
       await page.getByRole('button', { name: 'Закрыть' }).click();
     }
   }
+});
+
+test('session_menu_of_the_last_row_goes_up_and_stays_whole_with_the_archive_warning', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально и закрывает весь экран');
+  await page.setViewportSize({ width: 1707, height: 960 });
+  const { api, ids } = await boot(page);
+  turnRunning(api, ids.plain);
+  const row = page.locator(`[data-session="${ids.plain}"]`);
+  await row.scrollIntoViewIfNeeded();
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  await page.getByRole('button', { name: /В архив/ }).click();
+  await expect(page.getByRole('button', { name: 'Всё равно архивировать' })).toBeVisible();
+  const report = await page.locator('.popover').evaluate(async (panel) => {
+    await new Promise((done) => setTimeout(done, 200));
+    const box = panel.getBoundingClientRect();
+    const list = document.querySelector('.list')!.getBoundingClientRect();
+    return { below: list.bottom - box.bottom, overflow: panel.scrollHeight - panel.clientHeight };
+  });
+  expect(report.below).toBeGreaterThanOrEqual(-1);
+  expect(report.overflow).toBeLessThanOrEqual(1);
 });
 
 test('a_session_deleted_on_another_device_disappears_from_the_list_and_the_counts', async ({ page }) => {

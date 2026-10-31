@@ -295,12 +295,22 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       await route.fulfill({ status: 204, headers: headers() });
       return;
     }
+    if (route.request().method() === 'GET') {
+      const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
+      const detail = api.details.get(id);
+      if (!detail) return route.fulfill(refuse(404, 'not_found', 'Не найдено'));
+      const execution = detail.execution as { state?: string } | null | undefined;
+      const live = execution && !['stopped', 'failed'].includes(execution.state ?? '') ? execution : null;
+      await route.fulfill({ headers: headers(), json: { ...detail, execution: live, activity: detail.activity ?? { state: 'idle' } } });
+      return;
+    }
     if (route.request().method() !== 'PATCH') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-1) ?? '';
     const body = route.request().postDataJSON() as { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean };
     const row = api.list.get(id);
     if (!row) return route.fallback();
-    if (body.archived && !body.force && row.crunch.enabled) {
+    const turn = ['working', 'waiting_for_user', 'stalled'].includes((row.activity as { state?: string } | undefined)?.state ?? '') && Boolean(api.details.get(id)?.execution);
+    if (body.archived && !body.force && (row.crunch.enabled || turn)) {
       await route.fulfill({
         status: 409,
         headers: headers(),
@@ -311,7 +321,7 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
             scope: 'delivery',
             retry: 'explicit_new_operation',
             correlation_id: '00000000-0000-4000-8000-0000000000e3',
-            details: { reasons: ['crunch'] }
+            details: { reasons: [...(row.crunch.enabled ? ['crunch'] : []), ...(turn ? ['live_execution'] : [])] }
           }
         }
       });
@@ -568,6 +578,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       });
     }
     hub.flush();
+    const live = api.details.get(id);
+    if (live) live.execution = { state: 'stopped', generation: 1 };
     await route.fulfill({ status: 200, headers: headers(), json: { status: 'stopping' } });
   });
 

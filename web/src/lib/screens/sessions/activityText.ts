@@ -85,6 +85,21 @@ export function activityLine(
   }
 }
 
+/** Идёт ли ход: живой процесс, который ждёт ввода, никакой работы не ведёт. */
+export function turnRunning(activity: Activity): boolean {
+  if (activity.state === "waiting_for_user" || activity.state === "stalled")
+    return true;
+  if (activity.state !== "working") return false;
+  const phase = activity.evidence?.phase;
+  return phase !== "starting" && phase !== "stopping";
+}
+
+/** Что идёт прямо сейчас: продолжение фразы в предупреждениях меню. */
+export function turnText(activity: Activity, now: number): string {
+  const line = activityLine(activity, { now }).text;
+  return line.charAt(0).toLocaleLowerCase("ru-RU") + line.slice(1);
+}
+
 function working(
   evidence: ActivityEvidence,
   since: string | undefined,

@@ -2,6 +2,7 @@
   import { ApiError } from '#lib/api/http.js';
   import { deleteConversation, getConversation, patchConversation, setConversationGroups, patchSettings, setCrunch } from '#lib/api/client.js';
   import { errorText } from '#lib/api/errors.js';
+  import { stopSession } from '#lib/screens/chat/controls.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { PERMISSION_MODES, effortLabel, permissionHint, permissionLabel, permissionValue } from '#lib/format/labels.js';
   import { onMount, untrack } from 'svelte';
@@ -19,6 +20,7 @@
   import Toggle from '#lib/ui/Toggle.svelte';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
+  import { turnRunning, turnText, type Activity } from './activityText';
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
   import { menuTop } from './menuPlace';
 
@@ -44,6 +46,8 @@
     ondeleted?: (id: string) => void;
   } = $props();
 
+  const STOP_POLLS = 60;
+  const STOP_POLL_MS = 500;
   const seed = untrack(() => item);
   let title = $state(seed.title);
   let pinned = $state(seed.pinned);
@@ -56,9 +60,12 @@
   let resumeText = $state('Лимиты восстановлены, продолжай с того места, где остановился.');
   let reasons = $state<string[]>([]);
   let confirmingDelete = $state(false);
+  let stopFirst = $state(false);
+  let stopping = $state(false);
   let deleteError = $state('');
-  // Ключ живёт, пока сессия не удалена: повторное нажатие после обрыва повторяет ту же операцию.
+  // Ключи живут, пока сессия не удалена: повторное нажатие после обрыва повторяет те же операции.
   const deleteKey = crypto.randomUUID();
+  const stopKey = crypto.randomUUID();
   let sentPin = seed.pinned;
   let sentCrunch = seed.crunch?.enabled ?? false;
   // В строке списка текста продолжения нет, а хаб заменил бы сохранённый текст присланным.
@@ -119,9 +126,13 @@
 
   const reasonText: Record<string, string> = {
     crunch: 'кранч',
-    scheduled: 'отложенные сообщения',
-    live_execution: 'идёт исполнение'
+    scheduled: 'отложенные сообщения'
   };
+
+  async function reasonLabels(list: string[]): Promise<string[]> {
+    const turn = list.includes('live_execution') ? (await sessionNow(item.id).catch(() => null))?.turn : '';
+    return list.map((reason) => (reason === 'live_execution' ? turn || 'идёт ход агента' : (reasonText[reason] ?? 'активная работа')));
+  }
 
   async function patch(body: { title?: string; color?: string; pinned?: boolean; archived?: boolean; force?: boolean }, key = crypto.randomUUID()) {
     await patchConversation(item.id, body, key);
@@ -162,15 +173,58 @@
     await setConversationGroups(item.id, { group_ids: members }, crypto.randomUUID());
   }
 
+  async function sessionNow(id: string): Promise<{ live: boolean; turn: string }> {
+    const { data } = await getConversation(id);
+    const execution = data.execution as { state?: string } | null;
+    const activity = data.activity as unknown as Activity;
+    return {
+      live: execution !== null && !['stopped', 'failed'].includes(execution.state ?? ''),
+      turn: turnRunning(activity) ? turnText(activity, Date.now()) : ''
+    };
+  }
+
+  async function askDelete() {
+    if (stopping) return;
+    deleteError = '';
+    const now = await sessionNow(item.id).catch(() => null);
+    if (now?.turn) {
+      deleteError = `Сначала остановите работу: ${now.turn}`;
+      return;
+    }
+    stopFirst = now?.live ?? false;
+    confirmingDelete = true;
+  }
+
+  async function stopProcess(id: string): Promise<boolean> {
+    // Окно подтверждения могло стоять долго: начавшийся за это время ход удаление не обрывает.
+    const before = await sessionNow(id);
+    if (before.turn) {
+      deleteError = `Сначала остановите работу: ${before.turn}`;
+      return false;
+    }
+    if (!before.live) return true;
+    stopping = true;
+    await stopSession(id, { key: stopKey });
+    for (let wait = 0; wait < STOP_POLLS; wait++) {
+      if (!(await sessionNow(id)).live) return true;
+      await new Promise((done) => setTimeout(done, STOP_POLL_MS));
+    }
+    deleteError = 'Процесс не остановился: машина не ответила. Попробуйте ещё раз';
+    return false;
+  }
+
   async function remove() {
     deleteError = '';
     const id = item.id;
     try {
+      if (stopFirst && !(await stopProcess(id))) return;
       await deleteConversation(id, deleteKey);
       onclose();
       ondeleted?.(id);
     } catch (err) {
       deleteError = errorText(err, 'Не удалось удалить сессию');
+    } finally {
+      stopping = false;
     }
   }
 
@@ -181,7 +235,7 @@
       if (force) onclose();
     } catch (err) {
       if (err instanceof ApiError && err.code === 'archive_active') {
-        reasons = (err.details?.reasons ?? []).map((reason) => reasonText[reason] ?? 'активная работа');
+        reasons = await reasonLabels(err.details?.reasons ?? []);
         return;
       }
       throw err;
@@ -238,18 +292,19 @@
       <p class="note">Сначала подтвердите: {reasons.join(', ')}</p>
       <Button onclick={() => void archive(true)}>Всё равно архивировать</Button>
     {/if}
-    <button type="button" class="archive remove" onclick={() => { deleteError = ''; confirmingDelete = true; }}>
+    <button type="button" class="archive remove" onclick={() => void askDelete()}>
       <Icon name="trash" /><span>Удалить</span><small>Без возможности вернуть</small>
     </button>
+    {#if stopping}<p class="note" role="status">Останавливаю процесс</p>{/if}
     {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
   </div>
 {/snippet}
 
 {#if confirmingDelete}
   <ConfirmDialog
-    title="Удалить сессию?"
-    body={`Сессия «${item.title}» будет удалена вместе с историей и вложениями. Это нельзя отменить. История CLI на машине останется: её удаляют средствами самого агента.`}
-    confirmLabel="Удалить"
+    title={stopFirst ? 'Остановить и удалить сессию?' : 'Удалить сессию?'}
+    body={`${stopFirst ? `Процесс агента на машине ${item.machine.name} будет остановлен. ` : ''}Сессия «${item.title}» будет удалена вместе с историей и вложениями. Это нельзя отменить. История CLI на машине останется: её удаляют средствами самого агента.`}
+    confirmLabel={stopFirst ? 'Остановить и удалить' : 'Удалить'}
     danger
     onconfirm={() => { confirmingDelete = false; void remove(); }}
     onclose={() => { confirmingDelete = false; }}
