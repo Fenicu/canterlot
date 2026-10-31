@@ -73,7 +73,7 @@ test.describe('stack: input and queue', () => {
     expect(inputs[0]!.content[0]!.text).toBe('Строка 1\nСтрока 2');
   });
 
-  test('response_lost_after_commit_creates_one_input', tag, async ({ page }) => {
+  test('response_lost_after_commit_creates_one_input', tag, async ({ page, browserName }) => {
     test.setTimeout(60_000);
     const stack = getStack();
     const hub = createHubClient(stack);
@@ -93,10 +93,19 @@ test.describe('stack: input and queue', () => {
     await composerOf(page).fill(synthetic.script([synthetic.delta('ответ на потерянный ответ')]));
     await sendButtonOf(page).click();
 
-    await expect.poll(() => posts.length, { timeout: 40_000, message: 'клиент повторил запрос после потери ответа' }).toBeGreaterThanOrEqual(2);
-    expect(lost.length, 'кромка потеряла ответ на коммит').toBe(1);
-    expect(new Set(posts).size, 'повтор идёт с тем же ключом идемпотентности').toBe(1);
-    await sendChaos(stack.control, { action: 'blackhole', on: false, ws: true });
+    try {
+      // Firefox сам повторяет POST на оборванном соединении: страница не видит ни отказа, ни второго запроса.
+      if (browserName === 'firefox') {
+        await expect.poll(async () => (await hub.inputs(id)).length, { timeout: 40_000 }).toBe(1);
+      } else {
+        await expect.poll(() => posts.length, { timeout: 40_000, message: 'клиент повторил запрос после потери ответа' }).toBeGreaterThanOrEqual(2);
+        expect(lost.length, 'кромка потеряла ответ на коммит').toBe(1);
+      }
+      expect(new Set(posts).size, 'повтор идёт с тем же ключом идемпотентности').toBe(1);
+    } finally {
+      // Канал, оставленный молчать, обрушил бы все следующие проверки стенда.
+      await sendChaos(stack.control, { action: 'blackhole', on: false, ws: true });
+    }
 
     await expect(page.locator('article.card [data-block]')).toContainText('ответ на потерянный ответ', { timeout: 40_000 });
     expect(await hub.inputs(id)).toHaveLength(1);
