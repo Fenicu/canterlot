@@ -265,6 +265,11 @@ impl Translator {
         session == self.root || self.children.contains(session)
     }
 
+    /// Потомки сессии: у каждого своя копия правил.
+    pub fn children(&self) -> impl Iterator<Item = &str> {
+        self.children.iter().map(String::as_str)
+    }
+
     pub fn begin_run(&mut self, command: Uuid) {
         self.command = Some(command);
         self.usage.clear();

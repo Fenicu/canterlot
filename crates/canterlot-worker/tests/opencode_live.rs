@@ -13,7 +13,7 @@ use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
-        InstructionSpec, ModelUsage, StartSpec, Transmission, TransmitOutcome,
+        InstructionSpec, ModelUsage, SettingsChange, StartSpec, Transmission, TransmitOutcome,
         opencode::OpenCodeAdapter,
     },
     config::OpenCodeConfig,
@@ -566,6 +566,49 @@ async fn read_only_rules_reach_the_provider_request() {
     assert!(tools.contains(&"read"), "{tools:?}");
     assert!(!tools.contains(&"shell"), "{tools:?}");
     assert!(!tools.contains(&"write"), "{tools:?}");
+    session.close().await;
+}
+
+fn offered(request: &Value) -> Vec<String> {
+    request["tools"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
+        .map(str::to_owned)
+        .collect()
+}
+
+// Смена режима на ходу: инструменты следующего запроса модели уже по новым правилам, а `owner`
+// снимает их совсем.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_mode_change_applies_from_the_next_input() {
+    let stub = Stub::start(vec![
+        Reply::text("раз"),
+        Reply::text("два"),
+        Reply::text("три"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("первый")).await;
+    assert!(offered(&stub.requests()[0]).contains(&"shell".to_owned()));
+    let mut second = input("второй");
+    second.settings = Some(SettingsChange {
+        permission_mode: Some("read_only".into()),
+        ..Default::default()
+    });
+    session.turn(&second).await;
+    let tools = offered(&stub.requests()[1]);
+    assert!(!tools.contains(&"shell".to_owned()), "{tools:?}");
+    assert!(tools.contains(&"read".to_owned()), "{tools:?}");
+    let mut third = input("третий");
+    third.settings = Some(SettingsChange {
+        permission_mode: Some("owner".into()),
+        ..Default::default()
+    });
+    session.turn(&third).await;
+    assert!(offered(&stub.requests()[2]).contains(&"shell".to_owned()));
     session.close().await;
 }
 

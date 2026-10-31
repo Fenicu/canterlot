@@ -224,6 +224,8 @@ pub struct OpenCodeAdapter {
     refusals: JoinSet<()>,
     session: String,
     mode: PermissionMode,
+    /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
+    rules_dirty: bool,
     model: String,
     effort: String,
     instructions: InstructionSpec,
@@ -258,6 +260,7 @@ impl OpenCodeAdapter {
             refusals: JoinSet::new(),
             session: String::new(),
             mode: PermissionMode::Owner,
+            rules_dirty: false,
             model: String::new(),
             effort: String::new(),
             instructions: InstructionSpec {
@@ -418,13 +421,11 @@ impl OpenCodeAdapter {
             .get(&path, REQUEST_WAIT)
             .await
             .map_err(failed)?;
-        if let Some(rules) = self.mode.ruleset() {
-            let body = json!({"permissions": rules});
-            self.http()?
-                .patch(&path, &body, REQUEST_WAIT)
-                .await
-                .map_err(failed)?;
-        }
+        let body = json!({"permissions": self.mode.session_rules()});
+        self.http()?
+            .patch(&path, &body, REQUEST_WAIT)
+            .await
+            .map_err(failed)?;
         if let Some(model) = model_ref(&spec.model, &spec.effort) {
             let body = json!({"model": model});
             self.http()?
@@ -812,7 +813,7 @@ impl OpenCodeAdapter {
         self.lookup = Some(Lookup { command, task });
     }
 
-    // Смена настроек на ходу приходит со своими срезами: молча её терять нельзя.
+    // Смена модели и инструкций приходит со своими срезами: молча её терять нельзя.
     fn settings_error(&self, change: &SettingsChange) -> Option<&'static str> {
         let differs = |wanted: &Option<String>, current: &str| {
             wanted.as_deref().is_some_and(|wanted| wanted != current)
@@ -822,12 +823,47 @@ impl OpenCodeAdapter {
             || change
                 .permission_mode
                 .as_deref()
-                .is_some_and(|mode| PermissionMode::parse(mode) != Some(self.mode))
+                .is_some_and(|mode| PermissionMode::parse(mode).is_none())
             || change
                 .instructions
                 .as_ref()
                 .is_some_and(|next| !next.same_effect(&self.instructions));
         unsupported.then_some("settings_unavailable")
+    }
+
+    // Правила действуют со следующей проверки. Потомок получает копию при создании и смены
+    // родителя не видит, поэтому свой запрос каждому; завершённого потомка уже нет.
+    async fn apply_mode(
+        &mut self,
+        http: &Http,
+        wanted: PermissionMode,
+    ) -> Result<(), &'static str> {
+        if wanted == self.mode && !self.rules_dirty {
+            return Ok(());
+        }
+        self.rules_dirty = true;
+        let body = json!({"permissions": wanted.session_rules()});
+        let children: Vec<String> = self
+            .translator
+            .iter()
+            .flat_map(|translator| translator.children().map(str::to_owned))
+            .collect();
+        let path = format!("/api/session/{}", self.session);
+        http.patch(&path, &body, REQUEST_WAIT)
+            .await
+            .map_err(|_| "settings_unavailable")?;
+        for child in children {
+            match http
+                .patch(&format!("/api/session/{child}"), &body, REQUEST_WAIT)
+                .await
+            {
+                Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
+                Err(_) => return Err("settings_unavailable"),
+            }
+        }
+        self.mode = wanted;
+        self.rules_dirty = false;
+        Ok(())
     }
 
     async fn transmit_inner(&mut self, input: &Transmission) -> TransmitOutcome {
@@ -867,6 +903,16 @@ impl OpenCodeAdapter {
                 }
             }
         }
+        let previous = self.mode;
+        let wanted = input
+            .settings
+            .as_ref()
+            .and_then(|change| change.permission_mode.as_deref())
+            .and_then(PermissionMode::parse)
+            .unwrap_or(previous);
+        if let Err(reason) = self.apply_mode(&http, wanted).await {
+            return TransmitOutcome::Rejected(reason.into());
+        }
         self.delivery.active = Some(command);
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_run(command);
@@ -879,8 +925,13 @@ impl OpenCodeAdapter {
                     kind: input::PROOF_KIND,
                 })
             }
+            // Хаб новых настроек не применил: сервер возвращается к прежним перед вводом.
             Err(HttpError::Status { status, tag }) if input::is_rejection(status) => {
                 self.delivery.active = None;
+                if self.mode != previous {
+                    self.mode = previous;
+                    self.rules_dirty = true;
+                }
                 TransmitOutcome::Rejected(tag)
             }
             _ => {

@@ -37,7 +37,7 @@ impl PermissionMode {
                 rule("canterlot_canterlot_limits", "allow"),
                 rule("todowrite", "allow"),
             ],
-            // Список задан явно: без question и subagent они исчезли бы из инструментов.
+            // Список задан явно: всё, чего в нём нет, исчезает из инструментов модели.
             Self::ReadOnly => vec![
                 rule("*", "deny"),
                 rule("read", "allow"),
@@ -45,8 +45,15 @@ impl PermissionMode {
                 rule("grep", "allow"),
                 rule("question", "allow"),
                 rule("subagent", "allow"),
+                rule("todowrite", "allow"),
+                rule("canterlot_canterlot_limits", "allow"),
             ],
         };
         Some(Value::Array(rules))
+    }
+
+    /// Правила для `PATCH`: `null` сервер игнорирует, снять их можно только пустым списком.
+    pub fn session_rules(self) -> Value {
+        self.ruleset().unwrap_or_else(|| Value::Array(Vec::new()))
     }
 }

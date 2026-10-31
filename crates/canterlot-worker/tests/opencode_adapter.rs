@@ -548,6 +548,8 @@ async fn modes_become_session_rules() {
                 {"action": "grep", "resource": "*", "effect": "allow"},
                 {"action": "question", "resource": "*", "effect": "allow"},
                 {"action": "subagent", "resource": "*", "effect": "allow"},
+                {"action": "todowrite", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_limits", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -866,6 +868,20 @@ async fn resume_reapplies_rules_and_model_to_the_same_session() {
         model["body"]["model"],
         json!({"id": "fake-1", "providerID": "fake", "variant": "high"})
     );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Правила прошлого режима лежат в базе: `owner` без явной очистки унаследовал бы их.
+#[tokio::test]
+async fn resume_in_owner_mode_clears_the_rules_of_the_session() {
+    let (script, id) = resume_script(true);
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(id.clone());
+    bench.spec.permission_mode = "owner".into();
+    bench.start_ok().await;
+    let requests = bench.fake.requests();
+    let patch = find(&requests, "PATCH", &id).expect("rules");
+    assert_eq!(patch["body"], json!({"permissions": []}));
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -1384,6 +1400,201 @@ async fn settings_change_is_refused_until_its_slice() {
         instructions: None,
     });
     assert_eq!(bench.adapter.validate_transmission(&same), Ok(()));
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn with_rules_route(mut script: Script, replies: Vec<Reply>) -> Script {
+    let session = session_of(&script);
+    script.set_route("PATCH", &format!("/api/session/{session}"), replies);
+    script
+}
+
+fn mode_change(mode: &str) -> SettingsChange {
+    SettingsChange {
+        permission_mode: Some(mode.into()),
+        ..Default::default()
+    }
+}
+
+fn position(requests: &[Value], method: &str, tail: &str) -> usize {
+    requests
+        .iter()
+        .position(|request| request["method"] == method && path_of(request).ends_with(tail))
+        .unwrap_or_else(|| panic!("{method} {tail}: {requests:?}"))
+}
+
+// Смена режима на ходу: новые правила раньше ввода, режим отметок меняется вместе с ними.
+#[tokio::test]
+async fn mode_change_goes_before_the_input() {
+    let mut bench = Bench::new(with_rules_route(two_turns(), vec![reply_204()]));
+    bench.start_ok().await;
+    let first = bench.input("раз");
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let mut second = bench.input("два");
+    second.settings = Some(mode_change("read_only"));
+    assert_eq!(bench.adapter.validate_transmission(&second), Ok(()));
+    bench.accepted(&second).await;
+    let requests = bench.fake.requests();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .collect();
+    assert_eq!(patches.len(), 1, "{requests:?}");
+    assert_eq!(patches[0]["body"]["permissions"][0]["effect"], "deny");
+    let prompts: Vec<usize> = requests
+        .iter()
+        .enumerate()
+        .filter(|(_, request)| path_of(request).ends_with("/prompt"))
+        .map(|(index, _)| index)
+        .collect();
+    assert!(position(&requests, "PATCH", "") < prompts[1]);
+    assert!(prompts[0] < position(&requests, "PATCH", ""));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// `null` сервер игнорирует: снять правила можно только пустым списком.
+#[tokio::test]
+async fn switching_to_owner_clears_the_session_rules() {
+    let mut bench = Bench::new(with_rules_route(ready(), vec![reply_204()]));
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("owner"));
+    bench.accepted(&input).await;
+    let requests = bench.fake.requests();
+    let patch = &requests[position(&requests, "PATCH", "")];
+    assert_eq!(patch["body"], json!({"permissions": []}));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn same_mode_sends_no_rules() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("bypass"));
+    bench.accepted(&input).await;
+    assert!(
+        bench
+            .fake
+            .requests()
+            .iter()
+            .all(|request| request["method"] != "PATCH")
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Потомок получает копию правил при создании: `read_only` родителя его не трогает сам.
+#[tokio::test]
+async fn mode_change_reaches_the_live_children() {
+    let capture = two_turns();
+    let session = session_of(&capture);
+    let child = "ses_child00000000000000000000000".to_owned();
+    let mut script = with_rules_route(capture, vec![reply_204()]);
+    script.set_route("PATCH", &format!("/api/session/{child}"), vec![reply_204()]);
+    let created = script
+        .steps
+        .iter()
+        .position(|step| matches!(step, Step::Emit { .. }))
+        .unwrap();
+    script.steps.insert(
+        created,
+        Step::Emit {
+            events: vec![json!({"type": "session.created",
+                "data": {"sessionID": child, "parentID": session}})],
+        },
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("раз");
+    bench.accepted(&first).await;
+    bench.until_finished(first.command_id).await;
+    let mut second = bench.input("два");
+    second.settings = Some(mode_change("read_only"));
+    bench.accepted(&second).await;
+    let requests = bench.fake.requests();
+    let patched: Vec<&str> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(path_of)
+        .collect();
+    assert_eq!(patched.len(), 2, "{requests:?}");
+    assert!(patched.iter().any(|path| path.ends_with(&child)));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Правила не применились: ввод не уходит, а следующий ввод применяет их снова.
+#[tokio::test]
+async fn failed_mode_change_stops_the_input_and_is_applied_again() {
+    let failed = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "InternalError"})),
+        ..Default::default()
+    };
+    let mut bench = Bench::new(with_rules_route(ready(), vec![failed, reply_204()]));
+    bench.start_ok().await;
+    let mut refused = bench.input("x");
+    refused.settings = Some(mode_change("ask"));
+    assert!(matches!(
+        bench.transmit(&refused).await,
+        TransmitOutcome::Rejected(reason) if reason == "settings_unavailable"
+    ));
+    assert!(find(&bench.fake.requests(), "POST", "/prompt").is_none());
+    let next = bench.input("y");
+    bench.accepted(&next).await;
+    let requests = bench.fake.requests();
+    let patches: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .collect();
+    assert_eq!(patches.len(), 2, "{requests:?}");
+    // Режим остался прежним: на сервере могли остаться новые правила, их надо вернуть.
+    assert_eq!(patches[1]["body"]["permissions"][0]["effect"], "allow");
+    assert!(position(&requests, "PATCH", "") < position(&requests, "POST", "/prompt"));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn unknown_mode_in_a_settings_change_is_refused() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("yolo"));
+    assert_eq!(
+        bench.adapter.validate_transmission(&input),
+        Err("settings_unavailable")
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Отказ в приёме ввода оставляет прежний режим: хаб нового не применил.
+#[tokio::test]
+async fn refused_input_returns_the_previous_mode() {
+    let mut script = with_rules_route(ready(), vec![reply_204()]);
+    set_prompt_reply(&mut script, |reply| {
+        *reply = Reply {
+            status: 400,
+            body: Some(json!({"_tag": "InvalidRequestError"})),
+            ..Default::default()
+        };
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(mode_change("ask"));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
+    ));
+    let next = bench.input("y");
+    let _ = bench.transmit(&next).await;
+    let requests = bench.fake.requests();
+    let effects: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(|request| request["body"]["permissions"][0]["effect"].clone())
+        .collect();
+    assert_eq!(effects, [json!("ask"), json!("allow")]);
     bench.close(CloseMode::Graceful).await;
 }
 

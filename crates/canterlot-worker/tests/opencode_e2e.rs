@@ -7,8 +7,8 @@
 //! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
 
 use canterlot_proto::worker::v1::{
-    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, StartExecution,
-    StopExecution, TextBlock, command::Kind, content_block, record_body::Body,
+    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, SettingsOverride,
+    StartExecution, StopExecution, TextBlock, command::Kind, content_block, record_body::Body,
 };
 use canterlot_worker::{
     adapter::opencode::replay::{Reply, Script, Step},
@@ -182,6 +182,10 @@ impl Env {
     }
 
     async fn deliver(&self, text: &str) -> Uuid {
+        self.deliver_with(text, None).await
+    }
+
+    async fn deliver_with(&self, text: &str, settings: Option<SettingsOverride>) -> Uuid {
         let id = Uuid::now_v7();
         self.send(self.command(
             id,
@@ -191,7 +195,7 @@ impl Env {
                 content: vec![ContentBlock {
                     block: Some(content_block::Block::Text(TextBlock { text: text.into() })),
                 }],
-                ..Default::default()
+                settings,
             }),
         ))
         .await;
@@ -656,6 +660,59 @@ async fn request_the_journal_cannot_hold_is_refused_with_a_message() {
             .iter()
             .any(|body| matches!(body, Body::RequestOpened(_)))
     );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Смена режима приходит с вводом хаба и уходит на сервер раньше него.
+#[tokio::test]
+async fn mode_change_from_the_hub_reaches_the_server_before_the_input() {
+    let mut script = ready();
+    let session = script
+        .steps
+        .iter()
+        .find_map(|step| match step {
+            Step::Expect { reply, .. } => reply
+                .body
+                .as_ref()
+                .and_then(|body| body.pointer("/data/id"))
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            _ => None,
+        })
+        .unwrap();
+    script.set_route(
+        "PATCH",
+        &format!("/api/session/{session}"),
+        vec![Reply {
+            status: 204,
+            ..Default::default()
+        }],
+    );
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env
+        .deliver_with(
+            "дальше только чтение",
+            Some(SettingsOverride {
+                permission_mode: "read_only".into(),
+                ..Default::default()
+            }),
+        )
+        .await;
+    env.wait_finished(input).await;
+    let requests = env.fake().requests();
+    let rules = requests
+        .iter()
+        .position(|request| request["method"] == "PATCH")
+        .expect("rules");
+    let prompt = requests
+        .iter()
+        .position(|request| path_of(request).ends_with("/prompt"))
+        .unwrap();
+    assert!(rules < prompt, "{requests:?}");
+    assert_eq!(requests[rules]["body"]["permissions"][0]["effect"], "deny");
     env.stop().await;
     env.fake().wait_gone().await;
 }
