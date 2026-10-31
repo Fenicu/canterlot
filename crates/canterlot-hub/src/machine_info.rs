@@ -24,6 +24,30 @@ async fn machine(conn: &mut PgConnection, owner: Uuid, id: Uuid) -> Result<(), s
         .await?;
     Ok(())
 }
+/// Имена моделей приходят от CLI. Отказ закрыл бы поток, и воркер прислал бы тот же отчёт снова.
+fn replace_nul(report: &mut MachineReport) {
+    let mut texts: Vec<&mut String> = vec![
+        &mut report.worker_version,
+        &mut report.containment,
+        &mut report.os,
+        &mut report.home_dir,
+    ];
+    texts.extend(&mut report.allowed_roots);
+    for harness in &mut report.harnesses {
+        texts.extend([
+            &mut harness.harness,
+            &mut harness.provider,
+            &mut harness.title,
+        ]);
+        texts.extend(&mut harness.permission_modes);
+        for model in &mut harness.models {
+            texts.extend([&mut model.id, &mut model.title]);
+            texts.extend(&mut model.efforts);
+        }
+    }
+    texts.into_iter().for_each(crate::blocks::replace_nul);
+}
+
 pub async fn apply_report(
     pool: &PgPool,
     owner_id: Uuid,
@@ -31,7 +55,8 @@ pub async fn apply_report(
     report: &MachineReport,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let report = report.clone();
+    let mut report = report.clone();
+    replace_nul(&mut report);
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
     crate::conversations::lock_owner(&mut *conn, owner_id).await?;

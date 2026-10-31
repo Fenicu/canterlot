@@ -396,6 +396,32 @@ async fn workdir_suggestions_travel_the_control_stream(pool: PgPool) -> TestResu
     hub.join.await??;
     Ok(())
 }
+// Отказ в отчёте закрывает поток, и воркер прислал бы тот же отчёт снова.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn nul_in_a_report_never_refuses_it(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let mut r = report();
+    r.worker_version = "ver\0sion".into();
+    r.allowed_roots = vec!["/ro\0ot".into()];
+    r.containment = "cont\0ainment".into();
+    r.os = "o\0s".into();
+    r.home_dir = "/ho\0me".into();
+    r.harnesses[0].title = "ti\0tle".into();
+    r.harnesses[0].provider = "provi\0der".into();
+    r.harnesses[0].permission_modes = vec!["mo\0de".into()];
+    r.harnesses[0].models = vec![ModelInfo {
+        id: "i\0d".into(),
+        title: "ti\0tle".into(),
+        efforts: vec!["eff\0ort".into()],
+        ..Default::default()
+    }];
+    machine_info::apply_report(&pool, s.owner_id, s.machine_id, &r, Uuid::now_v7()).await?;
+    let models: Value = sqlx::query_scalar("select models from machine_harnesses")
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(models[0]["id"], "i\u{fffd}d");
+    Ok(())
+}
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn failed_report_apply_is_retried_after_reconnect(pool: PgPool) -> TestResult {
     let s = wire_seed(&pool).await;

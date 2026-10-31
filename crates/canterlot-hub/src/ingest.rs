@@ -1034,7 +1034,13 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
         | Body::JournalClosed(_)
         | Body::AdapterDiagnostic(_)
         | Body::ExecutionState(_)
-        | Body::RunFinished(_) => body.clone(),
+        | Body::RunFinished(_)
+        | Body::RequestOpened(_)
+        | Body::RequestClosed(_)
+        | Body::DecisionTransmissionStarted(_)
+        | Body::DecisionApplied(_)
+        | Body::DecisionNotApplied(_)
+        | Body::DecisionUnconfirmed(_) => body.clone(),
         _ => return Cow::Borrowed(body),
     };
     match &mut bounded {
@@ -1048,12 +1054,15 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
                 f.approved_by.clear();
             }
         }
+        // Текст дельты и финала заменяется в blocks: сумма воркера покрывает оригинал.
         Body::BlockFinal(f) => {
+            f.checksum = bounded_text(&f.checksum, 128);
             f.summary = bounded_text(&f.summary, 1024);
         }
         Body::BlockIncomplete(f) => f.reason = bounded_text(&f.reason, 1024),
         Body::JournalClosed(f) => f.reason = bounded_text(&f.reason, 1024),
         Body::PhaseChanged(f) => {
+            f.phase = bounded_text(&f.phase, 128);
             f.tool_name = bounded_text(&f.tool_name, 128);
             f.summary = bounded_text(&f.summary, 1024);
         }
@@ -1061,13 +1070,22 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
             f.kind = bounded_text(&f.kind, 128);
             f.event_type = bounded_text(&f.event_type, 128);
         }
-        Body::ExecutionState(f) => f.outcome = bounded_text(&f.outcome, 1024),
+        Body::ExecutionState(f) => {
+            f.outcome = bounded_text(&f.outcome, 1024);
+            blocks::replace_nul(&mut f.native_conversation_id);
+        }
         Body::RunFinished(f) => {
             for usage in &mut f.usage {
                 usage.agent = bounded_text(&usage.agent, 128);
                 usage.model = bounded_text(&usage.model, 128);
             }
         }
+        Body::RequestOpened(f) => blocks::replace_nul(&mut f.request_id),
+        Body::RequestClosed(f) => blocks::replace_nul(&mut f.request_id),
+        Body::DecisionTransmissionStarted(f) => blocks::replace_nul(&mut f.request_id),
+        Body::DecisionApplied(f) => blocks::replace_nul(&mut f.request_id),
+        Body::DecisionNotApplied(f) => blocks::replace_nul(&mut f.request_id),
+        Body::DecisionUnconfirmed(f) => blocks::replace_nul(&mut f.request_id),
         _ => unreachable!(),
     }
     Cow::Owned(bounded)
@@ -1939,6 +1957,32 @@ async fn apply_journal_body(
             .bind(execution_id)
             .execute(conn)
             .await?;
+        return Ok(Some(false));
+    }
+    // Отметка вместо записи, не влезшей в пакет, не знает исполнения: его знает журнал.
+    if let Body::AdapterDiagnostic(fact) = body
+        && kind == JournalKind::Sj
+        && Uuid::parse_str(&fact.execution_id).is_ok_and(|id| id.is_nil())
+    {
+        let execution: Option<Uuid> =
+            sqlx::query_scalar("select execution_id from journal_cursors where journal_id = $1")
+                .bind(journal_id)
+                .fetch_one(&mut *conn)
+                .await?;
+        let Some(execution) = execution else {
+            return Ok(Some(true));
+        };
+        let Some(run) = owned_execution(conn, machine_id, execution, None).await? else {
+            return Ok(Some(true));
+        };
+        execution_event(
+            conn,
+            &run,
+            "adapter_diagnostic",
+            json!({"kind": fact.kind, "event_type": fact.event_type}),
+            correlation_id,
+        )
+        .await?;
         return Ok(Some(false));
     }
     if !matches!(

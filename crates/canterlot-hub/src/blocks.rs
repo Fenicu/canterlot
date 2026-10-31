@@ -35,6 +35,12 @@ pub fn checksum(text: &str) -> String {
     hex(&Sha256::digest(text.as_bytes()))
 }
 
+pub(crate) fn replace_nul(text: &mut String) {
+    if let Cow::Owned(replaced) = without_nul(text) {
+        *text = replaced;
+    }
+}
+
 fn hex(digest: &[u8]) -> String {
     digest.iter().map(|byte| format!("{byte:02x}")).collect()
 }
