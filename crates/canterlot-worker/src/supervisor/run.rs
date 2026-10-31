@@ -7,7 +7,7 @@ use std::{
 };
 
 use canterlot_proto::{
-    limits::{BLOCK_FINAL_INLINE_MAX_BYTES, IPC_PROTOCOL_VERSION, MAX_BLOCK_DELTA_BYTES},
+    limits::{BLOCK_FINAL_INLINE_MAX_BYTES, IPC_PROTOCOL_VERSION},
     requests::DecisionPayload,
     worker::{
         ipc::{
@@ -36,6 +36,7 @@ use uuid::Uuid;
 
 use super::{
     SupervisorError, SupervisorFaults, SupervisorSpec,
+    blocks::{OpenBlock, delta_chunks},
     bounds::{MAX_REQUEST_ID_BYTES, bounded_json, bounded_record, bounded_todo},
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
     sj::Sj,
@@ -165,7 +166,7 @@ struct Supervisor {
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
     provider: String,
-    open_blocks: BTreeMap<Uuid, u64>,
+    open_blocks: BTreeMap<Uuid, OpenBlock>,
     known_interrupts: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
     interrupted: bool,
@@ -1587,7 +1588,7 @@ impl Supervisor {
                 summary,
                 approved_by,
             } => {
-                self.open_blocks.insert(block_id, 1);
+                self.open_blocks.insert(block_id, OpenBlock::new());
                 self.record(Body::BlockStarted(BlockStarted {
                     block_id: block_id.to_string(),
                     rev: 1,
@@ -1604,39 +1605,29 @@ impl Supervisor {
                 }))?;
             }
             AdapterEvent::BlockDelta { block_id, append } => {
-                let Some(rev) = self.open_blocks.get(&block_id).copied() else {
+                let Some(mut block) = self.open_blocks.remove(&block_id) else {
                     return Ok(());
                 };
-                let mut rev = rev;
-                let mut rest = append.as_str();
-                while !rest.is_empty() {
-                    let mut end = rest.len().min(MAX_BLOCK_DELTA_BYTES);
-                    while !rest.is_char_boundary(end) {
-                        end -= 1;
-                    }
-                    self.record(Body::BlockDelta(BlockDelta {
-                        block_id: block_id.to_string(),
-                        base_rev: rev,
-                        rev: rev + 1,
-                        append: rest[..end].to_owned(),
-                    }))?;
-                    rev += 1;
-                    rest = &rest[end..];
-                }
-                self.open_blocks.insert(block_id, rev);
+                let shipped = self.ship_deltas(block_id, &mut block, &append);
+                self.open_blocks.insert(block_id, block);
+                shipped?;
             }
             AdapterEvent::BlockFinal {
                 block_id,
                 text,
                 summary,
             } => {
-                let Some(rev) = self.open_blocks.remove(&block_id) else {
+                let Some(mut block) = self.open_blocks.remove(&block_id) else {
                     return Ok(());
                 };
                 let omitted = text.len() > BLOCK_FINAL_INLINE_MAX_BYTES;
+                if omitted {
+                    let tail = block.missing_tail(&text);
+                    self.ship_deltas(block_id, &mut block, tail)?;
+                }
                 self.record(Body::BlockFinal(BlockFinal {
                     block_id: block_id.to_string(),
-                    rev: rev + 1,
+                    rev: block.rev + 1,
                     checksum: checksum(&text),
                     text: if omitted { String::new() } else { text },
                     text_omitted: omitted,
@@ -1883,11 +1874,30 @@ impl Supervisor {
         Ok(())
     }
 
+    /// Текст дельтами не крупнее лимита, ревизии подряд от последней ушедшей.
+    fn ship_deltas(
+        &mut self,
+        block_id: Uuid,
+        block: &mut OpenBlock,
+        text: &str,
+    ) -> Result<(), SupervisorError> {
+        for chunk in delta_chunks(text) {
+            self.record(Body::BlockDelta(BlockDelta {
+                block_id: block_id.to_string(),
+                base_rev: block.rev,
+                rev: block.rev + 1,
+                append: chunk.to_owned(),
+            }))?;
+            block.sent(chunk);
+        }
+        Ok(())
+    }
+
     fn close_blocks(&mut self, reason: &str) -> Result<(), SupervisorError> {
-        for (block_id, rev) in std::mem::take(&mut self.open_blocks) {
+        for (block_id, block) in std::mem::take(&mut self.open_blocks) {
             self.record(Body::BlockIncomplete(BlockIncomplete {
                 block_id: block_id.to_string(),
-                rev: rev + 1,
+                rev: block.rev + 1,
                 reason: reason.into(),
             }))?;
         }

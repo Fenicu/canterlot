@@ -1343,7 +1343,11 @@ async fn late_tail_continues_the_streamed_prefix_and_never_replaces_it() {
     )
     .await;
     let sent = shipped(&bodies, &block);
-    assert_eq!(sent.deltas.len(), text.len(), "the prefix is not repeated");
+    assert_eq!(
+        sent.deltas.len(),
+        text.len(),
+        "the tail follows the streamed prefix without repeating it"
+    );
     assert!(sent.deltas == text && sent.contiguous && sent.biggest_delta <= 16_384);
     assert!(sent.fin.text_omitted && sent.fin.checksum == sha(&text));
 
