@@ -174,14 +174,24 @@ impl Worker {
             })
             .await
             .unwrap();
-        let ack = timeout(Duration::from_secs(3), self.down.message())
-            .await
-            .unwrap()
-            .unwrap()
-            .unwrap();
-        assert!(
-            matches!(ack.msg, Some(control_down::Msg::CjAck(JournalRangeAck { up_to_seq, .. })) if up_to_seq == self.seq)
-        );
+        timeout(Duration::from_secs(3), async {
+            loop {
+                let message = self.down.message().await.unwrap().unwrap();
+                match message.msg {
+                    // Под нагрузкой хаб успевает переотправить команду раньше подтверждения записи.
+                    Some(control_down::Msg::Command(resent))
+                        if resent.command_id == command.command_id => {}
+                    Some(control_down::Msg::CjAck(JournalRangeAck { up_to_seq, .. }))
+                        if up_to_seq == self.seq =>
+                    {
+                        break;
+                    }
+                    other => panic!("unexpected message: {other:?}"),
+                }
+            }
+        })
+        .await
+        .unwrap();
     }
 
     async fn finish(&mut self, command: &Command) {

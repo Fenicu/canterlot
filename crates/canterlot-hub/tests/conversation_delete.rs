@@ -170,6 +170,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into agent_todos(conversation_id,generation,source_revision,revision,items,omitted)
+         values($1,1,1,1,'[]',0)",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
          values($1,'message',$2,$3,now()+interval '1 day','{}')",
         &[job, owner, conversation],
