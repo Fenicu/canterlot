@@ -387,6 +387,7 @@ test('background_command_is_a_plain_row_with_a_badge_and_runs_until_its_task_end
   api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'running')]);
   await page.reload();
   const row = page.locator('.tool').filter({ hasText: 'sleep 25' });
+  await expect(row).toBeVisible({ timeout: 15_000 });
   await expect(row.getByText('Фоном')).toBeVisible();
   await expect(row.locator('[data-state="running"]')).toBeVisible();
   await expect(page.getByRole('link', { name: /Субагент/ })).toHaveCount(0);

@@ -177,6 +177,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into background_tasks(conversation_id,task_id,execution_id,generation,source_revision,kind,description,state,started_at)
+         values($1,'a1',$1,1,1,'agent','','running',now())",
+        &[conversation],
+    )
+    .await;
+    exec(
+        pool,
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
          values($1,'message',$2,$3,now()+interval '1 day','{}')",
         &[job, owner, conversation],
