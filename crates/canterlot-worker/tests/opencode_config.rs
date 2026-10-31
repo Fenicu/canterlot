@@ -63,6 +63,7 @@ executable = "/opt/opencode"
 data_root = "/srv/canterlot/opencode"
 refuse_paths = ["/srv/shared"]
 providers = ["anthropic", "openrouter"]
+owner_config = "/home/user/.config/opencode"
 "#;
     let config: WorkerConfig = toml::from_str(&worker_toml(extra)).unwrap();
     let cfg = config.opencode.unwrap();
@@ -73,6 +74,10 @@ providers = ["anthropic", "openrouter"]
     );
     assert_eq!(cfg.refuse_paths, vec![PathBuf::from("/srv/shared")]);
     assert_eq!(cfg.providers, ["anthropic", "openrouter"]);
+    assert_eq!(
+        cfg.owner_config,
+        Some(PathBuf::from("/home/user/.config/opencode"))
+    );
 }
 
 #[test]
@@ -89,6 +94,7 @@ fn table_survives_the_supervisor_spec() {
         data_root: None,
         refuse_paths: vec![PathBuf::from("/srv/shared")],
         providers: vec!["anthropic".into()],
+        owner_config: Some(PathBuf::from("/home/user/.config/opencode")),
     };
     let mut spec: toml::Value = toml::from_str(&format!(
         "execution_id = \"{id}\"\ngeneration = 1\nconversation_id = \"{id}\"\nprotocol_version = 1\n",

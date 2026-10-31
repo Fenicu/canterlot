@@ -21,6 +21,7 @@ const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c0
 // Служебные события и то, что разбирают следующие срезы адаптера.
 const KNOWN: &[&str] = &[
     "agent.updated",
+    "command.updated",
     "integration.updated",
     "mcp.resources.changed",
     "mcp.status.changed",
@@ -28,6 +29,7 @@ const KNOWN: &[&str] = &[
     "plugin.updated",
     "project.updated",
     "provider.updated",
+    "reference.updated",
     "server.connected",
     "session.agent.selected",
     "session.compaction.delta",
@@ -48,6 +50,8 @@ const KNOWN: &[&str] = &[
     "shell.created",
     "shell.deleted",
     "shell.exited",
+    "skill.updated",
+    "websearch.updated",
 ];
 
 /// Стабильный идентификатор блока: живые события и сверка по проекции дают один и тот же.

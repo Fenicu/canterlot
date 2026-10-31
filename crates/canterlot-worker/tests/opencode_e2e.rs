@@ -103,7 +103,11 @@ impl Env {
         fs::create_dir(&work).unwrap();
         let fake = script.map(Fake::new);
         let table = fake.as_ref().map_or(String::new(), |fake| {
-            format!("[opencode]\nexecutable = \"{}\"\n", fake.exe.display())
+            format!(
+                "[opencode]\nexecutable = \"{}\"\nowner_config = \"{}\"\n",
+                fake.exe.display(),
+                root.path().join("owner-config").display()
+            )
         });
         let config: WorkerConfig =
             toml::from_str(&worker_toml(root.path(), &work, &table)).unwrap();
@@ -412,6 +416,36 @@ async fn start_execution_reaches_running_through_a_real_supervisor() {
         env.fake().boot()["env"]["OPENCODE_CONFIG_DIR"],
         env.exec_dir().join("opencode-config").to_str().unwrap()
     );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Смена пресета идёт через настоящий супервизор: файл меняется, сервер тот же, а текст
+// пресета не попадает ни в журнал сопровождения, ни в спеку на диске.
+#[tokio::test]
+async fn preset_change_through_the_supervisor_keeps_the_server_and_the_text_private() {
+    let mut env = Env::new(Some(ready())).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let pids = env.fake().pids();
+    let settings = SettingsOverride {
+        instructions: Some(Instructions {
+            mode: "preset".into(),
+            text: "тайный текст пресета".into(),
+            preset_id: Uuid::now_v7().to_string(),
+            revision: 3,
+            title: "Пресет".into(),
+        }),
+        ..Default::default()
+    };
+    let command = env.deliver_with("Привет", Some(settings)).await;
+    env.wait_finished(command).await;
+    let agents = env.exec_dir().join("opencode-config/AGENTS.md");
+    assert_eq!(fs::read_to_string(agents).unwrap(), "тайный текст пресета");
+    assert_eq!(env.fake().pids(), pids, "no restart");
+    assert!(!env.logs().contains("тайный"));
+    let spec = fs::read_to_string(env.exec_dir().join("spec.toml")).unwrap();
+    assert!(!spec.contains("тайный"));
     env.stop().await;
     env.fake().wait_gone().await;
 }

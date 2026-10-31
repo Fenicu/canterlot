@@ -28,7 +28,8 @@
 		modelLabel,
 		permissionHint,
 		permissionLabel,
-		permissionValue
+		permissionValue,
+		presetChangeNote
 	} from '#lib/format/labels.js';
 
 	type AppliedPreset = components['schemas']['AppliedPreset'];
@@ -345,7 +346,7 @@
 				hint={presetPending ? `${presetTitle(effectiveRef)} → ${presetTitle(presetPending)} со следующего хода` : undefined}
 				error={rejectedPresetDeleted ? 'Инструкции удалены, смена отменена' : (presetsError ?? presetError ?? undefined)}
 			/>
-			<p class="note">Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.</p>
+			<p class="note">{presetChangeNote(provider)}</p>
 		</div>
 
 		<p class="note">Текущий ход продолжится с прежними настройками.</p>

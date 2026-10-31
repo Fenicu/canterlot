@@ -52,6 +52,15 @@ const PERMISSION_HINTS: Record<string, Record<string, string>> = {
   },
 };
 
+const PRESET_CHANGE_NOTE =
+  "Смена инструкций перезапускает агента между ходами с сохранением истории; фоновые задачи сессии остановятся.";
+const PRESET_CHANGE_NOTE_OPENCODE =
+  "Смена инструкций действует со следующего хода без перезапуска, фоновые задачи продолжат работать. Переход на «Как у владельца» и обратно перезапускает агента и останавливает их.";
+
+export function presetChangeNote(provider: Value): string {
+  return provider === "opencode" ? PRESET_CHANGE_NOTE_OPENCODE : PRESET_CHANGE_NOTE;
+}
+
 export function permissionHint(value: Value, provider: Value): string {
   const family =
     provider === "codex" || provider === "opencode" ? provider : "claude";

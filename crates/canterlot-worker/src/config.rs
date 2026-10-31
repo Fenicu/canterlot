@@ -412,6 +412,8 @@ pub struct OpenCodeConfig {
     pub refuse_paths: Vec<PathBuf>,
     /// Провайдеры в каталоге моделей сверх `opencode-go`.
     pub providers: Vec<String>,
+    /// Каталог конфигурации владельца; по умолчанию `$XDG_CONFIG_HOME/opencode`.
+    pub owner_config: Option<PathBuf>,
 }
 
 impl Default for OpenCodeConfig {
@@ -421,6 +423,7 @@ impl Default for OpenCodeConfig {
             data_root: None,
             refuse_paths: Vec::new(),
             providers: Vec::new(),
+            owner_config: None,
         }
     }
 }

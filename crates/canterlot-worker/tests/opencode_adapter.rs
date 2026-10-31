@@ -59,6 +59,7 @@ impl Bench {
         std::fs::create_dir_all(&exec_dir).unwrap();
         let mut cfg = OpenCodeConfig {
             executable: fake.exe.clone(),
+            owner_config: Some(fake.dir.path().join("owner-config")),
             ..Default::default()
         };
         change(&mut cfg);
@@ -535,6 +536,294 @@ async fn clean_mode_replaces_the_config_dir_with_an_empty_one() {
     );
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
     bench.close(CloseMode::Graceful).await;
+}
+
+fn owner_config(bench: &Bench) -> PathBuf {
+    let owner = bench.fake.dir.path().join("owner-config");
+    std::fs::create_dir_all(owner.join("plugins")).unwrap();
+    std::fs::write(owner.join("opencode.json"), "{}").unwrap();
+    std::fs::write(owner.join("opencode.jsonc"), "{}").unwrap();
+    std::fs::write(owner.join("AGENTS.md"), "инструкции владельца").unwrap();
+    owner
+}
+
+// Настройки, вход и плагины владельца остаются, его инструкции нет: оба файла конфигурации
+// читаются только из каталога, `OPENCODE_CONFIG` принял бы один.
+#[tokio::test]
+async fn clean_mode_links_the_owner_config_without_his_instructions() {
+    let mut bench = Bench::new(session_only());
+    let owner = owner_config(&bench);
+    bench.spec.instructions = instructions(InstructionMode::Clean, "");
+    bench.start_ok().await;
+    let dir = bench.exec_dir.join("opencode-config");
+    for name in ["opencode.json", "opencode.jsonc", "plugins"] {
+        assert_eq!(
+            std::fs::read_link(dir.join(name)).unwrap(),
+            owner.join(name),
+            "{name}"
+        );
+    }
+    assert!(!dir.join("AGENTS.md").exists());
+    assert_eq!(bench.env("OPENCODE_CONFIG"), None);
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn preset(text: &str, revision: u64) -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Preset,
+        text: text.into(),
+        preset_id: Some(Uuid::from_u128(7)),
+        revision,
+        title: "Пресет".into(),
+    }
+}
+
+fn instructions_change(next: InstructionSpec) -> SettingsChange {
+    SettingsChange {
+        instructions: Some(next),
+        ..Default::default()
+    }
+}
+
+fn agents_file(bench: &Bench) -> PathBuf {
+    bench.exec_dir.join("opencode-config/AGENTS.md")
+}
+
+fn boots(bench: &Bench) -> usize {
+    bench
+        .fake
+        .entries()
+        .iter()
+        .filter(|entry| entry["boot"] == true)
+        .count()
+}
+
+// Смена текста приходит модели сообщением `<system-update>` на следующем шаге: перезапуск не
+// нужен, файл меняется целиком и только для владельца.
+#[tokio::test]
+async fn preset_change_rewrites_the_file_and_keeps_the_server() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut bench = Bench::new(two_turns());
+    bench.spec.instructions = instructions(InstructionMode::Clean, "");
+    let started = bench.start_ok().await;
+    let mut first = bench.input("первый");
+    first.settings = Some(instructions_change(preset("Новый текст", 2)));
+    assert_eq!(bench.adapter.validate_transmission(&first), Ok(()));
+    bench.accepted(&first).await;
+    assert_eq!(
+        std::fs::read_to_string(agents_file(&bench)).unwrap(),
+        "Новый текст"
+    );
+    let mode = std::fs::metadata(agents_file(&bench)).unwrap();
+    assert_eq!(mode.permissions().mode() & 0o777, 0o600);
+    bench.until_finished(first.command_id).await;
+    let mut second = bench.input("второй");
+    second.settings = Some(instructions_change(instructions(
+        InstructionMode::Clean,
+        "",
+    )));
+    bench.accepted(&second).await;
+    assert!(!agents_file(&bench).exists());
+    assert_eq!(boots(&bench), 1, "no restart");
+    assert_eq!(bench.fake.pids(), vec![started.cli_pid]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Хаб настроек не применил: перед следующим вводом файл возвращается к прежнему тексту.
+#[tokio::test]
+async fn refused_input_brings_the_previous_instructions_back() {
+    let mut script = two_turns();
+    let session = session_of(&script);
+    script.steps.retain(|step| {
+        !step
+            .expected_path()
+            .is_some_and(|path| path.ends_with("/prompt"))
+    });
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/prompt"),
+        vec![
+            Reply {
+                status: 400,
+                body: Some(json!({"_tag": "InvalidRequestError"})),
+                ..Default::default()
+            },
+            Reply {
+                status: 400,
+                body: Some(json!({"_tag": "InvalidRequestError"})),
+                ..Default::default()
+            },
+        ],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.instructions = preset("Было", 1);
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(instructions_change(preset("Стало", 2)));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "InvalidRequestError"
+    ));
+    assert_eq!(
+        std::fs::read_to_string(agents_file(&bench)).unwrap(),
+        "Стало"
+    );
+    let next = bench.input("y");
+    assert!(matches!(
+        bench.transmit(&next).await,
+        TransmitOutcome::Rejected(_)
+    ));
+    assert_eq!(
+        std::fs::read_to_string(agents_file(&bench)).unwrap(),
+        "Было"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// «Как у владельца» и остальные режимы различаются окружением запуска: только такая смена
+// перезапускает сервер, а сессия та же.
+#[tokio::test]
+async fn switch_from_owner_restarts_the_server_with_the_same_session() {
+    let (script, session) = resumable(two_turns());
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(session.clone());
+    bench.spec.instructions = instructions(InstructionMode::Owner, "");
+    let started = bench.start_ok().await;
+    assert_eq!(bench.env("OPENCODE_CONFIG_DIR"), None);
+    let mut input = bench.input("x");
+    input.settings = Some(instructions_change(preset("Текст", 1)));
+    let outcome = bench.transmit(&input).await;
+    assert!(
+        !matches!(outcome, TransmitOutcome::Undetermined),
+        "{outcome:?}"
+    );
+    assert_eq!(boots(&bench), 2);
+    let pids = bench.fake.pids();
+    assert_eq!(pids.len(), 1, "{pids:?}");
+    assert_ne!(pids[0], started.cli_pid);
+    let boot = bench
+        .fake
+        .entries()
+        .into_iter()
+        .rfind(|entry| entry["boot"] == true)
+        .unwrap();
+    assert_eq!(
+        boot["env"]["OPENCODE_CONFIG_DIR"],
+        bench.exec_dir.join("opencode-config").to_str().unwrap()
+    );
+    assert_eq!(
+        std::fs::read_to_string(agents_file(&bench)).unwrap(),
+        "Текст"
+    );
+    let event = bench.event().await;
+    assert!(
+        matches!(event, AdapterEvent::CliRestarted { cli_pid, .. } if cli_pid == pids[0]),
+        "{event:?}"
+    );
+    let creates = bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request) == "/api/session")
+        .count();
+    assert_eq!(creates, 0, "the session survives the restart");
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Каталог не готов: работающий сервер не тронут, ввод отклонён.
+#[tokio::test]
+async fn restart_that_cannot_prepare_leaves_the_server_running() {
+    let mut bench = Bench::new(ready());
+    bench.spec.instructions = instructions(InstructionMode::Owner, "");
+    let started = bench.start_ok().await;
+    std::fs::write(bench.exec_dir.join("opencode-config"), "не каталог").unwrap();
+    let mut input = bench.input("x");
+    input.settings = Some(instructions_change(preset("Текст", 1)));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"
+    ));
+    assert_eq!(bench.fake.pids(), vec![started.cli_pid]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn resumable(mut script: Script) -> (Script, String) {
+    let session = session_of(&script);
+    script.set_route(
+        "GET",
+        &format!("/api/session/{session}"),
+        vec![Reply {
+            body: Some(json!({"data": {"id": session}})),
+            ..Default::default()
+        }],
+    );
+    script.set_route(
+        "PATCH",
+        &format!("/api/session/{session}"),
+        vec![reply_204()],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/model"),
+        vec![reply_204()],
+    );
+    (script, session)
+}
+
+// Новый запуск упал: возвращается прежняя конфигурация, ввод отклонён, сессия живёт.
+#[tokio::test]
+async fn failed_restart_respawns_the_previous_server_and_rejects_the_input() {
+    let (script, session) = resumable(ready());
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(session);
+    bench.spec.instructions = instructions(InstructionMode::Owner, "");
+    let started = bench.start_ok().await;
+    let flag = bench.fake.dir.path().join("fail-next");
+    let wrapper = std::fs::read_to_string(&bench.fake.exe).unwrap();
+    std::fs::write(
+        &bench.fake.exe,
+        wrapper.replacen(
+            "exec ",
+            &format!(
+                "if [ -f '{0}' ]; then rm '{0}'; exit 3; fi\nexec ",
+                flag.display()
+            ),
+            1,
+        ),
+    )
+    .unwrap();
+    std::fs::write(&flag, "").unwrap();
+    let mut input = bench.input("x");
+    input.settings = Some(instructions_change(preset("Текст", 1)));
+    assert!(matches!(
+        bench.transmit(&input).await,
+        TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"
+    ));
+    let pids = bench.fake.pids();
+    assert_eq!(pids.len(), 1, "{pids:?}");
+    assert_ne!(pids[0], started.cli_pid);
+    assert!(!agents_file(&bench).exists(), "previous configuration");
+    let event = bench.event().await;
+    assert!(
+        matches!(event, AdapterEvent::CliRestarted { cli_pid, .. } if cli_pid == pids[0]),
+        "{event:?}"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[test]
+fn preset_text_stays_out_of_debug_output() {
+    let change = instructions_change(preset("тайный текст", 1));
+    let input = Transmission {
+        command_id: Uuid::now_v7(),
+        attempt: 1,
+        text: String::new(),
+        files: Vec::new(),
+        settings: Some(change.clone()),
+    };
+    for shown in [format!("{change:?}"), format!("{input:?}")] {
+        assert!(!shown.contains("тайный"), "{shown}");
+    }
 }
 
 #[tokio::test]
@@ -1566,23 +1855,6 @@ async fn failed_rules_return_the_changed_model() {
         .map(|request| request["body"]["permissions"][0]["effect"].clone())
         .collect();
     assert_eq!(effects, [json!("ask"), json!("allow")]);
-    bench.close(CloseMode::Graceful).await;
-}
-
-// Инструкции приходят своим срезом: молча терять смену нельзя.
-#[tokio::test]
-async fn instructions_change_is_refused_until_its_slice() {
-    let mut bench = Bench::new(ready());
-    bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(SettingsChange {
-        instructions: Some(instructions(InstructionMode::Clean, "")),
-        ..Default::default()
-    });
-    assert_eq!(
-        bench.adapter.validate_transmission(&input),
-        Err("settings_unavailable")
-    );
     bench.close(CloseMode::Graceful).await;
 }
 

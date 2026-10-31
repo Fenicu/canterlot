@@ -11,6 +11,7 @@ import {
   permissionHint,
   permissionLabel,
   permissionValue,
+  presetChangeNote,
   providerLabel,
   rejectionLabel,
   scopeStatusLabel,
@@ -119,5 +120,14 @@ describe("format/labels", () => {
     expect(availabilityLabel("available")).toBe("В сети");
     expect(availabilityLabel("degraded")).toBe("Связь нестабильна");
     expect(availabilityLabel("unavailable")).toBe("Не в сети");
+  });
+});
+
+describe("presetChangeNote", () => {
+  it("warns about a restart except where the harness rereads the file", () => {
+    expect(presetChangeNote("claude")).toContain("перезапускает агента между ходами");
+    expect(presetChangeNote("codex")).toContain("перезапускает агента между ходами");
+    expect(presetChangeNote("opencode")).toContain("без перезапуска");
+    expect(presetChangeNote("opencode")).toContain("«Как у владельца»");
   });
 });

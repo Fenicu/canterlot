@@ -59,6 +59,10 @@ const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
 /// около 100 мс. Публичного сигнала нет, запас проверяет L2 на повторных холодных стартах.
 const MCP_SETTLE: Duration = Duration::from_millis(250);
+/// Эвристика: сервер читает `AGENTS.md` по наблюдателю файла с дебаунсом 100 мс, сигнала нет.
+/// Замер: 100 мс после записи мало, 200 мс хватает. Промах виден только на первом шаге.
+const INSTRUCTIONS_SETTLE: Duration = Duration::from_millis(400);
+const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER: usize = 4096;
@@ -197,6 +201,16 @@ fn model_ref(model: &str, effort: &str) -> Option<Value> {
     Some(reference)
 }
 
+fn owner_instructions() -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Owner,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    }
+}
+
 fn random_password() -> String {
     let bytes: [u8; 32] = rand::random();
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -269,6 +283,7 @@ struct Settings {
     mode: PermissionMode,
     model: String,
     effort: String,
+    instructions: InstructionSpec,
 }
 
 struct EventStream {
@@ -314,7 +329,13 @@ pub struct OpenCodeAdapter {
     model_dirty: bool,
     /// Варианты доступных моделей: сервер принимает неизвестный и падает только на ходе.
     variants: HashMap<String, Vec<String>>,
+    /// Инструкции, которые считает действующими хаб.
     instructions: InstructionSpec,
+    /// Инструкции на сервере: после отказа во вводе расходятся с `instructions`.
+    applied: InstructionSpec,
+    /// Спека запуска: перезапуск повторяет её с той же сессией.
+    spec: Option<StartSpec>,
+    version: Option<CliVersion>,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
     /// Поток потерян, сервер получил SIGTERM: срок до SIGKILL.
@@ -352,13 +373,10 @@ impl OpenCodeAdapter {
             effort: String::new(),
             model_dirty: false,
             variants: HashMap::new(),
-            instructions: InstructionSpec {
-                mode: InstructionMode::Owner,
-                text: String::new(),
-                preset_id: None,
-                revision: 0,
-                title: String::new(),
-            },
+            instructions: owner_instructions(),
+            applied: owner_instructions(),
+            spec: None,
+            version: None,
             exit: None,
             kill_at: None,
             exited: false,
@@ -441,14 +459,18 @@ impl OpenCodeAdapter {
         Ok(())
     }
 
-    async fn check_identity(&mut self, version: &CliVersion) -> Result<(), AdapterError> {
+    async fn check_identity(&mut self) -> Result<(), AdapterError> {
+        let version = self
+            .version
+            .clone()
+            .ok_or(AdapterError::StartFailed("cli_version_failed"))?;
         let pid = self.proc.as_ref().map(|proc| proc.pid);
         let info = self
             .http()?
             .get("/api/info", REQUEST_WAIT)
             .await
             .map_err(|_| AdapterError::StartFailed("server_unreachable"))?;
-        if info["version"].as_str() != Some(version_label(version))
+        if info["version"].as_str() != Some(version_label(&version))
             || info["pid"].as_u64() != pid.map(u64::from)
         {
             return Err(AdapterError::StartFailed("server_identity_mismatch"));
@@ -581,13 +603,11 @@ impl OpenCodeAdapter {
         }
     }
 
-    async fn start_inner(
-        &mut self,
-        spec: &StartSpec,
-        group: &dyn Containment,
-    ) -> Result<Started, AdapterError> {
-        self.mode = PermissionMode::parse(&spec.permission_mode)
-            .ok_or(AdapterError::StartFailed("unknown_permission_mode"))?;
+    // Окружение зависит от инструкций: своё у каждого запуска, пароль тоже.
+    async fn launch_env(
+        &self,
+        instructions: &InstructionSpec,
+    ) -> Result<(Vec<(OsString, OsString)>, String), AdapterError> {
         let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
         let mut env = prepared_env(&self.cfg, &layout, self.exec_dir.join("tmp"))
             .await
@@ -597,20 +617,12 @@ impl OpenCodeAdapter {
                     LayoutError::Io(_) => "data_root_failed",
                 })
             })?;
-        let version = version::check(&self.cfg.executable, &env)
-            .await
-            .map_err(version_failure)?;
-        let untested = matches!(version, CliVersion::UntestedNewer(_));
-        if untested {
-            self.diagnostic("untested_cli_version", false);
-        }
+        let owner = instructions::owner_dir(self.cfg.owner_config.as_deref(), &env);
         env.extend(
-            instructions::prepare(&self.exec_dir, &spec.instructions)
+            instructions::prepare(&self.exec_dir, owner, instructions)
                 .await
                 .map_err(|_| AdapterError::StartFailed("instructions_failed"))?,
         );
-        self.broker =
-            Some(Broker::bind_with(&self.exec_dir, ToolSet::LimitsOnly, "opencode").await?);
         let relay = match &self.relay_executable {
             Some(relay) => relay.clone(),
             None => std::env::current_exe()?,
@@ -621,14 +633,25 @@ impl OpenCodeAdapter {
             "OPENCODE_CONFIG_CONTENT".into(),
             mcp::config_content(&relay, &self.exec_dir).into(),
         ));
-        let base = self.spawn_server(spec, &env, group).await?;
+        Ok((env, password))
+    }
+
+    // Запуск сервера до готовой сессии: первый старт и перезапуск со сменой инструкций.
+    async fn launch(
+        &mut self,
+        spec: &StartSpec,
+        env: &[(OsString, OsString)],
+        password: String,
+        group: &dyn Containment,
+    ) -> Result<(), AdapterError> {
+        let base = self.spawn_server(spec, env, group).await?;
         let http = Http::new(base, password)
             .await
             .map_err(|_| AdapterError::StartFailed("server_unreachable"))?;
         self.http = Some(http);
         self.open_stream().await?;
-        self.check_identity(&version).await?;
-        if untested {
+        self.check_identity().await?;
+        if matches!(self.version, Some(CliVersion::UntestedNewer(_))) {
             self.check_schema().await?;
         }
         self.session = match &spec.native_conversation_id {
@@ -636,10 +659,41 @@ impl OpenCodeAdapter {
             None => self.create_session(spec).await?,
         };
         self.wait_mcp().await?;
-        self.wait_agents().await?;
+        self.wait_agents().await
+    }
+
+    async fn start_inner(
+        &mut self,
+        spec: &StartSpec,
+        group: &dyn Containment,
+    ) -> Result<Started, AdapterError> {
+        self.mode = PermissionMode::parse(&spec.permission_mode)
+            .ok_or(AdapterError::StartFailed("unknown_permission_mode"))?;
+        let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
+        let env = prepared_env(&self.cfg, &layout, self.exec_dir.join("tmp"))
+            .await
+            .map_err(|error| {
+                AdapterError::StartFailed(match error {
+                    LayoutError::Refused => "data_root_refused",
+                    LayoutError::Io(_) => "data_root_failed",
+                })
+            })?;
+        let version = version::check(&self.cfg.executable, &env)
+            .await
+            .map_err(version_failure)?;
+        if matches!(version, CliVersion::UntestedNewer(_)) {
+            self.diagnostic("untested_cli_version", false);
+        }
+        self.version = Some(version);
+        self.broker =
+            Some(Broker::bind_with(&self.exec_dir, ToolSet::LimitsOnly, "opencode").await?);
+        let (env, password) = self.launch_env(&spec.instructions).await?;
+        self.launch(spec, &env, password, group).await?;
         self.model = spec.model.clone();
         self.effort = spec.effort.clone();
         self.instructions = spec.instructions.clone();
+        self.applied = spec.instructions.clone();
+        self.spec = Some(spec.clone());
         let models = self.model_list().await;
         self.variants = catalog::variants(&models);
         self.translator = Some(Translator::new(
@@ -655,6 +709,80 @@ impl OpenCodeAdapter {
             cli_pid: proc.pid,
             cli_start_ticks: proc.start_ticks,
         })
+    }
+
+    fn report_restart(&mut self) {
+        if let Some(proc) = self.proc.as_ref() {
+            self.events.push_back(AdapterEvent::CliRestarted {
+                cli_pid: proc.pid,
+                cli_start_ticks: proc.start_ticks,
+            });
+        }
+    }
+
+    async fn relaunch_with(
+        &mut self,
+        spec: &StartSpec,
+        instructions: &InstructionSpec,
+        group: &dyn Containment,
+    ) -> Result<(), AdapterError> {
+        let (env, password) = self.launch_env(instructions).await?;
+        self.launch(spec, &env, password, group).await
+    }
+
+    // «Как у владельца» отличается окружением запуска: такая смена требует нового процесса,
+    // фоновые команды сессии уходят вместе со старым. Сессия та же.
+    async fn relaunch(
+        &mut self,
+        next: &InstructionSpec,
+        group: &dyn Containment,
+    ) -> Result<(), &'static str> {
+        let Some(mut spec) = self.spec.clone() else {
+            return Err(INSTRUCTIONS_FAILED);
+        };
+        spec.native_conversation_id = Some(self.session.clone());
+        spec.model = self.model.clone();
+        spec.effort = self.effort.clone();
+        // Каталог готовится раньше остановки: отказ здесь не трогает работающий сервер.
+        let (env, password) = self
+            .launch_env(next)
+            .await
+            .map_err(|_| INSTRUCTIONS_FAILED)?;
+        let _ = self.stop_server(true).await;
+        if self.launch(&spec, &env, password, group).await.is_ok() {
+            self.report_restart();
+            return Ok(());
+        }
+        let _ = self.stop_server(false).await;
+        let previous = self.applied.clone();
+        if self.relaunch_with(&spec, &previous, group).await.is_ok() {
+            self.report_restart();
+        } else {
+            let _ = self.stop_server(false).await;
+            self.finish_exit(None);
+        }
+        Err(INSTRUCTIONS_FAILED)
+    }
+
+    async fn apply_instructions(
+        &mut self,
+        wanted: &InstructionSpec,
+        group: &dyn Containment,
+    ) -> Result<(), &'static str> {
+        if !wanted.same_effect(&self.applied) {
+            let owner = InstructionMode::Owner;
+            if (wanted.mode == owner) != (self.applied.mode == owner) {
+                self.relaunch(wanted, group).await?;
+            } else {
+                instructions::rewrite(&self.exec_dir, wanted)
+                    .await
+                    .map_err(|_| INSTRUCTIONS_FAILED)?;
+                tokio::time::sleep(INSTRUCTIONS_SETTLE).await;
+            }
+            self.applied = wanted.clone();
+        }
+        self.instructions = wanted.clone();
+        Ok(())
     }
 
     // Упавший запуск не оставляет сервера: супервизор адаптера ещё не получил.
@@ -991,7 +1119,6 @@ impl OpenCodeAdapter {
         })
     }
 
-    // Смена инструкций приходит со своим срезом: молча её терять нельзя.
     fn settings_error(&self, change: &SettingsChange) -> Option<&'static str> {
         let model = change.model.as_deref().unwrap_or(&self.model);
         let effort = change.effort.as_deref().unwrap_or(&self.effort);
@@ -1000,11 +1127,7 @@ impl OpenCodeAdapter {
             || change
                 .permission_mode
                 .as_deref()
-                .is_some_and(|mode| PermissionMode::parse(mode).is_none())
-            || change
-                .instructions
-                .as_ref()
-                .is_some_and(|next| !next.same_effect(&self.instructions));
+                .is_some_and(|mode| PermissionMode::parse(mode).is_none());
         unsupported.then_some("settings_unavailable")
     }
 
@@ -1093,9 +1216,14 @@ impl OpenCodeAdapter {
         self.mode = previous.mode;
         self.model = previous.model;
         self.effort = previous.effort;
+        self.instructions = previous.instructions;
     }
 
-    async fn transmit_inner(&mut self, input: &Transmission) -> TransmitOutcome {
+    async fn transmit_inner(
+        &mut self,
+        input: &Transmission,
+        group: &dyn Containment,
+    ) -> TransmitOutcome {
         let command = input.command_id;
         if self.delivery.active.is_some() {
             return TransmitOutcome::Rejected("turn_active".into());
@@ -1137,6 +1265,19 @@ impl OpenCodeAdapter {
             mode: self.mode,
             model: self.model.clone(),
             effort: self.effort.clone(),
+            instructions: self.instructions.clone(),
+        };
+        let wanted = input
+            .settings
+            .as_ref()
+            .and_then(|change| change.instructions.clone())
+            .unwrap_or_else(|| self.instructions.clone());
+        if let Err(reason) = self.apply_instructions(&wanted, group).await {
+            return TransmitOutcome::Rejected(reason.into());
+        }
+        // Перезапуск сменил адрес и пароль.
+        let Some(http) = self.http.clone() else {
+            return TransmitOutcome::Undetermined;
         };
         if let Err(reason) = self.apply_settings(&http, input.settings.as_ref()).await {
             self.restore_settings(previous);
@@ -1221,6 +1362,34 @@ impl OpenCodeAdapter {
             code: status.and_then(|status| status.code()),
             signal: status.and_then(|status| status.signal()),
         });
+    }
+
+    // Сервер уходит сам по EOF stdin; мягкая остановка ждёт этого, затем сигналы.
+    async fn stop_server(&mut self, graceful: bool) -> Result<(), AdapterError> {
+        use rustix::process::Signal;
+        self.stream = None;
+        let Some(proc) = self.proc.as_mut() else {
+            return Ok(());
+        };
+        if proc.finished() {
+            return Ok(());
+        }
+        proc.close_stdin();
+        let gone = graceful
+            && (tokio::time::timeout(self.stop_grace, proc.wait())
+                .await
+                .is_ok()
+                || {
+                    proc.signal(Signal::TERM);
+                    tokio::time::timeout(TERM_GRACE, proc.wait()).await.is_ok()
+                });
+        if !gone {
+            proc.signal(Signal::KILL);
+            tokio::time::timeout(KILL_WAIT, proc.wait())
+                .await
+                .map_err(|_| AdapterError::Deadline)?;
+        }
+        Ok(())
     }
 
     // Отмена безопасна: обработка синхронна, состояние в `self`.
@@ -1325,15 +1494,11 @@ impl Adapter for OpenCodeAdapter {
         }
     }
 
-    async fn transmit(
-        &mut self,
-        input: &Transmission,
-        _group: &dyn Containment,
-    ) -> TransmitOutcome {
+    async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
         if self.exited || self.exit.is_some() || self.stream.is_none() {
             return TransmitOutcome::Undetermined;
         }
-        self.transmit_inner(input).await
+        self.transmit_inner(input, group).await
     }
 
     // Статус ответа и есть доказательство: запрос живёт в памяти сервера, отвечает он
@@ -1445,34 +1610,12 @@ impl Adapter for OpenCodeAdapter {
         mode: CloseMode,
         _group: &dyn Containment,
     ) -> Result<(), AdapterError> {
-        use rustix::process::Signal;
-        self.stream = None;
         if let Some(broker) = self.broker.as_mut() {
             broker.shutdown().await;
         }
-        let Some(proc) = self.proc.as_mut() else {
-            return Ok(());
-        };
-        if proc.finished() {
-            return Ok(());
-        }
-        proc.close_stdin();
-        let graceful = matches!(mode, CloseMode::Graceful);
-        let gone = graceful
-            && (tokio::time::timeout(self.stop_grace, proc.wait())
-                .await
-                .is_ok()
-                || {
-                    proc.signal(Signal::TERM);
-                    tokio::time::timeout(TERM_GRACE, proc.wait()).await.is_ok()
-                });
-        if !gone {
-            proc.signal(Signal::KILL);
-            tokio::time::timeout(KILL_WAIT, proc.wait())
-                .await
-                .map_err(|_| AdapterError::Deadline)?;
-        }
-        self.exited = true;
+        self.stop_server(matches!(mode, CloseMode::Graceful))
+            .await?;
+        self.exited = self.proc.is_some() || self.exited;
         Ok(())
     }
 }

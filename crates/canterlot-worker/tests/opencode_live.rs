@@ -85,6 +85,7 @@ impl Live {
         OpenCodeAdapter::new(
             OpenCodeConfig {
                 executable: self.wrapper.clone(),
+                owner_config: Some(self.root.path().join("config/opencode")),
                 ..Default::default()
             },
             self.exec_dir.clone(),
@@ -132,6 +133,19 @@ impl Live {
                     .then_some(pid)
             })
             .collect()
+    }
+
+    // Только процессы этого теста: `bash -c` запускается в рабочем каталоге.
+    fn running(&self, needle: &str) -> bool {
+        fs::read_dir("/proc").unwrap().flatten().any(|entry| {
+            let matches_cwd = fs::read_link(entry.path().join("cwd"))
+                .is_ok_and(|cwd| cwd.starts_with(self.root.path()));
+            let cmdline = fs::read(entry.path().join("cmdline")).unwrap_or_default();
+            matches_cwd
+                && String::from_utf8_lossy(&cmdline)
+                    .replace('\0', " ")
+                    .contains(needle)
+        })
     }
 
     async fn wait_gone(&self) {
@@ -829,6 +843,163 @@ async fn real_mode_change_applies_from_the_next_input() {
     });
     session.turn(&third).await;
     assert!(offered(&stub.requests()[2]).contains(&"shell".to_owned()));
+    session.close().await;
+}
+
+fn preset(text: &str, revision: u64) -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Preset,
+        text: text.into(),
+        preset_id: Some(Uuid::from_u128(7)),
+        revision,
+        title: "Пресет".into(),
+    }
+}
+
+impl Session {
+    async fn start_as(
+        stub: &Stub,
+        instructions: InstructionSpec,
+        prepare: impl FnOnce(&Live),
+    ) -> Self {
+        let live = Live::new(&stub.config());
+        prepare(&live);
+        let group = TreeContainment::new().unwrap();
+        let mut adapter = live.adapter();
+        let mut spec = live.spec("fake/fake-1", "bypass");
+        spec.instructions = instructions;
+        tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+            .await
+            .expect("start must finish")
+            .expect("start");
+        Self {
+            live,
+            group,
+            adapter,
+        }
+    }
+}
+
+fn clean() -> InstructionSpec {
+    InstructionSpec {
+        mode: InstructionMode::Clean,
+        text: String::new(),
+        preset_id: None,
+        revision: 0,
+        title: String::new(),
+    }
+}
+
+// «Без инструкций»: настройки из обоих файлов и плагины владельца на месте, его `AGENTS.md` нет.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_clean_mode_keeps_the_owner_config_and_drops_his_instructions() {
+    let stub = Stub::start(vec![Reply::text("ок")]).await;
+    let mut session = Session::start_as(&stub, clean(), |live| {
+        let owner = live.root.path().join("config/opencode");
+        fs::write(owner.join("AGENTS.md"), "CANARY_OWNER").unwrap();
+        let extra = live.root.path().join("extra.md");
+        fs::write(&extra, "CANARY_JSONC").unwrap();
+        fs::write(
+            owner.join("opencode.jsonc"),
+            format!(
+                "// второй файл\n{{\"instructions\": [\"{}\"]}}",
+                extra.display()
+            ),
+        )
+        .unwrap();
+        fs::create_dir(owner.join("plugins")).unwrap();
+        fs::write(
+            owner.join("plugins/canary.ts"),
+            "import fs from \"fs\"\nfs.writeFileSync(process.env.TMPDIR + \"/plugin_ran\", \"1\")\nexport default async () => ({})\n",
+        )
+        .unwrap();
+    })
+    .await;
+    session.turn(&input("привет")).await;
+    let seen = stub.requests()[0].to_string();
+    assert!(!seen.contains("CANARY_OWNER"), "{seen}");
+    assert!(
+        session.live.exec_dir.join("tmp/plugin_ran").exists(),
+        "owner plugin"
+    );
+    assert!(seen.contains("CANARY_JSONC"), "{seen}");
+    session.close().await;
+}
+
+// Пресет на ходу: текст доходит до следующего запроса без перезапуска, фоновая команда живёт,
+// а возврат к «Без инструкций» отменяет его для модели.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_preset_change_reaches_the_next_provider_request_without_a_restart() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "shell",
+            json!({"command": "sleep 4711", "description": "bg", "background": true}),
+        ),
+        Reply::text("раз"),
+        Reply::text("два"),
+        Reply::text("три"),
+        Reply::text("четыре"),
+    ])
+    .await;
+    let mut session = Session::start_as(&stub, clean(), |_| {}).await;
+    session.turn(&input("первый")).await;
+    let pids = session.live.servers();
+    let mut second = input("второй");
+    second.settings = Some(SettingsChange {
+        instructions: Some(preset("CANARY_PRESET_ONE", 1)),
+        ..Default::default()
+    });
+    session.turn(&second).await;
+    assert!(
+        stub.requests()[2].to_string().contains("CANARY_PRESET_ONE"),
+        "{}",
+        stub.requests()[2]
+    );
+    let mut third = input("третий");
+    third.settings = Some(SettingsChange {
+        instructions: Some(preset("CANARY_PRESET_TWO", 2)),
+        ..Default::default()
+    });
+    session.turn(&third).await;
+    assert!(stub.requests()[3].to_string().contains("CANARY_PRESET_TWO"));
+    let mut fourth = input("четвёртый");
+    fourth.settings = Some(SettingsChange {
+        instructions: Some(clean()),
+        ..Default::default()
+    });
+    session.turn(&fourth).await;
+    assert!(
+        stub.requests()[4]
+            .to_string()
+            .contains("Previously loaded instructions no longer apply"),
+        "{}",
+        stub.requests()[4]
+    );
+    assert_eq!(session.live.servers(), pids, "no restart");
+    assert!(session.live.running("sleep 4711"), "background shell lives");
+    session.close().await;
+}
+
+// Переход с «Как у владельца»: другой процесс, та же сессия, история на месте.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_switch_from_owner_restarts_with_the_same_session() {
+    let stub = Stub::start(vec![Reply::text("раз"), Reply::text("два")]).await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("первый")).await;
+    let before = session.live.servers();
+    let mut second = input("второй");
+    second.settings = Some(SettingsChange {
+        instructions: Some(preset("CANARY_RESTART", 1)),
+        ..Default::default()
+    });
+    session.turn(&second).await;
+    assert_ne!(session.live.servers(), before);
+    let seen = stub.requests()[1].to_string();
+    assert!(seen.contains("CANARY_RESTART"), "{seen}");
+    assert!(seen.contains("первый"), "history survives: {seen}");
     session.close().await;
 }
 
