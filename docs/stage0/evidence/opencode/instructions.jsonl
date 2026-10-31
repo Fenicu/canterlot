@@ -1,0 +1,26 @@
+{"dir": "console", "scenario": "instructions", "line": "========= instr"}
+{"dir": "console", "scenario": "instructions", "line": "default                            done ['XDG_GLOBAL', 'HOME_AGENTS', 'ABOVE_REPO', 'REPO_AGENTS', 'SUB_AGENTS', 'SKILL']"}
+{"dir": "console", "scenario": "instructions", "line": "order in system [('CANARY_SKILL', 11395), ('CANARY_XDG_GLOBAL', 11807), ('CANARY_SUB_AGENTS', 11906), ('CANARY_REPO_AGENTS', 12001), ('CANARY_ABOVE_REPO', 12092), ('CANARY_HOME_AGENTS', 12177)]"}
+{"dir": "console", "scenario": "instructions", "line": "instruction text sample Instructions from: <probe>/config/opencode/AGENTS.md"}
+{"dir": "console", "scenario": "instructions", "line": "CANARY_XDG_GLOBAL"}
+{"dir": "console", "scenario": "instructions", "line": "Instructions from: <probe>/home/proj/repo/sub/AGENTS.md"}
+{"dir": "console", "scenario": "instructions", "line": "CANARY_SUB_AGENTS"}
+{"dir": "console", "scenario": "instructions", "line": "Instructions from: <probe>/home/proj/repo/"}
+{"dir": "console", "scenario": "instructions", "line": "after AGENTS.md edit [('user', '<system-update>\\nThe instructions changed:\\nInstructions from: <probe>/home/proj/repo/AGENTS.md\\nCANARY_REPO_AGENTS changed\\n\\n</system-update>')]"}
+{"dir": "console", "scenario": "instructions", "line": "instr evt ['{\"sessionID\": \"ses_e706231e9ffe61MDkssgY8nIuJ\", \"delta\": {\"core/instructions\": \"5e47683b2fde13c03e5d23731e7bc3ba16adc996df18bb6560897753258bc32a\"}, \"text\": \"The instructions changed:\\\\nInstructions from: <probe>/home/p']"}
+{"dir": "console", "scenario": "instructions", "line": "entry put (204, None)"}
+{"dir": "console", "scenario": "instructions", "line": "entry in [(6, 'user', '<system-update>\\n&lt;context key=\"preset\"&gt;\\nCANARY_ENTRY text\\n&lt;/context&gt;\\n</system-update>')]"}
+{"dir": "console", "scenario": "instructions", "line": "entry put new session 204"}
+{"dir": "console", "scenario": "instructions", "line": "entry fresh in [(0, 'system')] ['CANARY_XDG_GLOBAL', 'CANARY_HOME_AGENTS', 'CANARY_ABOVE_REPO']"}
+{"dir": "console", "scenario": "instructions", "line": "rm 204"}
+{"dir": "console", "scenario": "instructions", "line": "CONFIG_PROJECT_DISABLE             done ['XDG_GLOBAL', 'SKILL']"}
+{"dir": "console", "scenario": "instructions", "line": "DISABLE_CLAUDE_CODE                done ['XDG_GLOBAL', 'HOME_AGENTS', 'ABOVE_REPO', 'REPO_AGENTS', 'SUB_AGENTS']"}
+{"dir": "console", "scenario": "instructions", "line": "CONFIG_DIR+CONFIG(file)            done ['HOME_AGENTS', 'ABOVE_REPO', 'REPO_AGENTS', 'SUB_AGENTS', 'OCDIR', 'SKILL']"}
+{"dir": "console", "scenario": "instructions", "line": "  /api/config [('directory', '<probe>/oc'), ('document', '<probe>/owner.json'), ('directory', '<probe>/home/proj/repo/.opencode')]"}
+{"dir": "console", "scenario": "instructions", "line": "  after preset edit [('user', '<system-update>\\nThe instructions changed:\\nInstructions from: <probe>/oc/AGENTS.md\\nCANARY_OCDIR second preset\\n\\n</system-update>')] system has new False"}
+{"dir": "console", "scenario": "instructions", "line": "CONFIG_CONTENT instr+system        done ['XDG_GLOBAL', 'HOME_AGENTS', 'ABOVE_REPO', 'REPO_AGENTS', 'SUB_AGENTS', 'CONFIGURED', 'SYSTEM_OVERRIDE', 'SKILL']"}
+{"dir": "console", "scenario": "instructions", "line": "  system starts CANARY_SYSTEM_OVERRIDE | # Your Model | - Name: Fake One | - Provider ID: fake | - Model ID: fake-1 | # Code Mode |  | Use the `execut len 11537 harness text kept False"}
+{"dir": "console", "scenario": "instructions", "line": "  /api/config [('document', '<probe>/config/opencode/opencode.json'), ('directory', '<probe>/config/opencode'), ('directory', '<probe>/home/proj/repo/.opencode'), ('document', '<content>')]"}
+{"dir": "console", "scenario": "instructions", "line": "========= home_override"}
+{"dir": "console", "scenario": "instructions", "line": "['CANARY_REPO_AGENTS', 'CANARY_SKILL']"}
+{"dir": "console", "scenario": "instructions", "line": "[[{'type': 'text', 'text': '<probe>/home\\n'}]]"}

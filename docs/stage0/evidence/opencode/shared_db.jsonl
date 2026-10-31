@@ -1,0 +1,21 @@
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "========= twoprocs"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "b sees a's events []"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "b prompt 200"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "b events [('session.inbox.enqueued', 10), ('session.execution.started', 11), ('session.tool.failed', 12), ('session.inbox.delivered', 13), ('session.step.started', 14), ('session.text.started', 15), ('session.text.ended', 16), ('session.step.streamed', 17), ('session.step.ended', 18), ('session.usage.updated', None)]"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "a events tail [('session.inbox.enqueued', 1), ('session.execution.started', 2), ('session.inbox.delivered', 4), ('session.execution.succeeded', 27)]"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "provider calls during 2 [['a busy', 'None', '{\"error\":{\"typ', 'b concurrent'], ['a busy', 'None', '{\"error\":{\"typ', 'b concurrent', 'a final']]"}
+{"dir": "console", "scenario": "shared_db_two_servers", "line": "msgs [('idle', ''), ('assistant', ''), ('idle', ''), ('assistant', ''), ('user', 'b concurrent'), ('assistant', ''), ('user', 'a busy')]"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "========= sweep"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "service alive None a active {'data': {'ses_e706159fcffeUQ4FZs0oproa5F': {'type': 'running'}}}"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "calls while a still owns the claim 1 [['{\"error\":{\"type\":\"aborted\",\"message\":\"To', 'The server restarted while you were work']]"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "msgs [('idle', ''), ('assistant', ''), ('idle', ''), ('assistant', ''), ('synthetic', 'The server restarted while you were working. Conti'), ('assistant', ''), ('user', 'long')]"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "timestamp=2026-10-31T01:41:43.561Z level=INFO run=96a24f7e message=event event.id=evt_18f9eae090015fkgPJI9V0Xx0J event.created=1793410903561 event.type=provider.updated event.location.directory=/tmp/o"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "timestamp=2026-10-31T01:41:43.579Z level=INFO run=96a24f7e message=event event.id=evt_18f9eae1b001WMkNtjb3WNJEsN event.created=1793410903579 event.type=model.updated event.location.directory=/tmp/open"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "timestamp=2026-10-31T01:41:43.585Z level=INFO run=96a24f7e message=event event.id=evt_18f9eae21001UcjUEcRlReJYTC event.created=1793410903585 event.type=agent.updated event.location.directory=/tmp/open"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "timestamp=2026-10-31T01:41:43.586Z level=INFO run=96a24f7e message=event event.id=evt_18f9eae220017QWXNct0BZCg21 event.created=1793410903586 event.type=command.updated event.location.directory=/tmp/op"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "synth []"}
+{"dir": "console", "scenario": "shared_db_service_sweep", "line": "130"}
+{"dir": "console", "scenario": "shared_db_two_sessions", "line": "========= two_sessions"}
+{"dir": "console", "scenario": "shared_db_two_sessions", "line": "True True"}
+{"dir": "console", "scenario": "shared_db_two_sessions", "line": "a tool ['session.tool.success'] b tool ['session.tool.success']"}
+{"dir": "console", "scenario": "shared_db_two_sessions", "line": "db locks in logs 0"}

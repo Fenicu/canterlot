@@ -1,0 +1,44 @@
+{"t_ms": 417, "dir": "note", "data": {"ready_line": "{\"url\":\"http://127.0.0.1:<port>\"}", "ready_ms": 415}}
+{"t_ms": 472, "dir": "note", "data": {"signal": "sigterm", "exit": 130}}
+{"t_ms": 889, "dir": "note", "data": {"ready_line": "{\"url\":\"http://127.0.0.1:<port>\"}", "ready_ms": 415}}
+{"t_ms": 932, "dir": "note", "data": {"signal": "sigint", "exit": 130}}
+{"t_ms": 1335, "dir": "note", "data": {"ready_line": "{\"url\":\"http://127.0.0.1:<port>\"}", "ready_ms": 401}}
+{"t_ms": 1374, "dir": "note", "data": {"signal": "stdin_eof", "exit": 0}}
+{"t_ms": 1813, "dir": "note", "data": {"ready_line": "{\"url\":\"http://127.0.0.1:<port>\"}", "ready_ms": 437}}
+{"t_ms": 1829, "dir": "note", "data": {"signal": "sigkill", "exit": -9}}
+{"t_ms": 2187, "dir": "note", "data": {"ready_line": "{\"url\":\"http://127.0.0.1:<port>\"}", "ready_ms": 357}}
+{"t_ms": 2426, "dir": "note", "data": {"stdin_eof_exit": 0, "ms": 31}}
+{"dir": "console", "scenario": "lifecycle", "line": "========= lifecycle"}
+{"dir": "console", "scenario": "lifecycle", "line": "{'sigterm': (130, 0.056), 'sigint': (130, 0.043), 'stdin_eof': (0, 0.04), 'sigkill': (-9, 0.016)}"}
+{"dir": "console", "scenario": "lifecycle", "line": "after stdout close 200"}
+{"dir": "console", "scenario": "lifecycle", "line": "env leak check: tool sees password?"}
+{"dir": "console", "scenario": "lifecycle", "line": "[[{'type': 'text', 'text': '0\\nOPENCODE\\nOPENCODE_DISABLE_AUTOUPDATE\\nOPENCODE_PRINT_LOGS\\nOPENCODE_SESSION_ID\\nOPENCODE_TERMINAL\\n'}]]"}
+{"dir": "console", "scenario": "lifecycle", "line": "session env (204, None)"}
+{"dir": "console", "scenario": "lifecycle", "line": "[[{'type': 'text', 'text': '1\\nnone\\n'}]]"}
+{"dir": "console", "scenario": "process_tree", "line": "========= tree"}
+{"dir": "console", "scenario": "process_tree", "line": "1155995 1155993 1155995 1155995   51 319060 /usr/bin/opencode serve --stdio --port 0 --print-logs --log-level "}
+{"dir": "console", "scenario": "process_tree", "line": "1156020 1155995 1156020 1156020    1 10216 /usr/bin/python3 -I <probe-lib>/mcp_stub.py"}
+{"dir": "console", "scenario": "process_tree", "line": "1156053 1155995 1156053 1156053    1  3412 /usr/bin/bash -c sleep 2 && echo x"}
+{"dir": "console", "scenario": "process_tree", "line": "1156054 1156053 1156053 1156053    1  1820 sleep 2"}
+{"dir": "console", "scenario": "process_tree", "line": "fd 28"}
+{"dir": "console", "scenario": "process_tree", "line": "bg wake ['session.inbox.enqueued', 'session.execution.started', 'shell.exited', 'session.inbox.enqueued', 'session.execution.started']"}
+{"dir": "console", "scenario": "process_tree", "line": "synthetic ['{\"type\": \"synthetic\", \"payload\": {\"text\": \"<shell id=\\\\\"sh_18f9f0afa001bq0RoSYVgJ4fC1\\\\\" state=\\\\\"completed\\\\\" command=\\\\\"sleep 2 && echo x\\\\\">\\\\nx\\\\n\\\\n</shell>\", \"description\": \"sleep 2 && echo x\", \"metadata\": {\"source\": \"shell\", \"shellID\": \"sh_18f9f0afa001bq0RoSYVgJ4fC1\", \"jobID\": \"sh_18f9f0afa001bq0RoSYV']"}
+{"dir": "console", "scenario": "cold_start", "line": "========= immediate"}
+{"dir": "console", "scenario": "cold_start", "line": "0 session ms 322 prompt ms 977 finished True first step ms 1662 mcp tool in first request False agent ['build']"}
+{"dir": "console", "scenario": "cold_start", "line": "  mcp at end [{'name': 'canterlot', 'status': {'status': 'connected'}}] agents 7"}
+{"dir": "console", "scenario": "cold_start", "line": "1 session ms 323 prompt ms 969 finished True first step ms 1614 mcp tool in first request False agent ['build']"}
+{"dir": "console", "scenario": "cold_start", "line": "  mcp at end [{'name': 'canterlot', 'status': {'status': 'connected'}}] agents 7"}
+{"dir": "console", "scenario": "cold_start", "line": "2 session ms 320 prompt ms 918 finished True first step ms 1563 mcp tool in first request False agent ['build']"}
+{"dir": "console", "scenario": "cold_start", "line": "  mcp at end [{'name': 'canterlot', 'status': {'status': 'connected'}}] agents 7"}
+{"dir": "console", "scenario": "cold_start", "line": "cold catalog: agents 0 models 9 default fake-1"}
+{"dir": "console", "scenario": "cold_start", "line": "warm: agents 7 models 9"}
+{"dir": "console", "scenario": "final_checks", "line": "idle server rss_kb, threads ['140156', '16']"}
+{"dir": "console", "scenario": "final_checks", "line": "bootstrap \"database schema bootstrap started\" migrations=50 role=server | \"database schema bootstrap completed\" migrations=50 durationMs=21 role=server | "}
+{"dir": "console", "scenario": "final_checks", "line": "default rules done True asked False files True True"}
+{"dir": "console", "scenario": "final_checks", "line": "warm prompt ms [462, 9, 16, 6, 6]"}
+{"dir": "console", "scenario": "final_checks", "line": "204"}
+{"dir": "console", "scenario": "final_checks", "line": "shell {'status': 'running', 'pid': 1161157, 'metadata': {'sessionID': 'ses_e70580f17ffebEhB0utGOUaepy'}} True"}
+{"dir": "console", "scenario": "final_checks", "line": "output (200, {'location': {'directory': '<probe>/ws'}, 'data': {'output': '', 'cursor': 0, 'size': 0, 'truncated': False}})"}
+{"dir": "console", "scenario": "final_checks", "line": "delete 204"}
+{"dir": "console", "scenario": "final_checks", "line": "alive after delete False [{'id': 'sh_18fa7f762001a8SeHOTndJio2k', 'status': 'killed'}] delete again 204"}
+{"dir": "console", "scenario": "final_checks", "line": "wake after delete ['session.inbox.enqueued', 'session.execution.started', 'session.inbox.enqueued', 'session.execution.started']"}
