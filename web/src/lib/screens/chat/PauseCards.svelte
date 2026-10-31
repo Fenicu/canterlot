@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import { pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
 	import {
 		continueSessionQueue,
@@ -21,14 +21,7 @@
 	} = $props();
 
 	const provider = $derived((chat.detail?.harness as { provider?: string })?.provider ?? 'claude');
-	const liveExecution = $derived(
-		chat.execution
-			? ((chat.execution as { live?: boolean; state?: string }).live ??
-			  ['created', 'starting', 'running', 'stopping'].includes(
-					(chat.execution as { state?: string }).state ?? ''
-			  ))
-			: false
-	);
+	const liveExecution = $derived(executionLive(chat.execution));
 
 	const failure = $derived(chat.activity as { state?: string; evidence?: { reason?: string } } | null);
 
@@ -41,7 +34,7 @@
 			liveExecution,
 			now,
 			turnRecorded: chat.turnRecorded,
-			executionOwnerLost: (chat.execution as { state?: string } | null)?.state === 'owner_lost',
+			executionOwnerLost: chat.execution?.state === 'owner_lost',
 			failureReason: failure?.state === 'failed' ? (failure.evidence?.reason ?? null) : null
 		})
 	);

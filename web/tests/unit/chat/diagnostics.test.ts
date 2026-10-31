@@ -12,9 +12,8 @@ describe("chat/diagnostics", () => {
 
     const data: DiagnosticsData = {
       conversationId: "00000000-0000-4000-8000-000000000001",
-      connectionId: "conn_test_123",
       execution: {
-        id: "00000000-0000-4000-8000-000000000002",
+        execution_id: "00000000-0000-4000-8000-000000000002",
         state: "running",
         generation: 3,
         outcome: "user_stop",
@@ -58,7 +57,7 @@ describe("chat/diagnostics", () => {
 
     // Must contain identifiers, kinds, cursors, counters
     expect(report).toContain("00000000-0000-4000-8000-000000000001");
-    expect(report).toContain("conn_test_123");
+    expect(report).toContain("execution.id: 00000000-0000-4000-8000-000000000002");
     expect(report).toContain("journal:14827");
     expect(report).toContain("running");
     expect(report).toContain("user_stop");

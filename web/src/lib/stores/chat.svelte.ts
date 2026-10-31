@@ -108,6 +108,16 @@ export interface ChatApi {
 }
 
 type QueueSnapshot = components["schemas"]["SnapshotQueueView"];
+/** Снимок даёт всё исполнение, событие смены состояния только часть полей. */
+export type ChatExecution = Partial<components["schemas"]["LiveExecutionView"]> & {
+  last_run?: unknown;
+};
+
+const LIVE_EXECUTION_STATES = ["created", "starting", "running", "stopping"];
+
+export function executionLive(execution: ChatExecution | null): boolean {
+  return LIVE_EXECUTION_STATES.includes(execution?.state ?? "");
+}
 type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 
@@ -191,7 +201,7 @@ export class ChatStore {
   turnRecorded = $state(false);
   /** Сессию удалили, пока чат был открыт: подписка уже закрыта. */
   deleted = $state(false);
-  execution = $state<Record<string, unknown> | null>(null);
+  execution = $state<ChatExecution | null>(null);
   activity = $state<Record<string, unknown> | null>(null);
   settings = $state<{
     effective: unknown;
@@ -490,7 +500,11 @@ export class ChatStore {
         return;
       case "execution_state_changed":
         if (event.kind === "execution_state_changed")
-          this.execution = { ...event.payload };
+          this.execution = {
+            ...this.execution,
+            ...event.payload,
+            execution_id: event.execution_id ?? this.execution?.execution_id,
+          };
         return;
       case "conversation_settings_changed":
         if (event.kind === "conversation_settings_changed") {
@@ -785,7 +799,7 @@ export class ChatStore {
       this.detail = data.detail;
       this.turnRecorded = data.detail.turn_recorded === true;
       if (data.detail.execution)
-        this.execution = data.detail.execution as Record<string, unknown>;
+        this.execution = data.detail.execution as ChatExecution;
       if (data.detail.activity)
         this.activity = data.detail.activity as Record<string, unknown>;
       if (data.detail.settings) {
