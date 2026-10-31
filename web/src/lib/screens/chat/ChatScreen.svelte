@@ -63,6 +63,8 @@
 		});
 	});
 
+	// Лимиты берутся из хранилища списка на каждый рендер: копия при открытии застывала бы до выхода из чата.
+	const limitProviders = $derived(providers.length > 0 ? providers : (runtime?.list.limits ?? []));
 	const machineId = $derived((chat.detail as ChatDetailWithMachine | null)?.machine?.id);
 	const resolvedMachine = $derived(
 		machine ?? (runtime && machineId ? (runtime.machines.items.get(machineId) ?? null) : null)
@@ -81,9 +83,6 @@
 			if (!machine && detail?.machine?.id) {
 				const mid = detail.machine.id;
 				machine = runtime.machines.items.get(mid) ?? [...runtime.machines.items.values()][0] ?? null;
-			}
-			if (providers.length === 0 && runtime.list.limits.length > 0) {
-				providers = runtime.list.limits;
 			}
 			const cfg = await loadConfig();
 			if (cfg?.limit_thresholds) {
@@ -109,7 +108,7 @@
 <section class="screen" data-ready>
 	<ChatHeader
 		{chat}
-		{providers}
+		providers={limitProviders}
 		{thresholds}
 		{now}
 		onOpenSheet={listRow ? () => (showSheet = true) : undefined}
