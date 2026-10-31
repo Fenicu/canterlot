@@ -69,6 +69,8 @@ pub enum MachineWarning {
     DiskUsageHigh,
     MetricsStale,
     LimitsMismatch,
+    CjJournalStopped,
+    SjJournalStopped,
 }
 #[derive(Serialize, ToSchema)]
 pub struct Workdirs {
@@ -143,6 +145,13 @@ pub(crate) async fn load_stored(
     let limits_ok: bool = r.try_get("limits_ok")?;
     if !limits_ok {
         warnings.push(MachineWarning::LimitsMismatch)
+    }
+    for kind in crate::ingest::stopped_journals(&mut *conn, id).await? {
+        warnings.push(if kind == "cj" {
+            MachineWarning::CjJournalStopped
+        } else {
+            MachineWarning::SjJournalStopped
+        });
     }
     let roots: sqlx::types::Json<Vec<String>> = r.try_get("allowed_roots")?;
     Ok(MachineView {

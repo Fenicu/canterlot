@@ -447,6 +447,10 @@ async fn other_database_failures_keep_the_record_for_a_retry(pool: PgPool) -> Te
     let execution = run.execution.execution_id;
     assert!(diagnostics(&pool, execution).await.is_empty());
     assert!(stop_commands(&pool, execution).await.is_empty());
+    assert!(
+        stops(&pool, run.journal).await.is_empty(),
+        "an outage is not a stop"
+    );
     sqlx::query("drop trigger refuse_block on blocks")
         .execute(&pool)
         .await?;
@@ -494,5 +498,167 @@ async fn journal_without_an_execution_still_refuses_the_batch(pool: PgPool) -> T
     };
     let error = ship(&run, batch).await.unwrap_err();
     assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    Ok(())
+}
+
+fn receipt() -> Body {
+    Body::CommandStored(CommandStored {
+        command_id: Uuid::now_v7().to_string(),
+        dispatch_attempt: 1,
+        machine_time_ms: 1,
+    })
+}
+
+fn cj_batch(journal: Uuid, first: u64, bodies: Vec<Option<Body>>) -> JournalRecords {
+    JournalRecords {
+        journal_id: journal.to_string(),
+        records: bodies
+            .into_iter()
+            .zip(first..)
+            .map(|(body, seq)| JournalRecord {
+                seq,
+                body: Some(RecordBody { body }),
+            })
+            .collect(),
+    }
+}
+
+async fn ship_cj(run: &Run, batch: JournalRecords) -> Result<u64, tonic::Status> {
+    run.ingest
+        .cj_records(run.seed.machine_id, &run.seed.credential_digest(), batch)
+        .await
+        .map(|ack| ack.up_to_seq)
+}
+
+async fn stop_events(pool: &PgPool, machine: Uuid) -> Vec<serde_json::Value> {
+    sqlx::query_scalar(
+        "select payload->'stopped' from events
+         where kind = 'machine_journal_stops_changed' and payload->>'machine_id' = $1
+         order by scope_seq",
+    )
+    .bind(machine.to_string())
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn stops(pool: &PgPool, journal: Uuid) -> Vec<(String, i64, String)> {
+    sqlx::query_as("select kind, seq, reason from journal_stops where journal_id = $1")
+        .bind(journal)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+async fn journal_diagnostics(pool: &PgPool, execution: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select payload->>'event_type' from events where execution_id = $1
+         and kind = 'adapter_diagnostic' and payload->>'kind' = 'journal_stopped'",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+// Отказ не подтверждается и не пропускается, а владелец узнаёт о нём один раз, не на каждый повтор.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn refused_cj_record_stays_unacked_and_is_shown_once_until_it_applies(
+    pool: PgPool,
+) -> TestResult {
+    let run = Run::new(&pool).await;
+    let journal = Uuid::now_v7();
+    let machine = run.seed.machine_id;
+    let batch = cj_batch(journal, 1, vec![Some(receipt()), None, Some(receipt())]);
+    for _ in 0..3 {
+        let error = ship_cj(&run, batch.clone()).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "unknown_record");
+    }
+    assert_eq!(cursor(&pool, journal).await, 1);
+    assert_eq!(
+        stops(&pool, journal).await,
+        [("cj".to_owned(), 2, "unknown_record".to_owned())]
+    );
+    assert_eq!(
+        stop_events(&pool, machine).await,
+        [serde_json::json!(["cj"])]
+    );
+
+    let updated = cj_batch(journal, 2, vec![Some(receipt()), Some(receipt())]);
+    assert_eq!(ship_cj(&run, updated).await?, 3);
+    assert_eq!(cursor(&pool, journal).await, 3);
+    assert!(stops(&pool, journal).await.is_empty());
+    assert_eq!(
+        stop_events(&pool, machine).await,
+        [serde_json::json!(["cj"]), serde_json::json!([])]
+    );
+    Ok(())
+}
+
+// Такой отказ приходит и от записи известного вида: состояние хабу неизвестно.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cj_record_of_a_known_kind_that_cannot_apply_stops_the_journal_too(
+    pool: PgPool,
+) -> TestResult {
+    let run = Run::new(&pool).await;
+    let journal = Uuid::now_v7();
+    let unknown_state = Body::ExecutionState(ExecutionState {
+        execution_id: run.id(),
+        generation: run.execution.generation as u64,
+        state: "paused".into(),
+        ..Default::default()
+    });
+    let batch = cj_batch(journal, 1, vec![Some(unknown_state)]);
+    let error = ship_cj(&run, batch).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
+    assert_eq!(error.message(), "invalid_record");
+    assert_eq!(
+        stops(&pool, journal).await,
+        [("cj".to_owned(), 1, "invalid_record".to_owned())]
+    );
+    Ok(())
+}
+
+// Запись неизвестного вида нельзя отбросить: после обновления хаба она применится.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn unknown_sj_record_is_not_contained_and_is_shown_in_its_conversation(
+    pool: PgPool,
+) -> TestResult {
+    let run = Run::new(&pool).await;
+    let execution = run.execution.execution_id;
+    let machine = run.seed.machine_id;
+    let mut batch = run.batch(vec![started(Uuid::now_v7())]);
+    batch.records[0].body = Some(RecordBody::default());
+    for _ in 0..2 {
+        let error = ship(&run, batch.clone()).await.unwrap_err();
+        assert_eq!(error.code(), tonic::Code::InvalidArgument);
+        assert_eq!(error.message(), "unknown_record");
+    }
+    assert_eq!(cursor(&pool, run.journal).await, 1);
+    assert!(stop_commands(&pool, execution).await.is_empty());
+    assert!(!fatal_pause(&pool, run.seed.conversation_id).await);
+    assert_eq!(
+        stops(&pool, run.journal).await,
+        [("sj".to_owned(), 2, "unknown_record".to_owned())]
+    );
+    assert_eq!(
+        journal_diagnostics(&pool, execution).await,
+        ["unknown_record seq=2"]
+    );
+    assert_eq!(
+        stop_events(&pool, machine).await,
+        [serde_json::json!(["sj"])]
+    );
+
+    assert_eq!(
+        ship(&run, run.batch(vec![started(Uuid::now_v7())])).await?,
+        2
+    );
+    assert!(stops(&pool, run.journal).await.is_empty());
+    assert_eq!(
+        stop_events(&pool, machine).await,
+        [serde_json::json!(["sj"]), serde_json::json!([])]
+    );
     Ok(())
 }
