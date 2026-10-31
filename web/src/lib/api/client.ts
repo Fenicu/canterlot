@@ -6,7 +6,9 @@ type Ok<T> = T extends { responses: infer R }
     ? B
     : R extends { 201: { content: { "application/json": infer B } } }
       ? B
-      : void
+      : R extends { 202: { content: { "application/json": infer B } } }
+        ? B
+        : void
   : void;
 
 type Body<T> = T extends {
@@ -227,6 +229,12 @@ export function getLimits(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_limits"]>>> {
   return http("GET", "/api/v1/limits", undefined, opts);
+}
+
+export function refreshLimits(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["post__api_v1_limits_refresh"]>>> {
+  return http("POST", "/api/v1/limits/refresh", undefined, opts);
 }
 
 export function limitsHistory(

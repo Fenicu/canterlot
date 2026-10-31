@@ -513,6 +513,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/limits/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_limits_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/machines": {
         parameters: {
             query?: never;
@@ -1596,6 +1612,12 @@ export interface components {
         };
         ReadBody: {
             seq: string;
+        };
+        RefreshView: {
+            /** @description Провайдеры, чьим машинам отправлена просьба об опросе. */
+            requested: string[];
+            /** Format: int64 */
+            retry_after_secs: number;
         };
         /**
          * @description Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
@@ -3578,6 +3600,57 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["History"];
                 };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_limits_refresh: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Просьба об опросе отправлена воркерам; новые показания придут событием limits_changed */
+            202: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RefreshView"];
+                };
+            };
+            /** @description Нет доступного воркера с лимитами */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Опрос просили слишком недавно */
+            429: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
