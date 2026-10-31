@@ -18,13 +18,10 @@ const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c0
 // Служебные события и то, что разбирают следующие срезы адаптера.
 const KNOWN: &[&str] = &[
     "agent.updated",
-    "form.cancelled",
-    "form.replied",
     "integration.updated",
     "mcp.resources.changed",
     "mcp.status.changed",
     "mcp.tools.changed",
-    "permission.replied",
     "plugin.updated",
     "project.updated",
     "provider.updated",
@@ -86,12 +83,29 @@ pub enum RequestKind {
 }
 
 /// Запрос сервера. Ответ идёт на путь его сессии: у потомка она своя.
-#[derive(Debug)]
 pub struct PendingRequest {
     pub kind: RequestKind,
     pub id: String,
     pub session: String,
     pub item: Option<String>,
+    pub child: bool,
+    /// Кадр запроса: команды, файлы и текст вопросов.
+    pub raw: Value,
+}
+
+impl PendingRequest {
+    pub fn agent(&self) -> &'static str {
+        if self.child { "subagent" } else { MAIN_AGENT }
+    }
+}
+
+impl fmt::Debug for PendingRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingRequest")
+            .field("kind", &self.kind)
+            .field("id", &self.id)
+            .finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug)]
@@ -110,6 +124,8 @@ pub enum Translated {
     ToolRunning(String),
     ToolDone(String),
     Request(PendingRequest),
+    /// Сервер закрыл запрос с этим идентификатором.
+    RequestSettled(String),
 }
 
 #[derive(Clone, Copy)]
@@ -295,6 +311,12 @@ impl Translator {
         if kind == "form.created" {
             return self.on_form(data);
         }
+        if matches!(
+            kind,
+            "permission.replied" | "form.replied" | "form.cancelled"
+        ) {
+            return self.on_settled(kind, data);
+        }
         let session = data.get("sessionID").and_then(Value::as_str);
         let terminal = kind.starts_with("session.execution.");
         if terminal && session.is_none() {
@@ -407,41 +429,63 @@ impl Translator {
         Vec::new()
     }
 
-    fn on_permission(&mut self, data: &Value) -> Vec<Translated> {
-        let session = string_field(data, "sessionID");
+    // Без идентификатора ответить нельзя, а вызов будет ждать вечно.
+    fn request(
+        &self,
+        event: &str,
+        kind: RequestKind,
+        raw: &Value,
+        item: Option<String>,
+    ) -> Vec<Translated> {
+        let session = string_field(raw, "sessionID");
+        let id = string_field(raw, "id");
+        if session.is_empty() || id.is_empty() {
+            return vec![Self::diagnostic("unparsed_event", event, true)];
+        }
         if !self.owns(session) {
             return Vec::new();
         }
+        vec![Translated::Request(PendingRequest {
+            kind,
+            id: id.to_owned(),
+            session: session.to_owned(),
+            item,
+            child: session != self.root,
+            raw: raw.clone(),
+        })]
+    }
+
+    fn on_permission(&mut self, data: &Value) -> Vec<Translated> {
         let item = data.get("source").map(|source| {
             tool_key(
                 string_field(source, "messageID"),
                 string_field(source, "id"),
             )
         });
-        vec![Translated::Request(PendingRequest {
-            kind: RequestKind::Permission,
-            id: string_field(data, "id").to_owned(),
-            session: session.to_owned(),
-            item,
-        })]
+        self.request("permission.asked", RequestKind::Permission, data, item)
     }
 
     fn on_form(&mut self, data: &Value) -> Vec<Translated> {
         let empty = Value::Null;
         let form = data.get("form").unwrap_or(&empty);
-        let session = string_field(form, "sessionID");
-        if !self.owns(session) {
-            return Vec::new();
-        }
         let item = form
             .pointer("/metadata/tool")
             .map(|tool| tool_key(string_field(tool, "messageID"), string_field(tool, "id")));
-        vec![Translated::Request(PendingRequest {
-            kind: RequestKind::Form,
-            id: string_field(form, "id").to_owned(),
-            session: session.to_owned(),
-            item,
-        })]
+        self.request("form.created", RequestKind::Form, form, item)
+    }
+
+    fn on_settled(&self, kind: &str, data: &Value) -> Vec<Translated> {
+        let key = if kind == "permission.replied" {
+            "requestID"
+        } else {
+            "id"
+        };
+        if !self.owns(string_field(data, "sessionID")) {
+            return Vec::new();
+        }
+        vec![Translated::RequestSettled(
+            string_field(data, key).to_owned(),
+        )]
     }
 
     fn tool_of(&mut self, data: &Value) -> (String, &mut ToolState) {

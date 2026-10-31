@@ -7,17 +7,18 @@
 //! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
 
 use canterlot_proto::worker::v1::{
-    Command, ContentBlock, DeliverInput, Instructions, StartExecution, StopExecution, TextBlock,
-    command::Kind, content_block, record_body::Body,
+    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, StartExecution,
+    StopExecution, TextBlock, command::Kind, content_block, record_body::Body,
 };
 use canterlot_worker::{
-    adapter::opencode::replay::Script,
+    adapter::opencode::replay::{Reply, Script, Step},
     config::WorkerConfig,
     exec::{ExecutionManager, SjRelay},
     session_store::StoreThread,
     store::{Accept, WorkerStore},
 };
 use rustix::process::{Pid, Signal, kill_process};
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -272,6 +273,46 @@ impl Env {
             .join(self.execution.to_string())
     }
 
+    fn decide(&self, request: &str, kind: &str, payload: &Value) -> Command {
+        self.command(
+            Uuid::now_v7(),
+            Kind::DeliverDecision(DeliverDecision {
+                request_id: request.to_owned(),
+                decision_id: Uuid::now_v7().to_string(),
+                generation: 1,
+                kind: kind.to_owned(),
+                decision_payload_json: payload.to_string().into_bytes(),
+            }),
+        )
+    }
+
+    async fn wait_request(&mut self) -> (String, Value) {
+        self.wait("request opened", |bodies| {
+            bodies
+                .iter()
+                .any(|body| matches!(body, Body::RequestOpened(_)))
+        })
+        .await;
+        self.bodies
+            .iter()
+            .find_map(|body| match body {
+                Body::RequestOpened(f) => Some((
+                    f.request_id.clone(),
+                    serde_json::from_slice(&f.payload_json).unwrap(),
+                )),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    fn replies(&self) -> Vec<Value> {
+        self.fake()
+            .requests()
+            .into_iter()
+            .filter(|request| path_of(request).ends_with("/reply"))
+            .collect()
+    }
+
     async fn stop(&mut self) {
         let stop = self.command(
             Uuid::now_v7(),
@@ -297,6 +338,11 @@ fn describe(body: &Body) -> String {
         Body::BlockFinal(_) => "block_final".into(),
         Body::BlockDelta(_) => "block_delta".into(),
         Body::RunFinished(_) => "run_finished".into(),
+        Body::RequestOpened(f) => format!("request_opened({})", f.kind),
+        Body::RequestClosed(f) => format!("request_closed({})", f.reason),
+        Body::DecisionApplied(_) => "decision_applied".into(),
+        Body::DecisionNotApplied(f) => format!("decision_not_applied({})", f.reason),
+        Body::DecisionUnconfirmed(_) => "decision_unconfirmed".into(),
         Body::InputAccepted(_) => "input_accepted".into(),
         Body::InputRejected(f) => format!("input_rejected({})", f.reason),
         Body::JournalClosed(_) => "journal_closed".into(),
@@ -464,6 +510,152 @@ async fn tools_reach_the_journal_with_exit_status_and_mark() {
         body,
         Body::BlockFinal(f) if f.summary == "shell: exit 3, exit 3"
     )));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+fn permission_turn() -> Script {
+    Script::from_capture("permissions", None)
+        .first_run()
+        .without_replies(404)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+fn allow() -> Value {
+    json!({"kind": "permission", "behavior": "allow", "message": null})
+}
+
+// Режим `ask` по боевому пути: карточка в журнале, решение владельца, один ответ серверу.
+#[tokio::test]
+async fn ask_reaches_the_owner_and_the_decision_goes_once() {
+    let mut env = Env::new(Some(permission_turn())).await;
+    env.start("ask").await;
+    env.wait_running().await;
+    let input = env.deliver("запусти").await;
+    let (request, payload) = env.wait_request().await;
+    assert_eq!(payload["command"], "echo one > one.txt");
+    assert!(env.replies().is_empty());
+    let decision = env.decide(&request, "permission", &allow());
+    env.send(decision.clone()).await;
+    env.wait("decision applied", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::DecisionApplied(_)))
+    })
+    .await;
+    // Хаб не получил подтверждения и шлёт ту же команду ещё раз.
+    let copy = decision.clone();
+    let accept = env
+        .thread
+        .as_ref()
+        .unwrap()
+        .call(move |store| Ok(store.as_mut().unwrap().accept_command(&copy)?))
+        .await
+        .unwrap();
+    assert!(matches!(accept, Accept::Duplicate), "{accept:?}");
+    env.manager().handle(decision, accept).await.unwrap();
+    // Другая команда с тем же запросом: второе решение владельца.
+    env.send(env.decide(&request, "permission", &allow())).await;
+    env.wait("second decision refused", |bodies| {
+        bodies.iter().any(
+            |body| matches!(body, Body::DecisionNotApplied(f) if f.reason == "already_transmitted"),
+        )
+    })
+    .await;
+    env.wait_finished(input).await;
+    let replies = env.replies();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["body"], json!({"decision": "once"}));
+    let applied = env
+        .bodies
+        .iter()
+        .find_map(|body| match body {
+            Body::DecisionApplied(f) => Some(f),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(applied.proof_kind, "opencode_reply_accepted");
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Карточка больше потолка журнала: владелец видит превью, решение идёт по настоящему запросу.
+#[tokio::test]
+async fn oversized_request_works_through_the_truncated_preview() {
+    let mut script = permission_turn();
+    let huge = "щ".repeat(300_000);
+    for step in &mut script.steps {
+        if let Step::Emit { events } = step {
+            for event in events {
+                if event["type"] == "permission.asked" {
+                    event["data"]["action"] = "edit".into();
+                    event["data"]["metadata"] = json!({"files": [
+                        {"file": "большой.txt", "patch": huge, "status": "modified"},
+                    ]});
+                }
+            }
+        }
+    }
+    let mut env = Env::new(Some(script)).await;
+    env.start("ask").await;
+    env.wait_running().await;
+    let input = env.deliver("правка").await;
+    let (request, payload) = env.wait_request().await;
+    assert_eq!(payload["truncated"], true);
+    assert_eq!(payload["changes"][0]["path"], "большой.txt");
+    assert!(payload["changes"][0]["diff"].as_str().unwrap().len() < huge.len());
+    env.send(env.decide(&request, "permission", &allow())).await;
+    env.wait_finished(input).await;
+    assert_eq!(env.replies().len(), 1);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Запрос, который супервизор не журналирует: отказ с текстом, ход идёт дальше.
+#[tokio::test]
+async fn request_the_journal_cannot_hold_is_refused_with_a_message() {
+    let mut script = permission_turn();
+    let long = format!("per_{}", "a".repeat(1100));
+    for step in &mut script.steps {
+        match step {
+            Step::Emit { events } => {
+                for event in events {
+                    if event["type"] == "permission.asked" {
+                        event["data"]["id"] = long.clone().into();
+                    }
+                }
+            }
+            Step::Expect { path, reply, .. } if path.ends_with("/reply") => {
+                let session = path.split("/permission/").next().unwrap().to_owned();
+                *path = format!("{session}/permission/{long}/reply");
+                *reply = Reply {
+                    status: 204,
+                    ..Default::default()
+                };
+            }
+            _ => {}
+        }
+    }
+    let mut env = Env::new(Some(script)).await;
+    env.start("ask").await;
+    env.wait_running().await;
+    let input = env.deliver("запусти").await;
+    env.wait_finished(input).await;
+    let replies = env.replies();
+    assert_eq!(replies.len(), 1, "{replies:?}");
+    assert_eq!(replies[0]["body"]["decision"], "reject");
+    assert!(
+        replies[0]["body"]["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty())
+    );
+    assert!(
+        !env.bodies
+            .iter()
+            .any(|body| matches!(body, Body::RequestOpened(_)))
+    );
     env.stop().await;
     env.fake().wait_gone().await;
 }

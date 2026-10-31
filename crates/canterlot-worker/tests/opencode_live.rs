@@ -9,10 +9,12 @@
 //! cargo test -p canterlot-worker --features opencode-live --test opencode_live -- --ignored --test-threads=1
 //! ```
 
+use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, BlockKind, CloseMode, InstructionMode, InstructionSpec, ModelUsage,
-        StartSpec, Transmission, TransmitOutcome, opencode::OpenCodeAdapter,
+        Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
+        InstructionSpec, ModelUsage, StartSpec, Transmission, TransmitOutcome,
+        opencode::OpenCodeAdapter,
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -406,10 +408,57 @@ async fn real_tools_report_exit_status_and_write_with_snapshots_off() {
     session.close().await;
 }
 
+impl Session {
+    async fn transmit(&mut self, input: &Transmission) {
+        match tokio::time::timeout(WAIT, self.adapter.transmit(input, &self.group))
+            .await
+            .expect("transmit must finish")
+        {
+            TransmitOutcome::Accepted(_) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    async fn until(&mut self, mut done: impl FnMut(&AdapterEvent) -> bool) -> Vec<AdapterEvent> {
+        let mut events = Vec::new();
+        loop {
+            let event = tokio::time::timeout(WAIT, self.adapter.next_event())
+                .await
+                .expect("adapter event");
+            let stop = done(&event);
+            events.push(event);
+            if stop {
+                return events;
+            }
+        }
+    }
+
+    async fn until_request(&mut self) -> (String, Value) {
+        let events = self
+            .until(|event| matches!(event, AdapterEvent::RequestOpened { .. }))
+            .await;
+        match events.last() {
+            Some(AdapterEvent::RequestOpened {
+                request_id,
+                payload,
+                ..
+            }) => (request_id.clone(), payload.clone()),
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+fn permission(behavior: PermissionBehavior, message: Option<&str>) -> DecisionPayload {
+    DecisionPayload::Permission {
+        behavior,
+        message: message.map(str::to_owned),
+    }
+}
+
 // Режим `ask`: запрос приходит настоящий, отказ с сообщением не кончает ход.
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
-async fn real_permission_prompt_is_refused_and_the_turn_goes_on() {
+async fn real_permission_prompt_declined_with_a_message_and_the_turn_goes_on() {
     let stub = Stub::start(vec![
         Reply::tool("write", json!({"path": "нельзя.txt", "content": "x"})),
         Reply::text("понял"),
@@ -417,8 +466,21 @@ async fn real_permission_prompt_is_refused_and_the_turn_goes_on() {
     .await;
     let mut session = Session::start(&stub, "ask").await;
     let turn = input("запиши");
-    let events = session.turn(&turn).await;
-    assert_eq!(marks(&events), [None]);
+    session.transmit(&turn).await;
+    let (request, payload) = session.until_request().await;
+    assert_eq!(payload["tool_name"], "edit");
+    let outcome = session
+        .adapter
+        .deliver_decision(&request, &permission(PermissionBehavior::Deny, None))
+        .await;
+    assert!(
+        matches!(outcome, DecisionOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let command = turn.command_id;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
     assert!(
         summaries(&events)
             .iter()
@@ -432,6 +494,58 @@ async fn real_permission_prompt_is_refused_and_the_turn_goes_on() {
         2,
         "the model saw the refusal and went on"
     );
+    session.close().await;
+}
+
+// Разрешение на один раз: инструмент отработал, повторное решение получает 404 сервера,
+// а правило в базу не записано.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_permission_allowed_once_runs_the_tool_and_saves_no_rule() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "shell",
+            json!({"command": "echo привет", "description": "x"}),
+        ),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("запусти");
+    session.transmit(&turn).await;
+    let mut events = session
+        .until(|event| matches!(event, AdapterEvent::RequestOpened { .. }))
+        .await;
+    let Some(AdapterEvent::RequestOpened {
+        request_id: request,
+        payload,
+        ..
+    }) = events.last().cloned()
+    else {
+        unreachable!();
+    };
+    assert_eq!(payload["command"], "echo привет");
+    let outcome = session
+        .adapter
+        .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
+        .await;
+    assert!(
+        matches!(outcome, DecisionOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let again = session
+        .adapter
+        .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
+        .await;
+    assert!(matches!(again, DecisionOutcome::NotApplied(_)), "{again:?}");
+    let command = turn.command_id;
+    events.extend(
+        session
+            .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+            .await,
+    );
+    assert_eq!(marks(&events), [None]);
+    assert!(finals(&events).iter().any(|text| text.contains("привет")));
     session.close().await;
 }
 

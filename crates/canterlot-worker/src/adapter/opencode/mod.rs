@@ -11,15 +11,17 @@ pub mod permissions;
 pub mod process;
 #[cfg(feature = "synthetic-adapter")]
 pub mod replay;
+pub mod requests;
 pub mod sse;
 pub mod version;
 
 use self::{
-    events::{PendingRequest, RequestKind, RunFailure, RunOutcome, Translated, Translator},
+    events::{PendingRequest, RunFailure, RunOutcome, Translated, Translator},
     http::{Http, HttpError},
     mcp::McpState,
     permissions::PermissionMode,
     process::{DataLayout, LayoutError, ReadyError, ServerProcess},
+    requests::{Intake, Reply, Requests, Settled},
     sse::StreamItem,
 };
 use crate::{
@@ -34,7 +36,7 @@ use crate::{
     config::OpenCodeConfig,
     containment::Containment,
 };
-use canterlot_proto::requests::DecisionPayload;
+use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
@@ -61,9 +63,6 @@ const STREAM_BUFFER: usize = 4096;
 const EXIT_DRAIN: Duration = Duration::from_millis(500);
 const SESSION_TITLE: &str = "canterlot";
 const ERROR_TEXT_BYTES: usize = 4096;
-/// Текст отказа уходит модели: без него сервер оборвал бы весь ход.
-const REFUSAL_MESSAGE: &str =
-    "This request cannot be answered in this session. Continue without it.";
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
 const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
@@ -83,7 +82,7 @@ impl OpenCodeCatalog {
             images: false,
             settings_midsession: false,
             settings_midsession_effort: false,
-            permission_modes: vec!["owner", "bypass"],
+            permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: Vec::new(),
         }
     }
@@ -221,6 +220,7 @@ pub struct OpenCodeAdapter {
     held: HeldTools,
     /// Вызовы, по которым был запрос: пометки CLI у них нет.
     asked: HashSet<String>,
+    requests: Requests,
     refusals: JoinSet<()>,
     session: String,
     mode: PermissionMode,
@@ -254,6 +254,7 @@ impl OpenCodeAdapter {
             lookup: None,
             held: HeldTools::default(),
             asked: HashSet::new(),
+            requests: Requests::default(),
             refusals: JoinSet::new(),
             session: String::new(),
             mode: PermissionMode::Owner,
@@ -639,6 +640,7 @@ impl OpenCodeAdapter {
     fn on_run_ended(&mut self, outcome: RunOutcome) {
         self.held.release_all(&mut self.events);
         self.asked.clear();
+        self.requests.drop_session(&self.session);
         let Some(command) = self.delivery.active.take() else {
             // Запуски без ввода разбирает свой срез: здесь только готовность к вводу.
             self.awaiting_input();
@@ -687,33 +689,60 @@ impl OpenCodeAdapter {
         self.held.release(item, mark, &mut self.events);
     }
 
-    // Карточек пока нет: без ответа запрос держал бы ход вечно, поэтому отказ сразу и
-    // всегда с сообщением. `always` не отправляется: он пишет правило на весь проект.
-    fn refuse(&mut self, request: PendingRequest) {
-        if let Some(item) = &request.item {
-            self.asked.insert(item.clone());
-            self.held.release(item, None, &mut self.events);
-        }
-        self.diagnostic("opencode_request_refused", false);
+    fn turn_running(&self) -> bool {
+        self.delivery.active.is_some()
+    }
+
+    // Ответ без ожидания итога: 404 значит, что сервер уже снял запрос сам. Цикл супервизора
+    // не ждёт сервер.
+    fn send_refusal(&mut self, reply: Reply) {
         let Some(http) = self.http.clone() else {
             return;
         };
         while self.refusals.try_join_next().is_some() {}
         self.refusals.spawn(async move {
-            let (session, id) = (&request.session, &request.id);
-            let _ = match request.kind {
-                RequestKind::Permission => {
-                    let path = format!("/api/session/{session}/permission/{id}/reply");
-                    let body = json!({"decision": "reject", "message": REFUSAL_MESSAGE});
-                    http.post(&path, &body, REQUEST_WAIT).await
-                }
-                RequestKind::Form => {
-                    let path = format!("/api/session/{session}/form/{id}");
-                    http.delete(&path, &[("message", REFUSAL_MESSAGE)], REQUEST_WAIT)
-                        .await
-                }
-            };
+            let _ = reply.send(&http).await;
         });
+    }
+
+    fn on_request(&mut self, request: PendingRequest) {
+        if let Some(item) = &request.item {
+            self.asked.insert(item.clone());
+            self.held.release(item, None, &mut self.events);
+        }
+        let id = request.id.clone();
+        match self.requests.intake(request) {
+            // Вне хода супервизор карточку не откроет: отказ сразу, иначе вызов ждал бы вечно.
+            Intake::Open(..) if !self.turn_running() => {
+                self.diagnostic("request_outside_turn", false);
+                if let Some(reply) = self.requests.refuse(&id, requests::REFUSED) {
+                    self.send_refusal(reply);
+                }
+            }
+            Intake::Open(event, phase) => {
+                self.events.push_back(event);
+                self.events.push_back(AdapterEvent::Phase {
+                    phase,
+                    tool_name: None,
+                    summary: None,
+                });
+            }
+            Intake::Refuse(reply, kind) => {
+                self.diagnostic(kind, false);
+                self.send_refusal(reply);
+            }
+            Intake::Duplicate => {}
+        }
+    }
+
+    // Запрос снял сам сервер: отказ по соседу в пачке или прерывание.
+    fn close_request(&mut self, request_id: String) {
+        if self.turn_running() {
+            self.events.push_back(AdapterEvent::RequestClosed {
+                request_id,
+                reason: "cli_cancelled".into(),
+            });
+        }
     }
 
     fn on_translated(&mut self, item: Translated) {
@@ -730,8 +759,19 @@ impl OpenCodeAdapter {
                     self.held.hold(item, block, event);
                 }
             }
-            Translated::ToolRunning(item) | Translated::ToolDone(item) => self.release_tool(&item),
-            Translated::Request(request) => self.refuse(request),
+            Translated::ToolRunning(item) => self.release_tool(&item),
+            Translated::ToolDone(item) => {
+                self.release_tool(&item);
+                for request_id in self.requests.close_item(&item) {
+                    self.close_request(request_id);
+                }
+            }
+            Translated::Request(request) => self.on_request(request),
+            Translated::RequestSettled(request_id) => {
+                if self.requests.on_settled(&request_id) == Some(Settled::Cleared) {
+                    self.close_request(request_id);
+                }
+            }
             Translated::InboxSeen(id) => {
                 if let Some(command) = self.delivery.unconfirmed
                     && input::message_id(command) == id
@@ -961,7 +1001,7 @@ impl Adapter for OpenCodeAdapter {
             streaming: Support::Supported,
             resume: Support::Supported,
             interrupt: Support::Unavailable("opencode_interrupt"),
-            approvals: Support::Unavailable("opencode_permissions"),
+            approvals: Support::Supported,
             questions: Support::Unavailable("opencode_questions"),
             background_work: Support::Unavailable("opencode_interrupt"),
             interrupt_keeps_process: true,
@@ -1006,12 +1046,56 @@ impl Adapter for OpenCodeAdapter {
         self.transmit_inner(input).await
     }
 
+    // Статус ответа и есть доказательство: запрос живёт в памяти сервера, отвечает он
+    // синхронно. Обрыв не доказывает ничего, а повтора нет: `answered` уже стоит.
     async fn deliver_decision(
         &mut self,
-        _request_id: &str,
-        _decision: &DecisionPayload,
+        request_id: &str,
+        decision: &DecisionPayload,
     ) -> DecisionOutcome {
-        DecisionOutcome::NotApplied("request_not_pending".into())
+        let reply = match self.requests.answer(request_id, decision) {
+            Ok(reply) => reply,
+            Err(reason) => return DecisionOutcome::NotApplied(reason.into()),
+        };
+        let Some(http) = self.http.clone() else {
+            return DecisionOutcome::Undetermined;
+        };
+        match reply.send(&http).await {
+            Ok(()) => {
+                if !self.requests.has_open() {
+                    let running = matches!(
+                        decision,
+                        DecisionPayload::Permission {
+                            behavior: PermissionBehavior::Allow,
+                            ..
+                        }
+                    );
+                    self.events.push_back(AdapterEvent::Phase {
+                        phase: if running {
+                            Phase::RunningTool
+                        } else {
+                            Phase::Generating
+                        },
+                        tool_name: None,
+                        summary: None,
+                    });
+                }
+                DecisionOutcome::Applied(requests::proof(request_id, decision))
+            }
+            Err(HttpError::Status {
+                status: 404 | 409, ..
+            }) => {
+                self.requests.forget(request_id);
+                DecisionOutcome::NotApplied("request_not_pending".into())
+            }
+            Err(_) => DecisionOutcome::Undetermined,
+        }
+    }
+
+    async fn refuse_request(&mut self, request_id: &str, message: &str) {
+        if let Some(reply) = self.requests.refuse(request_id, message) {
+            self.send_refusal(reply);
+        }
     }
 
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {

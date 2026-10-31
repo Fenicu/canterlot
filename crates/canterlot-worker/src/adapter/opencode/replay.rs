@@ -250,6 +250,35 @@ impl Script {
         self
     }
 
+    /// Только первый период работы записи: шаги до его терминального события.
+    pub fn first_run(mut self) -> Self {
+        let terminal = |event: &Value| {
+            event["type"].as_str().is_some_and(|kind| {
+                kind.starts_with("session.execution.") && kind != "session.execution.started"
+            })
+        };
+        let found = self.steps.iter().enumerate().find_map(|(index, step)| {
+            let Step::Emit { events } = step else {
+                return None;
+            };
+            events.iter().position(terminal).map(|event| (index, event))
+        });
+        if let Some((index, event)) = found {
+            self.steps.truncate(index + 1);
+            if let Some(Step::Emit { events }) = self.steps.last_mut() {
+                events.truncate(event + 1);
+            }
+        }
+        self
+    }
+
+    /// Без записанных отказов с этим статусом: адаптер таких повторов не шлёт.
+    pub fn without_replies(mut self, status: u16) -> Self {
+        self.steps
+            .retain(|step| !matches!(step, Step::Expect { reply, .. } if reply.status == status));
+        self
+    }
+
     pub fn push_route(&mut self, method: &str, path: &str, reply: Reply) {
         match self
             .routes
