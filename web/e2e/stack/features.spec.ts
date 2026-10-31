@@ -291,7 +291,7 @@ test.describe('stack: features and security', () => {
     await context.close();
   });
 
-  test('delete_is_refused_while_live_and_reaches_every_open_screen', tag, async ({ browser }) => {
+  test('delete_is_refused_while_live_and_the_menu_stops_an_idle_process_first', tag, async ({ browser }) => {
     test.setTimeout(120_000);
     const stack = getStack();
     const hub = createHubClient(stack);
@@ -307,18 +307,16 @@ test.describe('stack: features and security', () => {
     await chat.goto(`${stack.baseUrl}/c/${id}`);
     await expect(chat.locator('[data-ready]')).toBeVisible({ timeout: 20_000 });
 
+    const refused = await hub.fetch(`/api/v1/conversations/${id}`, { method: 'DELETE' });
+    expect(refused.status).toBe(409);
+    expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('conversation_live');
+
     await list.getByRole('button', { name: `Действия: ${title}` }).click();
     await list.getByRole('button', { name: /^Удалить/ }).click();
-    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
-    await expect(list.getByRole('alert').filter({ hasText: 'Сначала остановите сессию' })).toBeVisible({ timeout: 20_000 });
-    await expect(list.locator(`[data-session="${id}"]`)).toBeVisible();
-
-    await hub.json(`/api/v1/conversations/${id}/stop`, { method: 'POST', body: JSON.stringify({}) });
-    await expect.poll(async () => (await hub.json<{ execution: unknown }>(`/api/v1/conversations/${id}`)).execution, { timeout: 30_000 }).toBeNull();
-
-    await list.getByRole('button', { name: /^Удалить/ }).click();
-    await list.getByRole('dialog', { name: 'Удалить сессию?' }).getByRole('button', { name: 'Удалить', exact: true }).click();
-    await expect(list.locator(`[data-session="${id}"]`)).toHaveCount(0, { timeout: 20_000 });
+    const confirm = list.getByRole('dialog', { name: 'Остановить и удалить сессию?' });
+    await expect(confirm).toContainText('будет остановлен');
+    await confirm.getByRole('button', { name: 'Остановить и удалить' }).click();
+    await expect(list.locator(`[data-session="${id}"]`)).toHaveCount(0, { timeout: 30_000 });
     await expect(chat.getByRole('heading', { name: 'Сессия удалена' })).toBeVisible({ timeout: 20_000 });
 
     const gone = await hub.fetch(`/api/v1/conversations/${id}`);
