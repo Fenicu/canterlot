@@ -1042,7 +1042,11 @@ impl OpenCodeAdapter {
                 self.stuck.reset();
                 return Vec::new();
             }
-            RunOutcome::Interrupted => return Vec::new(),
+            // Период сжатия снят: кадра отказа может и не быть, а карточка ждёт итог.
+            RunOutcome::Interrupted => {
+                self.on_compaction_ended(Some(false), true);
+                return Vec::new();
+            }
         };
         if let Some(fact) = failure::limit_fact(failure, now_ms()) {
             self.events.push_back(AdapterEvent::Limit(fact));

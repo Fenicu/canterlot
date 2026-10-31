@@ -710,8 +710,8 @@ impl Translator {
         )]
     }
 
-    // Сжатие тратит токены отдельно от шагов. Придуманный кадр: `session.compaction.failed`
-    // в записях нет, форма из `SessionEvent.Compaction.Failed`.
+    // Сжатие тратит токены отдельно от шагов. `session.compaction.failed` в записях нет, форма
+    // из `SessionEvent.Compaction.Failed`, L2 проверяет её на настоящем сервере.
     fn on_compaction_ended(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
         if let Some(tokens) = data.get("tokens").filter(|tokens| tokens.is_object()) {
             let model = data

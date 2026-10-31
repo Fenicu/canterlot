@@ -1112,7 +1112,8 @@ fn recorded_todo_list_comes_whole_with_every_status() {
     );
 }
 
-// Придуманный кадр: у потомка живьём `todowrite` не снимался, форма взята у основного агента.
+// Придуманный кадр: форма взята у основного агента, настоящий проверяет L2
+// `real_child_todo_list_goes_to_the_lane_of_its_call`.
 fn child_todo(session: &str) -> Vec<Value> {
     vec![
         json!({"type": "session.tool.input.started", "data": {
@@ -1366,7 +1367,8 @@ fn compaction_is_context_maintenance_and_its_tokens_are_counted() {
     assert_eq!(usage[0].agent, "orchestrator");
 }
 
-// Придуманный кадр: в записях отказа сжатия нет, форма из схемы `SessionEvent.Compaction.Failed`.
+// Придуманный кадр: в записях отказа сжатия нет, форма из схемы `SessionEvent.Compaction.Failed`,
+// настоящий кадр проверяет L2 `real_compaction_without_a_summary_is_reported`.
 fn compaction_failed(error_type: &str, message: &str) -> Value {
     json!({"type": "session.compaction.failed", "data": {
         "sessionID": "ses_root", "reason": "manual", "inputID": "msg_1",

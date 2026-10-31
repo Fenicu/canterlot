@@ -5480,3 +5480,47 @@ async fn children_get_their_rules_at_once() {
     assert_eq!(patched, 4, "the session and every child");
     bench.close(CloseMode::Graceful).await;
 }
+
+// Придуманный кадр: прерывание периода сжатия без `session.compaction.failed`. Карточка не
+// должна ждать итог вечно.
+#[tokio::test]
+async fn interrupted_compaction_is_reported_as_failed() {
+    let mut script = ready();
+    let session = session_of(&script);
+    let recorded = "msg_0190cafe000070008000000000000098";
+    script.steps.push(Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/compact"),
+        reply: Reply {
+            body: Some(json!({"data": {"id": recorded, "type": "compaction"}})),
+            ..Default::default()
+        },
+        bind: [(recorded.to_owned(), "/id".to_owned())].into(),
+    });
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.compaction.started", "data": {
+                "sessionID": session, "reason": "manual", "inputID": recorded}}),
+            json!({"type": "session.execution.interrupted", "data": {
+                "sessionID": session, "reason": "user"}}),
+        ],
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::Accepted
+    );
+    let events = bench
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::Compacted { ok: false })
+    ));
+    bench.close(CloseMode::Graceful).await;
+}

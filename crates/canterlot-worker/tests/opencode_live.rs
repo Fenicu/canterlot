@@ -1830,6 +1830,9 @@ async fn real_compaction_without_a_summary_is_reported() {
         matches!(events.last(), Some(AdapterEvent::Compacted { ok: false })),
         "{events:?}"
     );
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+        .await;
     session.close().await;
 }
 
