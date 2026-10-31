@@ -1,6 +1,7 @@
 // Перевод уведомлений app-server в события адаптера: блоки, фазы, субагенты,
 // расход, картинки и ошибки. Переводчик не паникует и сессию не завершает:
 // неизвестное игнорируется с одной диагностикой на метод за исполнение.
+use super::super::labels::command_label;
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
 use serde_json::Value;
@@ -1619,11 +1620,11 @@ fn command_summary(item: &Value) -> String {
         })
         .unwrap_or_default();
     if actions.is_empty() {
-        cut120(
+        cut120(command_label(
             item.get("command")
                 .and_then(Value::as_str)
                 .unwrap_or_default(),
-        )
+        ))
     } else {
         cut120(&actions)
     }

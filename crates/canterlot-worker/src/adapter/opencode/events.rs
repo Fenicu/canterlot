@@ -5,6 +5,7 @@ use super::{
     super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase},
     requests::GLOBAL_SESSION,
 };
+use crate::adapter::labels::{command_label, path_tail};
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use serde_json::{Value, json};
 use std::{
@@ -260,20 +261,22 @@ pub fn tool_key(message: &str, id: &str) -> String {
 }
 
 fn tool_summary(name: &str, input: &Value) -> String {
-    let argument = [
-        "command",
-        "path",
-        "filePath",
-        "pattern",
-        "query",
-        "url",
-        "description",
-    ]
-    .iter()
-    .find_map(|key| input.get(key).and_then(Value::as_str));
-    let mut summary = match argument {
-        Some(argument) if !argument.is_empty() => format!("{name}: {argument}"),
-        _ => name.to_owned(),
+    let text = |key: &str| input.get(key).and_then(Value::as_str);
+    let argument = if let Some(command) = text("command") {
+        command_label(command).to_owned()
+    } else if let Some(path) = text("path").or_else(|| text("filePath")) {
+        path_tail(path, SUMMARY_BYTES.saturating_sub(name.len() + 2))
+    } else {
+        ["pattern", "query", "url", "description"]
+            .iter()
+            .find_map(|key| text(key))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    let mut summary = if argument.is_empty() {
+        name.to_owned()
+    } else {
+        format!("{name}: {argument}")
     };
     summary.truncate(summary.floor_char_boundary(SUMMARY_BYTES));
     summary

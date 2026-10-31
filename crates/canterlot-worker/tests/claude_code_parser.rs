@@ -791,3 +791,73 @@ fn json_nul_reaches_block_text_from_tool_results_and_text_deltas() {
         "{parsed:?}"
     );
 }
+
+fn tool_final(tool: &str, input: Value) -> (Option<String>, String) {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let id = Uuid::now_v7();
+    let start = json!({"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":id.to_string(),"name":tool}}});
+    let delta = json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":input.to_string()}}});
+    let stop = json!({"type":"stream_event","event":{"type":"content_block_stop","index":0}});
+    let parsed = feed_all(
+        &mut parser,
+        &[start.to_string(), delta.to_string(), stop.to_string()],
+    );
+    finals(&parsed)
+        .into_iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockFinal { summary, text, .. } => Some((summary.clone(), text.clone())),
+            _ => None,
+        })
+        .expect("tool final")
+}
+
+#[test]
+fn command_label_is_its_first_line_without_the_heredoc() {
+    let body = "cat > note.txt <<'EOF'\nсекретный текст\nEOF\nls";
+    let (summary, _) = tool_final("Bash", json!({"command": body}));
+    assert_eq!(summary.as_deref(), Some("Bash: cat > note.txt"));
+    let (summary, _) = tool_final("Bash", json!({"command": "\n  cargo test\n  cargo build"}));
+    assert_eq!(summary.as_deref(), Some("Bash: cargo test"));
+}
+
+#[test]
+fn file_label_keeps_the_end_of_the_path() {
+    let path = format!("/home/owner/{}/parser.rs", "deep/".repeat(40));
+    let (summary, _) = tool_final("Read", json!({"file_path": path}));
+    let summary = summary.unwrap();
+    assert!(summary.starts_with("Read: …"), "{summary}");
+    assert!(summary.ends_with("/parser.rs"), "{summary}");
+    assert!(summary.len() <= 120, "{}", summary.len());
+}
+
+#[test]
+fn tools_without_a_label_now_have_one() {
+    let label = |tool: &str, input: Value| tool_final(tool, input).0.unwrap();
+    assert_eq!(
+        label("Skill", json!({"skill": "superpowers:writing-plans"})),
+        "Skill: superpowers:writing-plans"
+    );
+    assert_eq!(
+        label("ToolSearch", json!({"query": "select:Read"})),
+        "ToolSearch: select:Read"
+    );
+    assert_eq!(
+        label("WebFetch", json!({"url": "https://example.org/a"})),
+        "WebFetch: https://example.org/a"
+    );
+    let question = json!({"questions": [{"question": "Продолжать?", "header": "Проверка"}]});
+    assert_eq!(
+        label("AskUserQuestion", question),
+        "AskUserQuestion: Продолжать?"
+    );
+}
+
+#[test]
+fn call_block_carries_the_whole_input() {
+    let command = format!("printf '{}'\necho done", "я".repeat(200));
+    let (_, text) = tool_final("Bash", json!({"command": command}));
+    assert_eq!(text, command);
+    let (_, text) = tool_final("Read", json!({"file_path": "/tmp/a"}));
+    assert_eq!(text, json!({"file_path": "/tmp/a"}).to_string());
+}

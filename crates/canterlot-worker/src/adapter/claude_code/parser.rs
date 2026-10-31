@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use super::super::labels::{command_label, path_tail};
 use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoStatus};
 
 /// Summary of a tool call: tool name plus the identifying argument.
@@ -659,7 +660,7 @@ impl Parser {
         }
         out.push(Parsed::Event(AdapterEvent::BlockFinal {
             block_id,
-            text: String::new(),
+            text: call_text(&input),
             summary: Some(tool_summary(&tool_name, &input)),
         }));
         out.push(Parsed::ToolCallComplete {
@@ -1070,12 +1071,43 @@ fn tool_result_text(content: &serde_json::Value) -> String {
     }
 }
 
-fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
-    let argument = ["command", "file_path", "pattern", "description"]
+fn tool_argument(tool_name: &str, input: &serde_json::Value) -> String {
+    let text = |key: &str| {
+        input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+    };
+    if let Some(command) = text("command") {
+        return command_label(command).to_owned();
+    }
+    if let Some(path) = text("file_path").or_else(|| text("notebook_path")) {
+        // Двоеточие и пробел после имени инструмента тоже занимают место в сводке.
+        let room = TOOL_CALL_SUMMARY_LIMIT.saturating_sub(tool_name.len() + 2);
+        return path_tail(path, room);
+    }
+    let question = input
+        .pointer("/questions/0/question")
+        .and_then(serde_json::Value::as_str);
+    ["pattern", "skill", "query", "url", "description"]
         .iter()
-        .filter_map(|key| input.get(key).and_then(serde_json::Value::as_str))
-        .next()
-        .unwrap_or_default();
+        .find_map(|key| text(key))
+        .or(question)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// Текст вызова: команда как есть, остальное сырым входом.
+fn call_text(input: &serde_json::Value) -> String {
+    match input.get("command").and_then(serde_json::Value::as_str) {
+        Some(command) => command.to_owned(),
+        None if input.is_null() => String::new(),
+        None => input.to_string(),
+    }
+}
+
+fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
+    let argument = tool_argument(tool_name, input);
     let mut summary = if argument.is_empty() {
         tool_name.to_owned()
     } else {
