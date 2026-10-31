@@ -45,6 +45,7 @@ struct ReadBody {
     deadline: watch::Sender<Option<Instant>>,
     /// Тело загрузки вложения: предел задаёт простой между кадрами, а не всё тело.
     idle: Option<Duration>,
+    waiting: bool,
 }
 
 impl HttpBody for ReadBody {
@@ -57,9 +58,21 @@ impl HttpBody for ReadBody {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let result = self.inner.as_mut().poll_frame(cx);
         if matches!(result, Poll::Ready(None | Some(Err(_)))) || self.inner.is_end_stream() {
+            self.waiting = false;
             self.deadline.send_replace(None);
-        } else if let (Poll::Ready(Some(Ok(_))), Some(idle)) = (&result, self.idle) {
-            self.deadline.send_replace(Some(Instant::now() + idle));
+        } else if let Some(idle) = self.idle {
+            // Простой считается только пока хаб ждёт клиента: обработка кадра на стороне хаба не в счёт.
+            match &result {
+                Poll::Ready(Some(Ok(_))) => {
+                    self.waiting = false;
+                    self.deadline.send_replace(None);
+                }
+                Poll::Pending if !self.waiting => {
+                    self.waiting = true;
+                    self.deadline.send_replace(Some(Instant::now() + idle));
+                }
+                _ => {}
+            }
         }
         result
     }
@@ -79,9 +92,6 @@ async fn body_deadline(
     next: Next,
 ) -> Response {
     let (parts, body) = request.into_parts();
-    state
-        .deadline
-        .send_replace((!body.is_end_stream()).then(|| Instant::now() + state.timeout));
     let upload = parts.method == axum::http::Method::PATCH
         && parts
             .uri
@@ -89,10 +99,15 @@ async fn body_deadline(
             .strip_prefix("/api/v1/attachments/")
             .and_then(|rest| rest.strip_suffix("/content"))
             .is_some_and(|id| !id.contains('/'));
+    // Загрузка взводит предел при первом ожидании клиента: подготовка обработчика в него не входит.
+    state
+        .deadline
+        .send_replace((!upload && !body.is_end_stream()).then(|| Instant::now() + state.timeout));
     let body = Body::new(ReadBody {
         inner: Box::pin(body),
         deadline: state.deadline.clone(),
         idle: upload.then_some(state.timeout),
+        waiting: false,
     });
     let response = next.run(Request::from_parts(parts, body)).await;
     if response.status() == StatusCode::SWITCHING_PROTOCOLS {
@@ -233,4 +248,52 @@ pub(super) async fn serve(
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio_stream::wrappers::ReceiverStream;
+
+    fn poll(body: &mut ReadBody) -> Poll<Option<Result<Frame<axum::body::Bytes>, axum::Error>>> {
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        Pin::new(body).poll_frame(&mut cx)
+    }
+
+    #[tokio::test]
+    async fn upload_idle_is_armed_only_while_waiting_for_the_client() {
+        let (frames, rx) = tokio::sync::mpsc::channel::<io::Result<axum::body::Bytes>>(4);
+        let (deadline, watcher) = watch::channel(None);
+        let mut body = ReadBody {
+            inner: Box::pin(Body::from_stream(ReceiverStream::new(rx))),
+            deadline,
+            idle: Some(Duration::from_secs(1)),
+            waiting: false,
+        };
+        assert!(poll(&mut body).is_pending());
+        assert!(
+            watcher.borrow().is_some(),
+            "waiting for the client arms the limit"
+        );
+        let armed = *watcher.borrow();
+        assert!(poll(&mut body).is_pending());
+        assert_eq!(
+            *watcher.borrow(),
+            armed,
+            "a repeated wait does not extend it"
+        );
+        frames.send(Ok("x".into())).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(matches!(poll(&mut body), Poll::Ready(Some(Ok(_)))));
+        assert!(
+            watcher.borrow().is_none(),
+            "frame handling by the hub is not idle time"
+        );
+        assert!(poll(&mut body).is_pending());
+        assert!(watcher.borrow().is_some());
+        drop(frames);
+        tokio::task::yield_now().await;
+        assert!(matches!(poll(&mut body), Poll::Ready(None)));
+        assert!(watcher.borrow().is_none());
+    }
 }
