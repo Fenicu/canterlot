@@ -20,6 +20,7 @@
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
   import { COLOR_KEYS, COLOR_NAMES } from './colors';
+  import { menuTop } from './menuPlace';
 
   let {
     item,
@@ -27,6 +28,7 @@
     machine = null,
     touch = isTouchPrimary(),
     anchor = 0,
+    anchorTop = 0,
     ongroups,
     onclose,
     ondeleted
@@ -36,6 +38,7 @@
     machine?: MachineRecord | null;
     touch?: boolean;
     anchor?: number;
+    anchorTop?: number;
     ongroups?: () => void;
     onclose: () => void;
     ondeleted?: (id: string) => void;
@@ -85,18 +88,28 @@
   const swatches = COLOR_KEYS.map((key) => ({ key, name: COLOR_NAMES[key] }));
 
   let panel = $state<HTMLElement | null>(null);
+  let content = $state<HTMLElement | null>(null);
   let top = $state(untrack(() => anchor));
   let room = $state<number | null>(null);
   const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
 
-  onMount(() => {
+  function place() {
     const parent = panel?.offsetParent;
-    if (!panel || !(parent instanceof HTMLElement)) return;
+    if (!panel || !content || !(parent instanceof HTMLElement)) return;
     const height = parent.clientHeight;
-    // Окно остаётся под своей строкой и прокручивается внутри; вверх уходит, только если снизу почти нет места.
-    const fits = height - anchor >= Math.min(panel.offsetHeight, height / 3);
-    top = fits ? anchor : Math.max(0, height - panel.offsetHeight);
+    const style = getComputedStyle(panel);
+    const full = content.offsetHeight + parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+    top = menuTop({ full, height, rowTop: anchorTop, rowBottom: anchor });
     room = height - top;
+  }
+
+  onMount(() => {
+    place();
+    if (!panel || !content || typeof ResizeObserver === 'undefined') return;
+    // Предупреждение архива и настройки меняют высоту: окно целиком остаётся на экране.
+    const observer = new ResizeObserver(() => place());
+    observer.observe(content);
+    return () => observer.disconnect();
   });
 
   function dismiss() {
@@ -177,7 +190,7 @@
 </script>
 
 {#snippet fields()}
-  <div class="fields">
+  <div class="fields" bind:this={content}>
     <Field label={touch ? 'Переименовать' : 'Название · Enter сохраняет'}>
       {#snippet children({ id })}
         <input {id} bind:value={title} aria-label="Название" onkeydown={(event) => { if (event.key === 'Enter') { event.preventDefault(); void saveTitle(); } }} onblur={() => void saveTitle()} />

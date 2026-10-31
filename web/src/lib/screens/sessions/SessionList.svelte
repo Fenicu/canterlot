@@ -50,7 +50,7 @@
   let searchOpen = $state(false);
   let results = $state<ListRow[] | null>(null);
   let sheetId = $state('');
-  let sheetTop = $state(0);
+  let sheetRow = $state({ top: 0, bottom: 0 });
   let listNode = $state<HTMLElement | null>(null);
   let groupsOpen = $state(false);
   let menu = $state(false);
@@ -183,7 +183,11 @@
 
   function openSheet(id: string) {
     const row = listNode?.querySelector(`[data-session="${CSS.escape(id)}"]`);
-    if (row && listNode) sheetTop = row.getBoundingClientRect().bottom - listNode.getBoundingClientRect().top;
+    if (row && listNode) {
+      const box = row.getBoundingClientRect();
+      const origin = listNode.getBoundingClientRect().top;
+      sheetRow = { top: box.top - origin, bottom: box.bottom - origin };
+    }
     sheetId = id;
   }
 
@@ -298,7 +302,8 @@
       item={sheetItem}
       groups={groups}
       machine={runtime?.machines.items.get(sheetItem.machine.id) ?? null}
-      anchor={sheetTop}
+      anchor={sheetRow.bottom}
+      anchorTop={sheetRow.top}
       ongroups={() => { sheetId = ''; groupsOpen = true; }}
       onclose={() => sheetId = ''}
       ondeleted={(id) => { if (page.params.id === id) void goto(resolve('sessions')); }}

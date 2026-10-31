@@ -243,6 +243,36 @@ test('delete_while_live_shows_the_refusal_and_keeps_the_session', async ({ page 
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toBeVisible();
 });
 
+test('session_menu_opens_whole_and_above_the_row_at_any_list_position', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально и закрывает весь экран');
+  await page.setViewportSize({ width: 1707, height: 960 });
+  await boot(page);
+  const actions = page.getByRole('button', { name: /^Действия:/ });
+  const last = (await actions.count()) - 1;
+  for (const [width, height] of [[1707, 960], [388, 760], [388, 587]] as const) {
+    await page.setViewportSize({ width, height });
+    for (const index of [0, last]) {
+      await actions.nth(index).scrollIntoViewIfNeeded();
+      await actions.nth(index).click();
+      const report = await page.locator('.popover').evaluate(async (panel) => {
+        await new Promise((done) => setTimeout(done, 250));
+        const box = panel.getBoundingClientRect();
+        const list = document.querySelector('.list')!.getBoundingClientRect();
+        const field = panel.querySelector('input')!.getBoundingClientRect();
+        const covered = document.elementFromPoint(field.left + field.width / 2, field.top + field.height / 2);
+        return { top: box.top - list.top, bottom: list.bottom - box.bottom, scrolled: panel.scrollTop, fieldOnTop: covered === panel.querySelector('input'), overflow: panel.scrollHeight - panel.clientHeight, room: list.height };
+      });
+      expect(report.top).toBeGreaterThanOrEqual(0);
+      expect(report.bottom).toBeGreaterThanOrEqual(-1);
+      expect(report.scrolled).toBe(0);
+      expect(report.fieldOnTop).toBe(true);
+      // Внутренняя прокрутка остаётся только там, где меню выше самого списка.
+      if (report.room > 560) expect(report.overflow).toBeLessThanOrEqual(1);
+      await page.getByRole('button', { name: 'Закрыть' }).click();
+    }
+  }
+});
+
 test('a_session_deleted_on_another_device_disappears_from_the_list_and_the_counts', async ({ page }) => {
   const { api, ids } = await boot(page);
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
