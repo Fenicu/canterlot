@@ -15,6 +15,7 @@
     font-size: var(--fs-sm);
     white-space: nowrap;
   }
+  .pill[data-state='done'] { padding-inline: var(--s0); background: var(--transparent); color: var(--time); }
   .pill[data-state='error'] { background: var(--danger-soft); color: var(--danger); }
   .pill[data-state='running'] { background: var(--accent-soft); color: var(--accent-link); }
 </style>

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
   import type { BlockModel } from '#lib/stores/blocks.js';
-  import { subagentCopy, toolStatusText, toolTiming } from '#lib/timeline/present.js';
+  import { subagentCopy, toolPillText, toolTiming } from '#lib/timeline/present.js';
   import StatusPill from '#lib/timeline/StatusPill.svelte';
   import Icon from '#lib/ui/Icon.svelte';
   let {
@@ -13,7 +13,7 @@
     conversationId
   }: { call: BlockModel; nodes: BlockModel[]; result: BlockModel | null; working: boolean; now: number; conversationId: string } = $props();
   const copy = $derived(subagentCopy(call, nodes, { result, working }));
-  const pill = $derived(toolStatusText({ ...toolTiming(call, result, working), error: copy.state === 'error', now }));
+  const pill = $derived(toolPillText({ ...toolTiming(call, result, working), error: copy.state === 'error', now }));
 </script>
 
 <a class="sub" href={resolve(`/c/${conversationId}/lane/${call.id}` as '/')}>

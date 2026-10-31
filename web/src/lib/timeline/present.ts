@@ -9,6 +9,7 @@ export const TOOL_PAGE_BYTES = 256 * 1024;
 export const TOOL_DOM_CAP = 2 * 1024 * 1024;
 export const REVEAL_LAG_MS = 600;
 const TOOL_MS_BELOW = 100;
+const TOOL_PILL_FROM_MS = 1000;
 /** У Claude Code между началом и финалом вызова только запись в журнал: дольше живут вызовы, которые считают время сами. */
 const TOOL_OWN_TIME_MIN_MS = 100;
 /** Так воркер помечает сводку результата, завершившегося ошибкой. */
@@ -94,6 +95,16 @@ export function toolStatusText(opts: {
     return `${Math.max(1, Math.round(elapsed))} мс`;
   const shown = opts.running ? Math.floor(elapsed / 1000) * 1000 : elapsed;
   return fmt.duration(shown);
+}
+
+/** В строке время важно, пока идёт работа или если её было заметно: сотни миллисекунд ни о чём не говорят. */
+export function toolPillText(opts: Parameters<typeof toolStatusText>[0]): string {
+  const quick =
+    !opts.error &&
+    !opts.running &&
+    opts.finishedAt !== null &&
+    opts.finishedAt - opts.startedAt < TOOL_PILL_FROM_MS;
+  return quick ? "" : toolStatusText(opts);
 }
 
 /** Начало и конец работы инструмента. Вызов у Claude Code финален сразу, время даёт результат. */

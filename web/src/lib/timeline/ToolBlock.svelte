@@ -1,7 +1,7 @@
 <script lang="ts">
   import type { Component } from 'svelte';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
-  import { callCaption, toolError, toolLabel, toolStatusText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import { callCaption, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
@@ -40,7 +40,7 @@
   const timing = $derived(toolTiming(block, result, working));
   const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(toolError(block, result));
-  const status = $derived(toolStatusText({ ...timing, error, now }));
+  const status = $derived(toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
