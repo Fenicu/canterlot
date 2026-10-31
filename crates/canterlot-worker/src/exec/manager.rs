@@ -328,6 +328,13 @@ pub(super) async fn validate(
                 .expect("adapter config lock")
                 .codex
                 .is_none())
+        || (start.harness == "opencode"
+            && shared
+                .adapters
+                .lock()
+                .expect("adapter config lock")
+                .opencode
+                .is_none())
     {
         return Ok(Err("harness_unavailable"));
     }
@@ -802,6 +809,10 @@ impl Actor {
             if let Some(cfg) = adapters.codex {
                 let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("codex"))?;
                 table.insert("codex".into(), cfg);
+            }
+            if let Some(cfg) = adapters.opencode {
+                let cfg = toml::Value::try_from(cfg).map_err(|_| ExecError::Verify("opencode"))?;
+                table.insert("opencode".into(), cfg);
             }
             fs::write(
                 &spec_path,

@@ -63,6 +63,7 @@ async fn fixture(pool: &PgPool, hub: &TestHub) -> (TempDir, WorkerConfig, Worker
             ..Default::default()
         },
         execution: Default::default(),
+        opencode: None,
     };
     (directory, config, store)
 }

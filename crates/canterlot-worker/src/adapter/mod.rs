@@ -9,6 +9,7 @@ pub mod claude_code;
 pub mod cli_version;
 pub mod codex;
 pub mod limit_note;
+pub mod opencode;
 #[cfg(feature = "synthetic-adapter")]
 pub mod synthetic;
 #[cfg(feature = "synthetic-adapter")]
@@ -619,13 +620,14 @@ const CLAUDE_MODELS: &[(&str, &str)] = &[
 ];
 
 pub fn catalog() -> Vec<HarnessCatalog> {
-    catalog_with(None, None, None)
+    catalog_with(None, None, None, None)
 }
 
 pub fn catalog_with(
     cfg: Option<&crate::config::ClaudeCodeConfig>,
     cli: Option<&claude_code::version::CliVersion>,
     codex: Option<&codex::CodexCatalog>,
+    opencode: Option<&opencode::OpenCodeCatalog>,
 ) -> Vec<HarnessCatalog> {
     let mut entries = Vec::new();
     if cfg.is_some() && cli.is_some() {
@@ -661,6 +663,9 @@ pub fn catalog_with(
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
             models: catalog.models(),
         });
+    }
+    if let Some(catalog) = opencode {
+        entries.push(catalog.harness());
     }
     #[cfg(feature = "synthetic-adapter")]
     entries.extend(
@@ -776,6 +781,7 @@ pub fn registry_with_deadline(
             exec_dir: PathBuf::new(),
             claude_code: None,
             codex: None,
+            opencode: None,
         },
     )
 }
@@ -785,10 +791,11 @@ pub struct AdapterContext {
     pub exec_dir: PathBuf,
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
+    pub opencode: Option<crate::config::OpenCodeConfig>,
 }
 
 pub fn known_harness(profile: &str) -> bool {
-    if profile == "claude_code" || profile == "codex" {
+    if matches!(profile, "claude_code" | "codex" | "opencode") {
         return true;
     }
     #[cfg(feature = "synthetic-adapter")]
@@ -814,6 +821,15 @@ pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adap
     if profile == "codex" {
         return ctx.codex.clone().map(|cfg| {
             Box::new(codex::CodexAdapter::new(
+                cfg,
+                ctx.exec_dir.clone(),
+                ctx.transmit_deadline,
+            )) as Box<dyn Adapter>
+        });
+    }
+    if profile == "opencode" {
+        return ctx.opencode.clone().map(|cfg| {
+            Box::new(opencode::OpenCodeAdapter::new(
                 cfg,
                 ctx.exec_dir.clone(),
                 ctx.transmit_deadline,

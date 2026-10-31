@@ -370,6 +370,7 @@ pub struct Worker {
     workdirs: crate::machine::workdirs::WorkdirSuggester,
     claude_version: Option<crate::adapter::claude_code::version::CliVersion>,
     codex_catalog: Option<crate::adapter::codex::CodexCatalog>,
+    opencode_catalog: Option<crate::adapter::opencode::OpenCodeCatalog>,
 }
 
 type MetricsFuture = Pin<
@@ -477,6 +478,7 @@ impl Worker {
             workdirs,
             claude_version: None,
             codex_catalog: None,
+            opencode_catalog: None,
             #[cfg(feature = "fault-injection")]
             probe: Default::default(),
             config,
@@ -574,7 +576,25 @@ impl Worker {
             sender,
             self.config.attachments.clone(),
         );
-        manager.configure_adapters(self.config.claude_code.clone(), self.config.codex.clone());
+        if let Some(cfg) = &self.config.opencode {
+            self.opencode_catalog =
+                match crate::adapter::opencode::discover(cfg, &self.config.data_dir).await {
+                    Ok(catalog) => Some(catalog),
+                    Err(reason) => {
+                        tracing::warn!(
+                            kind = "opencode_unavailable",
+                            ?reason,
+                            "OpenCode omitted from catalog"
+                        );
+                        None
+                    }
+                };
+        }
+        manager.configure_adapters(
+            self.config.claude_code.clone(),
+            self.config.codex.clone(),
+            self.config.opencode.clone(),
+        );
         manager
             .startup_verify()
             .await
@@ -1006,6 +1026,7 @@ impl Worker {
             let config = self.config.clone();
             let cli = self.claude_version.clone();
             let codex = self.codex_catalog.clone();
+            let opencode = self.opencode_catalog.clone();
             Some(ControlUp {
                 msg: Some(control_up::Msg::MachineReport(
                     tokio::task::spawn_blocking(move || {
@@ -1015,6 +1036,7 @@ impl Worker {
                                 config.claude_code.as_ref(),
                                 cli.as_ref(),
                                 codex.as_ref(),
+                                opencode.as_ref(),
                             ),
                         )
                     })

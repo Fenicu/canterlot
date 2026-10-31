@@ -486,6 +486,7 @@ impl Pilot {
                 },
                 ..Default::default()
             },
+            opencode: None,
         };
         let api = TestClient::over_socket(hub.http_addr()).await.as_owner();
         let mut pilot = Self {

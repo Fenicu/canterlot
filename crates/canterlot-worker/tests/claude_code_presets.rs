@@ -430,6 +430,7 @@ impl RestartHarness {
                 ..Default::default()
             }),
             codex: None,
+            opencode: None,
         };
         let mut adapter =
             canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
@@ -858,6 +859,7 @@ for line in sys.stdin:
             ..Default::default()
         }),
         codex: None,
+        opencode: None,
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();
@@ -940,6 +942,7 @@ sys.stdout.flush()
             ..Default::default()
         }),
         codex: None,
+        opencode: None,
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     adapter.set_stop_grace(Duration::from_millis(200));
@@ -1006,6 +1009,7 @@ for line in sys.stdin:
             ..Default::default()
         }),
         codex: None,
+        opencode: None,
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();

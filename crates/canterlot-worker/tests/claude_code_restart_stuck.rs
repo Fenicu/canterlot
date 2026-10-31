@@ -93,6 +93,7 @@ async fn restart_is_bounded_when_stdout_outlives_the_killed_cli() {
             ..Default::default()
         }),
         codex: None,
+        opencode: None,
     };
     let mut adapter = canterlot_worker::adapter::registry_with("claude_code", &context).unwrap();
     let group = TreeContainment::new().unwrap();

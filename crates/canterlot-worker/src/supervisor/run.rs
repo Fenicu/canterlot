@@ -1083,6 +1083,7 @@ impl Supervisor {
             exec_dir: self.exec_dir.clone(),
             claude_code: self.spec.claude_code.clone(),
             codex: self.spec.codex.clone(),
+            opencode: self.spec.opencode.clone(),
         };
         let Some(mut adapter) = registry_with(&start.profile, &context) else {
             tracing::warn!(

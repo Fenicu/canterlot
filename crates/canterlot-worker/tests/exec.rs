@@ -516,8 +516,11 @@ async fn start_execution_spawns_supervisor_and_relays_running() {
 #[tokio::test]
 async fn start_with_configured_adapters_reaches_running() {
     let mut env = Env::new().await;
-    env.manager()
-        .configure_adapters(Some(Default::default()), Some(Default::default()));
+    env.manager().configure_adapters(
+        Some(Default::default()),
+        Some(Default::default()),
+        Some(Default::default()),
+    );
     env.hub_session();
     let start = start_command(env.execution, 1, env.conversation, "synthetic", &env.work);
     env.send(start).await;

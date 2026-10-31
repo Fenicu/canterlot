@@ -145,6 +145,7 @@ impl Fixture {
                 ..Default::default()
             },
             execution: Default::default(),
+            opencode: None,
         };
         let mut fixture = Self {
             pool: pool.clone(),

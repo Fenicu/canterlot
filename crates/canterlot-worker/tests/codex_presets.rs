@@ -205,6 +205,7 @@ impl PresetHarness {
                 home_policy: TempDirPolicy::Allow,
                 ..Default::default()
             }),
+            opencode: None,
         };
         let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
         let group = TreeContainment::new().unwrap();

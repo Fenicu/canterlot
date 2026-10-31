@@ -1,9 +1,11 @@
 pub const HARNESS_PROVIDERS: &[(&str, &str)] = &[
     ("claude_code", "claude"),
     ("codex", "codex"),
+    ("opencode", "opencode"),
     ("synthetic", "claude"),
     ("synthetic-exit-on-interrupt", "claude"),
     ("synthetic-codex", "codex"),
+    ("synthetic-opencode", "opencode"),
 ];
 
 pub fn provider_of(harness: &str) -> Option<&'static str> {

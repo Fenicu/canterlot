@@ -300,6 +300,12 @@ allow_paid_model_poll = false
 executable = "codex" # Либо абсолютный путь к CLI.
 rate_limits_poll_interval_s = 300
 # home_dir = "/home/user/.local/state/canterlot-worker/codex-home" # CODEX_HOME canterlot для пресетов, кроме «Как у владельца»; по умолчанию <data_dir>/codex-home
+
+# Необязательная таблица: без неё харнесс OpenCode не показывается и не запускается.
+# [opencode]
+# executable = "opencode" # Либо абсолютный путь к CLI.
+# data_root = "/home/user/.local/state/canterlot-worker/opencode" # По умолчанию <data_dir>/opencode.
+# refuse_paths = [] # Каталоги, где базу держать нельзя, сверх данных владельца.
 ```
 
 Замените `/home/user` своим домашним каталогом; `~` внутри TOML не раскрывается.
@@ -334,6 +340,10 @@ rate_limits_poll_interval_s = 300
 scripts/codex-schema-check.sh
 CANTERLOT_CODEX_SMOKE=1 cargo test -p canterlot-worker --all-features --test codex_e2e -- --nocapture
 ```
+
+Адаптер OpenCode (`src/adapter/opencode`) говорит с `opencode serve --stdio --port 0` по HTTP и SSE на loopback, один сервер на исполнение. Харнесс спрятан за таблицей `[opencode]`: без неё каталог, реестр и оба других адаптера работают как раньше. Ключи таблицы: `executable` (по умолчанию `opencode` из `PATH`), `data_root` — корень данных canterlot (по умолчанию `<data_dir>/opencode`, внутри `data/`, `state/`, `cache/`, `tmp/`) и `refuse_paths` — каталоги, где базу держать нельзя; каталог `opencode` в данных владельца запрещён всегда: управляемая служба на общей базе подхватывает чужие живые исполнения. Минимум и проверенная версия 2.1.4, более новая допускается с диагностикой `untested_cli_version`, ветка 1.x не поддерживается. Даже `opencode --version` заводит каталоги и журнал, поэтому проверка идёт с теми же каталогами XDG, что и сервер. Окружение собирается заново: от воркера берутся только `PATH`, `HOME`, `USER`, `LANG`, `TERM` и `XDG_CONFIG_HOME`.
+
+С feature `synthetic-adapter` собирается `fake-opencode`: настоящий HTTP и SSE на loopback по сценарию `--script`, собранному из записей `docs/stage0/evidence/opencode` (`adapter::opencode::replay`). Запуск и тесты идут через тот же путь, что у настоящего CLI: `--version`, `serve --stdio --port 0`, пароль, строка готовности, выход по EOF stdin и код 130 по SIGTERM.
 
 Сопровождение добавляет свой MCP-сервер для разрешений, вопросов, чтения лимитов и работы с пресетами: `canterlot_presets_list`, `canterlot_preset_save` и `canterlot_preset_apply` вызывают хаб унарным `WorkerData.AgentCall` и действуют только на свою сессию (у Codex набор состоит из лимитов и пресетов, `approve` нет). SIGINT завершает ход и процесс CLI с исходом `user_stop`; продолжение запускает новое исполнение с `--resume` и тем же нативным ID. Отсутствие авторизации даёт `auth_required`, несовпадение ID или несовместимая версия дают `cli_incompatible`, недоступность canterlot MCP даёт `start_failed`.
 

@@ -165,6 +165,7 @@ pub(crate) struct ExecInfo {
 pub(crate) struct AdapterConfig {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
+    pub opencode: Option<crate::config::OpenCodeConfig>,
 }
 
 pub(crate) struct Shared {
@@ -394,9 +395,13 @@ impl ExecutionManager {
         &self,
         claude_code: Option<crate::config::ClaudeCodeConfig>,
         codex: Option<crate::config::CodexConfig>,
+        opencode: Option<crate::config::OpenCodeConfig>,
     ) {
-        *self.shared.adapters.lock().expect("adapter config lock") =
-            AdapterConfig { claude_code, codex };
+        *self.shared.adapters.lock().expect("adapter config lock") = AdapterConfig {
+            claude_code,
+            codex,
+            opencode,
+        };
     }
 
     /// Клиент вызовов инструментов агента; `None` на время разрыва.

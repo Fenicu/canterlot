@@ -51,6 +51,8 @@ pub struct SupervisorSpec {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     #[serde(default)]
     pub codex: Option<crate::config::CodexConfig>,
+    #[serde(default)]
+    pub opencode: Option<crate::config::OpenCodeConfig>,
 }
 
 fn load(exec_dir: &Path) -> Result<(SupervisorSpec, Vec<u8>), SupervisorError> {

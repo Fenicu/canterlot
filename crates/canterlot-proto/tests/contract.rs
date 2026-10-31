@@ -1149,6 +1149,8 @@ fn provider_table_maps_harnesses() {
         ["claude_code", "synthetic", "synthetic-exit-on-interrupt"]
     );
     assert_eq!(harnesses_of("codex"), ["codex", "synthetic-codex"]);
+    assert_eq!(provider_of("opencode"), Some("opencode"));
+    assert_eq!(harnesses_of("opencode"), ["opencode", "synthetic-opencode"]);
     assert!(harnesses_of("unknown").is_empty());
     for &(harness, provider) in HARNESS_PROVIDERS {
         assert_eq!(provider_of(harness), Some(provider));

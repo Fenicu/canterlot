@@ -30,6 +30,8 @@ pub struct WorkerConfig {
     pub claude_code: Option<ClaudeCodeConfig>,
     #[serde(default)]
     pub codex: Option<CodexConfig>,
+    #[serde(default)]
+    pub opencode: Option<OpenCodeConfig>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -397,6 +399,27 @@ fn default_codex_rate_limits_poll_interval_s() -> u64 {
 
 fn default_codex_executable() -> PathBuf {
     PathBuf::from("codex")
+}
+
+/// Таблица `[opencode]`: без неё харнесс не показывается и не запускается.
+#[derive(Clone, Debug, serde::Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct OpenCodeConfig {
+    pub executable: PathBuf,
+    /// Корень данных canterlot; по умолчанию <data_dir>/opencode. База владельца туда не попадает.
+    pub data_root: Option<PathBuf>,
+    /// Каталоги, в которых нельзя держать базу, сверх `opencode` в данных владельца.
+    pub refuse_paths: Vec<PathBuf>,
+}
+
+impl Default for OpenCodeConfig {
+    fn default() -> Self {
+        Self {
+            executable: PathBuf::from("opencode"),
+            data_root: None,
+            refuse_paths: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]

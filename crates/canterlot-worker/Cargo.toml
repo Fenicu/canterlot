@@ -9,6 +9,10 @@ publish.workspace = true
 synthetic-adapter = []
 fault-injection = ["canterlot-hub/fault-injection"]
 
+[[bin]]
+name = "fake-opencode"
+required-features = ["synthetic-adapter"]
+
 [dependencies]
 async-trait = "0.1.92"
 base64 = "0.23.1"
