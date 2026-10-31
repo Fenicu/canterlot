@@ -203,6 +203,7 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                 .get("required")
                 .and_then(Value::as_bool)
                 .unwrap_or(false),
+            field_names: Vec::new(),
         },
     };
     Ok(Frame::Event(event))
@@ -342,6 +343,7 @@ impl SyntheticAdapter {
                             kind: "invalid_event",
                             event_type: "invalid_frame".into(),
                             required: true,
+                            field_names: Vec::new(),
                         })
                     });
                 if sender.send((generation, frame)).await.is_err() {

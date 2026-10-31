@@ -407,6 +407,7 @@ fn exec_records_roundtrip() {
                 execution_id: "execution".into(),
                 kind: "unknown_optional_event".into(),
                 event_type: "future".into(),
+                ..Default::default()
             }),
         ),
     ];
@@ -1571,4 +1572,25 @@ fn compaction_records_keep_their_numbers() {
     assert_eq!(TodoStatus::Cancelled as i32, 4);
     let debug = format!("{:?}", command::Kind::CompactSession(CompactSession {}));
     assert!(debug.starts_with("CompactSession"));
+}
+
+#[test]
+fn adapter_diagnostic_field_names_are_additive() {
+    use canterlot_proto::worker::v1::AdapterDiagnostic;
+    let old = AdapterDiagnostic {
+        execution_id: "execution".into(),
+        kind: "unknown_optional_event".into(),
+        event_type: "future".into(),
+        ..Default::default()
+    };
+    let old_wire = old.encode_to_vec();
+    let decoded = AdapterDiagnostic::decode(old_wire.as_slice()).unwrap();
+    assert!(decoded.field_names.is_empty());
+    let new = AdapterDiagnostic {
+        field_names: vec!["alpha".into(), "beta".into()],
+        ..old.clone()
+    };
+    assert_roundtrip(new.clone());
+    // Новое поле четвёртое: старый разбор пропускает его, а старые записи читаются без него.
+    assert_eq!(&new.encode_to_vec()[..old_wire.len()], old_wire.as_slice());
 }

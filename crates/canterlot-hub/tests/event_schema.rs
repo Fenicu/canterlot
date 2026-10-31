@@ -322,6 +322,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         Body::AdapterDiagnostic(AdapterDiagnostic {
             execution_id: run.execution.execution_id.to_string(),
             kind: "test".into(),
+            field_names: vec!["alpha".into(), "beta".into()],
             ..Default::default()
         }),
     ])

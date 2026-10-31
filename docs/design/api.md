@@ -401,6 +401,7 @@ Ingest ограничивает свободный текст до записи 
 | `BlockStarted.tool_name`, `PhaseChanged.tool_name` | 128 |
 | `BlockStarted.agent`, `BlockStarted.model`, `RunFinished.usage[].agent/model` | 128 |
 | `AdapterDiagnostic.kind`, `AdapterDiagnostic.event_type` | 128 |
+| `AdapterDiagnostic.field_names[]`, не больше 32 имён | 64 |
 | `BlockIncomplete.reason`, `JournalClosed.reason`, `ExecutionState.outcome` | 1024 |
 
 Сопровождение подрезает эти поля заранее, до 4096 байт у сводок и 512 у имён: запись не может быть больше пакета SJ. Поле `payload` события `request_opened` не больше 256 КиБ JSON; метка `truncated: true` означает, что показано превью, а решение относится к полному входу.

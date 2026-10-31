@@ -120,6 +120,7 @@ fn failed_startup_status_is_an_optional_diagnostic() {
             kind,
             event_type,
             required,
+            ..
         } => {
             assert_eq!(kind, "mcp_unavailable");
             assert_eq!(event_type, "mcp_unavailable");

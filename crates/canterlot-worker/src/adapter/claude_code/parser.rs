@@ -9,6 +9,7 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
+use super::super::frame_names::object_field_names;
 use super::super::labels::{command_label, path_tail};
 use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoStatus};
 
@@ -266,7 +267,13 @@ impl Parser {
 
     /// Неизвестное имя кадра: одна необязательная диагностика на имя, не больше
     /// `MAX_UNKNOWN_TYPES` имён, сессию и ход это не трогает.
-    fn note_unknown(&mut self, out: &mut Vec<Parsed>, scope: &str, kind: Option<&str>) {
+    fn note_unknown(
+        &mut self,
+        out: &mut Vec<Parsed>,
+        scope: &str,
+        kind: Option<&str>,
+        shape: Option<&serde_json::Value>,
+    ) {
         let name = match kind.filter(|kind| !kind.is_empty()) {
             Some(kind) if scope.is_empty() => kind.to_owned(),
             Some(kind) => format!("{scope}/{kind}"),
@@ -280,6 +287,7 @@ impl Parser {
             kind: "unknown_event",
             event_type: name,
             required: false,
+            field_names: shape.map(object_field_names).unwrap_or_default(),
         }));
     }
 
@@ -413,6 +421,7 @@ impl Parser {
                 kind: "unparsed_line",
                 event_type: String::new(),
                 required: false,
+                field_names: Vec::new(),
             })];
         };
         let Some(frame) = value.as_object() else {
@@ -432,7 +441,7 @@ impl Parser {
             }
             Some("control_response") => self.feed_control_response(&value, &mut out),
             Some(kind) if !IGNORED_FRAMES.contains(&kind) => {
-                self.note_unknown(&mut out, "", Some(kind));
+                self.note_unknown(&mut out, "", Some(kind), Some(&value));
                 if out.is_empty() {
                     out.push(Parsed::Ignored);
                 }
@@ -476,7 +485,7 @@ impl Parser {
                 }
             }
             Some(kind) if !IGNORED_SYSTEM.contains(&kind) => {
-                self.note_unknown(out, "system", Some(kind));
+                self.note_unknown(out, "system", Some(kind), Some(value));
                 if out.is_empty() {
                     out.push(Parsed::Ignored);
                 }
@@ -575,7 +584,7 @@ impl Parser {
                             summary: None,
                         }));
                     }
-                    other => self.note_unknown(out, "content_block", other),
+                    other => self.note_unknown(out, "content_block", other, block),
                 }
             }
             Some("content_block_delta") => {
@@ -625,7 +634,7 @@ impl Parser {
                         }
                     }
                     Some(kind) if IGNORED_DELTAS.contains(&kind) => {}
-                    other => self.note_unknown(out, "delta", other),
+                    other => self.note_unknown(out, "delta", other, delta),
                 }
             }
             Some("content_block_stop") => {
@@ -699,7 +708,7 @@ impl Parser {
                 }
             }
             Some(kind) if IGNORED_STREAM_EVENTS.contains(&kind) => {}
-            other => self.note_unknown(out, "stream_event", other),
+            other => self.note_unknown(out, "stream_event", other, event),
         }
     }
 
@@ -759,7 +768,7 @@ impl Parser {
                 Some("thinking") => {
                     self.subagent_text(lane, BlockKind::Reasoning, text("thinking"), out);
                 }
-                other => self.note_unknown(out, "assistant_block", other),
+                other => self.note_unknown(out, "assistant_block", other, Some(block)),
             }
         }
     }
@@ -903,7 +912,7 @@ impl Parser {
             let kind = block.get("type").and_then(serde_json::Value::as_str);
             if kind != Some("tool_result") {
                 if !kind.is_some_and(|kind| IGNORED_USER_BLOCKS.contains(&kind)) {
-                    self.note_unknown(out, "user_block", kind);
+                    self.note_unknown(out, "user_block", kind, Some(block));
                 }
                 continue;
             }
@@ -972,6 +981,7 @@ impl Parser {
                         kind: "todo_lane_unknown",
                         event_type: String::new(),
                         required: false,
+                        field_names: Vec::new(),
                     }));
                     return;
                 }

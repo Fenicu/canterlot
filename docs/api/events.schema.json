@@ -1675,6 +1675,14 @@
             "event_type": {
               "type": "string",
               "maxLength": 128
+            },
+            "field_names": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 64
+              },
+              "maxItems": 32
             }
           },
           "required": [

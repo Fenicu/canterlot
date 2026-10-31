@@ -8,6 +8,7 @@ pub mod canterlot_mcp;
 pub mod claude_code;
 pub mod cli_version;
 pub mod codex;
+pub mod frame_names;
 pub mod held_tool;
 pub mod labels;
 pub mod limit_note;
@@ -478,6 +479,8 @@ pub enum AdapterEvent {
         kind: &'static str,
         event_type: String,
         required: bool,
+        /// Имена ключей неизвестного кадра, без значений; см. `frame_names`.
+        field_names: Vec<String>,
     },
     ProcessExited {
         code: Option<i32>,

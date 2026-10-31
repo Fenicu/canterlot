@@ -1,12 +1,16 @@
 //! Запросы сервера Codex: разрешения на команды и правки, структурированные
 //! вопросы, elicitation MCP и остальные методы. Согласие строится только из явного
 //! решения владельца: авто-allow нет, запрос без карточки получает отказ.
+use super::super::frame_names::object_field_names;
 use super::super::{AdapterEvent, valid_decision};
 use super::rpc::{RpcClient, RpcId};
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+
+/// Сколько разных неподдержанных методов получает диагностику за исполнение.
+const MAX_UNSUPPORTED_METHODS: usize = 64;
 
 pub struct RouteCtx<'a> {
     pub agent: &'a str,
@@ -298,6 +302,7 @@ impl Requests {
                     kind: "unsupported_elicitation",
                     event_type: elicitation_mode(params).to_owned(),
                     required: false,
+                    field_names: Vec::new(),
                 });
                 Intake::Reply(RpcClient::result(&id, elicitation_decline()))
             }
@@ -338,11 +343,14 @@ impl Requests {
                 })
             }
             _ => {
-                if self.seen_unsupported.insert(method.to_owned()) {
+                if self.seen_unsupported.len() < MAX_UNSUPPORTED_METHODS
+                    && self.seen_unsupported.insert(method.to_owned())
+                {
                     self.diagnostics.push(AdapterEvent::Diagnostic {
                         kind: "unsupported_server_request",
                         event_type: method.to_owned(),
                         required: false,
+                        field_names: object_field_names(params),
                     });
                 }
                 Intake::Reply(RpcClient::error(&id, -32601, "unsupported server request"))

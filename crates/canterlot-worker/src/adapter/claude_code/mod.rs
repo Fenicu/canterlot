@@ -115,6 +115,7 @@ impl ClaudeCodeAdapter {
             kind,
             event_type: kind.into(),
             required,
+            field_names: Vec::new(),
         });
     }
 
@@ -756,6 +757,7 @@ impl ClaudeCodeAdapter {
                     kind,
                     event_type: kind.into(),
                     required: false,
+                    field_names: Vec::new(),
                 },
             );
         }

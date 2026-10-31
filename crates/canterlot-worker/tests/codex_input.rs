@@ -261,6 +261,7 @@ fn merged_turn_id_stops_the_queue() {
             kind,
             event_type,
             required,
+            ..
         } => {
             assert_eq!(kind, "turn_merged");
             assert_eq!(event_type, "turn_merged");

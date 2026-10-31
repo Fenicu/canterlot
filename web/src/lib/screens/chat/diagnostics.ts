@@ -23,6 +23,8 @@ export interface DiagnosticsData {
 		kind: string;
 		/** Причина от адаптера, без текста разговора. */
 		detail?: string;
+		/** Имена ключей неизвестного кадра, без значений. */
+		fields?: string[];
 		correlation_id?: string;
 		seq?: string;
 	}>;
@@ -54,7 +56,8 @@ export function buildDiagnosticsReport(data: DiagnosticsData): string {
 		diagnosticEvents: (data.diagnosticEvents ?? []).map((e) => ({
 			kind: e.detail ? `${e.kind}: ${e.detail}` : e.kind,
 			correlation_id: e.correlation_id ?? null,
-			seq: e.seq ?? null
+			seq: e.seq ?? null,
+			fields: e.fields?.length ? e.fields.join(', ') : null
 		}))
 	};
 
@@ -74,6 +77,6 @@ export function buildDiagnosticsReport(data: DiagnosticsData): string {
 		`versions.build: ${safe.versions.build}`,
 		`versions.protocol: ${safe.versions.protocol}`,
 		`diagnosticEvents:`,
-		...safe.diagnosticEvents.map((e) => `  - ${e.kind} (${e.correlation_id ?? 'no-corr-id'}) [seq: ${e.seq ?? 'none'}]`)
+		...safe.diagnosticEvents.map((e) => `  - ${e.kind} (${e.correlation_id ?? 'no-corr-id'}) [seq: ${e.seq ?? 'none'}]${e.fields ? ` fields: ${e.fields}` : ''}`)
 	].join('\n');
 }

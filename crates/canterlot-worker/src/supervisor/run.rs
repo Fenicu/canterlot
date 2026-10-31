@@ -46,7 +46,8 @@ use crate::{
     adapter::{
         Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, CompactOutcome,
         DecisionOutcome, InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource,
-        Phase, SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, registry_with,
+        Phase, SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, frame_names,
+        registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -209,6 +210,26 @@ fn snake<T: serde::Serialize>(value: &T) -> String {
         .unwrap_or_default()
 }
 
+fn diagnostic_fact(
+    execution_id: String,
+    kind: &str,
+    event_type: &str,
+    required: bool,
+    field_names: &[String],
+) -> AdapterDiagnostic {
+    AdapterDiagnostic {
+        execution_id,
+        kind: if required {
+            "unknown_required_event"
+        } else {
+            "unknown_optional_event"
+        }
+        .into(),
+        event_type: diagnostic_event_type(kind, event_type),
+        field_names: frame_names::field_names(field_names.iter().map(String::as_str)),
+    }
+}
+
 /// Настоящее имя кадра хранится только там, где адаптер кладёт его в `event_type`.
 fn diagnostic_event_type(kind: &str, event_type: &str) -> String {
     safe_event_type(
@@ -230,16 +251,7 @@ fn diagnostic_event_type(kind: &str, event_type: &str) -> String {
 }
 
 fn safe_event_type(raw: &str) -> String {
-    raw.chars()
-        .take(64)
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
+    frame_names::safe_name(raw)
 }
 
 fn input_text(command: &canterlot_proto::worker::v1::Command) -> Option<String> {
@@ -948,6 +960,7 @@ impl Supervisor {
                     execution_id: self.spec.execution_id.to_string(),
                     kind: "capability_missing".into(),
                     event_type: "todo_dropped".into(),
+                    ..Default::default()
                 }))?;
             }
             return Ok(());
@@ -982,6 +995,7 @@ impl Supervisor {
                 execution_id: self.spec.execution_id.to_string(),
                 kind: "capability_missing".into(),
                 event_type: "media_dropped".into(),
+                ..Default::default()
             }))?;
             return Ok(());
         }
@@ -1195,6 +1209,7 @@ impl Supervisor {
                         execution_id: self.spec.execution_id.to_string(),
                         kind: "start_failed".into(),
                         event_type: safe_event_type(reason),
+                        ..Default::default()
                     }))?;
                 }
                 let cause = match other {
@@ -1753,6 +1768,7 @@ impl Supervisor {
                         execution_id: self.spec.execution_id.to_string(),
                         kind: "capability_missing".into(),
                         event_type: "limit_fact_dropped".into(),
+                        ..Default::default()
                     }))?;
                 } else {
                     let body = match fact {
@@ -1804,18 +1820,15 @@ impl Supervisor {
                 kind,
                 event_type,
                 required,
-                ..
+                field_names,
             } => {
-                self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
-                    execution_id: self.spec.execution_id.to_string(),
-                    kind: if required {
-                        "unknown_required_event"
-                    } else {
-                        "unknown_optional_event"
-                    }
-                    .into(),
-                    event_type: diagnostic_event_type(kind, &event_type),
-                }))?;
+                self.record(Body::AdapterDiagnostic(diagnostic_fact(
+                    self.spec.execution_id.to_string(),
+                    kind,
+                    &event_type,
+                    required,
+                    &field_names,
+                )))?;
                 if required {
                     self.begin_stop(
                         match kind {
@@ -1916,6 +1929,7 @@ impl Supervisor {
             execution_id: self.spec.execution_id.to_string(),
             kind: "unknown_optional_event".into(),
             event_type: event_type.into(),
+            ..Default::default()
         }))?;
         if let Some(adapter) = self.adapter.as_mut() {
             adapter.refuse_request(request_id, message).await;
@@ -2035,6 +2049,7 @@ impl Supervisor {
                 execution_id: self.spec.execution_id.to_string(),
                 kind: "capability_missing".into(),
                 event_type: "session_stuck_dropped".into(),
+                ..Default::default()
             }))?;
             return Ok(());
         }
@@ -2210,6 +2225,7 @@ impl Supervisor {
                 execution_id: self.spec.execution_id.to_string(),
                 kind: "containment_survivors".into(),
                 event_type: String::new(),
+                ..Default::default()
             }))?;
         }
         Ok(())
@@ -2317,6 +2333,34 @@ mod tests {
         ] {
             assert_eq!(diagnostic_event_type(kind, name), stored, "{kind}");
         }
+    }
+
+    #[test]
+    fn journal_fact_carries_only_bounded_names() {
+        let raw: Vec<String> = (0..50)
+            .map(|n| format!("key{n:02}"))
+            .chain(["bad key!".to_owned(), "x".repeat(200)])
+            .collect();
+        let fact = diagnostic_fact("e".into(), "unknown_event", "future", false, &raw);
+        assert_eq!(fact.kind, "unknown_optional_event");
+        assert_eq!(fact.event_type, "future");
+        assert_eq!(fact.field_names.len(), 32);
+        assert!(fact.field_names.windows(2).all(|pair| pair[0] < pair[1]));
+        assert!(
+            fact.field_names
+                .iter()
+                .all(|name| name.chars().count() <= 64)
+        );
+        assert!(
+            fact.field_names
+                .iter()
+                .all(|name| { name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') })
+        );
+        assert!(
+            diagnostic_fact("e".into(), "k", "k", true, &[])
+                .field_names
+                .is_empty()
+        );
     }
 
     #[test]

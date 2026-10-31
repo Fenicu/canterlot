@@ -372,6 +372,7 @@ impl Outbox {
                 kind: "turn_merged",
                 event_type: "turn_merged".into(),
                 required: true,
+                field_names: Vec::new(),
             });
         }
         self.active = Some(ActiveTurn {

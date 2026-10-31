@@ -1420,3 +1420,57 @@ fn compaction_of_a_child_is_not_reported() {
     event["data"]["sessionID"] = "ses_a".into();
     assert!(translator.feed(&event).is_empty());
 }
+
+#[test]
+fn unknown_events_carry_data_names_and_never_values() {
+    let secret = "sk-live-SECRET-0123456789";
+    let mut translator = Translator::new("ses_a", HashMap::new());
+    let event = json!({"type": "session.brand.new", "data": {
+        "sessionID": "ses_a", "apiKey": secret, "nested": {"password": secret}, "list": [secret],
+    }});
+    let out = translator.feed(&event);
+    let [
+        Translated::Event(AdapterEvent::Diagnostic {
+            kind: "unknown_event",
+            event_type,
+            required: false,
+            field_names,
+        }),
+    ] = out.as_slice()
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(event_type, "session.brand.new");
+    assert_eq!(field_names, &["apiKey", "list", "nested", "sessionID"]);
+    assert!(!format!("{event_type} {field_names:?}").contains(secret));
+
+    let terminal = json!({"type": "session.execution.paused", "data": {
+        "sessionID": "ses_a", "reason": secret,
+    }});
+    let out = translator.feed(&terminal);
+    let [
+        Translated::Event(AdapterEvent::Diagnostic {
+            required: true,
+            field_names,
+            ..
+        }),
+    ] = out.as_slice()
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(field_names, &["reason", "sessionID"]);
+
+    let typeless = json!({"data": {"sessionID": "ses_a"}, "token": secret});
+    let out = translator.feed(&typeless);
+    let [
+        Translated::Event(AdapterEvent::Diagnostic {
+            kind: "unparsed_event",
+            field_names,
+            ..
+        }),
+    ] = out.as_slice()
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(field_names, &["data", "token"]);
+}

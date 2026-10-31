@@ -1194,3 +1194,48 @@ fn json_nul_reaches_block_text_from_command_output_and_agent_text() {
         "{text:?}"
     );
 }
+
+#[test]
+fn unknown_notification_carries_param_names_and_never_values() {
+    let secret = "sk-live-SECRET-0123456789";
+    let mut translator = Translator::new("01a171c1-daf4-7b03-9198-680fc7eb0395", "gpt-6-luna");
+    let params = serde_json::json!({
+        "threadId": "t", "apiKey": secret, "nested": {"password": secret}, "list": [secret],
+    });
+    let out = translator.feed("thread/futureThing", &params);
+    let diagnostics: Vec<&AdapterEvent> = out
+        .iter()
+        .filter_map(|t| match t {
+            Translated::Event(event @ AdapterEvent::Diagnostic { .. }) => Some(event),
+            _ => None,
+        })
+        .collect();
+    let [
+        AdapterEvent::Diagnostic {
+            kind: "unknown_notification",
+            event_type,
+            required: false,
+            field_names,
+        },
+    ] = diagnostics.as_slice()
+    else {
+        panic!("{out:?}");
+    };
+    assert_eq!(event_type, "thread/futureThing");
+    assert_eq!(field_names, &["apiKey", "list", "nested", "threadId"]);
+    assert!(!format!("{event_type} {field_names:?}").contains(secret));
+}
+
+#[test]
+fn unknown_notification_names_are_bounded() {
+    let mut translator = Translator::new("01a171c1-daf4-7b03-9198-680fc7eb0395", "gpt-6-luna");
+    let mut reported = 0;
+    for n in 0..200 {
+        let out = translator.feed(&format!("future/method{n}"), &Value::Null);
+        reported += out
+            .iter()
+            .filter(|t| matches!(t, Translated::Event(AdapterEvent::Diagnostic { .. })))
+            .count();
+    }
+    assert_eq!(reported, 64);
+}

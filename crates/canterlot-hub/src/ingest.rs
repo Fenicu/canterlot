@@ -10,8 +10,9 @@ use canterlot_proto::{
         check_record_batch,
     },
     worker::v1::{
-        DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, DecisionUnconfirmed,
-        JournalRecords, ReconcileReport, RequestClosed, RequestOpened, record_body::Body,
+        AdapterDiagnostic, DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted,
+        DecisionUnconfirmed, JournalRecords, ReconcileReport, RequestClosed, RequestOpened,
+        record_body::Body,
     },
 };
 use prost::Message;
@@ -1048,6 +1049,18 @@ fn bounded_text(value: &str, limit: usize) -> String {
     value
 }
 
+/// Сколько имён ключей неизвестного кадра хранит событие диагностики.
+const MAX_DIAGNOSTIC_FIELD_NAMES: usize = 32;
+
+/// Тело события `adapter_diagnostic`; `field_names` нет у старых воркеров и у пустого списка.
+fn diagnostic_payload(fact: &AdapterDiagnostic) -> Value {
+    let mut payload = json!({"kind": fact.kind, "event_type": fact.event_type});
+    if !fact.field_names.is_empty() {
+        payload["field_names"] = json!(fact.field_names);
+    }
+    payload
+}
+
 fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
     let mut bounded = match body {
         Body::BlockStarted(_)
@@ -1092,6 +1105,10 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
         Body::AdapterDiagnostic(f) => {
             f.kind = bounded_text(&f.kind, 128);
             f.event_type = bounded_text(&f.event_type, 128);
+            f.field_names.truncate(MAX_DIAGNOSTIC_FIELD_NAMES);
+            for name in &mut f.field_names {
+                *name = bounded_text(name, 64);
+            }
         }
         Body::ExecutionState(f) => {
             f.outcome = bounded_text(&f.outcome, 1024);
@@ -1505,7 +1522,7 @@ async fn apply_body(
                     conn,
                     &run,
                     "adapter_diagnostic",
-                    json!({"kind": fact.kind, "event_type": fact.event_type}),
+                    diagnostic_payload(fact),
                     correlation_id,
                 )
                 .await?;
@@ -2137,7 +2154,7 @@ async fn apply_journal_body(
             conn,
             &run,
             "adapter_diagnostic",
-            json!({"kind": fact.kind, "event_type": fact.event_type}),
+            diagnostic_payload(fact),
             correlation_id,
         )
         .await?;

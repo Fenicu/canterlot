@@ -575,6 +575,7 @@ impl OpenCodeAdapter {
             kind,
             event_type: kind.into(),
             required,
+            field_names: Vec::new(),
         });
     }
 
@@ -1075,12 +1076,14 @@ impl OpenCodeAdapter {
             kind: "provider_failure",
             event_type: failure.kind.clone(),
             required: false,
+            field_names: Vec::new(),
         }];
         if failure.kind == failure::AUTH_FAILURE {
             follow.push(AdapterEvent::Diagnostic {
                 kind: "auth_required",
                 event_type: "auth_required".into(),
                 required: true,
+                field_names: Vec::new(),
             });
         } else if failure.overflow || overflowed {
             follow.push(AdapterEvent::ContextExhausted);
@@ -1089,6 +1092,7 @@ impl OpenCodeAdapter {
                 kind: "session_stuck",
                 event_type: "session_stuck".into(),
                 required: false,
+                field_names: Vec::new(),
             });
             follow.push(AdapterEvent::SessionStuck);
         }

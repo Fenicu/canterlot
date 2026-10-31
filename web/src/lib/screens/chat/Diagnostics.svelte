@@ -14,7 +14,7 @@
 		kind?: string;
 		type?: string;
 		correlation_id?: string;
-		payload?: { correlation_id?: string; event_type?: string };
+		payload?: { correlation_id?: string; event_type?: string; field_names?: string[] };
 		seq?: string;
 		created_seq?: string;
 	}
@@ -49,6 +49,7 @@
 			return {
 				kind: e.kind || e.type || 'diagnostic',
 				detail: e.payload?.event_type,
+				fields: e.payload?.field_names,
 				correlation_id: e.correlation_id || e.payload?.correlation_id,
 				seq: e.seq || e.created_seq
 			};
@@ -131,6 +132,9 @@
 							<span class="event-kind">{diagnosticKindLabel(ev.kind)}</span>
 							{#if ev.detail}<code>{ev.detail}</code>{/if}
 							{#if ev.correlation_id}<code>{ev.correlation_id}</code>{/if}
+							{#if ev.fields?.length}
+								<span class="fields">Поля кадра: <code>{ev.fields.join(', ')}</code></span>
+							{/if}
 						</div>
 					{/each}
 				</div>
@@ -180,6 +184,10 @@
 		min-width: 0;
 		font-family: var(--font-mono);
 		overflow-wrap: anywhere;
+	}
+	.key-value .fields {
+		flex-basis: 100%;
+		min-width: 0;
 	}
 	.event-kind {
 		font-weight: var(--weight-semibold);

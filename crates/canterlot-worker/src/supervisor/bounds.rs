@@ -63,6 +63,7 @@ pub(super) fn bounded_record(execution_id: Uuid, mut body: Body) -> Body {
         execution_id: execution_id.to_string(),
         kind: "unknown_optional_event".into(),
         event_type: "record_too_large".into(),
+        ..Default::default()
     })
 }
 
@@ -163,6 +164,19 @@ mod tests {
             text: text.to_owned(),
             status: canterlot_proto::worker::v1::TodoStatus::Pending as i32,
         }
+    }
+
+    #[test]
+    fn largest_diagnostic_fits_the_record_untouched() {
+        let body = Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: Uuid::nil().to_string(),
+            kind: "unknown_optional_event".into(),
+            event_type: "x".repeat(64),
+            field_names: (0..32)
+                .map(|n| format!("{n:02}{}", "k".repeat(62)))
+                .collect(),
+        });
+        assert_eq!(bounded_record(Uuid::nil(), body.clone()), body);
     }
 
     #[test]

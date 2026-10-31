@@ -1,6 +1,7 @@
 // Перевод уведомлений app-server в события адаптера: блоки, фазы, субагенты,
 // расход, картинки и ошибки. Переводчик не паникует и сессию не завершает:
 // неизвестное игнорируется с одной диагностикой на метод за исполнение.
+use super::super::frame_names::object_field_names;
 use super::super::labels::command_label;
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
@@ -9,6 +10,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+/// Потолки диагностик неизвестных методов те же, что у OpenCode.
+const MAX_UNKNOWN_METHODS: usize = 64;
+const MAX_METHOD_CHARS: usize = 64;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TurnStatus {
@@ -306,6 +311,7 @@ impl Translator {
             kind: "unparsed_line",
             event_type: "unparsed_line".into(),
             required: false,
+            field_names: Vec::new(),
         })
     }
 
@@ -380,7 +386,7 @@ impl Translator {
             _ if method.starts_with("hook/") => vec![Translated::Ignored],
             _ if method.ends_with("/requestApproval") => self.on_approval_request(params),
             _ if method == "item/tool/requestUserInput" => vec![Translated::Ignored],
-            _ => self.on_unknown(method),
+            _ => self.on_unknown(method, params),
         }
     }
 
@@ -389,16 +395,21 @@ impl Translator {
             kind,
             event_type: kind.into(),
             required: false,
+            field_names: Vec::new(),
         })
     }
 
-    fn on_unknown(&mut self, method: &str) -> Vec<Translated> {
-        if self.unknown_methods.insert(method.to_owned()) {
+    fn on_unknown(&mut self, method: &str, params: &Value) -> Vec<Translated> {
+        let name: String = method.chars().take(MAX_METHOD_CHARS).collect();
+        if self.unknown_methods.len() < MAX_UNKNOWN_METHODS
+            && self.unknown_methods.insert(name.clone())
+        {
             vec![
                 Translated::Event(AdapterEvent::Diagnostic {
                     kind: "unknown_notification",
-                    event_type: method.to_owned(),
+                    event_type: name,
                     required: false,
+                    field_names: object_field_names(params),
                 }),
                 Translated::Ignored,
             ]
@@ -1248,6 +1259,7 @@ impl Translator {
                 kind: "codex_system_error",
                 event_type: "codex_system_error".into(),
                 required: false,
+                field_names: Vec::new(),
             })];
         }
         // Вне хода запрос сразу отклоняется: фаза ожидания держала бы очередь хаба.
@@ -1438,6 +1450,7 @@ impl Translator {
             kind: "thread_closed",
             event_type: "thread_closed".into(),
             required: true,
+            field_names: Vec::new(),
         })]
     }
 
@@ -1574,6 +1587,7 @@ impl Translator {
                 kind: "codex_warning",
                 event_type: "codex_warning".into(),
                 required: false,
+                field_names: Vec::new(),
             })];
         }
         let command_id = self.active_turn.as_ref().map(|(_, id)| *id);

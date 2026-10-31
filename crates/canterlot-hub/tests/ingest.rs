@@ -2175,6 +2175,7 @@ async fn adapter_diagnostic_and_new_status_records_are_machine_scoped(pool: PgPo
             execution_id: execution.execution_id.to_string(),
             kind: "unknown_optional".into(),
             event_type: "notice".into(),
+            ..Default::default()
         }),
     ];
     let ingest = Ingest::new(pool.clone());
@@ -2211,6 +2212,58 @@ async fn adapter_diagnostic_and_new_status_records_are_machine_scoped(pool: PgPo
     assert_eq!(
         payload,
         json!({"kind":"unknown_optional", "event_type":"notice"})
+    );
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn adapter_diagnostic_keeps_bounded_field_names_and_omits_empty_ones(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution, _) = setup(&pool).await;
+    let diagnostic = |event_type: &str, field_names: Vec<String>| {
+        record_body::Body::AdapterDiagnostic(AdapterDiagnostic {
+            execution_id: execution.execution_id.to_string(),
+            kind: "unknown_optional_event".into(),
+            event_type: event_type.into(),
+            field_names,
+        })
+    };
+    let noisy: Vec<String> = (0..40)
+        .map(|n| format!("name{n:02}{}", "k".repeat(100)))
+        .collect();
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &batch(
+                Uuid::now_v7(),
+                vec![
+                    diagnostic("old_worker", Vec::new()),
+                    diagnostic("new_worker", vec!["alpha".into(), "beta".into()]),
+                    diagnostic("noisy", noisy),
+                ],
+            ),
+        )
+        .await?;
+    let rows: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where kind = 'adapter_diagnostic' order by scope_seq",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows[0],
+        json!({"kind": "unknown_optional_event", "event_type": "old_worker"})
+    );
+    assert_eq!(rows[1]["field_names"], json!(["alpha", "beta"]));
+    let names = rows[2]["field_names"].as_array().unwrap();
+    assert_eq!(names.len(), 32);
+    assert!(
+        names
+            .iter()
+            .all(|name| name.as_str().unwrap().chars().count() <= 64)
     );
     Ok(())
 }

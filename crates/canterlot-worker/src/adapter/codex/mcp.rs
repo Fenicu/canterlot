@@ -42,6 +42,7 @@ pub fn startup_status_event(method: &str, params: &Value) -> Option<AdapterEvent
             kind: "mcp_unavailable",
             event_type: "mcp_unavailable".into(),
             required: false,
+            field_names: Vec::new(),
         });
     }
     None

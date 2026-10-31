@@ -368,6 +368,7 @@ async fn adapter_child() {
                         kind,
                         event_type,
                         required,
+                        ..
                     } => {
                         assert_eq!(kind, "unknown_event");
                         diagnostic = Some((event_type, required));

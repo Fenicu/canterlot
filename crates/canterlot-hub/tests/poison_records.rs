@@ -170,6 +170,7 @@ async fn nul_in_any_text_of_a_record_never_refuses_the_record(pool: PgPool) -> T
                 execution_id: id.clone(),
                 kind: "ki\0nd".into(),
                 event_type: "ty\0pe".into(),
+                ..Default::default()
             }),
         ),
         (
@@ -292,6 +293,7 @@ async fn stub_of_an_oversized_record_is_attributed_to_the_journal(pool: PgPool) 
         execution_id: Uuid::nil().to_string(),
         kind: "unknown_optional_event".into(),
         event_type: "record_too_large".into(),
+        ..Default::default()
     }))
     .await?;
     let shown: Option<String> = sqlx::query_scalar(

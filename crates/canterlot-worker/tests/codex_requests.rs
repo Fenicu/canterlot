@@ -434,8 +434,7 @@ fn form_and_verification_elicitations_are_declined_without_a_card() {
                 [AdapterEvent::Diagnostic {
                     kind: "unsupported_elicitation",
                     event_type,
-                    required: false,
-                }] if event_type == mode
+                    required: false, .. }] if event_type == mode
             ),
             "line {line_no}: {diagnostics:?}"
         );
@@ -548,6 +547,16 @@ fn unsupported_server_requests_get_an_error_reply() {
             ..
         }
     )));
+    for event in &diagnostics {
+        let AdapterEvent::Diagnostic { field_names, .. } = event else {
+            unreachable!()
+        };
+        assert!(
+            field_names.windows(2).all(|pair| pair[0] < pair[1]),
+            "{field_names:?}"
+        );
+        assert!(field_names.len() <= 32);
+    }
     // Повтор того же метода новой диагностики не даёт.
     let data = fixture_data("unknown_server_request", 1);
     match requests.on_server_request(

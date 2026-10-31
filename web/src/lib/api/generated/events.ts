@@ -308,6 +308,10 @@ export interface AdapterDiagnostic {
   payload: {
     kind: string;
     event_type: string;
+    /**
+     * @maxItems 32
+     */
+    field_names?: string[];
   };
 }
 export interface StateDivergence {

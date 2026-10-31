@@ -129,6 +129,7 @@ async fn review_fix_agent_metadata_is_truncated_at_char_boundaries(pool: PgPool)
             execution_id: r.execution.execution_id.to_string(),
             kind: text.clone(),
             event_type: text.clone(),
+            ..Default::default()
         }),
         Body::JournalClosed(JournalClosed {
             execution_id: r.execution.execution_id.to_string(),

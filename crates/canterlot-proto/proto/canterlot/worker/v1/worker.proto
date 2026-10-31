@@ -422,6 +422,8 @@ message AdapterDiagnostic {
   string execution_id = 1;
   string kind = 2;
   string event_type = 3;
+  // Имена ключей неизвестного кадра: отсортированы, не больше 32, до 64 символов.
+  repeated string field_names = 4;
 }
 
 // Необязательная возможность pilot_v1 предлагается в Hello и повторяется в Accepted.

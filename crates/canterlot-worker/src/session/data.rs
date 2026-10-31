@@ -350,6 +350,7 @@ fn shippable(journal: Uuid, record: JournalRecord) -> JournalRecord {
                     execution_id: Uuid::nil().to_string(),
                     kind: "unknown_optional_event".into(),
                     event_type: "record_too_large".into(),
+                    ..Default::default()
                 },
             )),
         }),

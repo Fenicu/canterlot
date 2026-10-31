@@ -2469,7 +2469,7 @@ async fn unknown_event_does_not_stop_the_turn() {
     let events = bench.until_finished(input.command_id).await;
     assert!(events.iter().any(|event| matches!(
         event,
-        AdapterEvent::Diagnostic { kind: "unknown_event", required: false, event_type }
+        AdapterEvent::Diagnostic { kind: "unknown_event", required: false, event_type, .. }
             if event_type == "brand.new"
     )));
     bench.close(CloseMode::Graceful).await;

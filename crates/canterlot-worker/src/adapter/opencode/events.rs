@@ -6,6 +6,7 @@ use super::{
     failure,
     requests::GLOBAL_SESSION,
 };
+use crate::adapter::frame_names::object_field_names;
 use crate::adapter::labels::{command_label, path_tail};
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use serde_json::{Value, json};
@@ -611,7 +612,12 @@ impl Translator {
 
     pub fn feed(&mut self, event: &Value) -> Vec<Translated> {
         let Some(kind) = event.get("type").and_then(Value::as_str) else {
-            return vec![Self::diagnostic("unparsed_event", "unparsed_event", false)];
+            return vec![Self::diagnostic(
+                "unparsed_event",
+                "unparsed_event",
+                false,
+                event,
+            )];
         };
         let empty = Value::Null;
         let data = event.get("data").unwrap_or(&empty);
@@ -634,7 +640,7 @@ impl Translator {
         let session = data.get("sessionID").and_then(Value::as_str);
         let terminal = kind.starts_with("session.execution.");
         if terminal && session.is_none() {
-            return vec![Self::diagnostic("unknown_event", kind, true)];
+            return vec![Self::diagnostic("unknown_event", kind, true, data)];
         }
         if let Some(out) = self.on_work(kind, data) {
             return out;
@@ -668,8 +674,8 @@ impl Translator {
             }
             "shell.created" => vec![Translated::ShellStarted],
             _ if KNOWN.contains(&kind) => Vec::new(),
-            _ if terminal => vec![Self::diagnostic("unknown_event", kind, true)],
-            _ => self.on_unknown(kind),
+            _ if terminal => vec![Self::diagnostic("unknown_event", kind, true, data)],
+            _ => self.on_unknown(kind, data),
         }
     }
 
@@ -769,20 +775,27 @@ impl Translator {
             .clone()
     }
 
-    fn diagnostic(kind: &'static str, event_type: &str, required: bool) -> Translated {
+    /// `shape` — неизвестный кадр или его данные: от него берутся имена ключей.
+    fn diagnostic(
+        kind: &'static str,
+        event_type: &str,
+        required: bool,
+        shape: &Value,
+    ) -> Translated {
         Translated::Event(AdapterEvent::Diagnostic {
             kind,
             event_type: event_type.to_owned(),
             required,
+            field_names: object_field_names(shape),
         })
     }
 
-    fn on_unknown(&mut self, kind: &str) -> Vec<Translated> {
+    fn on_unknown(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
         let name: String = kind.chars().take(MAX_TYPE_CHARS).collect();
         if self.unknown.len() >= MAX_UNKNOWN_TYPES || !self.unknown.insert(name.clone()) {
             return Vec::new();
         }
-        vec![Self::diagnostic("unknown_event", &name, false)]
+        vec![Self::diagnostic("unknown_event", &name, false, data)]
     }
 
     fn on_created(&mut self, data: &Value) {
@@ -879,7 +892,7 @@ impl Translator {
         let session = string_field(raw, "sessionID");
         let id = string_field(raw, "id");
         if session.is_empty() || id.is_empty() {
-            return vec![Self::diagnostic("unparsed_event", event, true)];
+            return vec![Self::diagnostic("unparsed_event", event, true, raw)];
         }
         let global = kind == RequestKind::Form && session == GLOBAL_SESSION;
         if !global && !self.owns(session) {
@@ -1104,6 +1117,7 @@ impl Translator {
                     "todo_lane_unknown",
                     "todo_lane_unknown",
                     false,
+                    &Value::Null,
                 ));
             }
         };

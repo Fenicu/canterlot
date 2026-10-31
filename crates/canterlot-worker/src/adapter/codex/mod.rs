@@ -247,6 +247,7 @@ impl CodexAdapter {
             kind,
             event_type: kind.into(),
             required,
+            field_names: Vec::new(),
         });
     }
 

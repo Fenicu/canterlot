@@ -572,6 +572,7 @@ impl InputDriver {
                         kind: "oversized_frame",
                         event_type: String::new(),
                         required: false,
+                        field_names: Vec::new(),
                     }))
             }
             StdoutLine::Eof => self.eof = true,

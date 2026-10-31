@@ -1018,3 +1018,45 @@ fn unknown_type_names_are_bounded() {
     }
     assert_eq!(reported, 64);
 }
+
+fn first_names(parsed: &[Parsed]) -> Vec<String> {
+    parsed
+        .iter()
+        .find_map(|p| match p {
+            Parsed::Event(AdapterEvent::Diagnostic { field_names, .. }) => {
+                Some(field_names.clone())
+            }
+            _ => None,
+        })
+        .expect("diagnostic")
+}
+
+#[test]
+fn unknown_frames_carry_key_names_and_never_values() {
+    let secret = "sk-live-SECRET-0123456789";
+    let mut parser = Parser::new();
+    let frame = json!({
+        "type": "future_frame",
+        "api_key": secret,
+        "nested": {"password": secret},
+        "list": [secret],
+    })
+    .to_string();
+    let parsed = parser.feed(&frame);
+    assert_eq!(first_names(&parsed), ["api_key", "list", "nested", "type"]);
+    assert!(!format!("{parsed:?}").contains(secret));
+
+    let system = json!({"type": "system", "subtype": "future_notice", "token": secret});
+    let parsed = parser.feed(&system.to_string());
+    assert_eq!(first_names(&parsed), ["subtype", "token", "type"]);
+
+    let block = stream(json!({"type": "content_block_start", "index": 0,
+        "content_block": {"type": "future_block", "payload": secret}}));
+    let parsed = parser.feed(&block);
+    assert_eq!(first_names(&parsed), ["payload", "type"]);
+    assert!(
+        parsed
+            .iter()
+            .all(|p| !format!("{p:?}").contains(secret) && !format!("{p:?}").contains("sk-live"))
+    );
+}
