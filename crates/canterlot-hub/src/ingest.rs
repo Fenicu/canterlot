@@ -963,8 +963,7 @@ impl Ingest {
                             .map_err(pilot_error)?;
                     Ok((
                         at.is_none(),
-                        result
-                            .provider_changed
+                        (result.provider_changed || result.refreshed)
                             .then_some((observation.provider, observation.window)),
                         at.is_none(),
                     ))
@@ -1896,7 +1895,7 @@ impl crate::grpc::Ingest for Ingest {
                     }
                     let recorded =
                         limits::record_in_tx(&mut *conn, &o, now, &limits, mapped).await?;
-                    if recorded.provider_changed {
+                    if recorded.provider_changed || recorded.refreshed {
                         changed.insert((o.provider, o.window));
                     }
                     if !mapped {

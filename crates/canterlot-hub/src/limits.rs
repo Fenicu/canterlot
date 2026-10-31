@@ -65,8 +65,12 @@ pub struct Observation {
 pub struct Recorded {
     pub snapshot_stored: bool,
     pub provider_changed: bool,
+    /// Равное показание поверх давно не обновлявшегося: клиенту нужна новая отметка времени.
+    pub refreshed: bool,
     pub stale: bool,
 }
+/// Равные показания чаще этого срока событие не порождают, иначе опрос каждые несколько минут забил бы ленту.
+const REFRESH_EVENT_GAP: chrono::Duration = chrono::Duration::seconds(120);
 #[derive(Debug, Serialize)]
 pub struct ProviderLimits {
     pub provider: String,
@@ -120,7 +124,7 @@ pub async fn record_observation_in_tx(
     correlation_id: Uuid,
 ) -> Result<Recorded, sqlx::Error> {
     let result = record_in_tx(conn, o, now, config, true).await?;
-    if result.provider_changed {
+    if result.provider_changed || result.refreshed {
         emit_changed(conn, owner_id, &o.provider, o.window, correlation_id).await?;
     }
     Ok(result)
@@ -172,10 +176,13 @@ pub(crate) async fn record_in_tx(
     if newer && o.window == Window::Weekly {
         weekly_stage(conn, o, observed_at, now, config).await?;
     }
+    let changed = used != Some(i32::from(o.used_permille)) || reset != o.resets_at;
     Ok(Recorded {
         snapshot_stored: store,
-        provider_changed: newer
-            && (used != Some(i32::from(o.used_permille)) || reset != o.resets_at),
+        provider_changed: newer && changed,
+        refreshed: newer
+            && !changed
+            && seen.is_some_and(|seen| observed_at - seen >= REFRESH_EVENT_GAP),
         stale: !newer,
     })
 }

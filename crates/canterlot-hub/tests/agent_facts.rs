@@ -1426,6 +1426,25 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    record(&pool, &s, &obs(&s, 960, at)).await;
+    let later = at + Duration::minutes(5);
+    let r = record(&pool, &s, &obs(&s, 960, later)).await;
+    assert!(!r.provider_changed);
+    assert!(r.refreshed);
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='limits_changed'"
+        )
+        .await,
+        2
+    );
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn a_limit_hit_again_after_the_pause_was_cleared_pauses_again(pool: PgPool) -> TestResult {
     let mut r = Run::new(&pool).await;
     let hit = |reset: i64| {
