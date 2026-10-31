@@ -27,7 +27,7 @@ use crate::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome,
         ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
-        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
+        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent, reaped,
     },
     config::CodexConfig,
     containment::Containment,
@@ -1640,12 +1640,6 @@ fn exit_event(status: std::process::ExitStatus) -> AdapterEvent {
         code: status.code(),
         signal: status.signal(),
     }
-}
-
-/// Ребёнок уже убран другой проверкой members (общий супервизор тестового
-/// процесса): `ECHILD` означает, что процесса точно нет.
-fn reaped(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error())
 }
 
 /// Сигнал группе процессов app-server (сервер — лидер своей группы).

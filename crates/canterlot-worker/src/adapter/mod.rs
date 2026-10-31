@@ -6,6 +6,7 @@ use uuid::Uuid;
 
 pub mod canterlot_mcp;
 pub mod claude_code;
+pub mod cli_version;
 pub mod codex;
 pub mod limit_note;
 #[cfg(feature = "synthetic-adapter")]
@@ -843,6 +844,12 @@ mod tests {
 // Общий вспомогательный код адаптеров.
 
 use std::io;
+
+/// Ребёнок уже убран другой проверкой members (общий супервизор тестового
+/// процесса): `ECHILD` означает, что процесса точно нет.
+pub(crate) fn reaped(error: &io::Error) -> bool {
+    error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error())
+}
 
 /// Выполнить `spawn` с повторами при ETXTBSY/`ExecutableFileBusy`.
 pub async fn spawn_with_retry_io<F, Fut, T>(mut spawn: F) -> io::Result<T>

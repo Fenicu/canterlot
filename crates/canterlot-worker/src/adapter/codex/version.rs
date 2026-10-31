@@ -6,7 +6,8 @@ use tokio::process::Command;
 use tokio::time::timeout;
 
 use super::process::GroupKill;
-use crate::adapter::spawn_with_retry_io;
+pub use crate::adapter::cli_version::{CliVersion, VersionError};
+use crate::adapter::{cli_version::VersionPolicy, reaped, spawn_with_retry_io};
 
 const OUTPUT_CAP: u64 = 64 * 1024;
 
@@ -14,53 +15,15 @@ const OUTPUT_CAP: u64 = 64 * 1024;
 pub const MIN_SUPPORTED_VERSION: (u32, u32, u32) = (0, 164, 0);
 pub const VERIFIED_VERSIONS: &[(u32, u32, u32)] = &[(0, 164, 0)];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CliVersion {
-    Verified(String),
-    UntestedNewer(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VersionError {
-    NotFound,
-    Failed,
-    Unparsable,
-    BelowMinimum(String),
-}
-
-// Слово версии без `codex-cli`, с суффиксами semver.
-fn version_token(output: &str) -> Result<&str, VersionError> {
-    let text = output.strip_prefix("codex-cli").unwrap_or(output).trim();
-    text.split_whitespace()
-        .next()
-        .ok_or(VersionError::Unparsable)
-}
-
-// Ядро `x.y.z` и признак предварительной сборки (`-…`); метаданные `+…` не влияют.
-fn split_version(token: &str) -> Result<((u32, u32, u32), bool), VersionError> {
-    let token = token.split_once('+').map_or(token, |(core, _)| core);
-    let (core, pre) = match token.split_once('-') {
-        Some((core, _)) => (core, true),
-        None => (token, false),
-    };
-    let mut parts = core.split('.');
-    let mut nums = [0u32; 3];
-    for slot in &mut nums {
-        *slot = parts
-            .next()
-            .ok_or(VersionError::Unparsable)?
-            .parse::<u32>()
-            .map_err(|_| VersionError::Unparsable)?;
-    }
-    if parts.next().is_some() {
-        return Err(VersionError::Unparsable);
-    }
-    Ok(((nums[0], nums[1], nums[2]), pre))
-}
+const POLICY: VersionPolicy = VersionPolicy {
+    prefix: "codex-cli",
+    minimum: MIN_SUPPORTED_VERSION,
+    verified: VERIFIED_VERSIONS,
+};
 
 // Разбирает и `codex-cli 0.164.0`, и голое `0.164.0`, и `0.165.0-alpha.2`.
 pub fn parse_version(output: &str) -> Result<(u32, u32, u32), VersionError> {
-    split_version(version_token(output)?).map(|(core, _)| core)
+    POLICY.parse(output)
 }
 
 pub async fn check(executable: &Path) -> Result<CliVersion, VersionError> {
@@ -104,7 +67,7 @@ pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersi
         // Обход сдерживания мог забрать зомби: вывод уже прочитан, судит он.
         let status = match child.wait().await {
             Ok(status) => Some(status),
-            Err(error) if super::reaped(&error) => None,
+            Err(error) if reaped(&error) => None,
             Err(error) => return Err(error),
         };
         Ok::<_, std::io::Error>((status, text))
@@ -117,24 +80,5 @@ pub async fn check_within(executable: &Path, limit: Duration) -> Result<CliVersi
     if status.is_some_and(|status| !status.success()) {
         return Err(VersionError::Failed);
     }
-    let text = String::from_utf8_lossy(&output);
-    let token = version_token(&text)?;
-    let (v, pre) = split_version(token)?;
-    let label = if pre {
-        token
-            .split_once('+')
-            .map_or(token, |(core, _)| core)
-            .to_owned()
-    } else {
-        format!("{}.{}.{}", v.0, v.1, v.2)
-    };
-    // Предварительная сборка младше своего выпуска: x.y.z-pre < x.y.z.
-    if v < MIN_SUPPORTED_VERSION || (pre && v == MIN_SUPPORTED_VERSION) {
-        return Err(VersionError::BelowMinimum(label));
-    }
-    if !pre && VERIFIED_VERSIONS.contains(&v) {
-        Ok(CliVersion::Verified(label))
-    } else {
-        Ok(CliVersion::UntestedNewer(label))
-    }
+    POLICY.classify(&String::from_utf8_lossy(&output))
 }

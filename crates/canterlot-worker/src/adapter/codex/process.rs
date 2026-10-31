@@ -11,10 +11,10 @@ use tokio::process::Command as TokioCommand;
 /// выходе, кроме снятого после чистого завершения: kill_on_drop убивает только
 /// обёртку (node), родной процесс — её ребёнок в той же группе. Объявлять после
 /// `Child`, чтобы сторож сработал раньше, чем pid обёртки освободится.
-pub(super) struct GroupKill(Option<rustix::process::Pid>);
+pub(in crate::adapter) struct GroupKill(Option<rustix::process::Pid>);
 
 impl GroupKill {
-    pub(super) fn of(child: &tokio::process::Child) -> Self {
+    pub(in crate::adapter) fn of(child: &tokio::process::Child) -> Self {
         Self(
             child
                 .id()
@@ -23,7 +23,7 @@ impl GroupKill {
         )
     }
 
-    pub(super) fn disarm(&mut self) {
+    pub(in crate::adapter) fn disarm(&mut self) {
         self.0 = None;
     }
 }

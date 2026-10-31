@@ -800,12 +800,6 @@ impl ClaudeCodeAdapter {
 const KILL_DRAIN: Duration = Duration::from_secs(1);
 
 /// Ранний выход CLI сразу после запуска: процесс не прожил и секунды.
-/// Ребёнок уже убран другой проверкой `members` (общий супервизор тестового
-/// процесса): `ECHILD` означает, что процесса точно нет.
-fn reaped(error: &std::io::Error) -> bool {
-    error.raw_os_error() == Some(rustix::io::Errno::CHILD.raw_os_error())
-}
-
 async fn exited_early(cli: &mut CliProcess) -> bool {
     let start = Instant::now();
     while start.elapsed() < Duration::from_secs(1) {
