@@ -306,6 +306,7 @@ rate_limits_poll_interval_s = 300
 # executable = "opencode" # Либо абсолютный путь к CLI.
 # data_root = "/home/user/.local/state/canterlot-worker/opencode" # По умолчанию <data_dir>/opencode.
 # providers = ["anthropic"] # Провайдеры в каталоге моделей сверх opencode-go.
+# default_model = "opencode-go/muse-spark-1.3-contributor" # Первая в каталоге, форма выбирает её.
 # owner_config = "/home/user/.config/opencode" # Каталог конфигурации владельца, по умолчанию $XDG_CONFIG_HOME/opencode.
 # refuse_paths = [] # Каталоги, где базу держать нельзя, сверх данных владельца.
 ```

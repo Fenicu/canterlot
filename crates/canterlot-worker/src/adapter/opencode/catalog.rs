@@ -127,6 +127,13 @@ pub fn entries(models: &Value, default: Option<&Value>, providers: &[String]) ->
     entries
 }
 
+/// Модель из настройки воркера идёт первой: форма сессии выбирает первую.
+pub fn prefer(entries: &mut [ModelEntry], model: &str) {
+    if entries.iter().any(|entry| entry.id == model) {
+        entries.sort_by_key(|entry| entry.id != model);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -173,6 +180,16 @@ mod tests {
             .map(|entry| entry.id)
             .collect();
         assert_eq!(ids, ["opencode-go/b", "opencode-go/a", "opencode-go/c"]);
+    }
+
+    #[test]
+    fn preferred_model_goes_first_and_an_unknown_one_changes_nothing() {
+        let list = json!({"data": [model("opencode-go", "a"), model("opencode-go", "b")]});
+        let mut found = entries(&list, None, &[]);
+        prefer(&mut found, "opencode-go/b");
+        assert_eq!(found[0].id, "opencode-go/b");
+        prefer(&mut found, "opencode-go/absent");
+        assert_eq!(found[0].id, "opencode-go/b");
     }
 
     #[test]
