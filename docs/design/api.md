@@ -268,6 +268,7 @@
 | `POST /api/v1/conversations/{id}/inputs` | `content[]` (`{"type":"text","text"}`), `attachment_ids?` (до 10 готовых вложений), `retry_of?` | 201, `SubmittedInput`; блоки `attachment` хаб добавляет после текста сам |
 | `POST /api/v1/inputs/{id}/cancel` | - | `CancelOutcome` |
 | `POST /api/v1/conversations/{id}/interrupt` | - | `StopOutcome`: пауза очереди, прерывание, отзыв |
+| `POST /api/v1/conversations/{id}/compact` | - | `CompactOutcome`: сжатие контекста живой застрявшей сессии; 400 без паузы `session_stuck`, без живого исполнения и во время хода. Тратит токены, поэтому только по действию владельца |
 | `POST /api/v1/conversations/{id}/stop` | `force?` | `StopExecutionOutcome` |
 | `POST /api/v1/conversations/{id}/queue/continue` | - | `ContinueOutcome` |
 | `PATCH /api/v1/conversations/{id}/settings` | `model?`, `effort?`, `permission_mode?`, `instruction_profile?` | `{effective, pending, rev}` |

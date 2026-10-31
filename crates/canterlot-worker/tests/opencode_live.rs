@@ -16,7 +16,7 @@ use canterlot_worker::{
         DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
         LimitWindow, LocalFile, MediaSource, ModelUsage, Phase, SettingsChange, StartSpec,
         TodoItem, TodoStatus, Transmission, TransmitOutcome,
-        opencode::{OpenCodeAdapter, discover},
+        opencode::{OpenCodeAdapter, VERIFIED_OPENAPI_SHA256, discover},
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -1952,4 +1952,55 @@ async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
         .collect();
     assert_eq!(lists, vec![Some(call)], "{events:?}");
     session.close().await;
+}
+
+// Договор с проверенной версией: схема настоящего сервера совпадает с манифестом.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_server_schema_matches_the_manifest() {
+    use sha2::{Digest, Sha256};
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+    };
+    let stub = Stub::start(Vec::new()).await;
+    let live = Live::new(&stub.config());
+    let password = "manifest-check";
+    let data = live.root.path().join("manifest");
+    let mut child = Command::new(&live.wrapper)
+        .args(["serve", "--stdio", "--port", "0"])
+        .env("OPENCODE_PASSWORD", password)
+        .env("XDG_DATA_HOME", data.join("data"))
+        .env("XDG_STATE_HOME", data.join("state"))
+        .env("XDG_CACHE_HOME", data.join("cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let bytes = client
+        .get(format!("{}/openapi.json", ready["url"].as_str().unwrap()))
+        .basic_auth("opencode", Some(password))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        digest, VERIFIED_OPENAPI_SHA256,
+        "scripts/opencode-schema-check.sh"
+    );
 }

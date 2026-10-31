@@ -85,13 +85,13 @@ stateDiagram-v2
 
 Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
 
-| Событие | Claude Code 2.1.310 | Codex 0.164.0 |
-| --- | --- | --- |
-| запись после `transmission_started` | строка `SDKUserMessage` с `uuid` = `command_id` | `turn/start` с `clientUserMessageId` = `command_id` |
-| `acceptance_proven` | первый `stream_event` или `assistant` с `command_id` в `user_message_uuid(s)` | `item/started` элемента `userMessage` с `clientId` = `command_id` |
-| `explicit_rejection` | не бывает для корректного ввода | ошибка JSON-RPC в ответ на `turn/start` |
-| `non_acceptance_proven` | недостижим | недостижим |
-| ввод влит в чужой ход | не возникает, пока ввод пишется только после `result` (затвор сопровождения, п. 2) | ответ `turn/start` несёт `turn.id` уже активного хода. **Предложение**: ввод получает статус по своему доказательству, очередь получает паузу `fatal_error` с ошибкой области `adapter_protocol`. Причина: обычная отправка молча стала вмешательством, что §7.3 запрещает |
+| Событие | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| --- | --- | --- | --- |
+| запись после `transmission_started` | строка `SDKUserMessage` с `uuid` = `command_id` | `turn/start` с `clientUserMessageId` = `command_id` | `POST .../prompt` с `id: msg_<command_id>` и всегда `delivery: "queue"`: значение по умолчанию `steer` влило бы ввод в идущий ход |
+| `acceptance_proven` | первый `stream_event` или `assistant` с `command_id` в `user_message_uuid(s)` | `item/started` элемента `userMessage` с `clientId` = `command_id` | ответ 200 с тем же `id`; позднее доказательство находит сверка по `.../inbox` и `.../message` |
+| `explicit_rejection` | не бывает для корректного ввода | ошибка JSON-RPC в ответ на `turn/start` | 400, 404 или 409 на `POST .../prompt` |
+| `non_acceptance_proven` | недостижим | недостижим | недостижим: достижимость при мёртвом сервере и пустых проекциях тестом не доказана, остаётся `acceptance_unconfirmed` |
+| ввод влит в чужой ход | не возникает, пока ввод пишется только после `result` (затвор сопровождения, п. 2) | ответ `turn/start` несёт `turn.id` уже активного хода. **Предложение**: ввод получает статус по своему доказательству, очередь получает паузу `fatal_error` с ошибкой области `adapter_protocol`. Причина: обычная отправка молча стала вмешательством, что §7.3 запрещает | не возникает: ввод идёт с `delivery: "queue"`. Запуск без ввода приписывается последней команде, ввод ждёт его конца |
 
 Затвор сопровождения перед `transmission_started` описан в §3. Сопровождение может ждать открытия затвора (каталог занят, вложения не готовы, агент не готов); ожидание видно хабу как удержание очереди, а отмена и отзыв в это время побеждают.
 
@@ -179,7 +179,7 @@ stateDiagram-v2
 5. для команды не записаны отмена или отзыв;
 6. журнал машины не в `critical`.
 
-Факт этапа 0 к п. 2: оба CLI вливают ввод, записанный во время хода, в этот ход (Claude Code при вызовах инструментов, Codex всегда), поэтому без п. 2 обычная отправка стала бы вмешательством. Готовность: Claude Code `result`, Codex `turn/completed` и `thread/status/changed` → `idle`.
+Факт этапа 0 к п. 2: Claude Code и Codex вливают ввод, записанный во время хода, в этот ход (Claude Code при вызовах инструментов, Codex всегда), поэтому без п. 2 обычная отправка стала бы вмешательством. OpenCode делает то же со значением по умолчанию `steer`, поэтому адаптер всегда шлёт `delivery: "queue"`. Готовность: Claude Code `result`, Codex `turn/completed` и `thread/status/changed` → `idle`, OpenCode `session.execution.*`.
 
 ### Автомат режима очереди
 
@@ -308,14 +308,14 @@ stateDiagram-v2
 
 Отображение на CLI (факты этапа 0, решение владельца OD-2 и решения контролёра в [сводке этапа 0](../stage0/README.md) §6):
 
-| Событие | Claude Code 2.1.310 | Codex 0.164.0 |
-| --- | --- | --- |
-| `interrupt_delivered` | SIGINT процессу CLI | `turn/interrupt {threadId, turnId}` |
-| `agent_ack` | `result` с `subtype: error_during_execution`, `terminal_reason: aborted_tools`, 35 мс; он же конец хода | ответ `{}`, 15 мс |
-| `run_ended_or_process_exited` | выход процесса CLI с кодом 0 | `turn/completed status: interrupted`, 15–16 мс, процесс жив |
-| процессы инструментов | дерево Bash убито | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер показывает её по `thread/backgroundTerminals/list` (INT-7) |
-| открытый запрос пользователя | MCP `notifications/cancelled` → `request_closed(interrupted)` | `serverRequest/resolved` без нашего ответа → `request_closed(interrupted)` |
-| исполнение после прерывания | `running` → `stopping` → `stopped(user_stop)` | остаётся `running` |
+| Событие | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| --- | --- | --- | --- |
+| `interrupt_delivered` | SIGINT процессу CLI | `turn/interrupt {threadId, turnId}` | `POST .../interrupt` |
+| `agent_ack` | `result` с `subtype: error_during_execution`, `terminal_reason: aborted_tools`, 35 мс; он же конец хода | ответ `{}`, 15 мс | ответ `{interrupted: true}`, `false` значит `not_applicable` |
+| `run_ended_or_process_exited` | выход процесса CLI с кодом 0 | `turn/completed status: interrupted`, 15–16 мс, процесс жив | `session.execution.interrupted {reason: "user"}`, процесс жив |
+| процессы инструментов | дерево Bash убито | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер показывает её по `thread/backgroundTerminals/list` (INT-7) | основная команда снята, фоновые `shell` работают дальше и показываются блоком; `DELETE` разбудил бы модель |
+| открытый запрос пользователя | MCP `notifications/cancelled` → `request_closed(interrupted)` | `serverRequest/resolved` без нашего ответа → `request_closed(interrupted)` | сервер снимает запрос сам: `request_closed(interrupted)`, остальным отказ с текстом |
+| исполнение после прерывания | `running` → `stopping` → `stopped(user_stop)` | остаётся `running` | остаётся `running` |
 
 **Решение владельца (OD-2)** для Claude Code: прерывание = документированный SIGINT, недокументированный `control_request` не используется. Выход процесса является ожидаемым итогом команды `interrupt`, а не `process_exited`: исполнение `stopped(user_stop)`, у очереди только пауза `user_stop`, которая и так требует явного продолжения (§7.3). Продолжение = явный resume, новое исполнение (около 1 с старта; эта задержка относится к resume, а не к прерыванию); `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
 
@@ -373,16 +373,16 @@ stateDiagram-v2
 
 Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
 
-| Факт | Claude Code 2.1.310 | Codex 0.164.0 |
-| --- | --- | --- |
-| `request_opened` | вызов MCP `tools/call` нашего prompt tool: `tool_name`, точный `input`, `tool_use_id`; `tool_name: AskUserQuestion` означает вопрос. Форма аргументов не документирована: контрактный тест на каждую версию | server request `item/commandExecution/requestApproval` или `item/fileChange/requestApproval` с `threadId`, `turnId`, `itemId`; вопрос `item/tool/requestUserInput` на экспериментальной поверхности, включённой решением владельца (OD-1), в обычном режиме и в plan mode |
-| нативный ID для `request_id` | `tool_use_id` | `itemId` и JSON-RPC `id` запроса (уникален в пределах соединения) |
-| допустимые решения | allow (с `updatedInput`) или deny (с текстом); ответы на вопросы в `updatedInput.answers`, свободный текст допускается | только из `availableDecisions` запроса (у команды в проверке `accept`, `acceptWithExecpolicyAmendment`, `cancel`); ответы на вопросы из `options[].label`, свободный текст при `isOther` |
-| срок | CLI запрос не истекает (документировано) | у одобрения поля срока нет; у вопроса поле `autoResolutionMs`, в проверке `null`; истечение не проверялось |
-| `request_closed` | MCP `notifications/cancelled` с `requestId` при прерывании хода; терминальное исполнение | `serverRequest/resolved` без нашего ответа: прерывание, начало или конец хода; терминальное исполнение |
-| `application_proven` | `tool_result` с тем же `tool_use_id` после ответа: allow даёт вывод инструмента, deny даёт `is_error` с нашим текстом и запись в `result.permission_denials` | `serverRequest/resolved` по нашему `requestId` и `item/completed` того же `itemId` со статусом решения; одного `serverRequest/resolved` мало, он приходит и при очистке |
-| отказ CLI в решении | не бывает: ответ после `notifications/cancelled` не исполняется, ошибки нет | не бывает: поздний и повторный ответы молча игнорируются |
-| действие без запроса (`auto_approved_by_cli_policy`) | встроенный read-only набор (`ls`, чтение в рабочем каталоге, `sleep 20`) и разрешения из настроек владельца (OD-3); часть команд CLI блокирует сам (`standalone sleep 30`) | действия, которые не требуют одобрения в режиме сессии; пользовательские `.rules` владельца с `allow` исполняют команду вне песочницы без запроса (OD-3) |
+| Факт | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| --- | --- | --- | --- |
+| `request_opened` | вызов MCP `tools/call` нашего prompt tool: `tool_name`, точный `input`, `tool_use_id`; `tool_name: AskUserQuestion` означает вопрос. Форма аргументов не документирована: контрактный тест на каждую версию | server request `item/commandExecution/requestApproval` или `item/fileChange/requestApproval` с `threadId`, `turnId`, `itemId`; вопрос `item/tool/requestUserInput` на экспериментальной поверхности, включённой решением владельца (OD-1), в обычном режиме и в plan mode | `permission.asked` или `form.created`; запрос потомка несёт его `sessionID`, ответ идёт на путь потомка |
+| нативный ID для `request_id` | `tool_use_id` | `itemId` и JSON-RPC `id` запроса (уникален в пределах соединения) | `per_...` или `frm_...` |
+| допустимые решения | allow (с `updatedInput`) или deny (с текстом); ответы на вопросы в `updatedInput.answers`, свободный текст допускается | только из `availableDecisions` запроса (у команды в проверке `accept`, `acceptWithExecpolicyAmendment`, `cancel`); ответы на вопросы из `options[].label`, свободный текст при `isOther` | `{"decision": "once"}` или отказ с текстом: отказ без текста кончает ход; `always` не отправляется |
+| срок | CLI запрос не истекает (документировано) | у одобрения поля срока нет; у вопроса поле `autoResolutionMs`, в проверке `null`; истечение не проверялось | не истекает, живёт только в памяти сервера |
+| `request_closed` | MCP `notifications/cancelled` с `requestId` при прерывании хода; терминальное исполнение | `serverRequest/resolved` без нашего ответа: прерывание, начало или конец хода; терминальное исполнение | `permission.replied` и `form.cancelled` без нашего ответа, конец хода, прерывание |
+| `application_proven` | `tool_result` с тем же `tool_use_id` после ответа: allow даёт вывод инструмента, deny даёт `is_error` с нашим текстом и запись в `result.permission_denials` | `serverRequest/resolved` по нашему `requestId` и `item/completed` того же `itemId` со статусом решения; одного `serverRequest/resolved` мало, он приходит и при очистке | 204 на ответ |
+| отказ CLI в решении | не бывает: ответ после `notifications/cancelled` не исполняется, ошибки нет | не бывает: поздний и повторный ответы молча игнорируются | 404 и 409: `request_not_pending`; 400: `decision_invalid`, затем отказ с текстом |
+| действие без запроса (`auto_approved_by_cli_policy`) | встроенный read-only набор (`ls`, чтение в рабочем каталоге, `sleep 20`) и разрешения из настроек владельца (OD-3); часть команд CLI блокирует сам (`standalone sleep 30`) | действия, которые не требуют одобрения в режиме сессии; пользовательские `.rules` владельца с `allow` исполняют команду вне песочницы без запроса (OD-3) | вызов дошёл до конца без `permission.asked` при режиме не `bypass`: пометка `cli_policy` |
 
 Карточка запроса в журнале ограничена 256 КиБ JSON. Крупные поля заменяются превью, а в карточку добавляется метка `truncated: true`; разрешение относится к исходному входу, который адаптер хранит у себя. У вопроса `id` и `label` не обрезаются: ответ сверяется по ним. Если не влезает и превью, агент получает явный отказ, а в журнал уходит диагностика `request_too_large`. Запрос вне хода и запрос, переживший конец хода, тоже получают отказ: ответить на них некому. Вне хода диагностика `request_outside_turn`.
 

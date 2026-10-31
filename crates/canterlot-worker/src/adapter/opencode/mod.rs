@@ -86,7 +86,7 @@ const SESSION_TITLE: &str = "canterlot";
 const STALE_INPUT_NOTICE: &str = "Ввод остался в очереди после падения и не выполнен: он снят, чтобы не исполниться вместе со следующим.";
 const ERROR_TEXT_BYTES: usize = 4096;
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
-const VERIFIED_OPENAPI_SHA256: &str =
+pub const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
 
 /// Итог проверки при старте воркера: версия CLI и каталог моделей.

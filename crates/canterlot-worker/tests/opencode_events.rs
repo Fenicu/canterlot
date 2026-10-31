@@ -7,9 +7,10 @@ use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use canterlot_worker::adapter::{
     AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus,
     opencode::{
-        catalog,
+        VERIFIED_OPENAPI_SHA256, catalog,
         events::{RunOutcome, Translated, Translator, block_id},
         replay::capture_lines,
+        version,
     },
 };
 use serde_json::{Value, json};
@@ -110,6 +111,27 @@ fn recorded_turn_gives_independent_text_and_reasoning_blocks() {
     assert_eq!(finals[&text], "Hello world");
     assert_eq!(deltas[&reasoning], "think more");
     assert_eq!(deltas[&text], "Hello world");
+}
+
+// Манифест версии: постоянная адаптера и запись этапа 0 не должны разойтись молча.
+#[test]
+fn verified_schema_digest_is_the_recorded_one() {
+    let manifest = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../docs/stage0/evidence/opencode/openapi-2.1.4.sha256"),
+    )
+    .unwrap();
+    let runtime = manifest
+        .lines()
+        .find(|line| line.contains("GET /openapi.json"))
+        .and_then(|line| line.split_whitespace().next())
+        .unwrap();
+    assert_eq!(runtime, VERIFIED_OPENAPI_SHA256);
+    assert!(
+        version::VERIFIED_VERSIONS
+            .iter()
+            .any(|(major, minor, patch)| format!("{major}.{minor}.{patch}") == "2.1.4")
+    );
 }
 
 #[test]
