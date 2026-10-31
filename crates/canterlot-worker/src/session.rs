@@ -87,6 +87,20 @@ impl JournalDiagnostics {
     }
 }
 
+/// Отказ определяется записью журнала: повтор упрётся в неё же до обновления хаба или воркера.
+fn refused_record(message: &str) -> bool {
+    matches!(
+        message,
+        "unknown_record"
+            | "invalid_record"
+            | "rejected_value"
+            | "foreign_journal"
+            | "foreign_execution"
+            | "journal_kind_mismatch"
+            | "execution"
+    )
+}
+
 pub fn try_send_metrics(tx: &mpsc::Sender<ControlUp>, metrics: MachineMetrics) -> bool {
     let message = ControlUp {
         msg: Some(control_up::Msg::MachineMetrics(metrics)),
@@ -647,6 +661,7 @@ impl Worker {
             .to_string();
         let mut cap = self.config.timers.backoff_min;
         let mut read_retries = 0;
+        let mut refusal = None;
         loop {
             if *shutdown.borrow() {
                 self.transition(SessionState::Disconnected);
@@ -670,7 +685,15 @@ impl Worker {
             self.manager.as_ref().unwrap().set_agent_caller(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
-            if let WorkerError::Hub { code, .. } = &error {
+            if live_since.is_some() {
+                refusal = None;
+            }
+            if let WorkerError::Hub { code, message } = &error {
+                if refused_record(message) && refusal.as_ref() != Some(message) {
+                    tracing::error!(kind = "journal_refused", reason = %message,
+                        "hub refused a journal record; retrying until hub or worker is updated");
+                    refusal = Some(message.clone());
+                }
                 tracing::warn!(error_kind = ?last_error, code = ?code, "session attempt failed");
             } else {
                 tracing::warn!(error_kind = ?last_error, "session attempt failed");

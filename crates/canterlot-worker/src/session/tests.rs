@@ -18,6 +18,55 @@ fn hub_status_preserves_code_and_static_message() {
     }
 }
 
+#[derive(Clone, Default)]
+struct Logs(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Logs {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+// Хаб держит стоп, пока его не обновят: повторы идут, но причина должна быть видна и не тонуть в них.
+#[tokio::test(flavor = "current_thread")]
+async fn hub_refusal_of_a_journal_record_is_logged_once_with_its_reason() {
+    use tracing::instrument::WithSubscriber;
+    let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+        status: Some((tonic::Code::InvalidArgument, "unknown_record")),
+        ..Default::default()
+    })
+    .await;
+    let logs = Logs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let worker = Worker::new(hub.config.clone(), store);
+    let (stop, shutdown) = watch::channel(false);
+    let join = tokio::spawn(worker.run(shutdown).with_subscriber(subscriber));
+    for _ in 0..3 {
+        timeout(Duration::from_secs(3), async {
+            while !matches!(hub.event().await, support::Observed::Hello(..)) {}
+        })
+        .await
+        .unwrap();
+    }
+    stop.send_replace(true);
+    join.await.unwrap().unwrap();
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert_eq!(
+        logs.matches("kind=\"journal_refused\"").count(),
+        1,
+        "{logs}"
+    );
+    assert!(logs.contains("reason=unknown_record"), "{logs}");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn stalled_store_does_not_delay_inbound_or_heartbeat_timers() {
     let (mut hub, store) = support::ProtocolHub::start(support::Behavior::default()).await;
