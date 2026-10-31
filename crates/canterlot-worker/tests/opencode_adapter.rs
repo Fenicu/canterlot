@@ -4039,6 +4039,84 @@ async fn input_during_an_autonomous_run_shares_its_end() {
     bench.close(CloseMode::Graceful).await;
 }
 
+/// Настоящие кадры `live/merged_autonomous.jsonl`, начиная с этого ввода команды.
+fn live_period(session: &str, command: &str, input: &str) -> Vec<Value> {
+    let file = std::fs::read_to_string(evidence_path("live/merged_autonomous")).unwrap();
+    file.lines()
+        .filter_map(|line| {
+            let record: Value = serde_json::from_str(line).unwrap();
+            (record["dir"] == "sse").then(|| record["data"].clone())
+        })
+        .skip_while(|frame| frame["data"]["inboxID"] != command)
+        .map(|frame| {
+            let text = frame
+                .to_string()
+                .replace("ses_01a1934a953571f98f2ea7ff099453bc", session)
+                .replace(command, input);
+            serde_json::from_str(&text).unwrap()
+        })
+        .collect()
+}
+
+// Смоук, пункт 33: фоновая команда кончилась посреди хода, её `synthetic` доставлен в тот же
+// период. Конец один и приписан вводу, второго хода нет.
+#[tokio::test]
+async fn background_shell_that_ends_during_a_turn_stays_inside_it() {
+    let mut script = ready();
+    let session = session_of(&script);
+    let prompt = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(prompt);
+    script.steps.push(Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/prompt"),
+        reply: Reply {
+            body: Some(json!({"data": {"id": "$ID"}})),
+            ..Default::default()
+        },
+        bind: [("$ID".to_owned(), "/id".to_owned())].into_iter().collect(),
+    });
+    script.steps.push(Step::Emit {
+        events: live_period(&session, "msg_01a193536e71715888e52b9b5dd1d236", "$ID"),
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("дальше");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RunAdopted { .. })),
+        "{events:?}"
+    );
+    let AdapterEvent::RunFinished { usage, .. } = events.last().unwrap() else {
+        unreachable!();
+    };
+    assert_eq!(usage[0].input_tokens, 402, "both steps are counted");
+    assert_eq!(usage[0].output_tokens, 300);
+    assert_eq!(usage[0].cache_read_tokens, 23_010);
+    assert_eq!(text_of(&events, "Text").last().unwrap(), "finished");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), bench.adapter.next_event())
+            .await
+            .is_ok_and(|event| matches!(
+                event,
+                AdapterEvent::Phase {
+                    phase: Phase::AwaitingInput,
+                    ..
+                }
+            ))
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Запрос в запуске без ввода показать есть кому: ход приписан последней команде.
 #[tokio::test]
 async fn request_during_an_autonomous_run_reaches_the_owner() {
