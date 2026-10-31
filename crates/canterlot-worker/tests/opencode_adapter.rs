@@ -4669,6 +4669,72 @@ async fn oversized_frame_is_recovered_from_the_projection() {
     bench.close(CloseMode::Graceful).await;
 }
 
+// Кадр не разобран, как и слишком большой: результат инструмента читается из проекции.
+#[tokio::test]
+async fn undecodable_frame_is_recovered_from_the_projection() {
+    let mut script = recorded("cut_midturn");
+    let drop_at = script
+        .steps
+        .iter()
+        .position(|step| matches!(step, Step::DropSse))
+        .unwrap();
+    script.steps[drop_at] = Step::Frame {
+        raw: "data: {\"type\":\"session.tool.succ\n\n".to_owned(),
+    };
+    script.steps.remove(drop_at + 1);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "unparsed_event",
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert_eq!(subscriptions(&bench), 1, "the stream stays");
+    assert_each_block_once(&events);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер режет строки по UTF-16: половина эмодзи в истории не должна закрыть возобновление.
+#[tokio::test]
+async fn lone_surrogate_in_history_does_not_stop_a_resume() {
+    let mut script = recorded("kill_mid_tool");
+    let path = format!("/api/session/{RECORDED_SESSION}/message");
+    let recorded = script.route("GET", &path).expect("recorded").replies[0].clone();
+    let raw = recorded.body.clone().unwrap().to_string().replacen(
+        "\"data\":[{",
+        "\"data\":[{\"broken\":\"\\ud83d\",",
+        1,
+    );
+    assert!(raw.contains("\\ud83d"));
+    script.set_route(
+        "GET",
+        &path,
+        vec![Reply {
+            raw: Some(raw),
+            ..Default::default()
+        }],
+    );
+    for (method, tail) in [("PATCH", ""), ("POST", "/model")] {
+        script.set_route(
+            method,
+            &format!("/api/session/{RECORDED_SESSION}{tail}"),
+            vec![reply_204()],
+        );
+    }
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    bench.close(CloseMode::Graceful).await;
+}
+
 // Ввод, пришедший в разрыв, не ждёт и не пропадает: сервер жив, события добирает сверка.
 #[tokio::test]
 async fn input_during_a_reconnect_goes_through() {

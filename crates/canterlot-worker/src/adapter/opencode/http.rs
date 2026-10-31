@@ -4,7 +4,7 @@
 
 use reqwest::{Client, Method};
 use serde_json::Value;
-use std::{fmt, time::Duration};
+use std::{borrow::Cow, fmt, time::Duration};
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ERROR_BYTES: usize = 64 * 1024;
@@ -51,6 +51,54 @@ fn error_tag(body: &[u8]) -> String {
                 && tag.bytes().all(|byte| byte.is_ascii_alphanumeric())
         })
         .unwrap_or_else(|| "UnknownError".to_owned())
+}
+
+fn surrogate_at(json: &[u8], at: usize) -> Option<u16> {
+    let digits = json.get(at..at + 6)?.strip_prefix(br"\u")?;
+    let unit = u16::from_str_radix(std::str::from_utf8(digits).ok()?, 16).ok()?;
+    (0xD800..=0xDFFF).contains(&unit).then_some(unit)
+}
+
+// Обратная косая черта бывает только внутри строки и всегда начинает экранирование,
+// поэтому проход по ним не путает `\\ud83d` с суррогатом.
+fn repair_surrogates(json: &[u8]) -> Cow<'_, [u8]> {
+    let mut repaired = Vec::new();
+    let mut copied = 0;
+    let mut at = 0;
+    while let Some(found) = json
+        .get(at..)
+        .and_then(|rest| rest.iter().position(|byte| *byte == b'\\'))
+    {
+        let escape = at + found;
+        at = escape + 2;
+        let Some(unit) = surrogate_at(json, escape) else {
+            continue;
+        };
+        let paired = (0xD800..0xDC00).contains(&unit)
+            && surrogate_at(json, escape + 6).is_some_and(|low| low >= 0xDC00);
+        if paired {
+            at = escape + 12;
+            continue;
+        }
+        repaired.extend_from_slice(&json[copied..escape]);
+        repaired.extend_from_slice(br"\ufffd");
+        copied = escape + 6;
+        at = copied;
+    }
+    if copied == 0 {
+        return Cow::Borrowed(json);
+    }
+    repaired.extend_from_slice(&json[copied..]);
+    Cow::Owned(repaired)
+}
+
+/// Сервер режет строки по UTF-16, и `JSON.stringify` пишет половину эмодзи как `\ud83d`.
+/// serde_json такой строки не принимает, а терять из-за неё весь ответ нельзя.
+pub fn decode_json(body: &[u8]) -> Result<Value, serde_json::Error> {
+    serde_json::from_slice(body).or_else(|error| match repair_surrogates(body) {
+        Cow::Owned(repaired) => serde_json::from_slice(&repaired),
+        Cow::Borrowed(_) => Err(error),
+    })
 }
 
 async fn bounded_body(response: &mut reqwest::Response, cap: usize) -> Result<Vec<u8>, HttpError> {
@@ -124,7 +172,7 @@ impl Http {
         if body.is_empty() {
             return Ok(Value::Null);
         }
-        serde_json::from_slice(&body).map_err(|_| HttpError::Decode)
+        decode_json(&body).map_err(|_| HttpError::Decode)
     }
 
     pub async fn get(&self, path: &str, limit: Duration) -> Result<Value, HttpError> {
@@ -211,5 +259,33 @@ mod tests {
             .await
             .unwrap();
         assert!(!format!("{http:?}").contains("пароль"));
+    }
+
+    fn text(json: &str) -> String {
+        let value = decode_json(format!("\"{json}\"").as_bytes()).unwrap();
+        value.as_str().unwrap().to_owned()
+    }
+
+    #[test]
+    fn surrogates_without_a_pair_become_the_replacement_character() {
+        assert_eq!(text(r"a\ud83d"), "a\u{fffd}");
+        assert_eq!(text(r"\uD83Db"), "\u{fffd}b");
+        assert_eq!(text(r"\ude00"), "\u{fffd}");
+        assert_eq!(text(r"\ud83d\u0041"), "\u{fffd}A");
+        assert_eq!(text(r"\ud83d\ud83d\ude00"), "\u{fffd}😀");
+    }
+
+    #[test]
+    fn valid_escapes_stay_untouched() {
+        assert_eq!(text(r"\ud83d\ude00"), "😀");
+        assert_eq!(text(r"\\ud83d"), r"\ud83d");
+        assert_eq!(text(r"\\\ude00"), "\\\u{fffd}");
+        assert_eq!(text(r#"\"\u0041"#), "\"A");
+    }
+
+    #[test]
+    fn broken_json_stays_an_error() {
+        assert!(decode_json(b"{\"a\":").is_err());
+        assert!(decode_json(br#"{"a":"\ud83"#).is_err());
     }
 }

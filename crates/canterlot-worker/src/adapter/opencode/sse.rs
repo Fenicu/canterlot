@@ -143,7 +143,7 @@ fn decode(frame: Frame) -> StreamItem {
         Frame::Data(bytes) => bytes,
         Frame::Oversized => return StreamItem::Oversized,
     };
-    match serde_json::from_slice::<Value>(&bytes) {
+    match super::http::decode_json(&bytes) {
         Ok(value) if value.is_object() => StreamItem::Event(value),
         _ => StreamItem::Undecodable {
             required: bytes
@@ -244,6 +244,17 @@ mod tests {
         let shown = format!("{item:?}");
         assert!(shown.contains("session.text.delta"), "{shown}");
         assert!(!shown.contains("секрет"), "{shown}");
+    }
+
+    #[test]
+    fn half_of_an_emoji_does_not_lose_the_frame() {
+        let item = decode(Frame::Data(
+            br#"{"type":"session.tool.success","data":{"text":"a\ud83d"}}"#.to_vec(),
+        ));
+        let StreamItem::Event(event) = item else {
+            panic!("{item:?}");
+        };
+        assert_eq!(event["data"]["text"], "a\u{fffd}");
     }
 
     #[test]

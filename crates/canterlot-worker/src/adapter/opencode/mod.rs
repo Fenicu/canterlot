@@ -1656,6 +1656,14 @@ impl OpenCodeAdapter {
         }
     }
 
+    // Кадр потерян, как при разрыве, но поток жив.
+    fn recover_lost_frame(&mut self) {
+        if let Some(translator) = self.translator.as_mut() {
+            translator.on_gap();
+        }
+        self.start_resync(false);
+    }
+
     fn on_stream(&mut self, item: Option<StreamItem>) {
         match item {
             Some(StreamItem::Event(event)) => {
@@ -1670,14 +1678,11 @@ impl OpenCodeAdapter {
             }
             Some(StreamItem::Undecodable { required }) => {
                 self.diagnostic("unparsed_event", required);
+                self.recover_lost_frame();
             }
-            // Кадр потерян, как при разрыве, но поток жив.
             Some(StreamItem::Oversized) => {
                 self.diagnostic("oversized_frame", false);
-                if let Some(translator) = self.translator.as_mut() {
-                    translator.on_gap();
-                }
-                self.start_resync(false);
+                self.recover_lost_frame();
             }
             Some(StreamItem::Ended) | None => self.on_stream_end(),
         }
