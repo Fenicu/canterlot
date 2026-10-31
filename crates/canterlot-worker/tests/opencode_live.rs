@@ -12,9 +12,10 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, DecisionOutcome,
-        InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, MediaSource, ModelUsage,
-        SettingsChange, StartSpec, TodoItem, TodoStatus, Transmission, TransmitOutcome,
+        Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
+        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
+        LimitWindow, LocalFile, MediaSource, ModelUsage, Phase, SettingsChange, StartSpec,
+        TodoItem, TodoStatus, Transmission, TransmitOutcome,
         opencode::{OpenCodeAdapter, discover},
     },
     config::OpenCodeConfig,
@@ -1723,6 +1724,190 @@ async fn real_todo_list_comes_whole_with_a_cancelled_item() {
                 todo("снято", TodoStatus::Cancelled)
             ]
         )]
+    );
+    session.close().await;
+}
+
+const OBSERVED_REFUSAL: &str = "The request contains invalid parameters. Check the request body for any errors or inconsistencies.";
+
+/// Сводка по обязательному шаблону OpenCode, запись этапа 0.
+const SUMMARY: &str = "## Objective\n- probe\n\n## Requirements\n- (none)\n\n## Decisions\n- (none)\n\n## Work State\n### Completed\n- (none)\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n1. (none)\n\n## Relevant Files\n- (none)\n\n## Important Context\n- (none)\n";
+
+fn refusal(message: &str) -> Reply {
+    Reply::Status {
+        status: 400,
+        body: json!({"model": "fake-1", "error": {
+            "code": null, "message": message, "param": null,
+            "type": "invalid_request_error"}}),
+    }
+}
+
+impl Session {
+    async fn compact(&mut self) -> CompactOutcome {
+        tokio::time::timeout(WAIT, self.adapter.compact(Uuid::now_v7()))
+            .await
+            .expect("compact must finish")
+    }
+
+    async fn refused_turn(&mut self, text: &str) {
+        let events = self.turn(&input(text)).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Error,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+    }
+}
+
+// Запись `stuck_invalid_request` на настоящем сервере: отказ, отказ, сжатие, ответ.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_same_refusal_twice_offers_compaction_and_it_recovers() {
+    let stub = Stub::start(vec![
+        refusal(OBSERVED_REFUSAL),
+        refusal(OBSERVED_REFUSAL),
+        Reply::text(SUMMARY),
+        Reply::text("снова работает"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.refused_turn("один").await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::SessionStuck))
+        .await;
+    assert_eq!(session.compact().await, CompactOutcome::Accepted);
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::Compacted { ok: true })
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase {
+            phase: Phase::ContextMaintenance,
+            ..
+        }
+    )));
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+        .await;
+    let events = session.turn(&input("три")).await;
+    assert_eq!(finals(&events), ["снова работает"]);
+    assert_eq!(stub.requests().len(), 4, "one model call per input");
+    session.close().await;
+}
+
+// Отказ сжатия снимается с настоящего сервера: в записях этапа 0 такого кадра нет.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_compaction_without_a_summary_is_reported() {
+    let stub = Stub::start(vec![
+        refusal(OBSERVED_REFUSAL),
+        refusal(OBSERVED_REFUSAL),
+        Reply::text("без шаблона"),
+        Reply::text("снова без шаблона"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.refused_turn("один").await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::SessionStuck))
+        .await;
+    assert_eq!(session.compact().await, CompactOutcome::Accepted);
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Compacted { ok: false })),
+        "{events:?}"
+    );
+    session.close().await;
+}
+
+// Второе переполнение: сервер сжал и снова получил отказ, чинить ему больше нечем.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_overflow_after_compaction_exhausts_the_context() {
+    let overflow = "prompt is too long: 900000 tokens > 200000 maximum";
+    let stub = Stub::start(vec![
+        Reply::text("первый ответ"),
+        refusal(overflow),
+        Reply::text(SUMMARY),
+        refusal(overflow),
+        refusal(overflow),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("один")).await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::ContextExhausted))
+        .await;
+    session.close().await;
+}
+
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_quota_refusal_is_a_reached_limit_with_the_wait() {
+    let stub = Stub::start(vec![Reply::Limited {
+        body: json!({"error": {"message": "Go usage limit reached", "type": "GoUsageLimitError"}}),
+        retry_after_s: 3600,
+    }])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("x")).await;
+    let fact = events.iter().find_map(|event| match event {
+        AdapterEvent::Limit(fact) => Some(fact.clone()),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            fact,
+            Some(LimitFact::Reached {
+                window: LimitWindow::FiveHour,
+                resets_at_ms: Some(_),
+            })
+        ),
+        "{fact:?}"
+    );
+    session.close().await;
+}
+
+// Повтор запроса к модели на настоящем сервере: фаза есть, вторая запись ввода не нужна.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
+    let stub = Stub::start(vec![
+        Reply::Status {
+            status: 429,
+            body: json!({"error": {"message": "slow down", "type": "rate_limit_error"}}),
+        },
+        Reply::text("после повтора"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("x")).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase { summary: Some(summary), .. } if summary == "retry 2"
+    )));
+    assert_eq!(finals(&events), ["после повтора"]);
+    assert_eq!(
+        stub.requests()
+            .iter()
+            .filter(|request| request["messages"].to_string().contains('x'))
+            .count(),
+        2,
+        "the model is called again, the input stays one"
     );
     session.close().await;
 }

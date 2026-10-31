@@ -23,6 +23,11 @@ pub enum Reply {
         status: u16,
         body: Value,
     },
+    /// Отказ с заголовком `Retry-After`.
+    Limited {
+        body: Value,
+        retry_after_s: u64,
+    },
     /// Текст кусками с паузами: между ними есть время разорвать поток.
     Paced {
         chunks: Vec<String>,
@@ -119,7 +124,7 @@ fn stream(reply: &Reply) -> String {
             }
             "tool_calls"
         }
-        Reply::Status { .. } | Reply::Paced { .. } => "stop",
+        Reply::Status { .. } | Reply::Limited { .. } | Reply::Paced { .. } => "stop",
     };
     body += &chunk(json!({}), Some(finish));
     body += &usage();
@@ -185,6 +190,16 @@ async fn serve(shared: Arc<Mutex<Shared>>, stream_socket: TcpStream) {
             let body = body.to_string();
             format!(
                 "HTTP/1.1 {status} Error\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+        Reply::Limited {
+            body,
+            retry_after_s,
+        } => {
+            let body = body.to_string();
+            format!(
+                "HTTP/1.1 429 Error\r\ncontent-type: application/json\r\nretry-after: {retry_after_s}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
                 body.len()
             )
         }
