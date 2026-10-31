@@ -573,3 +573,24 @@ test('live_turn_folds_steps_without_a_jump_and_keeps_the_running_one_and_the_own
   await expect(page.locator('.steps .surface .head')).toHaveAttribute('aria-expanded', 'true');
   await expect(page.locator('.steps .tool')).toHaveCount(6);
 });
+
+test('wide_code_block_fades_its_cut_edge_and_a_fitting_one_does_not', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedFirstDialog(api);
+  const last = FIRST_DIALOG.filter((item) => item.kind === 'block' && item.block_kind === 'text').at(-1) as { id: string };
+  const wide = ['```', `echo ${'очень-длинный-аргумент '.repeat(12)}`, '```', '', '```', 'ls', '```'].join('\n');
+  api.blocks.set(last.id, { ...api.blocks.get(last.id)!, text: wide });
+  for (const item of api.histories.get(id)!) if (item.kind === 'block' && item.id === last.id) item.content = wide;
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const code = page.locator('.prose pre');
+  await expect(code).toHaveCount(2);
+  await code.first().scrollIntoViewIfNeeded();
+  await expect(code.first()).toHaveAttribute('data-fade', 'end');
+  await expect(code.first()).not.toHaveCSS('mask-image', 'none');
+  await expect(code.last()).not.toHaveAttribute('data-fade', /.+/);
+  await code.first().evaluate((node) => { node.scrollLeft = node.scrollWidth; node.dispatchEvent(new Event('scroll')); });
+  await expect(code.first()).toHaveAttribute('data-fade', 'start');
+});
