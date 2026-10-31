@@ -268,6 +268,32 @@ async fn inline_final_without_deltas_raises_no_checksum_mismatch(pool: PgPool) -
     Ok(())
 }
 
+// Супервизор открывает блок ревизией 1, поэтому ревизия не говорит, были ли дельты.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn inline_final_after_a_supervisor_start_raises_no_checksum_mismatch(
+    pool: PgPool,
+) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    let Body::BlockStarted(mut opened) = start(id) else {
+        unreachable!()
+    };
+    opened.rev = 1;
+    run.send(vec![
+        Body::BlockStarted(opened),
+        final_fact(id, 2, "bad\n\nExited with code 3"),
+    ])
+    .await;
+    assert_eq!(block(&pool, id).await.2, "final");
+    assert!(
+        !events(&pool, id)
+            .await
+            .iter()
+            .any(|e| e.0 == "block_checksum_mismatch")
+    );
+    Ok(())
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;

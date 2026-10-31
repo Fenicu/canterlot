@@ -243,7 +243,7 @@ pub async fn finalize(
         return Ok(BlockOutcome::Diagnosed("block_conflicting_final"));
     }
     // Без дельт накопленного текста нет, сверять его не с чем: у малого финала текст приходит целиком.
-    let accumulated_known = fact.text_omitted || block.rev > 0;
+    let accumulated_known = fact.text_omitted || !accumulated.is_empty();
     let mismatch =
         checksum(content) != expected || (accumulated_known && checksum(&accumulated) != expected);
     if fact.text_omitted && (block.revision_gap || mismatch) {
