@@ -569,7 +569,14 @@ async fn ownership_is_durable_before_cli_start() {
     let journal = env.manager().observations()[0].sj_journal_id.clone();
     assert_eq!(record.sj_journal_id, journal);
     assert_eq!(record.secret_sha256.len(), 32);
-    assert!(!record.boot_id.is_empty() && record.ipc_socket.ends_with("ipc.sock"));
+    assert!(!record.boot_id.is_empty());
+    let expected = match std::env::var_os("XDG_RUNTIME_DIR") {
+        Some(runtime) => Path::new(&runtime)
+            .join("canterlot")
+            .join(format!("{}.sock", env.execution)),
+        None => Path::new(&record.exec_dir).join("ipc.sock"),
+    };
+    assert_eq!(Path::new(&record.ipc_socket), expected);
     env.stop().await;
 }
 
