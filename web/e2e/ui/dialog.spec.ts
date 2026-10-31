@@ -143,6 +143,29 @@ test('file_row_leads_with_the_name_and_the_full_command_opens_above_the_output',
   await expect(row.locator('.out').last()).toHaveText('Вывода нет');
 });
 
+test('quick_steps_show_no_time_and_a_finished_time_has_no_chip', async ({ page }) => {
+  await reloaded(page);
+  const bash = toolRow(page, 'printf').first();
+  await expect(bash.locator('.pill')).toHaveCount(0);
+  const paint = await page.locator('.sub .pill').evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { fill: style.backgroundColor, padding: style.paddingLeft };
+  });
+  expect(paint).toEqual({ fill: 'rgba(0, 0, 0, 0)', padding: '0px' });
+});
+
+test('reasoning_rows_share_the_column_of_tool_rows_and_the_feed_fades_at_its_edges', async ({ page }) => {
+  await reloaded(page);
+  const tool = await page.locator('.tool .chevron').first().boundingBox();
+  const reasoning = await page.locator('.reasoning .chevron').first().boundingBox();
+  expect(Math.abs((tool?.x ?? 0) - (reasoning?.x ?? 99))).toBeLessThanOrEqual(1);
+  const mask = await page.locator('.feed').evaluate((node) => {
+    const style = getComputedStyle(node) as CSSStyleDeclaration & { webkitMaskImage?: string };
+    return style.maskImage || style.webkitMaskImage || 'none';
+  });
+  expect(mask).toContain('linear-gradient');
+});
+
 test('long_link_in_the_owner_message_wraps', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);
