@@ -11,6 +11,10 @@ pub enum PermissionMode {
     ReadOnly,
 }
 
+/// Чтение через MCP canterlot; сохранение и применение пресета решает режим, как у других.
+const LIMITS_TOOL: &str = "canterlot_canterlot_limits";
+const PRESETS_TOOL: &str = "canterlot_canterlot_presets_list";
+
 fn rule(action: &str, effect: &str) -> Value {
     json!({"action": action, "resource": "*", "effect": effect})
 }
@@ -34,7 +38,8 @@ impl PermissionMode {
             Self::Ask => vec![
                 rule("*", "ask"),
                 rule("question", "allow"),
-                rule("canterlot_canterlot_limits", "allow"),
+                rule(LIMITS_TOOL, "allow"),
+                rule(PRESETS_TOOL, "allow"),
                 rule("todowrite", "allow"),
             ],
             // Список задан явно: всё, чего в нём нет, исчезает из инструментов модели.
@@ -46,7 +51,8 @@ impl PermissionMode {
                 rule("question", "allow"),
                 rule("subagent", "allow"),
                 rule("todowrite", "allow"),
-                rule("canterlot_canterlot_limits", "allow"),
+                rule(LIMITS_TOOL, "allow"),
+                rule(PRESETS_TOOL, "allow"),
             ],
         };
         Some(Value::Array(rules))

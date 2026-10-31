@@ -450,6 +450,60 @@ async fn preset_change_through_the_supervisor_keeps_the_server_and_the_text_priv
     env.fake().wait_gone().await;
 }
 
+// Команда реле из конфигурации запуска — настоящий `mcp-relay` воркера, а брокер живёт в
+// супервизоре: именно это соединение открывает сервер OpenCode.
+#[tokio::test]
+async fn relay_from_the_boot_config_reaches_the_broker_of_the_supervisor() {
+    use std::{
+        io::{BufRead as _, BufReader, Write as _},
+        process::{Command as Process, Stdio},
+    };
+    let mut env = Env::new(Some(ready())).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let boot = env.fake().boot();
+    let content: Value =
+        serde_json::from_str(boot["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
+    let server = &content["mcp"]["servers"]["canterlot"];
+    assert_eq!(server["codemode"], false);
+    let command: Vec<&str> = server["command"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    let mut relay = Process::new(command[0])
+        .args(&command[1..])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut stdin = relay.stdin.take().unwrap();
+    let call = json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+        "params": {"name": "canterlot_limits", "arguments": {}},
+    });
+    writeln!(stdin, "{call}").unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    let stdout = relay.stdout.take().unwrap();
+    let answer = tokio::task::spawn_blocking(move || {
+        BufReader::new(stdout).read_line(&mut line).unwrap();
+        line
+    });
+    let answer: Value =
+        serde_json::from_str(&timeout(WAIT, answer).await.unwrap().unwrap()).unwrap();
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "no limit data yet in this session"
+    );
+    drop(stdin);
+    relay.wait().unwrap();
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
 // Смерть супервизора закрывает stdin, и сервер уходит сам.
 #[tokio::test]
 async fn dead_supervisor_releases_the_server_through_the_stdin_lease() {

@@ -23,6 +23,51 @@ fn tool_names(tools: &Value) -> Vec<&str> {
         .collect()
 }
 
+// У каждого харнесса свой бюджет в тексте: модель OpenCode не должна читать про Claude.
+#[test]
+fn opencode_gets_its_own_budget_and_instructions_without_approve() {
+    use canterlot_worker::adapter::canterlot_mcp::ToolSet;
+    let list = mcp::handle_rpc_with_provider(
+        &json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}),
+        ToolSet::LimitsOnly,
+        "opencode",
+    );
+    let tools = list.as_reply().expect("tools/list")["result"]["tools"].clone();
+    let limits = tools
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|tool| tool["name"] == "canterlot_limits")
+        .unwrap();
+    let description = limits["description"].as_str().unwrap();
+    assert!(description.contains("OpenCode API budget"), "{description}");
+    assert!(!description.contains("Claude"), "{description}");
+    let start = mcp::handle_rpc_with_provider(
+        &json!({"jsonrpc":"2.0","id":2,"method":"initialize","params":{}}),
+        ToolSet::LimitsOnly,
+        "opencode",
+    );
+    let text = start.as_reply().expect("initialize")["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(!text.contains("Claude"), "{text}");
+    assert!(!text.contains("Codex"), "{text}");
+    assert!(text.contains("canterlot_limits"), "{text}");
+    assert!(text.contains("canterlot_presets_list"), "{text}");
+    let snapshot = canterlot_proto::worker::v1::LimitsSnapshot {
+        provider: "opencode".into(),
+        current: vec![canterlot_proto::worker::v1::LimitObservation {
+            window: canterlot_proto::worker::v1::LimitWindow::Weekly.into(),
+            used_permille: 500,
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let reply = mcp::limits_tool_text(&snapshot, "opencode");
+    assert!(reply.starts_with("OpenCode API budget"), "{reply}");
+}
+
 #[test]
 fn both_tool_sets_list_the_preset_tools() {
     for (tool_set, provider) in [

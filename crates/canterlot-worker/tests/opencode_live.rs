@@ -12,9 +12,9 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
-        InstructionSpec, InterruptOutcome, ModelUsage, SettingsChange, StartSpec, Transmission,
-        TransmitOutcome,
+        Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, DecisionOutcome,
+        InstructionMode, InstructionSpec, InterruptOutcome, ModelUsage, SettingsChange, StartSpec,
+        Transmission, TransmitOutcome,
         opencode::{OpenCodeAdapter, discover},
     },
     config::OpenCodeConfig,
@@ -1003,22 +1003,152 @@ async fn real_switch_from_owner_restarts_with_the_same_session() {
     session.close().await;
 }
 
-// Инструмент MCP виден в первом запросе после холодного старта.
+const CANTERLOT_TOOLS: [&str; 4] = [
+    "canterlot_canterlot_limits",
+    "canterlot_canterlot_presets_list",
+    "canterlot_canterlot_preset_save",
+    "canterlot_canterlot_preset_apply",
+];
+
+// Инструменты MCP видны в первом запросе после холодного старта. Спека требует 20 повторов:
+// `connected` публикуется раньше регистрации инструментов, ожидание остаётся эвристикой.
 #[tokio::test]
 #[ignore = "L2: настоящий opencode, см. заголовок файла"]
-async fn canterlot_tool_is_in_the_first_provider_request() {
-    for _ in 0..3 {
+async fn canterlot_tools_are_in_the_first_provider_request_across_cold_starts() {
+    for attempt in 0..20 {
         let stub = Stub::start(vec![Reply::text("ок")]).await;
         let mut session = Session::start(&stub, "bypass").await;
         session.turn(&input("лимиты")).await;
-        let request = &stub.requests()[0];
-        let tools: Vec<_> = request["tools"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|tool| tool.pointer("/function/name").and_then(Value::as_str))
-            .collect();
-        assert!(tools.contains(&"canterlot_canterlot_limits"), "{tools:?}");
+        let tools = offered(&stub.requests()[0]);
+        for name in CANTERLOT_TOOLS {
+            assert!(
+                tools.iter().any(|tool| tool == name),
+                "cold start {attempt}: {name} missing in {tools:?}"
+            );
+        }
         session.close().await;
     }
+}
+
+// Список пресетов и лимиты: вызов модели проходит настоящий клиент MCP, реле и брокер, а ответ
+// доходит до следующего запроса. Лимиты отвечает адаптер, поэтому событий о них нет.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_preset_and_limit_tools_answer_the_model() {
+    let stub = Stub::start(vec![
+        Reply::Tools(vec![
+            ("canterlot_canterlot_limits".into(), json!({})),
+            ("canterlot_canterlot_presets_list".into(), json!({})),
+        ]),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("покажи пресеты");
+    session.transmit(&turn).await;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::AgentCall { .. }))
+        .await;
+    let Some(AdapterEvent::AgentCall { call_id, tool, .. }) = events.last().cloned() else {
+        unreachable!();
+    };
+    assert_eq!(tool, "presets.list");
+    session
+        .adapter
+        .agent_call_result(
+            call_id,
+            AgentCallResult::Ok(json!({"presets": ["CANARY_PRESET"]})),
+        )
+        .await;
+    let command = turn.command_id;
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    let seen = stub.requests()[1].to_string();
+    assert!(seen.contains("CANARY_PRESET"), "{seen}");
+    assert!(seen.contains("no limit data yet"), "{seen}");
+    session.close().await;
+}
+
+// В `ask` список и лимиты идут без карточки, а применение пресета спрашивает: действует
+// разрешение самого CLI (`pilot.md` §4). В `read_only` модели предлагается только чтение.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_modes_treat_the_preset_tools_by_their_effect() {
+    let stub = Stub::start(vec![
+        Reply::tool("canterlot_canterlot_presets_list", json!({})),
+        Reply::tool("canterlot_canterlot_preset_apply", json!({"id": "clean"})),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("примени пресет");
+    session.transmit(&turn).await;
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::AgentCall { .. }))
+        .await;
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RequestOpened { .. })),
+        "the list asks nothing"
+    );
+    let Some(AdapterEvent::AgentCall { call_id, .. }) = events.last().cloned() else {
+        unreachable!();
+    };
+    session
+        .adapter
+        .agent_call_result(call_id, AgentCallResult::Ok(json!({"presets": []})))
+        .await;
+    let (request, payload) = session.until_request().await;
+    assert_eq!(payload["tool_name"], "canterlot_canterlot_preset_apply");
+    let outcome = session
+        .adapter
+        .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
+        .await;
+    assert!(
+        matches!(outcome, DecisionOutcome::Applied(_)),
+        "{outcome:?}"
+    );
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::AgentCall { .. }))
+        .await;
+    let Some(AdapterEvent::AgentCall { call_id, tool, .. }) = events.last().cloned() else {
+        unreachable!();
+    };
+    assert_eq!(tool, "presets.apply");
+    session
+        .adapter
+        .agent_call_result(call_id, AgentCallResult::Ok(json!({"applied": true})))
+        .await;
+    let command = turn.command_id;
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+        .await;
+    session.close().await;
+    let stub = Stub::start(vec![Reply::text("ок")]).await;
+    let mut session = Session::start(&stub, "read_only").await;
+    session.turn(&input("читай")).await;
+    let tools = offered(&stub.requests()[0]);
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool == "canterlot_canterlot_limits")
+    );
+    assert!(
+        tools
+            .iter()
+            .any(|tool| tool == "canterlot_canterlot_presets_list")
+    );
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool == "canterlot_canterlot_preset_apply")
+    );
+    assert!(
+        !tools
+            .iter()
+            .any(|tool| tool == "canterlot_canterlot_preset_save")
+    );
+    session.close().await;
 }

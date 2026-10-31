@@ -7,9 +7,9 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, BlockKind, CloseMode, DecisionOutcome,
-        InstructionMode, InstructionSpec, InterruptOutcome, Phase, SettingsChange, StartSpec,
-        Started, Transmission, TransmitOutcome,
+        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode,
+        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, Phase, SettingsChange,
+        StartSpec, Started, Transmission, TransmitOutcome,
         opencode::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
@@ -841,6 +841,7 @@ async fn modes_become_session_rules() {
                 {"action": "subagent", "resource": "*", "effect": "allow"},
                 {"action": "todowrite", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_limits", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_presets_list", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -849,6 +850,7 @@ async fn modes_become_session_rules() {
                 {"action": "*", "resource": "*", "effect": "ask"},
                 {"action": "question", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_limits", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_canterlot_presets_list", "resource": "*", "effect": "allow"},
                 {"action": "todowrite", "resource": "*", "effect": "allow"},
             ]),
         ),
@@ -3985,5 +3987,116 @@ async fn refused_request_outside_our_sessions_is_ignored() {
     bench.accepted(&input).await;
     bench.until_finished(input.command_id).await;
     assert!(find(&bench.fake.requests(), "POST", "/reply").is_none());
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Соединение реле: сервер OpenCode говорит с брокером через тот же сокет.
+struct Relay {
+    reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl Relay {
+    async fn connect(bench: &Bench) -> Self {
+        let stream = tokio::net::UnixStream::connect(bench.exec_dir.join("mcp.sock"))
+            .await
+            .unwrap();
+        let (read, writer) = stream.into_split();
+        Self {
+            reader: tokio::io::BufReader::new(read),
+            writer,
+        }
+    }
+
+    async fn send(&mut self, message: Value) {
+        use tokio::io::AsyncWriteExt as _;
+        let mut line = message.to_string();
+        line.push('\n');
+        self.writer.write_all(line.as_bytes()).await.unwrap();
+    }
+
+    async fn reply(&mut self) -> Value {
+        use tokio::io::AsyncBufReadExt as _;
+        let mut line = String::new();
+        tokio::time::timeout(WAIT, self.reader.read_line(&mut line))
+            .await
+            .expect("relay reply")
+            .unwrap();
+        serde_json::from_str(&line).unwrap()
+    }
+
+    async fn call(&mut self, id: u64, name: &str) {
+        self.send(json!({
+            "jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": {}},
+        }))
+        .await;
+    }
+}
+
+// Набор инструментов и текст бюджета: сервер получает их при подключении реле.
+#[tokio::test]
+async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
+    let mut bench = Bench::new(session_only());
+    bench.start_ok().await;
+    let mut relay = Relay::connect(&bench).await;
+    relay
+        .send(json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}))
+        .await;
+    let list = relay.reply().await;
+    let names: Vec<&str> = list["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|tool| tool["name"].as_str())
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "canterlot_limits",
+            "canterlot_presets_list",
+            "canterlot_preset_save",
+            "canterlot_preset_apply"
+        ]
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Лимиты отвечает адаптер, пресеты идут через хаб и возвращаются результатом инструмента.
+#[tokio::test]
+async fn limits_and_preset_calls_go_through_the_broker() {
+    let mut bench = Bench::new(session_only());
+    bench.start_ok().await;
+    let mut relay = Relay::connect(&bench).await;
+    relay.call(1, "canterlot_limits").await;
+    let pump = tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await;
+    assert!(
+        pump.is_err(),
+        "a limits query is answered inside the adapter"
+    );
+    let answer = relay.reply().await;
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "no limit data yet in this session"
+    );
+    relay.call(2, "canterlot_presets_list").await;
+    let event = bench.event().await;
+    let AdapterEvent::AgentCall { call_id, tool, .. } = event else {
+        panic!("{event:?}");
+    };
+    assert_eq!(tool, "presets.list");
+    bench
+        .adapter
+        .agent_call_result(call_id, AgentCallResult::Ok(json!({"presets": []})))
+        .await;
+    let answer = relay.reply().await;
+    assert_eq!(answer["id"], 2);
+    assert!(
+        answer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("presets"),
+        "{answer}"
+    );
     bench.close(CloseMode::Graceful).await;
 }
