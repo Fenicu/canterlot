@@ -3,7 +3,7 @@
 //! Харнесс OpenCode спрятан за таблицей `[opencode]`: без неё пилот не меняется.
 
 use canterlot_worker::{
-    adapter::{self, AdapterContext},
+    adapter::{self, AdapterContext, opencode::catalog::ModelEntry},
     config::{OpenCodeConfig, WorkerConfig},
     supervisor::SupervisorSpec,
 };
@@ -62,6 +62,7 @@ fn table_reads_every_key() {
 executable = "/opt/opencode"
 data_root = "/srv/canterlot/opencode"
 refuse_paths = ["/srv/shared"]
+providers = ["anthropic", "openrouter"]
 "#;
     let config: WorkerConfig = toml::from_str(&worker_toml(extra)).unwrap();
     let cfg = config.opencode.unwrap();
@@ -71,6 +72,7 @@ refuse_paths = ["/srv/shared"]
         Some(PathBuf::from("/srv/canterlot/opencode"))
     );
     assert_eq!(cfg.refuse_paths, vec![PathBuf::from("/srv/shared")]);
+    assert_eq!(cfg.providers, ["anthropic", "openrouter"]);
 }
 
 #[test]
@@ -86,6 +88,7 @@ fn table_survives_the_supervisor_spec() {
         executable: PathBuf::from("/opt/opencode"),
         data_root: None,
         refuse_paths: vec![PathBuf::from("/srv/shared")],
+        providers: vec!["anthropic".into()],
     };
     let mut spec: toml::Value = toml::from_str(&format!(
         "execution_id = \"{id}\"\ngeneration = 1\nconversation_id = \"{id}\"\nprotocol_version = 1\n",
@@ -99,6 +102,7 @@ fn table_survives_the_supervisor_spec() {
     let cfg = parsed.opencode.unwrap();
     assert_eq!(cfg.executable, PathBuf::from("/opt/opencode"));
     assert_eq!(cfg.refuse_paths, vec![PathBuf::from("/srv/shared")]);
+    assert_eq!(cfg.providers, ["anthropic"]);
 }
 
 #[test]
@@ -114,6 +118,11 @@ fn harness_is_known_to_the_registry() {
 fn catalog_shows_the_harness_only_with_a_probe_result() {
     let catalog = adapter::opencode::OpenCodeCatalog {
         version: adapter::cli_version::CliVersion::Verified("2.1.4".into()),
+        models: vec![ModelEntry {
+            id: "opencode-go/muse-spark".into(),
+            title: "Muse Spark".into(),
+            efforts: vec!["low".into(), "high".into()],
+        }],
     };
     let entries = adapter::catalog_with(None, None, None, Some(&catalog));
     let entry = entries
@@ -122,6 +131,13 @@ fn catalog_shows_the_harness_only_with_a_probe_result() {
         .expect("catalog entry");
     assert_eq!(entry.provider, "opencode");
     assert_eq!(entry.title, "OpenCode");
-    // Смена настроек на ходу приходит со своими срезами.
-    assert!(!entry.settings_midsession);
+    assert!(entry.settings_midsession);
+    assert!(entry.settings_midsession_effort);
+    assert_eq!(
+        entry.permission_modes,
+        ["owner", "ask", "bypass", "read_only"]
+    );
+    assert_eq!(entry.models[0].id, "opencode-go/muse-spark");
+    assert_eq!(entry.models[0].title, "Muse Spark");
+    assert_eq!(entry.models[0].efforts, ["low", "high"]);
 }

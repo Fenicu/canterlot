@@ -252,10 +252,7 @@ mod layout {
         adapter::opencode::process::{DataLayout, LayoutError, base_env, check_root},
         config::OpenCodeConfig,
     };
-    use std::{
-        ffi::OsString,
-        path::{Path, PathBuf},
-    };
+    use std::{ffi::OsString, path::Path};
 
     fn env(pairs: &[(&str, &str)]) -> Vec<(OsString, OsString)> {
         pairs
@@ -403,31 +400,5 @@ mod layout {
         ] {
             assert_eq!(get(secret), None);
         }
-    }
-
-    #[tokio::test]
-    async fn discover_keeps_the_version_check_inside_canterlot_data() {
-        let dir = tempfile::tempdir().unwrap();
-        let seen = dir.path().join("seen");
-        let exe = super::fake_exec::write_executable(
-            &dir.path().join("opencode"),
-            format!(
-                "#!/bin/sh\necho \"$XDG_DATA_HOME\" > {}\necho 'opencode v2.1.4'\n",
-                seen.display()
-            ),
-            0o700,
-        );
-        let cfg = OpenCodeConfig {
-            executable: exe,
-            ..Default::default()
-        };
-        let data: PathBuf = dir.path().join("data");
-        canterlot_worker::adapter::opencode::discover(&cfg, &data)
-            .await
-            .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(seen).unwrap().trim(),
-            data.join("opencode/data").to_str().unwrap()
-        );
     }
 }

@@ -927,3 +927,48 @@ async fn autonomous_run_is_a_turn_for_the_supervisor() {
     env.stop().await;
     env.fake().wait_gone().await;
 }
+
+// Смена модели и усилия с вводом хаба: запрос раньше ввода, в формате `Model.Ref`.
+#[tokio::test]
+async fn model_change_from_the_hub_reaches_the_server_before_the_input() {
+    let mut script = ready();
+    let session = session_id(&script);
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/model"),
+        vec![Reply {
+            status: 204,
+            ..Default::default()
+        }],
+    );
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env
+        .deliver_with(
+            "другой моделью",
+            Some(SettingsOverride {
+                model: "opencode/flint-40b-free".into(),
+                effort: "max".into(),
+                ..Default::default()
+            }),
+        )
+        .await;
+    env.wait_finished(input).await;
+    let requests = env.fake().requests();
+    let model = requests
+        .iter()
+        .position(|request| request["method"] == "POST" && path_of(request).ends_with("/model"))
+        .expect("model change");
+    let prompt = requests
+        .iter()
+        .position(|request| path_of(request).ends_with("/prompt"))
+        .unwrap();
+    assert!(model < prompt, "{requests:?}");
+    assert_eq!(
+        requests[model]["body"],
+        json!({"model": {"id": "flint-40b-free", "providerID": "opencode", "variant": "max"}})
+    );
+    env.stop().await;
+    env.fake().wait_gone().await;
+}

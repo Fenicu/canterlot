@@ -410,6 +410,8 @@ pub struct OpenCodeConfig {
     pub data_root: Option<PathBuf>,
     /// Каталоги, в которых нельзя держать базу, сверх `opencode` в данных владельца.
     pub refuse_paths: Vec<PathBuf>,
+    /// Провайдеры в каталоге моделей сверх `opencode-go`.
+    pub providers: Vec<String>,
 }
 
 impl Default for OpenCodeConfig {
@@ -418,6 +420,7 @@ impl Default for OpenCodeConfig {
             executable: PathBuf::from("opencode"),
             data_root: None,
             refuse_paths: Vec::new(),
+            providers: Vec::new(),
         }
     }
 }

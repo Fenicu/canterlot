@@ -28,8 +28,9 @@ use self::{
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
-        DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec, InterruptOutcome, Phase,
-        Proof, SettingsChange, StartSpec, Started, Support, Transmission, TransmitOutcome,
+        DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec, InterruptOutcome,
+        ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
+        TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
         held_tool::HeldTools,
@@ -69,10 +70,11 @@ const ERROR_TEXT_BYTES: usize = 4096;
 const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
 
-/// Итог проверки при старте воркера: версия CLI. Каталог моделей появится с его срезом.
+/// Итог проверки при старте воркера: версия CLI и каталог моделей.
 #[derive(Clone)]
 pub struct OpenCodeCatalog {
     pub version: CliVersion,
+    pub models: Vec<catalog::ModelEntry>,
 }
 
 impl OpenCodeCatalog {
@@ -82,10 +84,18 @@ impl OpenCodeCatalog {
             provider: "opencode",
             title: "OpenCode",
             images: false,
-            settings_midsession: false,
-            settings_midsession_effort: false,
+            settings_midsession: true,
+            settings_midsession_effort: true,
             permission_modes: vec!["owner", "ask", "bypass", "read_only"],
-            models: Vec::new(),
+            models: self
+                .models
+                .iter()
+                .map(|entry| ModelCatalog {
+                    id: entry.id.clone(),
+                    title: entry.title.clone(),
+                    efforts: entry.efforts.clone(),
+                })
+                .collect(),
         }
     }
 }
@@ -94,6 +104,8 @@ impl OpenCodeCatalog {
 pub enum DiscoverError {
     Version(VersionError),
     DataRoot(LayoutError),
+    /// Сервер не поднялся или не отдал список моделей.
+    Catalog,
 }
 
 // Каталоги и окружение своих данных: без них проверка версии пишет к владельцу.
@@ -127,7 +139,38 @@ pub async fn discover(
     let version = version::check(&cfg.executable, &env)
         .await
         .map_err(DiscoverError::Version)?;
-    Ok(OpenCodeCatalog { version })
+    let models = probe_models(cfg, env, &layout.tmp())
+        .await
+        .map_err(|_| DiscoverError::Catalog)?;
+    Ok(OpenCodeCatalog { version, models })
+}
+
+// Список моделей зависит от учётных данных и конфигурации, поэтому его отдаёт сам сервер.
+// Запуск короткий и без сессий, на общей базе canterlot это безопасно.
+async fn probe_models(
+    cfg: &OpenCodeConfig,
+    mut env: Vec<(OsString, OsString)>,
+    workdir: &Path,
+) -> Result<Vec<catalog::ModelEntry>, ()> {
+    let password = random_password();
+    env.push(("OPENCODE_PASSWORD".into(), password.clone().into()));
+    let mut proc = ServerProcess::spawn_probe(&cfg.executable, workdir, &env)
+        .await
+        .map_err(drop)?;
+    let models = async {
+        let base = proc.ready_url(READY_WAIT).await.map_err(drop)?;
+        let http = Http::new(base, password).await.map_err(drop)?;
+        let models = http.get("/api/model", REQUEST_WAIT).await.map_err(drop)?;
+        let default = http.get("/api/model/default", REQUEST_WAIT).await.ok();
+        Ok(catalog::entries(&models, default.as_ref(), &cfg.providers))
+    }
+    .await;
+    proc.close_stdin();
+    if tokio::time::timeout(TERM_GRACE, proc.wait()).await.is_err() {
+        proc.signal(rustix::process::Signal::KILL);
+        let _ = tokio::time::timeout(KILL_WAIT, proc.wait()).await;
+    }
+    models
 }
 
 fn version_failure(error: VersionError) -> AdapterError {
@@ -148,7 +191,7 @@ fn version_label(version: &CliVersion) -> &str {
 fn model_ref(model: &str, effort: &str) -> Option<Value> {
     let (provider, id) = model.split_once('/')?;
     let mut reference = json!({"id": id, "providerID": provider});
-    if !effort.is_empty() {
+    if !effort.is_empty() && effort != catalog::NO_VARIANT {
         reference["variant"] = effort.into();
     }
     Some(reference)
@@ -221,6 +264,13 @@ async fn lookup_done(lookup: &mut Option<Lookup>) -> bool {
     }
 }
 
+/// Настройки сессии на случай отказа во вводе.
+struct Settings {
+    mode: PermissionMode,
+    model: String,
+    effort: String,
+}
+
 struct EventStream {
     items: mpsc::Receiver<StreamItem>,
     task: tokio::task::JoinHandle<()>,
@@ -260,6 +310,10 @@ pub struct OpenCodeAdapter {
     rules_dirty: bool,
     model: String,
     effort: String,
+    /// То же для модели.
+    model_dirty: bool,
+    /// Варианты доступных моделей: сервер принимает неизвестный и падает только на ходе.
+    variants: HashMap<String, Vec<String>>,
     instructions: InstructionSpec,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
@@ -296,6 +350,8 @@ impl OpenCodeAdapter {
             rules_dirty: false,
             model: String::new(),
             effort: String::new(),
+            model_dirty: false,
+            variants: HashMap::new(),
             instructions: InstructionSpec {
                 mode: InstructionMode::Owner,
                 text: String::new(),
@@ -515,14 +571,13 @@ impl OpenCodeAdapter {
     }
 
     // Окно контекста не приходит в событиях. Без каталога ход всё равно работает.
-    async fn context_windows(&mut self) -> HashMap<String, u64> {
+    async fn model_list(&mut self) -> Value {
         match self.http {
             Some(ref http) => http
                 .get("/api/model", REQUEST_WAIT)
                 .await
-                .map(|models| catalog::context_windows(&models))
-                .unwrap_or_default(),
-            None => HashMap::new(),
+                .unwrap_or(Value::Null),
+            None => Value::Null,
         }
     }
 
@@ -585,8 +640,12 @@ impl OpenCodeAdapter {
         self.model = spec.model.clone();
         self.effort = spec.effort.clone();
         self.instructions = spec.instructions.clone();
-        let windows = self.context_windows().await;
-        self.translator = Some(Translator::new(&self.session, windows));
+        let models = self.model_list().await;
+        self.variants = catalog::variants(&models);
+        self.translator = Some(Translator::new(
+            &self.session,
+            catalog::context_windows(&models),
+        ));
         let proc = self
             .proc
             .as_ref()
@@ -924,13 +983,20 @@ impl OpenCodeAdapter {
         self.lookup = Some(Lookup { command, task });
     }
 
-    // Смена модели и инструкций приходит со своими срезами: молча её терять нельзя.
+    fn known_model(&self, model: &str, effort: &str) -> bool {
+        self.variants.get(model).is_some_and(|variants| {
+            effort.is_empty()
+                || effort == catalog::NO_VARIANT
+                || variants.iter().any(|variant| variant == effort)
+        })
+    }
+
+    // Смена инструкций приходит со своим срезом: молча её терять нельзя.
     fn settings_error(&self, change: &SettingsChange) -> Option<&'static str> {
-        let differs = |wanted: &Option<String>, current: &str| {
-            wanted.as_deref().is_some_and(|wanted| wanted != current)
-        };
-        let unsupported = differs(&change.model, &self.model)
-            || differs(&change.effort, &self.effort)
+        let model = change.model.as_deref().unwrap_or(&self.model);
+        let effort = change.effort.as_deref().unwrap_or(&self.effort);
+        let moved = model != self.model || effort != self.effort;
+        let unsupported = (moved && !self.known_model(model, effort))
             || change
                 .permission_mode
                 .as_deref()
@@ -977,6 +1043,58 @@ impl OpenCodeAdapter {
         Ok(())
     }
 
+    // Запроса на ввод с моделью нет: смена отдельным вызовом, со следующего периода работы.
+    async fn apply_model(
+        &mut self,
+        http: &Http,
+        model: String,
+        effort: String,
+    ) -> Result<(), &'static str> {
+        if model == self.model && effort == self.effort && !self.model_dirty {
+            return Ok(());
+        }
+        self.model_dirty = true;
+        if let Some(reference) = model_ref(&model, &effort) {
+            let path = format!("/api/session/{}/model", self.session);
+            http.post(&path, &json!({"model": reference}), REQUEST_WAIT)
+                .await
+                .map_err(|_| "settings_unavailable")?;
+        }
+        self.model = model;
+        self.effort = effort;
+        self.model_dirty = false;
+        Ok(())
+    }
+
+    // Настройки вступают в силу только с принятым вводом: хаб применяет их так же. Модель
+    // первой: неудачная смена правил не должна оставить открытый режим.
+    async fn apply_settings(
+        &mut self,
+        http: &Http,
+        change: Option<&SettingsChange>,
+    ) -> Result<(), &'static str> {
+        let model = change.and_then(|change| change.model.clone());
+        let effort = change.and_then(|change| change.effort.clone());
+        let mode = change
+            .and_then(|change| change.permission_mode.as_deref())
+            .and_then(PermissionMode::parse)
+            .unwrap_or(self.mode);
+        let (model, effort) = (
+            model.unwrap_or_else(|| self.model.clone()),
+            effort.unwrap_or_else(|| self.effort.clone()),
+        );
+        self.apply_model(http, model, effort).await?;
+        self.apply_mode(http, mode).await
+    }
+
+    fn restore_settings(&mut self, previous: Settings) {
+        self.rules_dirty |= self.mode != previous.mode;
+        self.model_dirty |= self.model != previous.model || self.effort != previous.effort;
+        self.mode = previous.mode;
+        self.model = previous.model;
+        self.effort = previous.effort;
+    }
+
     async fn transmit_inner(&mut self, input: &Transmission) -> TransmitOutcome {
         let command = input.command_id;
         if self.delivery.active.is_some() {
@@ -1000,6 +1118,7 @@ impl OpenCodeAdapter {
         if input.attempt > 1 {
             match input::find_input(&http, &self.session, &id).await {
                 Ok(true) => {
+                    self.delivery.last = Some(command);
                     self.finish_without_turn(command);
                     return TransmitOutcome::Accepted(Proof {
                         command_id: command,
@@ -1014,14 +1133,13 @@ impl OpenCodeAdapter {
                 }
             }
         }
-        let previous = self.mode;
-        let wanted = input
-            .settings
-            .as_ref()
-            .and_then(|change| change.permission_mode.as_deref())
-            .and_then(PermissionMode::parse)
-            .unwrap_or(previous);
-        if let Err(reason) = self.apply_mode(&http, wanted).await {
+        let previous = Settings {
+            mode: self.mode,
+            model: self.model.clone(),
+            effort: self.effort.clone(),
+        };
+        if let Err(reason) = self.apply_settings(&http, input.settings.as_ref()).await {
+            self.restore_settings(previous);
             return TransmitOutcome::Rejected(reason.into());
         }
         // Супервизор не узнал о запуске без ввода раньше ввода: сервер сольёт их в один период.
@@ -1050,10 +1168,7 @@ impl OpenCodeAdapter {
                 if let Some(translator) = self.translator.as_mut() {
                     translator.begin_run(adopted);
                 }
-                if self.mode != previous {
-                    self.mode = previous;
-                    self.rules_dirty = true;
-                }
+                self.restore_settings(previous);
                 TransmitOutcome::Rejected(tag)
             }
             _ => {

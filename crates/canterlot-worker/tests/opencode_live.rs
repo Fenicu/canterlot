@@ -14,7 +14,8 @@ use canterlot_worker::{
     adapter::{
         Adapter, AdapterEvent, BlockKind, CloseMode, DecisionOutcome, InstructionMode,
         InstructionSpec, InterruptOutcome, ModelUsage, SettingsChange, StartSpec, Transmission,
-        TransmitOutcome, opencode::OpenCodeAdapter,
+        TransmitOutcome,
+        opencode::{OpenCodeAdapter, discover},
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -666,6 +667,55 @@ async fn real_background_shell_wakes_a_run_attributed_to_the_last_command() {
             .any(|text| text == "команда закончилась")
     );
     assert_eq!(stub.requests().len(), 3);
+    session.close().await;
+}
+
+// Каталог настоящего сервера: Go в изоляции нет, включённый провайдер виден с вариантами.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_catalog_lists_the_enabled_provider() {
+    let stub = Stub::start(Vec::new()).await;
+    let live = Live::new(&stub.config());
+    let data = live.root.path().join("data");
+    let cfg = OpenCodeConfig {
+        executable: live.wrapper.clone(),
+        providers: vec!["fake".into()],
+        ..Default::default()
+    };
+    let catalog = tokio::time::timeout(WAIT, discover(&cfg, &data))
+        .await
+        .expect("discover must finish")
+        .map_err(|_| "discover failed")
+        .unwrap();
+    assert_eq!(catalog.models[0].id, "fake/fake-1");
+    assert_eq!(catalog.models[0].efforts, ["low", "medium", "high"]);
+    assert!(
+        catalog
+            .models
+            .iter()
+            .all(|model| model.id.starts_with("fake/"))
+    );
+    assert_eq!(stub.requests().len(), 0, "no model call");
+    live.wait_gone().await;
+}
+
+// Смена усилия посреди сессии видна в запросе к провайдеру.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_effort_change_reaches_the_provider_request() {
+    let stub = Stub::start(vec![Reply::text("раз"), Reply::text("два")]).await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("первый")).await;
+    let mut second = input("второй");
+    second.settings = Some(SettingsChange {
+        effort: Some("high".into()),
+        ..Default::default()
+    });
+    assert_eq!(session.adapter.validate_transmission(&second), Ok(()));
+    session.turn(&second).await;
+    let requests = stub.requests();
+    assert_ne!(requests[0]["reasoning_effort"], "high");
+    assert_eq!(requests[1]["reasoning_effort"], "high", "{}", requests[1]);
     session.close().await;
 }
 

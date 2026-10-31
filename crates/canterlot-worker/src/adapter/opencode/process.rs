@@ -247,6 +247,19 @@ pub struct ServerProcess {
 
 const MAX_READY_LINE: u64 = 64 * 1024;
 
+fn command(executable: &Path, workdir: &Path, env: &[(OsString, OsString)]) -> Command {
+    let mut cmd = Command::new(executable);
+    cmd.env_clear()
+        .envs(env.iter().map(|(key, value)| (key, value)))
+        .args(["serve", "--stdio", "--port", "0"])
+        .current_dir(workdir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    cmd
+}
+
 impl ServerProcess {
     pub async fn spawn(
         executable: &Path,
@@ -254,16 +267,8 @@ impl ServerProcess {
         env: &[(OsString, OsString)],
         group: &dyn Containment,
     ) -> Result<Self, LaunchError> {
-        let mut child = spawn_with_retry_io(|| {
-            let mut cmd = Command::new(executable);
-            cmd.env_clear()
-                .envs(env.iter().map(|(key, value)| (key, value)))
-                .args(["serve", "--stdio", "--port", "0"])
-                .current_dir(workdir)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(false);
+        let child = spawn_with_retry_io(|| {
+            let mut cmd = command(executable, workdir, env);
             group.prepare_command(&mut cmd);
             async move { cmd.spawn() }
         })
@@ -279,19 +284,43 @@ impl ServerProcess {
             .find(|member| member.pid == pid)
             .ok_or(LaunchError::NotInContainment)?;
         group.register_cli(&member);
+        Ok(Self::owning(child, pid, member.start_ticks))
+    }
+
+    /// Короткий запуск в процессе воркера для чтения каталога: сдерживание принадлежит
+    /// супервизорам исполнений, здесь хватает своей группы процессов.
+    pub async fn spawn_probe(
+        executable: &Path,
+        workdir: &Path,
+        env: &[(OsString, OsString)],
+    ) -> Result<Self, LaunchError> {
+        let child = spawn_with_retry_io(|| {
+            let mut cmd = command(executable, workdir, env);
+            cmd.process_group(0);
+            async move { cmd.spawn() }
+        })
+        .await
+        .map_err(LaunchError::Spawn)?;
+        let pid = child
+            .id()
+            .ok_or(LaunchError::Spawn(std::io::Error::other("no pid")))?;
+        Ok(Self::owning(child, pid, 0))
+    }
+
+    fn owning(mut child: Child, pid: u32, start_ticks: u64) -> Self {
         let stdin = child.stdin.take();
         let stdout = child.stdout.take().map(BufReader::new);
         let stderr = child.stderr.take().map(drain);
-        Ok(Self {
+        Self {
             pid,
-            start_ticks: member.start_ticks,
+            start_ticks,
             child,
             stdin,
             stdout,
             stdout_drain: None,
             _stderr_drain: stderr,
             finished: false,
-        })
+        }
     }
 
     /// Первая строка stdout; дальше сервер в stdout не пишет, но вычитывается до конца.

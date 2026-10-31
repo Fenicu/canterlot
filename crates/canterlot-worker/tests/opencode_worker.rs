@@ -83,6 +83,7 @@ stop_retry = "300ms"
 
 [opencode]
 executable = "{executable}"
+providers = ["fake"]
 "#,
         port = paths.port,
         root = paths.root.display(),
@@ -194,6 +195,20 @@ async fn worker_with_the_table_reports_the_harness_and_runs_a_turn(pool: PgPool)
             == 1
     })
     .await;
+
+    // Каталог дошёл до хаба: форма и проверка настроек берут модели отсюда.
+    let (models, modes, midsession): (serde_json::Value, serde_json::Value, bool) = sqlx::query_as(
+        "select models, permission_modes, settings_midsession from machine_harnesses
+         where machine_id = $1 and harness = 'opencode'",
+    )
+    .bind(machine_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(models[0]["id"], "fake/fake-1");
+    assert_eq!(models[0]["efforts"], json!(["low", "medium", "high"]));
+    assert_eq!(modes, json!(["owner", "ask", "bypass", "read_only"]));
+    assert!(midsession);
 
     let started = executions::start(&pool, owner, conversation, Uuid::now_v7())
         .await

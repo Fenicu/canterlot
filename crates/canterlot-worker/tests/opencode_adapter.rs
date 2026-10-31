@@ -11,7 +11,9 @@ use canterlot_worker::{
         InstructionMode, InstructionSpec, InterruptOutcome, Phase, SettingsChange, StartSpec,
         Started, Transmission, TransmitOutcome,
         opencode::{
-            OpenCodeAdapter,
+            DiscoverError, OpenCodeAdapter,
+            catalog::ModelEntry,
+            discover,
             replay::{Reply, Script, Step},
         },
     },
@@ -1379,19 +1381,38 @@ async fn attachments_go_as_paths_in_the_text_until_their_slice() {
     bench.close(CloseMode::Graceful).await;
 }
 
+fn with_model_route(mut script: Script, replies: Vec<Reply>) -> Script {
+    let session = session_of(&script);
+    script.set_route("POST", &format!("/api/session/{session}/model"), replies);
+    script
+}
+
+fn model_change(model: Option<&str>, effort: Option<&str>) -> SettingsChange {
+    SettingsChange {
+        model: model.map(str::to_owned),
+        effort: effort.map(str::to_owned),
+        ..Default::default()
+    }
+}
+
+// Сервер принимает неизвестный вариант с 204 и падает только на ходе: проверка раньше него.
 #[tokio::test]
-async fn settings_change_is_refused_until_its_slice() {
+async fn unknown_model_and_variant_are_refused_before_the_server() {
     let mut bench = Bench::new(ready());
     bench.start_ok().await;
-    let mut input = bench.input("x");
-    input.settings = Some(SettingsChange {
-        model: Some("fake/other".into()),
-        ..Default::default()
-    });
-    assert_eq!(
-        bench.adapter.validate_transmission(&input),
-        Err("settings_unavailable")
-    );
+    for (model, effort) in [
+        (Some("fake/other"), None),
+        (None, Some("ultra")),
+        (Some("opencode/big-pickle"), Some("high")),
+    ] {
+        let mut input = bench.input("x");
+        input.settings = Some(model_change(model, effort));
+        assert_eq!(
+            bench.adapter.validate_transmission(&input),
+            Err("settings_unavailable"),
+            "{model:?} {effort:?}"
+        );
+    }
     let mut same = bench.input("x");
     same.settings = Some(SettingsChange {
         model: Some("fake/fake-1".into()),
@@ -1400,7 +1421,294 @@ async fn settings_change_is_refused_until_its_slice() {
         instructions: None,
     });
     assert_eq!(bench.adapter.validate_transmission(&same), Ok(()));
+    let mut known = bench.input("x");
+    known.settings = Some(model_change(Some("opencode/flint-40b-free"), Some("max")));
+    assert_eq!(bench.adapter.validate_transmission(&known), Ok(()));
+    let mut plain = bench.input("x");
+    plain.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
+    assert_eq!(bench.adapter.validate_transmission(&plain), Ok(()));
     bench.close(CloseMode::Graceful).await;
+}
+
+// Смена модели и усилия: запрос раньше ввода, вариант вместе с моделью.
+#[tokio::test]
+async fn model_change_goes_before_the_input() {
+    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(model_change(Some("opencode/flint-40b-free"), Some("max")));
+    bench.accepted(&input).await;
+    let requests = bench.fake.requests();
+    let model = position(&requests, "POST", "/model");
+    assert!(model < position(&requests, "POST", "/prompt"));
+    assert_eq!(
+        requests[model]["body"],
+        json!({"model": {"id": "flint-40b-free", "providerID": "opencode", "variant": "max"}})
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Только усилие: модель остаётся текущей.
+#[tokio::test]
+async fn effort_change_keeps_the_model() {
+    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(model_change(None, Some("low")));
+    bench.accepted(&input).await;
+    let requests = bench.fake.requests();
+    let model = position(&requests, "POST", "/model");
+    assert_eq!(
+        requests[model]["body"],
+        json!({"model": {"id": "fake-1", "providerID": "fake", "variant": "low"}})
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// У модели без вариантов усилие каталога условное, серверу оно не передаётся.
+#[tokio::test]
+async fn model_without_variants_goes_without_one() {
+    let mut bench = Bench::new(with_model_route(ready(), vec![reply_204()]));
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(model_change(Some("opencode/big-pickle"), Some("default")));
+    bench.accepted(&input).await;
+    let requests = bench.fake.requests();
+    assert_eq!(
+        requests[position(&requests, "POST", "/model")]["body"],
+        json!({"model": {"id": "big-pickle", "providerID": "opencode"}})
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn same_model_sends_no_change() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(model_change(Some("fake/fake-1"), Some("high")));
+    bench.accepted(&input).await;
+    assert!(find(&bench.fake.requests(), "POST", "/model").is_none());
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Отказ в смене: ввод не уходит, следующий ввод возвращает то, что считает текущим хаб.
+#[tokio::test]
+async fn failed_model_change_stops_the_input_and_returns_the_settings() {
+    let failed = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "InternalError"})),
+        ..Default::default()
+    };
+    let script = with_model_route(
+        with_rules_route(ready(), vec![reply_204()]),
+        vec![failed, reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let mut refused = bench.input("x");
+    refused.settings = Some(SettingsChange {
+        permission_mode: Some("ask".into()),
+        ..model_change(Some("opencode/flint-40b-free"), Some("max"))
+    });
+    assert!(matches!(
+        bench.transmit(&refused).await,
+        TransmitOutcome::Rejected(reason) if reason == "settings_unavailable"
+    ));
+    let next = bench.input("y");
+    bench.accepted(&next).await;
+    let requests = bench.fake.requests();
+    let models: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/model"))
+        .map(|request| request["body"]["model"]["id"].clone())
+        .collect();
+    assert_eq!(models, [json!("flint-40b-free"), json!("fake-1")]);
+    // Модель идёт первой: при её отказе режим не менялся, открывать его нечему.
+    assert!(requests.iter().all(|request| request["method"] != "PATCH"));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn failed_rules_return_the_changed_model() {
+    let failed = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "InternalError"})),
+        ..Default::default()
+    };
+    let script = with_model_route(
+        with_rules_route(ready(), vec![failed, reply_204()]),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let mut refused = bench.input("x");
+    refused.settings = Some(SettingsChange {
+        permission_mode: Some("ask".into()),
+        ..model_change(Some("opencode/flint-40b-free"), Some("max"))
+    });
+    assert!(matches!(
+        bench.transmit(&refused).await,
+        TransmitOutcome::Rejected(reason) if reason == "settings_unavailable"
+    ));
+    let next = bench.input("y");
+    bench.accepted(&next).await;
+    let requests = bench.fake.requests();
+    let models: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/model"))
+        .map(|request| request["body"]["model"]["id"].clone())
+        .collect();
+    assert_eq!(models, [json!("flint-40b-free"), json!("fake-1")]);
+    let effects: Vec<_> = requests
+        .iter()
+        .filter(|request| request["method"] == "PATCH")
+        .map(|request| request["body"]["permissions"][0]["effect"].clone())
+        .collect();
+    assert_eq!(effects, [json!("ask"), json!("allow")]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Инструкции приходят своим срезом: молча терять смену нельзя.
+#[tokio::test]
+async fn instructions_change_is_refused_until_its_slice() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    let mut input = bench.input("x");
+    input.settings = Some(SettingsChange {
+        instructions: Some(instructions(InstructionMode::Clean, "")),
+        ..Default::default()
+    });
+    assert_eq!(
+        bench.adapter.validate_transmission(&input),
+        Err("settings_unavailable")
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn catalog_reply(models: Value) -> Reply {
+    Reply {
+        body: Some(json!({"data": models})),
+        ..Default::default()
+    }
+}
+
+/// Запись Go: форма полей из `go_catalog`, состав выдуман, ключа в записи нет.
+fn recorded_catalog() -> Vec<Value> {
+    let mut models: Vec<Value> = Script::default()
+        .with_recorded_models()
+        .route("GET", "/api/model")
+        .unwrap()
+        .replies[0]
+        .body
+        .as_ref()
+        .unwrap()["data"]
+        .as_array()
+        .unwrap()
+        .clone();
+    let mut go = models[0].clone();
+    go["providerID"] = "opencode-go".into();
+    go["id"] = "muse-spark-1.3-contributor".into();
+    go["name"] = "Muse Spark 1.3 Contributor".into();
+    models.push(go);
+    models
+}
+
+async fn discovered(script: Script, providers: &[&str]) -> Result<Vec<ModelEntry>, DiscoverError> {
+    let fake = Fake::new(script);
+    let data = fake.dir.path().join("data");
+    let cfg = OpenCodeConfig {
+        executable: fake.exe.clone(),
+        providers: providers.iter().map(|name| (*name).to_owned()).collect(),
+        ..Default::default()
+    };
+    let found = tokio::time::timeout(WAIT, discover(&cfg, &data))
+        .await
+        .expect("discover must finish");
+    fake.wait_gone().await;
+    found.map(|catalog| catalog.models)
+}
+
+// Решение 2: в каталоге Go и явно включённые провайдеры, идентификатор с провайдером.
+#[tokio::test]
+async fn discover_lists_go_and_the_enabled_providers() {
+    let mut script = Script::default();
+    script.version = "opencode v2.1.4".into();
+    script.set_route(
+        "GET",
+        "/api/model",
+        vec![catalog_reply(Value::Array(recorded_catalog()))],
+    );
+    script.set_route(
+        "GET",
+        "/api/model/default",
+        vec![Reply {
+            body: Some(json!({"data": {"id": "fake-1", "providerID": "fake"}})),
+            ..Default::default()
+        }],
+    );
+    let models = discovered(script.clone(), &["fake"]).await.unwrap();
+    let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["fake/fake-1", "opencode-go/muse-spark-1.3-contributor"]
+    );
+    assert_eq!(models[0].efforts, ["low", "medium", "high"]);
+    assert_eq!(models[1].title, "Muse Spark 1.3 Contributor");
+    let only_go = discovered(script, &[]).await.unwrap();
+    assert_eq!(only_go.len(), 1);
+    assert!(only_go[0].id.starts_with("opencode-go/"));
+}
+
+// Без подписки каталог пуст, но харнесс виден: `[opencode]` настроен.
+#[tokio::test]
+async fn discover_without_available_models_is_not_a_failure() {
+    let mut script = Script::default();
+    script.version = "opencode v2.1.4".into();
+    script.set_route("GET", "/api/model", vec![catalog_reply(json!([]))]);
+    assert_eq!(discovered(script, &[]).await.unwrap(), []);
+}
+
+#[tokio::test]
+async fn discover_of_a_dead_server_hides_the_harness() {
+    let mut script = Script::default();
+    script.version = "opencode v2.1.4".into();
+    script.ready.exit = Some(1);
+    assert!(matches!(
+        discovered(script, &[]).await,
+        Err(DiscoverError::Catalog)
+    ));
+}
+
+// Проверка при старте воркера пишет только в каталоги canterlot.
+#[tokio::test]
+async fn discover_keeps_the_probe_inside_canterlot_data() {
+    let mut script = Script::default();
+    script.version = "opencode v2.1.4".into();
+    script.set_route("GET", "/api/model", vec![catalog_reply(json!([]))]);
+    let fake = Fake::new(script);
+    let data = fake.dir.path().join("data");
+    let cfg = OpenCodeConfig {
+        executable: fake.exe.clone(),
+        ..Default::default()
+    };
+    discover(&cfg, &data).await.unwrap();
+    fake.wait_gone().await;
+    let boot = fake.boot();
+    assert_eq!(
+        boot["env"]["XDG_DATA_HOME"],
+        data.join("opencode/data").to_str().unwrap()
+    );
+    assert_eq!(
+        boot["env"]["XDG_STATE_HOME"],
+        data.join("opencode/state").to_str().unwrap()
+    );
+    assert_eq!(boot["password_set"], true);
+    assert!(
+        fake.requests()
+            .iter()
+            .all(|request| request["authorized"] == true)
+    );
 }
 
 fn with_rules_route(mut script: Script, replies: Vec<Reply>) -> Script {

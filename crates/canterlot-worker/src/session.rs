@@ -579,7 +579,15 @@ impl Worker {
         if let Some(cfg) = &self.config.opencode {
             self.opencode_catalog =
                 match crate::adapter::opencode::discover(cfg, &self.config.data_dir).await {
-                    Ok(catalog) => Some(catalog),
+                    Ok(catalog) => {
+                        if catalog.models.is_empty() {
+                            tracing::warn!(
+                                kind = "opencode_no_models",
+                                "OpenCode has no available models"
+                            );
+                        }
+                        Some(catalog)
+                    }
                     Err(reason) => {
                         tracing::warn!(
                             kind = "opencode_unavailable",
