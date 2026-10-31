@@ -1542,7 +1542,9 @@ impl OpenCodeAdapter {
             for child in &snapshot.children {
                 translator.add_child(child.clone());
             }
-            let items = translator.replay(&snapshot.messages, !snapshot.running, false);
+            let mut items = translator.replay(&snapshot.messages, !snapshot.running, false);
+            // История, а не работа: сессия ждёт ввода, фаза прошлых вызовов к ней не относится.
+            items.retain(|item| !matches!(item, Translated::Event(AdapterEvent::Phase { .. })));
             self.apply_items(items);
         }
         for id in &snapshot.inbox {

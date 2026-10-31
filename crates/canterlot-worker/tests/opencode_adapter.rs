@@ -4635,6 +4635,13 @@ async fn restart_closes_the_orphan_tool_and_finds_what_was_lost() {
             .any(|event| matches!(event, AdapterEvent::RunFinished { .. }))
     );
     assert_eq!(prompts(&bench), 0, "no prompt is sent on resume");
+    // Смоук: чтение истории оставляло фазу `generating` у сессии, которая ждёт ввода.
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::Phase { .. })),
+        "{events:?}"
+    );
     // Следующий ввод: сервер сам закрывает тот же вызов, блок уже закрыт.
     let input = bench.input("дальше");
     bench.accepted(&input).await;
