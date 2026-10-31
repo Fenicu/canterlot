@@ -240,6 +240,23 @@ impl Session {
         }
     }
 
+    async fn start_with(stub: &Stub, mode: &str, prepare: impl FnOnce(&Live)) -> Self {
+        let live = Live::new(&stub.config());
+        prepare(&live);
+        let group = TreeContainment::new().unwrap();
+        let mut adapter = live.adapter();
+        let spec = live.spec("fake/fake-1", mode);
+        tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+            .await
+            .expect("start must finish")
+            .expect("start");
+        Self {
+            live,
+            group,
+            adapter,
+        }
+    }
+
     async fn turn(&mut self, input: &Transmission) -> Vec<AdapterEvent> {
         match tokio::time::timeout(WAIT, self.adapter.transmit(input, &self.group))
             .await
@@ -801,6 +818,104 @@ async fn real_question_refused_with_a_message_lets_the_model_go_on() {
         .await;
     assert_eq!(stub.requests().len(), 2, "the model went on");
     assert!(stub.requests()[1].to_string().contains("Owner is away"));
+    session.close().await;
+}
+
+// Смоук, пункт 41: у OpenCode лимита вопросов нет, форма шире карточки снимается с сообщением,
+// и модель идёт дальше.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_form_with_five_fields_is_refused_and_the_model_goes_on() {
+    let question = |index: u32| {
+        json!({"question": format!("Вопрос {index}?"), "header": format!("В{index}"),
+               "options": [{"label": "Да", "description": "да"}]})
+    };
+    let questions: Vec<Value> = (0..5).map(question).collect();
+    let stub = Stub::start(vec![
+        Reply::tool("question", json!({"questions": questions})),
+        Reply::text("понял"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("спроси пять раз")).await;
+    assert_eq!(stub.requests().len(), 2, "the model went on");
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RequestOpened { .. })),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "opencode_form_refused",
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    session.close().await;
+}
+
+/// Сервер MCP, который на вызов инструмента спрашивает клиента и отвечает его решением.
+const ELICITING_MCP: &str = r#"
+import json, sys
+def send(message):
+    sys.stdout.write(json.dumps(message) + "\n")
+    sys.stdout.flush()
+call = None
+for line in sys.stdin:
+    message = json.loads(line)
+    method = message.get("method")
+    if method == "initialize":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {
+            "protocolVersion": message["params"]["protocolVersion"],
+            "capabilities": {"tools": {}}, "serverInfo": {"name": "ask", "version": "1"}}})
+    elif method == "tools/list":
+        send({"jsonrpc": "2.0", "id": message["id"], "result": {"tools": [{
+            "name": "question", "description": "asks the client",
+            "inputSchema": {"type": "object", "properties": {}}}]}})
+    elif method == "tools/call":
+        call = message["id"]
+        send({"jsonrpc": "2.0", "id": 9001, "method": "elicitation/create", "params": {
+            "message": "Which one?", "requestedSchema": {
+                "type": "object", "properties": {"choice": {"type": "string"}}}}})
+    elif message.get("id") == 9001:
+        action = message.get("result", {}).get("action", "error")
+        send({"jsonrpc": "2.0", "id": call, "result": {
+            "content": [{"type": "text", "text": "elicitation " + action}]}})
+"#;
+
+// Смоук, пункт 40: настоящая форма MCP живёт на сессии `global`. Отказ доходит до сервера MCP,
+// вызов не висит до прерывания.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_mcp_elicitation_is_refused_and_the_call_returns() {
+    let stub = Stub::start(vec![
+        Reply::tool("ask_question", json!({})),
+        Reply::text("понял"),
+    ])
+    .await;
+    let mut config: Value = serde_json::from_str(&stub.config()).unwrap();
+    let mut session = Session::start_with(&stub, "bypass", |live| {
+        let script = live.root.path().join("ask.py");
+        fs::write(&script, ELICITING_MCP).unwrap();
+        config["mcp"] = json!({"servers": {"ask": {
+            "type": "local", "codemode": false,
+            "command": ["python3", script.to_string_lossy()],
+        }}});
+        fs::write(
+            live.root.path().join("config/opencode/opencode.json"),
+            config.to_string(),
+        )
+        .unwrap();
+    })
+    .await;
+    let events = session.turn(&input("спроси")).await;
+    assert_eq!(stub.requests().len(), 2, "{events:?}");
+    let seen = stub.requests()[1].to_string();
+    assert!(seen.contains("elicitation cancel"), "{seen}");
     session.close().await;
 }
 

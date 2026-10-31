@@ -3386,8 +3386,8 @@ fn assert_cancelled(bench: &Bench, events: &[AdapterEvent], tail: &str) {
     assert!(cancel["query"].as_str().unwrap().contains("message="));
 }
 
-// Больше четырёх вопросов карточка не показывает, без ответа ход завис бы. Кадр выдуман
-// из записанного: сценарий с пятью вопросами не прогонялся.
+// Больше четырёх вопросов карточка не показывает, без ответа ход завис бы. Настоящую форму
+// проверяет L2 `real_form_with_five_fields_is_refused_and_the_model_goes_on`.
 #[tokio::test]
 async fn form_with_too_many_questions_is_cancelled_with_a_message() {
     let (script, path) = form_cancel_script(|form| {
@@ -3404,13 +3404,14 @@ async fn form_with_too_many_questions_is_cancelled_with_a_message() {
     bench.close(CloseMode::Graceful).await;
 }
 
-// Формы MCP не вопросы: полей карточка не соберёт. Кадр выдуман по схеме `Form.Info`,
-// `sessionID: "global"` из исходников `form-location.ts`.
+// Формы MCP не вопросы: полей карточка не соберёт. Настоящую форму от настоящего сервера MCP
+// проверяет L2 `real_mcp_elicitation_is_refused_and_the_call_returns`.
 #[tokio::test]
 async fn elicitation_form_is_cancelled_with_a_message() {
     let (script, path) = form_cancel_script(|form| {
         form["sessionID"] = "global".into();
-        form["metadata"] = json!({"kind": "elicitation"});
+        form["metadata"] =
+            json!({"kind": "mcp-elicitation", "server": "ask", "message": "Which one?"});
     });
     let (mut bench, events) = cancelled_form(script).await;
     assert!(path.contains("/session/global/form/"));
