@@ -4,18 +4,18 @@
 
 ## 1. Закреплённые версии
 
-| Параметр | Claude Code | Codex |
-| --- | --- | --- |
-| Отчёт | [claude-code.md](claude-code.md) | [codex.md](codex.md) |
-| CLI | `2.1.310 (Claude Code)`, бинарник `~/.local/share/claude/versions/2.1.310` | `codex-cli 0.164.0`, npm `@openai/codex`: Node-обёртка (v24.22.1) запускает нативный `codex app-server` |
-| Интерфейс | `claude -p` в режиме stream-json; разрешения и вопросы через `--permission-prompt-tool` и MCP-сервер на Rust | `codex app-server --listen stdio://`, JSON-RPC 2.0 в JSONL |
-| Модель доказательств | `claude-haiku-5-5` (алиас `haiku`), effort `low` | `gpt-6-luna`, effort `low` |
-| Учётная запись | claude.ai, подписка max | ChatGPT, план plus |
-| Дата прогонов | 25.10.2026 | 25.10.2026 |
-| Стенд | Debian 13 (trixie), Linux 6.12.74, x86-64, VM | тот же |
-| Прототип | `spikes/claude-probe` (Rust 1.99.1) | `spikes/codex-probe` (Rust 1.99.1) |
-| Доказательства | `evidence/claude-code/*.jsonl` | `evidence/codex/*.jsonl`, манифесты схемы `evidence/codex/schema-0.164.0/` |
-| Расход квоты | 35 запусков модели из 40 (CC §8) | 30 запросов `turn/start`/`turn/steer`, из них 25 реальных ходов (CX §1) |
+| Параметр | Claude Code | Codex | OpenCode |
+| --- | --- | --- | --- |
+| Отчёт | [claude-code.md](claude-code.md) | [codex.md](codex.md) | [opencode.md](opencode.md) |
+| CLI | `2.1.310 (Claude Code)`, бинарник `~/.local/share/claude/versions/2.1.310` | `codex-cli 0.164.0`, npm `@openai/codex`: Node-обёртка (v24.22.1) запускает нативный `codex app-server` | `opencode v2.1.4`, npm `@opencode/cli`, один ELF, тег `v2.1.4`, `68bc26b7` |
+| Интерфейс | `claude -p` в режиме stream-json; разрешения и вопросы через `--permission-prompt-tool` и MCP-сервер на Rust | `codex app-server --listen stdio://`, JSON-RPC 2.0 в JSONL | `opencode serve --stdio --port 0`, HTTP и SSE на loopback |
+| Модель доказательств | `claude-haiku-5-5` (алиас `haiku`), effort `low` | `gpt-6-luna`, effort `low` | локальная заглушка OpenAI Chat Completions; настоящая модель не отвечала: все бесплатные 429 |
+| Учётная запись | claude.ai, подписка max | ChatGPT, план plus | нет: каталоги XDG изолированы, вход на этапе 2 в базу canterlot |
+| Дата прогонов | 25.10.2026 | 25.10.2026 | 31.10.2026 |
+| Стенд | Debian 13 (trixie), Linux 6.12.74, x86-64, VM | тот же | тот же |
+| Прототип | `spikes/claude-probe` (Rust 1.99.1) | `spikes/codex-probe` (Rust 1.99.1) | внешняя обвязка, описана в OC §8; в продукте `fake-opencode` и L2 `opencode_live.rs` |
+| Доказательства | `evidence/claude-code/*.jsonl` | `evidence/codex/*.jsonl`, манифесты схемы `evidence/codex/schema-0.164.0/` | `evidence/opencode/*.jsonl`, манифест `evidence/opencode/openapi-2.1.4.sha256` |
+| Расход квоты | 35 запусков модели из 40 (CC §8) | 30 запросов `turn/start`/`turn/steer`, из них 25 реальных ходов (CX §1) | 3 запроса к внешним моделям, все отказ `429 FreeUsageLimitError` |
 
 ## 2. Матрица возможностей
 
@@ -23,21 +23,21 @@
 
 ### 2.1. Обязательные (§10.2 и список этапа 0 из §20)
 
-| Возможность | Claude Code 2.1.310 | Codex 0.164.0 |
-| --- | --- | --- |
-| Диагностика без платного запроса | PASS: `--version`, `auth status --json`, сухой старт | PASS: `initialize`, `account/read`, `model/list`, `config/read` |
-| Запуск и начало разговора, native ID | PASS: ID задаёт воркер через `--session-id` | PASS: `thread/start` возвращает `thread.id` (UUIDv7) |
-| Текстовый ввод | PASS: `SDKUserMessage` строкой NDJSON в stdin | PASS: `turn/start` с вводом типа `text` |
-| Несколько последовательных вводов | PASS: следующий ввод после `result` предыдущего | PASS: `turn/start` после `turn/completed` |
-| Потоковый текст (частичный вывод) | PASS: `stream_event` `text_delta`, финал `assistant` | PASS: `item/agentMessage/delta`, финал `item/completed` |
-| Инструменты и ошибки | PASS: `tool_use` и `tool_result` по `tool_use_id`, `is_error` | PASS: `commandExecution` от `item/started` до `item/completed`, `exitCode` |
-| Разрешения | PASS: prompt tool, MCP-сервер на Rust, супервизор | PASS: `item/*/requestApproval`, ответ `{decision}` |
-| Структурированные вопросы | PASS: `AskUserQuestion` через тот же prompt tool | PASS по OD-1 (в отчёте PARTIAL): `item/tool/requestUserInput`, экспериментальная поверхность |
-| Прерывание | PASS по OD-2 (в отчёте PARTIAL): SIGINT, продолжение через `--resume` | PASS (решение контролёра): `turn/interrupt`, процесс CLI жив |
-| Возобновление | PASS: `--resume <session_id>`, в том числе после SIGKILL | PASS: `thread/resume` в новом процессе, в том числе после SIGKILL |
-| Доказуемая семантика доставки (приём команды) | PASS: UUID ввода в `user_message_uuid(s)` ответа | PASS: `clientUserMessageId` возвращается в `userMessage.clientId` |
-| Отказ внешнего сервиса | PASS: `system/api_retry`, затем `result` с `is_error` | PASS: `error {willRetry}`, затем `turn/completed status: failed` |
-| **Полный обязательный набор** | **подтверждён прототипом** на 2.1.310 (прерывание по OD-2) | **подтверждён прототипом** на 0.164.0 (вопросы по OD-1) |
+| Возможность | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| --- | --- | --- | --- |
+| Диагностика без платного запроса | PASS: `--version`, `auth status --json`, сухой старт | PASS: `initialize`, `account/read`, `model/list`, `config/read` | PASS: `--version`, `GET /api/info`, `GET /api/model` |
+| Запуск и начало разговора, native ID | PASS: ID задаёт воркер через `--session-id` | PASS: `thread/start` возвращает `thread.id` (UUIDv7) | PASS: `POST /api/session` с `ses_<uuid>` воркера |
+| Текстовый ввод | PASS: `SDKUserMessage` строкой NDJSON в stdin | PASS: `turn/start` с вводом типа `text` | PASS: `POST .../prompt {id, text}` |
+| Несколько последовательных вводов | PASS: следующий ввод после `result` предыдущего | PASS: `turn/start` после `turn/completed` | PASS: `delivery: "queue"` |
+| Потоковый текст (частичный вывод) | PASS: `stream_event` `text_delta`, финал `assistant` | PASS: `item/agentMessage/delta`, финал `item/completed` | PASS: `session.text.*`, `session.reasoning.*` |
+| Инструменты и ошибки | PASS: `tool_use` и `tool_result` по `tool_use_id`, `is_error` | PASS: `commandExecution` от `item/started` до `item/completed`, `exitCode` | PASS: `session.tool.*`; ненулевой выход `shell` это `success` с `metadata.exit` |
+| Разрешения | PASS: prompt tool, MCP-сервер на Rust, супервизор | PASS: `item/*/requestApproval`, ответ `{decision}` | PASS: `permission.asked`, `POST .../reply`, правила сессии |
+| Структурированные вопросы | PASS: `AskUserQuestion` через тот же prompt tool | PASS по OD-1 (в отчёте PARTIAL): `item/tool/requestUserInput`, экспериментальная поверхность | PASS: `question`, `form.created`, `POST .../form/{id}/reply` |
+| Прерывание | PASS по OD-2 (в отчёте PARTIAL): SIGINT, продолжение через `--resume` | PASS (решение контролёра): `turn/interrupt`, процесс CLI жив | PASS: `POST .../interrupt`, процесс жив |
+| Возобновление | PASS: `--resume <session_id>`, в том числе после SIGKILL | PASS: `thread/resume` в новом процессе, в том числе после SIGKILL | PASS: новый процесс на той же базе, тот же `ses_...`, в том числе после SIGKILL |
+| Доказуемая семантика доставки (приём команды) | PASS: UUID ввода в `user_message_uuid(s)` ответа | PASS: `clientUserMessageId` возвращается в `userMessage.clientId` | PASS: ответ 200 с тем же `id` после записи в `session_inbox` |
+| Отказ внешнего сервиса | PASS: `system/api_retry`, затем `result` с `is_error` | PASS: `error {willRetry}`, затем `turn/completed status: failed` | PASS на заглушке: `session.retry.scheduled`, `session.execution.failed` с типом; настоящий ход Go не наблюдался |
+| **Полный обязательный набор** | **подтверждён прототипом** на 2.1.310 (прерывание по OD-2) | **подтверждён прототипом** на 0.164.0 (вопросы по OD-1) | **подтверждён на заглушке провайдера** на 2.1.4; replay потока FAIL, восстановление по проекциям |
 
 Особенности механизмов со статусом PASS, которые меняют проектирование (подробно в §5):
 
@@ -51,19 +51,23 @@
 | Claude Code, разрешения и вопросы | форма аргументов вызова prompt tool не документирована | CC §2.3, §7 р. 9 |
 | Оба, несколько вводов | ввод, записанный во время хода, вливается в этот ход | CC §4.3, CX §4.3 |
 | Оба, отказ сервиса | повторы идут минутами без итога хода: Claude Code больше 3 мин, Codex без предела | CC §3.1, CX §3 |
+| OpenCode, база | должна быть своей и эксклюзивной: управляемая служба подхватывает живые исполнения как осиротевшие; поэтому вход `auth login --standalone` | OC §7 р. 1 |
+| OpenCode, поток | replay нет, восстановление только по проекциям | OC §4.5 |
+| OpenCode, ввод | значение по умолчанию `steer` вливает ввод в ход, адаптер всегда шлёт `queue` | OC §4.3 |
+| OpenCode, отказ сервиса | один и тот же `provider.invalid-request` застревает: история не меняется, первопричина не установлена | OC §5.12 |
 
 ### 2.2. Необязательные (§10.2)
 
-| Возможность | Claude Code 2.1.310 | Codex 0.164.0 |
-| --- | --- | --- |
-| Изображения | supported, проверено: base64-блок `image` в `content` | supported, проверено: `localImage` по пути |
-| Файлы | supported без нативной передачи: путь в тексте; не проверялось | unsupported: нет типа ввода, путь в тексте |
-| Выбор модели | supported: `--model` при запуске, `/model` вводом; проверен запуск | supported: `model/list`, `thread/start.model`, `turn/start.model` |
-| Effort | supported, применение не наблюдаемо: `--effort`, `/effort` | supported: `turn/start.effort` |
-| Plan mode | supported: `--permission-mode plan`; не проверялось | supported, EXPERIMENTAL (включено OD-1): `collaborationMode {mode: "plan"}` |
-| Вмешательство в активный запуск | supported: поле `priority`; проверено только поведение по умолчанию | supported: `turn/steer {expectedTurnId}`, проверено |
-| Фоновые работы | supported, проверено: `run_in_background`, `system/background_tasks_changed` | supported частично, управление EXPERIMENTAL (включено OD-1): `thread/backgroundTerminals/list`, `clean` |
-| Usage и токены | supported: `result.usage`, `modelUsage`, `rate_limit_event` | supported: `thread/tokenUsage/updated`, `account/rateLimits/*` |
+| Возможность | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| --- | --- | --- | --- |
+| Изображения | supported, проверено: base64-блок `image` в `content` | supported, проверено: `localImage` по пути | supported, проверено: `files` с `file://` по `capabilities.input` модели |
+| Файлы | supported без нативной передачи: путь в тексте; не проверялось | unsupported: нет типа ввода, путь в тексте | путь в тексте: двоичный файл в `files` молча исчезает |
+| Выбор модели | supported: `--model` при запуске, `/model` вводом; проверен запуск | supported: `model/list`, `thread/start.model`, `turn/start.model` | supported: `GET /api/model`, `POST .../model` |
+| Effort | supported, применение не наблюдаемо: `--effort`, `/effort` | supported: `turn/start.effort` | supported: вариант модели; неизвестный сервер принимает и падает на ходе, адаптер сверяет с каталогом |
+| Plan mode | supported: `--permission-mode plan`; не проверялось | supported, EXPERIMENTAL (включено OD-1): `collaborationMode {mode: "plan"}` | агент `plan`, не выводится: решение владельца 31.10, только `build` |
+| Вмешательство в активный запуск | supported: поле `priority`; проверено только поведение по умолчанию | supported: `turn/steer {expectedTurnId}`, проверено | supported: `delivery: "steer"`, адаптер не использует |
+| Фоновые работы | supported, проверено: `run_in_background`, `system/background_tasks_changed` | supported частично, управление EXPERIMENTAL (включено OD-1): `thread/backgroundTerminals/list`, `clean` | supported, проверено: `shell {background}`, фоновый `subagent`, `GET /api/shell` |
+| Usage и токены | supported: `result.usage`, `modelUsage`, `rate_limit_event` | supported: `thread/tokenUsage/updated`, `account/rateLimits/*` | supported: `session.step.ended`, `session.compaction.ended`; API квот нет |
 
 ## 3. Приёмочные проверки AT-G-01…AT-G-05 на данный момент
 
@@ -131,6 +135,8 @@
 | 8 | Готовность при старте. Claude Code до первого ввода кадров не выдаёт (`system/init` приходит только с ним); признак старта: MCP-сервер разрешений получил от CLI `initialize` и `tools/list`. Codex: ответ `initialize`, затем ответ `thread/start` | CC §3.1 (диагностика), `diagnostics.jsonl`; CX §2, §6 |
 | 9 | Закрепление версии и контрактные тесты: версия Claude Code меняется часто, форма аргументов prompt tool не документирована; `codex app-server` целиком experimental, схема генерируется из CLI. Воркер запускает закреплённый бинарник, отключает автообновление, сверяет версию и пропускает неизвестные события с диагностикой | CC §7 р. 7, р. 9, р. 11; CX §2, §7 р. 2 |
 | 10 | Фоновые работы: у Claude Code наблюдаемы документированно (`system/background_tasks_changed` с полным списком `tasks`, только фоновые задачи Bash). У Codex на стабильной поверхности их не видно, тред при живой команде переходит в `idle`; список даёт экспериментальный `thread/backgroundTerminals/list`, включённый решением OD-1. Учёт обоих CLI не покрывает процессы, которые команда отсоединила сама, поэтому отсутствие работы дополнительно проверяется по cgroup исполнения | CC §3.2, `background.jsonl`; CX §5, §7 р. 3, `background.jsonl` |
+
+Выводы OpenCode 2.1.4 (OC = [opencode.md](opencode.md)) другие в трёх местах. Интерфейс это локальный сервер с HTTP и SSE, а не поток в stdio. Replay нет, поэтому всё, что потеряно в разрыве, читается из проекций одним путём сверки. База эксклюзивна, поэтому у canterlot своя база и один вход в неё. Остальное совпадает: ввод только после конца хода, положительное доказательство приёма, полноты истории нет, инструменты в своих группах процессов. Только на настоящей модели можно проверить реальный поток, тело отказа Go и `Retry-After`: это чек-лист смоука, а не код.
 
 ## 6. Решения контролёра
 
