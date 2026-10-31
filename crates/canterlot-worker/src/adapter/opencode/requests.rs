@@ -9,7 +9,7 @@ use super::{
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt,
     time::Duration,
 };
@@ -399,6 +399,21 @@ impl Requests {
         ids.iter()
             .filter_map(|id| self.refuse(id, message))
             .collect()
+    }
+
+    /// Открытые запросы, которых нет на сервере: сняты, пока потока не было. Отвеченный не
+    /// трогается: его итог приходит своим путём.
+    pub fn gone(&mut self, alive: &HashSet<&str>) -> Vec<String> {
+        let ids: Vec<String> = self
+            .pending
+            .iter()
+            .filter(|(id, pending)| !pending.answered && !alive.contains(id.as_str()))
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            self.pending.remove(id);
+        }
+        ids
     }
 
     /// Период работы сессии кончился: её запросов на сервере больше нет.

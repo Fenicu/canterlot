@@ -37,6 +37,8 @@ pub struct Script {
     /// Зависший сервер: EOF stdin и SIGTERM не завершают.
     pub ignore_eof: bool,
     pub ignore_term: bool,
+    /// Отказывать в подписке на поток, начиная с этой по счёту: связь не восстановить.
+    pub refuse_events_from: Option<u32>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -104,6 +106,10 @@ pub enum Step {
         ms: u64,
     },
     DropSse,
+    /// Дождаться этой по счёту подписки на поток: сценарий продолжается после переподключения.
+    AwaitSubscription {
+        count: u32,
+    },
     Die {
         code: u8,
         #[serde(default)]
@@ -151,16 +157,41 @@ impl Script {
     /// Сценарий из записи: изменяющие запросы идут строго по порядку с событиями
     /// между ними, чтения становятся маршрутами с записанными ответами.
     pub fn from_capture(name: &str, scenario: Option<&str>) -> Self {
+        Self::from_lines(capture_lines(name, scenario))
+    }
+
+    fn from_lines(lines: Vec<Value>) -> Self {
         let mut script = Self {
             version: "opencode v2.1.4".into(),
             ..Default::default()
         };
         let mut request: Option<(String, String)> = None;
         let mut events = Vec::new();
-        for line in capture_lines(name, scenario) {
+        let mut subscriptions = 1;
+        for line in lines {
             let data = line.get("data").cloned().unwrap_or(Value::Null);
             match line.get("dir").and_then(Value::as_str) {
                 Some("sse") if data["type"] != "server.connected" => events.push(data),
+                Some("cut") => {
+                    subscriptions += 1;
+                    if !events.is_empty() {
+                        script.steps.push(Step::Emit {
+                            events: std::mem::take(&mut events),
+                        });
+                    }
+                    script.steps.push(Step::DropSse);
+                    script.steps.push(Step::AwaitSubscription {
+                        count: subscriptions,
+                    });
+                }
+                // Запись держит два запуска: сценарий двойника — только второй.
+                Some("note") if data["restarted"] == true => {
+                    script = Self {
+                        version: script.version,
+                        ..Default::default()
+                    };
+                    events.clear();
+                }
                 Some("http_out") => {
                     if !events.is_empty() {
                         script.steps.push(Step::Emit {
@@ -183,6 +214,7 @@ impl Script {
                         ..Default::default()
                     };
                     if method == "GET" {
+                        let path = path.split('?').next().unwrap_or_default().to_owned();
                         if path == "/api/info"
                             && let Some(body) = reply.body.as_mut()
                         {
@@ -209,6 +241,15 @@ impl Script {
             script.steps.push(Step::Emit { events });
         }
         script
+    }
+
+    /// Первый запуск записи с перезапуском: всё до него.
+    pub fn first_boot(name: &str, scenario: Option<&str>) -> Self {
+        let lines: Vec<Value> = capture_lines(name, scenario)
+            .into_iter()
+            .take_while(|line| line["data"]["restarted"] != true)
+            .collect();
+        Self::from_lines(lines)
     }
 
     /// Статус canterlot в `/api/mcp`: записанный `pending`, затем `status`.
@@ -322,6 +363,8 @@ struct State {
     table: Vec<(String, String)>,
     routes: Vec<RouteState>,
     subscribers: Vec<mpsc::UnboundedSender<Vec<u8>>>,
+    subscriptions: u32,
+    refuse_events_from: Option<u32>,
     log: Option<std::fs::File>,
 }
 
@@ -357,9 +400,14 @@ fn substitute(value: &Value, table: &[(String, String)], pid: u32) -> Value {
             out.into()
         }
         Value::Array(items) => items.iter().map(|v| substitute(v, table, pid)).collect(),
+        // Ключом бывает и идентификатор: `/api/session/active`.
         Value::Object(map) => map
             .iter()
-            .map(|(key, value)| (key.clone(), substitute(value, table, pid)))
+            .map(|(key, value)| {
+                let key = substitute(&Value::String(key.clone()), table, pid);
+                let key = key.as_str().unwrap_or_default().to_owned();
+                (key, substitute(value, table, pid))
+            })
             .collect::<serde_json::Map<_, _>>()
             .into(),
         other => other.clone(),
@@ -400,6 +448,12 @@ async fn run_steps(shared: Arc<Shared>) {
             }
             Step::Stall { ms } => tokio::time::sleep(Duration::from_millis(ms)).await,
             Step::DropSse => shared.state.lock().unwrap().subscribers.clear(),
+            Step::AwaitSubscription { count } => {
+                if shared.state.lock().unwrap().subscriptions < count {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    continue;
+                }
+            }
             Step::Die { code, kill } => {
                 if kill {
                     let _ = rustix::process::kill_process(
@@ -504,7 +558,11 @@ where
     let (sender, mut receiver) = mpsc::unbounded_channel();
     let connected = json!({"id": "evt_fake_connected", "type": "server.connected", "data": {}});
     let _ = sender.send(frame(&connected));
-    shared.state.lock().unwrap().subscribers.push(sender);
+    {
+        let mut state = shared.state.lock().unwrap();
+        state.subscribers.push(sender);
+        state.subscriptions += 1;
+    }
     let mut beat = tokio::time::interval(HEARTBEAT);
     beat.tick().await;
     loop {
@@ -551,10 +609,22 @@ fn built_in(shared: &Shared, request: &Request) -> Reply {
             ..Default::default()
         };
     }
-    // Пустая очередь и неизвестное сообщение, как у живого сервера.
-    if request.method == "GET" && request.path.ends_with("/inbox") {
+    // Пустые проекции, как у живого сервера без работы (`recovery.jsonl`).
+    if request.method == "GET"
+        && (request.path.ends_with("/inbox")
+            || request.path.ends_with("/permission")
+            || request.path.ends_with("/form")
+            || request.path.ends_with("/message")
+            || request.path == "/api/session")
+    {
         return Reply {
             body: Some(json!({"data": []})),
+            ..Default::default()
+        };
+    }
+    if request.method == "GET" && request.path == "/api/session/active" {
+        return Reply {
+            body: Some(json!({"data": {}})),
             ..Default::default()
         };
     }
@@ -662,6 +732,17 @@ async fn serve_connection(shared: Arc<Shared>, stream: TcpStream) {
             continue;
         }
         if request.method == "GET" && request.path == "/api/event" {
+            let refused = {
+                let state = shared.state.lock().unwrap();
+                state
+                    .refuse_events_from
+                    .is_some_and(|from| state.subscriptions + 1 >= from)
+            };
+            if refused {
+                shared.state.lock().unwrap().subscriptions += 1;
+                let _ = write_reply(&mut writer, 500, b"{}").await;
+                return;
+            }
             let _ = serve_events(&shared, &mut writer).await;
             return;
         }
@@ -760,6 +841,8 @@ pub async fn main(args: Vec<String>) -> ExitCode {
             .map(|route| RouteState { route, next: 0 })
             .collect(),
         subscribers: Vec::new(),
+        subscriptions: 0,
+        refuse_events_from: script.refuse_events_from,
         log,
     };
     state.write_log(&boot_entry(&rest));

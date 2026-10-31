@@ -7,8 +7,10 @@ pub mod http;
 pub mod input;
 pub mod instructions;
 pub mod mcp;
+pub mod orphans;
 pub mod permissions;
 pub mod process;
+pub mod reconcile;
 #[cfg(feature = "synthetic-adapter")]
 pub mod replay;
 pub mod requests;
@@ -22,6 +24,7 @@ use self::{
     mcp::McpState,
     permissions::PermissionMode,
     process::{DataLayout, LayoutError, ReadyError, ServerProcess},
+    reconcile::Snapshot,
     requests::{Intake, Reply, Requests, Settled},
     sse::StreamItem,
 };
@@ -66,9 +69,17 @@ const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER: usize = 4096;
+/// Паузы перед подпиской заново. Сервер живёт отдельно от потока: обычно хватает первой.
+const RECONNECT_DELAYS: [Duration; 4] = [
+    Duration::from_millis(0),
+    Duration::from_millis(200),
+    Duration::from_secs(1),
+    Duration::from_secs(3),
+];
 /// Хвост событий после выхода сервера.
 const EXIT_DRAIN: Duration = Duration::from_millis(500);
 const SESSION_TITLE: &str = "canterlot";
+const STALE_INPUT_NOTICE: &str = "Ввод остался в очереди после падения и не выполнен: он снят, чтобы не исполниться вместе со следующим.";
 const ERROR_TEXT_BYTES: usize = 4096;
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
 const VERIFIED_OPENAPI_SHA256: &str =
@@ -240,6 +251,8 @@ struct Delivery {
     delivered: bool,
     /// Идёт период, начатый не вводом `active`: его конец может оказаться чужим.
     foreign: bool,
+    /// Ход закрыт по проекции: терминал этого периода мог ещё идти по новому потоку.
+    stale_terminal: bool,
 }
 
 /// Чтение проекций после `Undetermined`. Отдельная задача: итог ждёт в `self`, а не на
@@ -281,6 +294,74 @@ async fn lookup_done(lookup: &mut Option<Lookup>) -> bool {
     }
 }
 
+/// Подписка и чтение проекций в отдельной задаче: `next_event` могут бросить в любой момент.
+struct Resync {
+    task: tokio::task::JoinHandle<Option<Resynced>>,
+}
+
+struct Resynced {
+    /// `None`: поток жив, потерян один кадр, подписываться заново незачем.
+    stream: Option<EventStream>,
+    snapshot: Snapshot,
+}
+
+impl Drop for Resync {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn resync_done(resync: &mut Option<Resync>) -> Option<Resynced> {
+    match resync {
+        Some(pending) => (&mut pending.task).await.ok().flatten(),
+        None => std::future::pending().await,
+    }
+}
+
+async fn subscribe(http: &Http, wait: Duration) -> Option<EventStream> {
+    let response = http.events(wait).await.ok()?;
+    let (sender, mut items) = mpsc::channel(STREAM_BUFFER);
+    let task = tokio::spawn(sse::pump(response, sender));
+    let stream = async {
+        while let Some(item) = items.recv().await {
+            match item {
+                StreamItem::Event(event) if event["type"] == "server.connected" => return true,
+                StreamItem::Ended => return false,
+                _ => {}
+            }
+        }
+        false
+    };
+    let connected = tokio::time::timeout(wait, stream).await;
+    let stream = EventStream { items, task };
+    matches!(connected, Ok(true)).then_some(stream)
+}
+
+// Подписка раньше чтения: иначе событие между ними потеряно навсегда.
+async fn resubscribe(http: Http, session: String, children: Vec<String>) -> Option<Resynced> {
+    for delay in RECONNECT_DELAYS {
+        tokio::time::sleep(delay).await;
+        let Some(stream) = subscribe(&http, REQUEST_WAIT).await else {
+            continue;
+        };
+        if let Ok(snapshot) = reconcile::read(&http, &session, children.clone()).await {
+            return Some(Resynced {
+                stream: Some(stream),
+                snapshot,
+            });
+        }
+    }
+    None
+}
+
+async fn reread(http: Http, session: String, children: Vec<String>) -> Option<Resynced> {
+    let snapshot = reconcile::read(&http, &session, children).await.ok()?;
+    Some(Resynced {
+        stream: None,
+        snapshot,
+    })
+}
+
 /// Настройки сессии на случай отказа во вводе.
 struct Settings {
     mode: PermissionMode,
@@ -317,11 +398,14 @@ pub struct OpenCodeAdapter {
     delivery: Delivery,
     lookup: Option<Lookup>,
     shells: Option<ShellList>,
+    resync: Option<Resync>,
     held: HeldTools,
     /// Вызовы, по которым был запрос: пометки CLI у них нет.
     asked: HashSet<String>,
     requests: Requests,
     refusals: JoinSet<()>,
+    /// Снимки фоновых команд для журнала сирот.
+    shell_journal: JoinSet<()>,
     session: String,
     mode: PermissionMode,
     /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
@@ -367,10 +451,12 @@ impl OpenCodeAdapter {
             delivery: Delivery::default(),
             lookup: None,
             shells: None,
+            resync: None,
             held: HeldTools::default(),
             asked: HashSet::new(),
             requests: Requests::default(),
             refusals: JoinSet::new(),
+            shell_journal: JoinSet::new(),
             session: String::new(),
             mode: PermissionMode::Owner,
             rules_dirty: false,
@@ -440,28 +526,11 @@ impl OpenCodeAdapter {
 
     // Поток открывается раньше всех запросов: событие до подписки потеряно навсегда.
     async fn open_stream(&mut self) -> Result<(), AdapterError> {
-        let response = self
-            .http()?
-            .events(self.ready_wait.min(REQUEST_WAIT))
+        let wait = self.ready_wait.min(REQUEST_WAIT);
+        let stream = subscribe(self.http()?, wait)
             .await
-            .map_err(|_| AdapterError::StartFailed("server_unreachable"))?;
-        let (sender, mut items) = mpsc::channel(STREAM_BUFFER);
-        let task = tokio::spawn(sse::pump(response, sender));
-        let connected = tokio::time::timeout(self.ready_wait, async {
-            while let Some(item) = items.recv().await {
-                match item {
-                    StreamItem::Event(event) if event["type"] == "server.connected" => return true,
-                    StreamItem::Ended => return false,
-                    _ => {}
-                }
-            }
-            false
-        })
-        .await;
-        self.stream = Some(EventStream { items, task });
-        if !matches!(connected, Ok(true)) {
-            return Err(AdapterError::StartFailed("server_unreachable"));
-        }
+            .ok_or(AdapterError::StartFailed("server_unreachable"))?;
+        self.stream = Some(stream);
         Ok(())
     }
 
@@ -693,6 +762,9 @@ impl OpenCodeAdapter {
         self.version = Some(version);
         self.broker =
             Some(Broker::bind_with(&self.exec_dir, ToolSet::LimitsOnly, "opencode").await?);
+        if let Some(native) = &spec.native_conversation_id {
+            self.sweep_orphans(native).await;
+        }
         let (env, password) = self.launch_env(&spec.instructions).await?;
         self.launch(spec, &env, password, group).await?;
         self.model = spec.model.clone();
@@ -707,6 +779,9 @@ impl OpenCodeAdapter {
             &self.session,
             catalog::context_windows(&models),
         ));
+        if spec.native_conversation_id.is_some() {
+            self.reconcile_resume().await?;
+        }
         let proc = self
             .proc
             .as_ref()
@@ -755,6 +830,8 @@ impl OpenCodeAdapter {
             .launch_env(next)
             .await
             .map_err(|_| INSTRUCTIONS_FAILED)?;
+        // Сверка старого сервера новому не поможет: у него свой поток и своё чтение на старте.
+        self.resync = None;
         let _ = self.stop_server(true).await;
         if self.launch(&spec, &env, password, group).await.is_ok() {
             self.report_restart();
@@ -1084,9 +1161,241 @@ impl OpenCodeAdapter {
                     self.prove_late(command);
                 }
             }
-            Translated::RunStarted => self.on_run_started(),
+            Translated::RunStarted => {
+                self.delivery.stale_terminal = false;
+                self.on_run_started();
+            }
+            Translated::RunEnded(_) if std::mem::take(&mut self.delivery.stale_terminal) => {}
             Translated::RunEnded(outcome) => self.on_run_ended(outcome),
+            Translated::ShellStarted => self.journal_shells(),
         }
+    }
+
+    fn orphan_journal(&self, session: &str) -> PathBuf {
+        let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
+        orphans::journal_path(layout.root(), session)
+    }
+
+    fn journal_shells(&mut self) {
+        let (Some(http), Some(translator)) = (self.http.clone(), self.translator.as_ref()) else {
+            return;
+        };
+        let owners = translator
+            .children()
+            .map(str::to_owned)
+            .chain([self.session.clone()])
+            .collect();
+        while self.shell_journal.try_join_next().is_some() {}
+        self.shell_journal.spawn(orphans::record(
+            http,
+            self.orphan_journal(&self.session),
+            owners,
+        ));
+    }
+
+    // Запись осталась только после падения и сервера, и супервизора: дерево процессов уже не
+    // поможет, снимать некому, кроме следующего запуска.
+    async fn sweep_orphans(&mut self, session: &str) {
+        let path = self.orphan_journal(session);
+        let swept = tokio::task::spawn_blocking(move || orphans::sweep(&path)).await;
+        if matches!(swept, Ok(Ok(count)) if count > 0) {
+            self.diagnostic("opencode_orphans_stopped", false);
+        }
+    }
+
+    fn apply_items(&mut self, items: Vec<Translated>) {
+        for item in items {
+            self.on_translated(item);
+        }
+    }
+
+    // Запрос с сервера идёт тем же путём, что событие: повтор отсекает `Requests`.
+    fn reopen_requests(&mut self, snapshot: &Snapshot) {
+        let Some(translator) = self.translator.as_mut() else {
+            return;
+        };
+        let mut items = Vec::new();
+        for request in &snapshot.permissions {
+            items.extend(translator.pending_permission(request));
+        }
+        for form in &snapshot.forms {
+            items.extend(translator.pending_form(form));
+        }
+        self.apply_items(items);
+        let alive: HashSet<&str> = snapshot
+            .permissions
+            .iter()
+            .chain(&snapshot.forms)
+            .filter_map(|request| request.get("id")?.as_str())
+            .collect();
+        for request_id in self.requests.gone(&alive) {
+            self.close_request(request_id);
+        }
+    }
+
+    fn close_by_projection(&mut self, snapshot: &Snapshot) {
+        let input = self.delivery.active.map(input::message_id);
+        if let Some(id) = &input {
+            let queued = snapshot.inbox.iter().any(|item| item == id);
+            // Ввод ещё в очереди или снимок старше запроса: его ход впереди.
+            if queued || !reconcile::delivered(&snapshot.messages, id) {
+                return;
+            }
+        }
+        let outcome = reconcile::last_outcome(&snapshot.messages, input.as_deref());
+        let outcome = match outcome.and_then(|idle| idle.get("outcome")?.as_str()) {
+            Some("succeeded") => RunOutcome::Succeeded,
+            Some("failed") => RunOutcome::Failed(events::RunFailure {
+                kind: outcome
+                    .and_then(|idle| idle.pointer("/error/type")?.as_str())
+                    .unwrap_or("unknown")
+                    .to_owned(),
+                message: outcome
+                    .and_then(|idle| idle.pointer("/error/message")?.as_str())
+                    .unwrap_or_default()
+                    .to_owned(),
+            }),
+            // Сервер жив и не работает, а итога нет: ход не закрыть иначе.
+            _ => RunOutcome::Interrupted,
+        };
+        self.delivery.stale_terminal = true;
+        self.on_run_ended(outcome);
+    }
+
+    // Единственный путь сверки на живом сервере: потерянное приходит теми же обработчиками.
+    fn apply_snapshot(&mut self, snapshot: Snapshot) {
+        let Some(translator) = self.translator.as_mut() else {
+            return;
+        };
+        for child in &snapshot.children {
+            translator.add_child(child.clone());
+        }
+        let unseen = translator.has_unseen(&snapshot.messages);
+        let inputs: Vec<(Uuid, bool)> = [self.delivery.active, self.delivery.unconfirmed]
+            .into_iter()
+            .flatten()
+            .map(|command| {
+                let id = input::message_id(command);
+                (command, reconcile::delivered(&snapshot.messages, &id))
+            })
+            .collect();
+        for (command, delivered) in inputs {
+            let id = input::message_id(command);
+            if delivered || snapshot.inbox.contains(&id) {
+                self.on_translated(Translated::InboxSeen { id, delivered });
+            }
+        }
+        // Период без ввода начался и, возможно, кончился в разрыве.
+        if !self.turn_running() && (snapshot.running || unseen) {
+            self.on_run_started();
+        }
+        if let Some(translator) = self.translator.as_mut() {
+            let items = translator.replay(&snapshot.messages, false, true);
+            self.apply_items(items);
+        }
+        self.reopen_requests(&snapshot);
+        if self.turn_running() && !snapshot.running {
+            self.close_by_projection(&snapshot);
+        } else if self.turn_running() && !self.requests.has_open() {
+            self.events.push_back(AdapterEvent::Phase {
+                phase: Phase::Generating,
+                tool_name: None,
+                summary: None,
+            });
+        }
+    }
+
+    fn on_resynced(&mut self, done: Option<Resynced>) {
+        self.resync = None;
+        let Some(done) = done else {
+            if self.stream.is_none() {
+                self.give_up_stream();
+            }
+            return;
+        };
+        if let Some(stream) = done.stream {
+            self.stream = Some(stream);
+        }
+        self.apply_snapshot(done.snapshot);
+    }
+
+    fn start_resync(&mut self, reconnect: bool) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        if self.resync.is_some() {
+            return;
+        }
+        let session = self.session.clone();
+        let children: Vec<String> = self
+            .translator
+            .iter()
+            .flat_map(|translator| translator.children().map(str::to_owned))
+            .collect();
+        let task = if reconnect {
+            tokio::spawn(resubscribe(http, session, children))
+        } else {
+            tokio::spawn(reread(http, session, children))
+        };
+        self.resync = Some(Resync { task });
+    }
+
+    // Сервер остался без потока и без проекций: конца хода не будет, поэтому он снимается,
+    // а исполнение получает ProcessExited вместо вечного ожидания.
+    fn give_up_stream(&mut self) {
+        self.diagnostic("event_stream_lost", false);
+        if let Some(proc) = self.proc.as_mut() {
+            proc.close_stdin();
+            proc.signal(rustix::process::Signal::TERM);
+            self.kill_at = Some(Instant::now() + TERM_GRACE);
+        }
+    }
+
+    // Запуск после падения: исполнения нет, поэтому `running` значит сироту, а ввод, оставшийся
+    // в очереди, снимается: хаб считает его неопределённым, а следующий ввод исполнил бы его.
+    async fn reconcile_resume(&mut self) -> Result<(), AdapterError> {
+        let snapshot = reconcile::read(self.http()?, &self.session, Vec::new())
+            .await
+            .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
+        if let Some(translator) = self.translator.as_mut() {
+            for child in &snapshot.children {
+                translator.add_child(child.clone());
+            }
+            let items = translator.replay(&snapshot.messages, !snapshot.running, false);
+            self.apply_items(items);
+        }
+        for id in &snapshot.inbox {
+            let path = format!("/api/session/{}/inbox/{id}", self.session);
+            self.http()?
+                .delete(&path, &[], REQUEST_WAIT)
+                .await
+                .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
+        }
+        if !snapshot.inbox.is_empty() {
+            self.resume_notice(STALE_INPUT_NOTICE.to_owned());
+        }
+        Ok(())
+    }
+
+    // Команды старого исполнения хаб не примет: блок без привязки к вводу.
+    fn resume_notice(&mut self, text: String) {
+        let block_id = Uuid::now_v7();
+        self.events.push_back(AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::Warning,
+            input_command_id: None,
+            parent: None,
+            agent: "orchestrator".into(),
+            model: self.model.clone(),
+            tool_name: None,
+            summary: None,
+            approved_by: None,
+        });
+        self.events.push_back(AdapterEvent::BlockFinal {
+            block_id,
+            text,
+            summary: None,
+        });
     }
 
     fn on_lookup(&mut self, found: bool) {
@@ -1348,25 +1657,40 @@ impl OpenCodeAdapter {
             Some(StreamItem::Undecodable { required }) => {
                 self.diagnostic("unparsed_event", required);
             }
-            Some(StreamItem::Oversized) => self.diagnostic("oversized_frame", false),
+            // Кадр потерян, как при разрыве, но поток жив.
+            Some(StreamItem::Oversized) => {
+                self.diagnostic("oversized_frame", false);
+                if let Some(translator) = self.translator.as_mut() {
+                    translator.on_gap();
+                }
+                self.start_resync(false);
+            }
             Some(StreamItem::Ended) | None => self.on_stream_end(),
         }
     }
 
-    // Переподключения пока нет: без потока конца хода не будет, поэтому сервер снимается,
-    // а исполнение получает ProcessExited вместо вечного ожидания.
+    #[cfg(feature = "synthetic-adapter")]
+    pub fn native_session(&self) -> &str {
+        &self.session
+    }
+
+    /// Разрыв потока по требованию теста с настоящим сервером: снаружи его не устроить.
+    #[cfg(feature = "synthetic-adapter")]
+    pub fn cut_stream(&mut self) {
+        self.on_stream_end();
+    }
+
     fn on_stream_end(&mut self) {
         self.stream = None;
         if let Some((status, _)) = self.exit.take() {
             self.finish_exit(status);
             return;
         }
-        self.diagnostic("event_stream_lost", false);
-        if let Some(proc) = self.proc.as_mut() {
-            proc.close_stdin();
-            proc.signal(rustix::process::Signal::TERM);
-            self.kill_at = Some(Instant::now() + TERM_GRACE);
+        if let Some(translator) = self.translator.as_mut() {
+            translator.on_gap();
         }
+        self.resync = None;
+        self.start_resync(true);
     }
 
     fn finish_exit(&mut self, status: Option<ExitStatus>) {
@@ -1431,14 +1755,17 @@ impl OpenCodeAdapter {
         let (Some(proc), Some(broker)) = (self.proc.as_mut(), self.broker.as_mut()) else {
             return std::future::pending().await;
         };
+        // Пока идёт сверка, поток ждёт: конец хода не должен обогнать потерянное.
+        let reading = self.resync.is_none();
         let item = async {
             match stream {
-                Some(stream) => stream.items.recv().await,
-                None => std::future::pending().await,
+                Some(stream) if reading => stream.items.recv().await,
+                _ => std::future::pending().await,
             }
         };
         let lookup = &mut self.lookup;
         let shells = &mut self.shells;
+        let resync = &mut self.resync;
         let kill_at = self.kill_at;
         let escalate = async {
             match kill_at {
@@ -1452,6 +1779,7 @@ impl OpenCodeAdapter {
             event = broker.next() => self.on_broker(event),
             found = lookup_done(lookup) => self.on_lookup(found),
             list = shells_done(shells) => self.on_shells(list),
+            done = resync_done(resync) => self.on_resynced(done),
             () = escalate => {
                 self.kill_at = None;
                 proc.signal(rustix::process::Signal::KILL);
@@ -1509,7 +1837,9 @@ impl Adapter for OpenCodeAdapter {
     }
 
     async fn transmit(&mut self, input: &Transmission, group: &dyn Containment) -> TransmitOutcome {
-        if self.exited || self.exit.is_some() || self.stream.is_none() {
+        // Без потока, пока идёт подписка заново, ввод допустим: сервер жив, а что не придёт
+        // событием, покажет сверка.
+        if self.exited || self.exit.is_some() || (self.stream.is_none() && self.resync.is_none()) {
             return TransmitOutcome::Undetermined;
         }
         self.transmit_inner(input, group).await

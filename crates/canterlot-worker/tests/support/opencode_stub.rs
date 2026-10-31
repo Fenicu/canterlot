@@ -14,9 +14,20 @@ use tokio::{
 };
 
 pub enum Reply {
-    Text { reasoning: String, text: String },
+    Text {
+        reasoning: String,
+        text: String,
+    },
     Tools(Vec<(String, Value)>),
-    Status { status: u16, body: Value },
+    Status {
+        status: u16,
+        body: Value,
+    },
+    /// Текст кусками с паузами: между ними есть время разорвать поток.
+    Paced {
+        chunks: Vec<String>,
+        pause_ms: u64,
+    },
 }
 
 impl Reply {
@@ -108,7 +119,7 @@ fn stream(reply: &Reply) -> String {
             }
             "tool_calls"
         }
-        Reply::Status { .. } => "stop",
+        Reply::Status { .. } | Reply::Paced { .. } => "stop",
     };
     body += &chunk(json!({}), Some(finish));
     body += &usage();
@@ -150,6 +161,25 @@ async fn serve(shared: Arc<Mutex<Shared>>, stream_socket: TcpStream) {
         shared.replies.pop_front()
     };
     let reply = reply.unwrap_or_else(|| Reply::text("out of script"));
+    if let Reply::Paced { chunks, pause_ms } = &reply {
+        let head =
+            "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n";
+        let _ = write.write_all(head.as_bytes()).await;
+        let _ = write
+            .write_all(chunk(json!({"role": "assistant"}), None).as_bytes())
+            .await;
+        for text in chunks {
+            let _ = write
+                .write_all(chunk(json!({"content": text}), None).as_bytes())
+                .await;
+            let _ = write.flush().await;
+            tokio::time::sleep(std::time::Duration::from_millis(*pause_ms)).await;
+        }
+        let tail = chunk(json!({}), Some("stop")) + &usage() + "data: [DONE]\n\n";
+        let _ = write.write_all(tail.as_bytes()).await;
+        let _ = write.shutdown().await;
+        return;
+    }
     let response = match &reply {
         Reply::Status { status, body } => {
             let body = body.to_string();

@@ -1268,3 +1268,362 @@ async fn real_model_without_pictures_gets_paths() {
     assert!(seen.contains("данные.bin"), "{seen}");
     session.close().await;
 }
+
+fn paced(chunks: &[&str], pause_ms: u64) -> Reply {
+    Reply::Paced {
+        chunks: chunks.iter().map(|chunk| (*chunk).to_owned()).collect(),
+        pause_ms,
+    }
+}
+
+/// Сверка по тому, что собрал бы хаб: один старт и один финал, дельты равны финалу.
+fn assert_each_block_once(events: &[AdapterEvent]) -> Vec<String> {
+    use std::collections::BTreeMap;
+    let mut blocks: BTreeMap<Uuid, (usize, String, Vec<String>)> = BTreeMap::new();
+    for event in events {
+        match event {
+            AdapterEvent::BlockStarted { block_id, .. } => {
+                blocks.entry(*block_id).or_default().0 += 1;
+            }
+            AdapterEvent::BlockDelta { block_id, append } => {
+                blocks.entry(*block_id).or_default().1.push_str(append);
+            }
+            AdapterEvent::BlockFinal { block_id, text, .. } => {
+                blocks.entry(*block_id).or_default().2.push(text.clone());
+            }
+            _ => {}
+        }
+    }
+    for (id, (started, deltas, finals)) in &blocks {
+        assert_eq!(*started, 1, "{id}: {blocks:?}");
+        assert_eq!(finals.len(), 1, "{id}: {blocks:?}");
+        assert!(
+            deltas.is_empty() || *deltas == finals[0],
+            "{id}: {blocks:?}"
+        );
+    }
+    blocks.into_values().flat_map(|block| block.2).collect()
+}
+
+// Настоящий сервер, настоящий разрыв: дельты посреди текста потеряны, конец хода может быть
+// в разрыве или после него. Блоки целы и не задвоены, провайдер получил один запрос на шаг.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_stream_cut_loses_no_block_and_duplicates_none() {
+    let stub = Stub::start(vec![
+        paced(&["первый ", "второй ", "третий ", "четвёртый"], 250),
+        Reply::text("хвост"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("начни");
+    session.transmit(&turn).await;
+    let mut events = session
+        .until(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
+        .await;
+    session.adapter.cut_stream();
+    let command = turn.command_id;
+    events.extend(
+        session
+            .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+            .await,
+    );
+    let texts = assert_each_block_once(&events);
+    assert_eq!(texts, ["первый второй третий четвёртый"]);
+    assert_eq!(stub.requests().len(), 1);
+    let usage = events.iter().find_map(|event| match event {
+        AdapterEvent::RunFinished { usage, .. } => Some(usage.clone()),
+        _ => None,
+    });
+    assert_eq!(usage.unwrap()[0].input_tokens, 70, "counted once");
+    let next = input("дальше");
+    session.turn(&next).await;
+    assert_eq!(stub.requests().len(), 2, "the input after the cut works");
+    session.close().await;
+}
+
+// Весь конец хода в разрыве: живого терминала нет, ход закрывает проекция настоящего сервера.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_stream_cut_over_the_end_of_the_turn_finishes_it() {
+    let stub = Stub::start(vec![
+        paced(&["начало ", "конец"], 50),
+        Reply::text("второй"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("начни");
+    session.transmit(&turn).await;
+    let mut events = session
+        .until(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
+        .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    session.adapter.cut_stream();
+    let command = turn.command_id;
+    events.extend(
+        session
+            .until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+            .await,
+    );
+    assert_each_block_once(&events);
+    session.turn(&input("дальше")).await;
+    session.close().await;
+}
+
+// Запрос родился без потока: карточка из проекции, решение доходит, инструмент работает.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_permission_asked_during_a_cut_reaches_the_owner() {
+    let stub = Stub::start(vec![
+        paced(&["сейчас "], 400),
+        Reply::tool(
+            "shell",
+            json!({"command": "echo разрешено", "description": "x"}),
+        ),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "ask").await;
+    let turn = input("запусти");
+    session.transmit(&turn).await;
+    session
+        .until(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
+        .await;
+    session.adapter.cut_stream();
+    let _ = stub.requests();
+    session.close_after_turn_with_prompt(turn.command_id).await;
+}
+
+impl Session {
+    // У `paced` нет вызова инструмента, поэтому ход кончается сам: второй ввод идёт с запросом.
+    async fn close_after_turn_with_prompt(mut self, command: Uuid) {
+        self.until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+            .await;
+        let turn = input("теперь запусти");
+        self.transmit(&turn).await;
+        let (request, payload) = self.until_request().await;
+        assert_eq!(payload["command"], "echo разрешено");
+        let outcome = self
+            .adapter
+            .deliver_decision(&request, &permission(PermissionBehavior::Allow, None))
+            .await;
+        assert!(
+            matches!(outcome, DecisionOutcome::Applied(_)),
+            "{outcome:?}"
+        );
+        let command = turn.command_id;
+        self.until(|event| matches!(event, AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == command))
+            .await;
+        self.close().await;
+    }
+}
+
+impl Live {
+    // Новое исполнение той же базы: свой каталог, та же сессия.
+    fn second_execution(&self) -> OpenCodeAdapter {
+        let exec_dir = self.root.path().join("data/executions/two");
+        fs::create_dir_all(&exec_dir).unwrap();
+        OpenCodeAdapter::new(
+            OpenCodeConfig {
+                executable: self.wrapper.clone(),
+                owner_config: Some(self.root.path().join("config/opencode")),
+                ..Default::default()
+            },
+            exec_dir,
+            Duration::from_secs(20),
+        )
+        .with_relay_executable(PathBuf::from(env!("CARGO_BIN_EXE_canterlot-worker")))
+    }
+
+    fn shell_journal(&self, native: &str) -> PathBuf {
+        self.root
+            .path()
+            .join("data/opencode/shells")
+            .join(format!("{native}.json"))
+    }
+
+    async fn wait_for(&self, what: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !what() {
+            assert!(Instant::now() < deadline);
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+}
+
+fn kill(pid: u32) {
+    let pid = Pid::from_raw(i32::try_from(pid).unwrap()).unwrap();
+    kill_process(pid, Signal::KILL).unwrap();
+}
+
+async fn drain(adapter: &mut OpenCodeAdapter) -> Vec<AdapterEvent> {
+    let mut events = Vec::new();
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(500), adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    events
+}
+
+// SIGKILL посреди команды: новый запуск находит текст до неё, закрывает сироту, снимает её
+// процесс и не шлёт ввода. Следующий ввод настоящий сервер закрывает тем же вызовом: блок уже
+// закрыт. Модель получает старый ввод один раз.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_server_kill_recovers_on_resume_and_stops_the_orphan() {
+    let stub = Stub::start(vec![
+        Reply::Tools(vec![(
+            "shell".into(),
+            json!({"command": "sleep 4712", "description": "x"}),
+        )]),
+        Reply::text("дальше"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let native = session.adapter.native_session().to_owned();
+    let turn = input("запусти");
+    session.transmit(&turn).await;
+    session
+        .until(|event| {
+            matches!(event, AdapterEvent::Phase { summary: Some(summary), .. }
+            if summary.contains("sleep 4712"))
+        })
+        .await;
+    let journal = session.live.shell_journal(&native);
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !journal.exists() {
+        assert!(Instant::now() < deadline, "journal of the running shell");
+        let _ = tokio::time::timeout(Duration::from_millis(50), session.adapter.next_event()).await;
+    }
+    assert!(session.live.running("sleep 4712"));
+    for pid in session.live.servers() {
+        kill(pid);
+    }
+    let Session {
+        live,
+        group,
+        adapter,
+    } = session;
+    drop(adapter);
+    assert!(live.running("sleep 4712"), "the orphan outlives the server");
+    let mut second = live.second_execution();
+    let mut spec = live.spec("fake/fake-1", "bypass");
+    spec.native_conversation_id = Some(native.clone());
+    let started = tokio::time::timeout(WAIT, second.start(&spec, &group))
+        .await
+        .expect("start must finish")
+        .expect("resume");
+    assert_eq!(started.native_conversation_id, native);
+    let events = drain(&mut second).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Diagnostic {
+            kind: "opencode_orphans_stopped",
+            ..
+        }
+    )));
+    assert!(
+        summaries(&events)
+            .iter()
+            .any(|summary| summary.ends_with(", interrupted")),
+        "{:?}",
+        summaries(&events)
+    );
+    live.wait_for(|| !live.running("sleep 4712")).await;
+    assert_eq!(stub.requests().len(), 1, "nothing was sent on resume");
+    let mut session = Session {
+        live,
+        group,
+        adapter: second,
+    };
+    let next = session.turn(&input("продолжай")).await;
+    assert!(
+        !summaries(&next)
+            .iter()
+            .any(|summary| summary.contains("sleep 4712")),
+        "{:?}",
+        summaries(&next)
+    );
+    let seen = stub.requests()[1].to_string();
+    assert_eq!(seen.matches("запусти").count(), 1, "{seen}");
+    session.close().await;
+}
+
+// Сервер убит, супервизор жив: команды сервера остаются его потомками через subreaper, поэтому
+// их снимает обычное дерево процессов, как у Codex.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_orphan_of_a_killed_server_dies_with_the_process_tree() {
+    use canterlot_worker::containment::Containment as _;
+    let stub = Stub::start(vec![Reply::Tools(vec![(
+        "shell".into(),
+        json!({"command": "sleep 4713", "description": "x"}),
+    )])])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let turn = input("запусти");
+    session.transmit(&turn).await;
+    session
+        .until(|event| {
+            matches!(event, AdapterEvent::Phase { summary: Some(summary), .. }
+            if summary.contains("sleep 4713"))
+        })
+        .await;
+    session
+        .live
+        .wait_for(|| session.live.running("sleep 4713"))
+        .await;
+    for pid in session.live.servers() {
+        kill(pid);
+    }
+    session
+        .until(|event| matches!(event, AdapterEvent::ProcessExited { .. }))
+        .await;
+    assert!(session.live.running("sleep 4713"), "the orphan is alive");
+    session
+        .group
+        .terminate(Duration::from_secs(2))
+        .await
+        .unwrap();
+    session
+        .live
+        .wait_for(|| !session.live.running("sleep 4713"))
+        .await;
+}
+
+// Смерть супервизора в живом потоке: сервер уходит по EOF stdin и сам дописывает проекцию.
+// Новое исполнение показывает то, что журнал не получил, а незавершённый ввод не шлёт.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_stdin_lease_keeps_the_partial_text_for_the_next_execution() {
+    let stub = Stub::start(vec![paced(&["уцелевший ", "кусок", " никогда"], 700)]).await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let native = session.adapter.native_session().to_owned();
+    let turn = input("пиши");
+    session.transmit(&turn).await;
+    session
+        .until(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
+        .await;
+    let Session {
+        live,
+        group,
+        adapter,
+    } = session;
+    drop(adapter);
+    live.wait_gone().await;
+    let mut second = live.second_execution();
+    let mut spec = live.spec("fake/fake-1", "bypass");
+    spec.native_conversation_id = Some(native);
+    tokio::time::timeout(WAIT, second.start(&spec, &group))
+        .await
+        .expect("start must finish")
+        .expect("resume");
+    let events = drain(&mut second).await;
+    let texts = assert_each_block_once(&events);
+    assert_eq!(texts.len(), 1, "{texts:?}");
+    assert!(texts[0].starts_with("уцелевший"), "{texts:?}");
+    assert_eq!(stub.requests().len(), 1);
+    second.close(CloseMode::Graceful, &group).await.unwrap();
+    live.wait_gone().await;
+}

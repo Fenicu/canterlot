@@ -49,6 +49,7 @@ fn ready() -> Script {
 struct Env {
     guard: ProcessGuard,
     fake: Option<Fake>,
+    config: WorkerConfig,
     root: TempDir,
     work: PathBuf,
     thread: Option<StoreThread>,
@@ -114,10 +115,15 @@ impl Env {
         let thread = StoreThread::new(WorkerStore::open(&root.path().join("store")).unwrap());
         let (sender, relay) = mpsc::channel(64);
         let manager = ExecutionManager::new(config.execution.clone(), thread.client(), sender);
-        manager.configure_adapters(config.claude_code, config.codex, config.opencode);
+        manager.configure_adapters(
+            config.claude_code.clone(),
+            config.codex.clone(),
+            config.opencode.clone(),
+        );
         Self {
             guard: ProcessGuard::new(root.path()),
             fake,
+            config,
             root,
             work,
             thread: Some(thread),
@@ -129,6 +135,58 @@ impl Env {
             execution: Uuid::now_v7(),
             conversation: Uuid::now_v7(),
         }
+    }
+
+    // Служба умирает и поднимается заново, сопровождение остаётся.
+    async fn restart_worker(&mut self) {
+        self.manager.take().unwrap().shutdown().await;
+        self.thread.take().unwrap().close().await.unwrap();
+        let thread = StoreThread::new(WorkerStore::open(&self.root.path().join("store")).unwrap());
+        let (sender, relay) = mpsc::channel(64);
+        let manager = ExecutionManager::new(self.config.execution.clone(), thread.client(), sender);
+        manager.configure_adapters(
+            self.config.claude_code.clone(),
+            self.config.codex.clone(),
+            self.config.opencode.clone(),
+        );
+        assert_eq!(
+            manager.startup_verify().await.unwrap(),
+            vec![self.execution]
+        );
+        self.thread = Some(thread);
+        self.manager = Some(manager);
+        self.relay = relay;
+        self.manager().on_hub_session(self.committed.clone());
+    }
+
+    // Новое исполнение той же сессии. Каталог старого хаб отпускает, когда группа пуста; здесь
+    // свой каталог хранилища: проверяется запуск адаптера, а не снятие `owner_lost`.
+    async fn resume_as_new_execution(&mut self, script: Script, native: &str) {
+        self.fake().rewrite(script);
+        self.manager.take().unwrap().shutdown().await;
+        self.thread.take().unwrap().close().await.unwrap();
+        let store = self.root.path().join("store");
+        fs::rename(&store, self.root.path().join("store-dead")).unwrap();
+        let thread = StoreThread::new(WorkerStore::open(&store).unwrap());
+        let (sender, relay) = mpsc::channel(64);
+        let manager = ExecutionManager::new(self.config.execution.clone(), thread.client(), sender);
+        manager.configure_adapters(
+            self.config.claude_code.clone(),
+            self.config.codex.clone(),
+            self.config.opencode.clone(),
+        );
+        self.thread = Some(thread);
+        self.manager = Some(manager);
+        self.relay = relay;
+        self.execution = Uuid::now_v7();
+        self.seen.clear();
+        self.committed.clear();
+        self.manager().on_hub_session(self.committed.clone());
+        let mut start = self.start_command("bypass");
+        if let Some(Kind::StartExecution(start)) = start.kind.as_mut() {
+            start.native_conversation_id = native.to_owned();
+        }
+        self.send(start).await;
     }
 
     fn fake(&self) -> &Fake {
@@ -584,6 +642,201 @@ async fn long_tool_output_survives_the_block_limits() {
         })
         .collect();
     assert_eq!(joined, text);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+/// Что собрал бы хаб из журнала: один старт и один финал на блок, дельты равны финалу.
+fn assert_each_block_once(bodies: &[Body]) -> Vec<String> {
+    let mut started: HashMap<&str, usize> = HashMap::new();
+    let mut deltas: HashMap<&str, String> = HashMap::new();
+    let mut finals: HashMap<&str, Vec<&str>> = HashMap::new();
+    for body in bodies {
+        match body {
+            Body::BlockStarted(block) => *started.entry(&block.block_id).or_default() += 1,
+            Body::BlockDelta(block) => deltas
+                .entry(&block.block_id)
+                .or_default()
+                .push_str(&block.append),
+            Body::BlockFinal(block) => finals.entry(&block.block_id).or_default().push(&block.text),
+            _ => {}
+        }
+    }
+    let mut texts = Vec::new();
+    for (id, count) in &started {
+        assert_eq!(*count, 1, "{id}");
+        let last = finals.get(id).expect("block without a final");
+        assert_eq!(last.len(), 1, "{id}: {last:?}");
+        if let Some(streamed) = deltas.get(id) {
+            assert_eq!(streamed, last[0], "{id}");
+        }
+        texts.push(last[0].to_owned());
+    }
+    texts.sort();
+    texts
+}
+
+fn prompts(env: &Env) -> usize {
+    env.fake()
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/prompt"))
+        .count()
+}
+
+// Разрыв потока под настоящим супервизором: журнал получает каждый блок один раз.
+#[tokio::test]
+async fn stream_cut_through_the_supervisor_keeps_every_block_once() {
+    let mut env = Env::new(Some(recorded("cut_midturn"))).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let command = env.deliver("начни").await;
+    env.wait_finished(command).await;
+    assert_eq!(
+        assert_each_block_once(&env.bodies),
+        [
+            "echo из разрыва",
+            "думаю ",
+            "из разрыва\n",
+            "первый кусок",
+            "после разрыва"
+        ]
+    );
+    assert_eq!(prompts(&env), 1);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Перезапуск воркера не задевает сопровождение: тот же сервер, ход доходит до конца, журнал
+// докатывается без повторов, а ввод ушёл один раз.
+#[tokio::test]
+async fn worker_restart_keeps_the_server_and_every_block_once() {
+    let mut env = Env::new(Some(recorded("cut_midturn"))).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let pids = env.fake().pids();
+    let command = env.deliver("начни").await;
+    env.wait("first block", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::BlockStarted(_)))
+    })
+    .await;
+    env.restart_worker().await;
+    env.wait_finished(command).await;
+    assert_eq!(env.fake().pids(), pids, "the same server");
+    assert_eq!(
+        assert_each_block_once(&env.bodies),
+        [
+            "echo из разрыва",
+            "думаю ",
+            "из разрыва\n",
+            "первый кусок",
+            "после разрыва"
+        ]
+    );
+    assert_eq!(prompts(&env), 1);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+fn parent_of(pid: u32) -> u32 {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
+    stat[stat.rfind(')').unwrap() + 2..]
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap()
+}
+
+// Смерть супервизора: сервер уходит по stdin, а новое исполнение той же сессии находит в
+// проекции всё, что журнал не получил, и закрывает оборванный вызов. Ввод не повторяется.
+#[tokio::test]
+async fn supervisor_crash_loses_no_block_and_sends_no_prompt_again() {
+    let first = Script::first_boot("recovery", Some("eof_mid_tool"))
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(first)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let command = env.deliver("запусти").await;
+    env.wait("tool call", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(
+                body,
+                Body::BlockStarted(block) if block.kind == "tool_call"
+            )
+        })
+    })
+    .await;
+    let server = env.fake().pids()[0];
+    let supervisor = parent_of(server);
+    kill_process(
+        Pid::from_raw(i32::try_from(supervisor).unwrap()).unwrap(),
+        Signal::KILL,
+    )
+    .unwrap();
+    env.fake().wait_gone().await;
+    let before = env.bodies.clone();
+    assert!(
+        !before
+            .iter()
+            .any(|body| matches!(body, Body::RunFinished(_))),
+        "the turn never ended"
+    );
+    let native = before
+        .iter()
+        .find_map(|body| match body {
+            Body::ExecutionState(fact) if !fact.native_conversation_id.is_empty() => {
+                Some(fact.native_conversation_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    // Запись знает свой идентификатор сессии, а этот создал адаптер.
+    let text = serde_json::to_string(&recorded("eof_mid_tool")).unwrap();
+    let mut resume: Script =
+        serde_json::from_str(&text.replace("ses_0190cafe000070008000000000000001", &native))
+            .unwrap();
+    resume.set_route(
+        "PATCH",
+        &format!("/api/session/{native}"),
+        vec![Reply {
+            status: 204,
+            ..Default::default()
+        }],
+    );
+    resume.set_route(
+        "POST",
+        &format!("/api/session/{native}/model"),
+        vec![Reply {
+            status: 204,
+            ..Default::default()
+        }],
+    );
+    env.resume_as_new_execution(resume, &native).await;
+    env.wait_running().await;
+    env.wait("orphan closed", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(
+                body,
+                Body::BlockFinal(block) if block.summary.ends_with(", interrupted")
+            )
+        })
+    })
+    .await;
+    let texts: Vec<String> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockFinal(block) => Some(block.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(texts.iter().any(|text| text == "до команды"), "{texts:?}");
+    assert_eq!(prompts(&env), 1, "{command}");
     env.stop().await;
     env.fake().wait_gone().await;
 }

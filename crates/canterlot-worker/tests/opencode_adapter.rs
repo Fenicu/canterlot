@@ -194,6 +194,16 @@ impl Bench {
     }
 }
 
+trait Applied {
+    fn is_applied(&self) -> bool;
+}
+
+impl Applied for DecisionOutcome {
+    fn is_applied(&self) -> bool {
+        matches!(self, DecisionOutcome::Applied(_))
+    }
+}
+
 fn allow() -> DecisionPayload {
     DecisionPayload::Permission {
         behavior: PermissionBehavior::Allow,
@@ -803,11 +813,12 @@ async fn failed_restart_respawns_the_previous_server_and_rejects_the_input() {
     assert_eq!(pids.len(), 1, "{pids:?}");
     assert_ne!(pids[0], started.cli_pid);
     assert!(!agents_file(&bench).exists(), "previous configuration");
-    let event = bench.event().await;
-    assert!(
-        matches!(event, AdapterEvent::CliRestarted { cli_pid, .. } if cli_pid == pids[0]),
-        "{event:?}"
-    );
+    loop {
+        if let AdapterEvent::CliRestarted { cli_pid, .. } = bench.event().await {
+            assert_eq!(cli_pid, pids[0]);
+            break;
+        }
+    }
     bench.close(CloseMode::Graceful).await;
 }
 
@@ -2306,6 +2317,7 @@ async fn lost_stream_stops_the_server_instead_of_waiting_forever() {
         .unwrap();
     script.steps.truncate(position + 1);
     script.steps.push(Step::Stall { ms: 100 });
+    script.refuse_events_from = Some(2);
     script.steps.push(Step::DropSse);
     let mut bench = Bench::new(script);
     bench.start_ok().await;
@@ -2348,6 +2360,7 @@ async fn lost_stream_escalates_when_the_server_ignores_the_signal() {
         .unwrap();
     script.steps.truncate(position + 1);
     script.steps.push(Step::Stall { ms: 100 });
+    script.refuse_events_from = Some(2);
     script.steps.push(Step::DropSse);
     script.ignore_eof = true;
     script.ignore_term = true;
@@ -4098,5 +4111,552 @@ async fn limits_and_preset_calls_go_through_the_broker() {
             .contains("presets"),
         "{answer}"
     );
+    bench.close(CloseMode::Graceful).await;
+}
+
+/// Запись настоящего сервера с разрывом потока или перезапуском (`recovery.jsonl`).
+fn recorded(scenario: &str) -> Script {
+    Script::from_capture("recovery", Some(scenario))
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+const RECORDED_SESSION: &str = "ses_0190cafe000070008000000000000001";
+
+#[derive(Debug, Default)]
+struct Ledger {
+    started: usize,
+    deltas: String,
+    finals: Vec<String>,
+}
+
+/// Что собрал бы хаб: повторный старт или второй финал блока здесь видны.
+fn ledger(events: &[AdapterEvent]) -> std::collections::BTreeMap<Uuid, Ledger> {
+    let mut blocks = std::collections::BTreeMap::<Uuid, Ledger>::new();
+    for event in events {
+        match event {
+            AdapterEvent::BlockStarted { block_id, .. } => {
+                blocks.entry(*block_id).or_default().started += 1;
+            }
+            AdapterEvent::BlockDelta { block_id, append } => {
+                blocks.entry(*block_id).or_default().deltas.push_str(append);
+            }
+            AdapterEvent::BlockFinal { block_id, text, .. } => {
+                blocks
+                    .entry(*block_id)
+                    .or_default()
+                    .finals
+                    .push(text.clone());
+            }
+            _ => {}
+        }
+    }
+    blocks
+}
+
+fn assert_each_block_once(events: &[AdapterEvent]) -> Vec<String> {
+    let blocks = ledger(events);
+    for (id, block) in &blocks {
+        assert_eq!(block.started, 1, "{id}: {blocks:?}");
+        assert_eq!(block.finals.len(), 1, "{id}: {blocks:?}");
+        assert!(
+            block.deltas.is_empty() || block.deltas == block.finals[0],
+            "the hub checksum would not match: {id}: {blocks:?}"
+        );
+    }
+    let mut texts: Vec<String> = blocks
+        .into_values()
+        .flat_map(|block| block.finals)
+        .collect();
+    texts.sort();
+    texts
+}
+
+fn usage_of(events: &[AdapterEvent]) -> (u64, u64) {
+    events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::RunFinished { usage, .. } => Some((
+                usage.iter().map(|model| model.input_tokens).sum(),
+                usage.iter().map(|model| model.output_tokens).sum(),
+            )),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn prompts(bench: &Bench) -> usize {
+    bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| request["method"] == "POST" && path_of(request).ends_with("/prompt"))
+        .count()
+}
+
+fn subscriptions(bench: &Bench) -> usize {
+    bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| path_of(request) == "/api/event")
+        .count()
+}
+
+// Разрыв посреди хода: конец текста, вызов и его результат ушли в разрыв, второй шаг идёт
+// уже по новому потоку. Каждый блок один раз, текст целиком, расход без задвоения.
+#[tokio::test]
+async fn stream_cut_loses_no_block_and_duplicates_none() {
+    let mut bench = Bench::new(recorded("cut_midturn"));
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(
+        assert_each_block_once(&events),
+        [
+            "echo из разрыва",
+            "думаю ",
+            "из разрыва\n",
+            "первый кусок",
+            "после разрыва"
+        ]
+    );
+    assert_eq!(usage_of(&events), (200, 40));
+    assert_eq!(prompts(&bench), 1, "no prompt is sent twice");
+    assert_eq!(subscriptions(&bench), 2);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Конец хода целиком в разрыве: живого терминала не будет, ход закрывает проекция.
+#[tokio::test]
+async fn stream_cut_over_the_end_of_the_turn_finishes_from_the_projection() {
+    let mut bench = Bench::new(recorded("cut_terminal_lost"));
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(assert_each_block_once(&events), ["начало конец"]);
+    assert_eq!(usage_of(&events), (100, 20));
+    let next = bench.event().await;
+    assert!(
+        matches!(
+            next,
+            AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                ..
+            }
+        ),
+        "{next:?}"
+    );
+    assert_eq!(prompts(&bench), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Терминал пришёл уже по новому потоку, а проекция его видела: следующий ввод им не закрыть.
+#[tokio::test]
+async fn late_terminal_of_a_reconciled_turn_does_not_end_the_next_one() {
+    let mut script = recorded("cut_terminal_lost");
+    let session = session_of(&script);
+    let terminal = json!({
+        "type": "session.execution.succeeded",
+        "data": {"sessionID": session},
+    });
+    // Придуманный порядок: этот же кадр настоящий сервер шлёт раньше подписки либо позже.
+    script.steps.push(Step::Stall { ms: 300 });
+    script.steps.push(Step::Emit {
+        events: vec![terminal],
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let drained = tokio::time::timeout(Duration::from_millis(300), async {
+        loop {
+            let event = bench.adapter.next_event().await;
+            assert!(
+                !matches!(event, AdapterEvent::RunFinished { .. }),
+                "{event:?}"
+            );
+        }
+    })
+    .await;
+    assert!(drained.is_err());
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Запрос родился в разрыве: карточка открывается по проекции один раз, решение доходит.
+#[tokio::test]
+async fn permission_asked_in_the_gap_reopens_from_the_projection() {
+    let mut bench = Bench::new(recorded("cut_permission"));
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let (request, payload, events) = bench.until_request().await;
+    assert_eq!(payload["command"], "echo разрешение");
+    let outcome = bench.deliver(&request, &allow()).await;
+    assert!(
+        outcome.is_applied(),
+        "{outcome:?}: {:?}",
+        bench.fake.requests().last()
+    );
+    let mut events = events;
+    events.extend(bench.until_finished(input.command_id).await);
+    let opened = events
+        .iter()
+        .filter(|event| matches!(event, AdapterEvent::RequestOpened { .. }))
+        .count();
+    assert_eq!(opened, 1);
+    assert_each_block_once(&events);
+    assert_eq!(prompts(&bench), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn question_asked_in_the_gap_reopens_from_the_projection() {
+    let mut bench = Bench::new(recorded("cut_form"));
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let (request, payload, _) = bench.until_request().await;
+    assert_eq!(payload["questions"][0]["text"], "Какой цвет?");
+    let answer = DecisionPayload::Question {
+        answers: [("q0".to_owned(), AnswerValue::Single("Синий".into()))]
+            .into_iter()
+            .collect(),
+    };
+    assert!(bench.deliver(&request, &answer).await.is_applied());
+    bench.until_finished(input.command_id).await;
+    let replies = bench.replies();
+    assert_eq!(replies[0]["body"], json!({"answer": {"q0": "Синий"}}));
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Потомок родился в разрыве: о нём знает только список сессий, ответ идёт на его путь.
+#[tokio::test]
+async fn permission_of_a_child_born_in_the_gap_is_found() {
+    let mut bench = Bench::new(recorded("cut_child_permission"));
+    bench.spec.permission_mode = "ask".into();
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let (request, payload, _) = bench.until_request().await;
+    assert_eq!(payload["agent"], "subagent");
+    assert!(bench.deliver(&request, &allow()).await.is_applied());
+    let replies = bench.replies();
+    assert!(
+        path_of(&replies[0]).contains("ses_e6f9fe28"),
+        "{:?}",
+        replies[0]
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер умер вместе с потоком: это выход, а не разрыв, и повторной подписки не ждём.
+#[tokio::test]
+async fn dead_server_is_an_exit_not_a_gap() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    script.steps.truncate(position + 1);
+    script.steps.push(Step::Stall { ms: 100 });
+    script.steps.push(Step::Die {
+        code: 9,
+        kill: true,
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    loop {
+        if let AdapterEvent::ProcessExited { signal, .. } = bench.event().await {
+            assert_eq!(signal, Some(9));
+            break;
+        }
+    }
+    assert_eq!(subscriptions(&bench), 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+async fn resumed(scenario: &str) -> (Bench, Vec<AdapterEvent>) {
+    let mut script = recorded(scenario);
+    script.set_route(
+        "PATCH",
+        &format!("/api/session/{RECORDED_SESSION}"),
+        vec![reply_204()],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{RECORDED_SESSION}/model"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    let mut events = Vec::new();
+    while let Ok(event) =
+        tokio::time::timeout(Duration::from_millis(300), bench.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    (bench, events)
+}
+
+// После SIGKILL инструмент в проекции `running`, а исполнения нет: это сирота. Текст до него
+// находится, расход к чужому ходу не приписывается, ввод не повторяется.
+#[tokio::test]
+async fn restart_closes_the_orphan_tool_and_finds_what_was_lost() {
+    let (mut bench, events) = resumed("kill_mid_tool").await;
+    let texts = assert_each_block_once(&events);
+    assert!(texts.contains(&"до команды".to_owned()), "{texts:?}");
+    assert!(
+        texts.iter().any(|text| text.contains("прерван")),
+        "{texts:?}"
+    );
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { summary: Some(summary), .. }
+                if summary.ends_with(", interrupted")
+        )),
+        "{events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+    );
+    assert_eq!(prompts(&bench), 0, "no prompt is sent on resume");
+    // Следующий ввод: сервер сам закрывает тот же вызов, блок уже закрыт.
+    let input = bench.input("дальше");
+    bench.accepted(&input).await;
+    let next = bench.until_finished(input.command_id).await;
+    assert!(
+        !next.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { summary: Some(summary), .. }
+                if summary.contains("shell")
+        )),
+        "{next:?}"
+    );
+    assert_eq!(assert_each_block_once(&next), ["дальше"]);
+    assert_eq!(usage_of(&next), (100, 20), "only the new step");
+    bench.close(CloseMode::Graceful).await;
+}
+
+// EOF stdin: сервер успел закрыть инструмент сам, сирот нет, но итог надо показать.
+#[tokio::test]
+async fn restart_after_the_stdin_lease_shows_the_closed_tool() {
+    let (mut bench, events) = resumed("eof_mid_tool").await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { summary: Some(summary), .. }
+                if summary.ends_with(", interrupted")
+        )),
+        "{events:?}"
+    );
+    assert_each_block_once(&events);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// SIGKILL посреди текста: проекция пуста, показывать нечего, блоков не появляется.
+#[tokio::test]
+async fn restart_after_a_kill_in_the_middle_of_a_text_adds_nothing() {
+    let (mut bench, events) = resumed("kill_mid_text").await;
+    assert!(ledger(&events).is_empty(), "{events:?}");
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Ввод пережил рестарт в очереди: хаб считает его неопределённым, и следующий ввод не должен
+// исполнить его вместе с собой.
+#[tokio::test]
+async fn restart_cancels_the_input_left_in_the_queue() {
+    let (mut bench, events) = resumed("queued_restart").await;
+    let requests = bench.fake.requests();
+    let cancel = requests
+        .iter()
+        .find(|request| request["method"] == "DELETE")
+        .expect("inbox cancel");
+    assert!(path_of(cancel).contains("/inbox/msg_"), "{cancel}");
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::BlockFinal { text, .. } if text.contains("очереди")
+        )),
+        "{events:?}"
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Проекция с картинками больше потолка ответа: сверка не падает, а читает страницами мельче.
+#[tokio::test]
+async fn projection_over_the_body_cap_is_read_in_smaller_pages() {
+    let mut script = recorded("kill_mid_tool");
+    let path = format!("/api/session/{RECORDED_SESSION}/message");
+    let recorded = script.route("GET", &path).expect("recorded").replies[0].clone();
+    script.set_route(
+        "GET",
+        &path,
+        vec![
+            Reply {
+                raw: Some(" ".repeat(65 * 1024 * 1024)),
+                ..Default::default()
+            },
+            recorded,
+        ],
+    );
+    script.set_route(
+        "PATCH",
+        &format!("/api/session/{RECORDED_SESSION}"),
+        vec![reply_204()],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{RECORDED_SESSION}/model"),
+        vec![reply_204()],
+    );
+    let mut bench = Bench::new(script);
+    bench.spec.native_conversation_id = Some(RECORDED_SESSION.to_owned());
+    bench.start_ok().await;
+    let reads: Vec<String> = bench
+        .fake
+        .requests()
+        .iter()
+        .filter(|request| path_of(request).ends_with("/message"))
+        .map(|request| request["query"].as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(reads, ["limit=100&order=desc", "limit=25&order=desc"]);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Кадр больше потолка потерян, как при разрыве: инструмент закрывается по проекции.
+#[tokio::test]
+async fn oversized_frame_is_recovered_from_the_projection() {
+    let mut script = recorded("cut_midturn");
+    let drop_at = script
+        .steps
+        .iter()
+        .position(|step| matches!(step, Step::DropSse))
+        .unwrap();
+    script.steps[drop_at] = Step::Frame {
+        raw: format!("data: {}\n\n", "x".repeat(65 * 1024 * 1024)),
+    };
+    script.steps.remove(drop_at + 1);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("начни");
+    bench.accepted(&input).await;
+    let events = bench.until_finished(input.command_id).await;
+    assert!(
+        events.iter().any(|event| matches!(
+            event,
+            AdapterEvent::Diagnostic {
+                kind: "oversized_frame",
+                ..
+            }
+        )),
+        "{events:?}"
+    );
+    assert_eq!(subscriptions(&bench), 1, "the stream stays");
+    assert_each_block_once(&events);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Ввод, пришедший в разрыв, не ждёт и не пропадает: сервер жив, события добирает сверка.
+#[tokio::test]
+async fn input_during_a_reconnect_goes_through() {
+    let mut bench = Bench::new(ready());
+    bench.start_ok().await;
+    bench.adapter.cut_stream();
+    let input = bench.input("Привет");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert_eq!(prompts(&bench), 1);
+    assert_eq!(subscriptions(&bench), 2);
+    bench.close(CloseMode::Graceful).await;
+}
+
+// Сервер и супервизор умерли вместе: команду прошлого сервера снимает новый запуск по журналу.
+#[tokio::test]
+async fn resume_stops_the_shell_journalled_by_the_dead_server() {
+    use std::os::unix::process::CommandExt as _;
+    let mut orphan = std::process::Command::new("sleep")
+        .arg("60")
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let mut script = ready();
+    let session = session_of(&script);
+    script.set_route(
+        "GET",
+        &format!("/api/session/{session}"),
+        vec![Reply {
+            body: Some(json!({"data": {"id": session}})),
+            ..Default::default()
+        }],
+    );
+    script.set_route(
+        "PATCH",
+        &format!("/api/session/{session}"),
+        vec![reply_204()],
+    );
+    script.set_route(
+        "POST",
+        &format!("/api/session/{session}/model"),
+        vec![reply_204()],
+    );
+    script.set_route(
+        "GET",
+        &format!("/api/session/{session}/message"),
+        vec![Reply {
+            body: Some(json!({"data": []})),
+            ..Default::default()
+        }],
+    );
+    let mut bench = Bench::new(script);
+    let journal = bench
+        .fake
+        .dir
+        .path()
+        .join("data/opencode/shells")
+        .join(format!("{session}.json"));
+    std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+    let ticks = canterlot_worker::containment::start_ticks(orphan.id()).unwrap();
+    std::fs::write(
+        &journal,
+        json!([{"pid": orphan.id(), "start_ticks": ticks}]).to_string(),
+    )
+    .unwrap();
+    bench.spec.native_conversation_id = Some(session);
+    bench.start_ok().await;
+    // Статус забирает уборка соседних тестов: смотрим на сам процесс.
+    let pid = orphan.id();
+    let stopped = tokio::time::timeout(WAIT, async {
+        loop {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let state = stat
+                .rfind(')')
+                .and_then(|end| stat[end + 1..].trim_start().chars().next());
+            if matches!(state, None | Some('Z' | 'X')) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    });
+    stopped.await.expect("the orphan is stopped");
+    let _ = orphan.wait();
+    assert!(!journal.exists());
     bench.close(CloseMode::Graceful).await;
 }

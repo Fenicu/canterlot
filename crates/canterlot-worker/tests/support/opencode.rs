@@ -66,6 +66,12 @@ impl Fake {
         fs::rename(temporary, self.script.with_extension("overrides")).unwrap();
     }
 
+    /// Следующий запуск пойдёт по другому сценарию: так проверяется возобновление.
+    pub fn rewrite(&self, mut script: Script) {
+        script.log = Some(self.log.clone());
+        fs::write(&self.script, serde_json::to_vec(&script).unwrap()).unwrap();
+    }
+
     /// Запрос и строка запуска из журнала двойника, в порядке прихода.
     pub fn entries(&self) -> Vec<Value> {
         fs::read_to_string(&self.log)
