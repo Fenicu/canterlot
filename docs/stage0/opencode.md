@@ -48,7 +48,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 
 - Готовность: 0,4-0,6 с до строки в stdout, миграция пустой базы из 50 шагов около 20 мс. [Ж: start_stream.jsonl, lifecycle.jsonl]
 - Сервер слушает только `127.0.0.1` на свободном порту. Вход: HTTP Basic, пользователь `opencode`, пароль из окружения; без заголовка 401. `GET /` без пароля отдаёт веб-интерфейс (200), `/api/*` и `/openapi.json` закрыты. [Ж: modes.jsonl, start_stream.jsonl] [И: packages/server/src/auth.ts:20]
-- В режиме `--stdio` пароль удаляется из окружения процесса, инструменты его не видят; в `shell` есть `OPENCODE_SESSION_ID`. [Ж: lifecycle.jsonl] [И: packages/cli/src/server-process.ts:87]
+- В режиме `--stdio` пароль удаляется из окружения процесса, и `shell` его не наследует; `/proc/<pid>/environ` сервера при этом не очищается, команда того же пользователя может его прочитать. В `shell` есть `OPENCODE_SESSION_ID`. [Ж: lifecycle.jsonl] [И: packages/cli/src/server-process.ts:87]
 - `OPENCODE_DISABLE_AUTOUPDATE=1` отключает проверку обновлений. [И: packages/cli/src/services/updater.ts:534] Запускается ли проверка в `serve` без него, не проверялось: переменная задаётся всегда. [Н]
 
 ### 2.3. Используемые операции
