@@ -13,7 +13,7 @@ use canterlot_worker::{
         opencode::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
-            discover,
+            discover, discover_within,
             replay::{Reply, Script, Step},
         },
     },
@@ -5401,4 +5401,22 @@ async fn failed_manual_compaction_is_reported_and_the_session_stays() {
     let events = bench.until_finished(input.command_id).await;
     assert_eq!(text_of(&events, "Error").len(), 1);
     bench.close(CloseMode::Graceful).await;
+}
+
+// Зависший `opencode` не держит старт воркера: сопровождения Claude и Codex ждут за ним.
+#[tokio::test]
+async fn hung_server_does_not_hold_the_worker_past_the_deadline() {
+    let mut script = ready();
+    script.ready.silent = true;
+    let fake = Fake::new(script);
+    let data = fake.dir.path().join("worker");
+    let cfg = OpenCodeConfig {
+        executable: fake.exe.clone(),
+        ..Default::default()
+    };
+    let started = std::time::Instant::now();
+    let found = discover_within(&cfg, &data, Duration::from_millis(300)).await;
+    assert!(matches!(found, Err(DiscoverError::Timeout)));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    fake.wait_gone().await;
 }

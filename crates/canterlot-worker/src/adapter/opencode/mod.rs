@@ -58,6 +58,8 @@ use uuid::Uuid;
 /// Строка готовности и ожидание MCP: на проверенной версии доли секунды.
 const READY_WAIT: Duration = Duration::from_secs(20);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
+/// Весь `discover` при старте воркера: запуск сервера, версия и каталог.
+const DISCOVER_WAIT: Duration = Duration::from_secs(20);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
@@ -125,6 +127,8 @@ pub enum DiscoverError {
     DataRoot(LayoutError),
     /// Сервер не поднялся или не отдал список моделей.
     Catalog,
+    /// Проверка не уложилась в срок: дальше ждут сопровождения других харнессов.
+    Timeout,
 }
 
 // Каталоги и окружение своих данных: без них проверка версии пишет к владельцу.
@@ -148,6 +152,24 @@ async fn prepared_env(
 
 /// Проверка при старте воркера; без неё харнесс не попадает в каталог.
 pub async fn discover(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    discover_within(cfg, data_dir, DISCOVER_WAIT).await
+}
+
+/// Отмена по сроку безопасна: брошенный процесс снимают EOF stdin и SIGTERM при `Drop`.
+pub async fn discover_within(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+    limit: Duration,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    tokio::time::timeout(limit, discover_inner(cfg, data_dir))
+        .await
+        .map_err(|_| DiscoverError::Timeout)?
+}
+
+async fn discover_inner(
     cfg: &OpenCodeConfig,
     data_dir: &Path,
 ) -> Result<OpenCodeCatalog, DiscoverError> {
