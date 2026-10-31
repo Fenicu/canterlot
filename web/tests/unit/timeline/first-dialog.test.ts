@@ -12,7 +12,7 @@ import {
   toolTiming,
   toolTitle,
 } from "#lib/timeline/present.js";
-import { blockLinks, buildRows } from "#lib/timeline/rows.js";
+import { blockLinks, buildRows, shownInCard } from "#lib/timeline/rows.js";
 import { FIRST_DIALOG, firstDialogBlock } from "../../../testing/fixtures/first-dialog";
 
 const CONV = "01a19179-9c91-73e5-bfc8-f4cb774a303d";
@@ -165,5 +165,14 @@ describe("first dialog: tool titles", () => {
     expect(toolTitle({ toolName: "mcp__remnawave__users_get_users", summary: "mcp__remnawave__users_get_users" }))
       .toEqual({ name: "users_get_users", server: "remnawave", argument: "" });
     expect(toolTitle({ toolName: "mcp__plugin_context7_context7__query-docs", summary: null }).server).toBe("context7");
+  });
+});
+
+describe("first dialog: reasoning", () => {
+  it("empty_rows_are_not_in_the_card_and_text_rows_stay", () => {
+    const chat = loaded();
+    const reasoning = [...chat.blocks.values()].filter((block) => block.kind === "reasoning");
+    expect(reasoning.filter(shownInCard)).toHaveLength(2);
+    expect(reasoning).toHaveLength(5);
   });
 });

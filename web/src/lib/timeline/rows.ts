@@ -60,6 +60,11 @@ export function blockLinks(entries: TimelineEntry[]): BlockLinks {
   };
 }
 
+/** Рассуждение без текста открывать не на что: ни строки, ни отступа от него. */
+export function shownInCard(block: BlockModel): boolean {
+  return block.kind !== "reasoning" || block.text.trim().length > 0;
+}
+
 export function buildRows(
   entries: TimelineEntry[],
   opts?: { laneRoot?: string; now?: number; links?: BlockLinks },

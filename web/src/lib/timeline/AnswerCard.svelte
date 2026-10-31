@@ -4,7 +4,7 @@
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
-  import { isSubagentCall, type BlockLinks } from '#lib/timeline/rows.js';
+  import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
@@ -35,13 +35,14 @@
   } = $props();
 
   let expanded = $state(false);
-  const blocks = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
+  const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
+  const blocks = $derived(all.filter(shownInCard));
   const hidden = $derived(Math.max(0, blocks.length - 40));
   const shown = $derived(!expanded && blocks.length > 60 ? [...blocks.slice(0, 20), ...blocks.slice(-20)] : blocks);
-  const head = $derived(blocks[0]);
-  const streaming = $derived(blocks.some((block) => block.state === 'streaming'));
-  const active = $derived(blocks.findLast((block) => block.state === 'streaming'));
-  const started = $derived(blocks.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
+  const head = $derived(all[0]);
+  const streaming = $derived(all.some((block) => block.state === 'streaming'));
+  const active = $derived(all.findLast((block) => block.state === 'streaming'));
+  const started = $derived(all.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);

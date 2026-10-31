@@ -8,7 +8,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { blockLinks, buildRows, dayStart, type Row } from '#lib/timeline/rows.js';
+  import { blockLinks, buildRows, dayStart, shownInCard, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
@@ -62,7 +62,7 @@
     node.setAttribute('data-renders', String(Number(node.getAttribute('data-renders') ?? '0') + 1));
   });
   const streaming = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
-  const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || entry.block.state === 'incomplete')));
+  const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
