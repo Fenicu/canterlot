@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { modelLabel } from "#lib/format/labels.js";
 import type { DraftStore } from "#lib/drafts/store.js";
 import type { OpJournal } from "#lib/ops/journal.js";
+import { summarizeRun } from "#lib/screens/chat/info.js";
 import { ChatStore, type ChatApi, type HistoryBlock } from "#lib/stores/chat.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
@@ -139,6 +140,12 @@ describe("first dialog: names", () => {
     const copy = subagentCopy(agent, [handBack, explore]);
     expect(copy.title).toBe("Субагент · Explore · Opus 5.5");
     expect(copy.detail).toBe("Работает · Find note.txt in check dir");
+  });
+
+  it("answer_sheet_names_the_harness_and_the_model_for_people", () => {
+    const part = { agent: "orchestrator", model: "claude-opus-5-5", kind: "main" };
+    const info = summarizeRun({ parts: [part] } as never, { title: "Claude Code", provider: "claude" });
+    expect(info.parts[0]).toEqual({ title: "Основной ответ", sub: "Claude", model: "Opus 5.5" });
   });
 
   it("model_ids_read_as_product_names", () => {
