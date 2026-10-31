@@ -1060,3 +1060,188 @@ fn unknown_frames_carry_key_names_and_never_values() {
             .all(|p| !format!("{p:?}").contains(secret) && !format!("{p:?}").contains("sk-live"))
     );
 }
+
+// --- пробуждающие ходы: кадры записаны с настоящего CLI, см. README фикстур ---
+
+const RACE_FIRST: &str = "72e9efaa-797a-4bec-90f3-ac637db9a507";
+const RACE_SECOND: &str = "346dc38a-f607-470c-b440-a96c9ae86d09";
+
+/// Кадры по порядку файла; запись в stdin становится командой, как в адаптере.
+fn replay_rows(parser: &mut Parser, rows: &[(String, String)]) -> Vec<Parsed> {
+    let mut out = Vec::new();
+    for (dir, frame) in rows {
+        if dir == "in" {
+            let value: Value = serde_json::from_str(frame).unwrap();
+            parser.set_input_command(Uuid::parse_str(value["uuid"].as_str().unwrap()).unwrap());
+        } else {
+            out.extend(parser.feed(frame));
+        }
+    }
+    out
+}
+
+fn finished(parsed: &[Parsed]) -> Vec<Uuid> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished {
+                input_command_id, ..
+            }) => Some(*input_command_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn adopted(parsed: &[Parsed]) -> Vec<Uuid> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => Some(*input_command_id),
+            _ => None,
+        })
+        .collect()
+}
+
+fn is_wake_result(frame: &str) -> bool {
+    let value: Value = serde_json::from_str(frame).unwrap();
+    value["type"] == "result" && value["origin"]["kind"] == "task-notification"
+}
+
+#[test]
+fn wake_turn_result_does_not_finish_the_last_command() {
+    let rows = fixtures::replay_fixture_rows("background_race");
+    let wake = rows.iter().position(|(_, f)| is_wake_result(f)).unwrap();
+    let mut parser = Parser::new();
+    let before = replay_rows(&mut parser, &rows[..wake]);
+    let during = replay_rows(&mut parser, &rows[wake..=wake]);
+    let (first, second) = (
+        Uuid::parse_str(RACE_FIRST).unwrap(),
+        Uuid::parse_str(RACE_SECOND).unwrap(),
+    );
+    assert_eq!(finished(&before), vec![first]);
+    assert!(
+        finished(&during).is_empty(),
+        "the wake result belongs to no written command"
+    );
+    assert!(
+        !during.iter().any(|p| matches!(
+            p,
+            Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                ..
+            })
+        )),
+        "the written message still waits for its turn"
+    );
+    let rest = replay_rows(&mut parser, &rows[wake + 1..]);
+    assert_eq!(
+        finished(&rest),
+        vec![second, second],
+        "its own result, then the last wake turn adopted on it"
+    );
+    assert_eq!(adopted(&rest), vec![second]);
+}
+
+#[test]
+fn wake_turn_after_idle_is_adopted_on_the_last_command() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    let commands: Vec<Uuid> = rows
+        .iter()
+        .filter(|(dir, _)| dir == "in")
+        .map(|(_, frame)| {
+            let value: Value = serde_json::from_str(frame).unwrap();
+            Uuid::parse_str(value["uuid"].as_str().unwrap()).unwrap()
+        })
+        .collect();
+    let last = *commands.last().unwrap();
+    assert_eq!(adopted(&parsed), vec![last, last]);
+    assert_eq!(finished(&parsed), vec![commands[0], last, last, last]);
+    let start = parsed
+        .iter()
+        .position(|p| matches!(p, Parsed::Event(AdapterEvent::RunAdopted { .. })))
+        .unwrap();
+    assert!(
+        matches!(
+            parsed[start + 1..]
+                .iter()
+                .find(|p| matches!(p, Parsed::Event(AdapterEvent::Phase { .. }))),
+            Some(Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::Generating,
+                ..
+            }))
+        ),
+        "the adoption comes before the phase of the wake turn"
+    );
+}
+
+#[test]
+fn wake_turn_result_with_origin_task_notification_has_no_command() {
+    let mut parser = Parser::new();
+    let parsed = parser.feed(
+        &json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "origin": {"kind": "task-notification", "producer": "session-task", "runId": "r"},
+            "modelUsage": {},
+        })
+        .to_string(),
+    );
+    assert!(finished(&parsed).is_empty(), "no nil command id");
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::Diagnostic {
+            kind: "autonomous_run_unattributed",
+            ..
+        })
+    )));
+}
+
+#[test]
+fn message_start_of_a_user_turn_is_not_a_wake_turn() {
+    let rows = fixtures::replay_fixture_rows("background_race");
+    let first_result = rows
+        .iter()
+        .position(|(_, f)| f.contains("\"type\":\"result\""))
+        .unwrap();
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows[..=first_result]);
+    assert!(adopted(&parsed).is_empty(), "two messages of one user turn");
+}
+
+#[test]
+fn usage_of_an_overlapped_wake_turn_stays_for_the_result_of_the_message() {
+    let rows = fixtures::replay_fixture_rows("background_race");
+    let own = rows
+        .iter()
+        .rposition(|(_, f)| f.contains(&format!("\"user_message_uuid\":\"{RACE_SECOND}\"")))
+        .unwrap();
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows[..=own]);
+    let usage = parsed
+        .iter()
+        .rev()
+        .find_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished { usage, .. }) => Some(usage.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let total: u64 = usage.iter().map(|u| u.output_tokens).sum();
+    let result = |i: usize| -> u64 {
+        let value: Value = serde_json::from_str(&rows[i].1).unwrap();
+        value["modelUsage"]["claude-haiku-5-5"]["outputTokens"]
+            .as_u64()
+            .unwrap()
+    };
+    let first = rows
+        .iter()
+        .position(|(_, f)| f.contains("\"type\":\"result\""))
+        .unwrap();
+    assert_eq!(
+        total,
+        result(own) - result(first),
+        "both the wake turn and the message, nothing lost"
+    );
+}

@@ -826,6 +826,72 @@ async fn interrupt_not_applicable_without_a_turn() {
     harness.shutdown().await;
 }
 
+// Ход, начатый агентом без ввода: очередь его ждёт, а прерывание до него доходит.
+#[tokio::test]
+async fn interrupt_during_adopted_wake_turn_is_sent_to_agent() {
+    use canterlot_proto::worker::ipc::InterruptRequest;
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    let (first, interrupt, next) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    harness
+        .deliver(first, 1, &script(r#"{"delta":"done"},{"wake_turn":true}"#))
+        .await;
+    harness
+        .wait_records("wake turn", |b| {
+            let finished = index(b, |x| matches!(x, Body::RunFinished(_)));
+            let phase = b
+                .iter()
+                .rposition(|x| matches!(x, Body::PhaseChanged(p) if p.phase == "generating"));
+            matches!((finished, phase), (Some(finished), Some(phase)) if finished < phase)
+        })
+        .await;
+    harness.deliver(next, 1, "after the wake turn").await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    harness.pump(Duration::from_millis(100)).await;
+    assert!(
+        !harness
+            .records
+            .values()
+            .any(|b| matches!(b, Body::TransmissionStarted(f) if f.command_id == next.to_string())),
+        "the next input waits for the adopted turn"
+    );
+    harness
+        .send(down::Msg::Interrupt(InterruptRequest {
+            command_id: interrupt.to_string(),
+            dispatch_attempt: 1,
+        }))
+        .await;
+    let bodies = harness
+        .wait_records("next turn after the interrupt", |b| run_finished(b, next))
+        .await;
+    assert_eq!(
+        interrupt_states(&bodies, interrupt),
+        vec![
+            InterruptState::SentToAgent as i32,
+            InterruptState::Acknowledged as i32,
+            InterruptState::Completed as i32
+        ]
+    );
+    let finished: Vec<(String, bool)> = bodies
+        .iter()
+        .filter_map(|b| match b {
+            Body::RunFinished(f) => Some((f.input_command_id.clone(), f.adopted)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        vec![
+            (first.to_string(), false),
+            (first.to_string(), true),
+            (next.to_string(), false)
+        ]
+    );
+    harness.shutdown().await;
+}
+
 #[tokio::test]
 async fn interrupt_keeps_or_exits_process_by_profile() {
     use canterlot_proto::worker::ipc::InterruptRequest;

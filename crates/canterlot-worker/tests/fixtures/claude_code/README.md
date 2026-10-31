@@ -84,3 +84,14 @@ adapter wrote, `"out"` is CLI stdout, `"note"` carries MCP traffic
   thinking and rate limit frames, and `system/init` down to what the parser
   reads. The list arrives whole in the `user` frame as
   `tool_use_result.newTodos`, the same frame for both lanes.
+- `background.jsonl`, `background_race.jsonl` — background work through
+  `claude -p` (not the live smoke), bypass mode, no MCP servers, `--tools
+  Agent,Bash`. The first starts a background `Agent` and a background `Bash`,
+  sends a second message 3 s after the `result` and waits for both completions
+  and their wake turns. The second writes a message at the instant the
+  `task_notification` of the agent arrives: the wake turn starts, its `result`
+  (`origin.kind: "task-notification"`, no `user_message_uuids`) comes first, then
+  the replay, the answer and the `result` of the message. `in` rows are what was
+  written to stdin. Scrubbed: paths, thinking signatures, `prompt` of
+  `task_started`, `rate_limit_event`, and `system/init` down to what the parser
+  reads.

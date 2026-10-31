@@ -28,10 +28,11 @@ const MAX_TYPE_CHARS: usize = 64;
 /// записи в `docs/stage0/evidence/claude-code` и фикстуры воркера; новое имя
 /// сюда добавляют только по записанному кадру.
 const IGNORED_FRAMES: [&str; 1] = ["command_lifecycle"];
-const IGNORED_SYSTEM: [&str; 6] = [
+const IGNORED_SYSTEM: [&str; 7] = [
     "api_retry",
     "background_tasks_changed",
     "task_notification",
+    "task_progress",
     "task_started",
     "task_updated",
     "thinking_tokens",
@@ -239,6 +240,12 @@ pub struct Parser {
     last_usage: Option<MessageUsage>,
     /// Имена уже названных неизвестных кадров: на исполнение один раз на имя.
     unknown: HashSet<String>,
+    /// Записанная команда ждёт своего `result`.
+    command_open: bool,
+    /// Пробуждающий ход приписан этой команде: CLI начал его сам.
+    wake: Option<Uuid>,
+    /// CLI начал ход без ввода, первого кадра модели ещё могло не быть.
+    cli_turn: bool,
 }
 
 impl Default for Parser {
@@ -262,6 +269,9 @@ impl Parser {
             assembler: ToolInputAssembler::default(),
             last_usage: None,
             unknown: HashSet::new(),
+            command_open: false,
+            wake: None,
+            cli_turn: false,
         }
     }
 
@@ -293,9 +303,33 @@ impl Parser {
 
     pub fn set_input_command(&mut self, id: Uuid) {
         self.input_command = Some(id);
+        self.command_open = true;
+    }
+
+    /// CLI занят ходом, который начал сам: ввод ему не нужен, перезапуск его оборвал бы.
+    pub fn wake_turn_open(&self) -> bool {
+        self.wake.is_some() || self.cli_turn
+    }
+
+    /// Ход без ввода идёт от модели: для сопровождения это ход последней команды. Кадр
+    /// `system/init` для этого не годится: его одного мало, чтобы держать очередь.
+    fn adopt_wake_turn(&mut self, out: &mut Vec<Parsed>) {
+        if self.command_open || self.wake.is_some() {
+            return;
+        }
+        let Some(command) = self.input_command else {
+            return;
+        };
+        self.wake = Some(command);
+        out.push(Parsed::Event(AdapterEvent::RunAdopted {
+            input_command_id: command,
+        }));
     }
 
     pub fn reset_process(&mut self) {
+        self.command_open = false;
+        self.wake = None;
+        self.cli_turn = false;
         self.prev_usage.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
@@ -466,6 +500,7 @@ impl Parser {
                     self.current_model = model.clone();
                     self.session_model.get_or_insert(model.clone());
                 }
+                self.cli_turn = !self.command_open && self.input_command.is_some();
                 out.push(Parsed::Init {
                     session_id: string("session_id"),
                     model,
@@ -504,6 +539,9 @@ impl Parser {
             .and_then(serde_json::Value::as_str);
         match event_type {
             Some("message_start") => {
+                if parent.is_none() {
+                    self.adopt_wake_turn(out);
+                }
                 let message = event.and_then(|event| event.get("message"));
                 if parent.is_some()
                     && let Some(id) = message
@@ -993,32 +1031,65 @@ impl Parser {
         }));
     }
 
+    /// `result` пробуждающего хода не заканчивает записанную команду. Сообщение, записанное
+    /// раньше его конца, CLI держит у себя, и его собственный `result` идёт следом: тогда
+    /// кадр ничего не завершает, а расход достаётся этому `result` как разница счётчиков.
+    fn result_command(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) -> Option<Uuid> {
+        let waking = value
+            .pointer("/origin/kind")
+            .and_then(serde_json::Value::as_str)
+            == Some("task-notification");
+        self.cli_turn = false;
+        if !waking && (self.command_open || self.wake.is_none()) {
+            self.command_open = false;
+            self.wake = None;
+            return Some(self.input_command.unwrap_or_default());
+        }
+        if self.wake.is_none() && !self.command_open {
+            self.adopt_wake_turn(out);
+            if self.wake.is_none() {
+                out.push(Parsed::Event(AdapterEvent::Diagnostic {
+                    kind: "autonomous_run_unattributed",
+                    event_type: String::new(),
+                    required: false,
+                    field_names: Vec::new(),
+                }));
+            }
+        }
+        self.wake.take()
+    }
+
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
-        out.push(Parsed::Event(AdapterEvent::Phase {
-            phase: Phase::AwaitingInput,
-            tool_name: None,
-            summary: None,
-        }));
-        let usage = self.turn_usage(value);
-        let main = self
-            .session_model
-            .clone()
-            .unwrap_or_else(|| self.current_model.clone());
-        let last = self.last_usage.unwrap_or_default();
-        out.push(Parsed::Event(AdapterEvent::RunFinished {
-            input_command_id: self.input_command.unwrap_or_default(),
-            usage,
-            context_tokens: last.input + last.cache_read + last.cache_write,
-            context_window_tokens: value
-                .get("modelUsage")
-                .and_then(|usage| usage.get(&main))
-                .and_then(|model| model.get("contextWindow"))
-                .and_then(serde_json::Value::as_u64)
-                .unwrap_or(0),
-        }));
+        let finished = self.result_command(value, out);
+        if !self.command_open {
+            out.push(Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            }));
+        }
+        if let Some(input_command_id) = finished {
+            let usage = self.turn_usage(value);
+            let main = self
+                .session_model
+                .clone()
+                .unwrap_or_else(|| self.current_model.clone());
+            let last = self.last_usage.unwrap_or_default();
+            out.push(Parsed::Event(AdapterEvent::RunFinished {
+                input_command_id,
+                usage,
+                context_tokens: last.input + last.cache_read + last.cache_write,
+                context_window_tokens: value
+                    .get("modelUsage")
+                    .and_then(|usage| usage.get(&main))
+                    .and_then(|model| model.get("contextWindow"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0),
+            }));
+        }
         if value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true) {
             if is_context_overflow(value) {
                 out.push(Parsed::Event(AdapterEvent::ContextExhausted));

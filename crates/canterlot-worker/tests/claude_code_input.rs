@@ -331,6 +331,80 @@ async fn second_input_waits_for_first_result() {
     assert_eq!(uuids, vec![ALPHA.to_owned(), BRAVO.to_owned()]);
 }
 
+/// Строки записанной фикстуры `from..=to` без обёртки; `in` пропускаются.
+fn fixture_frames(name: &str, from: usize, to: usize) -> Vec<String> {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_code")
+        .join(format!("{name}.jsonl"));
+    std::fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|row| row["dir"] != "note")
+        .enumerate()
+        .filter(|(index, row)| (from..=to).contains(index) && row["dir"] == "out")
+        .map(|(_, row)| serde_json::to_string(&row["data"]).unwrap())
+        .collect()
+}
+
+// Порядок записанного кадра за кадром: сообщение записано на уведомлении о завершении,
+// пробуждающий ход начинается следом, его `result` приходит раньше ответа на сообщение.
+#[tokio::test]
+async fn message_written_during_wake_turn_is_still_proven_by_its_own_answer_frame() {
+    const FIRST: &str = "72e9efaa-797a-4bec-90f3-ac637db9a507";
+    const SECOND: &str = "346dc38a-f607-470c-b440-a96c9ae86d09";
+    let rows = fixture_frames("background_race", 0, 1000);
+    let split = rows
+        .iter()
+        .position(|frame| frame.contains("\"subtype\":\"task_notification\""))
+        .unwrap();
+    let last = rows
+        .iter()
+        .rposition(|frame| frame.contains(&format!("\"user_message_uuid\":\"{SECOND}\"")))
+        .unwrap();
+    let mut fake = Fake::start(|dir| {
+        write_frames(dir, "turn_1.out", &rows[..=split]);
+        write_frames(dir, "turn_2.out", &rows[split + 1..=last]);
+    })
+    .await;
+    let mut driver = InputDriver::new(InputQueue::new(launch("ask")), Parser::new());
+    let first = tokio::time::timeout(
+        WAIT,
+        driver.transmit(&mut fake.cli, &tx(id(FIRST), 1, "one"), None, DEADLINE),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(first, TransmitOutcome::Accepted(_)));
+    finish_turn(&mut driver, &mut fake).await;
+    drain(&mut driver);
+
+    let second = tokio::time::timeout(
+        WAIT,
+        driver.transmit(&mut fake.cli, &tx(id(SECOND), 1, "two"), None, DEADLINE),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(second, TransmitOutcome::Accepted(ref p) if p.command_id == id(SECOND)),
+        "proven by its own answer frame, got {second:?}"
+    );
+    finish_turn(&mut driver, &mut fake).await;
+    let finished: Vec<Uuid> = drain(&mut driver)
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished {
+                input_command_id, ..
+            }) => Some(*input_command_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finished,
+        vec![id(SECOND)],
+        "one finish, from its own result, no early one from the wake result"
+    );
+}
+
 #[test]
 fn delivery_is_proven_by_answer_frame_not_by_echo() {
     let mut queue = InputQueue::new(launch("ask"));

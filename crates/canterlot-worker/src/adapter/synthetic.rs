@@ -150,6 +150,9 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             };
             AdapterEvent::Media { block_id, source }
         }
+        "run_adopted" => AdapterEvent::RunAdopted {
+            input_command_id: uuid("input_command_id")?,
+        },
         "completed" => {
             let input_command_id = uuid("input_command_id")?;
             blocks.clear();
@@ -773,6 +776,9 @@ impl Adapter for SyntheticAdapter {
                     AdapterEvent::RunFinished { .. } | AdapterEvent::ProcessExited { .. }
                 ) {
                     self.active = false;
+                }
+                if matches!(event, AdapterEvent::RunAdopted { .. }) {
+                    self.active = true;
                 }
                 return event;
             }

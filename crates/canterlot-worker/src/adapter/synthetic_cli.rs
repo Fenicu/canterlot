@@ -32,6 +32,8 @@
 //! {"todo":[{"text":"…","status":"in_progress"}]} — полный список задач; внутри субагента
 //! идёт в его дорожку. {"large_todo":{"repeat":"щ","times":3000,"count":1000}} — такой же
 //! список сверх всех потолков.
+//! {"wake_turn":true} после конца хода начинает ход без ввода, как Claude Code по завершении
+//! фоновой задачи: `run_adopted`, затем фаза; ход кончается по `interrupt`.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
@@ -147,6 +149,7 @@ struct Lane {
 struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
     late_request: Option<Value>,
+    wake_turn: bool,
     command: Uuid,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
@@ -314,6 +317,8 @@ fn run_steps<'a>(
                 phase(Phase::AwaitingPermission).await?;
             } else if let Some(payload) = step.get("late_request") {
                 turn.late_request = Some(payload.clone());
+            } else if step.get("wake_turn").is_some() {
+                turn.wake_turn = true;
             } else if let Some(items) = step.get("todo") {
                 let items: Vec<super::TodoItem> = serde_json::from_value(items.clone())
                     .map_err(|_| io::Error::other("invalid todo"))?;
@@ -603,15 +608,26 @@ fn hex_empty() -> String {
         .collect()
 }
 
-async fn run_turn(
+struct TurnInput {
     command: Uuid,
     text: String,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
+}
+
+async fn run_turn(
+    input: TurnInput,
     model: &str,
     context: &mut u64,
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
+    wake_turn: &std::cell::Cell<Option<Uuid>>,
 ) -> io::Result<Option<i32>> {
+    let TurnInput {
+        command,
+        text,
+        files,
+        instructions,
+    } = input;
     let steps = if text.starts_with("{\"synthetic\":") {
         let value: Value =
             serde_json::from_str(&text).map_err(|_| io::Error::other("invalid script"))?;
@@ -626,6 +642,7 @@ async fn run_turn(
     let mut turn = Turn {
         decisions,
         late_request: None,
+        wake_turn: false,
         command,
         files,
         instructions,
@@ -665,6 +682,7 @@ async fn run_turn(
         );
     }
     let late_request = turn.late_request.take();
+    let waking = turn.wake_turn;
     let usage: Vec<_> = turn.usage.into_values().collect();
     for row in &usage {
         *context = context
@@ -679,6 +697,11 @@ async fn run_turn(
         emit(json!({"type":"request_opened", "request_id":id, "kind":"permission", "payload":payload}))
             .await?;
         phase(Phase::AwaitingPermission).await?;
+    }
+    if waking {
+        wake_turn.set(Some(command));
+        emit(json!({"type":"run_adopted", "input_command_id":command})).await?;
+        phase(Phase::Generating).await?;
     }
     Ok(None)
 }
@@ -768,6 +791,7 @@ pub async fn run(
         .filter(|m| !m.is_empty())
         .unwrap_or_else(|| "synthetic-large".into());
     let mut context_tokens = 0;
+    let wake_turn = std::cell::Cell::new(None);
     while let Some(line) = lines.next_line().await? {
         log_input(&line);
         let request: Request =
@@ -790,13 +814,16 @@ pub async fn run(
                 }
                 let (decisions, receiver) = mpsc::unbounded_channel();
                 let turn = run_turn(
-                    command_id,
-                    text,
-                    files,
-                    instructions,
+                    TurnInput {
+                        command: command_id,
+                        text,
+                        files,
+                        instructions,
+                    },
                     &model,
                     &mut context_tokens,
                     receiver,
+                    &wake_turn,
                 );
                 tokio::pin!(turn);
                 // Готовность объявляется после выхода из select активного хода.
@@ -804,7 +831,7 @@ pub async fn run(
                     tokio::select! {
                             result = &mut turn => {
                                 if let Some(code) = result? { std::process::exit(code); }
-                                phase(Phase::AwaitingInput).await?;
+                                if wake_turn.get().is_none() { phase(Phase::AwaitingInput).await?; }
                                 break;
                             }
                             line = lines.next_line() => {
@@ -835,6 +862,10 @@ pub async fn run(
             Request::Initialize { .. } => return Err(io::Error::other("already initialized")),
             Request::Interrupt { id } => {
                 emit(json!({"type":"interrupted", "id":id})).await?;
+                if let Some(command) = wake_turn.take() {
+                    phase(Phase::AwaitingInput).await?;
+                    completed(command, vec![], 0).await?;
+                }
                 if profile == "synthetic-exit-on-interrupt" {
                     return Ok(());
                 }

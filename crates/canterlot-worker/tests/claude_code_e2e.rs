@@ -716,6 +716,61 @@ fn out_frames(rows: &[Value]) -> Vec<Value> {
         .collect()
 }
 
+/// Конец обычного хода и следом начало пробуждающего: так идут кадры записанной сессии.
+fn turn_then_wake() -> Vec<Value> {
+    vec![
+        json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuids":["@input"],"event":{"type":"message_start","message":{"id":"m1","model":"claude-haiku-test","usage":{}}}}),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+        json!({"type":"system","subtype":"init","session_id":"x","model":"claude-haiku-test","permissionMode":"default","mcp_servers":[{"name":"canterlot","status":"connected"}]}),
+        json!({"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"id":"m2","model":"claude-haiku-test","usage":{}}}}),
+        json!("@wait"),
+    ]
+}
+
+#[tokio::test]
+async fn interrupt_reaches_a_wake_turn_and_finishes_it_on_the_last_command() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![turn_then_wake()]);
+    std::fs::write(
+        f.dir.path().join("interrupt.json"),
+        serde_json::to_vec(&json!([
+            {"type":"result","subtype":"error_during_execution","is_error":true,"terminal_reason":"aborted_streaming","modelUsage":{}},
+        ]))
+        .unwrap(),
+    )
+    .unwrap();
+    f.start().await;
+    f.send(&tx(id)).await;
+    f.wait_point().await;
+    let mut seen = f.finish().await;
+    loop {
+        let event = f.event().await;
+        let adopted = matches!(event, AdapterEvent::RunAdopted { .. });
+        seen.push(event);
+        if adopted {
+            break;
+        }
+    }
+    assert!(seen.iter().any(|e| matches!(
+        e,
+        AdapterEvent::RunAdopted { input_command_id } if *input_command_id == id
+    )));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.interrupt())
+            .await
+            .unwrap(),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    let events = f.finish().await;
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::RunFinished { input_command_id, .. } if *input_command_id == id
+    )));
+    f.close().await;
+}
+
 #[tokio::test]
 async fn interrupt_while_streaming_is_acknowledged() {
     let _sigint =

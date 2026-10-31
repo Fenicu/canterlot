@@ -73,6 +73,22 @@ pub fn replay_fixture(name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Кадры фикстуры по порядку файла, с направлением: `in` — записанное в stdin, `out` — кадр CLI.
+#[allow(dead_code)]
+pub fn replay_fixture_rows(name: &str) -> Vec<(String, String)> {
+    read_lines(fixture_path(name))
+        .into_iter()
+        .filter_map(|line| {
+            let wrapper: Value = serde_json::from_str(&line).ok()?;
+            let dir = wrapper.get("dir")?.as_str()?.to_owned();
+            if dir == "note" {
+                return None;
+            }
+            Some((dir, serde_json::to_string(wrapper.get("data")?).ok()?))
+        })
+        .collect()
+}
+
 pub mod codex {
     //! Повтор кадров Codex: свидетельства и сконструированные фикстуры в обёртке
     //! `{"t_ms","dir","data"}`. `out` — сообщение app-server, `in` — то, что писал

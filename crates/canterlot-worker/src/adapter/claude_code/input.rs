@@ -92,6 +92,8 @@ pub struct InputQueue {
     control_timeout: Duration,
     fifo: VecDeque<Queued>,
     active: Option<ActiveTurn>,
+    /// Команда, на которую приписан пробуждающий ход: его тоже можно прервать.
+    adopted: Option<Uuid>,
     control: Option<PendingControl>,
     rejected: Vec<(Uuid, &'static str)>,
     proven: HashSet<Uuid>,
@@ -121,6 +123,7 @@ impl InputQueue {
             control_timeout: CONTROL_TIMEOUT,
             fifo: VecDeque::new(),
             active: None,
+            adopted: None,
             control: None,
             rejected: Vec::new(),
             proven: HashSet::new(),
@@ -371,10 +374,16 @@ impl InputQueue {
                     kind: PROOF_KIND,
                 });
             }
+            Parsed::Event(AdapterEvent::RunAdopted { input_command_id }) => {
+                self.adopted = Some(*input_command_id);
+                self.interrupt = Interrupt::None;
+            }
             Parsed::Event(AdapterEvent::RunFinished {
                 input_command_id, ..
             }) => {
-                if self.is_active(*input_command_id) {
+                if self.adopted == Some(*input_command_id) {
+                    self.adopted = None;
+                } else if self.is_active(*input_command_id) {
                     self.active = None;
                 }
             }
@@ -415,7 +424,7 @@ impl InputQueue {
 
     /// Отметить отправку SIGINT; `false`, если хода нет и прерывать нечего.
     pub fn interrupt_sent(&mut self) -> bool {
-        if self.active.is_none() {
+        if self.active.is_none() && self.adopted.is_none() {
             return false;
         }
         self.interrupt = Interrupt::Sent;
