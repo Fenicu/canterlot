@@ -14,7 +14,7 @@ use canterlot_worker::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
             discover, discover_within,
-            replay::{Reply, Script, Step},
+            replay::{Reply, Script, Step, evidence_path},
         },
     },
     config::OpenCodeConfig,
@@ -1973,7 +1973,7 @@ fn catalog_reply(models: Value) -> Reply {
     }
 }
 
-/// Запись Go: форма полей из `go_catalog`, состав выдуман, ключа в записи нет.
+/// Модели записи `models` и настоящие записи Go: `evidence/opencode/live/catalog.jsonl`.
 fn recorded_catalog() -> Vec<Value> {
     let mut models: Vec<Value> = Script::default()
         .with_recorded_models()
@@ -1986,11 +1986,11 @@ fn recorded_catalog() -> Vec<Value> {
         .as_array()
         .unwrap()
         .clone();
-    let mut go = models[0].clone();
-    go["providerID"] = "opencode-go".into();
-    go["id"] = "muse-spark-1.3-contributor".into();
-    go["name"] = "Muse Spark 1.3 Contributor".into();
-    models.push(go);
+    let go = std::fs::read_to_string(evidence_path("live/catalog")).unwrap();
+    models.extend(go.lines().filter_map(|line| {
+        let record: Value = serde_json::from_str(line).unwrap();
+        (record["dir"] == "http_in").then(|| record["data"].clone())
+    }));
     models
 }
 
@@ -2037,13 +2037,28 @@ async fn discover_lists_go_and_the_enabled_providers() {
     let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
     assert_eq!(
         ids,
-        ["fake/fake-1", "opencode-go/muse-spark-1.3-contributor"]
+        [
+            "fake/fake-1",
+            "opencode-go/mimo-v2.6-pro",
+            "opencode-go/muse-spark-1.3-contributor",
+            "opencode-go/glm-5.3",
+        ]
     );
     assert_eq!(models[0].efforts, ["low", "medium", "high"]);
-    assert_eq!(models[1].title, "Muse Spark 1.3 Contributor");
+    assert_eq!(models[1].efforts, ["default"], "a model without variants");
+    assert_eq!(models[3].images, Some(false));
+    let muse = &models[2];
+    assert_eq!(muse.title, "Muse Spark 1.3 Contributor");
+    assert_eq!(muse.efforts, ["minimal", "low", "medium", "high", "xhigh"]);
+    assert_eq!(muse.images, Some(true));
+    assert_eq!(muse.context_window, Some(1_048_576));
     let only_go = discovered(script, &[]).await.unwrap();
-    assert_eq!(only_go.len(), 1);
-    assert!(only_go[0].id.starts_with("opencode-go/"));
+    assert_eq!(only_go.len(), 3);
+    assert!(
+        only_go
+            .iter()
+            .all(|model| model.id.starts_with("opencode-go/"))
+    );
 }
 
 // Без подписки каталог пуст, но харнесс виден: `[opencode]` настроен.
