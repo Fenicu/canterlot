@@ -430,12 +430,17 @@ impl Translator {
                     _ => {}
                 }
             }
-            if usage && message.pointer("/time/completed").is_some() {
-                let data = json!({
-                    "assistantMessageID": id,
-                    "tokens": message.get("tokens").cloned().unwrap_or(Value::Null),
-                });
-                self.on_step_finished(&data);
+            if message.pointer("/time/completed").is_some() {
+                if usage {
+                    let data = json!({
+                        "assistantMessageID": id,
+                        "tokens": message.get("tokens").cloned().unwrap_or(Value::Null),
+                    });
+                    self.on_step_finished(&data);
+                } else {
+                    // Следующий разрыв прочитает этот шаг снова, уже с учётом расхода.
+                    self.counted.insert(id.to_owned());
+                }
             }
         }
         out

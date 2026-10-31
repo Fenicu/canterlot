@@ -761,3 +761,30 @@ fn long_tool_output_goes_as_a_delta_before_the_final() {
             .any(|event| matches!(event, AdapterEvent::BlockDelta { .. }))
     );
 }
+
+// Расход старых шагов уже учтён прошлым исполнением, а следующий разрыв читает тот же хвост.
+#[test]
+fn steps_seen_at_resume_are_not_counted_by_the_next_gap() {
+    let step = |id: &str| {
+        json!({
+            "type": "assistant",
+            "id": id,
+            "model": {"id": "fake-1", "providerID": "fake"},
+            "time": {"completed": 1},
+            "tokens": {"input": 100, "output": 10, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            "content": [],
+        })
+    };
+    let old = step("msg_old");
+    let mut translator = Translator::new("ses_1", HashMap::new());
+    translator.replay(std::slice::from_ref(&old), true, false);
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    translator.replay(&[old, step("msg_new")], false, true);
+    let AdapterEvent::RunFinished { usage, .. } = translator.finish_run(command) else {
+        panic!("finish");
+    };
+    assert_eq!(usage.len(), 1, "{usage:?}");
+    assert_eq!(usage[0].input_tokens, 100);
+    assert_eq!(usage[0].output_tokens, 10);
+}
