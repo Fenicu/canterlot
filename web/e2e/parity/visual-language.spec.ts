@@ -161,7 +161,12 @@ test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
             if (got.some((value) => value !== want)) note(`shape ${selector} must use ${token}`, el, got.join(' '));
           }
         };
-        expectRadius('.topbar', '--radius-pill');
+        for (const bar of document.querySelectorAll('.topbar')) {
+          const style = getComputedStyle(bar);
+          if (style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.borderTopLeftRadius !== '0px') {
+            note('topbar-has-backing', bar, `${style.backgroundColor} ${style.borderTopLeftRadius}`);
+          }
+        }
         const dock = document.querySelector('.dock nav');
         if (dock && getComputedStyle(dock).backgroundColor !== 'rgba(0, 0, 0, 0)') {
           note('dock-has-backing', dock, getComputedStyle(dock).backgroundColor);

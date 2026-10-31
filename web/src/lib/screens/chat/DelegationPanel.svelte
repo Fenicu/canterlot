@@ -126,9 +126,10 @@
 		align-items: center;
 		min-height: var(--target);
 		margin: var(--s5) var(--gutter) var(--s3);
-		padding: var(--s2) var(--s3) var(--s2) var(--s8);
-		border-radius: var(--radius-pill);
-		background: var(--surface);
+		padding-block: var(--s2);
+	}
+	.topbar > :global(:last-child) {
+		margin-right: var(--icon-hang);
 	}
 	.panel-title {
 		margin: 0;
