@@ -1911,3 +1911,45 @@ async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
     );
     session.close().await;
 }
+
+// Живьём у потомка `todowrite` на этапе 0 не снимался: L1 держит придуманный кадр, здесь он
+// сверяется с настоящим сервером.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "subagent",
+            json!({"agent": "general", "description": "проба", "prompt": "сделай"}),
+        ),
+        Reply::tool(
+            "todowrite",
+            json!({"todos": [{"content": "дочерний пункт", "status": "in_progress"}]}),
+        ),
+        Reply::text("готово у потомка"),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("делегируй")).await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                tool_name: Some(name),
+                ..
+            } if name == "subagent" => Some(*block_id),
+            _ => None,
+        })
+        .expect("subagent call");
+    let lists: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::TodoUpdated { lane, .. } => Some(*lane),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists, vec![Some(call)], "{events:?}");
+    session.close().await;
+}
