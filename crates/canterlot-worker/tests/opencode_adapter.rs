@@ -21,7 +21,7 @@ use canterlot_worker::{
     containment::TreeContainment,
 };
 use serde_json::{Value, json};
-use std::{path::PathBuf, time::Duration};
+use std::{os::unix::fs::PermissionsExt as _, path::PathBuf, time::Duration};
 use uuid::Uuid;
 
 #[path = "support/opencode.rs"]
@@ -1614,6 +1614,13 @@ fn recorded_catalog() -> Vec<Value> {
     models
 }
 
+fn verified_cli() -> Script {
+    Script {
+        version: "opencode v2.1.4".into(),
+        ..Default::default()
+    }
+}
+
 async fn discovered(script: Script, providers: &[&str]) -> Result<Vec<ModelEntry>, DiscoverError> {
     let fake = Fake::new(script);
     let data = fake.dir.path().join("data");
@@ -1632,8 +1639,7 @@ async fn discovered(script: Script, providers: &[&str]) -> Result<Vec<ModelEntry
 // Решение 2: в каталоге Go и явно включённые провайдеры, идентификатор с провайдером.
 #[tokio::test]
 async fn discover_lists_go_and_the_enabled_providers() {
-    let mut script = Script::default();
-    script.version = "opencode v2.1.4".into();
+    let mut script = verified_cli();
     script.set_route(
         "GET",
         "/api/model",
@@ -1663,16 +1669,14 @@ async fn discover_lists_go_and_the_enabled_providers() {
 // Без подписки каталог пуст, но харнесс виден: `[opencode]` настроен.
 #[tokio::test]
 async fn discover_without_available_models_is_not_a_failure() {
-    let mut script = Script::default();
-    script.version = "opencode v2.1.4".into();
+    let mut script = verified_cli();
     script.set_route("GET", "/api/model", vec![catalog_reply(json!([]))]);
     assert_eq!(discovered(script, &[]).await.unwrap(), []);
 }
 
 #[tokio::test]
 async fn discover_of_a_dead_server_hides_the_harness() {
-    let mut script = Script::default();
-    script.version = "opencode v2.1.4".into();
+    let mut script = verified_cli();
     script.ready.exit = Some(1);
     assert!(matches!(
         discovered(script, &[]).await,
@@ -1683,17 +1687,39 @@ async fn discover_of_a_dead_server_hides_the_harness() {
 // Проверка при старте воркера пишет только в каталоги canterlot.
 #[tokio::test]
 async fn discover_keeps_the_probe_inside_canterlot_data() {
-    let mut script = Script::default();
-    script.version = "opencode v2.1.4".into();
+    let mut script = verified_cli();
     script.set_route("GET", "/api/model", vec![catalog_reply(json!([]))]);
     let fake = Fake::new(script);
     let data = fake.dir.path().join("data");
+    // `--version` тоже заводит каталоги и журнал: обёртка видит окружение обоих запусков.
+    let seen = fake.dir.path().join("seen");
+    let wrapper = fake.dir.path().join("wrapper");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\necho \"$XDG_DATA_HOME\" >> '{}'\nexec '{}' \"$@\"\n",
+            seen.display(),
+            fake.exe.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
     let cfg = OpenCodeConfig {
-        executable: fake.exe.clone(),
+        executable: wrapper,
         ..Default::default()
     };
     discover(&cfg, &data).await.unwrap();
     fake.wait_gone().await;
+    let expected = data.join("opencode/data");
+    let runs: Vec<String> = std::fs::read_to_string(seen)
+        .unwrap()
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    assert_eq!(
+        runs,
+        [expected.to_str().unwrap(), expected.to_str().unwrap()]
+    );
     let boot = fake.boot();
     assert_eq!(
         boot["env"]["XDG_DATA_HOME"],
