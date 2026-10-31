@@ -167,6 +167,7 @@ message Command {
     StartExecution start_execution = 14;
     StopExecution stop_execution = 15;
     DeliverDecision deliver_decision = 16;
+    CompactSession compact_session = 17;
   }
 }
 
@@ -199,6 +200,9 @@ message WithdrawInput {
 }
 
 message Interrupt {}
+
+// Сжать контекст живой сессии. Тратит токены, поэтому только по действию владельца.
+message CompactSession {}
 
 message StartExecution {
   string conversation_id = 1;
@@ -254,6 +258,9 @@ message RecordBody {
     DecisionUnconfirmed decision_unconfirmed = 33;
     // Только при согласованной возможности todo_v1.
     TodoUpdated todo_updated = 34;
+    // Только при согласованной возможности compact_v1.
+    SessionStuck session_stuck = 35;
+    CompactionStatus compaction_status = 36;
   }
 }
 
@@ -662,6 +669,28 @@ enum TodoStatus {
   TODO_STATUS_IN_PROGRESS = 2;
   TODO_STATUS_COMPLETED = 3;
   TODO_STATUS_CANCELLED = 4;
+}
+
+// Один и тот же отказ провайдера подряд: следующий ввод получит то же самое.
+message SessionStuck {
+  string execution_id = 1;
+  uint64 generation = 2;
+}
+
+enum CompactionState {
+  COMPACTION_STATE_UNSPECIFIED = 0;
+  COMPACTION_STATE_SENT_TO_AGENT = 1;
+  COMPACTION_STATE_COMPLETED = 2;
+  COMPACTION_STATE_FAILED = 3;
+  COMPACTION_STATE_NOT_APPLICABLE = 4;
+  COMPACTION_STATE_SUPERSEDED = 5;
+  COMPACTION_STATE_REJECTED_STALE = 6;
+}
+
+message CompactionStatus {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  CompactionState state = 3;
 }
 
 message TodoItem {

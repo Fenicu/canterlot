@@ -23,6 +23,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(read))
         .routes(routes!(decision))
         .routes(routes!(interrupt))
+        .routes(routes!(compact))
         .routes(routes!(stop))
         .routes(routes!(continue_queue))
         .routes(routes!(cancel_input))
@@ -199,6 +200,19 @@ async fn interrupt(
 ) -> Result<Json<crate::delivery::control::StopOutcome>, ApiError> {
     let result = crate::delivery::control::request_stop(&s.pool, o.owner_id, id, &key, c).await?;
     s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/compact",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Сжатие контекста запрошено",body=crate::delivery::control::CompactOutcome)))]
+async fn compact(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+) -> Result<Json<crate::delivery::control::CompactOutcome>, ApiError> {
+    let result =
+        crate::delivery::control::request_compaction(&s.pool, o.owner_id, id, &key, c).await?;
     Ok(Json(result))
 }
 

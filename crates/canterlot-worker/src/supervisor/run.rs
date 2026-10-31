@@ -17,11 +17,12 @@ use canterlot_proto::{
         },
         v1::{
             AdapterDiagnostic, BlockDelta, BlockFinal, BlockIncomplete, BlockMedia, BlockStarted,
-            DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, DecisionUnconfirmed,
-            DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost,
-            InputCancelWon, InputDispatchDeferred, InputRejected, InputTransmissionStarted,
-            InputWithdrawn, InterruptState, InterruptStatus, JournalClosed, JournalOpened,
-            PhaseChanged, RequestClosed, RequestOpened, RunFinished, TodoItem as ProtoTodoItem,
+            CompactionState, CompactionStatus, DecisionApplied, DecisionNotApplied,
+            DecisionTransmissionStarted, DecisionUnconfirmed, DeliverDecision,
+            InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost, InputCancelWon,
+            InputDispatchDeferred, InputRejected, InputTransmissionStarted, InputWithdrawn,
+            InterruptState, InterruptStatus, JournalClosed, JournalOpened, PhaseChanged,
+            RequestClosed, RequestOpened, RunFinished, SessionStuck, TodoItem as ProtoTodoItem,
             TodoStatus as ProtoTodoStatus, TodoUpdated, content_block, record_body::Body,
         },
     },
@@ -43,9 +44,9 @@ use super::{
 };
 use crate::{
     adapter::{
-        Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, DecisionOutcome,
-        InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource, Phase,
-        SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, registry_with,
+        Adapter, AdapterContext, AdapterEvent, AgentCallResult, CloseMode, CompactOutcome,
+        DecisionOutcome, InstructionSpec, InterruptOutcome, LimitFact, LocalFile, MediaSource,
+        Phase, SettingsChange, StartSpec, TodoStatus, Transmission, TransmitOutcome, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
     media::{self, Prepared, Skip},
@@ -163,12 +164,16 @@ struct Supervisor {
     turn_started: Option<Instant>,
     pilot_v1: bool,
     todo_v1: bool,
+    compact_v1: bool,
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
     provider: String,
     open_blocks: BTreeMap<Uuid, OpenBlock>,
     known_interrupts: HashSet<(String, u32)>,
     pending_interrupts: Vec<(String, u32)>,
+    known_compactions: HashSet<(String, u32)>,
+    /// Сжатие принято адаптером, итог придёт событием.
+    pending_compaction: Option<(String, u32)>,
     interrupted: bool,
     aborting_turn: bool,
     /// Вызовы инструментов агента в ожидании ответа хаба: срок ответа.
@@ -288,11 +293,14 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         turn_started: None,
         pilot_v1: false,
         todo_v1: false,
+        compact_v1: false,
         todo_drop_reported: false,
         provider: String::new(),
         open_blocks: BTreeMap::new(),
         known_interrupts: HashSet::new(),
         pending_interrupts: Vec::new(),
+        known_compactions: HashSet::new(),
+        pending_compaction: None,
         interrupted: false,
         aborting_turn: false,
         agent_calls: HashMap::new(),
@@ -689,6 +697,10 @@ impl Supervisor {
             )?,
             down::Msg::Interrupt(interrupt) => {
                 self.on_interrupt(interrupt.command_id, interrupt.dispatch_attempt)
+                    .await?
+            }
+            down::Msg::Compact(compact) => {
+                self.on_compact(compact.command_id, compact.dispatch_attempt)
                     .await?
             }
             down::Msg::Stop(stop) => self.on_stop(stop.force).await?,
@@ -1101,6 +1113,7 @@ impl Supervisor {
         adapter.set_stop_grace(timers.stop_grace);
         self.pilot_v1 = start.pilot_v1;
         self.todo_v1 = start.todo_v1;
+        self.compact_v1 = start.compact_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
@@ -1745,6 +1758,17 @@ impl Supervisor {
             }
             AdapterEvent::Media { block_id, source } => self.on_media(block_id, source)?,
             AdapterEvent::TodoUpdated { lane, items } => self.on_todo(lane, items)?,
+            AdapterEvent::SessionStuck => self.on_stuck()?,
+            AdapterEvent::Compacted { ok } => {
+                if let Some((id, attempt)) = self.pending_compaction.take() {
+                    let state = if ok {
+                        CompactionState::Completed
+                    } else {
+                        CompactionState::Failed
+                    };
+                    self.compaction_record(&id, attempt, state)?;
+                }
+            }
             AdapterEvent::ContextExhausted => {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }
@@ -1969,6 +1993,67 @@ impl Supervisor {
         Ok(())
     }
 
+    fn compaction_record(
+        &mut self,
+        id: &str,
+        attempt: u32,
+        state: CompactionState,
+    ) -> Result<(), SupervisorError> {
+        self.record(Body::CompactionStatus(CompactionStatus {
+            command_id: id.to_owned(),
+            dispatch_attempt: attempt,
+            state: state.into(),
+        }))?;
+        Ok(())
+    }
+
+    fn on_stuck(&mut self) -> Result<(), SupervisorError> {
+        if !self.compact_v1 {
+            self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                execution_id: self.spec.execution_id.to_string(),
+                kind: "capability_missing".into(),
+                event_type: "session_stuck_dropped".into(),
+            }))?;
+            return Ok(());
+        }
+        self.record(Body::SessionStuck(SessionStuck {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+        }))?;
+        Ok(())
+    }
+
+    // Сжатие запускает отдельный период работы: во время хода его не начать.
+    async fn on_compact(&mut self, id: String, attempt: u32) -> Result<(), SupervisorError> {
+        if !self.known_compactions.insert((id.clone(), attempt)) {
+            return Ok(());
+        }
+        if matches!(
+            self.lifecycle,
+            Lifecycle::Stopping(_) | Lifecycle::Draining { .. }
+        ) {
+            return self.compaction_record(&id, attempt, CompactionState::Superseded);
+        }
+        let (Some(command), None, Some(adapter)) = (
+            Uuid::parse_str(&id).ok(),
+            self.active_turn,
+            self.adapter.as_mut(),
+        ) else {
+            return self.compaction_record(&id, attempt, CompactionState::NotApplicable);
+        };
+        match adapter.compact(command).await {
+            CompactOutcome::Accepted => {
+                self.compaction_record(&id, attempt, CompactionState::SentToAgent)?;
+                self.pending_compaction = Some((id, attempt));
+                Ok(())
+            }
+            CompactOutcome::NotApplicable => {
+                self.compaction_record(&id, attempt, CompactionState::NotApplicable)
+            }
+            CompactOutcome::Failed => self.compaction_record(&id, attempt, CompactionState::Failed),
+        }
+    }
+
     async fn on_stop(&mut self, force: bool) -> Result<(), SupervisorError> {
         match &mut self.lifecycle {
             Lifecycle::Stopping(state) => {
@@ -2140,6 +2225,9 @@ impl Supervisor {
         };
         self.close_blocks(reason)?;
         self.complete_interrupts()?;
+        if let Some((id, attempt)) = self.pending_compaction.take() {
+            self.compaction_record(&id, attempt, CompactionState::Superseded)?;
+        }
         let mut keys: Vec<_> = self.inputs.keys().copied().collect();
         keys.sort();
         for key in keys {

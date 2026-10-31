@@ -32,9 +32,9 @@ use self::{
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
-        DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec, InterruptOutcome,
-        ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
-        TransmitOutcome,
+        CompactOutcome, DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec,
+        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support,
+        Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
         held_tool::HeldTools,
@@ -449,6 +449,10 @@ pub struct OpenCodeAdapter {
     spec: Option<StartSpec>,
     /// Сжатие в этом периоде отказало из-за переполнения: сервер больше ничего не сделает.
     overflowed: bool,
+    /// Отказы подряд: повтор предлагает сжатие.
+    stuck: failure::StuckWatch,
+    /// Сообщение ручного сжатия, чей итог ждёт супервизор.
+    compaction: Option<String>,
     version: Option<CliVersion>,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
@@ -494,6 +498,8 @@ impl OpenCodeAdapter {
             applied: owner_instructions(),
             spec: None,
             overflowed: false,
+            stuck: failure::StuckWatch::default(),
+            compaction: None,
             version: None,
             exit: None,
             kill_at: None,
@@ -998,8 +1004,13 @@ impl OpenCodeAdapter {
     // хода, чтобы расход и блок ошибки успели попасть в журнал до остановки.
     fn judge(&mut self, outcome: &RunOutcome) -> Vec<AdapterEvent> {
         let overflowed = std::mem::take(&mut self.overflowed);
-        let RunOutcome::Failed(failure) = outcome else {
-            return Vec::new();
+        let failure = match outcome {
+            RunOutcome::Failed(failure) => failure,
+            RunOutcome::Succeeded => {
+                self.stuck.reset();
+                return Vec::new();
+            }
+            RunOutcome::Interrupted => return Vec::new(),
         };
         if let Some(fact) = failure::limit_fact(failure, now_ms()) {
             self.events.push_back(AdapterEvent::Limit(fact));
@@ -1017,8 +1028,44 @@ impl OpenCodeAdapter {
             });
         } else if failure.overflow || overflowed {
             follow.push(AdapterEvent::ContextExhausted);
+        } else if self.stuck.on_failure(failure) {
+            follow.push(AdapterEvent::Diagnostic {
+                kind: "session_stuck",
+                event_type: "session_stuck".into(),
+                required: false,
+            });
+            follow.push(AdapterEvent::SessionStuck);
         }
         follow
+    }
+
+    fn on_compaction_ended(&mut self, failed: Option<bool>, manual: bool) {
+        self.overflowed |= failed == Some(true);
+        if failed.is_none() {
+            self.stuck.reset();
+        }
+        if manual && self.compaction.take().is_some() {
+            self.events.push_back(AdapterEvent::Compacted {
+                ok: failed.is_none(),
+            });
+        }
+    }
+
+    // Итог ручного сжатия мог выпасть в разрыв: сообщение сжатия лежит в проекции.
+    fn settle_compaction(&mut self, snapshot: &Snapshot) {
+        let Some(id) = self.compaction.as_deref() else {
+            return;
+        };
+        let status = snapshot
+            .messages
+            .iter()
+            .find(|message| message["id"].as_str() == Some(id))
+            .and_then(|message| message["status"].as_str());
+        match status {
+            Some("completed") => self.on_compaction_ended(None, true),
+            Some("failed") => self.on_compaction_ended(Some(false), true),
+            _ => {}
+        }
     }
 
     fn on_run_ended(&mut self, outcome: RunOutcome) {
@@ -1225,8 +1272,8 @@ impl OpenCodeAdapter {
             Translated::RunEnded(_) if std::mem::take(&mut self.delivery.stale_terminal) => {}
             Translated::RunEnded(outcome) => self.on_run_ended(outcome),
             Translated::ShellStarted => self.journal_shells(),
-            Translated::CompactionEnded { failed, .. } => {
-                self.overflowed |= failed == Some(true);
+            Translated::CompactionEnded { failed, manual } => {
+                self.on_compaction_ended(failed, manual);
             }
         }
     }
@@ -1352,6 +1399,7 @@ impl OpenCodeAdapter {
             self.apply_items(items);
         }
         self.reopen_requests(&snapshot);
+        self.settle_compaction(&snapshot);
         if self.turn_running() && !snapshot.running {
             self.close_by_projection(&snapshot);
         } else if self.turn_running() && !self.requests.has_open() {
@@ -2003,6 +2051,26 @@ impl Adapter for OpenCodeAdapter {
             }
         }
         outcome
+    }
+
+    // Идентификатор из команды: повтор доставки попадёт в тот же элемент очереди сервера.
+    async fn compact(&mut self, command: Uuid) -> CompactOutcome {
+        if self.turn_running() || self.compaction.is_some() {
+            return CompactOutcome::NotApplicable;
+        }
+        let Some(http) = self.http.clone() else {
+            return CompactOutcome::NotApplicable;
+        };
+        let id = input::message_id(command);
+        let path = format!("/api/session/{}/compact", self.session);
+        let body = json!({"id": id, "delivery": "queue"});
+        match http.post(&path, &body, REQUEST_WAIT).await {
+            Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                self.compaction = Some(id);
+                CompactOutcome::Accepted
+            }
+            _ => CompactOutcome::Failed,
+        }
     }
 
     fn set_stop_grace(&mut self, grace: Duration) {

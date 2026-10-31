@@ -39,6 +39,7 @@ impl fmt::Debug for command::Kind {
             Self::CancelInput(input) => f.debug_tuple("CancelInput").field(input).finish(),
             Self::WithdrawInput(input) => f.debug_tuple("WithdrawInput").field(input).finish(),
             Self::Interrupt(input) => f.debug_tuple("Interrupt").field(input).finish(),
+            Self::CompactSession(input) => f.debug_tuple("CompactSession").field(input).finish(),
             Self::StartExecution(input) => f.debug_tuple("StartExecution").field(input).finish(),
             Self::DeliverDecision(input) => f.debug_tuple("DeliverDecision").field(input).finish(),
             Self::StopExecution(input) => f.debug_tuple("StopExecution").field(input).finish(),

@@ -7,9 +7,9 @@
 //! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
 
 use canterlot_proto::worker::v1::{
-    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, Interrupt, InterruptState,
-    SettingsOverride, StartExecution, StopExecution, TextBlock, command::Kind, content_block,
-    record_body::Body,
+    Command, CompactSession, CompactionState, ContentBlock, DeliverDecision, DeliverInput,
+    Instructions, Interrupt, InterruptState, SettingsOverride, StartExecution, StopExecution,
+    TextBlock, command::Kind, content_block, record_body::Body,
 };
 use canterlot_worker::{
     adapter::opencode::replay::{Reply, Script, Step},
@@ -234,7 +234,7 @@ impl Env {
                     mode: "clean".into(),
                     ..Default::default()
                 }),
-                capabilities: vec!["pilot_v1".into(), "todo_v1".into()],
+                capabilities: vec!["pilot_v1".into(), "todo_v1".into(), "compact_v1".into()],
                 ..Default::default()
             }),
         )
@@ -1039,6 +1039,103 @@ async fn todo_list_reaches_the_journal_and_the_flag_reaches_the_server() {
     let config: Value =
         serde_json::from_str(boot["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
     assert_eq!(config["experimental"]["todo"], true);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Застрявшая сессия по боевому пути: факт в журнале, команда сжатия, итог, ввод один раз.
+#[tokio::test]
+async fn stuck_session_and_compaction_go_through_the_supervisor() {
+    let script = Script::from_capture("stuck_invalid_request", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let one = env.deliver("one").await;
+    env.wait_finished(one).await;
+    assert!(
+        !env.bodies
+            .iter()
+            .any(|body| matches!(body, Body::SessionStuck(_)))
+    );
+    let two = env.deliver("two").await;
+    env.wait_finished(two).await;
+    env.wait("stuck fact", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::SessionStuck(_)))
+    })
+    .await;
+    let diagnostics: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::AdapterDiagnostic(fact) => Some(fact.event_type.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|kind| kind == "provider_invalid_request")
+    );
+    assert!(diagnostics.iter().any(|kind| kind == "session_stuck"));
+    let command = Uuid::now_v7();
+    env.send(env.command(command, Kind::CompactSession(CompactSession {})))
+        .await;
+    env.wait("compaction finished", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::CompactionStatus(fact)
+                if fact.command_id == command.to_string()
+                    && fact.state == CompactionState::Completed as i32)
+        })
+    })
+    .await;
+    let three = env.deliver("three").await;
+    env.wait_finished(three).await;
+    assert_eq!(prompts(&env), 3);
+    assert!(!env.logs().contains("invalid parameters"));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Команда сжатия посреди хода: сервер её не видит, владелец получает итог.
+#[tokio::test]
+async fn compaction_during_a_turn_is_not_applicable() {
+    let script = Script::from_capture("interrupt", None)
+        .first_run()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("hang").await;
+    env.wait("input accepted", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::InputAccepted(fact) if fact.command_id == input.to_string())
+        })
+    })
+    .await;
+    env.wait("run active", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::PhaseChanged(_)))
+    })
+    .await;
+    let command = Uuid::now_v7();
+    env.send(env.command(command, Kind::CompactSession(CompactSession {})))
+        .await;
+    env.wait("compaction refused", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::CompactionStatus(fact)
+                if fact.state == CompactionState::NotApplicable as i32)
+        })
+    })
+    .await;
+    assert!(find(&env.fake().requests(), "POST", "/compact").is_none());
     env.stop().await;
     env.fake().wait_gone().await;
 }

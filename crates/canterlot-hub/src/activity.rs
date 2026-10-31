@@ -18,7 +18,7 @@ use crate::{
     bus::{self, EventBus, Notice},
     config::{ActivityConfig, MachinesConfig},
     events::{self, NewEvent, Scope},
-    model::{ExecutionState, HoldReason, HoldView, PauseReason, RunSlot},
+    model::{CompactionProgress, ExecutionState, HoldReason, HoldView, PauseReason, RunSlot},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -381,21 +381,34 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         }
     }
     for pause in &i.queue.pause_reasons {
-        if let PauseReason::LimitReached {
-            provider,
-            window,
-            resets_at,
-        } = pause
-        {
-            return Activity {
-                state: S::QuotaPaused,
-                evidence: Evidence::QuotaPaused {
-                    reason: "limit_reached".into(),
-                    provider: provider.clone(),
-                    window: window.clone(),
-                    until: *resets_at,
-                },
-            };
+        match pause {
+            PauseReason::LimitReached {
+                provider,
+                window,
+                resets_at,
+            } => {
+                return Activity {
+                    state: S::QuotaPaused,
+                    evidence: Evidence::QuotaPaused {
+                        reason: "limit_reached".into(),
+                        provider: provider.clone(),
+                        window: window.clone(),
+                        until: *resets_at,
+                    },
+                };
+            }
+            PauseReason::SessionStuck {
+                compaction: Some(CompactionProgress::Requested),
+            } => return working("context_maintenance"),
+            PauseReason::SessionStuck { .. } => {
+                return Activity {
+                    state: S::Failed,
+                    evidence: Evidence::Failed {
+                        reason: "session_stuck".into(),
+                    },
+                };
+            }
+            _ => {}
         }
     }
     idle()

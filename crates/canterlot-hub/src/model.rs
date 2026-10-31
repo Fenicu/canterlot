@@ -134,6 +134,19 @@ pub enum PauseReason {
     },
     OwnerLost,
     RestorePending,
+    /// Один и тот же отказ провайдера подряд. Причина отказа неизвестна.
+    SessionStuck {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        compaction: Option<CompactionProgress>,
+    },
+}
+
+/// Ход сжатия контекста, запрошенного владельцем.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactionProgress {
+    Requested,
+    Failed,
 }
 
 impl PauseReason {
@@ -146,6 +159,7 @@ impl PauseReason {
             Self::UnconfirmedDelivery { .. } => "unconfirmed_delivery",
             Self::OwnerLost => "owner_lost",
             Self::RestorePending => "restore_pending",
+            Self::SessionStuck { .. } => "session_stuck",
         }
     }
 }
@@ -165,6 +179,7 @@ impl FromStr for PauseReason {
             }),
             "unconfirmed_delivery" => Err(ModelError::MissingReasonData("unconfirmed_delivery")),
             "owner_lost" => Ok(Self::OwnerLost),
+            "session_stuck" => Ok(Self::SessionStuck { compaction: None }),
             "restore_pending" => Ok(Self::RestorePending),
             _ => Err(ModelError::UnknownValue {
                 kind: "pause reason",
@@ -375,6 +390,7 @@ pub enum CommandKind {
     StartExecution,
     StopExecution,
     DeliverDecision,
+    CompactSession,
 }
 
 impl CommandKind {
@@ -387,6 +403,7 @@ impl CommandKind {
             Self::StartExecution => "start_execution",
             Self::StopExecution => "stop_execution",
             Self::DeliverDecision => "deliver_decision",
+            Self::CompactSession => "compact_session",
         }
     }
 }
@@ -403,6 +420,7 @@ impl FromStr for CommandKind {
             "start_execution" => Ok(Self::StartExecution),
             "stop_execution" => Ok(Self::StopExecution),
             "deliver_decision" => Ok(Self::DeliverDecision),
+            "compact_session" => Ok(Self::CompactSession),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

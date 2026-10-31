@@ -7,7 +7,7 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode,
+        Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
         DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
         LimitWindow, Phase, SettingsChange, StartSpec, Started, Transmission, TransmitOutcome,
         opencode::{
@@ -5064,6 +5064,14 @@ impl Bench {
     }
 }
 
+impl Bench {
+    async fn compact(&mut self, command: Uuid) -> CompactOutcome {
+        tokio::time::timeout(WAIT, self.adapter.compact(command))
+            .await
+            .expect("compact must finish")
+    }
+}
+
 fn limit_of(events: &[AdapterEvent]) -> Option<LimitFact> {
     events.iter().find_map(|event| match event {
         AdapterEvent::Limit(fact) => Some(fact.clone()),
@@ -5251,5 +5259,146 @@ async fn retry_of_the_server_sends_no_second_prompt() {
         .filter(|request| path_of(request).ends_with("/prompt"))
         .count();
     assert_eq!(prompts, 1);
+    bench.close(CloseMode::Graceful).await;
+}
+
+fn stuck_session() -> Script {
+    Script::from_capture("stuck_invalid_request", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents()
+}
+
+// Запись целиком: два отказа подряд, сжатие, следующий ввод проходит.
+#[tokio::test]
+async fn same_refusal_twice_offers_compaction_and_compaction_clears_it() {
+    let mut bench = Bench::new(stuck_session());
+    bench.start_ok().await;
+    let one = bench.input("one");
+    bench.accepted(&one).await;
+    let first = bench.until_finished(one.command_id).await;
+    assert!(
+        !first
+            .iter()
+            .any(|event| matches!(event, AdapterEvent::SessionStuck))
+    );
+    let two = bench.input("two");
+    bench.accepted(&two).await;
+    bench.until_finished(two.command_id).await;
+    bench
+        .until(|event| matches!(event, AdapterEvent::SessionStuck))
+        .await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::Accepted
+    );
+    let compaction = bench
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        compaction.last(),
+        Some(AdapterEvent::Compacted { ok: true })
+    ));
+    assert!(compaction.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase {
+            phase: Phase::ContextMaintenance,
+            ..
+        }
+    )));
+    bench.until_finished(two.command_id).await;
+    let three = bench.input("three");
+    bench.accepted(&three).await;
+    let events = bench.until_finished(three.command_id).await;
+    assert!(text_of(&events, "Error").is_empty());
+    let requests = bench.fake.requests();
+    let compact = find(&requests, "POST", "/compact").expect("compaction request");
+    assert_eq!(compact["body"]["delivery"], "queue");
+    assert!(
+        compact["body"]["id"]
+            .as_str()
+            .is_some_and(|id| id.starts_with("msg_"))
+    );
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn compaction_is_refused_while_a_turn_runs() {
+    let mut bench = Bench::new(hanging_turn());
+    bench.start_ok().await;
+    let input = bench.input("hang");
+    bench.accepted(&input).await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::NotApplicable
+    );
+    assert!(find(&bench.fake.requests(), "POST", "/compact").is_none());
+    bench.close(CloseMode::Force).await;
+}
+
+#[tokio::test]
+async fn server_refusal_of_compaction_is_reported_at_once() {
+    let mut script = ready();
+    script.push_route(
+        "POST",
+        &format!("/api/session/{}/compact", session_of(&script)),
+        Reply {
+            status: 409,
+            body: Some(json!({"_tag": "ConflictError"})),
+            ..Default::default()
+        },
+    );
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    assert_eq!(bench.compact(Uuid::now_v7()).await, CompactOutcome::Failed);
+    bench.close(CloseMode::Force).await;
+}
+
+// Придуманный кадр: `session.compaction.failed` ручного сжатия.
+#[tokio::test]
+async fn failed_manual_compaction_is_reported_and_the_session_stays() {
+    let mut script = ready();
+    let session = session_of(&script);
+    let recorded = "msg_0190cafe000070008000000000000099";
+    script.steps.push(Step::Expect {
+        method: "POST".into(),
+        path: format!("/api/session/{session}/compact"),
+        reply: Reply {
+            body: Some(json!({"data": {"id": recorded, "type": "compaction"}})),
+            ..Default::default()
+        },
+        bind: [(recorded.to_owned(), "/id".to_owned())].into(),
+    });
+    script.steps.push(Step::Emit {
+        events: vec![
+            json!({"type": "session.execution.started", "data": {"sessionID": session}}),
+            json!({"type": "session.compaction.started", "data": {
+                "sessionID": session, "reason": "manual", "inputID": recorded}}),
+            json!({"type": "session.compaction.failed", "data": {
+                "sessionID": session, "reason": "manual", "inputID": recorded,
+                "error": {"type": "compaction.failed", "message": "no summary"}}}),
+            json!({"type": "session.execution.failed", "data": {
+                "sessionID": session,
+                "error": {"type": "compaction.failed", "message": "no summary"}}}),
+        ],
+    });
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let input = bench.input("x");
+    bench.accepted(&input).await;
+    bench.until_finished(input.command_id).await;
+    assert_eq!(
+        bench.compact(Uuid::now_v7()).await,
+        CompactOutcome::Accepted
+    );
+    let events = bench
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::Compacted { ok: false })
+    ));
+    let events = bench.until_finished(input.command_id).await;
+    assert_eq!(text_of(&events, "Error").len(), 1);
     bench.close(CloseMode::Graceful).await;
 }

@@ -10,16 +10,17 @@ use canterlot_proto::{
     limits::IPC_PROTOCOL_VERSION,
     worker::{
         ipc::{
-            CliStarted, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest, LocalFile,
-            MediaResult, MediaUpload, Ownership, OwnershipPhase, ShipFrom, SjAck, SjBatch,
-            StartCli, StopRequest, SupervisorToControl, control_to_supervisor as down,
+            CliStarted, CompactRequest, ControlToSupervisor, Deliver, DeliverAck, InterruptRequest,
+            LocalFile, MediaResult, MediaUpload, Ownership, OwnershipPhase, ShipFrom, SjAck,
+            SjBatch, StartCli, StopRequest, SupervisorToControl, control_to_supervisor as down,
             supervisor_to_control as up,
         },
         v1::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
-            CommandRejected, DecisionNotApplied, ExecutionState, InputCancelLost, InputCancelWon,
-            InputDispatchDeferred, InputWithdrawn, InterruptState, InterruptStatus, MediaHeader,
-            StartExecution, WithdrawInput, command::Kind, content_block, record_body::Body,
+            CommandRejected, CompactionState, CompactionStatus, DecisionNotApplied, ExecutionState,
+            InputCancelLost, InputCancelWon, InputDispatchDeferred, InputWithdrawn, InterruptState,
+            InterruptStatus, MediaHeader, StartExecution, WithdrawInput, command::Kind,
+            content_block, record_body::Body,
         },
     },
 };
@@ -426,6 +427,14 @@ async fn known_generation(shared: &Shared, id: Uuid) -> Result<Option<u64>, Exec
         .await?)
 }
 
+fn compaction_status(command: &Command, state: CompactionState) -> Body {
+    Body::CompactionStatus(CompactionStatus {
+        command_id: command.command_id.clone(),
+        dispatch_attempt: command.dispatch_attempt,
+        state: state.into(),
+    })
+}
+
 fn terminal_self(command: &Command) -> Vec<(String, u32)> {
     vec![(command.command_id.clone(), command.dispatch_attempt)]
 }
@@ -536,6 +545,20 @@ pub(super) async fn answer_without_execution(
                         dispatch_attempt: attempt,
                         state: state as i32,
                     })],
+                    terminal_self(command),
+                )
+                .await
+        }
+        Some(Kind::CompactSession(_)) => {
+            let state = match known {
+                Some(generation) if generation != command.execution_generation => {
+                    CompactionState::RejectedStale
+                }
+                _ => CompactionState::Superseded,
+            };
+            shared
+                .cj(
+                    vec![compaction_status(command, state)],
                     terminal_self(command),
                 )
                 .await
@@ -939,6 +962,7 @@ impl Actor {
                 instructions: start.instructions.clone(),
                 pilot_v1: start.capabilities.iter().any(|c| c == "pilot_v1"),
                 todo_v1: start.capabilities.iter().any(|c| c == "todo_v1"),
+                compact_v1: start.capabilities.iter().any(|c| c == "compact_v1"),
             }))
             .await;
         Ok(())
@@ -1126,6 +1150,7 @@ impl Actor {
                     | down::Msg::Cancel(_)
                     | down::Msg::Withdraw(_)
                     | down::Msg::Interrupt(_)
+                    | down::Msg::Compact(_)
                     | down::Msg::Stop(_)
                     | down::Msg::DeliverDecision(_)
             ) && {
@@ -1709,6 +1734,33 @@ impl Actor {
                         .await
                 } else {
                     self.interrupt_status(&command, InterruptState::Superseded)
+                        .await
+                }
+            }
+            Some(Kind::CompactSession(_)) => {
+                if live && command.execution_generation == self.generation {
+                    if !self
+                        .send(down::Msg::Compact(CompactRequest {
+                            command_id: cid_text,
+                            dispatch_attempt: attempt,
+                        }))
+                        .await
+                    {
+                        self.waiting.push_back(command);
+                        return Ok(());
+                    }
+                    self.shared.cj(vec![], self_terminal).await
+                } else {
+                    let state = if command.execution_generation == self.generation {
+                        CompactionState::Superseded
+                    } else {
+                        CompactionState::RejectedStale
+                    };
+                    self.shared
+                        .cj(
+                            vec![compaction_status(&command, state)],
+                            terminal_self(&command),
+                        )
                         .await
                 }
             }

@@ -164,6 +164,14 @@ pub enum InterruptOutcome {
     Undetermined,
     NotApplicable,
 }
+#[derive(Debug, PartialEq, Eq)]
+pub enum CompactOutcome {
+    /// Сервер принял запрос, итог придёт событием `Compacted`.
+    Accepted,
+    NotApplicable,
+    /// Отказ или неизвестный исход: можно попробовать снова, запрос идемпотентен.
+    Failed,
+}
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {
@@ -495,6 +503,12 @@ pub enum AdapterEvent {
         lane: Option<Uuid>,
         items: Vec<TodoItem>,
     },
+    /// Один и тот же отказ подряд: владельцу предлагается сжать контекст, очередь встаёт.
+    SessionStuck,
+    /// Сжатие, запрошенное через `compact`, закончилось.
+    Compacted {
+        ok: bool,
+    },
 }
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -580,6 +594,8 @@ impl fmt::Debug for AdapterEvent {
                 .field("call_id", call_id)
                 .field("tool", tool)
                 .finish_non_exhaustive(),
+            Self::SessionStuck => f.write_str("SessionStuck"),
+            Self::Compacted { ok } => f.debug_struct("Compacted").field("ok", ok).finish(),
             Self::TodoUpdated { lane, items } => f
                 .debug_struct("TodoUpdated")
                 .field("lane", lane)
@@ -779,6 +795,10 @@ pub trait Adapter: Send {
         let _ = self.deliver_decision(request_id, &deny).await;
     }
     async fn interrupt(&mut self) -> InterruptOutcome;
+    /// Сжать контекст по действию владельца. Сжимает только адаптер, который это умеет.
+    async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
+        CompactOutcome::NotApplicable
+    }
     async fn next_event(&mut self) -> AdapterEvent;
     async fn agent_call_result(&mut self, _call_id: Uuid, _result: AgentCallResult) {}
     /// Срок мягкой остановки из таймеров сопровождения: сколько `Graceful`

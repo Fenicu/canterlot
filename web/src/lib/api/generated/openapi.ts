@@ -128,6 +128,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/compact": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__compact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/crunch": {
         parameters: {
             query?: never;
@@ -886,6 +902,22 @@ export interface components {
                 state: components["schemas"]["InputState"];
             };
         };
+        CompactOutcome: {
+            requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        } | {
+            already_requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        };
+        /**
+         * @description Ход сжатия контекста, запрошенного владельцем.
+         * @enum {string}
+         */
+        CompactionProgress: "requested" | "failed";
         CompleteBody: {
             /** @description Контрольная сумма, с которой клиент завершает загрузку; другая сумма даёт конфликт. */
             sha256?: string | null;
@@ -1461,6 +1493,10 @@ export interface components {
         } | {
             /** @enum {string} */
             reason: "restore_pending";
+        } | {
+            compaction?: components["schemas"]["CompactionProgress"] | null;
+            /** @enum {string} */
+            reason: "session_stuck";
         };
         Point: {
             observed_at: string;
@@ -2417,6 +2453,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["BlockPage"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__compact: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Сжатие контекста запрошено */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CompactOutcome"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
