@@ -353,5 +353,5 @@
   .row[data-kind='input'] { padding-top: var(--s8); }
   .row:first-of-type { padding-top: var(--s0); }
   .day { margin: 0; padding-block: var(--s4) var(--s0); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
-  .jump { position: absolute; bottom: var(--s4); left: 50%; translate: -50%; min-height: var(--target); padding-inline: var(--s8); border-radius: var(--radius-pill); background: var(--popover); color: var(--text); font-size: var(--fs-meta); white-space: nowrap; }
+  .jump { position: absolute; bottom: var(--s4); left: 50%; translate: -50%; min-height: var(--target); padding-inline: var(--s8); border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-meta); white-space: nowrap; }
 </style>

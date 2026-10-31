@@ -184,6 +184,20 @@ test.describe('шапка и сообщения', () => {
     expect(box.height).toBeGreaterThanOrEqual(44);
     expect(Math.abs(box.x + box.width / 2 - (wrap.x + wrap.width / 2))).toBeLessThan(2);
     expect(wrap.y + wrap.height - (box.y + box.height)).toBeLessThan(24);
+    const paint = await pill.evaluate((node) => {
+      const probe = document.createElement('i');
+      node.append(probe);
+      const read = (token: string): string => {
+        probe.style.color = `var(${token})`;
+        return getComputedStyle(probe).color;
+      };
+      const pair = { accent: read('--accent'), ink: read('--accent-ink') };
+      probe.remove();
+      const style = getComputedStyle(node);
+      return { ...pair, fill: style.backgroundColor, text: style.color };
+    });
+    expect(paint.fill).toBe(paint.accent);
+    expect(paint.text).toBe(paint.ink);
   });
 });
 
