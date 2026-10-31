@@ -257,6 +257,18 @@ async fn final_checksum_mismatch_final_wins_with_diagnostic(pool: PgPool) -> Tes
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn inline_final_without_deltas_raises_no_checksum_mismatch(pool: PgPool) -> TestResult {
+    let mut run = Run::new(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(vec![start(id), final_fact(id, 1, "целиком в финале")])
+        .await;
+    assert_eq!(block(&pool, id).await.2, "final");
+    let seen = events(&pool, id).await;
+    assert_eq!(kinds(&seen), ["block_started", "block_final"]);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn oversized_final_uses_checksum_only_and_hub_verifies(pool: PgPool) -> TestResult {
     let mut run = Run::new(&pool).await;
     let id = Uuid::now_v7();
