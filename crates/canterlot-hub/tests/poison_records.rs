@@ -2,6 +2,7 @@
 
 use canterlot_hub::{
     executions,
+    grpc::Ingest as _,
     ingest::{Ingest, IngestError, IngestOutcome, JournalKind},
     model::ExecutionState as State,
     testkit::{self, Seed},
@@ -301,5 +302,197 @@ async fn stub_of_an_oversized_record_is_attributed_to_the_journal(pool: PgPool) 
     .fetch_optional(&pool)
     .await?;
     assert_eq!(shown.as_deref(), Some("record_too_large"));
+    Ok(())
+}
+
+fn started(id: Uuid) -> Body {
+    Body::BlockStarted(BlockStarted {
+        block_id: id.to_string(),
+        rev: 0,
+        kind: "text".into(),
+        ..Default::default()
+    })
+}
+
+fn undecodable_request(run: &Run) -> Body {
+    Body::RequestOpened(RequestOpened {
+        request_id: "request".into(),
+        execution_id: run.id(),
+        generation: run.execution.generation as u64,
+        kind: "permission".into(),
+        payload_json: br#"{"text":"\ud83d"}"#.to_vec(),
+    })
+}
+
+async fn ship(run: &Run, batch: JournalRecords) -> Result<u64, tonic::Status> {
+    run.ingest
+        .sj_records(run.seed.machine_id, &run.seed.credential_digest(), batch)
+        .await
+        .map(|ack| ack.up_to_seq)
+}
+
+async fn cursor(pool: &PgPool, journal: Uuid) -> i64 {
+    sqlx::query_scalar("select committed_seq from journal_cursors where journal_id = $1")
+        .bind(journal)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn diagnostics(pool: &PgPool, execution: Uuid) -> Vec<String> {
+    sqlx::query_scalar(
+        "select payload->>'event_type' from events where execution_id = $1
+         and kind = 'adapter_diagnostic' and payload->>'kind' = 'journal_record_rejected'",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn stop_commands(pool: &PgPool, execution: Uuid) -> Vec<(serde_json::Value, String)> {
+    sqlx::query_as(
+        "select payload, delivery_state from commands
+         where execution_id = $1 and kind = 'stop_execution'",
+    )
+    .bind(execution)
+    .fetch_all(pool)
+    .await
+    .unwrap()
+}
+
+async fn fatal_pause(pool: &PgPool, conversation: Uuid) -> bool {
+    sqlx::query_scalar(
+        "select pause_reasons @> '[{\"reason\":\"fatal_error\"}]'::jsonb
+         from queue_state where conversation_id = $1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+// Суррогат без пары не проходит ни serde_json, ни jsonb: повтор дал бы тот же отказ.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn refused_record_fails_its_execution_and_the_journal_moves_on(pool: PgPool) -> TestResult {
+    let run = Run::new(&pool).await;
+    let (before, after) = (Uuid::now_v7(), Uuid::now_v7());
+    let batch = run.batch(vec![
+        started(before),
+        undecodable_request(&run),
+        started(after),
+    ]);
+    assert_eq!(ship(&run, batch.clone()).await?, 4);
+    assert_eq!(cursor(&pool, run.journal).await, 4);
+    let execution = run.execution.execution_id;
+    assert_eq!(
+        diagnostics(&pool, execution).await,
+        ["invalid_record seq=3"]
+    );
+    assert!(fatal_pause(&pool, run.seed.conversation_id).await);
+    let commands = stop_commands(&pool, execution).await;
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert_eq!(commands[0].0["force"], true);
+    let blocks: i64 = sqlx::query_scalar("select count(*) from blocks where block_id = any($1)")
+        .bind([before, after])
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(blocks, 2);
+    assert_eq!(run.ingest.ignored_record_count(), 1);
+
+    assert_eq!(ship(&run, batch).await?, 4, "a repeat is a duplicate");
+    assert_eq!(diagnostics(&pool, execution).await.len(), 1);
+    assert_eq!(stop_commands(&pool, execution).await.len(), 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn value_refused_by_the_database_is_contained_like_an_invalid_record(
+    pool: PgPool,
+) -> TestResult {
+    let run = Run::new(&pool).await;
+    sqlx::raw_sql(
+        "create function refuse_block() returns trigger language plpgsql as $$
+         begin raise exception 'value' using errcode = '22023'; end $$;
+         create trigger refuse_block before insert on blocks
+         for each row execute function refuse_block();",
+    )
+    .execute(&pool)
+    .await?;
+    let batch = run.batch(vec![started(Uuid::now_v7())]);
+    assert_eq!(ship(&run, batch).await?, 2);
+    assert_eq!(
+        diagnostics(&pool, run.execution.execution_id).await,
+        ["rejected_value seq=2"]
+    );
+    Ok(())
+}
+
+// Отказ не из-за значения проходит сам или лечится хабом, а запись потерялась бы навсегда.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn other_database_failures_keep_the_record_for_a_retry(pool: PgPool) -> TestResult {
+    let run = Run::new(&pool).await;
+    sqlx::raw_sql(
+        "create function refuse_block() returns trigger language plpgsql as $$
+         begin raise exception 'outage'; end $$;
+         create trigger refuse_block before insert on blocks
+         for each row execute function refuse_block();",
+    )
+    .execute(&pool)
+    .await?;
+    let batch = run.batch(vec![started(Uuid::now_v7())]);
+    let error = ship(&run, batch.clone()).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::Internal);
+    assert_eq!(cursor(&pool, run.journal).await, 1);
+    let execution = run.execution.execution_id;
+    assert!(diagnostics(&pool, execution).await.is_empty());
+    assert!(stop_commands(&pool, execution).await.is_empty());
+    sqlx::query("drop trigger refuse_block on blocks")
+        .execute(&pool)
+        .await?;
+    assert_eq!(ship(&run, batch).await?, 2);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn finished_execution_is_not_stopped_again(pool: PgPool) -> TestResult {
+    let run = Run::new(&pool).await;
+    let execution = run.execution.execution_id;
+    executions::set_state(&pool, execution, State::Stopping, None, Uuid::now_v7()).await?;
+    executions::set_state(
+        &pool,
+        execution,
+        State::Stopped,
+        Some("normal_exit"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    let batch = run.batch(vec![Body::ExecutionState(ExecutionState {
+        execution_id: run.id(),
+        generation: run.execution.generation as u64,
+        state: "unknown".into(),
+        ..Default::default()
+    })]);
+    assert_eq!(ship(&run, batch).await?, 2);
+    assert_eq!(diagnostics(&pool, execution).await.len(), 1);
+    assert!(stop_commands(&pool, execution).await.is_empty());
+    Ok(())
+}
+
+// Без исполнения журнала сбой не к чему приписать.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn journal_without_an_execution_still_refuses_the_batch(pool: PgPool) -> TestResult {
+    let run = Run::new(&pool).await;
+    let batch = JournalRecords {
+        journal_id: Uuid::now_v7().to_string(),
+        records: vec![JournalRecord {
+            seq: 1,
+            body: Some(RecordBody {
+                body: Some(started(Uuid::now_v7())),
+            }),
+        }],
+    };
+    let error = ship(&run, batch).await.unwrap_err();
+    assert_eq!(error.code(), tonic::Code::InvalidArgument);
     Ok(())
 }

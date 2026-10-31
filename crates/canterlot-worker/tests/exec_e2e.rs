@@ -2129,3 +2129,112 @@ async fn nul_in_one_session_leaves_the_machine_stream_running(pool: PgPool) {
     .await;
     fixture.finish().await;
 }
+
+// Запись, которую база не примет и при повторе, останавливает своё исполнение, а не машину.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_running(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let other = testkit::seed_conversation(&pool, fixture.owner, fixture.config.machine_id).await;
+    sqlx::query("update conversations set workdir = $2 where id = $1")
+        .bind(other)
+        .bind(fixture.root.path().join("work").to_str().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let second = executions::start(&pool, fixture.owner, other, Uuid::now_v7())
+        .await
+        .unwrap();
+    let state = async |execution: Uuid| -> String {
+        sqlx::query_scalar("select state from executions where id = $1")
+            .bind(execution)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    };
+    until("second execution running", async || {
+        state(second.execution_id).await == "running"
+    })
+    .await;
+    sqlx::raw_sql(
+        "create function refuse_chunk() returns trigger language plpgsql as $$
+         begin
+           if new.text like '%неприемлемо%' then
+             raise exception 'value' using errcode = '22023';
+           end if;
+           return new;
+         end $$;
+         create trigger refuse_chunk before insert on block_chunks
+         for each row execute function refuse_chunk();",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    fixture
+        .submit(json!({"synthetic":[{"delta":"неприемлемо"}]}).to_string())
+        .await;
+    let (script, expected) = answer(3, 0);
+    submit::submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: fixture.owner,
+            conversation_id: other,
+            idempotency_key: Uuid::now_v7().to_string(),
+            content: vec![ContentBlock::Text { text: script }],
+            received_at: chrono::Utc::now(),
+            correlation_id: Uuid::now_v7(),
+        },
+    )
+    .await
+    .unwrap();
+    fixture.hub().dispatcher.trigger(other);
+    until("refused execution stopped", async || {
+        state(fixture.execution).await == "stopped"
+    })
+    .await;
+    assert!(fixture.paused("fatal_error").await);
+    until("journal of the refused execution closed", async || {
+        sqlx::query_scalar::<_, bool>("select closed from journal_cursors where execution_id = $1")
+            .bind(fixture.execution)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+    })
+    .await;
+    let content = async || -> Option<String> {
+        sqlx::query_scalar("select content from blocks where execution_id = $1 and state = 'final'")
+            .bind(second.execution_id)
+            .fetch_optional(&pool)
+            .await
+            .unwrap()
+    };
+    until("answer of the other session final", async || {
+        content().await.is_some()
+    })
+    .await;
+    assert!(content().await.as_deref() == Some(expected.as_str()));
+    let shown: i64 = sqlx::query_scalar(
+        "select count(*) from events where execution_id = $1 and kind = 'adapter_diagnostic'
+         and payload->>'kind' = 'journal_record_rejected'",
+    )
+    .bind(fixture.execution)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(shown, 1);
+    control::request_stop_execution(
+        &pool,
+        fixture.owner,
+        other,
+        true,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    until("second execution stopped", async || {
+        state(second.execution_id).await == "stopped"
+    })
+    .await;
+    fixture.finish().await;
+}

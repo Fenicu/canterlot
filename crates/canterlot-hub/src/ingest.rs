@@ -73,18 +73,31 @@ pub enum IngestError {
     Execution,
     #[error("database")]
     Database,
+    #[error("rejected_value")]
+    RejectedValue,
+}
+
+impl IngestError {
+    /// Отказ определяется самой записью: повтор той же записи даст его снова.
+    fn is_record_fault(&self) -> bool {
+        matches!(self, Self::InvalidRecord | Self::RejectedValue)
+    }
 }
 
 impl From<sqlx::Error> for IngestError {
-    fn from(_: sqlx::Error) -> Self {
-        Self::Database
+    fn from(error: sqlx::Error) -> Self {
+        if crate::dberr::describe(&error).is_rejected_value() {
+            Self::RejectedValue
+        } else {
+            Self::Database
+        }
     }
 }
 
 impl From<ExecutionError> for IngestError {
     fn from(error: ExecutionError) -> Self {
         match error {
-            ExecutionError::Db(_) => Self::Database,
+            ExecutionError::Db(error) => error.into(),
             _ => Self::Execution,
         }
     }
@@ -101,12 +114,19 @@ pub struct Ingest {
     pub faults: crate::fault_injection::Faults,
 }
 
+/// Сверх итога пакета: докуда он применён и какая запись отказала. Заполняется после commit.
+#[derive(Default)]
+struct BatchProgress {
+    prefix: Option<u64>,
+    refused_seq: Option<u64>,
+}
+
 // Итог SJ-транзакции: смены лимитов, прогресс, счётчик, отложенные ошибка и разрыв.
 type SjBatchOutcome = (
     BTreeSet<(String, crate::limits::Window)>,
     u64,
     u64,
-    Option<IngestError>,
+    Option<(IngestError, u64)>,
     Option<u64>,
 );
 
@@ -324,10 +344,10 @@ impl Ingest {
         credential: &[u8],
         kind: JournalKind,
         batch: &JournalRecords,
-    ) -> (Result<IngestOutcome, IngestError>, Option<u64>) {
-        let mut prefix = None;
+    ) -> (Result<IngestOutcome, IngestError>, BatchProgress) {
+        let mut progress = BatchProgress::default();
         let result = self
-            .apply_batch_inner(machine_id, credential, kind, batch, &mut prefix)
+            .apply_batch_inner(machine_id, credential, kind, batch, &mut progress)
             .await;
         match &result {
             Err(error) => tracing::warn!(kind = %error, machine_id = %machine_id,
@@ -338,7 +358,7 @@ impl Ingest {
             }
             _ => {}
         }
-        (result, prefix)
+        (result, progress)
     }
 
     /// Журнал удалённого разговора: записи подтверждаются без применения, и воркер отпускает
@@ -399,7 +419,7 @@ impl Ingest {
         credential: &[u8],
         kind: JournalKind,
         batch: &JournalRecords,
-        prefix: &mut Option<u64>,
+        progress: &mut BatchProgress,
     ) -> Result<IngestOutcome, IngestError> {
         require_active(&mut *self.pool.acquire().await?, machine_id, credential).await?;
         check_record_batch(batch).map_err(|_| IngestError::BatchLimit)?;
@@ -435,7 +455,7 @@ impl Ingest {
                     credential,
                     batch,
                     (up_to_seq, last_digest),
-                    prefix,
+                    progress,
                 )
                 .await?;
             self.trigger_dispatcher(machine_id).await?;
@@ -595,7 +615,7 @@ impl Ingest {
         credential: &[u8],
         batch: &JournalRecords,
         snapshot: (u64, Option<Vec<u8>>),
-        prefix: &mut Option<u64>,
+        progress: &mut BatchProgress,
     ) -> Result<IngestOutcome, IngestError> {
         let journal_id = parse_id(&batch.journal_id)?;
         let (mut up_to_seq, mut last_digest) = snapshot;
@@ -771,7 +791,7 @@ impl Ingest {
                     sqlx::query("rollback to savepoint sj_record")
                         .execute(&mut *conn)
                         .await?;
-                    failure = Some(error);
+                    failure = Some((error, record.seq));
                     break;
                 }
             }
@@ -827,10 +847,11 @@ impl Ingest {
             }
         }
         self.ignored.fetch_add(ignored_count, Ordering::Relaxed);
-        if let Some(error) = failure {
+        if let Some((error, seq)) = failure {
             if up_to_seq > entry_seq {
-                *prefix = Some(up_to_seq);
+                progress.prefix = Some(up_to_seq);
             }
+            progress.refused_seq = Some(seq);
             return Err(error);
         }
         if let Some(got_seq) = gap {
@@ -1010,7 +1031,7 @@ impl Ingest {
 fn pilot_error(error: sqlx::Error) -> IngestError {
     match error {
         sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
-        _ => IngestError::Database,
+        error => error.into(),
     }
 }
 
@@ -1564,6 +1585,87 @@ async fn apply_execution_fact(
 }
 
 impl Ingest {
+    /// Поток данных общий для всех сессий машины, поэтому запись, которую хаб не примет и при
+    /// повторе, держала бы их все. Курсор проходит мимо неё, отказ виден в диагностике, а само
+    /// исполнение останавливается: без записи его состояние уже нельзя считать верным.
+    /// `false`, если приписать сбой некому: тогда пакет отвергается как раньше.
+    async fn contain_refused_record(
+        &self,
+        machine_id: Uuid,
+        credential: &[u8],
+        batch: &JournalRecords,
+        seq: u64,
+        error: &IngestError,
+    ) -> Result<bool, IngestError> {
+        let journal_id = parse_id(&batch.journal_id)?;
+        let Some(record) = batch.records.iter().find(|record| record.seq == seq) else {
+            return Ok(false);
+        };
+        let digest = record
+            .body
+            .as_ref()
+            .map(|body| Sha256::digest(body.encode_to_vec()).to_vec());
+        let committed = i64::try_from(seq).map_err(|_| IngestError::InvalidRecord)?;
+        let credential = credential.to_owned();
+        let event_type = format!("{error} seq={seq}");
+        let contained = crate::db::in_tx::<bool, IngestError, _>(&self.pool, move |conn| {
+            Box::pin(async move {
+                require_active(&mut *conn, machine_id, &credential).await?;
+                let cursor: Option<(Option<Uuid>, i64)> = sqlx::query_as(
+                    "select execution_id, committed_seq from journal_cursors
+                     where journal_id = $1 and machine_id = $2 and kind = 'sj' for update",
+                )
+                .bind(journal_id)
+                .bind(machine_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+                let Some((Some(execution), previous)) = cursor else {
+                    return Ok(false);
+                };
+                if previous != committed - 1 {
+                    return Ok(false);
+                }
+                let Some(run) = owned_execution(&mut *conn, machine_id, execution, None).await?
+                else {
+                    return Ok(false);
+                };
+                let correlation_id = Uuid::now_v7();
+                crate::delivery::control::stop_after_refused_record_in_tx(
+                    &mut *conn,
+                    run.conversation_id,
+                    run.execution_id,
+                    correlation_id,
+                )
+                .await?;
+                sqlx::query(
+                    "update journal_cursors set committed_seq = $2, last_record_digest = $3,
+                         updated_at = clock_timestamp() where journal_id = $1",
+                )
+                .bind(journal_id)
+                .bind(committed)
+                .bind(digest)
+                .execute(&mut *conn)
+                .await?;
+                execution_event(
+                    &mut *conn,
+                    &run,
+                    "adapter_diagnostic",
+                    json!({"kind": "journal_record_rejected", "event_type": event_type}),
+                    correlation_id,
+                )
+                .await?;
+                Ok(true)
+            })
+        })
+        .await?;
+        if contained {
+            self.ignored.fetch_add(1, Ordering::Relaxed);
+            tracing::error!(kind = "journal_record_rejected", machine_id = %machine_id,
+                journal_id = %journal_id, seq, error = %error, "journal record refused");
+        }
+        Ok(contained)
+    }
+
     async fn range_ack(
         &self,
         machine_id: Uuid,
@@ -1571,10 +1673,26 @@ impl Ingest {
         kind: JournalKind,
         batch: JournalRecords,
     ) -> Result<canterlot_proto::worker::v1::JournalRangeAck, tonic::Status> {
-        let (result, prefix) = self
-            .apply_batch_report(machine_id, credential, kind, &batch)
-            .await;
-        if let Some(up_to_seq) = prefix {
+        let (result, progress) = loop {
+            let (result, progress) = self
+                .apply_batch_report(machine_id, credential, kind, &batch)
+                .await;
+            let refused = match (&result, progress.refused_seq) {
+                (Err(error), Some(seq)) if error.is_record_fault() => Some((error, seq)),
+                _ => None,
+            };
+            let Some((error, seq)) = refused else {
+                break (result, progress);
+            };
+            let contained = self
+                .contain_refused_record(machine_id, credential, &batch, seq, error)
+                .await
+                .map_err(|error| tonic::Status::internal(error.to_string()))?;
+            if !contained {
+                break (result, progress);
+            }
+        };
+        if let Some(up_to_seq) = progress.prefix {
             return Ok(canterlot_proto::worker::v1::JournalRangeAck {
                 journal_id: batch.journal_id,
                 up_to_seq,
@@ -1588,7 +1706,9 @@ impl Ingest {
                 IngestError::ForeignJournal | IngestError::ForeignExecution => {
                     tonic::Status::permission_denied(message)
                 }
-                IngestError::Database | IngestError::Execution => tonic::Status::internal(message),
+                IngestError::Database | IngestError::Execution | IngestError::RejectedValue => {
+                    tonic::Status::internal(message)
+                }
                 IngestError::UnknownRecord
                 | IngestError::InvalidRecord
                 | IngestError::JournalKindMismatch => tonic::Status::invalid_argument(message),
@@ -2054,10 +2174,7 @@ async fn apply_journal_body(
         return crate::media::attach_in_tx(conn, &run, fact, correlation_id)
             .await
             .map(Some)
-            .map_err(|error| match error {
-                sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
-                _ => IngestError::Database,
-            });
+            .map_err(pilot_error);
     }
     if let Body::TodoUpdated(fact) = body {
         if parse_id(&fact.execution_id)? != run.execution_id {
@@ -2066,10 +2183,7 @@ async fn apply_journal_body(
         return crate::todos::apply(conn, &run, fact, correlation_id)
             .await
             .map(Some)
-            .map_err(|error| match error {
-                sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord,
-                _ => IngestError::Database,
-            });
+            .map_err(pilot_error);
     }
     match body {
         Body::RequestOpened(fact) => {
@@ -2127,7 +2241,7 @@ async fn apply_journal_body(
             return Ok(Some(false));
         }
         _ => return Err(IngestError::InvalidRecord),
-    }.map_err(|error| match error { sqlx::Error::InvalidArgument(_) => IngestError::InvalidRecord, _ => IngestError::Database })?;
+    }.map_err(pilot_error)?;
     Ok(Some(matches!(outcome, BlockOutcome::Ignored(_))))
 }
 

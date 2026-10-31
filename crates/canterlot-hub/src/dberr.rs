@@ -60,6 +60,14 @@ impl DbErrorInfo {
     pub fn is_unavailable(&self) -> bool {
         self.class == CLASS_UNAVAILABLE
     }
+
+    /// База отвергла само значение: класс 22 (данные) и 54 (предел строки индекса).
+    /// Повтор того же значения даст тот же отказ.
+    pub fn is_rejected_value(&self) -> bool {
+        self.sqlstate
+            .as_deref()
+            .is_some_and(|code| code.starts_with("22") || code.starts_with("54"))
+    }
 }
 
 impl fmt::Debug for DbErrorInfo {

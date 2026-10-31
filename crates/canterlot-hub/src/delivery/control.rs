@@ -9,7 +9,7 @@ use crate::{
     events::{self, NewEvent, Scope},
     executions,
     idempotency::{self, Begin},
-    model::{InputState, PauseReason, RunSlot},
+    model::{ExecutionState, InputState, PauseReason, RunSlot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -284,37 +284,7 @@ pub async fn request_stop_execution(
             queue.save(&mut *conn, &slot, None, correlation_id).await?;
             let live = executions::live(&mut *conn, conversation_id).await?;
             let outcome = if let Some((execution_id, generation, _)) = live {
-                let existing: Option<Uuid> = sqlx::query_scalar(
-                    "select id from commands where conversation_id = $1 and kind = 'stop_execution'
-             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
-             and payload->>'force' = $4 order by created_at, id limit 1",
-                )
-                .bind(conversation_id)
-                .bind(execution_id)
-                .bind(generation)
-                .bind(if force { "true" } else { "false" })
-                .fetch_optional(&mut *conn)
-                .await?;
-                if let Some(command_id) = existing {
-                    StopExecutionOutcome::AlreadyRequested { command_id }
-                } else {
-                    let command_id = Uuid::now_v7();
-                    let machine_id: Uuid = sqlx::query_scalar(
-                        "insert into commands (id, machine_id, conversation_id, execution_id,
-                                       execution_generation, kind, payload, delivery_state)
-                 select $1, machine_id, id, $3, $4, 'stop_execution', $5, 'pending'
-                 from conversations where id = $2 returning machine_id",
-                    )
-                    .bind(command_id)
-                    .bind(conversation_id)
-                    .bind(execution_id)
-                    .bind(generation)
-                    .bind(json!({"force": force}))
-                    .fetch_one(&mut *conn)
-                    .await?;
-                    notify_outbox(&mut *conn, machine_id).await?;
-                    StopExecutionOutcome::Requested { command_id, force }
-                }
+                enqueue_stop(&mut *conn, conversation_id, execution_id, generation, force).await?
             } else {
                 StopExecutionOutcome::NothingToStop
             };
@@ -502,6 +472,81 @@ async fn record<T: Serialize>(
     } else {
         Err(ControlError::IdempotencyConflict)
     }
+}
+
+async fn enqueue_stop(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    generation: i64,
+    force: bool,
+) -> Result<StopExecutionOutcome, sqlx::Error> {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "select id from commands where conversation_id = $1 and kind = 'stop_execution'
+             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
+             and payload->>'force' = $4 order by created_at, id limit 1",
+    )
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .bind(if force { "true" } else { "false" })
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(command_id) = existing {
+        return Ok(StopExecutionOutcome::AlreadyRequested { command_id });
+    }
+    let command_id = Uuid::now_v7();
+    let machine_id: Uuid = sqlx::query_scalar(
+        "insert into commands (id, machine_id, conversation_id, execution_id,
+                                       execution_generation, kind, payload, delivery_state)
+                 select $1, machine_id, id, $3, $4, 'stop_execution', $5, 'pending'
+                 from conversations where id = $2 returning machine_id",
+    )
+    .bind(command_id)
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .bind(json!({"force": force}))
+    .fetch_one(&mut *conn)
+    .await?;
+    notify_outbox(&mut *conn, machine_id).await?;
+    Ok(StopExecutionOutcome::Requested { command_id, force })
+}
+
+/// Хаб отказался от записи журнала этого исполнения: очередь встаёт с видимой причиной,
+/// а исполнение останавливается обычным путём, и остаток журнала применяется как всегда.
+pub(crate) async fn stop_after_refused_record_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut queue: LockedQueue =
+        sqlx::query_as("select * from queue_state where conversation_id = $1 for update")
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
+    let Some((live, generation, state)) = executions::live(&mut *conn, conversation_id).await?
+    else {
+        return Ok(());
+    };
+    if live != execution_id || state == ExecutionState::OwnerLost {
+        return Ok(());
+    }
+    if !queue.pause_reasons.0.contains(&PauseReason::FatalError) {
+        queue.pause_reasons.0.push(PauseReason::FatalError);
+        let slot = queue.slot()?;
+        queue
+            .save(&mut *conn, &slot, Some(execution_id), correlation_id)
+            .await?;
+        events::append(
+            &mut *conn,
+            queue_event(&queue, "queue_paused", Some(execution_id), correlation_id),
+        )
+        .await?;
+    }
+    enqueue_stop(conn, conversation_id, execution_id, generation, true).await?;
+    Ok(())
 }
 
 async fn mark_owner_stop(
