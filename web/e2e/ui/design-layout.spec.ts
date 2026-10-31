@@ -334,8 +334,9 @@ test.describe('листы и панели', () => {
     expect(Math.max(...(edges as number[])) - Math.min(...(edges as number[]))).toBeLessThan(1);
   });
 
-  test('session_popover_closes_on_escape_and_sits_under_its_row', async ({ page, isMobile }) => {
+  test('session_popover_closes_on_escape_and_sits_beside_its_row', async ({ page, isMobile }) => {
     test.skip(isMobile, 'только рабочий стол');
+    await page.setViewportSize({ width: 1440, height: 1300 });
     const hub = new FakeHub();
     const api = new FakeHubApi(hub);
     const ids = seedMockupSessions(api);
@@ -349,7 +350,7 @@ test.describe('листы и панели', () => {
     const list = await page.locator('[data-list-scroll]').boundingBox();
     const box = (await popover.boundingBox())!;
     const rowBox = (await row.boundingBox())!;
-    expect(box.y).toBeGreaterThanOrEqual(rowBox.y + rowBox.height - 1);
+    expect(box.y >= rowBox.y + rowBox.height - 1 || box.y + box.height <= rowBox.y + 1).toBe(true);
     expect(box.y + box.height).toBeLessThanOrEqual(list!.y + list!.height + 80);
     await page.keyboard.press('Escape');
     await expect(popover).toHaveCount(0);

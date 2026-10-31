@@ -30,6 +30,7 @@
   import { resolve } from '$app/paths';
   import { page } from '$app/state';
   import { onMount, untrack } from 'svelte';
+  import { dismissable } from '#lib/ui/dismiss.js';
   import { collapsedSet, readCollapsed, writeCollapsed } from './collapsed';
   import EmptyState from './EmptyState.svelte';
   import GroupManager from './GroupManager.svelte';
@@ -142,10 +143,12 @@
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
 
   // Меню принадлежит строке: смена вкладки, поиска или экрана закрывает его, как и уход строки из списка.
+  // Закрытие листа подтверждения меняет запись истории, а не экран.
+  const path = $derived(page.url.pathname);
   $effect(() => {
     void tab;
     void query;
-    void page.url.pathname;
+    void path;
     untrack(() => {
       sheetId = '';
     });
@@ -188,11 +191,7 @@
       const origin = listNode.getBoundingClientRect().top;
       sheetRow = { top: box.top - origin, bottom: box.bottom - origin };
     }
-    sheetId = id;
-  }
-
-  function closeMenu(event: KeyboardEvent) {
-    if (event.key === 'Escape') menu = false;
+    sheetId = sheetId === id ? '' : id;
   }
 
   function resetSearch() {
@@ -211,8 +210,6 @@
     if (scroller) rememberScroll(scroller.scrollTop);
   });
 </script>
-
-<svelte:window onkeydown={closeMenu} />
 
 <svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
   <div class="bar">
@@ -241,7 +238,7 @@
     {/if}
 
     {#if menu}
-      <div class="menu-slot">
+      <div class="menu-slot" use:dismissable={{ onclose: () => { menu = false; }, keep: (target) => target.closest('[aria-label="Ещё"]') !== null }}>
         <Menu label="Ещё">
           <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
           <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
@@ -298,7 +295,7 @@
     {/if}
   </div>
   {#if sheetItem}
-    <SessionSheet
+    {#key sheetItem.id}<SessionSheet
       item={sheetItem}
       groups={groups}
       machine={runtime?.machines.items.get(sheetItem.machine.id) ?? null}
@@ -307,7 +304,7 @@
       ongroups={() => { sheetId = ''; groupsOpen = true; }}
       onclose={() => sheetId = ''}
       ondeleted={(id) => { if (page.params.id === id) void goto(resolve('sessions')); }}
-    />
+    />{/key}
   {/if}
   {#if groupsOpen}
     <GroupManager groups={groups} counts={groupCounts} onclose={() => groupsOpen = false} />

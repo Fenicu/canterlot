@@ -7,6 +7,7 @@
   import { presets } from '#lib/composer/schedule.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import Button from '#lib/ui/Button.svelte';
+  import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
   import Field from '#lib/ui/Field.svelte';
   import IconButton from '#lib/ui/IconButton.svelte';
   import Sheet from '#lib/ui/Sheet.svelte';
@@ -96,8 +97,9 @@
     opener?.focus();
   }
 
-  function escape(event: KeyboardEvent) {
-    if (event.key === 'Escape' && open && !touch) dismiss();
+  function dismissBy(reason: DismissReason) {
+    if (reason === 'escape') dismiss();
+    else onclose();
   }
 
   function zoneLine(at: number): string {
@@ -139,14 +141,12 @@
   {/if}
 {/snippet}
 
-<svelte:window onkeydown={escape} />
-
 {#if touch && open}
   <Sheet open title="Отправить позже" onclose={onclose}>
     {@render fields()}
   </Sheet>
 {:else if open}
-  <div class="popover" id={panelId} role="dialog" aria-labelledby="{panelId}-title">
+  <div class="popover" id={panelId} role="dialog" aria-labelledby="{panelId}-title" use:dismissable={{ onclose: dismissBy, keep: (target) => target.closest(`[aria-controls="${panelId}"]`) !== null }}>
     <header>
       <h2 id="{panelId}-title">Отправить позже</h2>
       <IconButton icon="close" label="Закрыть" onclick={dismiss} />

@@ -7,6 +7,7 @@
 	import { chatStateLine } from './stateLine';
 	import { modelLabel } from '#lib/format/labels.js';
 	import Icon from '#lib/ui/Icon.svelte';
+	import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import Menu from '#lib/ui/Menu.svelte';
 	import MenuItem from '#lib/ui/MenuItem.svelte';
@@ -114,15 +115,13 @@
 
 	let menuButton = $state<HTMLButtonElement | null>(null);
 
-	function closeMenuOnEscape(event: KeyboardEvent) {
-		if (event.key !== 'Escape' || !menuOpen) return;
+	function closeMenu(reason: DismissReason) {
 		menuOpen = false;
 		confirmingForce = false;
-		menuButton?.focus();
+		if (reason === 'escape') menuButton?.focus();
 	}
 </script>
 
-<svelte:window onkeydown={closeMenuOnEscape} />
 
 <div class="chat-header" role="region" aria-label="Шапка чата">
 	<div class="topbar">
@@ -197,7 +196,7 @@
 	{/if}
 
 	{#if menuOpen}
-		<div class="session-dropdown">
+		<div class="session-dropdown" use:dismissable={{ onclose: closeMenu, keep: (target) => menuButton?.contains(target) ?? false }}>
 			<Menu label="Действия над сессией">
 				{#if actionError}
 					<div class="action-error" role="alert">{actionError}</div>

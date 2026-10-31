@@ -96,6 +96,32 @@ test('ctrl_shift_enter_opens_send_later', async ({ page }) => {
   expect(hits).toHaveLength(0);
 });
 
+test('send_later_closes_outside_keeps_inside_and_toggles_on_its_button', async ({ page, isMobile }) => {
+  await boot(page);
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  await area.fill('позже');
+  await area.press('Control+Shift+Enter');
+  const panel = page.getByRole('dialog', { name: 'Отправить позже' });
+  await expect(panel).toBeVisible();
+  await panel.getByRole('heading', { name: 'Отправить позже' }).click();
+  await expect(panel).toBeVisible();
+  if (isMobile) {
+    await page.touchscreen.tap(195, 12);
+    await expect(panel).toHaveCount(0);
+    return;
+  }
+  await page.locator('.feed').click({ position: { x: 8, y: 8 } });
+  await expect(panel).toHaveCount(0);
+  const clock = page.getByRole('button', { name: 'Отправить позже' });
+  await clock.click();
+  await expect(panel).toBeVisible();
+  await clock.click();
+  await expect(panel).toHaveCount(0);
+  await clock.click();
+  await page.keyboard.press('Escape');
+  await expect(panel).toHaveCount(0);
+});
+
 test('ime_composition_enter_never_sends_in_the_browser', async ({ page }) => {
   await boot(page);
   const hits = await watch(page, '**/api/v1/conversations/*/inputs');

@@ -367,6 +367,121 @@ test('session_menu_of_the_last_row_goes_up_and_stays_whole_with_the_archive_warn
   expect(report.overflow).toBeLessThanOrEqual(1);
 });
 
+test('session_menu_closes_on_an_outside_click_however_it_was_opened', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: его проверяет отдельный тест');
+  await page.setViewportSize({ width: 1707, height: 1400 });
+  const { ids } = await boot(page);
+  const row = page.locator(`[data-session="${ids.plain}"]`);
+  const menu = page.getByRole('dialog', { name: 'Сессия' });
+  await row.getByRole('link').click({ button: 'right' });
+  await expect(menu).toBeVisible();
+  await page.locator('.brand').click();
+  await expect(menu).toHaveCount(0);
+  await row.getByRole('button').click();
+  await expect(menu).toBeVisible();
+  await page.locator('.brand').click({ button: 'right' });
+  await expect(menu).toHaveCount(0);
+  await row.getByRole('button').click();
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+  await row.getByRole('button').click();
+  await expect(menu).toBeVisible();
+  await row.getByRole('button').click();
+  await expect(menu).toHaveCount(0);
+});
+
+test('clicks_inside_the_session_menu_and_its_confirmation_keep_it_open', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: его проверяет отдельный тест');
+  const { ids } = await boot(page);
+  await page.locator(`[data-session="${ids.plain}"]`).getByRole('button').click();
+  const menu = page.getByRole('dialog', { name: 'Сессия' });
+  await menu.getByRole('textbox', { name: 'Название' }).click();
+  await menu.getByRole('switch', { name: 'Закрепить' }).click();
+  await menu.getByText('Настройки сессии').click();
+  await expect(menu).toBeVisible();
+  await menu.getByRole('button', { name: /^Удалить/ }).click();
+  const confirm = page.getByRole('dialog', { name: 'Удалить сессию?' });
+  await confirm.locator('p').first().click();
+  await page.keyboard.press('Escape');
+  await expect(confirm).toHaveCount(0);
+  await expect(menu).toBeVisible();
+  await menu.getByRole('button', { name: /^Удалить/ }).click();
+  await page.mouse.click(4, 4);
+  await expect(confirm).toHaveCount(0);
+  await expect(menu).toBeVisible();
+});
+
+test('another_row_takes_over_from_the_open_session_menu', async ({ page, isMobile }) => {
+  test.skip(isMobile, 'телефонное меню модально: строки под ним недоступны');
+  await page.setViewportSize({ width: 1707, height: 1400 });
+  await boot(page);
+  const rows = page.locator('[data-session]');
+  const first = rows.first();
+  const last = rows.last();
+  await first.getByRole('button').click();
+  const menu = page.getByRole('dialog', { name: 'Сессия' });
+  const name = menu.getByRole('textbox', { name: 'Название' });
+  await expect(name).toHaveValue((await first.locator('.title').textContent()) ?? '');
+  await last.getByRole('link').click({ button: 'right' });
+  await expect(name).toHaveValue((await last.locator('.title').textContent()) ?? '');
+  await first.getByRole('link').click({ button: 'right' });
+  await expect(name).toHaveValue((await first.locator('.title').textContent()) ?? '');
+  const id = await last.getAttribute('data-session');
+  await last.getByRole('link').click();
+  await expect(menu).toHaveCount(0);
+  await expect(page).toHaveURL(new RegExp(`/c/${id}`));
+});
+
+for (const way of ['outside', 'escape'] as const) {
+  test(`title_typed_in_the_menu_is_saved_when_it_closes_by_${way}`, async ({ page, isMobile }) => {
+    const { ids } = await boot(page);
+    const titles: string[] = [];
+    page.on('request', (request) => {
+      if (request.method() !== 'PATCH' || !request.url().includes(ids.plain)) return;
+      const body = request.postDataJSON() as { title?: string };
+      if (body.title) titles.push(body.title);
+    });
+    await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+    const field = page.getByRole('textbox', { name: 'Название' });
+    await field.fill('Новое имя');
+    if (way === 'escape') await field.press('Escape');
+    else if (isMobile) await page.touchscreen.tap(195, 12);
+    else await page.locator('.brand').click();
+    await expect(field).toHaveCount(0);
+    await expect(page.getByRole('link', { name: /Новое имя/ })).toBeVisible();
+    expect(titles).toEqual(['Новое имя']);
+  });
+}
+
+test('sheet_closes_on_a_tap_over_its_backdrop_and_not_inside', async ({ page, isMobile }) => {
+  test.skip(!isMobile, 'на рабочем столе меню сессии не лист');
+  await boot(page);
+  await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();
+  const sheet = page.getByRole('dialog', { name: 'Меню сессии' });
+  await sheet.getByRole('heading', { name: 'Меню сессии' }).tap();
+  await expect(sheet).toBeVisible();
+  await page.touchscreen.tap(195, 12);
+  await expect(sheet).toHaveCount(0);
+});
+
+test('more_menu_of_the_list_closes_outside_and_keeps_its_toggle', async ({ page, isMobile }) => {
+  await boot(page);
+  const toggle = page.getByRole('button', { name: 'Ещё', exact: true });
+  const menu = page.getByRole('menu', { name: 'Ещё' });
+  const outside = (): Promise<void> => (isMobile ? page.locator('.brand').tap() : page.locator('.brand').click());
+  await toggle.click();
+  await expect(menu).toBeVisible();
+  await outside();
+  await expect(menu).toHaveCount(0);
+  await toggle.click();
+  await toggle.click();
+  await expect(menu).toHaveCount(0);
+  await toggle.click();
+  await page.keyboard.press('Escape');
+  await expect(menu).toHaveCount(0);
+});
+
 test('a_session_deleted_on_another_device_disappears_from_the_list_and_the_counts', async ({ page }) => {
   const { api, ids } = await boot(page);
   await page.getByRole('button', { name: 'Действия: Повторная доставка ввода' }).click();

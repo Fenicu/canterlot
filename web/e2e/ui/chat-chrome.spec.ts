@@ -590,3 +590,23 @@ test('chat_chrome_has_no_horizontal_scroll_at_360px_and_keyboard_reaches_every_a
 	await page.keyboard.press('Tab');
 	await expect(page.locator('.chat-header [data-theme-toggle]')).toBeFocused();
 });
+
+test('session_dropdown_closes_outside_keeps_inside_and_toggles', async ({ page, isMobile }) => {
+	await bootChat(page);
+	const toggle = page.getByRole('button', { name: 'Меню сессии' });
+	const menu = page.getByRole('menu', { name: 'Действия над сессией' });
+	const outside = (): Promise<void> => (isMobile ? page.locator('.feed').tap({ position: { x: 8, y: 8 } }) : page.locator('.feed').click({ position: { x: 8, y: 8 } }));
+	await toggle.click();
+	await expect(menu).toBeVisible();
+	await outside();
+	await expect(menu).toHaveCount(0);
+	await toggle.click();
+	await toggle.click();
+	await expect(menu).toHaveCount(0);
+	await toggle.click();
+	await menu.locator('.menu-divider').dispatchEvent('pointerdown');
+	await expect(menu).toBeVisible();
+	await page.keyboard.press('Escape');
+	await expect(menu).toHaveCount(0);
+	await expect(toggle).toBeFocused();
+});

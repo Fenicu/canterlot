@@ -18,6 +18,7 @@
   import Sheet from '#lib/ui/Sheet.svelte';
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
+  import { dismissable, type DismissReason } from '#lib/ui/dismiss.js';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import type { MachineRecord } from '#lib/stores/machines.svelte.js';
   import { turnRunning, turnText, type Activity } from './activityText';
@@ -66,6 +67,7 @@
   // Ключи живут, пока сессия не удалена: повторное нажатие после обрыва повторяет те же операции.
   const deleteKey = crypto.randomUUID();
   const stopKey = crypto.randomUUID();
+  let sentTitle = seed.title;
   let sentPin = seed.pinned;
   let sentCrunch = seed.crunch?.enabled ?? false;
   // В строке списка текста продолжения нет, а хаб заменил бы сохранённый текст присланным.
@@ -120,9 +122,19 @@
   });
 
   function dismiss() {
+    void saveTitle();
     onclose();
     opener?.focus();
   }
+
+  function dismissBy(reason: DismissReason) {
+    if (reason === 'escape') return dismiss();
+    // Нажатие снаружи уже забрало фокус себе, и поле может исчезнуть раньше своего blur.
+    void saveTitle();
+    onclose();
+  }
+
+  const ownToggle = (target: Element) => target.closest(`[data-session="${CSS.escape(item.id)}"] button`) !== null;
 
   const reasonText: Record<string, string> = {
     crunch: 'кранч',
@@ -139,8 +151,10 @@
   }
 
   async function saveTitle() {
-    if (title.trim() === item.title) return;
-    await patch({ title: title.trim() });
+    const next = title.trim();
+    if (next === item.title || next === sentTitle) return;
+    sentTitle = next;
+    await patch({ title: next });
   }
 
   async function saveColor(value: string) {
@@ -311,12 +325,10 @@
   />
 {/if}
 
-<svelte:window onkeydown={(event) => { if (!touch && !confirmingDelete && event.key === 'Escape') dismiss(); }} />
-
 {#if touch}
-  <Sheet open title="Меню сессии" {onclose}>{@render fields()}</Sheet>
+  <Sheet open title="Меню сессии" onclose={() => { void saveTitle(); onclose(); }}>{@render fields()}</Sheet>
 {:else}
-  <div class="popover" role="dialog" aria-label="Сессия" bind:this={panel} style:top={`${top}px`} style:max-height={room === null ? undefined : `${room}px`}>
+  <div class="popover" role="dialog" aria-label="Сессия" bind:this={panel} use:dismissable={{ onclose: dismissBy, keep: ownToggle }} style:top={`${top}px`} style:max-height={room === null ? undefined : `${room}px`}>
     <div class="close"><IconButton icon="close" label="Закрыть" onclick={dismiss} /></div>
     {@render fields()}
   </div>

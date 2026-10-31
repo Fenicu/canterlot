@@ -238,7 +238,7 @@
         aria-haspopup="dialog"
         aria-expanded={later}
         aria-controls={laterId}
-        onclick={() => (later = true)}
+        onclick={() => (later = !later)}
       >
         <Icon name="clock" />
       </button>

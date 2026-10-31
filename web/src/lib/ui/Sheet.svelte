@@ -42,6 +42,17 @@
       first?.focus();
     }
   }
+  // Нажатие должно и начаться за листом: выделение текста, отпущенное над фоном, лист не закрывает.
+  let pressedBackdrop = false;
+  function overBackdrop(event: MouseEvent): boolean {
+    if (event.target !== dialog) return false;
+    const box = dialog.getBoundingClientRect();
+    return event.clientX < box.left || event.clientX > box.right || event.clientY < box.top || event.clientY > box.bottom;
+  }
+  function backdropClick(event: MouseEvent) {
+    if (pressedBackdrop && overBackdrop(event)) close();
+    pressedBackdrop = false;
+  }
   onMount(() => { mounted = true; });
   onDestroy(() => { if (dialog?.open) restore(); });
   $effect(() => {
@@ -64,7 +75,7 @@
   });
   $effect(() => { if (mounted && entry && routeKey && page.state.sheet !== routeKey) close(); });
 </script>
-<dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} oncancel={(event) => { event.preventDefault(); close(); }}>
+<dialog bind:this={dialog} aria-labelledby={id} aria-modal="true" onkeydown={keydown} onpointerdown={(event) => { pressedBackdrop = overBackdrop(event); }} onclick={backdropClick} oncancel={(event) => { event.preventDefault(); close(); }}>
   <div class="handle" aria-hidden="true"></div>
   <header><div class="titles"><h2 id={id}>{title}</h2>{#if subtitle}<p>{subtitle}</p>{/if}</div><IconButton icon="close" label="Закрыть" onclick={close} /></header>
   <div class="body">{@render children()}</div>
