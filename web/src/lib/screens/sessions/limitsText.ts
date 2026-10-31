@@ -14,6 +14,8 @@ export interface LimitRow {
   hot: { fiveHour: boolean; weekly: boolean };
   /** Хаб не знает ни одного окна: строка сводится к «нет данных». */
   empty: boolean;
+  /** Провайдер на недельном резерве: это дополнение к цифрам, а не замена им. */
+  reserve: boolean;
 }
 
 export interface LimitStrip {
@@ -22,14 +24,13 @@ export interface LimitStrip {
   details: string;
   tone: "default" | "warning" | "reserve";
   staleNote: string;
-  crunchLabel: string | null;
 }
 
 export function limitStrip(
   providers: ProviderLimits[],
   now: number,
   cfg: LimitThresholds,
-  opts: { prefer?: string; crunch?: boolean } = {},
+  opts: { prefer?: string } = {},
 ): LimitStrip {
   const ordered = [...providers].sort(
     (a, b) => rank(a.provider, opts.prefer) - rank(b.provider, opts.prefer),
@@ -72,7 +73,6 @@ export function limitStrip(
         Number.isFinite(stamp) && now - stamp > cfg.stale_after_secs * 1000,
     )
     .sort((a, b) => a - b)[0];
-  const reserve = views.some((item) => item.provider.weekly_reserve_active);
   return {
     summary,
     rows: views.map(({ provider, view }) => ({
@@ -81,11 +81,11 @@ export function limitStrip(
       weekly: view.weekly,
       hot: view.hot,
       empty: empty(provider),
+      reserve: provider.weekly_reserve_active,
     })),
     details,
     tone,
     staleNote: staleAt !== undefined ? `данные от ${fmt.clock(staleAt)}` : "",
-    crunchLabel: opts.crunch && reserve ? "Кранч · недельный резерв" : null,
   };
 }
 

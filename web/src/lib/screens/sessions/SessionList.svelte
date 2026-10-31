@@ -256,7 +256,6 @@
       now={now}
       thresholds={thresholds}
       prefer={openRow?.harness.provider ?? ''}
-      crunch={openRow?.crunch.enabled ?? false}
     />
 
     <GroupTabs

@@ -191,7 +191,6 @@
 				now={now}
 				thresholds={thresholds}
 				prefer={provider}
-				crunch={chat.crunch.enabled}
 				compact
 			/>
 		</div>
