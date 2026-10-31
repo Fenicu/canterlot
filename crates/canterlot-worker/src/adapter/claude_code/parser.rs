@@ -23,6 +23,10 @@ const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
 /// доходит до ленты без новых полей в протоколе, журнале и истории.
 const TOOL_FAILED_SUMMARY: &str = "error";
 
+/// Сводка результата запуска фоновой задачи: настоящий результат придёт позже. Хаб и лента
+/// не считают такой блок результатом вызова.
+const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
+
 /// Потолки диагностик неизвестных кадров те же, что у OpenCode.
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
@@ -1124,6 +1128,12 @@ impl Parser {
             Some(serde_json::Value::Array(blocks)) => blocks.iter().collect(),
             _ => Vec::new(),
         };
+        let launched = value.get("tool_use_result").is_some_and(|result| {
+            result.get("status").and_then(serde_json::Value::as_str) == Some("async_launched")
+                || result
+                    .get("backgroundTaskId")
+                    .is_some_and(serde_json::Value::is_string)
+        });
         for block in blocks {
             let kind = block.get("type").and_then(serde_json::Value::as_str);
             if kind != Some("tool_result") {
@@ -1164,7 +1174,11 @@ impl Parser {
             out.push(Parsed::Event(AdapterEvent::BlockFinal {
                 block_id,
                 text,
-                summary: is_error.then(|| TOOL_FAILED_SUMMARY.to_owned()),
+                summary: if is_error {
+                    Some(TOOL_FAILED_SUMMARY.to_owned())
+                } else {
+                    launched.then(|| TOOL_LAUNCHED_SUMMARY.to_owned())
+                },
             }));
             out.push(Parsed::ToolResult {
                 tool_use_id,

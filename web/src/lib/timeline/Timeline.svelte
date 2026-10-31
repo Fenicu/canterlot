@@ -55,7 +55,7 @@
   const OLDER_PAGE = 100;
 
   const today = $derived(dayStart(now));
-  const links = $derived(blockLinks(chat.timeline.entries));
+  const links = $derived(blockLinks(chat.timeline.entries, chat.backgroundFacts));
   const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot, links }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);

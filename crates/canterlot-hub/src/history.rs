@@ -454,6 +454,42 @@ pub struct DelegationNode {
     #[serde(with = "crate::model::optional_utc_time")]
     pub finished_at: Option<DateTime<Utc>>,
 }
+/// Вызов субагента Claude Code финален сразу после записи входа: его конец говорит только о
+/// том, что вызов сделан. Состояние даёт фоновая задача, а без неё настоящий результат вызова.
+fn subagent_state(
+    r: &sqlx::postgres::PgRow,
+    call: &'static str,
+    finished_at: Option<DateTime<Utc>>,
+) -> Result<(&'static str, Option<DateTime<Utc>>), sqlx::Error> {
+    let live: bool = r.try_get("live")?;
+    if let Some(task) = r.try_get::<Option<&str>, _>("task_state")? {
+        let state = match task {
+            "running" if live => return Ok(("running", None)),
+            "completed" => "done",
+            "failed" => "failed",
+            _ => "stopped",
+        };
+        let ended = r.try_get::<Option<DateTime<Utc>>, _>("task_ended_at")?;
+        return Ok((state, ended.or(finished_at)));
+    }
+    if let Some(result) = r.try_get::<Option<&str>, _>("result_state")? {
+        let failed = r.try_get::<Option<&str>, _>("result_summary")? == Some("error");
+        let state = match result {
+            "streaming" => return Ok(("running", None)),
+            "final" if failed => "failed",
+            "final" => "done",
+            _ => "incomplete",
+        };
+        let ended = r.try_get::<Option<DateTime<Utc>>, _>("result_finished_at")?;
+        return Ok((state, ended.or(finished_at)));
+    }
+    Ok(match call {
+        "incomplete" => ("incomplete", finished_at),
+        _ if live => ("running", None),
+        _ => ("incomplete", finished_at),
+    })
+}
+
 pub async fn delegation(
     conn: &mut PgConnection,
     owner_id: Uuid,
@@ -462,9 +498,36 @@ pub async fn delegation(
     if !owned(conn, owner_id, conversation_id).await? {
         return Ok(None);
     }
-    let rows=sqlx::query("select b.*,child.agent child_agent,child.model child_model from blocks b left join lateral (select agent,model from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id order by c.created_seq,c.block_id limit 1) child on true where b.conversation_id=$1 and b.kind='tool_call' and (lower(b.tool_name) in ('agent','task','spawn_agent','delegate') or exists(select 1 from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id and c.agent<>b.agent)) order by b.created_seq,b.block_id").bind(conversation_id).fetch_all(conn).await?;
+    let rows=sqlx::query("select b.*,child.agent child_agent,child.model child_model,
+            c.harness='claude_code' tracked,
+            b.execution_id=live.id is true live,
+            t.state task_state,t.ended_at task_ended_at,
+            result.state result_state,result.summary result_summary,result.finished_at result_finished_at
+        from blocks b
+        join conversations c on c.id=b.conversation_id
+        left join lateral (select agent,model from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id order by c.created_seq,c.block_id limit 1) child on true
+        left join lateral (select e.id from executions e where e.conversation_id=b.conversation_id and e.state in ('created','starting','running','stopping') limit 1) live on true
+        left join background_tasks t on t.conversation_id=b.conversation_id and t.block_id=b.block_id
+        left join lateral (select r.state,r.summary,r.finished_at from blocks r where r.parent_block_id=b.block_id and r.conversation_id=b.conversation_id and r.kind='tool_result' and r.summary is distinct from 'async_launched' order by r.created_seq desc,r.block_id limit 1) result on true
+        where b.conversation_id=$1 and b.kind='tool_call' and (lower(b.tool_name) in ('agent','task','spawn_agent','delegate') or exists(select 1 from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id and c.agent<>b.agent)) order by b.created_seq,b.block_id").bind(conversation_id).fetch_all(conn).await?;
     rows.into_iter()
         .map(|r| {
+            let tool_name: Option<String> = r.try_get("tool_name")?;
+            let call = match r.try_get::<&str, _>("state")? {
+                "streaming" => "running",
+                "final" => "done",
+                _ => "incomplete",
+            };
+            let finished_at: Option<DateTime<Utc>> = r.try_get("finished_at")?;
+            let subagent_call = r.try_get::<bool, _>("tracked")?
+                && tool_name
+                    .as_deref()
+                    .is_some_and(|name| matches!(name.to_lowercase().as_str(), "agent" | "task"));
+            let (state, finished_at) = if subagent_call {
+                subagent_state(&r, call, finished_at)?
+            } else {
+                (call, finished_at)
+            };
             Ok(DelegationNode {
                 block_id: r.try_get("block_id")?,
                 parent_block_id: r.try_get("parent_block_id")?,
@@ -474,16 +537,11 @@ pub async fn delegation(
                         name,
                         model: r.get("child_model"),
                     }),
-                tool_name: r.try_get("tool_name")?,
+                tool_name,
                 task: r.try_get("summary")?,
-                state: match r.try_get::<&str, _>("state")? {
-                    "streaming" => "running",
-                    "final" => "done",
-                    _ => "incomplete",
-                }
-                .into(),
+                state: state.into(),
                 started_at: r.try_get("created_at")?,
-                finished_at: r.try_get("finished_at")?,
+                finished_at,
             })
         })
         .collect::<Result<Vec<_>, _>>()

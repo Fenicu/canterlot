@@ -1,6 +1,7 @@
 import { harnessLabel, modelLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import { utf8Length } from "#lib/stores/blocks.js";
+import type { BackgroundFact } from "#lib/stores/background.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { subagentVerb } from "#lib/stores/delegation.js";
 import type { InputUiState } from "#lib/stores/inputs.js";
@@ -15,6 +16,13 @@ const TOOL_OWN_TIME_MIN_MS = 100;
 /** Так воркер помечает сводку результата, завершившегося ошибкой. */
 const TOOL_FAILED_MARK = "error";
 const CLI_ERROR_OPEN = "<tool_use_error>";
+/** Так воркер помечает ответ CLI на запуск фоновой задачи: это ещё не результат. */
+const TOOL_LAUNCHED_MARK = "async_launched";
+
+export function isLaunchResult(result: BlockModel | null): boolean {
+  // Сводка приходит с финалом блока и сама по себе не реактивна.
+  return !!result && result.state !== "streaming" && result.summary === TOOL_LAUNCHED_MARK;
+}
 
 export function deliveryLabel(
   state: InputUiState,
@@ -112,8 +120,14 @@ export function toolTiming(
   call: BlockModel,
   result: BlockModel | null,
   working: boolean,
+  background?: BackgroundFact | null,
 ): { running: boolean; startedAt: number; finishedAt: number | null } {
   const startedAt = call.startedAt ?? call.createdAt;
+  if (background) {
+    const running = background.state === "running";
+    return { running, startedAt, finishedAt: running ? null : background.endedAt };
+  }
+  if (isLaunchResult(result)) return toolTiming(call, null, working);
   // Такой вызов воркер придержал до результата: начало в ленте не совпадает с настоящим.
   if (call.approvedBy === "cli_policy" || call.kind === "tool_result")
     return { running: false, startedAt, finishedAt: null };
@@ -264,27 +278,41 @@ const SUBAGENT_END = { done: "Готово", error: "Ошибка", stopped: "П
 
 export type SubagentState = "running" | "done" | "error" | "stopped";
 
+const BACKGROUND_STATE: Record<string, SubagentState> = {
+  running: "running",
+  completed: "done",
+  failed: "error",
+  stopped: "stopped",
+};
+
 export function subagentCopy(
   call: BlockModel,
   children: BlockModel[],
-  end: { result: BlockModel | null; working: boolean },
+  end: {
+    result: BlockModel | null;
+    working: boolean;
+    background?: BackgroundFact | null;
+  },
 ): { title: string; detail: string; state: SubagentState } {
   const own = children.filter((child) => !isMainAgent(child.agent));
   const lead = own[0];
   const action = own.findLast((child) => child.toolName) ?? null;
   const model = lead?.model || call.model;
-  const running = toolTiming(call, end.result, end.working).running;
-  const state: SubagentState = toolFailed(end.result)
-    ? "error"
-    : running
-      ? "running"
-      : end.result
-        ? "done"
-        : "stopped";
+  const running = toolTiming(call, end.result, end.working, end.background).running;
+  const result = isLaunchResult(end.result) ? null : end.result;
+  const state: SubagentState = end.background
+    ? BACKGROUND_STATE[end.background.state] ?? "stopped"
+    : toolFailed(result)
+      ? "error"
+      : running
+        ? "running"
+        : result
+          ? "done"
+          : "stopped";
   const doing = action ? toolTitle(action) : null;
   const object = doing?.argument || doing?.name || "";
   const task = toolTitle(call).argument;
-  const verb = subagentVerb(action?.toolName ?? (lead ? null : call.toolName));
+  const verb = subagentVerb(action?.toolName ?? (lead || end.background ? null : call.toolName));
   const line =
     state === "running"
       ? [verb, object].filter((part) => part.length > 0).join(" ")

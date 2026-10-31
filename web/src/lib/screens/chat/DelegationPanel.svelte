@@ -2,7 +2,7 @@
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import { onMount, type Component } from 'svelte';
 	import { SvelteMap } from 'svelte/reactivity';
-	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import { delegation } from '#lib/api/client.js';
 	import { modelLabel } from '#lib/format/labels.js';
 	import { buildDelegation, type DelegationNode, subagentVerb } from '#lib/stores/delegation.js';
@@ -28,7 +28,13 @@
 		}
 	});
 
-	const liveNodes = $derived(buildDelegation(chat.blocks.values()));
+	const claudeCode = $derived((chat.detail?.harness as { id?: string } | undefined)?.id === 'claude_code');
+	const liveNodes = $derived(
+		buildDelegation(
+			chat.blocks.values(),
+			claudeCode ? { background: chat.backgroundFacts, live: executionLive(chat.execution) } : undefined
+		)
+	);
 
 	const combinedNodes = $derived.by(() => {
 		const map = new SvelteMap<string, DelegationNode>();
@@ -53,8 +59,9 @@
 	function getNodeVerb(node: DelegationNode): string {
 		if (node.state === 'waiting') return 'Ждёт';
 		if (node.state === 'done' || node.state === 'final' || node.state === 'completed') return 'Готово';
-		if (node.state === 'aborted' || node.state === 'failed' || node.state === 'error') return 'Прервано';
-		if (node.tool_name) return subagentVerb(node.tool_name);
+		if (node.state === 'failed' || node.state === 'error') return 'Ошибка';
+		if (node.state === 'aborted' || node.state === 'stopped' || node.state === 'incomplete') return 'Прервано';
+		if (node.tool_name && node.tool_name !== 'Agent' && node.tool_name !== 'Task') return subagentVerb(node.tool_name);
 		return 'Работает';
 	}
 
@@ -62,7 +69,7 @@
 		const verb = getNodeVerb(node);
 		if (verb === 'Ждёт') return 'warning';
 		if (verb === 'Готово') return 'muted';
-		if (verb === 'Прервано') return 'danger';
+		if (verb === 'Прервано' || verb === 'Ошибка') return 'danger';
 		return 'accent';
 	}
 </script>

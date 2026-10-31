@@ -28,8 +28,8 @@ export class BackgroundModel {
 	}
 
 	/** Задачи по блокам вызовов. Живой строки у остановившегося исполнения нет: процесса уже нет. */
-	facts(live: boolean): Map<string, BackgroundFact> {
-		const facts = new Map<string, BackgroundFact>();
+	facts(live: boolean): ReadonlyMap<string, BackgroundFact> {
+		const facts = new SvelteMap<string, BackgroundFact>();
 		for (const task of this.tasks.values()) {
 			if (!task.block_id) continue;
 			const ended = task.ended_at ? Date.parse(task.ended_at) : null;

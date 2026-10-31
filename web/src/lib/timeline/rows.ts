@@ -1,3 +1,4 @@
+import type { BackgroundFact } from "#lib/stores/background.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { fmt } from "#lib/format/ru.js";
 import { isDocked } from "#lib/stores/requests.svelte.js";
@@ -24,6 +25,8 @@ export interface BlockLinks {
   result(id: string): BlockModel | null;
   /** Родитель с учётом результатов субагента из старых строк, где вызова нет. */
   parent(block: BlockModel): string | null;
+  /** Фоновая задача вызова, если он её запустил. */
+  background(id: string): BackgroundFact | null;
 }
 
 const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
@@ -32,7 +35,10 @@ export function isSubagentCall(block: BlockModel): boolean {
   return block.kind === "tool_call" && SUBAGENT_TOOLS.has(block.toolName ?? "");
 }
 
-export function blockLinks(entries: TimelineEntry[]): BlockLinks {
+export function blockLinks(
+  entries: TimelineEntry[],
+  background?: ReadonlyMap<string, BackgroundFact>,
+): BlockLinks {
   const children = new Map<string, BlockModel[]>();
   const adopted = new Map<string, string>();
   const calls = new Map<string | null, string>();
@@ -61,6 +67,7 @@ export function blockLinks(entries: TimelineEntry[]): BlockLinks {
       return own.find((child) => isMainAgent(child.agent)) ?? own[0] ?? null;
     },
     parent: (block) => block.parentId ?? adopted.get(block.id) ?? null,
+    background: (id) => background?.get(id) ?? null,
   };
 }
 

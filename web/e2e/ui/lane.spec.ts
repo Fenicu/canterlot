@@ -105,6 +105,41 @@ test('desktop_delegation_panel_lists_nodes_with_state_labels_and_selects_a_lane'
 	await expect(panel.locator('.selected-lane .live-line')).toBeVisible();
 });
 
+test('delegation_shows_a_background_subagent_as_working_until_its_task_ends', async ({ page }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedFirstDialog(api);
+	await installChatRoutes(page, hub, api);
+	const rootBlockId = FIRST_DIALOG.find((item) => item.kind === 'block' && item.tool_name === 'Agent')?.id ?? '';
+	const detail = api.details.get(id);
+	if (detail) {
+		detail.harness = { id: 'claude_code', title: 'Claude Code', provider: 'claude' };
+		detail.execution = { state: 'running' };
+	}
+	const task = {
+		task_id: 'a1',
+		kind: 'agent',
+		block_id: rootBlockId,
+		parent_task_id: null,
+		description: 'фоном',
+		started_at: '2026-10-28T12:00:00.000Z'
+	};
+	api.pushBackground(id, [{ ...task, state: 'running', ended_at: null }]);
+	await page.setViewportSize({ width: 1440, height: 900 });
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-layout="desktop"]')).toBeVisible();
+	await page.getByRole('button', { name: 'Делегирование' }).click();
+	const node = page.locator('[data-pane="lane"] .tree-node').first();
+	await expect(node.getByText('Работает')).toBeVisible();
+
+	await page.goto(`/c/${id}/lane/${rootBlockId}`);
+	await expect(page.locator('.live-dot')).toHaveClass(/active/);
+
+	api.pushBackground(id, [{ ...task, state: 'stopped', ended_at: '2026-10-28T12:02:00.000Z' }]);
+	await expect(page.locator('.live-line')).toContainText('Прервано');
+	await expect(page.locator('.live-dot')).not.toHaveClass(/active/);
+});
+
 test('desktop_pane_opens_and_closes_without_losing_chat_scroll', async ({ page }) => {
 	const hub = new FakeHub();
 	const api = new FakeHubApi(hub);

@@ -329,6 +329,73 @@ test('subagent_row_links_to_the_lane_and_shows_live_status', async ({ page }) =>
   await expect(link.locator('.status')).toHaveAttribute('data-state', 'running');
 });
 
+function backgroundTask(id: string, blockId: string, kind: string, state: string) {
+  return {
+    task_id: id, kind, block_id: blockId, parent_task_id: null, description: 'фоном', state,
+    started_at: AT, ended_at: state === 'running' ? null : '2026-10-28T12:01:30.000Z'
+  };
+}
+
+function launchResult(api: FakeHubApi, parent: string, seq: string, text: string): HistoryBlock {
+  const block = textBlock(api, text, seq);
+  block.block_kind = 'tool_result';
+  block.parent_block_id = parent;
+  block.summary = 'async_launched';
+  block.agent = 'orchestrator';
+  return block;
+}
+
+test('background_subagent_works_until_its_task_ends_and_the_header_counts_it', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  const call = textBlock(api, '{}', '1');
+  call.tool_name = 'Agent';
+  call.block_kind = 'tool_call';
+  call.summary = 'разобрать модуль';
+  call.agent = 'orchestrator';
+  api.histories.set(id, [call, launchResult(api, call.id, '2', 'Async agent launched successfully.')]);
+  api.bindConversation(id);
+  const detail = api.details.get(id);
+  if (detail) {
+    detail.activity = { state: 'idle', evidence: { kind: 'idle', last_turn_at: AT, background_work: 1 }, since: AT };
+    detail.execution = { state: 'running' };
+  }
+  api.pushBackground(id, [backgroundTask('a1', call.id, 'agent', 'running')]);
+  await page.reload();
+  const link = page.getByRole('link', { name: /Субагент/ });
+  await expect(link.locator('.status')).toHaveAttribute('data-state', 'running');
+  await expect(link.locator('.status')).toContainText('Работает');
+  const state = page.locator('.state-chip');
+  await expect(state).toHaveText('Ожидает сообщения · 1 фоновая');
+  await expect(state).toHaveClass(/live/);
+  await expect(state).not.toHaveClass(/sr-only/);
+  await expect(page.locator('form.composer textarea, .composer textarea').first()).toBeEnabled();
+
+  api.pushBackground(id, [backgroundTask('a1', call.id, 'agent', 'completed')]);
+  await expect(link.locator('.status')).toHaveAttribute('data-state', 'done');
+  await expect(link.locator('.status')).toContainText('Готово');
+});
+
+test('background_command_is_a_plain_row_with_a_badge_and_runs_until_its_task_ends', async ({ page }) => {
+  const { api, id } = await boot(page, 0);
+  const call = toolBlock(api, 'sleep 25');
+  call.tool_name = 'Bash';
+  call.summary = 'Bash: sleep 25';
+  api.histories.set(id, [call, launchResult(api, call.id, '2', 'Command running in background with ID: b1')]);
+  api.bindConversation(id);
+  const detail = api.details.get(id);
+  if (detail) detail.execution = { state: 'running' };
+  api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'running')]);
+  await page.reload();
+  const row = page.locator('.tool').filter({ hasText: 'sleep 25' });
+  await expect(row.getByText('Фоном')).toBeVisible();
+  await expect(row.locator('[data-state="running"]')).toBeVisible();
+  await expect(page.getByRole('link', { name: /Субагент/ })).toHaveCount(0);
+
+  api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'failed')]);
+  await expect(row.locator('[data-state="error"]')).toBeVisible();
+  await expect(row.getByText('Фоном')).toBeVisible();
+});
+
 test('user_bubble_marks_follow_input_state', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const states = ['queued', 'on_machine', 'transmitting', 'acceptance_unconfirmed', 'accepted', 'rejected'] as const;

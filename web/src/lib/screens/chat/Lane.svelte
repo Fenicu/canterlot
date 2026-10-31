@@ -25,7 +25,7 @@
 	const blocks = $derived([...chat.blocks.values()]);
 	const machineName = $derived((chat.detail?.machine as { name?: string })?.name || 'workstation');
 
-	const links = $derived(blockLinks(chat.timeline.entries));
+	const links = $derived(blockLinks(chat.timeline.entries, chat.backgroundFacts));
 	const working = $derived(chat.activity?.state === 'working' || chat.activity?.state === 'waiting_for_user');
 	const model = $derived(
 		laneModel(blocks, rootBlockId, {
@@ -33,6 +33,7 @@
 			children: links.children(rootBlockId),
 			harness: chat.detail?.harness as { title?: string; provider?: string } | undefined,
 			result: links.result(rootBlockId),
+			background: links.background(rootBlockId),
 			working
 		})
 	);

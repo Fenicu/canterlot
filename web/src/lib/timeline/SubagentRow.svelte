@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import type { BackgroundFact } from '#lib/stores/background.svelte.js';
   import type { BlockModel } from '#lib/stores/blocks.js';
   import { subagentCopy, toolPillText, toolTiming } from '#lib/timeline/present.js';
   import StatusPill from '#lib/timeline/StatusPill.svelte';
@@ -8,12 +9,21 @@
     call,
     nodes,
     result,
+    background = null,
     working,
     now,
     conversationId
-  }: { call: BlockModel; nodes: BlockModel[]; result: BlockModel | null; working: boolean; now: number; conversationId: string } = $props();
-  const copy = $derived(subagentCopy(call, nodes, { result, working }));
-  const pill = $derived(toolPillText({ ...toolTiming(call, result, working), error: copy.state === 'error', now }));
+  }: {
+    call: BlockModel;
+    nodes: BlockModel[];
+    result: BlockModel | null;
+    background?: BackgroundFact | null;
+    working: boolean;
+    now: number;
+    conversationId: string;
+  } = $props();
+  const copy = $derived(subagentCopy(call, nodes, { result, working, background }));
+  const pill = $derived(toolPillText({ ...toolTiming(call, result, working, background), error: copy.state === 'error', now }));
 </script>
 
 <a class="sub" href={resolve(`/c/${conversationId}/lane/${call.id}` as '/')}>

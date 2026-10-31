@@ -4,7 +4,7 @@ import type { DraftStore } from "#lib/drafts/store.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import { summarizeRun } from "#lib/screens/chat/info.js";
 import { ChatStore, type ChatApi, type HistoryBlock } from "#lib/stores/chat.svelte.js";
-import type { BlockModel } from "#lib/stores/blocks.js";
+import { BlockModel } from "#lib/stores/blocks.js";
 import type { ConnectionManager } from "#lib/sync/connection.js";
 import {
   agentTitle,
@@ -252,5 +252,60 @@ describe("first dialog: failed tool", () => {
   it("output_loses_the_wrapper", () => {
     expect(cleanToolOutput("<tool_use_error>Blocked: standalone sleep 90.</tool_use_error>")).toBe("Blocked: standalone sleep 90.");
     expect(cleanToolOutput("plain <b>text</b>")).toBe("plain <b>text</b>");
+  });
+});
+
+describe("background subagent and command", () => {
+  const launched = (call: BlockModel): BlockModel => {
+    const result = new BlockModel("launch", "tool_result");
+    result.parentId = call.id;
+    result.summary = "async_launched";
+    result.state = "final";
+    result.createdAt = 1;
+    result.finishedAt = 1;
+    return result;
+  };
+  const agentCall = (): BlockModel => {
+    const call = new BlockModel("call", "tool_call");
+    call.toolName = "Agent";
+    call.state = "final";
+    call.startedAt = 1000;
+    call.finishedAt = 1000;
+    call.createdAt = 1000;
+    return call;
+  };
+  const running = { state: "running", kind: "agent", endedAt: null };
+
+  it("launch_result_is_not_the_result_of_the_call", () => {
+    const call = agentCall();
+    const timing = toolTiming(call, launched(call), false, running);
+    expect(timing).toMatchObject({ running: true, finishedAt: null });
+    const copy = subagentCopy(call, [], { result: launched(call), working: false, background: running });
+    expect(copy.state).toBe("running");
+    expect(copy.detail.startsWith("Работает")).toBe(true);
+  });
+
+  it("launch_result_without_a_task_is_still_not_done", () => {
+    const call = agentCall();
+    expect(toolTiming(call, launched(call), true).running).toBe(true);
+    expect(subagentCopy(call, [], { result: launched(call), working: false }).state).toBe("stopped");
+  });
+
+  it("subagent_ends_by_its_task_with_the_real_duration", () => {
+    const call = agentCall();
+    const end = (state: string) => ({ state, kind: "agent", endedAt: 4000 });
+    for (const [state, word, want] of [
+      ["completed", "Готово", "done"],
+      ["failed", "Ошибка", "error"],
+      ["stopped", "Прервано", "stopped"],
+    ] as const) {
+      const copy = subagentCopy(call, [], { result: launched(call), working: false, background: end(state) });
+      expect(copy.state).toBe(want);
+      expect(copy.detail.startsWith(word)).toBe(true);
+    }
+    expect(toolTiming(call, launched(call), false, end("completed"))).toMatchObject({
+      running: false,
+      finishedAt: 4000,
+    });
   });
 });

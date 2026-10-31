@@ -456,7 +456,11 @@ fn failed_tool_result_is_marked_in_its_summary() {
             _ => None,
         })
         .collect();
-    assert_eq!(marks, [None, None, None, Some("error")]);
+    assert_eq!(
+        marks,
+        [Some("async_launched"), None, None, Some("error")],
+        "the Agent call of this capture ran in the background"
+    );
 }
 
 #[test]
@@ -1178,6 +1182,43 @@ fn wake_turn_after_idle_is_adopted_on_the_last_command() {
 }
 
 #[test]
+fn wake_turn_usage_is_added_to_the_last_run() {
+    let rows = fixtures::replay_fixture_rows("background");
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, &rows);
+    let spent: Vec<u64> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::RunFinished { usage, .. }) => {
+                Some(usage.iter().map(|u| u.output_tokens).sum())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(spent.len(), 4, "two commands and two wake turns");
+    assert!(
+        spent[2..].iter().all(|tokens| *tokens > 0),
+        "a wake turn reports its own spending: {spent:?}"
+    );
+    let last: Value = serde_json::from_str(
+        &rows
+            .iter()
+            .rev()
+            .find(|(_, f)| is_wake_result(f))
+            .unwrap()
+            .1,
+    )
+    .unwrap();
+    assert_eq!(
+        spent.iter().sum::<u64>(),
+        last["modelUsage"]["claude-haiku-5-5"]["outputTokens"]
+            .as_u64()
+            .unwrap(),
+        "nothing lost, nothing counted twice"
+    );
+}
+
+#[test]
 fn wake_turn_result_with_origin_task_notification_has_no_command() {
     let mut parser = Parser::new();
     let parsed = parser.feed(
@@ -1428,4 +1469,58 @@ fn wake_turn_is_reported_while_it_is_open() {
     assert!(flags.contains(&true));
     assert_eq!(flags.last(), Some(&false), "closed with the last wake turn");
     assert!(!parser.wake_turn_open());
+}
+
+fn launch_marks(rows: &[(String, String)]) -> Vec<Option<String>> {
+    let mut parser = Parser::new();
+    let parsed = replay_rows(&mut parser, rows);
+    let results: Vec<Uuid> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolResult,
+                agent,
+                ..
+            }) if agent == "orchestrator" => Some(*block_id),
+            _ => None,
+        })
+        .collect();
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockFinal {
+                block_id, summary, ..
+            }) if results.contains(block_id) => Some(summary.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn launch_tool_result_is_marked_async_launched() {
+    let marks = launch_marks(&fixtures::replay_fixture_rows("background"));
+    assert_eq!(
+        marks,
+        vec![
+            Some("async_launched".to_owned()),
+            Some("async_launched".to_owned())
+        ],
+        "the agent and the bash launch, nothing else in the main lane"
+    );
+}
+
+#[test]
+fn real_tool_result_of_a_synchronous_agent_is_not_marked() {
+    let mut parser = Parser::new();
+    let parsed = parser.feed(
+        &json!({"type":"user","tool_use_result":{"status":"completed"},"message":{"role":"user","content":[
+            {"type":"tool_result","tool_use_id":"t1","content":"done"}
+        ]}})
+        .to_string(),
+    );
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::BlockFinal { summary: None, .. })
+    )));
 }

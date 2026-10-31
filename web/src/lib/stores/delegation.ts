@@ -1,3 +1,4 @@
+import type { BackgroundFact } from './background.svelte';
 import type { BlockModel } from './blocks';
 
 export interface DelegationNode {
@@ -20,11 +21,40 @@ const DELEGATING = new Set(['agent', 'task', 'spawn_agent', 'subagent', 'delegat
 
 const hubState = (state: string): string => (state === 'streaming' ? 'running' : state === 'final' ? 'done' : 'incomplete');
 
+/** Как у хаба: вызов субагента Claude Code финален сразу, его состояние читается отсюда. */
+export interface SubagentFacts {
+	background: ReadonlyMap<string, BackgroundFact>;
+	/** Исполнение живо: вызов без результата ещё работает. */
+	live: boolean;
+}
+
+const TASK_STATE: Record<string, string> = { completed: 'done', failed: 'failed', stopped: 'stopped' };
+
+function subagentState(block: BlockModel, result: BlockModel | undefined, facts: SubagentFacts): { state: string; finishedAt: number | null } {
+	const task = facts.background.get(block.id);
+	if (task) {
+		if (task.state === 'running') return { state: 'running', finishedAt: null };
+		return { state: TASK_STATE[task.state] ?? 'stopped', finishedAt: task.endedAt ?? block.finishedAt };
+	}
+	if (result) {
+		if (result.state === 'streaming') return { state: 'running', finishedAt: null };
+		const state = result.state !== 'final' ? 'incomplete' : result.summary === TOOL_FAILED ? 'failed' : 'done';
+		return { state, finishedAt: result.finishedAt ?? block.finishedAt };
+	}
+	if (hubState(block.state) === 'incomplete' || !facts.live) return { state: 'incomplete', finishedAt: block.finishedAt };
+	return { state: 'running', finishedAt: null };
+}
+
+const SUBAGENT_CALLS = new Set(['agent', 'task']);
+const TOOL_FAILED = 'error';
+const TOOL_LAUNCHED = 'async_launched';
+
 /**
  * Вызовы субагентов по блокам ленты, как их отдаёт хаб: вызов делегирования, имя и модель
- * берутся у первого дочернего блока, состояние приводится к running / done / incomplete.
+ * берутся у первого дочернего блока. Без `facts` состояние вызова приводится к running / done /
+ * incomplete, с ними у вызовов Agent и Task идёт от фоновой задачи и настоящего результата.
  */
-export function buildDelegation(blocks: Iterable<BlockModel>): DelegationNode[] {
+export function buildDelegation(blocks: Iterable<BlockModel>, facts?: SubagentFacts): DelegationNode[] {
 	const list = [...blocks];
 	const children = new Map<string, BlockModel[]>();
 	for (const block of list) {
@@ -46,13 +76,17 @@ export function buildDelegation(blocks: Iterable<BlockModel>): DelegationNode[] 
 		)
 		.sort(order)
 		.map((block) => {
-			const first = [...(children.get(block.id) ?? [])].sort(order)[0];
+			const own = [...(children.get(block.id) ?? [])].sort(order);
+			const first = own[0];
+			const result = own.findLast((child) => child.kind === 'tool_result' && child.summary !== TOOL_LAUNCHED);
+			const tracked = facts && SUBAGENT_CALLS.has((block.toolName ?? '').toLowerCase());
+			const end = tracked ? subagentState(block, result, facts) : { state: hubState(block.state), finishedAt: block.finishedAt };
 			return {
 				block_id: block.id,
 				parent_block_id: block.parentId,
 				started_at: iso(block.startedAt) ?? new Date(block.createdAt).toISOString(),
-				finished_at: iso(block.finishedAt),
-				state: hubState(block.state),
+				finished_at: iso(end.finishedAt),
+				state: end.state,
 				tool_name: block.toolName,
 				task: block.summary,
 				subagent: first ? { name: first.agent, model: first.model } : null

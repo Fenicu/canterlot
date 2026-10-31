@@ -77,9 +77,9 @@
         <TextBlock block={{ id: block.id, text: handBackText(block.text), state: 'final' }} />
       </section>
     {:else if isSubagentCall(block)}
-      <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} {working} {now} {conversationId} />
+      <SubagentRow call={block} nodes={links.children(block.id)} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {conversationId} />
     {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
+      <ToolBlock {block} result={links.result(block.id)} background={links.background(block.id)} {working} {now} {load} open={folds.isOpen(block.id)} onToggle={() => folds.toggle(block.id)} />
     {:else if block.kind === 'warning' || block.kind === 'error'}
       <NoticeBlock {block} />
     {:else if block.kind === 'reasoning'}

@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Component } from 'svelte';
+  import type { BackgroundFact } from '#lib/stores/background.svelte.js';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { stripAnsi } from '#lib/render/ansi.js';
   import { callCaption, firstLine, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
@@ -9,6 +10,7 @@
   let {
     block,
     result = null,
+    background = null,
     working = false,
     now,
     open,
@@ -17,6 +19,7 @@
   }: {
     block: BlockModel;
     result?: BlockModel | null;
+    background?: BackgroundFact | null;
     working?: boolean;
     now: number;
     open: boolean;
@@ -39,9 +42,9 @@
   // Результат без своего вызова: имени нет, строку объясняет начало вывода.
   const detail = $derived(title.name ? [title.server, label.text].filter(Boolean).join(' · ') : firstLine(stripAnsi(block.text)));
   const called = $derived(block.kind === 'tool_call' && block.text.trim().length > 0);
-  const timing = $derived(toolTiming(block, result, working));
+  const timing = $derived(toolTiming(block, result, working, background));
   const running = $derived(timing.running || block.state === 'stale');
-  const error = $derived(toolError(block, result));
+  const error = $derived(toolError(block, result) || background?.state === 'failed');
   const status = $derived(toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
@@ -51,6 +54,7 @@
 <div class="tool">
   <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
+      {#if background}<span class="policy-badge">Фоном</span>{/if}
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}
     {/snippet}
   </StepHead>

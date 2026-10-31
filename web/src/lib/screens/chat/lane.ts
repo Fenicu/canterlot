@@ -1,6 +1,7 @@
+import type { BackgroundFact } from "#lib/stores/background.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { harnessLabel, modelLabel } from "#lib/format/labels.js";
-import { isMainAgent, toolFailed, toolTitle } from "#lib/timeline/present.js";
+import { isLaunchResult, isMainAgent, toolFailed, toolTitle } from "#lib/timeline/present.js";
 
 export interface LaneModelResult {
   title: string;
@@ -20,6 +21,7 @@ export function laneModel(
     harness?: { title?: string; provider?: string } | null;
     /** Результат вызова субагента; пока его нет и ход идёт, субагент работает. */
     result?: BlockModel | null;
+    background?: BackgroundFact | null;
     working?: boolean;
   },
 ): LaneModelResult {
@@ -39,20 +41,22 @@ export function laneModel(
 
   let status = "Готово";
   let running = false;
+  const background = opts?.background ?? null;
+  const result = isLaunchResult(opts?.result ?? null) ? null : (opts?.result ?? null);
 
   if (root) {
     const isStreaming =
       root.state === "streaming" ||
       blocks.some((b) => b.parentId === rootBlockId && b.state === "streaming") ||
-      (opts?.working === true && !opts.result);
+      (background ? background.state === "running" : opts?.working === true && !result);
 
     if (isStreaming) {
       status = "Работает параллельно с основным агентом";
       running = true;
-    } else if (root.state === "incomplete" || root.state === "stale") {
+    } else if (root.state === "incomplete" || root.state === "stale" || background?.state === "stopped") {
       status = "Прервано";
       running = false;
-    } else if (toolFailed(opts?.result ?? null)) {
+    } else if (toolFailed(result) || background?.state === "failed") {
       status = "Ошибка";
       running = false;
     } else {

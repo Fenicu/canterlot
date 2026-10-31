@@ -210,6 +210,10 @@ export class ChatStore {
   /** Сессию удалили, пока чат был открыт: подписка уже закрыта. */
   deleted = $state(false);
   execution = $state<ChatExecution | null>(null);
+  /** Исполнения ещё не знаем сразу после снимка: строки снимка хаб уже привёл к его состоянию. */
+  readonly backgroundFacts = $derived(
+    this.background.facts(this.execution === null || executionLive(this.execution)),
+  );
   activity = $state<Record<string, unknown> | null>(null);
   settings = $state<{
     effective: unknown;

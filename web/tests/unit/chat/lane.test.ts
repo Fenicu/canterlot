@@ -40,4 +40,25 @@ describe("laneModel", () => {
     expect(model.status).toBe("Прервано");
     expect(model.running).toBe(false);
   });
+
+  test("lane_of_a_background_subagent_follows_its_task", () => {
+    const root = new BlockModel("agent-tool-1", "tool_call");
+    root.toolName = "Agent";
+    root.state = "final";
+    const launch = new BlockModel("launch-1", "tool_result");
+    launch.parentId = "agent-tool-1";
+    launch.summary = "async_launched";
+    launch.state = "final";
+    const blocks = [root, launch];
+    const fact = (state: string) => ({ state, kind: "agent", endedAt: null });
+
+    const running = laneModel(blocks, "agent-tool-1", { result: launch, working: false, background: fact("running") });
+    expect(running.running).toBe(true);
+    const done = laneModel(blocks, "agent-tool-1", { result: launch, working: false, background: fact("completed") });
+    expect([done.running, done.status]).toEqual([false, "Готово"]);
+    const failed = laneModel(blocks, "agent-tool-1", { result: launch, working: false, background: fact("failed") });
+    expect(failed.status).toBe("Ошибка");
+    const stopped = laneModel(blocks, "agent-tool-1", { result: launch, working: false, background: fact("stopped") });
+    expect(stopped.status).toBe("Прервано");
+  });
 });

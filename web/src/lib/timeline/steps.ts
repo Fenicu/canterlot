@@ -49,7 +49,7 @@ function isStep(entry: TimelineEntry, ctx: FoldContext): entry is BlockEntry {
 function running(block: BlockModel, ctx: FoldContext): boolean {
   if (block.state === "streaming" || block.state === "stale") return true;
   if (block.kind === "reasoning") return false;
-  return toolTiming(block, ctx.links.result(block.id), ctx.working).running;
+  return toolTiming(block, ctx.links.result(block.id), ctx.working, ctx.links.background(block.id)).running;
 }
 
 function stepName(block: BlockModel): string {
