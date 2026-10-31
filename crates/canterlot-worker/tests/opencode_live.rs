@@ -958,7 +958,10 @@ async fn real_mode_change_applies_from_the_next_input() {
         ..Default::default()
     });
     session.turn(&third).await;
-    assert!(offered(&stub.requests()[2]).contains(&"shell".to_owned()));
+    let tools = offered(&stub.requests()[2]);
+    for tool in ["shell", "question", "execute"] {
+        assert!(tools.contains(&tool.to_owned()), "{tools:?}");
+    }
     session.close().await;
 }
 

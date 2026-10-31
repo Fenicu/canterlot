@@ -8,7 +8,7 @@
 - **[И: путь]** прочитано в исходниках `anomalyco/opencode`, коммит `68bc26b7da1990ce10ffecfbc1e09eb13aa5d824` (тег `v2.1.4`), пути от корня репозитория.
 - **[Н]** не проверено: предположение или вывод без прямого доказательства.
 
-Итог. Режим интеграции: `opencode serve --stdio --port 0` плюс HTTP и `/api/event`. Запуск, доставка, поток, инструменты, разрешения, вопросы, субагенты, туду, картинки, компакция, прерывание и сверка после падения подтверждены реальным бинарником 2.1.4 с локальной заглушкой OpenAI-совместимого провайдера. Поведение настоящего провайдера не подтверждено: без учётных данных все три попытки на бесплатных моделях вернули `429 FreeUsageLimitError` (раздел 8). Требование к дизайну: своя база данных, не база владельца (раздел 6, риск 1).
+Итог. Режим интеграции: `opencode serve --stdio --port 0` плюс HTTP и `/api/event`. Запуск, доставка, поток, инструменты, разрешения, вопросы, субагенты, туду, картинки, компакция, прерывание и сверка после падения подтверждены реальным бинарником 2.1.4 с локальной заглушкой OpenAI-совместимого провайдера, а затем настоящей моделью на подписке Go (раздел 9). Не проверены на настоящем провайдере только отказы по квоте и `Retry-After` и всё, что требует заполненного окна. Требование к дизайну: своя база данных, не база владельца (раздел 6, риск 1).
 
 ## 1. Версия и стенд
 
@@ -22,6 +22,7 @@
 | Учётные данные | нет: `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_CACHE_HOME`, `HOME` и `TMPDIR` каждого прогона указывали во временный каталог |
 | Провайдер | локальная заглушка OpenAI Chat Completions (SSE, сценарии, вызовы инструментов, отказы) на `127.0.0.1` |
 | Запросы к внешним моделям | 3, все отказ `429 FreeUsageLimitError`, ни токена не потрачено (в evidence последние два); каталог `https://models.opencode.ai` читался без учётных данных |
+| Живой смоук | раздел 9: `opencode-go/muse-spark-1.3-contributor`, вход владельца в базу canterlot |
 
 Данные владельца. Логи и база `~/.local/share/opencode/` читались только для раздела 5.3: логи поиском по тексту ошибки, база в режиме `immutable`, только типы и числа без содержимого сообщений. `auth.json` и таблицы учётных данных не открывались.
 
@@ -91,7 +92,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 | Прерывание | PASS | `POST .../interrupt`, `session.execution.interrupted {reason:"user"}` за 25 мс | `interrupt.jsonl` | Фоновые shell выживают, снимаются `DELETE /api/shell/{id}` |
 | Возобновление | PASS | Новый процесс на той же базе, тот же `ses_...` | `resume.jsonl`, `crash.jsonl` | Подвисший инструмент закрывается только следующей работой |
 | Доказуемая доставка | PASS | Ответ 200 с тем же `id` после записи в `session_inbox`; повтор идемпотентен | `delivery_ack.jsonl` | `synchronous=NORMAL`: выдержит падение процесса, сбой питания не проверен |
-| Отказ внешнего сервиса | PASS (на заглушке) | `session.retry.scheduled`, `session.step.failed`, `session.execution.failed` с типом ошибки | `service_failure.jsonl`, `real_free_model.jsonl` | Настоящий провайдер проверен только на 429 |
+| Отказ внешнего сервиса | PASS | `session.retry.scheduled`, `session.step.failed`, `session.execution.failed` с типом ошибки | `service_failure.jsonl`, `real_free_model.jsonl`, `live/invalid_request_stuck.jsonl`, `live/auth.jsonl` | На настоящем провайдере проверены 401, 400 и 429 бесплатных моделей; 429 квоты Go только на заглушке |
 | Фоновые работы | PASS | `shell {background:true}`, фоновый `subagent`; `GET /api/shell`, `DELETE /api/shell/{id}` | `interrupt.jsonl`, `lifecycle.jsonl` | Завершение и снятие будят сессию отдельным запуском (раздел 5.1) |
 | Replay потока событий | **FAIL** | `/api/event` без replay; `/log` на CLI пуст | `reconnect.jsonl` | Восстановление только по проекциям (раздел 4.5) |
 
@@ -154,7 +155,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 - `GET /api/event` отдаёт события всех локаций сервера, включая дочерние сессии; первым идёт `server.connected`, каждые 15 с `: heartbeat`. [Ж: start_stream.jsonl] [И: packages/server/src/handlers/event.ts:21]
 - Устойчивые события несут `durable:{aggregateID, seq, version}`, `seq` растёт в пределах сессии. Эфемерные (`*.delta`, `session.tool.progress`, `session.usage.updated`, `permission.*`, `form.*`, `shell.*`) номера не имеют. [Ж: start_stream.jsonl] [И: packages/schema/src/session-event.ts]
 - **Replay нет.** `Last-Event-ID` игнорируется. [Ж: delivery_console.jsonl] `/api/experimental/session/{id}/log` на сервере CLI возвращает только `log.synced {seq}`, ни одного события, в том числе с `follow=true`: шина работает с `persist=false`, а CLI параметр не передаёт. Значение `true` включено только в сборке для workerd. [Ж: reconnect.jsonl] [И: packages/core/src/bus.ts:208, packages/server/src/workerd.ts:69, packages/cli/src/server-process.ts] Таблица `event` в рабочей базе владельца пуста, что согласуется с этим.
-- Отстающий подписчик отключается при переполнении очереди в 4096 кадров, остальные продолжают. [И: specs/v2/event-stream-architecture.md] Вживую не проверялось. [Н]
+- Отстающий подписчик отключается при переполнении очереди в 4096 кадров, остальные продолжают. [И: specs/v2/event-stream-architecture.md] Вживую не проверялось: `shell` кадров не шлёт, на ход приходится несколько десятков дельт. [Н]
 - Восстановление после разрыва: подписаться заново **раньше** чтения, затем снять проекции `GET .../message`, `.../inbox`, `.../permission`, `.../form`, `/api/session/active`. Дельты потеряны, но `session.text.ended` и проекция несут полный текст. [Ж: reconnect.jsonl, crash.jsonl]
 
 Запись `recovery.jsonl` (31.10, срез 13 адаптера, заглушка провайдера): разрыв потока посреди хода и за концом хода, запрос и форма в разрыве, потомок, родившийся в разрыве, EOF stdin и SIGKILL посреди инструмента и текста, ввод в очереди при перезапуске. Что она добавляет. [Ж: recovery.jsonl]
@@ -317,13 +318,15 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 
 - Порог автокомпакции: 85 % окна, не менее 16 тысяч запаса; `compaction.buffer` меняет. [И: packages/core/src/session/compaction.ts:128] Событие `session.compaction.started {reason:"auto"}`, полная история сохраняется, `/context` показывает сокращённую. [Ж: compaction.jsonl]
 - Отказ с текстом из списка переполнения (`prompt is too long` и др.) до первых данных: сам запускает компакцию и повторяет шаг, `step.failed` не публикуется. [Ж: compaction.jsonl] [И: packages/core/src/session/runner/step.ts:158, packages/ai/src/provider-error.ts:18]
-- Ручная: `POST .../compact {id?, delivery?}`, элемент очереди со своим `id`, повтор с тем же `id` возвращает тот же элемент. [И: packages/protocol/src/groups/session.ts, packages/core/src/session/inbox.ts] Шаблон сводки обязателен: иначе `session.compaction.failed`. [Ж: compaction.jsonl] Кадр отказа в записях нет, проверен живым тестом L2 `real_compaction_without_a_summary_is_reported`. [И: packages/core/src/session/compaction.ts]
+- Ручная: `POST .../compact {id?, delivery?}`, элемент очереди со своим `id`, повтор с тем же `id` возвращает тот же элемент. [И: packages/protocol/src/groups/session.ts, packages/core/src/session/inbox.ts] Шаблон сводки обязателен: иначе `session.compaction.failed`. [Ж: compaction.jsonl] Настоящие кадры: успех `session.compaction.delta`, затем `session.compaction.ended {model, text, tokens}`; отказ провайдера `session.compaction.failed {error}` и **`session.execution.succeeded`**, блока ошибки хода нет; нечего сжимать: `compaction.unavailable` «Nothing to compact yet»; прерывание: `session.compaction.failed {aborted, "Compaction cancelled"}`, затем `session.execution.interrupted {user}`. В проекции `{type:"compaction", status:"completed"|"failed", reason, model?, summary?, error?, metadata:{keepID}?}`. [Ж: live/compaction.jsonl, live/invalid_request_stuck.jsonl]
 - Тип ошибки переполнение не отличает: `SessionError` это `provider.invalid-request`, признак `context-overflow` наружу не выходит. [И: packages/core/src/session/to-session-error.ts] Адаптер берёт признак из шаблонов текста версии 2.1.4; второе переполнение после сжатия проверено L2 `real_overflow_after_compaction_exhausts_the_context`.
 - Повторы: до 10, паузы 2, 4, 8, затем по 10 с, `Retry-After` до 15 минут; живьём 6 подряд за 41 с. `specs/v2/session.md:84` с числом 4 устарел. [Ж: service_failure.jsonl] [И: packages/core/src/model-retry.ts:12,27]
 - Не повторяются: `Authentication, QuotaExceeded, ContentPolicy, InvalidRequest, UnsupportedOperation, NoRoute, Timeout`. Неопознанные ошибки **повторяются**. [И: packages/ai/src/provider-error.ts:85]
 - Обрыв потока: `provider.invalid-output`, новый шаг. [Ж: service_failure.jsonl]
 
 Типы `session.execution.failed.error.type`, проверенные вживую: `provider.auth`, `provider.rate-limit`, `provider.quota`, `provider.free-limit`, `provider.internal`, `provider.invalid-request`, `provider.invalid-output`, `provider.content-filter`, `provider.no-route`. [Ж: service_failure.jsonl, real_free_model.jsonl]
+
+На настоящем провайдере: `provider.free-limit` [Ж: real_free_model.jsonl], `provider.auth` 401 «Upstream request failed: Invalid credential» [Ж: live/auth.jsonl], `provider.invalid-request` 400 «Upstream request failed: Model is unavailable.», текст одинаков от попытки к попытке, идентификаторов запроса в нём нет [Ж: live/invalid_request_stuck.jsonl].
 
 ### 5.12. Отказ «invalid parameters»
 
@@ -356,7 +359,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 - После SIGKILL: `session/active` пуст, `outcome` старый (`succeeded`), инструмент в истории `running`. Режим `--stdio` ничего не продолжает сам ни при какой загрузке. Состояние лечит только следующий ввод: `session.tool.failed {aborted, "Tool execution interrupted: shell"}`. [Ж: crash.jsonl] [И: packages/server/src/process.ts:109, packages/core/src/session/execution/restart.ts:58]
 - Закрытие stdout не мешает серверу, после строки готовности он в stdout не пишет. [Ж: lifecycle.jsonl]
 - Холодный старт. `/api/agent` пуст, пока локация не поднята: она ленива и запускается первым запросом, привязанным к локации. Первый `POST /prompt` при этом ждёт готовности и завершается примерно за 0,6 с; сессия успевает отработать с агентом `build`. [Ж: lifecycle.jsonl]
-- Локация выгружается через 60 минут простоя (`experimental.location_idle_timeout`). [И: packages/schema/src/config/experimental.ts] Влияние на длинные паузы не проверено. [Н]
+- Локация выгружается через 60 минут простоя (`experimental.location_idle_timeout`). [И: packages/schema/src/config/experimental.ts] Выгрузка видна кадром `location.shutdown`, `GET /api/debug/location` пуст. Следующий ввод поднимает локацию, модель и MCP работают. [Ж: live/location_shutdown.jsonl, таймаут 20 с]
 - `PUT .../environment` **заменяет** окружение shell целиком, `HOME` пропадает. [Ж: lifecycle.jsonl]
 - Прерывание: основной shell снимается за 25 мс с `status:"killed"`, ход `interrupted {reason:"user"}`, частичный текст сохранён с `finish:"error"`. **Фоновый shell выживает** и продолжает работать; `DELETE /api/shell/{id}` убивает его, повтор идемпотентен, но запускает ответ модели (раздел 5.1). [Ж: interrupt.jsonl, lifecycle.jsonl] Следующий ввод работает сразу.
 - Несколько сессий на сервере поддерживаются, но ввод одной сессии в двух процессах ломает её: см. риск 1.
@@ -367,7 +370,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 
 1. **Общая база небезопасна.** Управляемая служба при старте считает все незакрытые claim осиротевшими. Живой тест: служба поднялась на той же базе, пока сервер `--stdio` выполнял инструмент; она пометила инструмент сбоем, вставила `The server restarted while you were working` и вызвала модель, хотя первый процесс ещё работал. Второй `--stdio` на той же сессии делает то же самое при первом вводе, между процессами нет ни событий, ни общего `session/active`. Разные сессии в двух `--stdio`-процессах на одной базе работают без конфликтов. Значит, canterlot обязан иметь свою базу и выполнять каждую сессию одним процессом. [Ж: shared_db.jsonl] [И: packages/core/src/session/execution/restart.ts:58]
 2. **Учётные данные лежат в той же базе.** Своя база означает отсутствие входов владельца. Для Go и бесплатных моделей хватает `OPENCODE_API_KEY`. [Ж: models.jsonl] OAuth других провайдеров так не перенести. Нужен выбор владельца.
-3. **Нет реального хода модели.** Маршруты Responses и Anthropic, настоящие дельты, `cache.write`, зашифрованные рассуждения не наблюдались. Заглушка подтверждает только контракт сервера OpenCode.
+3. **Настоящая модель проверена на одном маршруте.** Responses у `muse-spark-1.3-contributor` подтверждён вживую (раздел 9); маршрут Anthropic и ненулевой `cache.write` не наблюдались.
 4. **Весь API помечен как экспериментальный**, версия схемы `0.0.1`. Нужны закрепление версии и сверка манифеста схемы.
 5. **Нет replay.** Любой разрыв SSE теряет эфемерные события, включая `permission.asked` и `form.created`. Сверка проекциями обязательна и должна быть протестирована.
 6. **Гонка MCP на старте** не имеет публичного сигнала; ожидание `connected` плюс запас остаётся эвристикой. При промахе инструменты canterlot недоступны на первом шаге.
@@ -394,19 +397,54 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 
 Не проверено:
 
-- ход настоящей модели на любом маршруте (все бесплатные модели 429, ключей нет);
 - настоящее тело `GoUsageLimitError`, `Retry-After` у Go, `codexbar --provider opencodego`;
 - первопричина `invalid parameters` у провайдера;
+- автокомпакция и текст переполнения на настоящем провайдере: окно модели 1 МиБ токенов, цена проверки несоразмерна;
 - переполнение очереди SSE на 4096 кадров;
 - устойчивость к сбою питания при `synchronous=NORMAL`;
 - передача `PATCH permissions` существующим потомкам;
 - `session.move`, форки, откат;
-- компакция с отравленным элементом в сохраняемом хвосте;
-- поведение локации после выгрузки по простою;
+- компакция с отравленным элементом в сохраняемом хвосте: настоящую порчу истории получить не удалось, битая картинка отвергается на приёме;
 - миграция базы между версиями OpenCode;
-- более 4 вопросов в одной форме;
 - блоки потомка, выпавшие в разрыв потока: проекция читается только у корневой сессии, адаптер их не восстанавливает, расход таких шагов не считается.
 
 Закрыто на этапе 2 живыми тестами L2 на заглушке: передача правил потомкам (`PATCH` на каждого, родительский не наследуется), туду у субагента, кадр `session.compaction.failed`, второе переполнение, `provider.quota` с `Retry-After`, `session.retry.scheduled` на настоящем сервере. Что осталось для настоящей модели, перечислено в чек-листе смоука.
 
 Вход в базу canterlot только с `--standalone`: `opencode auth login --standalone`. Без флага команда работает через фоновую службу, а служба на этой базе нарушает ограничение из риска 1. [Ж: `opencode auth login --help` на 2.1.4, запуск с `--standalone` в изолированных каталогах создаёт `opencode.db` и не оставляет процессов]
+
+## 9. Живой смоук (31.10.2026)
+
+Настоящие хаб и воркер коммита этой ветки, одноразовая база, запуск и ввод через `ExecutionManager` и HTTP хаба, PWA через локальную кромку. Модель `opencode-go/muse-spark-1.3-contributor`, усилие `low`. Владелец дал разрешение на этот прогон. Модель учится на вводе, поэтому домашний каталог и конфигурация владельца подменялись одноразовыми, рабочий каталог лежал в `/tmp`, промпты содержали только тестовый текст. Записи: `evidence/opencode/live/`. Потрачено 61 тыс. токенов ввода, 389 тыс. чтения кэша, 6,6 тыс. вывода с рассуждениями, 0,008 USD по каталогу; подписка лимита не показала.
+
+Отличия настоящих кадров от выдуманных и от заглушки:
+
+| Что | Заглушка или выдумка | Настоящее |
+| --- | --- | --- |
+| Маршрут | Chat Completions | Responses: `native.itemId`, `native.responseId`, `reasoningEncryptedContent` |
+| Рассуждения | текст в `reasoning.ended` | обычно `text: ""` и зашифрованный блоб; изредка краткая сводка дельтами. Пустой блок PWA не показывает |
+| Дельты | мелкие | крупные куски, короткий текст приходит одной дельтой |
+| `cache.write` | ожидался ненулевым | всегда 0, кэш виден только в `cache.read` |
+| Запись Go в `/api/model` | состав выдуман | 28-30 записей; у части нет вариантов, усилие `default`; наборы вариантов разные (`none`, `thinking`, `max`) |
+| Период отказа сжатия | `session.execution.failed` | `session.execution.succeeded`: без блока от сжатия причина терялась |
+| Прерывание сжатия | терминал без кадра отказа | `session.compaction.failed {aborted}` раньше терминала |
+| Проекция сжатия | `{id, type, status}` из исходников | подтверждено, плюс `error`, `summary`, `metadata.keepID` |
+| Форма MCP | `kind: "elicitation"` | `kind: "mcp-elicitation"`, `sessionID: "global"`, `metadata.server`, `metadata.message` |
+| Служебные кадры | нет | `location.shutdown`, `models-dev.refreshed`, `shell.deleted`, `session.compaction.delta` |
+
+Найдено и исправлено:
+
+1. **`GET /api/model` отвечает 503 после 5 с ожидания плагинов.** `{"_tag":"ServiceUnavailableError","message":"Location plugins did not finish activating","service":"plugin"}`. Так же ведёт себя `/api/model/default`, `/api/agent` не ждёт. [И: packages/server/src/location.ts] `discover` считал это отказом каталога: после перезапуска воркера OpenCode исчезал из формы, сессии становились «Неизвестный харнесс». На старте исполнения молча терялись варианты, окно контекста и признак картинок. У владельца плагин `superpowers` активируется дольше 5 с. Адаптер ждёт 503 в пределах срока. Проверено на стенде с плагином на 7 с: воркер доступен за 9,9 с, обычный старт 2,6 с, `DISCOVER_WAIT` 20 с менять незачем. [Ж: live/plugins_503.jsonl]
+2. **Ложный `block_checksum_mismatch` у каждого блока без дельт.** Супервизор открывает блок ревизией 1, проверка хаба `block.rev > 0` срабатывала всегда: 34 диагностики на 78 финалов одной сессии. Касалось всех адаптеров, у OpenCode это каждый инструмент.
+3. **Отказ ручного сжатия терял текст провайдера.** Теперь блок ошибки идёт от самого сжатия; отмена ошибкой не считается.
+4. **Чтение истории на возобновлении оставляло фазу `generating`** у сессии, ждущей ввода.
+
+Подтверждено вживую без правок: приём ввода и доказательство `opencode_inbox_admitted`, дельты до PWA, `RunFinished.usage` против `session.step.ended` (`input` без кэша, `output` с рассуждениями), окно контекста из каталога, отсутствие запроса за заголовком (сумма `session.usage.updated` равна сумме шагов), код выхода в строке инструмента, запись при `snapshots: false`, карточка разрешения, `once` без сохранённого правила, отказ с сообщением, `read_only` и смена режима, вопрос, пометка `cli_policy`, MCP `canterlot_limits` и `presets_list`, пресеты (пользовательский без перезапуска, «Как у владельца» с навыками, «Без инструкций» с плагинами и без навыков), дорожка субагента, панель делегирования, отдельная строка расхода, туду с `cancelled`, прерывание и фоновый shell с предупреждением, слитый период с одним терминалом, разрыв потока, перезапуск воркера посреди хода, `kill -9` сервера с возобновлением и снятием сироты, выгрузка локации, картинка на входе и в строке `read`.
+
+Наблюдения для решения владельца:
+
+- **`read_only` и обратно путает модель.** `read_only` снимает `execute`, сервер убирает `core/codemode`; при возврате раздел приходит пользовательским `<system-update>` «Use the `execute` tool ... They cannot be called directly». Инструменты на месте, L2 это подтверждает, но `muse-spark-1.3-contributor` решила, что `shell` и `question` недоступны, и вызывала только `execute`, также на следующем вводе с прямой просьбой. В свежей сессии `owner` всё работает. Запрет `execute` снял бы эффект, но отрезал бы MCP владельца с режимом кода по умолчанию. [Ж: live/code_mode_after_read_only.jsonl]
+- **Первая модель каталога `iceman-contributor-free`**, она же выбор по умолчанию: контрибьюторские модели учатся на вводе.
+- **Блок потомка, открытый к концу родителя, закрывается как неполный.** Фоновый потомок с идущим инструментом даёт это всегда: `tool_call` неполный, результат приходит позже и ложится в ту же дорожку. Запись `live/background_subagent.jsonl`.
+- **Битая картинка отвергается на приёме** (400 из `image.normalize`): ввод `rejected`, в ленте без причины.
+- **После перезапуска исполнения команды ещё нет:** период сжатия не приписать, расход сжатия не попадает в историю, прерывание сжатия через хаб даёт `not_applicable`. В пределах одного исполнения приписывание работает.
+- `canterlot_limits` отвечает «no limit data yet»: источника лимитов нет (решение 6).
