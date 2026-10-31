@@ -27,7 +27,8 @@ use crate::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec, InterruptOutcome,
         ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
-        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent, reaped,
+        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent, held_tool::HeldTools,
+        reaped,
     },
     config::CodexConfig,
     containment::Containment,
@@ -123,7 +124,7 @@ pub struct CodexAdapter {
     limits: LimitTracker,
     broker: Option<Broker>,
     events: VecDeque<AdapterEvent>,
-    hold: Vec<HeldTool>,
+    hold: HeldTools,
     pending_writes: VecDeque<Value>,
     effective: Option<Effective>,
     owner: OwnerDefaults,
@@ -177,15 +178,6 @@ struct PendingTurn {
     settings: Option<SettingsChange>,
 }
 
-/// Начало вызова команды или правки файла ждёт решения о пометке «Разрешено
-/// правилами CLI»: запрос владельцу (без пометки), начало вывода или
-/// завершение без запроса (пометка по политике). События этого блока ждут с ним.
-struct HeldTool {
-    item_id: String,
-    block_id: Uuid,
-    events: Vec<AdapterEvent>,
-}
-
 /// Параметры перезапуска app-server с возобновлением треда.
 struct ResumeLaunch<'a> {
     mode: PermissionMode,
@@ -210,7 +202,7 @@ impl CodexAdapter {
             limits: LimitTracker::default(),
             broker: None,
             events: VecDeque::new(),
-            hold: Vec::new(),
+            hold: HeldTools::default(),
             pending_writes: VecDeque::new(),
             effective: None,
             owner: thread::owner_defaults_from(&Value::Null),
@@ -411,11 +403,7 @@ impl CodexAdapter {
             self.events.push_back(event);
             return;
         }
-        self.hold.push(HeldTool {
-            item_id,
-            block_id,
-            events: vec![event],
-        });
+        self.hold.hold(item_id, block_id, event);
     }
 
     /// Пометка по действующей политике, если по элементу не было запроса владельцу.
@@ -432,26 +420,8 @@ impl CodexAdapter {
         })
     }
 
-    fn release_tool(&mut self, position: usize, mark: Option<&'static str>) {
-        let held = self.hold.remove(position);
-        for mut event in held.events {
-            if let AdapterEvent::BlockStarted { approved_by, .. } = &mut event {
-                *approved_by = mark.map(str::to_owned);
-            }
-            self.events.push_back(event);
-        }
-    }
-
     fn release_item(&mut self, item_id: &str, mark: Option<&'static str>) {
-        if let Some(position) = self.hold.iter().position(|held| held.item_id == item_id) {
-            self.release_tool(position, mark);
-        }
-    }
-
-    fn release_all(&mut self) {
-        while !self.hold.is_empty() {
-            self.release_tool(0, None);
-        }
+        self.hold.release(item_id, mark, &mut self.events);
     }
 
     fn on_server_request(&mut self, id: RpcId, method: &str, params: &Value) {
@@ -606,24 +576,14 @@ impl CodexAdapter {
             parent: Some(parent),
             ..
         } = &event
-            && let Some(position) = self.hold.iter().position(|held| held.block_id == *parent)
+            && let Some(item_id) = self.hold.item_of_block(*parent).map(str::to_owned)
         {
-            let mark = self.cli_mark_for(&self.hold[position].item_id.clone());
-            self.release_tool(position, mark);
+            let mark = self.cli_mark_for(&item_id);
+            self.release_item(&item_id, mark);
         }
-        let block = match &event {
-            AdapterEvent::BlockDelta { block_id, .. }
-            | AdapterEvent::BlockFinal { block_id, .. }
-            | AdapterEvent::Media { block_id, .. } => Some(*block_id),
-            _ => None,
-        };
-        if let Some(block) = block
-            && let Some(held) = self.hold.iter_mut().find(|held| held.block_id == block)
-        {
-            held.events.push(event);
-            return;
+        if let Some(event) = self.hold.capture(event) {
+            self.events.push_back(event);
         }
-        self.events.push_back(event);
     }
 
     fn on_turn_completed(
@@ -642,7 +602,7 @@ impl CodexAdapter {
             self.unconfirmed.remove(&command);
         }
         // Отложенные вызовы уходят без пометки: ход кончился без их завершения.
-        self.release_all();
+        self.hold.release_all(&mut self.events);
         // turn_items живут до следующего хода: при прерывании конец хода приходит
         // раньше списка терминалов (ev/interrupt_cleanup.jsonl:34-37).
         self.completed_status.clear();

@@ -8,6 +8,7 @@ pub mod canterlot_mcp;
 pub mod claude_code;
 pub mod cli_version;
 pub mod codex;
+pub mod held_tool;
 pub mod limit_note;
 pub mod opencode;
 #[cfg(feature = "synthetic-adapter")]
