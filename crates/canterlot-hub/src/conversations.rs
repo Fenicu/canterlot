@@ -1328,8 +1328,10 @@ pub async fn change_settings(
         let effort: String = pending.get("effort").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("effort")?);
         let permission: String = pending.get("permission_mode").and_then(Value::as_str).map(str::to_owned).unwrap_or(row.try_get("permission_mode")?);
         let models: Option<Value> = row.try_get("models")?;
-        let m = models.as_ref().and_then(Value::as_array).and_then(|v| v.iter().find(|v| v["id"] == model)).ok_or(SettingsError::ModelUnknown)?;
-        if !m["efforts"].as_array().is_some_and(|v| v.iter().any(|v| v == &effort)) { return Err(SettingsError::EffortNotAllowed); }
+        let listed = models.as_ref().and_then(Value::as_array).and_then(|v| v.iter().find(|v| v["id"] == model));
+        // Модель уже убрана из каталога, но сессия на ней живёт: выбрать её заново нельзя, менять остальное можно.
+        if listed.is_none() && pending.get("model").is_some() { return Err(SettingsError::ModelUnknown); }
+        if let Some(m) = listed && !m["efforts"].as_array().is_some_and(|v| v.iter().any(|v| v == &effort)) { return Err(SettingsError::EffortNotAllowed); }
         let modes: Option<Value> = row.try_get("permission_modes")?;
         if (pending.get("permission_mode").is_some() || !permission.is_empty()) && !modes.as_ref().and_then(Value::as_array).is_some_and(|v| v.iter().any(|v| v == &permission)) { return Err(SettingsError::PermissionModeUnknown); }
         let live = executions::live(conn, id).await?.is_some();

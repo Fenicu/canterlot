@@ -80,6 +80,7 @@
   --caret-width: 2px;
   --caret-height: 1em;
   --icon: 20px;
+  --icon-hang: calc((var(--icon) - var(--target)) / 2);
   --icon-small: 16px;
   --handle-width: 32px;
   --handle-height: 4px;

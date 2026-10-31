@@ -68,6 +68,18 @@ function parseAndValidateHtml(html: string) {
   }
 }
 
+describe('ordered list numbering', () => {
+  test('list_keeps_the_number_it_starts_from', () => {
+    const md = createMarkdown();
+    expect(md.render('3. x')).toContain('<ol start="3">');
+    expect(md.render('2. Каталог `/tmp` создан.')).toContain('<ol start="2">');
+  });
+
+  test('list_from_one_has_no_start_attribute', () => {
+    expect(createMarkdown().render('1. x')).toContain('<ol>');
+  });
+});
+
 describe('markdown and xss security', () => {
   const xssCorpus = [
     // 1-5: Classic script and image handlers

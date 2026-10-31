@@ -22,7 +22,7 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const summary = $derived(info ? summarizeRun(info) : null);
+	const summary = $derived(info ? summarizeRun(info, chat.detail?.harness as { title?: string; provider?: string } | undefined) : null);
 
 	// Collect blocks for export that belong to this run
 	const runBlocks = $derived.by(() => {

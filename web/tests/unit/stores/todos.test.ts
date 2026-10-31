@@ -99,6 +99,20 @@ describe("stores/todos", () => {
   });
 });
 
+describe("chat store: execution", () => {
+  it("state_change_keeps_the_execution_id_of_the_snapshot", () => {
+    const chat = chatOf();
+    const id = "00000000-0000-4000-8000-0000000000e1";
+    chat.execution = { execution_id: id, state: "starting", generation: 2, created_at: "2026-10-28T12:00:00.000Z" };
+    const payload = { state: "running", generation: 2, outcome: null };
+    chat.applier.applyEvents([
+      { event: { ...ev("execution_state_changed", payload, "7"), execution_id: id } as HubEvent, overlap: false },
+    ]);
+    expect(chat.execution?.execution_id).toBe(id);
+    expect(chat.execution?.state).toBe("running");
+  });
+});
+
 describe("chat store: todo_updated", () => {
   it("event_updates_the_lane_in_place", () => {
     const chat = chatOf();

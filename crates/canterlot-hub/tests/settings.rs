@@ -36,6 +36,48 @@ async fn unsupported_setting_returns_422_with_reason(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_on_a_model_gone_from_the_catalog_keeps_its_other_settings_open(pool: PgPool) {
+    let (deps, _dir) =
+        testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
+    let owner = deps.installation.owner_id;
+    let machine = Uuid::now_v7();
+    sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
+        .bind(machine)
+        .bind(owner)
+        .execute(&pool)
+        .await
+        .unwrap();
+    testkit::seed_catalog(&pool, machine).await;
+    let conversation = testkit::seed_conversation(&pool, owner, machine).await;
+    sqlx::query("update conversations set model='opus',effort='high' where id=$1")
+        .bind(conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
+    let path = format!("/api/v1/conversations/{conversation}/settings");
+    let kept = client
+        .send(
+            Method::PATCH,
+            &path,
+            Some("effort"),
+            Some(json!({"effort":"low"})),
+        )
+        .await;
+    assert_eq!(kept.status, 200, "{}", String::from_utf8_lossy(&kept.body));
+    let gone = client
+        .send(
+            Method::PATCH,
+            &path,
+            Some("model"),
+            Some(json!({"model":"sonnet"})),
+        )
+        .await;
+    assert_eq!(gone.status, 422);
+    assert_eq!(gone.json::<Value>()["error"]["code"], "model_unknown");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn pending_settings_are_visible_in_detail_and_event(pool: PgPool) {
     let (deps, _dir) =
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;

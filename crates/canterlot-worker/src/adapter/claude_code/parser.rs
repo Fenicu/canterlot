@@ -5,13 +5,17 @@
 //! are `Ignored`, lines that are not JSON become an `unparsed_line`
 //! diagnostic. Partial tool JSON stays buffered until `content_block_stop`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
 use super::super::{AdapterEvent, BlockKind, ModelUsage, Phase, TodoItem, TodoStatus};
 
 /// Summary of a tool call: tool name plus the identifying argument.
 const TOOL_CALL_SUMMARY_LIMIT: usize = 120;
+
+/// Сводка результата, завершившегося ошибкой: у результата своей сводки нет, отметка
+/// доходит до ленты без новых полей в протоколе, журнале и истории.
+const TOOL_FAILED_SUMMARY: &str = "error";
 
 /// One open content block, keyed by stream index.
 struct OpenBlock {
@@ -206,6 +210,8 @@ pub struct Parser {
     blocks: HashMap<u64, OpenBlock>,
     tool_blocks: HashMap<String, Uuid>,
     tool_agents: HashMap<String, String>,
+    /// Сообщения субагента, пришедшие потоком: их целый кадр ничего нового не несёт.
+    streamed_messages: HashSet<String>,
     assembler: ToolInputAssembler,
     last_usage: Option<MessageUsage>,
 }
@@ -227,6 +233,7 @@ impl Parser {
             blocks: HashMap::new(),
             tool_blocks: HashMap::new(),
             tool_agents: HashMap::new(),
+            streamed_messages: HashSet::new(),
             assembler: ToolInputAssembler::default(),
             last_usage: None,
         }
@@ -240,6 +247,7 @@ impl Parser {
         self.prev_usage.clear();
         self.tool_blocks.clear();
         self.tool_agents.clear();
+        self.streamed_messages.clear();
         self.blocks.clear();
     }
 
@@ -432,6 +440,13 @@ impl Parser {
         match event_type {
             Some("message_start") => {
                 let message = event.and_then(|event| event.get("message"));
+                if parent.is_some()
+                    && let Some(id) = message
+                        .and_then(|message| message.get("id"))
+                        .and_then(serde_json::Value::as_str)
+                {
+                    self.streamed_messages.insert(id.to_owned());
+                }
                 self.note_model(
                     message
                         .and_then(|message| message.get("model"))
@@ -586,24 +601,13 @@ impl Parser {
                         let tool_name = block.tool_name.unwrap_or_default();
                         if let Some((_, assembled)) = self.assembler.stop(index) {
                             match assembled.input {
-                                Ok(input) => {
-                                    let summary = tool_summary(&tool_name, &input);
-                                    if tool_name == "Task" || tool_name == "Agent" {
-                                        self.tool_agents
-                                            .insert(tool_use_id.clone(), subagent_name(&input));
-                                    }
-                                    out.push(Parsed::Event(AdapterEvent::BlockFinal {
-                                        block_id: block.block_id,
-                                        text: String::new(),
-                                        summary: Some(summary),
-                                    }));
-                                    out.push(Parsed::ToolCallComplete {
-                                        block_id: block.block_id,
-                                        tool_use_id,
-                                        tool_name,
-                                        input,
-                                    });
-                                }
+                                Ok(input) => self.complete_tool(
+                                    out,
+                                    block.block_id,
+                                    tool_use_id,
+                                    tool_name,
+                                    input,
+                                ),
                                 Err(_) => {
                                     out.push(Parsed::Event(AdapterEvent::BlockStarted {
                                         block_id: Uuid::now_v7(),
@@ -641,6 +645,121 @@ impl Parser {
         }
     }
 
+    fn complete_tool(
+        &mut self,
+        out: &mut Vec<Parsed>,
+        block_id: Uuid,
+        tool_use_id: String,
+        tool_name: String,
+        input: serde_json::Value,
+    ) {
+        if tool_name == "Task" || tool_name == "Agent" {
+            self.tool_agents
+                .insert(tool_use_id.clone(), subagent_name(&input));
+        }
+        out.push(Parsed::Event(AdapterEvent::BlockFinal {
+            block_id,
+            text: String::new(),
+            summary: Some(tool_summary(&tool_name, &input)),
+        }));
+        out.push(Parsed::ToolCallComplete {
+            block_id,
+            tool_use_id,
+            tool_name,
+            input,
+        });
+    }
+
+    /// Субагент не шлёт потоковых кадров (CLI 2.1.311): его вызовы и текст приходят
+    /// только целыми кадрами `assistant` вперемешку с потоком основного агента.
+    fn feed_subagent_message(
+        &mut self,
+        lane: &str,
+        message: Option<&serde_json::Value>,
+        out: &mut Vec<Parsed>,
+    ) {
+        let streamed = message
+            .and_then(|message| message.get("id"))
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|id| self.streamed_messages.contains(id));
+        if streamed {
+            return;
+        }
+        let content = message
+            .and_then(|message| message.get("content"))
+            .and_then(serde_json::Value::as_array);
+        for block in content.into_iter().flatten() {
+            let text = |key: &str| {
+                block
+                    .get(key)
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+            };
+            match block.get("type").and_then(serde_json::Value::as_str) {
+                Some("tool_use") => self.subagent_tool(lane, block, out),
+                Some("text") => self.subagent_text(lane, BlockKind::Text, text("text"), out),
+                Some("thinking") => {
+                    self.subagent_text(lane, BlockKind::Reasoning, text("thinking"), out);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn subagent_text(&self, lane: &str, kind: BlockKind, text: &str, out: &mut Vec<Parsed>) {
+        if text.is_empty() {
+            return;
+        }
+        let (agent, parent) = self.agent_of(Some(lane));
+        let block_id = Uuid::now_v7();
+        out.push(Parsed::Event(AdapterEvent::BlockStarted {
+            block_id,
+            kind,
+            input_command_id: self.input_command,
+            parent,
+            agent,
+            model: self.current_model.clone(),
+            tool_name: None,
+            summary: None,
+            approved_by: None,
+        }));
+        out.push(Parsed::Event(AdapterEvent::BlockFinal {
+            block_id,
+            text: text.to_owned(),
+            summary: None,
+        }));
+    }
+
+    fn subagent_tool(&mut self, lane: &str, block: &serde_json::Value, out: &mut Vec<Parsed>) {
+        let string = |key: &str| {
+            block
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_owned()
+        };
+        let (tool_use_id, tool_name) = (string("id"), string("name"));
+        if self.tool_blocks.contains_key(&tool_use_id) {
+            return;
+        }
+        let (agent, parent) = self.agent_of(Some(lane));
+        let block_id = Uuid::now_v7();
+        self.tool_blocks.insert(tool_use_id.clone(), block_id);
+        out.push(Parsed::Event(AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::ToolCall,
+            input_command_id: self.input_command,
+            parent,
+            agent,
+            model: self.current_model.clone(),
+            tool_name: Some(tool_name.clone()),
+            summary: None,
+            approved_by: None,
+        }));
+        let input = block.get("input").cloned().unwrap_or_default();
+        self.complete_tool(out, block_id, tool_use_id, tool_name, input);
+    }
+
     fn feed_assistant(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
         let parent = value
             .get("parent_tool_use_id")
@@ -665,6 +784,9 @@ impl Parser {
             .filter(|info| info.is_object())
         {
             out.push(Parsed::RateLimit(info.clone()));
+        }
+        if let Some(lane) = parent {
+            self.feed_subagent_message(lane, message, out);
         }
         // Вывод локальной команды (`/context`, `/cost`) приходит одним кадром
         // `assistant` с `local_command_source` и без потоковых кадров (CLI 2.1.311).
@@ -755,7 +877,7 @@ impl Parser {
             out.push(Parsed::Event(AdapterEvent::BlockFinal {
                 block_id,
                 text,
-                summary: None,
+                summary: is_error.then(|| TOOL_FAILED_SUMMARY.to_owned()),
             }));
             out.push(Parsed::ToolResult {
                 tool_use_id,

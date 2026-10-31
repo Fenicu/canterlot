@@ -13,6 +13,7 @@
 	import PauseCards from './PauseCards.svelte';
 	import TodoPanel from './TodoPanel.svelte';
 	import RequestCard from '#lib/requests/RequestCard.svelte';
+	import { isDocked } from '#lib/stores/requests.svelte.js';
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
@@ -94,6 +95,7 @@
 	});
 
 	const waitingId = $props.id();
+	const docked = $derived([...chat.requests.items.values()].filter(isDocked));
 	// Вопрос из активности без открытого запроса отвечать некуда: показываем его только для чтения.
 	const waitingQuestion = $derived.by((): string | null => {
 		const evidence = chat.activity?.evidence as Record<string, unknown> | undefined;
@@ -129,9 +131,9 @@
 
 	<TodoPanel {chat} />
 
-	{#if chat.requests.items.size > 0}
+	{#if docked.length > 0}
 		<div class="request-cards-slot">
-			{#each [...chat.requests.items.values()] as req (req.id)}
+			{#each docked as req (req.id)}
 				<RequestCard
 					request={req}
 					onDecision={async (decision) => {

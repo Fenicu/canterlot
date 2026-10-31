@@ -99,14 +99,19 @@ describe("sessions/limits", () => {
       }).tone,
     ).toBe("warning");
     const reserve = { ...row, weekly_reserve_active: true };
-    const crunch = limitStrip(
-      [reserve],
+    const codex = { ...row, provider: "codex", weekly_reserve_active: false };
+    const strip = limitStrip(
+      [codex, reserve],
       now,
       { stale_after_secs: 3600, warn_pcts: [80], weekly_reserve_pct: 95 },
-      { crunch: true, prefer: "claude" },
+      { prefer: "claude" },
     );
-    expect(crunch.tone).toBe("reserve");
-    expect(crunch.crunchLabel).toBe("Кранч · недельный резерв");
+    expect(strip.tone).toBe("reserve");
+    expect(strip.rows.map((item) => [item.label, item.reserve])).toEqual([
+      ["Claude", true],
+      ["Codex", false],
+    ]);
+    expect(strip.rows[0]?.weekly).not.toBe("");
   });
   const cfg = { stale_after_secs: 1800, warn_pcts: [80], weekly_reserve_pct: 95 };
 

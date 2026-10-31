@@ -2,8 +2,10 @@
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
+  import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
-  import { childBlocks } from '#lib/timeline/rows.js';
+  import { agentTitle, toolTitle } from '#lib/timeline/present.js';
+  import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
   import NoticeBlock from '#lib/timeline/NoticeBlock.svelte';
   import ReasoningBlock from '#lib/timeline/ReasoningBlock.svelte';
@@ -14,14 +16,19 @@
 
   let {
     entries,
-    all,
+    links,
+    harness,
+    activeRun = null,
     conversationId,
     now,
     onInfo,
     load
   }: {
     entries: TimelineEntry[];
-    all: TimelineEntry[];
+    links: BlockLinks;
+    harness?: { title?: string; provider?: string } | null;
+    /** Ход, который идёт сейчас: вызов без результата в нём ещё работает. */
+    activeRun?: string | null;
     conversationId: string;
     now: number;
     onInfo?: (runId: string) => void;
@@ -29,15 +36,17 @@
   } = $props();
 
   let expanded = $state(false);
-  const blocks = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
+  const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
+  const blocks = $derived(entries.filter((entry) => entry.kind !== 'block' || shownInCard(entry.block)));
   const hidden = $derived(Math.max(0, blocks.length - 40));
   const shown = $derived(!expanded && blocks.length > 60 ? [...blocks.slice(0, 20), ...blocks.slice(-20)] : blocks);
-  const head = $derived(blocks[0]);
-  const streaming = $derived(blocks.some((block) => block.state === 'streaming'));
-  const active = $derived(blocks.findLast((block) => block.state === 'streaming'));
-  const started = $derived(blocks.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
+  const head = $derived(all[0]);
+  const streaming = $derived(all.some((block) => block.state === 'streaming'));
+  const active = $derived(all.findLast((block) => block.state === 'streaming'));
+  const started = $derived(all.find((block) => block.state === 'streaming')?.startedAt ?? head?.createdAt ?? now);
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
-  const agent = $derived(head?.agent ? head.agent[0]!.toLocaleUpperCase('ru-RU') + head.agent.slice(1) : 'Агент');
+  const agent = $derived(agentTitle(head?.agent ?? '', harness));
+  const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
 </script>
 
 <article class="card">
@@ -47,26 +56,31 @@
       <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
     </header>
   {/if}
-  {#each shown as block (block.id)}
-    {#if block.toolName === 'Agent'}
-      <SubagentRow call={block} nodes={childBlocks(all, block.id)} {conversationId} />
-    {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} {now} {load} />
-    {:else if block.kind === 'warning' || block.kind === 'error'}
-      <NoticeBlock {block} />
-    {:else if block.kind === 'reasoning'}
-      <ReasoningBlock {block} />
-    {:else}
-      {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
-      <TextBlock {block} />
-      {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+  {#each shown as entry (entry.key)}
+    {#if entry.kind === 'request'}
+      <RequestCard request={entry.request} onDecision={async () => undefined} />
+    {:else if entry.kind === 'block'}
+      {@const block = entry.block}
+      {#if isSubagentCall(block)}
+        <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
+      {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
+        <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
+      {:else if block.kind === 'warning' || block.kind === 'error'}
+        <NoticeBlock {block} />
+      {:else if block.kind === 'reasoning'}
+        <ReasoningBlock {block} />
+      {:else}
+        {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
+        <TextBlock {block} />
+        {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+      {/if}
     {/if}
   {/each}
   {#if !expanded && blocks.length > 60}
     <button type="button" class="more" onclick={() => { expanded = true; }}>Показать ещё {hidden} {fmt.plural(hidden, ['блок', 'блока', 'блоков'])}</button>
   {/if}
   {#if streaming && head}
-    <LiveLine {phase} tool={active?.toolName ?? ''} startedAt={started} {now} />
+    <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
   {/if}
 </article>
 

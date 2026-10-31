@@ -330,6 +330,134 @@ fn subagent_frames_carry_name_model_and_parent_block() {
     assert_eq!(input["subagent_type"], json!("Explore"));
 }
 
+struct Started {
+    id: Uuid,
+    kind: BlockKind,
+    agent: String,
+    parent: Option<Uuid>,
+    tool_name: Option<String>,
+}
+
+fn started(parsed: &[Parsed]) -> Vec<Started> {
+    parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockStarted {
+                block_id,
+                kind,
+                agent,
+                parent,
+                tool_name,
+                ..
+            }) => Some(Started {
+                id: *block_id,
+                kind: kind.clone(),
+                agent: agent.clone(),
+                parent: *parent,
+                tool_name: tool_name.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn subagent_tools_of_whole_frames_land_in_the_lane_of_its_call() {
+    let lines = fixtures::replay_fixture("subagent_live");
+    let mut parser = Parser::new();
+    parser.set_input_command(Uuid::parse_str(COMMAND).unwrap());
+    let parsed = feed_all(&mut parser, &lines);
+    let blocks = started(&parsed);
+    let call = blocks
+        .iter()
+        .find(|b| b.tool_name.as_deref() == Some("Agent"))
+        .expect("Agent call");
+    let tools: Vec<&Started> = blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::ToolCall) && b.agent == "Explore")
+        .collect();
+    let names: Vec<_> = tools.iter().map(|b| b.tool_name.as_deref()).collect();
+    assert_eq!(names, [Some("Bash"), Some("Read")]);
+    assert!(tools.iter().all(|b| b.parent == Some(call.id)));
+    let summaries: Vec<_> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockFinal {
+                block_id,
+                summary: Some(summary),
+                ..
+            }) if tools.iter().any(|tool| tool.id == *block_id) => Some(summary.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        summaries,
+        [
+            "Bash: find ./data -name note.txt",
+            "Read: /tmp/canterlot-smoke/data/note.txt"
+        ]
+    );
+    let results: Vec<&Started> = blocks
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::ToolResult) && b.agent == "Explore")
+        .collect();
+    assert_eq!(results.len(), 2);
+    for (result, tool) in results.iter().zip(&tools) {
+        assert_eq!(result.parent, Some(tool.id));
+    }
+    assert!(
+        blocks
+            .iter()
+            .filter(|b| matches!(b.kind, BlockKind::ToolResult))
+            .all(|b| b.parent.is_some()),
+        "no result is left without its call"
+    );
+    let text = blocks
+        .iter()
+        .find(|b| matches!(b.kind, BlockKind::Text) && b.agent == "Explore")
+        .expect("subagent text");
+    assert_eq!(text.parent, Some(call.id));
+    let completed = parsed
+        .iter()
+        .filter(|p| matches!(p, Parsed::ToolCallComplete { .. }))
+        .count();
+    assert_eq!(completed, 4, "Agent, Bash, Read and Read of the main agent");
+}
+
+#[test]
+fn streamed_subagent_text_is_not_repeated_by_its_whole_frame() {
+    let lines = fixtures::replay_fixture("subagent");
+    let mut parser = Parser::new();
+    let parsed = feed_all(&mut parser, &lines);
+    let texts = started(&parsed)
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::Text) && b.agent == "Explore")
+        .count();
+    assert_eq!(texts, 1);
+}
+
+#[test]
+fn failed_tool_result_is_marked_in_its_summary() {
+    let lines = fixtures::replay_fixture("subagent_live");
+    let mut parser = Parser::new();
+    let parsed = feed_all(&mut parser, &lines);
+    let results: Vec<Uuid> = started(&parsed)
+        .iter()
+        .filter(|b| matches!(b.kind, BlockKind::ToolResult))
+        .map(|b| b.id)
+        .collect();
+    let marks: Vec<Option<&str>> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(AdapterEvent::BlockFinal {
+                block_id, summary, ..
+            }) if results.contains(block_id) => Some(summary.as_deref()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(marks, [None, None, None, Some("error")]);
+}
+
 #[test]
 fn unknown_and_non_json_lines_never_end_the_stream() {
     let replay = fixtures::replay_evidence("resume");

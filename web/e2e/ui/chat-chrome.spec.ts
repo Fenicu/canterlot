@@ -105,6 +105,22 @@ test('settings_sheet_lists_catalog_values_and_marks_a_pending_change_for_the_nex
 	await expect(page.locator('.subtitle')).toContainText('со следующего хода');
 });
 
+test('settings_sheet_keeps_a_session_model_that_left_the_catalog', async ({ page }) => {
+	const seeded = await bootChat(page);
+	const detail = seeded.api.details.get(seeded.id);
+	if (detail) detail.model = 'opus';
+	await page.reload();
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	await expect(page.locator('.subtitle')).toContainText('opus');
+
+	await page.getByRole('button', { name: 'Меню сессии' }).click();
+	await page.getByRole('menuitem', { name: 'Настройки сессии' }).click();
+
+	const modelSelect = page.locator('#model');
+	await expect(modelSelect).toHaveValue('opus');
+	await expect(modelSelect.locator('option')).toHaveText(['opus-5.5', 'sonnet-5', 'haiku', 'opus']);
+});
+
 test('unsupported_midsession_setting_is_disabled_with_the_reason_text', async ({ page }) => {
 	await bootChat(page);
 

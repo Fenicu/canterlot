@@ -1,4 +1,6 @@
+import { harnessLabel, modelLabel } from "#lib/format/labels.js";
 import type { RunInfo } from "#lib/stores/run.js";
+import { isMainAgent } from "#lib/timeline/present.js";
 
 export interface InfoModel {
   parts: { title: string; sub: string; model: string }[];
@@ -24,7 +26,10 @@ export function formatDuration(ms: number): string {
   return remainingMins > 0 ? `${hours} ч ${remainingMins} мин` : `${hours} ч`;
 }
 
-export function summarizeRun(info: RunInfo): InfoModel {
+export function summarizeRun(
+  info: RunInfo,
+  harness?: { title?: string; provider?: string } | null,
+): InfoModel {
   const pending = !info.finished_at || info.duration_ms == null;
 
   const duration =
@@ -67,14 +72,14 @@ export function summarizeRun(info: RunInfo): InfoModel {
     ) {
       parts.push({
         title: "Основной ответ",
-        sub: p.agent || "Claude Code",
-        model: p.model,
+        sub: isMainAgent(p.agent ?? "") ? harnessLabel(harness) : p.agent,
+        model: modelLabel(p.model),
       });
     } else {
       parts.push({
         title: p.task || p.agent,
         sub: `Субагент · ${p.agent}`,
-        model: p.model,
+        model: modelLabel(p.model),
       });
     }
     // Хаб отдаёт часть на каждый блок: одинаковые строки сворачиваются в одну, иначе ключи списка совпадают.

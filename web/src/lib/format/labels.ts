@@ -255,9 +255,19 @@ function capitalize(text: string): string {
   return text.charAt(0).toLocaleUpperCase("ru-RU") + text.slice(1);
 }
 
+/** Название инструмента, через который идёт сессия: как в макете, без слова Code. */
+export function harnessLabel(harness: { title?: string; provider?: string } | null | undefined): string {
+  return lookup(PROVIDERS, harness?.provider?.toLowerCase()) ?? harness?.title ?? "Агент";
+}
+
 /** Строка сессии не держит каталог машины: `opus[1m]` владельцу показывается названием продукта, у `провайдер/модель` остаётся модель. */
 export const modelLabel = (value: string): string => {
   const base = value.replace(/\[1m\]$/, '');
   if (base !== value) return `${base.charAt(0).toUpperCase()}${base.slice(1)} 1M`;
+  const claude = /^claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?$/.exec(value);
+  if (claude) {
+    const [, family = '', major, minor] = claude;
+    return `${capitalize(family)} ${minor ? `${major}.${minor}` : major}`;
+  }
   return value.slice(value.indexOf('/') + 1);
 };

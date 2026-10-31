@@ -191,7 +191,6 @@
 				now={now}
 				thresholds={thresholds}
 				prefer={provider}
-				crunch={chat.crunch.enabled}
 				compact
 			/>
 		</div>
@@ -260,10 +259,8 @@
 		align-items: center;
 		gap: var(--s2);
 		min-width: 0;
-		padding: var(--s2) var(--s3);
+		padding-block: var(--s2);
 		margin: var(--s5) var(--gutter) var(--s3);
-		border-radius: var(--radius-pill);
-		background: var(--surface);
 		min-height: var(--target);
 	}
 	.header-info {
@@ -315,6 +312,10 @@
 		flex: none;
 		align-items: center;
 		gap: var(--s1);
+		margin-right: var(--icon-hang);
+	}
+	.back {
+		margin-left: var(--icon-hang);
 	}
 	.icon-button {
 		background: var(--transparent);

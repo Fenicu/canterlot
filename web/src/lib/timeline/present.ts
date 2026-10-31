@@ -1,3 +1,4 @@
+import { harnessLabel, modelLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 import { utf8Length } from "#lib/stores/blocks.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
@@ -7,6 +8,12 @@ import type { InputUiState } from "#lib/stores/inputs.js";
 export const TOOL_PAGE_BYTES = 256 * 1024;
 export const TOOL_DOM_CAP = 2 * 1024 * 1024;
 export const REVEAL_LAG_MS = 600;
+const TOOL_MS_BELOW = 100;
+/** У Claude Code между началом и финалом вызова только запись в журнал: дольше живут вызовы, которые считают время сами. */
+const TOOL_OWN_TIME_MIN_MS = 100;
+/** Так воркер помечает сводку результата, завершившегося ошибкой. */
+const TOOL_FAILED_MARK = "error";
+const CLI_ERROR_OPEN = "<tool_use_error>";
 
 export function deliveryLabel(
   state: InputUiState,
@@ -83,8 +90,89 @@ export function toolStatusText(opts: {
   if (!opts.running && opts.finishedAt === null) return "";
   const end = opts.running ? opts.now : (opts.finishedAt as number);
   const elapsed = Math.max(0, end - opts.startedAt);
+  if (!opts.running && elapsed < TOOL_MS_BELOW)
+    return `${Math.max(1, Math.round(elapsed))} мс`;
   const shown = opts.running ? Math.floor(elapsed / 1000) * 1000 : elapsed;
   return fmt.duration(shown);
+}
+
+/** Начало и конец работы инструмента. Вызов у Claude Code финален сразу, время даёт результат. */
+export function toolTiming(
+  call: BlockModel,
+  result: BlockModel | null,
+  working: boolean,
+): { running: boolean; startedAt: number; finishedAt: number | null } {
+  const startedAt = call.startedAt ?? call.createdAt;
+  // Такой вызов воркер придержал до результата: начало в ленте не совпадает с настоящим.
+  if (call.approvedBy === "cli_policy" || call.kind === "tool_result")
+    return { running: false, startedAt, finishedAt: null };
+  if (result) {
+    const done = result.state === "final" || result.state === "incomplete";
+    return {
+      running: !done,
+      startedAt,
+      finishedAt: done ? (result.finishedAt ?? result.createdAt) : null,
+    };
+  }
+  const own = (call.finishedAt ?? startedAt) - startedAt;
+  if (call.state !== "streaming" && own >= TOOL_OWN_TIME_MIN_MS)
+    return { running: false, startedAt, finishedAt: call.finishedAt };
+  return {
+    running: call.state === "streaming" || working,
+    startedAt,
+    finishedAt: null,
+  };
+}
+
+export function toolFailed(result: BlockModel | null): boolean {
+  if (!result) return false;
+  return result.summary === TOOL_FAILED_MARK || result.text.startsWith(CLI_ERROR_OPEN);
+}
+
+/** Обёртку CLI вокруг текста ошибки владельцу показывать незачем. */
+export function cleanToolOutput(text: string): string {
+  const inner = /^<tool_use_error>([\s\S]*?)<\/tool_use_error>\s*$/.exec(text);
+  return inner ? (inner[1] ?? "") : text;
+}
+
+const MAIN_AGENTS = new Set(["orchestrator", "main", ""]);
+
+/** `orchestrator` — внутренняя метка хаба и адаптеров, владелец видит название инструмента сессии. */
+export function isMainAgent(agent: string): boolean {
+  return MAIN_AGENTS.has(agent);
+}
+
+export function agentTitle(
+  agent: string,
+  harness: { title?: string; provider?: string } | null | undefined,
+): string {
+  if (isMainAgent(agent)) return harnessLabel(harness);
+  return agent.charAt(0).toLocaleUpperCase("ru-RU") + agent.slice(1);
+}
+
+export interface ToolTitle {
+  name: string;
+  server: string;
+  argument: string;
+}
+
+function mcpServer(raw: string): string {
+  const plugin = /^plugin_(.+)_\1$/.exec(raw);
+  return plugin?.[1] ?? raw.replace(/^plugin_/, "");
+}
+
+/** Сводка воркера начинается с имени инструмента, а имя MCP несёт служебный префикс: в строке всё это по одному разу. */
+export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): ToolTitle {
+  const raw = block.toolName ?? "";
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(raw);
+  const name = mcp?.[2] ?? raw;
+  const server = mcp ? mcpServer(mcp[1] ?? "") : "";
+  let argument = block.summary ?? "";
+  if (raw && argument === raw) argument = "";
+  for (const joint of [": ", ", "])
+    if (raw && argument.startsWith(raw + joint))
+      argument = argument.slice(raw.length + joint.length);
+  return { name, server: name.includes(server) ? "" : server, argument };
 }
 
 export function takeToolPage(
@@ -124,15 +212,19 @@ export function subagentCopy(
   call: BlockModel,
   children: BlockModel[],
 ): { title: string; detail: string } {
-  const first = children[0];
-  const name = first?.agent || call.agent || "агент";
-  const model = first?.model || call.model || "";
-  const verb = subagentVerb(first?.toolName ?? call.toolName);
-  const object = first?.summary || first?.toolName || "";
-  const task = call.summary ?? "";
+  const own = children.filter((child) => !isMainAgent(child.agent));
+  const lead = own[0];
+  const action = own.findLast((child) => child.toolName) ?? null;
+  const model = lead?.model || call.model;
+  const verb = subagentVerb(action?.toolName ?? (lead ? null : call.toolName));
+  const doing = action ? toolTitle(action) : null;
+  const object = doing?.argument || doing?.name || "";
+  const task = toolTitle(call).argument;
   const detail = [verb, object].filter((part) => part.length > 0).join(" ");
   return {
-    title: `Субагент · ${name} · ${model}`.replace(/\s·\s$/, ""),
+    title: ["Субагент", lead?.agent ?? "", model ? modelLabel(model) : ""]
+      .filter((part) => part.length > 0)
+      .join(" · "),
     detail: task ? `${detail} · ${task}` : detail,
   };
 }

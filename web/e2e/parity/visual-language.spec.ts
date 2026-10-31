@@ -161,7 +161,12 @@ test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
             if (got.some((value) => value !== want)) note(`shape ${selector} must use ${token}`, el, got.join(' '));
           }
         };
-        expectRadius('.topbar', '--radius-pill');
+        for (const bar of document.querySelectorAll('.topbar')) {
+          const style = getComputedStyle(bar);
+          if (style.backgroundColor !== 'rgba(0, 0, 0, 0)' || style.borderTopLeftRadius !== '0px') {
+            note('topbar-has-backing', bar, `${style.backgroundColor} ${style.borderTopLeftRadius}`);
+          }
+        }
         const dock = document.querySelector('.dock nav');
         if (dock && getComputedStyle(dock).backgroundColor !== 'rgba(0, 0, 0, 0)') {
           note('dock-has-backing', dock, getComputedStyle(dock).backgroundColor);
@@ -171,7 +176,13 @@ test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
         expectRadius('.send', '--radius-round');
         expectRadius('.fab', '--radius-round');
         expectRadius('dialog[open]:has(.handle)', '--radius-sheet', 'top');
-        expectRadius('pre', '--radius-sm');
+        expectRadius('pre:not(.out pre)', '--radius-sm');
+        // Вывод инструмента без своего фона: скругление с overflow срезало бы углы текста.
+        for (const pre of document.querySelectorAll('.out pre')) {
+          if (visible(pre) && getComputedStyle(pre).borderTopLeftRadius !== '0px') {
+            note('tool-output-rounded', pre, getComputedStyle(pre).borderTopLeftRadius);
+          }
+        }
 
         for (const el of document.querySelectorAll('body *')) {
           if (!visible(el) || el === probe) continue;

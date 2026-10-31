@@ -1,10 +1,12 @@
 import type { BlockModel } from './blocks';
 import type { InputView } from './inputs';
+import type { RequestItem } from './requests.svelte';
 import { rawCell } from './cell.svelte';
 
 export type TimelineEntry =
 	| { kind: 'input'; key: string; seq: string; input: InputView }
-	| { kind: 'block'; key: string; seq: string; block: BlockModel };
+	| { kind: 'block'; key: string; seq: string; block: BlockModel }
+	| { kind: 'request'; key: string; seq: string; request: RequestItem };
 
 export function cmpSeq(a: string, b: string): number {
 	const left = BigInt(a);
@@ -98,6 +100,7 @@ export class TimelineModel {
 function sameEntry(a: TimelineEntry, b: TimelineEntry): boolean {
 	if (a.seq !== b.seq) return false;
 	if (a.kind === 'block') return b.kind === 'block' && a.block === b.block;
+	if (a.kind === 'request') return b.kind === 'request' && a.request === b.request;
 	return b.kind === 'input' && a.input === b.input;
 }
 

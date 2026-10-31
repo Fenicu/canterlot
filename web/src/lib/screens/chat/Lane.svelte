@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { blockLinks } from '#lib/timeline/rows.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
 	import TodoPanel from './TodoPanel.svelte';
@@ -25,7 +26,7 @@
 	const machineName = $derived((chat.detail?.machine as { name?: string })?.name || 'workstation');
 
 	const model = $derived(
-		laneModel(blocks, rootBlockId, { machineName })
+		laneModel(blocks, rootBlockId, { machineName, children: blockLinks(chat.timeline.entries).children(rootBlockId) })
 	);
 </script>
 
@@ -109,9 +110,7 @@
 		min-width: 0;
 		min-height: var(--target);
 		margin: var(--s5) var(--gutter) var(--s3);
-		padding: var(--s2) var(--s3);
-		border-radius: var(--radius-pill);
-		background: var(--surface);
+		padding-block: var(--s2);
 	}
 	.header-info {
 		flex: 1;
@@ -237,6 +236,12 @@
 		background: var(--raised);
 		color: var(--text);
 		font-size: var(--fs-meta);
+	}
+	.topbar > .icon-button:first-child {
+		margin-left: var(--icon-hang);
+	}
+	.topbar > .icon-button:last-child {
+		margin-right: var(--icon-hang);
 	}
 	.icon-button {
 		background: var(--transparent);

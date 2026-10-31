@@ -21,16 +21,7 @@
 
 	interface DetailLike {
 		title?: string;
-		connection_id?: string;
 		machine?: { name?: string };
-	}
-
-	interface ExecutionLike {
-		id?: string;
-		state?: string;
-		generation?: number;
-		outcome?: string | null;
-		live?: boolean;
 	}
 
 	interface ActivityLike {
@@ -49,7 +40,7 @@
 	let copied = $state(false);
 
 	const detail = $derived(chat.detail as DetailLike | null);
-	const execution = $derived(chat.execution as ExecutionLike | null);
+	const execution = $derived(chat.execution);
 	const activity = $derived(chat.activity as ActivityLike | null);
 
 	const diagnosticEvents = $derived(
@@ -66,11 +57,10 @@
 
 	const diagData = $derived<DiagnosticsData>({
 		conversationId: chat.id,
-		connectionId: detail?.connection_id ?? 'conn_live',
 		execution: {
-			id: execution?.id,
-			state: execution?.state ?? (execution?.live ? 'live' : 'idle'),
-			generation: execution?.generation ?? 1,
+			execution_id: execution?.execution_id,
+			state: execution?.state ?? 'idle',
+			generation: execution?.generation,
 			outcome: execution?.outcome ?? null
 		},
 		activity: {
@@ -114,7 +104,7 @@
 			<h3>Исполнение</h3>
 			<div class="rows">
 				<div class="key-value"><span>Состояние</span><code>{executionStateLabel(diagData.execution?.state ?? 'idle')}</code></div>
-				<div class="key-value"><span>Поколение</span><code>{diagData.execution?.generation ?? 1}</code></div>
+				<div class="key-value"><span>Поколение</span><code>{diagData.execution?.generation ?? 'нет'}</code></div>
 				{#if diagData.execution?.outcome}
 					<div class="key-value"><span>Итог</span><code>{executionOutcomeLabel(diagData.execution.outcome)}</code></div>
 				{/if}

@@ -2,13 +2,14 @@
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { announce } from '#lib/a11y/announce.js';
+  import RequestCard from '#lib/requests/RequestCard.svelte';
   import { clock } from '#lib/clock.js';
   import { probe } from '#lib/perf/probe.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { buildRows, dayStart, type Row } from '#lib/timeline/rows.js';
+  import { blockLinks, buildRows, dayStart, shownInCard, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
@@ -48,7 +49,8 @@
   const PIN_PX = 48;
 
   const today = $derived(dayStart(now));
-  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot }));
+  const links = $derived(blockLinks(chat.timeline.entries));
+  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot, links }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   let seenRows: string | null = null;
@@ -61,7 +63,13 @@
     node.setAttribute('data-renders', String(Number(node.getAttribute('data-renders') ?? '0') + 1));
   });
   const streaming = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
-  const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || entry.block.state === 'incomplete')));
+  const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
+  const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
+  const activeRun = $derived.by(() => {
+    const state = chat.activity?.state;
+    if (state !== 'working' && state !== 'waiting_for_user') return null;
+    return chat.timeline.entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
+  });
 
   function layout(list: Row[], top: number, viewport: number): void {
     ix.setCount(list.length);
@@ -322,8 +330,10 @@
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
           <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
+        {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
+          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} />
         {:else if row.kind === 'answer'}
-          <AnswerCard entries={row.entries} all={chat.timeline.entries} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard entries={row.entries} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
       </div>
     {/each}

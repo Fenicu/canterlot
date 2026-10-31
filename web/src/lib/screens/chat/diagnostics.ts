@@ -1,12 +1,10 @@
+import type { components } from '#lib/api/generated/openapi.js';
+
+type LiveExecution = components['schemas']['LiveExecutionView'];
+
 export interface DiagnosticsData {
 	conversationId: string;
-	connectionId?: string | null;
-	execution?: {
-		id?: string | null;
-		state?: string | null;
-		generation?: number | null;
-		outcome?: string | null;
-	} | null;
+	execution?: Partial<Pick<LiveExecution, 'execution_id' | 'state' | 'generation' | 'outcome'>> | null;
 	activity?: {
 		state?: string | null;
 		evidence?: Record<string, unknown> | null;
@@ -33,9 +31,8 @@ export interface DiagnosticsData {
 export function buildDiagnosticsReport(data: DiagnosticsData): string {
 	const safe = {
 		conversationId: data.conversationId,
-		connectionId: data.connectionId ?? 'none',
 		execution: {
-			id: data.execution?.id ?? null,
+			id: data.execution?.execution_id ?? null,
 			state: data.execution?.state ?? null,
 			generation: data.execution?.generation ?? null,
 			outcome: data.execution?.outcome ?? null
@@ -64,7 +61,6 @@ export function buildDiagnosticsReport(data: DiagnosticsData): string {
 	return [
 		`=== Canterlot Diagnostics Report ===`,
 		`conversationId: ${safe.conversationId}`,
-		`connectionId: ${safe.connectionId}`,
 		`execution.id: ${safe.execution.id ?? 'none'}`,
 		`execution.state: ${safe.execution.state ?? 'none'}`,
 		`execution.generation: ${safe.execution.generation ?? 'none'}`,

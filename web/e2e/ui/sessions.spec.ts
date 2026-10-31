@@ -380,7 +380,11 @@ test('limits_strip_warns_at_80_and_shows_the_reserve_variant', async ({ page }) 
   hub.flush();
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/c/${ids.pinned}`);
-  await expect(page.getByText('Кранч · недельный резерв')).toBeVisible();
+  const strip = page.locator('[data-pane="list"] .limits summary');
+  await expect(strip).toContainText('Claude 5ч');
+  await expect(strip).toContainText('неделя 96%');
+  await expect(strip).toContainText('Codex 5ч');
+  await expect(strip.locator('.reserve')).toHaveText(['резерв']);
 });
 
 test('empty_states_offer_actions', async ({ page }) => {

@@ -14,6 +14,10 @@ pub const TIMELINE_KEYS_SQL: &str = "select * from (
  (select id, 'input' item_kind, feed_seq seq from inputs
   where conversation_id=$1 and feed_seq is not null and (not $3 or feed_seq>$2) and (not $4 or feed_seq<$2)
   order by feed_seq desc limit $5)
+ union all
+ (select id, 'request' item_kind, created_seq seq from requests
+  where conversation_id=$1 and created_seq is not null and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
+  order by created_seq desc limit $5)
 ) timeline order by seq desc limit $5";
 const FORWARD_KEYS_SQL: &str = "select * from (
  (select block_id id, 'block' item_kind, created_seq seq from blocks
@@ -23,6 +27,10 @@ const FORWARD_KEYS_SQL: &str = "select * from (
  (select id, 'input' item_kind, feed_seq seq from inputs
   where conversation_id=$1 and feed_seq is not null and (not $3 or feed_seq>$2) and (not $4 or feed_seq<$2)
   order by feed_seq asc limit $5)
+ union all
+ (select id, 'request' item_kind, created_seq seq from requests
+  where conversation_id=$1 and created_seq is not null and (not $3 or created_seq>$2) and (not $4 or created_seq<$2)
+  order by created_seq asc limit $5)
 ) timeline order by seq asc limit $5";
 
 #[derive(Serialize, ToSchema)]
@@ -81,11 +89,24 @@ pub struct BlockView {
     /// Картинки, на которые смотрел агент; появляются после `block_media_attached`.
     pub media: Vec<crate::media::MediaView>,
 }
+/// Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
+/// стоит у поля ввода, решённый остаётся здесь и после перезагрузки.
+#[derive(Serialize, ToSchema)]
+pub struct RequestItemView {
+    pub id: Uuid,
+    pub request_kind: String,
+    pub state: String,
+    pub request_payload: Value,
+    pub decision_payload: Option<Value>,
+    pub created_seq: String,
+    pub created_at: String,
+}
 #[derive(Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TimelineItem {
     Input(InputView),
     Block(Box<BlockView>),
+    Request(Box<RequestItemView>),
 }
 #[derive(Serialize, ToSchema)]
 pub struct HistoryPage {
@@ -141,6 +162,24 @@ fn prefix(text: &str, max: usize) -> &str {
         end -= 1;
     }
     &text[..end]
+}
+async fn request_view(conn: &mut PgConnection, id: Uuid) -> Result<RequestItemView, sqlx::Error> {
+    // Как в снимке: незавершённому запросу остановленного исполнения ответа уже не будет.
+    let r = sqlx::query(
+        "select r.kind,case when r.state in ('open','decision_saved','decision_transmitting') and e.state in ('stopped','failed','owner_lost') then 'closed_without_decision' else r.state end state,r.request_payload,r.decision_payload,r.created_seq,r.created_at from requests r join executions e on e.id=r.execution_id where r.id=$1",
+    )
+    .bind(id)
+    .fetch_one(conn)
+    .await?;
+    Ok(RequestItemView {
+        id,
+        request_kind: r.try_get("kind")?,
+        state: r.try_get("state")?,
+        request_payload: r.try_get("request_payload")?,
+        decision_payload: r.try_get("decision_payload")?,
+        created_seq: r.try_get::<i64, _>("created_seq")?.to_string(),
+        created_at: time(r.try_get("created_at")?),
+    })
 }
 async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx::Error> {
     let r = sqlx::query("select * from blocks where block_id=$1")
@@ -224,14 +263,20 @@ pub async fn page(
     let mut items = Vec::with_capacity(keys.len());
     for k in keys {
         let id: Uuid = k.try_get("id")?;
-        if k.try_get::<&str, _>("item_kind")? == "input" {
-            let r = sqlx::query("select * from inputs where id=$1")
-                .bind(id)
-                .fetch_one(&mut *conn)
-                .await?;
-            items.push(TimelineItem::Input(input_view(r)?));
-        } else {
-            items.push(TimelineItem::Block(Box::new(block_view(conn, id).await?)));
+        match k.try_get::<&str, _>("item_kind")? {
+            "input" => {
+                let r = sqlx::query("select * from inputs where id=$1")
+                    .bind(id)
+                    .fetch_one(&mut *conn)
+                    .await?;
+                items.push(TimelineItem::Input(input_view(r)?));
+            }
+            "request" => {
+                items.push(TimelineItem::Request(Box::new(
+                    request_view(conn, id).await?,
+                )));
+            }
+            _ => items.push(TimelineItem::Block(Box::new(block_view(conn, id).await?))),
         }
     }
     Ok(Some(HistoryPage {

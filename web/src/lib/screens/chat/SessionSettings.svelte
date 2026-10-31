@@ -8,7 +8,7 @@
 
 <script lang="ts">
 	import { errorText } from '#lib/api/errors.js';
-	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
 	import { listPresets } from '#lib/api/client.js';
@@ -108,10 +108,8 @@
 				}))
 	);
 
-	// Whether midsession settings are supported by harness execution
-	const midsessionSupported = $derived(
-		chat.execution ? (chat.execution.settings_midsession !== false) : true
-	);
+	const live = $derived(executionLive(chat.execution));
+	const midsessionSupported = $derived(!live || harness?.settings_midsession !== false);
 
 	// Local form state
 	let selectedModel = $state('opus');
@@ -161,7 +159,7 @@
 
 	// Available efforts for selected model
 	const currentModelRecord = $derived(availableModels.find((m) => m.id === selectedModel));
-	const availableEfforts = $derived(currentModelRecord?.efforts ?? ['low', 'medium', 'high']);
+	const availableEfforts = $derived(currentModelRecord?.efforts ?? availableModels[0]?.efforts ?? ['low', 'medium', 'high']);
 
 	$effect(() => {
 		const efforts = availableEfforts;
@@ -175,7 +173,13 @@
 		harness?.permission_modes ?? [...PERMISSION_MODES]
 	);
 
-	const modelOptions = $derived(availableModels.map((m) => ({ value: m.id, label: m.title || m.id })));
+	// Модель сессии могли убрать из каталога: она остаётся видна, пока владелец не выберет другую.
+	const modelOptions = $derived([
+		...availableModels.map((m) => ({ value: m.id, label: m.title || m.id })),
+		...(effective.model && !availableModels.some((m) => m.id === effective.model)
+			? [{ value: effective.model, label: modelLabel(effective.model) }]
+			: [])
+	]);
 	const effortOptions = $derived(availableEfforts.map((value) => ({ value, label: effortLabel(value) })));
 	const permissionOptions = $derived(availablePermissionModes.map((value) => ({ value, label: permissionLabel(value) })));
 	const presetSelectOptions = $derived(presetOptions.map((option) => ({ value: option.id, label: option.title })));
@@ -276,7 +280,7 @@
 		{/if}
 
 		<div class="card">
-			<p class="state"><span class="live-dot" class:active={chat.execution?.live}></span><strong>{chat.execution?.live ? 'Сессия работает' : 'Сессия в ожидании'}</strong></p>
+			<p class="state"><span class="live-dot" class:active={live}></span><strong>{live ? 'Сессия работает' : 'Сессия в ожидании'}</strong></p>
 			<p class="note">
 				{(chat.detail?.harness as { title?: string })?.title ?? 'Claude Code'} ·
 				{(chat.detail?.machine as { name?: string })?.name ?? 'workstation'}

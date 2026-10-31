@@ -7664,6 +7664,38 @@
         },
         "additionalProperties": false
       },
+      "RequestItemView": {
+        "type": "object",
+        "description": "Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос\nстоит у поля ввода, решённый остаётся здесь и после перезагрузки.",
+        "required": [
+          "id",
+          "request_kind",
+          "state",
+          "request_payload",
+          "created_seq",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string"
+          },
+          "created_seq": {
+            "type": "string"
+          },
+          "decision_payload": {},
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "request_kind": {
+            "type": "string"
+          },
+          "request_payload": {},
+          "state": {
+            "type": "string"
+          }
+        }
+      },
       "RequestView": {
         "type": "object",
         "required": [
@@ -8473,6 +8505,27 @@
                     "type": "string",
                     "enum": [
                       "block"
+                    ]
+                  }
+                }
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "$ref": "#/components/schemas/RequestItemView"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "kind"
+                ],
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "request"
                     ]
                   }
                 }

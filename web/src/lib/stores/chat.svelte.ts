@@ -31,7 +31,7 @@ import {
   type InputView,
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
-import { RequestsModel } from "./requests.svelte";
+import { RequestsModel, isDocked } from "./requests.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -51,6 +51,7 @@ export interface HistoryBlock {
   model?: string;
   tool_name?: string | null;
   summary?: string | null;
+  approved_by?: string | null;
   input_command_id?: string | null;
   incomplete_reason?: string | null;
   line_count?: number | null;
@@ -87,7 +88,11 @@ export interface HistoryInput {
   retry_of?: string | null;
 }
 
-export type HistoryItem = HistoryBlock | HistoryInput;
+export type HistoryRequest = components["schemas"]["RequestItemView"] & {
+  kind: "request";
+};
+
+export type HistoryItem = HistoryBlock | HistoryInput | HistoryRequest;
 
 export interface HistoryPage {
   items: HistoryItem[];
@@ -108,6 +113,16 @@ export interface ChatApi {
 }
 
 type QueueSnapshot = components["schemas"]["SnapshotQueueView"];
+/** Снимок даёт всё исполнение, событие смены состояния только часть полей. */
+export type ChatExecution = Partial<components["schemas"]["LiveExecutionView"]> & {
+  last_run?: unknown;
+};
+
+const LIVE_EXECUTION_STATES = ["created", "starting", "running", "stopping"];
+
+export function executionLive(execution: ChatExecution | null): boolean {
+  return LIVE_EXECUTION_STATES.includes(execution?.state ?? "");
+}
 type QueuedInput = QueueSnapshot["queued"][number];
 export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 
@@ -191,7 +206,7 @@ export class ChatStore {
   turnRecorded = $state(false);
   /** Сессию удалили, пока чат был открыт: подписка уже закрыта. */
   deleted = $state(false);
-  execution = $state<Record<string, unknown> | null>(null);
+  execution = $state<ChatExecution | null>(null);
   activity = $state<Record<string, unknown> | null>(null);
   settings = $state<{
     effective: unknown;
@@ -490,7 +505,11 @@ export class ChatStore {
         return;
       case "execution_state_changed":
         if (event.kind === "execution_state_changed")
-          this.execution = { ...event.payload };
+          this.execution = {
+            ...this.execution,
+            ...event.payload,
+            execution_id: event.execution_id ?? this.execution?.execution_id,
+          };
         return;
       case "conversation_settings_changed":
         if (event.kind === "conversation_settings_changed") {
@@ -598,6 +617,7 @@ export class ChatStore {
         return;
       case "request_opened":
         this.requests.applyOpened(event);
+        this.#placeRequest(event);
         return;
       case "request_closed":
         this.requests.applyClosed(event);
@@ -618,6 +638,19 @@ export class ChatStore {
       default:
         this.unknownKinds += 1;
     }
+  }
+
+  /** Место в ленте запрос получает сразу: туда он и перейдёт, когда владелец ответит. */
+  #placeRequest(event: HubEvent): void {
+    if (event.kind !== "request_opened") return;
+    const request = this.requests.items.get(event.payload.request_id);
+    if (!request) return;
+    this.timeline.upsert({
+      kind: "request",
+      key: `request:${request.id}`,
+      seq: event.scope_seq,
+      request,
+    });
   }
 
   #diagnose(item: unknown): void {
@@ -785,7 +818,7 @@ export class ChatStore {
       this.detail = data.detail;
       this.turnRecorded = data.detail.turn_recorded === true;
       if (data.detail.execution)
-        this.execution = data.detail.execution as Record<string, unknown>;
+        this.execution = data.detail.execution as ChatExecution;
       if (data.detail.activity)
         this.activity = data.detail.activity as Record<string, unknown>;
       if (data.detail.settings) {
@@ -840,9 +873,9 @@ export class ChatStore {
     if (!keepOlder) {
       const keptSeq = new SvelteSet(
         items.map((item) =>
-          item.kind === "block"
-            ? `block:${item.id}`
-            : `input:${item.idempotency_key}`,
+          item.kind === "input"
+            ? `input:${item.idempotency_key}`
+            : `${item.kind}:${item.id}`,
         ),
       );
       for (const entry of older)
@@ -867,7 +900,14 @@ export class ChatStore {
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {
     const entries: TimelineEntry[] = [];
     for (const item of items) {
-      if (item.kind === "block") {
+      if (item.kind === "request") {
+        entries.push({
+          kind: "request",
+          key: `request:${item.id}`,
+          seq: item.created_seq,
+          request: this.requests.ingestHistory(item),
+        });
+      } else if (item.kind === "block") {
         const block = this.#blockFromHistory(item, dir === "tail");
         entries.push({
           kind: "block",
@@ -901,6 +941,7 @@ export class ChatStore {
     block.model = item.model ?? block.model;
     block.toolName = item.tool_name ?? block.toolName;
     block.summary = item.summary ?? block.summary;
+    block.approvedBy = item.approved_by ?? block.approvedBy;
     block.inputCommandId = item.input_command_id ?? block.inputCommandId;
     block.createdSeq = item.created_seq;
     block.createdAt = Date.parse(item.created_at);
@@ -916,7 +957,6 @@ export class ChatStore {
         ready: shot.ready !== false,
       }));
     }
-    block.lineCount = item.line_count ?? block.lineCount;
     block.truncated = item.content_truncated;
     block.contentBytes = item.content_bytes;
     if (
@@ -934,6 +974,8 @@ export class ChatStore {
           ? (item.summary ?? "")
           : item.content;
     }
+    // Счёт хаба идёт по всему тексту, а в истории лежит только его начало.
+    block.lineCount = item.line_count ?? block.lineCount;
     if (
       item.state === "final" ||
       item.state === "incomplete" ||
@@ -997,13 +1039,14 @@ function visible(): boolean {
 }
 
 function seqOf(item: HistoryItem): string {
-  if (item.kind === "block") return item.created_seq;
-  return item.feed_seq || item.created_seq;
+  if (item.kind === "input") return item.feed_seq || item.created_seq;
+  return item.created_seq;
 }
 
 function terminalEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "block")
     return entry.block.state === "final" || entry.block.state === "incomplete";
+  if (entry.kind === "request") return !isDocked(entry.request);
   return (
     entry.input.state === "accepted" ||
     entry.input.state === "rejected" ||

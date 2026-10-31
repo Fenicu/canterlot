@@ -242,7 +242,10 @@ pub async fn finalize(
         .await?;
         return Ok(BlockOutcome::Diagnosed("block_conflicting_final"));
     }
-    let mismatch = checksum(&accumulated) != expected || checksum(content) != expected;
+    // Без дельт накопленного текста нет, сверять его не с чем: у малого финала текст приходит целиком.
+    let accumulated_known = fact.text_omitted || block.rev > 0;
+    let mismatch =
+        checksum(content) != expected || (accumulated_known && checksum(&accumulated) != expected);
     if fact.text_omitted && (block.revision_gap || mismatch) {
         sqlx::query("update blocks set content = $2, rev = $3, state = 'incomplete', checksum = null, incomplete_reason = 'revision_gap', updated_at = clock_timestamp() where block_id = $1")
             .bind(block_id).bind(content).bind(rev(fact.rev)?).execute(&mut *conn).await?;

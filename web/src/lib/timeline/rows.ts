@@ -1,6 +1,8 @@
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { fmt } from "#lib/format/ru.js";
+import { isDocked } from "#lib/stores/requests.svelte.js";
 import type { TimelineEntry } from "#lib/stores/timeline.js";
+import { isMainAgent } from "./present";
 import type { RowKind } from "./virtual";
 
 export type { RowKind };
@@ -16,14 +18,63 @@ export function dayStart(ts: number): number {
   return new Date(ts).setHours(0, 0, 0, 0);
 }
 
+export interface BlockLinks {
+  children(id: string): BlockModel[];
+  /** Результат вызова инструмента: вывод и конец работы лежат в нём. */
+  result(id: string): BlockModel | null;
+  /** Родитель с учётом результатов субагента из старых строк, где вызова нет. */
+  parent(block: BlockModel): string | null;
+}
+
+const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
+
+export function isSubagentCall(block: BlockModel): boolean {
+  return block.kind === "tool_call" && SUBAGENT_TOOLS.has(block.toolName ?? "");
+}
+
+export function blockLinks(entries: TimelineEntry[]): BlockLinks {
+  const children = new Map<string, BlockModel[]>();
+  const adopted = new Map<string, string>();
+  const calls = new Map<string | null, string>();
+  for (const entry of entries) {
+    if (entry.kind !== "block") continue;
+    const block = entry.block;
+    if (isSubagentCall(block)) calls.set(block.inputCommandId, block.id);
+    const lane =
+      block.parentId === null &&
+      block.kind === "tool_result" &&
+      !isMainAgent(block.agent)
+        ? calls.get(block.inputCommandId)
+        : undefined;
+    if (lane) adopted.set(block.id, lane);
+    const parent = block.parentId ?? lane;
+    if (!parent) continue;
+    const list = children.get(parent);
+    if (list) list.push(block);
+    else children.set(parent, [block]);
+  }
+  return {
+    children: (id) => children.get(id) ?? [],
+    result: (id) =>
+      children.get(id)?.find((child) => child.kind === "tool_result") ?? null,
+    parent: (block) => block.parentId ?? adopted.get(block.id) ?? null,
+  };
+}
+
+/** Рассуждение без текста открывать не на что: ни строки, ни отступа от него. */
+export function shownInCard(block: BlockModel): boolean {
+  return block.kind !== "reasoning" || block.text.trim().length > 0;
+}
+
 export function buildRows(
   entries: TimelineEntry[],
-  opts?: { laneRoot?: string; now?: number },
+  opts?: { laneRoot?: string; now?: number; links?: BlockLinks },
 ): Row[] {
+  const links = opts?.links ?? blockLinks(entries);
   const source = opts?.laneRoot
-    ? descendants(entries, opts.laneRoot)
+    ? descendants(entries, opts.laneRoot, links)
     : entries.filter(
-        (entry) => entry.kind === "input" || entry.block.parentId === null,
+        (entry) => entry.kind !== "block" || links.parent(entry.block) === null,
       );
   const rows: Row[] = [];
   let card: Row | null = null;
@@ -32,6 +83,12 @@ export function buildRows(
   const now = opts?.now ?? Date.now();
   for (const entry of source) {
     if (entry.kind === "input" && entry.input.placement !== "feed") continue;
+    if (entry.kind === "request") {
+      if (isDocked(entry.request)) continue;
+      if (card) card.entries.push(entry);
+      else rows.push({ key: entry.key, kind: "request", entries: [entry] });
+      continue;
+    }
     const stamp =
       entry.kind === "block"
         ? entry.block.createdAt
@@ -70,35 +127,28 @@ export function buildRows(
   return rows;
 }
 
-function descendants(entries: TimelineEntry[], root: string): TimelineEntry[] {
-  const children = new Map<string, string[]>();
-  for (const entry of entries) {
-    if (entry.kind !== "block" || !entry.block.parentId) continue;
-    const list = children.get(entry.block.parentId) ?? [];
-    list.push(entry.block.id);
-    children.set(entry.block.parentId, list);
-  }
+function descendants(
+  entries: TimelineEntry[],
+  root: string,
+  links: BlockLinks,
+): TimelineEntry[] {
   const keep = new Set<string>();
   const walk = (id: string): void => {
-    for (const child of children.get(id) ?? []) {
-      keep.add(child);
-      walk(child);
+    for (const child of links.children(id)) {
+      keep.add(child.id);
+      walk(child.id);
     }
   };
   walk(root);
+  // Результат вызова показывает строка самого вызова.
+  const folded = (block: BlockModel): boolean =>
+    block.kind === "tool_result" &&
+    block.parentId !== null &&
+    block.parentId !== root;
   return entries.filter(
-    (entry) => entry.kind === "block" && keep.has(entry.block.id),
+    (entry) =>
+      entry.kind === "block" &&
+      keep.has(entry.block.id) &&
+      !folded(entry.block),
   );
-}
-
-export function childBlocks(
-  entries: TimelineEntry[],
-  parentId: string,
-): BlockModel[] {
-  const found: BlockModel[] = [];
-  for (const entry of entries) {
-    if (entry.kind === "block" && entry.block.parentId === parentId)
-      found.push(entry.block);
-  }
-  return found;
 }

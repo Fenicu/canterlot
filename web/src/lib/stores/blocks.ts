@@ -86,6 +86,7 @@ export class BlockModel {
   model = "";
   toolName: string | null = null;
   summary: string | null = null;
+  approvedBy: string | null = null;
   inputCommandId: string | null = null;
   createdSeq = "0";
   createdAt = 0;
@@ -117,7 +118,7 @@ export class BlockModel {
   }
   set text(value: string) {
     this.#text.set(value);
-    this.lineCount = value.length === 0 ? 0 : value.split("\n").length;
+    this.lineCount = countLines(value);
   }
   get rev(): number {
     return this.#rev.get();
@@ -149,6 +150,13 @@ export class BlockModel {
   set media(value: BlockMedia[]) {
     this.#media.set(value);
   }
+}
+
+/** Как `str::lines` хаба: перевод строки в конце новой строки не открывает. */
+function countLines(value: string): number {
+  if (value.length === 0) return 0;
+  const breaks = value.split("\n").length;
+  return value.endsWith("\n") ? breaks - 1 : breaks;
 }
 
 function display(block: BlockModel): string {
@@ -209,6 +217,7 @@ function startBlock(
   block.model = payload.model;
   block.toolName = payload.tool_name;
   block.summary = payload.summary;
+  block.approvedBy = payload.approved_by;
   block.inputCommandId = payload.input_command_id;
   block.createdSeq = ev.scope_seq;
   block.createdAt = at(ev);
@@ -279,7 +288,8 @@ function applyFinal(
   const block = ensure(blocks, payload.block_id);
   block.finishedAt = at(ev);
   block.checksum = payload.checksum;
-  if (payload.summary !== undefined) block.summary = payload.summary;
+  // Хаб оставляет сводку начала блока, если финал своей не принёс.
+  block.summary = payload.summary ?? block.summary;
   if (payload.text_omitted) {
     block.rev = payload.rev;
     if (block.sawGap || block.state === "stale") {

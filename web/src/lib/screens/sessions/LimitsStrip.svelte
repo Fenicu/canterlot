@@ -9,18 +9,16 @@
     now,
     thresholds,
     prefer = '',
-    crunch = false,
     compact = false
   }: {
     providers: ProviderLimits[];
     now: number;
     thresholds: LimitThresholds;
     prefer?: string;
-    crunch?: boolean;
     compact?: boolean;
   } = $props();
 
-  const view = $derived(limitStrip(providers, now, thresholds, { prefer, crunch }));
+  const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
 </script>
 
@@ -28,18 +26,13 @@
   <details class="limits" data-tone={view.tone}>
     <summary>
       <span class="rows">
-        {#if view.crunchLabel}
-          <span>{view.crunchLabel}</span>
-        {:else}
-          {#each shown as row (row.label)}
-            {#if row.empty}
-              <span class="row">{compact ? 'Лимиты' : row.label} · нет данных</span>
-            {:else}
-              <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span></span>
-            {/if}
-          {/each}
-        {/if}
-        {#if view.tone === 'reserve'}<span class="reserve">резерв</span>{/if}
+        {#each shown as row (row.label)}
+          {#if row.empty}
+            <span class="row">{compact ? 'Лимиты' : row.label} · нет данных</span>
+          {:else}
+            <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span>{#if row.reserve} · <span class="reserve">резерв</span>{/if}</span>
+          {/if}
+        {/each}
       </span>
       <span class="chevron"><Icon name="down" /></span>
     </summary>
