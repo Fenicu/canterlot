@@ -38,6 +38,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "instructions_v1",
     "workdir_suggest_v1",
     "todo_v1",
+    "compact_v1",
 ];
 
 #[derive(Clone)]

@@ -137,7 +137,7 @@ pub fn permission_payload(request: &PendingRequest) -> Value {
     let mut payload = json!({
         "tool_name": action,
         "tool_use_id": tool_use_id,
-        "agent": request.agent(),
+        "agent": request.agent,
         "deny_also_interrupts": false,
     });
     if let Some(message) = raw.get("message").filter(|message| message.is_string()) {
@@ -217,7 +217,7 @@ fn question_payload(request: &PendingRequest) -> Option<(Value, Vec<Question>)> 
     let payload = json!({
         "questions": shown,
         "tool_use_id": tool_use_id.unwrap_or(Value::Null),
-        "agent": request.agent(),
+        "agent": request.agent,
     });
     Some((payload, questions))
 }
@@ -447,7 +447,7 @@ mod tests {
             id: "per_1".into(),
             session: "ses_1".into(),
             item: None,
-            child: false,
+            agent: "orchestrator".into(),
             raw,
         }
     }
@@ -474,8 +474,8 @@ mod tests {
     #[test]
     fn child_request_is_labelled() {
         let mut child = request(json!({"action": "shell", "resources": ["ls"]}));
-        child.child = true;
-        assert_eq!(permission_payload(&child)["agent"], "subagent");
+        child.agent = "general".into();
+        assert_eq!(permission_payload(&child)["agent"], "general");
     }
 
     fn field(value: Value) -> PendingRequest {
@@ -484,7 +484,7 @@ mod tests {
             id: "frm_1".into(),
             session: "ses_1".into(),
             item: None,
-            child: false,
+            agent: "orchestrator".into(),
             raw: json!({"metadata": {"kind": "question"}, "fields": [value]}),
         }
     }

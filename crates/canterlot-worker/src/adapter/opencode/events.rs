@@ -2,7 +2,8 @@
 //! события чужих сессий отбрасываются, неизвестный тип даёт одну диагностику.
 
 use super::{
-    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase},
+    super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus},
+    failure,
     requests::GLOBAL_SESSION,
 };
 use crate::adapter::labels::{command_label, path_tail};
@@ -15,6 +16,11 @@ use std::{
 use uuid::Uuid;
 
 const MAIN_AGENT: &str = "orchestrator";
+const TODO_TOOL: &str = "todowrite";
+/// Сводка фазы при повторе запроса: дальше номер попытки, подпись строит PWA.
+pub const RETRY_SUMMARY: &str = "retry";
+/// Потомок из списка сессий: как его зовут, скажет его первый шаг.
+const UNNAMED_CHILD: &str = "subagent";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 const SUMMARY_BYTES: usize = 240;
@@ -36,16 +42,12 @@ const KNOWN: &[&str] = &[
     "server.connected",
     "session.agent.selected",
     "session.compaction.delta",
-    "session.compaction.ended",
-    "session.compaction.failed",
-    "session.compaction.started",
     "session.created",
     "session.deleted",
     "session.inbox.cancelled",
     "session.instructions.updated",
     "session.model.selected",
     "session.permissions",
-    "session.retry.scheduled",
     "session.step.streamed",
     "session.synthetic",
     "session.tool.input.ended",
@@ -67,6 +69,33 @@ pub fn block_id(session: &str, message: &str, kind: &str, part: &str) -> Uuid {
 pub struct RunFailure {
     pub kind: String,
     pub message: String,
+    /// Сколько просил подождать провайдер.
+    pub retry_after_ms: Option<u64>,
+    /// Провайдер отверг запрос как слишком длинный: свой повтор со сжатием сервер уже сделал.
+    pub overflow: bool,
+}
+
+impl RunFailure {
+    /// `error` из `session.execution.failed` и из проекции: одна форма `SessionError`.
+    pub fn from_error(error: Option<&Value>) -> Self {
+        let field = |pointer: &str| {
+            error
+                .and_then(|error| error.pointer(pointer))
+                .and_then(Value::as_str)
+        };
+        let kind = field("/type").unwrap_or("unknown").to_owned();
+        let message = field("/message").unwrap_or_default().to_owned();
+        let overflow =
+            failure::is_overflow(&kind, &message, field("/response/body").unwrap_or_default());
+        Self {
+            kind,
+            message,
+            retry_after_ms: error
+                .and_then(|error| error.get("retryAfterMs"))
+                .and_then(Value::as_u64),
+            overflow,
+        }
+    }
 }
 
 impl fmt::Debug for RunFailure {
@@ -96,15 +125,9 @@ pub struct PendingRequest {
     pub id: String,
     pub session: String,
     pub item: Option<String>,
-    pub child: bool,
+    pub agent: String,
     /// Кадр запроса: команды, файлы и текст вопросов.
     pub raw: Value,
-}
-
-impl PendingRequest {
-    pub fn agent(&self) -> &'static str {
-        if self.child { "subagent" } else { MAIN_AGENT }
-    }
 }
 
 impl fmt::Debug for PendingRequest {
@@ -140,6 +163,12 @@ pub enum Translated {
     Request(PendingRequest),
     /// Сервер закрыл запрос с этим идентификатором.
     RequestSettled(String),
+    /// Сжатие контекста закончилось. `failed`: отказ, в значении признак переполнения.
+    /// `manual`: запрошено через `POST .../compact`, а не самим сервером.
+    CompactionEnded {
+        failed: Option<bool>,
+        manual: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -170,6 +199,7 @@ struct ToolState {
     block: Uuid,
     input: Value,
     open: bool,
+    child: bool,
 }
 
 /// Открытый текстовый блок: хаб сверяет финал с тем, что получил дельтами.
@@ -178,6 +208,19 @@ struct OpenText {
     text: String,
     /// Часть дельт потеряна в разрыве: новые не помогут, остаток даст конец блока.
     gapped: bool,
+    child: bool,
+}
+
+/// Сессия субагента. Связь с вызовом приходит `session.tool.progress`, сервер публикует её
+/// раньше первого ввода потомка. После разрыва связь может быть неизвестна.
+struct Child {
+    lane: Option<Uuid>,
+    agent: String,
+}
+
+struct Step {
+    model: String,
+    child: bool,
 }
 
 #[derive(Default)]
@@ -188,12 +231,25 @@ struct Tally {
     cache_write: u64,
 }
 
+impl Tally {
+    // `input` уже без кэша, `output` без рассуждений: так их записывает сервер.
+    fn add(&mut self, tokens: &Value) {
+        let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+        self.input += count("/input");
+        self.output += count("/output") + count("/reasoning");
+        self.cache_read += count("/cache/read");
+        self.cache_write += count("/cache/write");
+    }
+}
+
 pub struct Translator {
     root: String,
-    children: HashSet<String>,
+    children: HashMap<String, Child>,
     command: Option<Uuid>,
+    /// Фоновый потомок работает и между ходами: его блоки приписаны последней команде.
+    last_command: Option<Uuid>,
     /// Модель шага: `session.step.started` единственный источник.
-    steps: HashMap<String, String>,
+    steps: HashMap<String, Step>,
     model: String,
     open: HashMap<Uuid, OpenText>,
     /// Закрытые блоки: после разрыва и сервер, и проекция покажут их ещё раз.
@@ -204,7 +260,8 @@ pub struct Translator {
     gap: bool,
     /// `id` вызова уникален только в шаге, поэтому ключ — пара с сообщением.
     tools: HashMap<String, ToolState>,
-    usage: BTreeMap<String, Tally>,
+    /// Ключ — пара (модель, агент).
+    usage: BTreeMap<(String, String), Tally>,
     context_tokens: u64,
     windows: HashMap<String, u64>,
     unknown: HashSet<String>,
@@ -316,6 +373,27 @@ fn pictures(data: &Value) -> Vec<String> {
         .collect()
 }
 
+// Своего события у списка нет: полный список лежит в результате `todowrite`.
+fn todo_items(data: &Value) -> Option<Vec<TodoItem>> {
+    let items = data.pointer("/metadata/todos")?.as_array()?;
+    Some(
+        items
+            .iter()
+            .filter_map(|item| {
+                Some(TodoItem {
+                    text: item.get("content")?.as_str()?.to_owned(),
+                    status: match item.get("status").and_then(Value::as_str) {
+                        Some("in_progress") => TodoStatus::InProgress,
+                        Some("completed") => TodoStatus::Completed,
+                        Some("cancelled") => TodoStatus::Cancelled,
+                        _ => TodoStatus::Pending,
+                    },
+                })
+            })
+            .collect(),
+    )
+}
+
 // Финал крупнее порога хаб собирает только из дельт: без них блок останется пустым.
 fn finish_block(block_id: Uuid, text: String, summary: Option<String>, out: &mut Vec<Translated>) {
     if text.len() > BLOCK_FINAL_INLINE_MAX_BYTES {
@@ -342,8 +420,9 @@ impl Translator {
     pub fn new(root: &str, windows: HashMap<String, u64>) -> Self {
         Self {
             root: root.to_owned(),
-            children: HashSet::new(),
+            children: HashMap::new(),
             command: None,
+            last_command: None,
             steps: HashMap::new(),
             model: String::new(),
             open: HashMap::new(),
@@ -360,7 +439,7 @@ impl Translator {
 
     /// Своя сессия или её потомок; ответы на запросы идут на путь этой сессии.
     pub fn owns(&self, session: &str) -> bool {
-        session == self.root || self.children.contains(session)
+        session == self.root || self.children.contains_key(session)
     }
 
     /// Поток оборвался: дельты открытых блоков уже неполны.
@@ -373,7 +452,10 @@ impl Translator {
 
     /// Потомок из списка сессий: события о его рождении потеряны.
     pub fn add_child(&mut self, session: String) {
-        self.children.insert(session);
+        self.children.entry(session).or_insert_with(|| Child {
+            lane: None,
+            agent: UNNAMED_CHILD.to_owned(),
+        });
     }
 
     /// Запрос из проекции: тот же путь, что у живого события.
@@ -413,7 +495,7 @@ impl Translator {
         {
             let id = string_field(message, "id");
             if let Some(model) = message.get("model").and_then(model_label) {
-                self.steps.insert(id.to_owned(), model.clone());
+                self.remember_step(id, model.clone(), false);
                 self.model = model;
             }
             for (_, ordinal, part) in assistant_parts(std::slice::from_ref(message)) {
@@ -490,26 +572,28 @@ impl Translator {
 
     /// Потомки сессии: у каждого своя копия правил.
     pub fn children(&self) -> impl Iterator<Item = &str> {
-        self.children.iter().map(String::as_str)
+        self.children.keys().map(String::as_str)
     }
 
     /// Команда следующих блоков. Расход не сбрасывается: запуск без ввода, в который влился
     /// ввод, считается вместе с ним.
     pub fn begin_run(&mut self, command: Option<Uuid>) {
         self.command = command;
+        self.last_command = command.or(self.last_command);
     }
 
     pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
         self.command = None;
-        self.steps.clear();
-        self.open.clear();
-        self.tools.clear();
+        // Фоновый потомок работает дальше: его блоки и инструменты ещё закончатся.
+        self.steps.retain(|_, step| step.child);
+        self.open.retain(|_, block| block.child);
+        self.tools.retain(|_, tool| tool.child);
         self.gap = false;
         let usage = std::mem::take(&mut self.usage)
             .into_iter()
-            .map(|(model, tally)| ModelUsage {
+            .map(|((model, agent), tally)| ModelUsage {
                 model,
-                agent: MAIN_AGENT.into(),
+                agent,
                 input_tokens: tally.input,
                 output_tokens: tally.output,
                 cache_read_tokens: tally.cache_read,
@@ -551,6 +635,9 @@ impl Translator {
         if terminal && session.is_none() {
             return vec![Self::diagnostic("unknown_event", kind, true)];
         }
+        if let Some(out) = self.on_work(kind, data) {
+            return out;
+        }
         if session.is_some_and(|session| session != self.root) {
             return Vec::new();
         }
@@ -562,18 +649,9 @@ impl Translator {
                 vec![Translated::RunEnded(RunOutcome::Interrupted)]
             }
             "session.execution.failed" => {
-                vec![Translated::RunEnded(RunOutcome::Failed(RunFailure {
-                    kind: data
-                        .pointer("/error/type")
-                        .and_then(Value::as_str)
-                        .unwrap_or("unknown")
-                        .to_owned(),
-                    message: data
-                        .pointer("/error/message")
-                        .and_then(Value::as_str)
-                        .unwrap_or_default()
-                        .to_owned(),
-                }))]
+                vec![Translated::RunEnded(RunOutcome::Failed(
+                    RunFailure::from_error(data.get("error")),
+                ))]
             }
             "session.execution.started" => vec![Translated::RunStarted],
             "session.inbox.enqueued" | "session.inbox.delivered" => {
@@ -582,6 +660,25 @@ impl Translator {
                     delivered: kind == "session.inbox.delivered",
                 }]
             }
+            "session.retry.scheduled" => Self::on_retry(data),
+            "session.compaction.started" => vec![Self::phase(Phase::ContextMaintenance, None)],
+            "session.compaction.ended" | "session.compaction.failed" => {
+                self.on_compaction_ended(kind, data)
+            }
+            "shell.created" => vec![Translated::ShellStarted],
+            _ if KNOWN.contains(&kind) => Vec::new(),
+            _ if terminal => vec![Self::diagnostic("unknown_event", kind, true)],
+            _ => self.on_unknown(kind),
+        }
+    }
+
+    // Работа агента, основного или потомка. Сессия уже проверена владельцем только у основного.
+    fn on_work(&mut self, kind: &str, data: &Value) -> Option<Vec<Translated>> {
+        let session = data.get("sessionID").and_then(Value::as_str);
+        if session.is_some_and(|session| !self.owns(session)) {
+            return None;
+        }
+        Some(match kind {
             "session.step.started" => self.on_step_started(data),
             "session.step.ended" | "session.step.failed" => self.on_step_finished(data),
             "session.text.started" => self.on_started(TextKind::Text, data),
@@ -595,11 +692,81 @@ impl Translator {
             "session.tool.progress" => self.on_tool_progress(data),
             "session.tool.success" => self.on_tool_success(data),
             "session.tool.failed" => self.on_tool_failed(data),
-            "shell.created" => vec![Translated::ShellStarted],
-            _ if KNOWN.contains(&kind) => Vec::new(),
-            _ if terminal => vec![Self::diagnostic("unknown_event", kind, true)],
-            _ => self.on_unknown(kind),
+            _ => return None,
+        })
+    }
+
+    fn phase(phase: Phase, summary: Option<String>) -> Translated {
+        Translated::Event(AdapterEvent::Phase {
+            phase,
+            tool_name: None,
+            summary,
+        })
+    }
+
+    // Запрос к модели повторяет сам сервер, ввод не отправляется заново. Подпись строит PWA.
+    fn on_retry(data: &Value) -> Vec<Translated> {
+        let attempt = data.get("attempt").and_then(Value::as_u64).unwrap_or(1);
+        vec![Self::phase(
+            Phase::Generating,
+            Some(format!("{RETRY_SUMMARY} {attempt}")),
+        )]
+    }
+
+    // Сжатие тратит токены отдельно от шагов. `session.compaction.failed` в записях нет, форма
+    // из `SessionEvent.Compaction.Failed`, L2 проверяет её на настоящем сервере.
+    fn on_compaction_ended(&mut self, kind: &str, data: &Value) -> Vec<Translated> {
+        if let Some(tokens) = data.get("tokens").filter(|tokens| tokens.is_object()) {
+            let model = data
+                .get("model")
+                .and_then(model_label)
+                .unwrap_or_else(|| self.model.clone());
+            let tally = self
+                .usage
+                .entry((model, MAIN_AGENT.to_owned()))
+                .or_default();
+            tally.add(tokens);
         }
+        let failed = (kind == "session.compaction.failed")
+            .then(|| RunFailure::from_error(data.get("error")).overflow);
+        vec![
+            Self::phase(Phase::Generating, None),
+            Translated::CompactionEnded {
+                failed,
+                manual: string_field(data, "reason") == "manual",
+            },
+        ]
+    }
+
+    fn is_child(&self, data: &Value) -> bool {
+        self.children.contains_key(string_field(data, "sessionID"))
+    }
+
+    /// Родитель верхнего блока и имя агента по сессии события.
+    fn lane_of(&self, data: &Value) -> (Option<Uuid>, String) {
+        match self.children.get(string_field(data, "sessionID")) {
+            Some(child) => (child.lane, child.agent.clone()),
+            None => (None, MAIN_AGENT.to_owned()),
+        }
+    }
+
+    fn command_of(&self, data: &Value) -> Option<Uuid> {
+        if self.is_child(data) {
+            self.command.or(self.last_command)
+        } else {
+            self.command
+        }
+    }
+
+    fn remember_step(&mut self, message: &str, model: String, child: bool) {
+        self.steps.insert(message.to_owned(), Step { model, child });
+    }
+
+    fn model_of(&self, data: &Value) -> String {
+        self.steps
+            .get(string_field(data, "assistantMessageID"))
+            .map_or(&self.model, |step| &step.model)
+            .clone()
     }
 
     fn diagnostic(kind: &'static str, event_type: &str, required: bool) -> Translated {
@@ -620,19 +787,55 @@ impl Translator {
 
     fn on_created(&mut self, data: &Value) {
         let parent = string_field(data, "parentID");
-        if !parent.is_empty() && self.owns(parent) {
-            self.children
-                .insert(string_field(data, "sessionID").to_owned());
+        if parent.is_empty() || !self.owns(parent) {
+            return;
+        }
+        let id = string_field(data, "sessionID").to_owned();
+        self.add_child(id.clone());
+        self.name_child(&id, data);
+    }
+
+    fn name_child(&mut self, session: &str, data: &Value) {
+        if let (Some(child), Some(agent)) = (
+            self.children.get_mut(session),
+            data.get("agent").and_then(Value::as_str),
+        ) {
+            agent.clone_into(&mut child.agent);
         }
     }
 
+    // Вызов `subagent` называет свою сессию: этот блок и есть дорожка потомка.
+    fn link_child(&mut self, data: &Value) {
+        let Some(session) = data.pointer("/metadata/sessionID").and_then(Value::as_str) else {
+            return;
+        };
+        let call = block_id(
+            &self.root,
+            string_field(data, "assistantMessageID"),
+            "tool",
+            string_field(data, "id"),
+        );
+        self.add_child(session.to_owned());
+        if let Some(child) = self.children.get_mut(session) {
+            child.lane = Some(call);
+        }
+    }
+
+    // Фазу задаёт основной агент: потомок работает внутри его вызова.
     fn on_step_started(&mut self, data: &Value) -> Vec<Translated> {
+        let child = self.is_child(data);
+        if child {
+            self.name_child(string_field(data, "sessionID"), data);
+        }
         if let Some(model) = data.get("model").and_then(model_label) {
-            self.steps.insert(
-                string_field(data, "assistantMessageID").to_owned(),
-                model.clone(),
-            );
-            self.model = model;
+            let step = string_field(data, "assistantMessageID");
+            self.remember_step(step, model.clone(), child);
+            if !child {
+                self.model = model;
+            }
+        }
+        if child {
+            return Vec::new();
         }
         vec![Translated::Event(AdapterEvent::Phase {
             phase: Phase::Generating,
@@ -641,27 +844,27 @@ impl Translator {
         })]
     }
 
-    // `input` уже без кэша, `output` без рассуждений: так их записывает сервер.
     fn on_step_finished(&mut self, data: &Value) -> Vec<Translated> {
+        let child = self.is_child(data);
+        let model = self.model_of(data);
+        let step = string_field(data, "assistantMessageID");
+        if child {
+            self.steps.remove(step);
+        }
         let Some(tokens) = data.get("tokens").filter(|tokens| tokens.is_object()) else {
             return Vec::new();
         };
-        let step = string_field(data, "assistantMessageID");
         if !self.counted.insert(step.to_owned()) {
             return Vec::new();
         }
-        let count = |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
-        let model = self
-            .steps
-            .get(string_field(data, "assistantMessageID"))
-            .unwrap_or(&self.model)
-            .clone();
-        let tally = self.usage.entry(model).or_default();
-        tally.input += count("/input");
-        tally.output += count("/output") + count("/reasoning");
-        tally.cache_read += count("/cache/read");
-        tally.cache_write += count("/cache/write");
-        self.context_tokens = count("/input") + count("/cache/read") + count("/cache/write");
+        let (_, agent) = self.lane_of(data);
+        self.usage.entry((model, agent)).or_default().add(tokens);
+        // У потомка своё окно: контекст разговора считает только основной агент.
+        if !child {
+            let count =
+                |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
+            self.context_tokens = count("/input") + count("/cache/read") + count("/cache/write");
+        }
         Vec::new()
     }
 
@@ -687,7 +890,11 @@ impl Translator {
             id: id.to_owned(),
             session: session.to_owned(),
             item,
-            child: session != self.root,
+            agent: self
+                .children
+                .get(session)
+                .map_or(MAIN_AGENT, |child| child.agent.as_str())
+                .to_owned(),
             raw: raw.clone(),
         })]
     }
@@ -730,11 +937,13 @@ impl Translator {
         let id = string_field(data, "id");
         let key = tool_key(message, id);
         let block = block_id(&self.root, message, "tool", id);
+        let child = self.children.contains_key(string_field(data, "sessionID"));
         let state = self.tools.entry(key.clone()).or_insert_with(|| ToolState {
             name: "tool".to_owned(),
             block,
             input: Value::Null,
             open: false,
+            child,
         });
         (key, state)
     }
@@ -752,12 +961,9 @@ impl Translator {
 
     // Начало блока ждёт входа: сводка без него пуста.
     fn open_tool(&mut self, data: &Value, out: &mut Vec<Translated>) {
-        let model = self
-            .steps
-            .get(string_field(data, "assistantMessageID"))
-            .unwrap_or(&self.model)
-            .clone();
-        let command = self.command;
+        let model = self.model_of(data);
+        let (parent, agent) = self.lane_of(data);
+        let command = self.command_of(data);
         let (item, state) = self.tool_of(data);
         if std::mem::replace(&mut state.open, true) {
             return;
@@ -767,8 +973,8 @@ impl Translator {
             block_id: block,
             kind: BlockKind::ToolCall,
             input_command_id: command,
-            parent: None,
-            agent: MAIN_AGENT.into(),
+            parent,
+            agent,
             model,
             tool_name: Some(state.name.clone()),
             summary: Some(tool_summary(&state.name, &state.input)),
@@ -795,15 +1001,18 @@ impl Translator {
         let (name, summary) = (state.name.clone(), tool_summary(&state.name, &state.input));
         let mut out = Vec::new();
         self.open_tool(data, &mut out);
-        out.push(Translated::Event(AdapterEvent::Phase {
-            phase: Phase::RunningTool,
-            tool_name: Some(name),
-            summary: Some(summary),
-        }));
+        if !self.is_child(data) {
+            out.push(Translated::Event(AdapterEvent::Phase {
+                phase: Phase::RunningTool,
+                tool_name: Some(name),
+                summary: Some(summary),
+            }));
+        }
         out
     }
 
     fn on_tool_progress(&mut self, data: &Value) -> Vec<Translated> {
+        self.link_child(data);
         if self.tool_finished(data) {
             return Vec::new();
         }
@@ -813,15 +1022,13 @@ impl Translator {
 
     fn finish_tool(&mut self, data: &Value, text: String, status: &str) -> Vec<Translated> {
         let mut out = Vec::new();
+        self.link_child(data);
         if self.tool_finished(data) {
             return out;
         }
         self.open_tool(data, &mut out);
-        let model = self
-            .steps
-            .get(string_field(data, "assistantMessageID"))
-            .unwrap_or(&self.model)
-            .clone();
+        let model = self.model_of(data);
+        let (_, agent) = self.lane_of(data);
         let message = string_field(data, "assistantMessageID");
         let id = string_field(data, "id");
         let item = tool_key(message, id);
@@ -840,9 +1047,9 @@ impl Translator {
         out.push(Translated::Event(AdapterEvent::BlockStarted {
             block_id: result,
             kind: BlockKind::ToolResult,
-            input_command_id: self.command,
+            input_command_id: self.command_of(data),
             parent: Some(state.block),
-            agent: MAIN_AGENT.into(),
+            agent,
             model,
             tool_name: None,
             summary: None,
@@ -858,11 +1065,13 @@ impl Translator {
             Some(summary),
             &mut out,
         );
-        out.push(Translated::Event(AdapterEvent::Phase {
-            phase: Phase::Generating,
-            tool_name: None,
-            summary: None,
-        }));
+        if !state.child {
+            out.push(Translated::Event(AdapterEvent::Phase {
+                phase: Phase::Generating,
+                tool_name: None,
+                summary: None,
+            }));
+        }
         out
     }
 
@@ -872,7 +1081,33 @@ impl Translator {
             Some(code) => format!("exit {code}"),
             None => "completed".to_owned(),
         };
-        self.finish_tool(data, content_text(data), &status)
+        let list = self.todo_update(data);
+        let mut out = self.finish_tool(data, content_text(data), &status);
+        out.extend(list);
+        out
+    }
+
+    fn todo_update(&self, data: &Value) -> Option<Translated> {
+        let key = tool_key(
+            string_field(data, "assistantMessageID"),
+            string_field(data, "id"),
+        );
+        if self.tool_finished(data) || self.tools.get(&key)?.name != TODO_TOOL {
+            return None;
+        }
+        let items = todo_items(data)?;
+        let lane = match self.children.get(string_field(data, "sessionID")) {
+            None => None,
+            Some(child) if child.lane.is_some() => child.lane,
+            Some(_) => {
+                return Some(Self::diagnostic(
+                    "todo_lane_unknown",
+                    "todo_lane_unknown",
+                    false,
+                ));
+            }
+        };
+        Some(Translated::Event(AdapterEvent::TodoUpdated { lane, items }))
     }
 
     fn on_tool_failed(&mut self, data: &Value) -> Vec<Translated> {
@@ -907,20 +1142,23 @@ impl Translator {
     // своё состояние, а не стек.
     fn ensure_open(&mut self, kind: TextKind, data: &Value, out: &mut Vec<Translated>) -> Uuid {
         let block_id = self.id_of(kind, data);
-        if let std::collections::hash_map::Entry::Vacant(entry) = self.open.entry(block_id) {
-            entry.insert(OpenText::default());
-            let model = self
-                .steps
-                .get(string_field(data, "assistantMessageID"))
-                .unwrap_or(&self.model)
-                .clone();
+        if !self.open.contains_key(&block_id) {
+            let child = self.is_child(data);
+            self.open.insert(
+                block_id,
+                OpenText {
+                    child,
+                    ..OpenText::default()
+                },
+            );
+            let (parent, agent) = self.lane_of(data);
             out.push(Translated::Event(AdapterEvent::BlockStarted {
                 block_id,
                 kind: kind.block(),
-                input_command_id: self.command,
-                parent: None,
-                agent: MAIN_AGENT.into(),
-                model,
+                input_command_id: self.command_of(data),
+                parent,
+                agent,
+                model: self.model_of(data),
                 tool_name: None,
                 summary: None,
                 approved_by: None,

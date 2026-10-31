@@ -5,7 +5,7 @@ use canterlot_hub::{
         self, ActivityInputs, ActivityState as S, Evidence as E, ExecutionFacts, LinkState,
         ProcessFacts, QueueFacts, Thresholds,
     },
-    model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+    model::{CompactionProgress, ExecutionState, HoldReason, PauseReason, RunSlot},
 };
 use chrono::{TimeDelta, Utc};
 use uuid::Uuid;
@@ -218,6 +218,29 @@ fn owner_lost_is_failed_with_reason() {
             reason: "owner_lost".into()
         }
     );
+}
+
+#[test]
+fn stuck_session_is_failed_with_that_reason_while_the_execution_lives() {
+    let mut i = inputs();
+    i.queue.slot = RunSlot::Free;
+    i.queue
+        .pause_reasons
+        .push(PauseReason::SessionStuck { compaction: None });
+    assert_eq!(
+        activity::compute(&i, &thresholds()).evidence,
+        E::Failed {
+            reason: "session_stuck".into()
+        }
+    );
+    i.queue.pause_reasons = vec![PauseReason::SessionStuck {
+        compaction: Some(CompactionProgress::Requested),
+    }];
+    let activity = activity::compute(&i, &thresholds());
+    assert!(matches!(
+        activity.evidence,
+        E::Working { ref phase, .. } if phase == "context_maintenance"
+    ));
 }
 
 #[test]

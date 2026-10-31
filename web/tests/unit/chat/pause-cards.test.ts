@@ -18,7 +18,67 @@ const RESET_AT_FMT = fmt.resetAt(Date.parse(RESET_AT_ISO), NOW);
 const WAKE_AT_ISO = "2026-10-29T13:30:00.000Z";
 const WAKE_AT_FMT = fmt.clock(Date.parse(WAKE_AT_ISO));
 
+const OPENCODE = {
+  provider: "opencode",
+  crunch: false,
+  resumeText: null,
+  now: NOW,
+};
+
+function stuckCard(compaction?: "requested" | "failed", liveExecution = true) {
+  const reason: PauseReason = { reason: "session_stuck", compaction };
+  const q: QueueView = { pause_reasons: [reason], hold_reasons: [], queued: 1 };
+  return pauseHoldCards(q, { ...OPENCODE, liveExecution })[0]!;
+}
+
 describe("chat/pauseCards", () => {
+  it("stuck_session_offers_compaction_and_claims_no_cause", () => {
+    const card = stuckCard();
+    expect(card.tone).toBe("danger");
+    expect(card.title).toBe(
+      "Очередь остановлена: один и тот же отказ провайдера подряд",
+    );
+    expect(card.actions.map((action) => action.id)).toEqual([
+      "compact_context",
+      "continue_queue",
+    ]);
+    expect(card.actions[0]!.label).toBe("Сжать контекст");
+    expect(card.body.join(" ")).toContain("Причина отказа неизвестна");
+    expect(card.body.join(" ")).toContain("тратит токены");
+  });
+
+  it("requested_compaction_waits_without_actions", () => {
+    const card = stuckCard("requested");
+    expect(card.actions).toEqual([]);
+    expect(card.body).toEqual(["Контекст сжимается"]);
+  });
+
+  it("failed_compaction_says_so_and_may_be_tried_again", () => {
+    const card = stuckCard("failed");
+    expect(card.body[0]).toBe("Сжатие не удалось");
+    expect(card.actions.map((action) => action.id)).toEqual([
+      "compact_context",
+      "continue_queue",
+    ]);
+  });
+
+  it("stopped_session_cannot_compact_and_offers_the_run", () => {
+    const card = stuckCard(undefined, false);
+    expect(card.actions.map((action) => action.id)).toEqual(["run"]);
+  });
+
+  it("limit_without_a_reset_time_does_not_promise_one", () => {
+    const q: QueueView = {
+      pause_reasons: [{ reason: "limit_reached", provider: "opencode" }],
+      hold_reasons: [],
+      queued: 1,
+    };
+    const card = pauseHoldCards(q, { ...OPENCODE, liveExecution: true })[0]!;
+    expect(card.title).toBe(
+      "Остановлена: достигнут лимит OpenCode; без «кранча» продолжение не отправляется",
+    );
+  });
+
   it("pause_hold_cards_cover_every_reason_with_the_exact_action", () => {
     // Table over every PauseReason
     const pauseCases: {

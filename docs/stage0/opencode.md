@@ -223,7 +223,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 Инструмент `subagent {agent, description, prompt, model?, sessionID?, background?}`. Агенты: `general`, `explore`. Глубина по умолчанию 1, `experimental.subagent_depth` меняет её. [И: packages/core/src/tool/plugin/subagent.ts:17,129]
 
 - Потомок это отдельная сессия: `session.created {parentID}`, затем обычные события с её `sessionID` в том же `/api/event`. Связь с вызовом: `session.tool.progress {id, metadata:{sessionID, status:"running"}}` у родителя. [Ж: subagent.jsonl]
-- Ключ дорожки: блок вызова `subagent`. Порядок в захватах: `tool.called`, затем `session.created`, затем `tool.progress`. События потомка до `progress` надо держать, сопоставляя через `parentID`.
+- Ключ дорожки: блок вызова `subagent`. Порядок в захватах: `tool.called`, затем `session.created`, затем `tool.progress`. Сервер публикует `progress` раньше ввода потомка, поэтому событий потомка до него нет и держать нечего. [И: packages/core/src/tool/plugin/subagent.ts] В проекции `running`-вызова `metadata` пуста: `progress` эфемерен, после разрыва связь даёт `metadata` результата вызова. [Ж: recovery.jsonl] [И: packages/core/src/session/message-updater.ts]
 - Запрос разрешения потомка несёт `sessionID` потомка, ответ идёт на его путь. [Ж: subagent.jsonl]
 - Потомок наследует `permissions` родителя при создании, режимы `ask` и `read_only` не обходятся: в `ask` shell потомка спросил разрешение, в `read_only` инструмента у потомка не было. [Ж: subagent.jsonl] [И: packages/core/src/session.ts:298-301] Передаётся ли позднее `PATCH` родителя уже созданным потомкам, не проверено. [Н]
 - `interrupt` родителя снимает основного и фонового потомка и их shell. [Ж: subagent.jsonl]
@@ -232,7 +232,7 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 
 ### 5.4. Туду
 
-Инструмент `todowrite` есть только при `experimental.todo: true`; без флага его нет в списке инструментов. [Ж: todo.jsonl] [И: packages/core/src/tool/plugin/todo.ts:11,50] Своего события нет. Источник: `session.tool.success.metadata.todos` с полным списком `[{content, status}]`, имя инструмента надо помнить с `session.tool.input.started`. Статусы: `pending, in_progress, completed, cancelled`; `cancelled` в `TodoStatus` отсутствует. [Ж: todo.jsonl] Дорожка: `sessionID` события через связь субагента. У субагента туду работает так же. [И: там же] Вживую у потомка не проверялось. [Н]
+Инструмент `todowrite` есть только при `experimental.todo: true`; без флага его нет в списке инструментов. [Ж: todo.jsonl] [И: packages/core/src/tool/plugin/todo.ts:11,50] Своего события нет. Источник: `session.tool.success.metadata.todos` с полным списком `[{content, status}]`, имя инструмента надо помнить с `session.tool.input.started`. Статусы: `pending, in_progress, completed, cancelled`; `cancelled` в `TodoStatus` отсутствует. [Ж: todo.jsonl] Дорожка: `sessionID` события через связь субагента. У субагента туду работает так же. [И: там же] Проверено живым тестом L2 `real_child_todo_list_goes_to_the_lane_of_its_call` на заглушке провайдера.
 
 ### 5.5. Инструкции и конфигурация
 
@@ -311,12 +311,14 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 - Настоящий ответ бесплатных моделей: `provider.free-limit`, `retryAfterMs: 80814000` (22,4 ч), тело `FreeUsageLimitError`. [Ж: real_free_model.jsonl]
 - Окна Go по тексту консоли: «Estimated requests per 5 hours and monthly usage limits by model». [И: packages/console/app/src/i18n/en.ts:219] Значит, есть месячное окно, которого нет в `LimitWindow`.
 - `codexbar usage --provider opencodego` есть в справке 0.79.0 и соответствует `pilot.md` §7.1. Не запускался: читает учётные данные владельца. [Н]
+- Решение владельца 31.10: только `Reached` из отказа, без `codexbar` и без месячного окна. Окна в отказе нет: ожидание длиннее пяти часов адаптер считает недельным.
 
 ### 5.11. Компакция, повторы, переполнение
 
 - Порог автокомпакции: 85 % окна, не менее 16 тысяч запаса; `compaction.buffer` меняет. [И: packages/core/src/session/compaction.ts:128] Событие `session.compaction.started {reason:"auto"}`, полная история сохраняется, `/context` показывает сокращённую. [Ж: compaction.jsonl]
 - Отказ с текстом из списка переполнения (`prompt is too long` и др.) до первых данных: сам запускает компакцию и повторяет шаг, `step.failed` не публикуется. [Ж: compaction.jsonl] [И: packages/core/src/session/runner/step.ts:158, packages/ai/src/provider-error.ts:18]
-- Ручная: `POST .../compact`, элемент очереди со своим `id`. Шаблон сводки обязателен: иначе `compaction.failed`. [Ж: compaction.jsonl] [И: packages/core/src/session/compaction.ts]
+- Ручная: `POST .../compact {id?, delivery?}`, элемент очереди со своим `id`, повтор с тем же `id` возвращает тот же элемент. [И: packages/protocol/src/groups/session.ts, packages/core/src/session/inbox.ts] Шаблон сводки обязателен: иначе `session.compaction.failed`. [Ж: compaction.jsonl] Кадр отказа в записях нет, проверен живым тестом L2 `real_compaction_without_a_summary_is_reported`. [И: packages/core/src/session/compaction.ts]
+- Тип ошибки переполнение не отличает: `SessionError` это `provider.invalid-request`, признак `context-overflow` наружу не выходит. [И: packages/core/src/session/to-session-error.ts] Адаптер берёт признак из шаблонов текста версии 2.1.4; второе переполнение после сжатия проверено L2 `real_overflow_after_compaction_exhausts_the_context`.
 - Повторы: до 10, паузы 2, 4, 8, затем по 10 с, `Retry-After` до 15 минут; живьём 6 подряд за 41 с. `specs/v2/session.md:84` с числом 4 устарел. [Ж: service_failure.jsonl] [И: packages/core/src/model-retry.ts:12,27]
 - Не повторяются: `Authentication, QuotaExceeded, ContentPolicy, InvalidRequest, UnsupportedOperation, NoRoute, Timeout`. Неопознанные ошибки **повторяются**. [И: packages/ai/src/provider-error.ts:85]
 - Обрыв потока: `provider.invalid-output`, новый шаг. [Ж: service_failure.jsonl]
@@ -403,4 +405,8 @@ env -i PATH=... HOME=... XDG_DATA_HOME=<свой> XDG_CONFIG_HOME=<свой> \
 - поведение локации после выгрузки по простою;
 - миграция базы между версиями OpenCode;
 - более 4 вопросов в одной форме;
-- туду у субагента вживую.
+- блоки потомка, выпавшие в разрыв потока: проекция читается только у корневой сессии, адаптер их не восстанавливает, расход таких шагов не считается.
+
+Закрыто на этапе 2 живыми тестами L2 на заглушке: передача правил потомкам (`PATCH` на каждого, родительский не наследуется), туду у субагента, кадр `session.compaction.failed`, второе переполнение, `provider.quota` с `Retry-After`, `session.retry.scheduled` на настоящем сервере. Что осталось для настоящей модели, перечислено в чек-листе смоука.
+
+Вход в базу canterlot только с `--standalone`: `opencode auth login --standalone`. Без флага команда работает через фоновую службу, а служба на этой базе нарушает ограничение из риска 1. [Ж: `opencode auth login --help` на 2.1.4, запуск с `--standalone` в изолированных каталогах создаёт `opencode.db` и не оставляет процессов]

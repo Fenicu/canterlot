@@ -141,6 +141,10 @@
 		color: var(--success);
 	}
 
+	.word[data-status='cancelled'] {
+		color: var(--warning);
+	}
+
 	.now {
 		flex: 1;
 		min-width: var(--s0);
@@ -187,7 +191,7 @@
 		transition: color var(--duration-fast) var(--ease);
 	}
 
-	.item[data-status='completed'] {
+	.item:is([data-status='completed'], [data-status='cancelled']) {
 		color: var(--secondary);
 	}
 

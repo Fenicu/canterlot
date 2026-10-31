@@ -29,6 +29,21 @@ describe("sessions/activity", () => {
     expect(
       line({
         state: "working",
+        evidence: { phase: "generating", summary: "retry 3" },
+      }).text,
+    ).toBe("Повторяет запрос к модели, попытка 3");
+    expect(
+      line({
+        state: "working",
+        evidence: { phase: "generating", summary: "Субагент general: done" },
+      }).text,
+    ).toBe("Генерирует");
+    expect(
+      line({ state: "failed", evidence: { reason: "session_stuck" } }).text,
+    ).toBe("Сбой: один и тот же отказ провайдера подряд");
+    expect(
+      line({
+        state: "working",
         evidence: {
           phase: "running_tool",
           tool_name: "cargo test",

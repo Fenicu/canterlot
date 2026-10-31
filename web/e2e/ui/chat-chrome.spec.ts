@@ -219,6 +219,45 @@ test('stop_force_stop_resume_and_continue_queue_call_endpoints_with_keys_and_con
 	await expect.poll(() => calls.find((c) => c.url.endsWith('/queue/continue'))).toBeDefined();
 });
 
+test('stuck_session_card_asks_for_compaction_and_shows_its_progress', async ({ page }) => {
+	const posted: string[] = [];
+	page.on('request', (req) => {
+		if (req.method() === 'POST') posted.push(req.url());
+	});
+	const { hub, id } = await bootChat(page);
+	hub.append(`conversation:${id}`, {
+		kind: 'execution_state_changed',
+		conversation_id: id,
+		payload: { generation: 3, outcome: null, state: 'running' }
+	});
+	hub.append(`conversation:${id}`, {
+		kind: 'queue_state_changed',
+		conversation_id: id,
+		payload: {
+			pause_reasons: [{ reason: 'session_stuck' }],
+			hold_reasons: [],
+			run_slot: 'free'
+		}
+	});
+	hub.flush();
+
+	const card = page.locator('.pause-card[data-tone="danger"]');
+	await expect(card).toContainText('один и тот же отказ провайдера подряд');
+	await expect(card).toContainText('Причина отказа неизвестна');
+	await card.getByRole('button', { name: 'Сжать контекст' }).click();
+	await expect.poll(() => posted.filter((url) => url.endsWith('/compact')).length).toBe(1);
+	await expect(card).toContainText('Контекст сжимается');
+	await expect(card.getByRole('button')).toHaveCount(0);
+
+	hub.append(`conversation:${id}`, {
+		kind: 'queue_state_changed',
+		conversation_id: id,
+		payload: { pause_reasons: [], hold_reasons: [], run_slot: 'free' }
+	});
+	hub.flush();
+	await expect(card).toHaveCount(0);
+});
+
 test('failed_start_offers_one_action_everywhere_and_it_clears_the_pause', async ({ page }) => {
 	const resumes: { continue_queue?: boolean }[] = [];
 	page.on('request', (req) => {

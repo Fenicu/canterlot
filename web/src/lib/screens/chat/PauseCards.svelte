@@ -2,6 +2,7 @@
 	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
 	import { pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
 	import {
+		compactSessionContext,
 		continueSessionQueue,
 		resumeSession,
 		spendSessionReserve,
@@ -86,6 +87,9 @@
 			switch (action.id) {
 				case 'continue_queue':
 					await continueSessionQueue(chat.id);
+					break;
+				case 'compact_context':
+					await compactSessionContext(chat.id);
 					break;
 				case 'run':
 					await resumeSession(chat.id, { continue_queue: chat.queue.pause_reasons.length > 0 });

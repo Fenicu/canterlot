@@ -607,6 +607,26 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ status: 200, headers: headers(), json: {} });
   });
 
+  await page.route('**/api/v1/conversations/*/compact', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    hub.append(`conversation:${id}`, {
+      kind: 'queue_state_changed',
+      conversation_id: id,
+      payload: {
+        pause_reasons: [{ reason: 'session_stuck', compaction: 'requested' }],
+        hold_reasons: [],
+        run_slot: 'free'
+      }
+    });
+    hub.flush();
+    await route.fulfill({
+      status: 200,
+      headers: headers(),
+      json: { requested: { command_id: crypto.randomUUID() } }
+    });
+  });
+
   await page.route('**/api/v1/conversations/*/queue/continue', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-3) ?? '';

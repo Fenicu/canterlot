@@ -508,6 +508,21 @@ export function stop(
   );
 }
 
+export function compact(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["post__api_v1_conversations__id__compact"]>>
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/compact`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function continueQueue(
   conversationId: string,
   key: string,

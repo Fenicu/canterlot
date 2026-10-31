@@ -7,9 +7,9 @@
 //! `exec/manager.rs` падал из-за пропущенной настройки адаптеров.
 
 use canterlot_proto::worker::v1::{
-    Command, ContentBlock, DeliverDecision, DeliverInput, Instructions, Interrupt, InterruptState,
-    SettingsOverride, StartExecution, StopExecution, TextBlock, command::Kind, content_block,
-    record_body::Body,
+    Command, CompactSession, CompactionState, ContentBlock, DeliverDecision, DeliverInput,
+    Instructions, Interrupt, InterruptState, SettingsOverride, StartExecution, StopExecution,
+    TextBlock, command::Kind, content_block, record_body::Body,
 };
 use canterlot_worker::{
     adapter::opencode::replay::{Reply, Script, Step},
@@ -234,7 +234,7 @@ impl Env {
                     mode: "clean".into(),
                     ..Default::default()
                 }),
-                capabilities: vec!["pilot_v1".into()],
+                capabilities: vec!["pilot_v1".into(), "todo_v1".into(), "compact_v1".into()],
                 ..Default::default()
             }),
         )
@@ -941,6 +941,230 @@ async fn tools_reach_the_journal_with_exit_status_and_mark() {
         Body::BlockFinal(f) if f.summary == "shell: exit 3, exit 3"
     )));
     env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Субагенты по боевому пути: дорожки потомков в журнале, расход под именем агента,
+// фоновый потомок живёт дольше периода родителя.
+#[tokio::test]
+async fn subagent_blocks_reach_the_journal_in_their_lanes() {
+    let script = Script::from_capture("subagent", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("delegate").await;
+    env.wait("the run after the background child", |bodies| {
+        bodies
+            .iter()
+            .filter(|body| matches!(body, Body::RunFinished(_)))
+            .count()
+            >= 2
+    })
+    .await;
+    let blocks: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockStarted(fact) => Some(fact),
+            _ => None,
+        })
+        .collect();
+    let calls: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.tool_name == "subagent")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    let lane = |agent: &str| -> Vec<_> {
+        blocks
+            .iter()
+            .filter(|block| block.agent == agent && block.kind != "tool_result")
+            .collect()
+    };
+    assert_eq!(lane("general").len(), 3, "reasoning, shell, text");
+    assert!(
+        lane("general")
+            .iter()
+            .all(|block| block.parent_block_id == calls[0].block_id)
+    );
+    assert_eq!(lane("explore").len(), 1);
+    assert_eq!(lane("explore")[0].parent_block_id, calls[1].block_id);
+    let first = env
+        .bodies
+        .iter()
+        .find_map(|body| match body {
+            Body::RunFinished(fact) if fact.input_command_id == input.to_string() => Some(fact),
+            _ => None,
+        })
+        .unwrap();
+    let general = first
+        .usage
+        .iter()
+        .find(|line| line.agent == "general")
+        .expect("usage of the child");
+    assert_eq!(general.input_tokens, 140);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Список задач по боевому пути: запись журнала с отменённым пунктом и включённый флаг.
+#[tokio::test]
+async fn todo_list_reaches_the_journal_and_the_flag_reaches_the_server() {
+    let script = Script::from_capture("todo", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("plan").await;
+    env.wait_finished(input).await;
+    let lists: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::TodoUpdated(fact) => Some(fact),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists.len(), 2, "{}", env.logs());
+    assert_eq!(lists[1].lane_block_id, "");
+    assert_eq!(
+        lists[1].items[1].status,
+        canterlot_proto::worker::v1::TodoStatus::Cancelled as i32
+    );
+    let boot = env.fake().boot();
+    let config: Value =
+        serde_json::from_str(boot["env"]["OPENCODE_CONFIG_CONTENT"].as_str().unwrap()).unwrap();
+    assert_eq!(config["experimental"]["todo"], true);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Застрявшая сессия по боевому пути: факт в журнале, команда сжатия, итог, ввод один раз.
+#[tokio::test]
+async fn stuck_session_and_compaction_go_through_the_supervisor() {
+    let script = Script::from_capture("stuck_invalid_request", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let one = env.deliver("one").await;
+    env.wait_finished(one).await;
+    assert!(
+        !env.bodies
+            .iter()
+            .any(|body| matches!(body, Body::SessionStuck(_)))
+    );
+    let two = env.deliver("two").await;
+    env.wait_finished(two).await;
+    env.wait("stuck fact", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::SessionStuck(_)))
+    })
+    .await;
+    let diagnostics: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::AdapterDiagnostic(fact) => Some(fact.event_type.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        diagnostics
+            .iter()
+            .any(|kind| kind == "provider_invalid_request")
+    );
+    assert!(diagnostics.iter().any(|kind| kind == "session_stuck"));
+    let command = Uuid::now_v7();
+    env.send(env.command(command, Kind::CompactSession(CompactSession {})))
+        .await;
+    env.wait("compaction finished", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::CompactionStatus(fact)
+                if fact.command_id == command.to_string()
+                    && fact.state == CompactionState::Completed as i32)
+        })
+    })
+    .await;
+    let three = env.deliver("three").await;
+    env.wait_finished(three).await;
+    assert_eq!(prompts(&env), 3);
+    assert!(!env.logs().contains("invalid parameters"));
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Команда сжатия посреди хода: сервер её не видит, владелец получает итог.
+#[tokio::test]
+async fn compaction_during_a_turn_is_not_applicable() {
+    let script = Script::from_capture("interrupt", None)
+        .first_run()
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("hang").await;
+    env.wait("input accepted", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::InputAccepted(fact) if fact.command_id == input.to_string())
+        })
+    })
+    .await;
+    env.wait("run active", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::PhaseChanged(_)))
+    })
+    .await;
+    let command = Uuid::now_v7();
+    env.send(env.command(command, Kind::CompactSession(CompactSession {})))
+        .await;
+    env.wait("compaction refused", |bodies| {
+        bodies.iter().any(|body| {
+            matches!(body, Body::CompactionStatus(fact)
+                if fact.state == CompactionState::NotApplicable as i32)
+        })
+    })
+    .await;
+    assert!(find(&env.fake().requests(), "POST", "/compact").is_none());
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
+// Отказ запуска без текста разговора: владелец видит, на каком шаге остановилось.
+#[tokio::test]
+async fn failed_start_names_its_step_in_a_diagnostic() {
+    let mut script = ready();
+    for step in &mut script.steps {
+        if let Step::Expect { path, reply, .. } = step
+            && path == "/api/session"
+        {
+            reply.status = 500;
+            reply.body = Some(json!({"_tag": "Internal"}));
+        }
+    }
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait("failed execution", |bodies| {
+        bodies
+            .iter()
+            .any(|body| matches!(body, Body::ExecutionState(fact) if fact.state == "failed"))
+    })
+    .await;
+    assert!(env.bodies.iter().any(|body| matches!(
+        body,
+        Body::AdapterDiagnostic(fact)
+            if fact.kind == "start_failed" && fact.event_type == "session_create_failed"
+    )));
     env.fake().wait_gone().await;
 }
 

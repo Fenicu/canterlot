@@ -12,10 +12,11 @@
 use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, DecisionOutcome,
-        InstructionMode, InstructionSpec, InterruptOutcome, LocalFile, MediaSource, ModelUsage,
-        SettingsChange, StartSpec, Transmission, TransmitOutcome,
-        opencode::{OpenCodeAdapter, discover},
+        Adapter, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
+        DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
+        LimitWindow, LocalFile, MediaSource, ModelUsage, Phase, SettingsChange, StartSpec,
+        TodoItem, TodoStatus, Transmission, TransmitOutcome,
+        opencode::{OpenCodeAdapter, VERIFIED_OPENAPI_SHA256, discover},
     },
     config::OpenCodeConfig,
     containment::TreeContainment,
@@ -1624,4 +1625,385 @@ async fn real_stdin_lease_keeps_the_partial_text_for_the_next_execution() {
     assert_eq!(stub.requests().len(), 1);
     second.close(CloseMode::Graceful, &group).await.unwrap();
     live.wait_gone().await;
+}
+
+// Субагент на настоящем сервере: связь с вызовом, имя агента и расход потомка. Последний
+// ответ заглушки уходит родителю, потому что потомок завершает свой шаг раньше.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_subagent_runs_in_the_lane_of_its_call() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "subagent",
+            json!({"agent": "general", "description": "проба", "prompt": "сделай"}),
+        ),
+        Reply::text("готово у потомка"),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("делегируй")).await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                tool_name: Some(name),
+                ..
+            } if name == "subagent" => Some(*block_id),
+            _ => None,
+        })
+        .expect("subagent call");
+    let lane: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                parent,
+                agent,
+                kind: BlockKind::Text,
+                ..
+            } => Some((*parent, agent.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        lane,
+        vec![
+            (Some(call), "general".to_owned()),
+            (None, "orchestrator".to_owned())
+        ]
+    );
+    let Some(AdapterEvent::RunFinished { usage, .. }) = events.last() else {
+        panic!("run must finish");
+    };
+    assert!(
+        usage.iter().any(|line| line.agent == "general"),
+        "{usage:?}"
+    );
+    assert!(
+        usage.iter().any(|line| line.agent == "orchestrator"),
+        "{usage:?}"
+    );
+    session.close().await;
+}
+
+// Флаг `experimental.todo` на настоящем сервере: инструмент есть и отдаёт полный список.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_todo_list_comes_whole_with_a_cancelled_item() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "todowrite",
+            json!({"todos": [
+                {"content": "сделано", "status": "completed"},
+                {"content": "снято", "status": "cancelled"},
+            ]}),
+        ),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("составь план")).await;
+    let lists: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::TodoUpdated { lane, items } => Some((*lane, items.clone())),
+            _ => None,
+        })
+        .collect();
+    let todo = |text: &str, status| TodoItem {
+        text: text.into(),
+        status,
+    };
+    assert_eq!(
+        lists,
+        vec![(
+            None,
+            vec![
+                todo("сделано", TodoStatus::Completed),
+                todo("снято", TodoStatus::Cancelled)
+            ]
+        )]
+    );
+    session.close().await;
+}
+
+const OBSERVED_REFUSAL: &str = "The request contains invalid parameters. Check the request body for any errors or inconsistencies.";
+
+/// Сводка по обязательному шаблону OpenCode, запись этапа 0.
+const SUMMARY: &str = "## Objective\n- probe\n\n## Requirements\n- (none)\n\n## Decisions\n- (none)\n\n## Work State\n### Completed\n- (none)\n\n### Active\n- (none)\n\n### Blocked\n- (none)\n\n## Next Move\n1. (none)\n\n## Relevant Files\n- (none)\n\n## Important Context\n- (none)\n";
+
+fn refusal(message: &str) -> Reply {
+    Reply::Status {
+        status: 400,
+        body: json!({"model": "fake-1", "error": {
+            "code": null, "message": message, "param": null,
+            "type": "invalid_request_error"}}),
+    }
+}
+
+impl Session {
+    async fn compact(&mut self) -> CompactOutcome {
+        tokio::time::timeout(WAIT, self.adapter.compact(Uuid::now_v7()))
+            .await
+            .expect("compact must finish")
+    }
+
+    async fn refused_turn(&mut self, text: &str) {
+        let events = self.turn(&input(text)).await;
+        assert!(
+            events.iter().any(|event| matches!(
+                event,
+                AdapterEvent::BlockStarted {
+                    kind: BlockKind::Error,
+                    ..
+                }
+            )),
+            "{events:?}"
+        );
+    }
+}
+
+// Запись `stuck_invalid_request` на настоящем сервере: отказ, отказ, сжатие, ответ.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_same_refusal_twice_offers_compaction_and_it_recovers() {
+    let stub = Stub::start(vec![
+        refusal(OBSERVED_REFUSAL),
+        refusal(OBSERVED_REFUSAL),
+        Reply::text(SUMMARY),
+        Reply::text("снова работает"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.refused_turn("один").await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::SessionStuck))
+        .await;
+    assert_eq!(session.compact().await, CompactOutcome::Accepted);
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(matches!(
+        events.last(),
+        Some(AdapterEvent::Compacted { ok: true })
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase {
+            phase: Phase::ContextMaintenance,
+            ..
+        }
+    )));
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+        .await;
+    let events = session.turn(&input("три")).await;
+    assert_eq!(finals(&events), ["снова работает"]);
+    assert_eq!(stub.requests().len(), 4, "one model call per input");
+    session.close().await;
+}
+
+// Отказ сжатия снимается с настоящего сервера: в записях этапа 0 такого кадра нет.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_compaction_without_a_summary_is_reported() {
+    let stub = Stub::start(vec![
+        refusal(OBSERVED_REFUSAL),
+        refusal(OBSERVED_REFUSAL),
+        Reply::text("без шаблона"),
+        Reply::text("снова без шаблона"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.refused_turn("один").await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::SessionStuck))
+        .await;
+    assert_eq!(session.compact().await, CompactOutcome::Accepted);
+    let events = session
+        .until(|event| matches!(event, AdapterEvent::Compacted { .. }))
+        .await;
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Compacted { ok: false })),
+        "{events:?}"
+    );
+    session
+        .until(|event| matches!(event, AdapterEvent::RunFinished { .. }))
+        .await;
+    session.close().await;
+}
+
+// Второе переполнение: сервер сжал и снова получил отказ, чинить ему больше нечем.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_overflow_after_compaction_exhausts_the_context() {
+    let overflow = "prompt is too long: 900000 tokens > 200000 maximum";
+    let stub = Stub::start(vec![
+        Reply::text("первый ответ"),
+        refusal(overflow),
+        Reply::text(SUMMARY),
+        refusal(overflow),
+        refusal(overflow),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    session.turn(&input("один")).await;
+    session.refused_turn("два").await;
+    session
+        .until(|event| matches!(event, AdapterEvent::ContextExhausted))
+        .await;
+    session.close().await;
+}
+
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_quota_refusal_is_a_reached_limit_with_the_wait() {
+    let stub = Stub::start(vec![Reply::Limited {
+        body: json!({"error": {"message": "Go usage limit reached", "type": "GoUsageLimitError"}}),
+        retry_after_s: 3600,
+    }])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("x")).await;
+    let fact = events.iter().find_map(|event| match event {
+        AdapterEvent::Limit(fact) => Some(fact.clone()),
+        _ => None,
+    });
+    assert!(
+        matches!(
+            fact,
+            Some(LimitFact::Reached {
+                window: LimitWindow::FiveHour,
+                resets_at_ms: Some(_),
+            })
+        ),
+        "{fact:?}"
+    );
+    session.close().await;
+}
+
+// Повтор запроса к модели на настоящем сервере: фаза есть, вторая запись ввода не нужна.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_retry_of_a_rate_limit_finishes_the_same_turn() {
+    let stub = Stub::start(vec![
+        Reply::Status {
+            status: 429,
+            body: json!({"error": {"message": "slow down", "type": "rate_limit_error"}}),
+        },
+        Reply::text("после повтора"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("x")).await;
+    assert!(events.iter().any(|event| matches!(
+        event,
+        AdapterEvent::Phase { summary: Some(summary), .. } if summary == "retry 2"
+    )));
+    assert_eq!(finals(&events), ["после повтора"]);
+    assert_eq!(
+        stub.requests()
+            .iter()
+            .filter(|request| request["messages"].to_string().contains('x'))
+            .count(),
+        2,
+        "the model is called again, the input stays one"
+    );
+    session.close().await;
+}
+
+// Живьём у потомка `todowrite` на этапе 0 не снимался: L1 держит придуманный кадр, здесь он
+// сверяется с настоящим сервером.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_child_todo_list_goes_to_the_lane_of_its_call() {
+    let stub = Stub::start(vec![
+        Reply::tool(
+            "subagent",
+            json!({"agent": "general", "description": "проба", "prompt": "сделай"}),
+        ),
+        Reply::tool(
+            "todowrite",
+            json!({"todos": [{"content": "дочерний пункт", "status": "in_progress"}]}),
+        ),
+        Reply::text("готово у потомка"),
+        Reply::text("готово"),
+    ])
+    .await;
+    let mut session = Session::start(&stub, "bypass").await;
+    let events = session.turn(&input("делегируй")).await;
+    let call = events
+        .iter()
+        .find_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                tool_name: Some(name),
+                ..
+            } if name == "subagent" => Some(*block_id),
+            _ => None,
+        })
+        .expect("subagent call");
+    let lists: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::TodoUpdated { lane, .. } => Some(*lane),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(lists, vec![Some(call)], "{events:?}");
+    session.close().await;
+}
+
+// Договор с проверенной версией: схема настоящего сервера совпадает с манифестом.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn real_server_schema_matches_the_manifest() {
+    use sha2::{Digest, Sha256};
+    use std::{
+        io::{BufRead, BufReader},
+        process::{Command, Stdio},
+    };
+    let stub = Stub::start(Vec::new()).await;
+    let live = Live::new(&stub.config());
+    let password = "manifest-check";
+    let data = live.root.path().join("manifest");
+    let mut child = Command::new(&live.wrapper)
+        .args(["serve", "--stdio", "--port", "0"])
+        .env("OPENCODE_PASSWORD", password)
+        .env("XDG_DATA_HOME", data.join("data"))
+        .env("XDG_STATE_HOME", data.join("state"))
+        .env("XDG_CACHE_HOME", data.join("cache"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    let ready: Value = serde_json::from_str(&line).unwrap();
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let bytes = client
+        .get(format!("{}/openapi.json", ready["url"].as_str().unwrap()))
+        .basic_auth("opencode", Some(password))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    drop(child.stdin.take());
+    child.wait().unwrap();
+    let digest: String = Sha256::digest(&bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    assert_eq!(
+        digest, VERIFIED_OPENAPI_SHA256,
+        "scripts/opencode-schema-check.sh"
+    );
 }

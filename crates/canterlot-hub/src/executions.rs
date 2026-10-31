@@ -6,7 +6,7 @@ use uuid::Uuid;
 use crate::{
     delivery::LockedQueue,
     events::{self, NewEvent, Scope},
-    model::{ExecutionState, HoldReason, PauseReason, RunSlot},
+    model::{CompactionProgress, ExecutionState, HoldReason, PauseReason, RunSlot},
 };
 
 #[derive(Debug, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
@@ -397,6 +397,14 @@ pub async fn set_state_in_tx(
                 .0
                 .retain(|reason| *reason != HoldReason::ExecutionStarting);
             add_once(&mut queue.hold_reasons.0, HoldReason::NoLiveExecution);
+            // Итога сжатия уже не будет: карточка не должна ждать его вечно.
+            for reason in &mut queue.pause_reasons.0 {
+                if let PauseReason::SessionStuck { compaction } = reason
+                    && *compaction == Some(CompactionProgress::Requested)
+                {
+                    *compaction = Some(CompactionProgress::Failed);
+                }
+            }
             if matches!(slot, RunSlot::Running { .. }) {
                 slot = RunSlot::Free;
                 queue

@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
-        CancelInput, Command, ControlDown, DeliverDecision, DeliverInput, Instructions, Interrupt,
-        SettingsOverride, StartExecution, StopExecution, WithdrawInput, command, control_down,
+        CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
+        Instructions, Interrupt, SettingsOverride, StartExecution, StopExecution, WithdrawInput,
+        command, control_down,
     },
 };
 use prost::Message;
@@ -150,6 +151,9 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    if row.kind == "compact_session" && !has(crate::session::CAPABILITY_COMPACT_V1) {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -166,6 +170,7 @@ fn to_proto_with_capability(
         start.capabilities = [
             crate::session::CAPABILITY_PILOT_V1,
             crate::session::CAPABILITY_TODO_V1,
+            crate::session::CAPABILITY_COMPACT_V1,
         ]
         .into_iter()
         .filter(|capability| has(capability))
@@ -292,6 +297,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
             })
         }
         "interrupt" => command::Kind::Interrupt(Interrupt {}),
+        "compact_session" => command::Kind::CompactSession(CompactSession {}),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,

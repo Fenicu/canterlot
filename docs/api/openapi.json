@@ -1044,6 +1044,73 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/compact": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "post__api_v1_conversations__id__compact",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Сжатие контекста запрошено",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompactOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/crunch": {
       "put": {
         "tags": [
@@ -4768,6 +4835,58 @@
           }
         ]
       },
+      "CompactOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "required": [
+                  "command_id"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "already_requested"
+            ],
+            "properties": {
+              "already_requested": {
+                "type": "object",
+                "required": [
+                  "command_id"
+                ],
+                "properties": {
+                  "command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "CompactionProgress": {
+        "type": "string",
+        "description": "Ход сжатия контекста, запрошенного владельцем.",
+        "enum": [
+          "requested",
+          "failed"
+        ]
+      },
       "CompleteBody": {
         "type": "object",
         "properties": {
@@ -7123,6 +7242,31 @@
                 ]
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "Один и тот же отказ провайдера подряд. Причина отказа неизвестна.",
+            "required": [
+              "reason"
+            ],
+            "properties": {
+              "compaction": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CompactionProgress"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "enum": [
+                  "session_stuck"
+                ]
+              }
+            }
           }
         ]
       },
@@ -8444,7 +8588,8 @@
         "enum": [
           "pending",
           "in_progress",
-          "completed"
+          "completed",
+          "cancelled"
         ]
       },
       "UploadOffer": {

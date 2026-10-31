@@ -3,6 +3,7 @@
 
 pub mod catalog;
 pub mod events;
+pub mod failure;
 pub mod http;
 pub mod input;
 pub mod instructions;
@@ -31,9 +32,9 @@ use self::{
 use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
-        DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec, InterruptOutcome,
-        ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
-        TransmitOutcome,
+        CompactOutcome, DecisionOutcome, HarnessCatalog, InstructionMode, InstructionSpec,
+        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support,
+        Transmission, TransmitOutcome,
         canterlot_mcp::{Broker, BrokerEvent, ToolSet},
         cli_version::{CliVersion, VersionError},
         held_tool::HeldTools,
@@ -57,6 +58,8 @@ use uuid::Uuid;
 /// Строка готовности и ожидание MCP: на проверенной версии доли секунды.
 const READY_WAIT: Duration = Duration::from_secs(20);
 const REQUEST_WAIT: Duration = Duration::from_secs(10);
+/// Весь `discover` при старте воркера: запуск сервера, версия и каталог.
+const DISCOVER_WAIT: Duration = Duration::from_secs(20);
 const INTERRUPT_WAIT: Duration = Duration::from_secs(5);
 const POLL_EVERY: Duration = Duration::from_millis(100);
 /// Эвристика: `connected` публикуется раньше инструментов, дебаунс `mcp.tools.changed`
@@ -69,6 +72,7 @@ const INSTRUCTIONS_FAILED: &str = "instructions_change_failed";
 const TERM_GRACE: Duration = Duration::from_secs(2);
 const KILL_WAIT: Duration = Duration::from_secs(2);
 const STREAM_BUFFER: usize = 4096;
+const PATCH_BATCH: usize = 16;
 /// Паузы перед подпиской заново. Сервер живёт отдельно от потока: обычно хватает первой.
 const RECONNECT_DELAYS: [Duration; 4] = [
     Duration::from_millis(0),
@@ -82,7 +86,7 @@ const SESSION_TITLE: &str = "canterlot";
 const STALE_INPUT_NOTICE: &str = "Ввод остался в очереди после падения и не выполнен: он снят, чтобы не исполниться вместе со следующим.";
 const ERROR_TEXT_BYTES: usize = 4096;
 /// Схема `GET /openapi.json` проверенной версии (`evidence/opencode/openapi-2.1.4.sha256`).
-const VERIFIED_OPENAPI_SHA256: &str =
+pub const VERIFIED_OPENAPI_SHA256: &str =
     "23a25e5604b1274987ab7093be1eea517bd93d588e849ea53ad93a977878db3a";
 
 /// Итог проверки при старте воркера: версия CLI и каталог моделей.
@@ -124,6 +128,8 @@ pub enum DiscoverError {
     DataRoot(LayoutError),
     /// Сервер не поднялся или не отдал список моделей.
     Catalog,
+    /// Проверка не уложилась в срок: дальше ждут сопровождения других харнессов.
+    Timeout,
 }
 
 // Каталоги и окружение своих данных: без них проверка версии пишет к владельцу.
@@ -147,6 +153,24 @@ async fn prepared_env(
 
 /// Проверка при старте воркера; без неё харнесс не попадает в каталог.
 pub async fn discover(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    discover_within(cfg, data_dir, DISCOVER_WAIT).await
+}
+
+/// Отмена по сроку безопасна: брошенный процесс снимают EOF stdin и SIGTERM при `Drop`.
+pub async fn discover_within(
+    cfg: &OpenCodeConfig,
+    data_dir: &Path,
+    limit: Duration,
+) -> Result<OpenCodeCatalog, DiscoverError> {
+    tokio::time::timeout(limit, discover_inner(cfg, data_dir))
+        .await
+        .map_err(|_| DiscoverError::Timeout)?
+}
+
+async fn discover_inner(
     cfg: &OpenCodeConfig,
     data_dir: &Path,
 ) -> Result<OpenCodeCatalog, DiscoverError> {
@@ -228,6 +252,14 @@ fn owner_instructions() -> InstructionSpec {
 fn random_password() -> String {
     let bytes: [u8; 32] = rand::random();
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| u64::try_from(elapsed.as_millis()).ok())
+        .unwrap_or(0)
 }
 
 fn session_id() -> String {
@@ -338,14 +370,20 @@ async fn subscribe(http: &Http, wait: Duration) -> Option<EventStream> {
 }
 
 // Правила потомку ставятся отдельно: завершённого уже нет, остальной сохранил бы прежние.
+// Пачками, а не по одному: это ждёт цикл супервизора, а с ним решения и остановка.
 async fn patch_children(http: &Http, children: &[String], body: &Value) -> Result<(), HttpError> {
-    for child in children {
-        match http
-            .patch(&format!("/api/session/{child}"), body, REQUEST_WAIT)
-            .await
-        {
-            Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
-            Err(error) => return Err(error),
+    for batch in children.chunks(PATCH_BATCH) {
+        let mut patches = JoinSet::new();
+        for child in batch {
+            let (http, body) = (http.clone(), body.clone());
+            let path = format!("/api/session/{child}");
+            patches.spawn(async move { http.patch(&path, &body, REQUEST_WAIT).await });
+        }
+        while let Some(done) = patches.join_next().await {
+            match done.map_err(|_| HttpError::Lost)? {
+                Ok(_) | Err(HttpError::Status { status: 404, .. }) => {}
+                Err(error) => return Err(error),
+            }
         }
     }
     Ok(())
@@ -420,6 +458,8 @@ pub struct OpenCodeAdapter {
     refusals: JoinSet<()>,
     /// Снимки фоновых команд для журнала сирот.
     shell_journal: JoinSet<()>,
+    /// Журнал сирот живой сессии: снимки идут строго по очереди.
+    orphan_journal: Option<orphans::Journal>,
     session: String,
     mode: PermissionMode,
     /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
@@ -438,6 +478,12 @@ pub struct OpenCodeAdapter {
     applied: InstructionSpec,
     /// Спека запуска: перезапуск повторяет её с той же сессией.
     spec: Option<StartSpec>,
+    /// Сжатие в этом периоде отказало из-за переполнения: сервер больше ничего не сделает.
+    overflowed: bool,
+    /// Отказы подряд: повтор предлагает сжатие.
+    stuck: failure::StuckWatch,
+    /// Сообщение ручного сжатия, чей итог ждёт супервизор.
+    compaction: Option<String>,
     version: Option<CliVersion>,
     /// Момент, после которого хвост потока больше не ждём.
     exit: Option<(Option<ExitStatus>, Instant)>,
@@ -471,6 +517,7 @@ impl OpenCodeAdapter {
             requests: Requests::default(),
             refusals: JoinSet::new(),
             shell_journal: JoinSet::new(),
+            orphan_journal: None,
             session: String::new(),
             mode: PermissionMode::Owner,
             rules_dirty: false,
@@ -482,6 +529,9 @@ impl OpenCodeAdapter {
             instructions: owner_instructions(),
             applied: owner_instructions(),
             spec: None,
+            overflowed: false,
+            stuck: failure::StuckWatch::default(),
+            compaction: None,
             version: None,
             exit: None,
             kill_at: None,
@@ -982,13 +1032,87 @@ impl OpenCodeAdapter {
         });
     }
 
+    // Лимит пишется внутри хода: хаб привязывает его к текущему вводу. Остальное идёт за концом
+    // хода, чтобы расход и блок ошибки успели попасть в журнал до остановки.
+    fn judge(&mut self, outcome: &RunOutcome) -> Vec<AdapterEvent> {
+        let overflowed = std::mem::take(&mut self.overflowed);
+        let failure = match outcome {
+            RunOutcome::Failed(failure) => failure,
+            RunOutcome::Succeeded => {
+                self.stuck.reset();
+                return Vec::new();
+            }
+            // Период сжатия снят: кадра отказа может и не быть, а карточка ждёт итог.
+            RunOutcome::Interrupted => {
+                self.on_compaction_ended(Some(false), true);
+                return Vec::new();
+            }
+        };
+        if let Some(fact) = failure::limit_fact(failure, now_ms()) {
+            self.events.push_back(AdapterEvent::Limit(fact));
+        }
+        let mut follow = vec![AdapterEvent::Diagnostic {
+            kind: "provider_failure",
+            event_type: failure.kind.clone(),
+            required: false,
+        }];
+        if failure.kind == failure::AUTH_FAILURE {
+            follow.push(AdapterEvent::Diagnostic {
+                kind: "auth_required",
+                event_type: "auth_required".into(),
+                required: true,
+            });
+        } else if failure.overflow || overflowed {
+            follow.push(AdapterEvent::ContextExhausted);
+        } else if self.stuck.on_failure(failure) {
+            follow.push(AdapterEvent::Diagnostic {
+                kind: "session_stuck",
+                event_type: "session_stuck".into(),
+                required: false,
+            });
+            follow.push(AdapterEvent::SessionStuck);
+        }
+        follow
+    }
+
+    fn on_compaction_ended(&mut self, failed: Option<bool>, manual: bool) {
+        self.overflowed |= failed == Some(true);
+        if failed.is_none() {
+            self.stuck.reset();
+        }
+        if manual && self.compaction.take().is_some() {
+            self.events.push_back(AdapterEvent::Compacted {
+                ok: failed.is_none(),
+            });
+        }
+    }
+
+    // Итог ручного сжатия мог выпасть в разрыв: сообщение сжатия лежит в проекции.
+    fn settle_compaction(&mut self, snapshot: &Snapshot) {
+        let Some(id) = self.compaction.as_deref() else {
+            return;
+        };
+        let status = snapshot
+            .messages
+            .iter()
+            .find(|message| message["id"].as_str() == Some(id))
+            .and_then(|message| message["status"].as_str());
+        match status {
+            Some("completed") => self.on_compaction_ended(None, true),
+            Some("failed") => self.on_compaction_ended(Some(false), true),
+            _ => {}
+        }
+    }
+
     fn on_run_ended(&mut self, outcome: RunOutcome) {
         self.held.release_all(&mut self.events);
         self.asked.clear();
         self.requests.drop_session(&self.session);
+        let follow = self.judge(&outcome);
         let Some(command) = self.delivery.active.or(self.delivery.adopted) else {
             // Запуск без единой команды: приписать некому, блоков хода нет.
             self.awaiting_input();
+            self.events.extend(follow);
             return;
         };
         if let RunOutcome::Failed(failure) = &outcome {
@@ -1002,6 +1126,7 @@ impl OpenCodeAdapter {
             && !interrupted
         {
             self.delivery.foreign = false;
+            self.events.extend(follow);
             return;
         }
         self.delivery.active = None;
@@ -1015,6 +1140,7 @@ impl OpenCodeAdapter {
             self.events.push_back(translator.finish_run(command));
         }
         self.awaiting_input();
+        self.events.extend(follow);
         if interrupted {
             self.list_shells(command);
         }
@@ -1182,6 +1308,9 @@ impl OpenCodeAdapter {
             Translated::RunEnded(_) if std::mem::take(&mut self.delivery.stale_terminal) => {}
             Translated::RunEnded(outcome) => self.on_run_ended(outcome),
             Translated::ShellStarted => self.journal_shells(),
+            Translated::CompactionEnded { failed, manual } => {
+                self.on_compaction_ended(failed, manual);
+            }
         }
     }
 
@@ -1200,11 +1329,12 @@ impl OpenCodeAdapter {
             .chain([self.session.clone()])
             .collect();
         while self.shell_journal.try_join_next().is_some() {}
-        self.shell_journal.spawn(orphans::record(
-            http,
-            self.orphan_journal(&self.session),
-            owners,
-        ));
+        let path = self.orphan_journal(&self.session);
+        let journal = self
+            .orphan_journal
+            .get_or_insert_with(|| orphans::Journal::new(path));
+        self.shell_journal
+            .spawn(journal.clone().record(http, owners));
     }
 
     // Запись осталась только после падения и сервера, и супервизора: дерево процессов уже не
@@ -1261,16 +1391,9 @@ impl OpenCodeAdapter {
         let outcome = reconcile::last_outcome(&snapshot.messages, input.as_deref());
         let outcome = match outcome.and_then(|idle| idle.get("outcome")?.as_str()) {
             Some("succeeded") => RunOutcome::Succeeded,
-            Some("failed") => RunOutcome::Failed(events::RunFailure {
-                kind: outcome
-                    .and_then(|idle| idle.pointer("/error/type")?.as_str())
-                    .unwrap_or("unknown")
-                    .to_owned(),
-                message: outcome
-                    .and_then(|idle| idle.pointer("/error/message")?.as_str())
-                    .unwrap_or_default()
-                    .to_owned(),
-            }),
+            Some("failed") => RunOutcome::Failed(RunFailure::from_error(
+                outcome.and_then(|idle| idle.get("error")),
+            )),
             // Сервер жив и не работает, а итога нет: ход не закрыть иначе.
             _ => RunOutcome::Interrupted,
         };
@@ -1313,6 +1436,7 @@ impl OpenCodeAdapter {
             self.apply_items(items);
         }
         self.reopen_requests(&snapshot);
+        self.settle_compaction(&snapshot);
         if self.turn_running() && !snapshot.running {
             self.close_by_projection(&snapshot);
         } else if self.turn_running() && !self.requests.has_open() {
@@ -1964,6 +2088,26 @@ impl Adapter for OpenCodeAdapter {
             }
         }
         outcome
+    }
+
+    // Идентификатор из команды: повтор доставки попадёт в тот же элемент очереди сервера.
+    async fn compact(&mut self, command: Uuid) -> CompactOutcome {
+        if self.turn_running() || self.compaction.is_some() {
+            return CompactOutcome::NotApplicable;
+        }
+        let Some(http) = self.http.clone() else {
+            return CompactOutcome::NotApplicable;
+        };
+        let id = input::message_id(command);
+        let path = format!("/api/session/{}/compact", self.session);
+        let body = json!({"id": id, "delivery": "queue"});
+        match http.post(&path, &body, REQUEST_WAIT).await {
+            Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                self.compaction = Some(id);
+                CompactOutcome::Accepted
+            }
+            _ => CompactOutcome::Failed,
+        }
     }
 
     fn set_stop_grace(&mut self, grace: Duration) {

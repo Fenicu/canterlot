@@ -309,8 +309,24 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     let id = testkit::seed_conversation(&pool, owner, machine).await;
     let doomed = testkit::seed_conversation(&pool, owner, machine).await;
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
+    let stuck = testkit::seed_conversation(&pool, owner, machine).await;
     sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
         .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let live = canterlot_hub::executions::start(&pool, owner, stuck, Uuid::now_v7())
+        .await
+        .unwrap();
+    use canterlot_hub::model::ExecutionState;
+    for state in [ExecutionState::Starting, ExecutionState::Running] {
+        canterlot_hub::executions::set_state(&pool, live.execution_id, state, None, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    sqlx::query("update queue_state set pause_reasons=$2 where conversation_id=$1")
+        .bind(stuck)
+        .bind(json!([{"reason":"session_stuck"}]))
         .execute(&pool)
         .await
         .unwrap();
@@ -523,6 +539,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::POST,
             "/api/v1/conversations/{id}/interrupt",
             format!("/api/v1/conversations/{id}/interrupt"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/compact",
+            format!("/api/v1/conversations/{stuck}/compact"),
             None,
             None,
         ),

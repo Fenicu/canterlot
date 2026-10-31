@@ -392,6 +392,38 @@ async fn nul_and_unknown_status_do_not_poison_the_journal(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn cancelled_item_keeps_its_status(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    let execution = running(&pool, &seed).await;
+    let batch = records(
+        Uuid::now_v7(),
+        1,
+        vec![
+            opened(&execution),
+            fact(
+                &execution,
+                2,
+                None,
+                vec![
+                    item("сделано", TodoStatus::Completed),
+                    item("снято", TodoStatus::Cancelled),
+                ],
+            ),
+        ],
+    );
+    apply(&pool, &seed, &batch).await;
+    assert_eq!(
+        lists(&pool, &seed).await[0].items,
+        vec![
+            view("сделано", ViewStatus::Completed),
+            view("снято", ViewStatus::Cancelled)
+        ]
+    );
+    let events = todo_events(&pool, seed.conversation_id).await;
+    assert_eq!(events[0].payload["items"][1]["status"], "cancelled");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn list_of_a_foreign_execution_is_refused(pool: PgPool) {
     let seed = testkit::seed(&pool).await;
     let execution = running(&pool, &seed).await;
@@ -459,6 +491,9 @@ fn events_schema_describes_todo_updated() {
     });
     let validator = schema_validator();
     assert!(validator.is_valid(&valid));
+    let mut cancelled = valid.clone();
+    cancelled["payload"]["items"][0]["status"] = json!("cancelled");
+    assert!(validator.is_valid(&cancelled));
     let mut wrong = valid.clone();
     wrong["payload"]["items"][0]["status"] = json!("done");
     assert!(!validator.is_valid(&wrong));

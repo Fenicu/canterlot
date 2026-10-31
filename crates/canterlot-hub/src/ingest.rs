@@ -892,6 +892,8 @@ fn touches_activity(body: &Body) -> bool {
             | Body::DecisionApplied(_)
             | Body::DecisionNotApplied(_)
             | Body::TodoUpdated(_)
+            | Body::SessionStuck(_)
+            | Body::CompactionStatus(_)
     )
 }
 
@@ -1451,6 +1453,41 @@ async fn apply_body(
                 }
             }
         }
+        Body::CompactionStatus(fact) => {
+            use canterlot_proto::worker::v1::CompactionState;
+            let command_id = parse_id(&fact.command_id)?;
+            let state =
+                CompactionState::try_from(fact.state).map_err(|_| IngestError::InvalidRecord)?;
+            let status = match state {
+                CompactionState::SentToAgent => "sent_to_agent",
+                CompactionState::Completed => "completed",
+                CompactionState::Failed => "failed",
+                CompactionState::NotApplicable => "not_applicable",
+                CompactionState::Superseded => "superseded",
+                CompactionState::RejectedStale => "rejected_stale",
+                CompactionState::Unspecified => return Err(IngestError::InvalidRecord),
+            };
+            if let Some(target) = command(conn, machine_id, command_id).await?
+                && target.kind == "compact_session"
+                && target.dispatch_attempt == attempt(fact.dispatch_attempt)?
+            {
+                let terminal = state != CompactionState::SentToAgent;
+                sqlx::query("update commands set last_status = $2, delivery_state = case when $3 then 'completed' else delivery_state end, completed_at = case when $3 then coalesce(completed_at, now()) else completed_at end, result = case when $3 then jsonb_build_object('status', $2::text) else result end where id = $1")
+                    .bind(command_id).bind(status).bind(terminal).execute(&mut *conn).await?;
+                if terminal
+                    && let Some(execution_id) = target.execution_id
+                    && let Some(run) = owned_execution(conn, machine_id, execution_id, None).await?
+                {
+                    crate::delivery::control::on_compaction_done_in_tx(
+                        conn,
+                        &run,
+                        state == CompactionState::Completed,
+                        correlation_id,
+                    )
+                    .await?;
+                }
+            }
+        }
         Body::WithdrawRefused(fact) => {
             let command_id = parse_id(&fact.command_id)?;
             if let Some(target) = command(conn, machine_id, command_id).await?
@@ -1492,7 +1529,8 @@ async fn apply_body(
         | Body::BlockMedia(_)
         | Body::PhaseChanged(_)
         | Body::JournalOpened(_)
-        | Body::TodoUpdated(_) => return Err(IngestError::InvalidRecord),
+        | Body::TodoUpdated(_)
+        | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
     }
     Ok(false)
 }
@@ -2121,6 +2159,7 @@ async fn apply_journal_body(
             | Body::DecisionNotApplied(_)
             | Body::DecisionUnconfirmed(_)
             | Body::TodoUpdated(_)
+            | Body::SessionStuck(_)
     ) {
         return Ok(None);
     }
@@ -2184,6 +2223,13 @@ async fn apply_journal_body(
             .await
             .map(Some)
             .map_err(pilot_error);
+    }
+    if let Body::SessionStuck(fact) = body {
+        if parse_id(&fact.execution_id)? != run.execution_id {
+            return Err(IngestError::ForeignExecution);
+        }
+        crate::delivery::control::on_session_stuck_in_tx(conn, &run, correlation_id).await?;
+        return Ok(Some(false));
     }
     match body {
         Body::RequestOpened(fact) => {

@@ -6,10 +6,11 @@ use uuid::Uuid;
 
 use super::LockedQueue;
 use crate::{
+    blocks::ExecutionRef,
     events::{self, NewEvent, Scope},
     executions,
     idempotency::{self, Begin},
-    model::{ExecutionState, InputState, PauseReason, RunSlot},
+    model::{CompactionProgress, ExecutionState, InputState, PauseReason, RunSlot},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -35,6 +36,13 @@ pub enum StopExecutionOutcome {
     Requested { command_id: Uuid, force: bool },
     AlreadyRequested { command_id: Uuid },
     NothingToStop,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum CompactOutcome {
+    Requested { command_id: Uuid },
+    AlreadyRequested { command_id: Uuid },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -248,6 +256,181 @@ pub async fn request_stop(
         })
     })
     .await
+}
+
+fn set_compaction(queue: &mut LockedQueue, wanted: Option<CompactionProgress>) -> bool {
+    let mut found = false;
+    for reason in &mut queue.pause_reasons.0 {
+        if let PauseReason::SessionStuck { compaction } = reason {
+            *compaction = wanted;
+            found = true;
+        }
+    }
+    found
+}
+
+/// Сжатие тратит токены, поэтому только по действию владельца и только из застрявшей сессии.
+pub async fn request_compaction(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    idempotency_key: &str,
+    correlation_id: Uuid,
+) -> Result<CompactOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "request_compaction";
+    let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let mut queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let slot = queue.slot()?;
+            if slot != RunSlot::Free {
+                return Err(ControlError::InvalidRequest {
+                    reason: "run_in_progress",
+                });
+            }
+            let Some((execution_id, generation, ExecutionState::Running)) =
+                executions::live(&mut *conn, conversation_id).await?
+            else {
+                return Err(ControlError::InvalidRequest {
+                    reason: "no_live_execution",
+                });
+            };
+            if !set_compaction(&mut queue, Some(CompactionProgress::Requested)) {
+                return Err(ControlError::InvalidRequest {
+                    reason: "session_not_stuck",
+                });
+            }
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "select id from commands where conversation_id = $1 and kind = 'compact_session'
+                 and execution_id = $2 and execution_generation = $3
+                 and delivery_state <> 'completed' order by created_at, id limit 1",
+            )
+            .bind(conversation_id)
+            .bind(execution_id)
+            .bind(generation)
+            .fetch_optional(&mut *conn)
+            .await?;
+            let outcome = if let Some(command_id) = existing {
+                CompactOutcome::AlreadyRequested { command_id }
+            } else {
+                let command_id = Uuid::now_v7();
+                let machine_id: Uuid = sqlx::query_scalar(
+                    "insert into commands (id, machine_id, conversation_id, execution_id,
+                                   execution_generation, kind, payload, delivery_state)
+                     select $1, machine_id, id, $3, $4, 'compact_session', $5, 'pending'
+                     from conversations where id = $2 returning machine_id",
+                )
+                .bind(command_id)
+                .bind(conversation_id)
+                .bind(execution_id)
+                .bind(generation)
+                .bind(json!({"execution_id": execution_id, "execution_generation": generation}))
+                .fetch_one(&mut *conn)
+                .await?;
+                notify_outbox(&mut *conn, machine_id).await?;
+                queue
+                    .save(&mut *conn, &slot, Some(execution_id), correlation_id)
+                    .await?;
+                CompactOutcome::Requested { command_id }
+            };
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
+}
+
+async fn lock_run(conn: &mut PgConnection, run: &ExecutionRef) -> Result<LockedQueue, sqlx::Error> {
+    sqlx::query_as("select * from queue_state where conversation_id = $1 for update")
+        .bind(run.conversation_id)
+        .fetch_one(conn)
+        .await
+}
+
+/// Факт воркера: один и тот же отказ подряд. Очередь встаёт, иначе ввод ушёл бы в тот же отказ.
+pub async fn on_session_stuck_in_tx(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut queue = lock_run(conn, run).await?;
+    let stuck = |reason: &PauseReason| matches!(reason, PauseReason::SessionStuck { .. });
+    if queue.pause_reasons.0.iter().any(stuck) {
+        return Ok(());
+    }
+    queue
+        .pause_reasons
+        .0
+        .push(PauseReason::SessionStuck { compaction: None });
+    let slot = queue.slot()?;
+    queue
+        .save(conn, &slot, Some(run.execution_id), correlation_id)
+        .await?;
+    events::append(
+        conn,
+        queue_event(
+            &queue,
+            "queue_paused",
+            Some(run.execution_id),
+            correlation_id,
+        ),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Итог сжатия: удача снимает паузу и очередь идёт дальше, отказ оставляет карточку.
+pub async fn on_compaction_done_in_tx(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    ok: bool,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let mut queue = lock_run(conn, run).await?;
+    if ok {
+        queue
+            .pause_reasons
+            .0
+            .retain(|reason| !matches!(reason, PauseReason::SessionStuck { .. }));
+    } else {
+        set_compaction(&mut queue, Some(CompactionProgress::Failed));
+    }
+    let slot = queue.slot()?;
+    queue
+        .save(conn, &slot, Some(run.execution_id), correlation_id)
+        .await?;
+    events::append(
+        conn,
+        queue_event(
+            &queue,
+            if queue.pause_reasons.0.is_empty() {
+                "queue_resumed"
+            } else {
+                "queue_paused"
+            },
+            Some(run.execution_id),
+            correlation_id,
+        ),
+    )
+    .await?;
+    Ok(())
 }
 
 pub async fn request_stop_execution(
