@@ -196,7 +196,6 @@ export function toolTitle(block: Pick<BlockModel, "toolName" | "summary">): Tool
   for (const joint of [": ", ", "])
     if (raw && argument.startsWith(raw + joint))
       argument = argument.slice(raw.length + joint.length);
-  if (raw === ASK_TOOL) argument = argument.replace(/^AskUserQuestion: /, "");
   return { name, server: name.includes(server) ? "" : server, argument };
 }
 

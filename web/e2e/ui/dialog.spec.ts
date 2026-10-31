@@ -166,6 +166,30 @@ test('reasoning_rows_share_the_column_of_tool_rows_and_the_feed_fades_at_its_edg
   expect(mask).toContain('linear-gradient');
 });
 
+test('nothing_new_is_announced_while_the_whole_feed_fits_after_opening_a_row', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = dialogConversation(api);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const scope = `conversation:${id}`;
+  const run = api.id();
+  const block = (kind: string, tool_name: string | null) => ({ block_id: api.id(), rev: 0, kind, input_command_id: run, parent_block_id: null, agent: 'orchestrator', model: 'claude-opus-5-5', tool_name, summary: null, approved_by: null });
+  hub.append(scope, { kind: 'block_started', conversation_id: id, payload: block('tool_call', 'Bash') });
+  hub.flush();
+  await page.locator('.tool .head').click();
+  await expect(page.locator('.tool .head')).toHaveAttribute('aria-expanded', 'true');
+  const later = block('text', null);
+  hub.append(scope, { kind: 'block_started', conversation_id: id, payload: later });
+  hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id: later.block_id, base_rev: 0, rev: 1, append: 'Короткий ответ' } });
+  hub.flush();
+  await expect(page.locator('[role="log"]')).toContainText('Короткий ответ');
+  await page.waitForTimeout(200);
+  await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toHaveCount(0);
+  await expect(page.locator('.feed')).toHaveAttribute('data-pinned', '');
+});
+
 test('long_link_in_the_owner_message_wraps', async ({ page }) => {
   const hub = new FakeHub();
   const api = new FakeHubApi(hub);

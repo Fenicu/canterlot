@@ -277,7 +277,7 @@
         if (target !== null) scrollTo(target);
         settle();
         // Свёрнутый ход может уместиться в окно: тогда старшую страницу не вызвать прокруткой.
-        const room = chat.timeline.entries.length + OLDER_PAGE <= chat.timeline.maxLoaded;
+        const room = !laneRoot && chat.timeline.entries.length + OLDER_PAGE <= chat.timeline.maxLoaded;
         if (room && el.scrollHeight - el.clientHeight <= PIN_PX) void pullOlder();
       });
       requestAnimationFrame(() => {

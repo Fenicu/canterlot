@@ -44,7 +44,9 @@ export class ScrollController {
   ): void {
     if (kind === "prepend" || kind === "height-above") return;
     if (this.pinned) this.#toBottom();
-    else if (kind === "tail-growth") this.#showJump.set(true);
+    else if (kind !== "tail-growth") return;
+    else if (this.#gap() <= PIN_PX) this.#pinned.set(true);
+    else this.#showJump.set(true);
   }
 
   ownScroll(top: number): void {
@@ -89,9 +91,13 @@ export class ScrollController {
     this.#frame = 0;
   }
 
+  #gap(): number {
+    return this.#el.scrollHeight - this.#el.clientHeight - this.#el.scrollTop;
+  }
+
   #readScroll(): void {
     const top = this.#el.scrollTop;
-    const gap = this.#el.scrollHeight - this.#el.clientHeight - top;
+    const gap = this.#gap();
     const own = this.#target !== null && Math.abs(top - this.#target) <= 1;
     this.#target = null;
     const userUp = !own && top + 1 < this.#last;
