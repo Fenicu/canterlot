@@ -9,7 +9,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { FeedFolds } from '#lib/timeline/folds.svelte.js';
+  import { FeedFolds } from '#lib/timeline/folds.js';
   import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {

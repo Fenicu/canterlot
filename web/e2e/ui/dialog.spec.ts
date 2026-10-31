@@ -283,7 +283,6 @@ test('reading_a_long_turn_up_and_down_loses_no_row_and_keeps_the_anchor', async 
   const feed = page.locator('.feed');
   await expect(feed).toHaveAttribute('data-loaded', '100');
   await page.locator('.card').first().evaluate((card) => { (card as HTMLElement & { mark?: boolean }).mark = true; });
-  const seam = page.getByRole('button', { name: /Показать ещё \d+ шаг/ });
 
   // Первый экран над разрезом: эти строки владелец читает, пока грузится старшая страница.
   await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 1400; });

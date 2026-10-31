@@ -4,7 +4,7 @@
   import type { BlockPage } from '#lib/stores/blocks.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
-  import type { FeedFolds } from '#lib/timeline/folds.svelte.js';
+  import type { FeedFolds } from '#lib/timeline/folds.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
