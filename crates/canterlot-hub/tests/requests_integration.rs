@@ -5,6 +5,7 @@ use canterlot_hub::{
     delivery::dispatch::{self, BlockReason, DispatchOutcome, GateInputs},
     events::StoredEvent,
     executions,
+    history::{self, HistoryCursor, TimelineItem},
     ingest::{Ingest, IngestOutcome, JournalKind},
     model::{ExecutionState, HoldReason},
     requests::{RequestKind, RequestRow, RequestState},
@@ -12,8 +13,8 @@ use canterlot_hub::{
     testkit::{self, Seed},
 };
 use canterlot_proto::worker::v1::{
-    DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, JournalOpened, JournalRecord,
-    JournalRecords, RecordBody, RequestOpened, record_body,
+    BlockStarted, DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted, JournalOpened,
+    JournalRecord, JournalRecords, RecordBody, RequestOpened, record_body,
 };
 use chrono::{TimeDelta, Utc};
 use serde_json::{Value, json};
@@ -70,6 +71,132 @@ async fn setup_running_execution(pool: &PgPool) -> (Seed, executions::StartedExe
             .unwrap();
     }
     (seed, execution)
+}
+
+fn block_started(id: Uuid, kind: &str) -> record_body::Body {
+    record_body::Body::BlockStarted(BlockStarted {
+        block_id: id.to_string(),
+        kind: kind.into(),
+        ..Default::default()
+    })
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn request_keeps_its_place_in_history_among_the_blocks(pool: PgPool) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let (call, later, request) = (Uuid::now_v7(), Uuid::now_v7(), Uuid::now_v7());
+    let question = json!({"questions": [{"id": "q1", "text": "Продолжать?", "options": ["Да"]}]});
+    let records = batch(
+        Uuid::now_v7(),
+        vec![
+            opened(&execution),
+            block_started(call, "tool_call"),
+            record_body::Body::RequestOpened(RequestOpened {
+                request_id: request.to_string(),
+                execution_id: execution.execution_id.to_string(),
+                generation: execution.generation as u64,
+                kind: "question".into(),
+                payload_json: serde_json::to_vec(&question)?,
+            }),
+            block_started(later, "text"),
+        ],
+    );
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await?;
+    sqlx::query(
+        "update requests set state = 'decision_applied', decision_payload = $2 where id = $1",
+    )
+    .bind(request)
+    .bind(json!({"kind": "question", "answers": {"q1": "Да"}}))
+    .execute(&pool)
+    .await?;
+    let mut conn = pool.acquire().await?;
+    let page = history::page(
+        &mut conn,
+        seed.owner_id,
+        seed.conversation_id,
+        HistoryCursor::Tail,
+        100,
+    )
+    .await?
+    .expect("own conversation");
+    let order: Vec<String> = page
+        .items
+        .iter()
+        .map(|item| match item {
+            TimelineItem::Block(block) => block.id.to_string(),
+            TimelineItem::Request(view) => view.id.to_string(),
+            TimelineItem::Input(view) => view.id.to_string(),
+        })
+        .collect();
+    assert_eq!(
+        order,
+        [call, request, later].map(|id| id.to_string()),
+        "the request stays between the blocks around it"
+    );
+    let Some(TimelineItem::Request(view)) = page.items.get(1) else {
+        panic!("request item");
+    };
+    assert_eq!(view.request_kind, "question");
+    assert_eq!(view.state, "decision_applied");
+    assert_eq!(view.request_payload, question);
+    assert_eq!(view.decision_payload.as_ref().unwrap()["answers"]["q1"], "Да");
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn open_request_of_a_stopped_execution_comes_back_closed_in_history(
+    pool: PgPool,
+) -> TestResult {
+    let (seed, execution) = setup_running_execution(&pool).await;
+    let request = Uuid::now_v7();
+    let question = json!({"questions": [{"id": "q1", "text": "Продолжать?", "options": ["Да"]}]});
+    let records = batch(
+        Uuid::now_v7(),
+        vec![
+            opened(&execution),
+            record_body::Body::RequestOpened(RequestOpened {
+                request_id: request.to_string(),
+                execution_id: execution.execution_id.to_string(),
+                generation: execution.generation as u64,
+                kind: "question".into(),
+                payload_json: serde_json::to_vec(&question)?,
+            }),
+        ],
+    );
+    Ingest::new(pool.clone())
+        .apply_batch(
+            seed.machine_id,
+            &seed.credential_digest(),
+            JournalKind::Sj,
+            &records,
+        )
+        .await?;
+    sqlx::query("update executions set state = 'stopped' where id = $1")
+        .bind(execution.execution_id)
+        .execute(&pool)
+        .await?;
+    let mut conn = pool.acquire().await?;
+    let page = history::page(
+        &mut conn,
+        seed.owner_id,
+        seed.conversation_id,
+        HistoryCursor::Tail,
+        100,
+    )
+    .await?
+    .expect("own conversation");
+    let Some(TimelineItem::Request(view)) = page.items.first() else {
+        panic!("request item");
+    };
+    assert_eq!(view.state, "closed_without_decision");
+    Ok(())
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

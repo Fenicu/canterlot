@@ -1,5 +1,6 @@
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { fmt } from "#lib/format/ru.js";
+import { isDocked } from "#lib/stores/requests.svelte.js";
 import type { TimelineEntry } from "#lib/stores/timeline.js";
 import { isMainAgent } from "./present";
 import type { RowKind } from "./virtual";
@@ -73,7 +74,7 @@ export function buildRows(
   const source = opts?.laneRoot
     ? descendants(entries, opts.laneRoot, links)
     : entries.filter(
-        (entry) => entry.kind === "input" || links.parent(entry.block) === null,
+        (entry) => entry.kind !== "block" || links.parent(entry.block) === null,
       );
   const rows: Row[] = [];
   let card: Row | null = null;
@@ -82,6 +83,12 @@ export function buildRows(
   const now = opts?.now ?? Date.now();
   for (const entry of source) {
     if (entry.kind === "input" && entry.input.placement !== "feed") continue;
+    if (entry.kind === "request") {
+      if (isDocked(entry.request)) continue;
+      if (card) card.entries.push(entry);
+      else rows.push({ key: entry.key, kind: "request", entries: [entry] });
+      continue;
+    }
     const stamp =
       entry.kind === "block"
         ? entry.block.createdAt

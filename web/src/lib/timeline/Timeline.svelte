@@ -2,6 +2,7 @@
   import { onMount, tick, untrack } from 'svelte';
   import { SvelteMap } from 'svelte/reactivity';
   import { announce } from '#lib/a11y/announce.js';
+  import RequestCard from '#lib/requests/RequestCard.svelte';
   import { clock } from '#lib/clock.js';
   import { probe } from '#lib/perf/probe.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
@@ -329,6 +330,8 @@
           <p class="day">{row.label}</p>
         {:else if row.kind === 'input' && row.entries[0]?.kind === 'input'}
           <UserBubble input={row.entries[0].input} {chat} agentWorking={streaming && row.key === lastInput} />
+        {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
+          <RequestCard request={row.entries[0].request} onDecision={async () => undefined} />
         {:else if row.kind === 'answer'}
           <AnswerCard entries={row.entries} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}

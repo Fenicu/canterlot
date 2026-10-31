@@ -2,6 +2,7 @@
   import { blockEndLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
+  import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
@@ -36,7 +37,7 @@
 
   let expanded = $state(false);
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
-  const blocks = $derived(all.filter(shownInCard));
+  const blocks = $derived(entries.filter((entry) => entry.kind !== 'block' || shownInCard(entry.block)));
   const hidden = $derived(Math.max(0, blocks.length - 40));
   const shown = $derived(!expanded && blocks.length > 60 ? [...blocks.slice(0, 20), ...blocks.slice(-20)] : blocks);
   const head = $derived(all[0]);
@@ -55,19 +56,24 @@
       <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
     </header>
   {/if}
-  {#each shown as block (block.id)}
-    {#if isSubagentCall(block)}
-      <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
-    {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
-      <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
-    {:else if block.kind === 'warning' || block.kind === 'error'}
-      <NoticeBlock {block} />
-    {:else if block.kind === 'reasoning'}
-      <ReasoningBlock {block} />
-    {:else}
-      {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
-      <TextBlock {block} />
-      {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+  {#each shown as entry (entry.key)}
+    {#if entry.kind === 'request'}
+      <RequestCard request={entry.request} onDecision={async () => undefined} />
+    {:else if entry.kind === 'block'}
+      {@const block = entry.block}
+      {#if isSubagentCall(block)}
+        <SubagentRow call={block} nodes={links.children(block.id)} {conversationId} />
+      {:else if block.kind === 'tool_call' || block.kind === 'tool_result'}
+        <ToolBlock {block} result={links.result(block.id)} {working} {now} {load} />
+      {:else if block.kind === 'warning' || block.kind === 'error'}
+        <NoticeBlock {block} />
+      {:else if block.kind === 'reasoning'}
+        <ReasoningBlock {block} />
+      {:else}
+        {#if block.state === 'incomplete'}<p class="incomplete">Неполный ответ</p>{/if}
+        <TextBlock {block} />
+        {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
+      {/if}
     {/if}
   {/each}
   {#if !expanded && blocks.length > 60}

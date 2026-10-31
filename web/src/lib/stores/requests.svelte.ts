@@ -44,6 +44,11 @@ export function createRequestItem(init: RequestItem): RequestItem {
   return item;
 }
 
+/** Открытый запрос стоит у поля ввода, чтобы его не пропустили; решённый остаётся в ленте на своём месте. */
+export function isDocked(request: Pick<RequestItem, 'state'>): boolean {
+  return request.state === 'open' || request.state === 'sending';
+}
+
 /** Секретный вопрос: ответ живёт только в памяти, на устройство не пишется. */
 export function hasSecretQuestion(payload: unknown): boolean {
   const record = asRecord(payload);
@@ -123,6 +128,12 @@ export class RequestsModel {
         }));
       }
     }
+  }
+
+  /** Строка истории: та же запись запроса, что и в снимке, только с местом в ленте. */
+  ingestHistory(row: { id: string; request_kind: string; state: string; request_payload: unknown; decision_payload?: unknown }): RequestItem {
+    this.ingestSnapshot([{ ...row, kind: row.request_kind }]);
+    return this.items.get(row.id)!;
   }
 
   applyOpened(event: HubEvent): void {

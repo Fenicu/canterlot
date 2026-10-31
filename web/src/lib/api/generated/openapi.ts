@@ -1561,6 +1561,20 @@ export interface components {
         ReadBody: {
             seq: string;
         };
+        /**
+         * @description Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
+         *     стоит у поля ввода, решённый остаётся здесь и после перезагрузки.
+         */
+        RequestItemView: {
+            created_at: string;
+            created_seq: string;
+            decision_payload?: unknown;
+            /** Format: uuid */
+            id: string;
+            request_kind: string;
+            request_payload: unknown;
+            state: string;
+        };
         RequestView: {
             /** Format: uuid */
             conversation_id: string;
@@ -1764,6 +1778,9 @@ export interface components {
         }) | (components["schemas"]["BlockView"] & {
             /** @enum {string} */
             kind: "block";
+        }) | (components["schemas"]["RequestItemView"] & {
+            /** @enum {string} */
+            kind: "request";
         });
         TodoItemView: {
             status: components["schemas"]["TodoStatus"];

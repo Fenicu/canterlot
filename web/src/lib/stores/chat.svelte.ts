@@ -31,7 +31,7 @@ import {
   type InputView,
 } from "./inputs";
 import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
-import { RequestsModel } from "./requests.svelte";
+import { RequestsModel, isDocked } from "./requests.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
 import type { components } from "#lib/api/generated/openapi.js";
 
@@ -88,7 +88,11 @@ export interface HistoryInput {
   retry_of?: string | null;
 }
 
-export type HistoryItem = HistoryBlock | HistoryInput;
+export type HistoryRequest = components["schemas"]["RequestItemView"] & {
+  kind: "request";
+};
+
+export type HistoryItem = HistoryBlock | HistoryInput | HistoryRequest;
 
 export interface HistoryPage {
   items: HistoryItem[];
@@ -613,6 +617,7 @@ export class ChatStore {
         return;
       case "request_opened":
         this.requests.applyOpened(event);
+        this.#placeRequest(event);
         return;
       case "request_closed":
         this.requests.applyClosed(event);
@@ -633,6 +638,19 @@ export class ChatStore {
       default:
         this.unknownKinds += 1;
     }
+  }
+
+  /** Место в ленте запрос получает сразу: туда он и перейдёт, когда владелец ответит. */
+  #placeRequest(event: HubEvent): void {
+    if (event.kind !== "request_opened") return;
+    const request = this.requests.items.get(event.payload.request_id);
+    if (!request) return;
+    this.timeline.upsert({
+      kind: "request",
+      key: `request:${request.id}`,
+      seq: event.scope_seq,
+      request,
+    });
   }
 
   #diagnose(item: unknown): void {
@@ -855,9 +873,9 @@ export class ChatStore {
     if (!keepOlder) {
       const keptSeq = new SvelteSet(
         items.map((item) =>
-          item.kind === "block"
-            ? `block:${item.id}`
-            : `input:${item.idempotency_key}`,
+          item.kind === "input"
+            ? `input:${item.idempotency_key}`
+            : `${item.kind}:${item.id}`,
         ),
       );
       for (const entry of older)
@@ -882,7 +900,14 @@ export class ChatStore {
   #ingest(items: HistoryItem[], dir: "older" | "newer" | "tail"): void {
     const entries: TimelineEntry[] = [];
     for (const item of items) {
-      if (item.kind === "block") {
+      if (item.kind === "request") {
+        entries.push({
+          kind: "request",
+          key: `request:${item.id}`,
+          seq: item.created_seq,
+          request: this.requests.ingestHistory(item),
+        });
+      } else if (item.kind === "block") {
         const block = this.#blockFromHistory(item, dir === "tail");
         entries.push({
           kind: "block",
@@ -1014,13 +1039,14 @@ function visible(): boolean {
 }
 
 function seqOf(item: HistoryItem): string {
-  if (item.kind === "block") return item.created_seq;
-  return item.feed_seq || item.created_seq;
+  if (item.kind === "input") return item.feed_seq || item.created_seq;
+  return item.created_seq;
 }
 
 function terminalEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "block")
     return entry.block.state === "final" || entry.block.state === "incomplete";
+  if (entry.kind === "request") return !isDocked(entry.request);
   return (
     entry.input.state === "accepted" ||
     entry.input.state === "rejected" ||

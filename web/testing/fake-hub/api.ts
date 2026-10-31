@@ -110,7 +110,8 @@ export class FakeHubApi {
 		this.hub.setSnapshot(`conversation:${id}`, () => this.conversationData(id));
 	}
 
-	conversationData(id: string): SnapshotData {
+	/** Запросы разговора по журналу: снимок берёт незавершённые, история все, каждый со своим местом. */
+	private requestRows(id: string): Map<string, Record<string, unknown>> {
 		const requestsMap = new Map<string, Record<string, unknown>>();
 
 		const rawDetail = this.details.get(id) as Record<string, unknown> | undefined;
@@ -135,8 +136,13 @@ export class FakeHubApi {
 						kind: p.kind ?? 'question',
 						state: 'open',
 						request_payload: p.payload ?? p,
-						payload: p.payload ?? p
+						payload: p.payload ?? p,
+						created_seq: ev.scope_seq,
+						created_at: ev.committed_at
 					});
+				} else {
+					existing.created_seq ??= ev.scope_seq;
+					existing.created_at ??= ev.committed_at;
 				}
 			} else if (ev.kind === 'request_decided') {
 				const req = requestsMap.get(reqId);
@@ -160,7 +166,11 @@ export class FakeHubApi {
 			}
 		}
 
-		const open_requests = [...requestsMap.values()].filter((r) =>
+		return requestsMap;
+	}
+
+	conversationData(id: string): SnapshotData {
+		const open_requests = [...this.requestRows(id).values()].filter((r) =>
 			r.state === 'open' || r.state === 'decision_saved' || r.state === 'decision_transmitting'
 		);
 		const todos = new Map<string | null, TodoList>();
@@ -306,7 +316,27 @@ export class FakeHubApi {
 	}
 
 	page(id: string, query: { before?: string; after?: string; limit?: number }): HistoryPage {
-		const all = (this.histories.get(id) ?? []).filter((item) => !waiting(item)).sort((a, b) => cmp(seqOf(a), seqOf(b)));
+		const placed = [...this.requestRows(id).values()].flatMap((row): HistoryItem[] =>
+			row.created_seq
+				? [
+						{
+							kind: 'request',
+							id: String(row.id),
+							request_kind: String(row.kind),
+							state: String(row.state),
+							request_payload: row.request_payload,
+							decision_payload: row.decision_payload,
+							created_seq: String(row.created_seq),
+							created_at: String(row.created_at)
+						}
+					]
+				: []
+		);
+		const seeded = this.histories.get(id) ?? [];
+		const known = new Set(seeded.map((item) => item.id));
+		const all = [...seeded, ...placed.filter((item) => !known.has(item.id))]
+			.filter((item) => !waiting(item))
+			.sort((a, b) => cmp(seqOf(a), seqOf(b)));
 		let filtered = all;
 		if (query.before) filtered = filtered.filter((item) => cmp(seqOf(item), query.before!) < 0);
 		if (query.after) filtered = filtered.filter((item) => cmp(seqOf(item), query.after!) > 0);
@@ -384,7 +414,7 @@ export class FakeHubApi {
 }
 
 function seqOf(item: HistoryItem): string {
-	return item.kind === 'block' ? item.created_seq : item.feed_seq || item.created_seq;
+	return item.kind === 'input' ? item.feed_seq || item.created_seq : item.created_seq;
 }
 
 function cmp(a: string, b: string): number {

@@ -1,11 +1,37 @@
 import { sha256Hex } from '../../src/lib/stores/blocks';
-import type { HistoryBlock, HistoryInput, HistoryItem } from '../../src/lib/stores/chat.svelte';
+import type { HistoryBlock, HistoryInput, HistoryItem, HistoryRequest } from '../../src/lib/stores/chat.svelte';
 import { FakeHubApi } from '../fake-hub/api';
 import { seedConversation } from '../fake-hub/seed';
 import rows from './first-dialog.json' with { type: 'json' };
 
+/** Вопрос диалога: стоит после вызова AskUserQuestion (seq 181), до его результата (seq 192). */
+export const FIRST_QUESTION: HistoryRequest = {
+	kind: 'request',
+	id: '01a1917b-0ee1-7000-8000-000000000001',
+	request_kind: 'question',
+	state: 'decision_applied',
+	request_payload: {
+		questions: [
+			{
+				id: 'q0',
+				text: 'Продолжать проверку интерфейса?',
+				header: 'Проверка',
+				options: [
+					{ label: 'Продолжить', description: 'Выполнить sleep 90 и дать итоговый ответ' },
+					{ label: 'Закончить', description: 'Пропустить sleep и сразу дать итоговый ответ' }
+				],
+				multi_select: false,
+				allow_custom: true
+			}
+		]
+	},
+	decision_payload: { kind: 'question', answers: { q0: 'Продолжить' } },
+	created_seq: '182',
+	created_at: '2026-10-31T10:22:04.640Z'
+};
+
 /** Строки настоящего первого диалога с продакшена в порядке ленты. */
-export const FIRST_DIALOG = rows as unknown as HistoryItem[];
+export const FIRST_DIALOG = [...(rows as unknown as HistoryItem[]), FIRST_QUESTION];
 
 const blocks = (): HistoryBlock[] => FIRST_DIALOG.flatMap((item) => (item.kind === 'block' ? [item] : []));
 
@@ -38,7 +64,11 @@ function inputOf(item: HistoryInput) {
 }
 
 /** Тот же диалог живыми событиями: страница уже открыта, блоки приходят по одному. */
-export async function playFirstDialog(api: FakeHubApi, id: string): Promise<void> {
+export async function playFirstDialog(
+	api: FakeHubApi,
+	id: string,
+	afterBlock?: (block: HistoryBlock) => Promise<void>
+): Promise<void> {
 	const scope = `conversation:${id}`;
 	const open: string[] = [];
 	const append = (kind: string, payload: unknown, at: string): void => {
@@ -80,6 +110,10 @@ export async function playFirstDialog(api: FakeHubApi, id: string): Promise<void
 			{ block_id: block.id, rev: 1, text: block.content, checksum: await sha256Hex(block.content), text_omitted: false, summary: block.summary ?? null },
 			block.finished_at ?? block.created_at
 		);
+		if (afterBlock) {
+			api.hub.flush();
+			await afterBlock(block);
+		}
 	}
 	for (const block of open.splice(0)) append('block_incomplete', { block_id: block, rev: 1, reason: 'turn_ended' }, '2026-10-31T10:24:25.200Z');
 	api.hub.flush();

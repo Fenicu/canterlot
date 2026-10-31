@@ -2410,7 +2410,7 @@ async fn apply_request_opened(
         .await?;
     }
 
-    events::append(
+    let event = events::append(
         conn,
         NewEvent {
             scope: Scope::Conversation {
@@ -2428,6 +2428,11 @@ async fn apply_request_opened(
         },
     )
     .await?;
+    sqlx::query("update requests set created_seq = $2 where id = $1")
+        .bind(id)
+        .bind(event.scope_seq)
+        .execute(&mut *conn)
+        .await?;
 
     Ok(false)
 }
