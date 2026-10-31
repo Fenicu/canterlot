@@ -42,14 +42,28 @@ const PERMISSION_HINTS: Record<string, Record<string, string>> = {
     bypass: "Codex выполняет всё без подтверждений и без песочницы.",
     read_only: "Codex работает в песочнице только для чтения и ни о чём не спрашивает.",
   },
+  opencode: {
+    owner:
+      "Режим не передаётся: OpenCode берёт правила из своей конфигурации, opencode.json. По умолчанию это выполнение без вопросов.",
+    ask: "OpenCode спрашивает перед каждым действием: решение приходит карточкой.",
+    bypass: "OpenCode выполняет всё без подтверждений.",
+    read_only:
+      "OpenCode читает и ищет, а запись и команды модели не предлагаются.",
+  },
 };
 
 export function permissionHint(value: Value, provider: Value): string {
-  const family = provider === "codex" ? "codex" : "claude";
+  const family =
+    provider === "codex" || provider === "opencode" ? provider : "claude";
   return lookup(PERMISSION_HINTS[family] ?? {}, permissionValue(value)) ?? "";
 }
 
+/** Каталог машины пуст: у агента нет ни одной доступной модели. */
+export const NO_MODELS_HINT =
+  "Этому агенту на машине недоступна ни одна модель: проверьте его вход и список провайдеров.";
+
 const EFFORT_LABELS: Record<string, string> = {
+  default: "По умолчанию",
   none: "Без рассуждений",
   minimal: "Минимальное",
   low: "Низкое",
@@ -194,7 +208,11 @@ export function availabilityLabel(value: Value): string {
   return lookup(AVAILABILITY, value) ?? "Не в сети";
 }
 
-const PROVIDERS: Record<string, string> = { claude: "Claude", codex: "Codex" };
+const PROVIDERS: Record<string, string> = {
+  claude: "Claude",
+  codex: "Codex",
+  opencode: "OpenCode",
+};
 
 export function providerLabel(value: Value): string {
   return lookup(PROVIDERS, value?.toLowerCase()) ?? "Другой провайдер";
@@ -204,8 +222,9 @@ function capitalize(text: string): string {
   return text.charAt(0).toLocaleUpperCase("ru-RU") + text.slice(1);
 }
 
-/** Строка сессии не держит каталог машины, а `opus[1m]` владельцу показывается названием продукта. */
+/** Строка сессии не держит каталог машины: `opus[1m]` владельцу показывается названием продукта, у `провайдер/модель` остаётся модель. */
 export const modelLabel = (value: string): string => {
   const base = value.replace(/\[1m\]$/, '');
-  return base === value ? value : `${base.charAt(0).toUpperCase()}${base.slice(1)} 1M`;
+  if (base !== value) return `${base.charAt(0).toUpperCase()}${base.slice(1)} 1M`;
+  return value.slice(value.indexOf('/') + 1);
 };

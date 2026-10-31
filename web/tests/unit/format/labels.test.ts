@@ -35,12 +35,17 @@ describe("format/labels", () => {
     expect(permissionValue("bypass")).toBe("bypass");
   });
 
+  it("opencode_has_the_owner_names", () => {
+    expect(providerLabel("opencode")).toBe("OpenCode");
+    expect(effortLabel("default")).toBe("По умолчанию");
+  });
+
   it("new_sessions_default_to_bypass", () => {
     expect(DEFAULT_PERMISSION_MODE).toBe("bypass");
   });
 
-  it("every_mode_has_a_hint_for_both_harness_families", () => {
-    for (const provider of ["claude", "codex"]) {
+  it("every_mode_has_a_hint_for_every_harness_family", () => {
+    for (const provider of ["claude", "codex", "opencode"]) {
       for (const mode of PERMISSION_MODES) {
         expect(permissionHint(mode, provider)).not.toBe("");
       }
@@ -48,6 +53,8 @@ describe("format/labels", () => {
     expect(permissionHint("owner", "claude")).toContain("~/.claude/settings.json");
     expect(permissionHint("owner", "claude")).toContain("dontAsk");
     expect(permissionHint("owner", "codex")).toContain("approval_policy");
+    expect(permissionHint("owner", "opencode")).toContain("opencode.json");
+    expect(permissionHint("read_only", "opencode")).toContain("OpenCode");
     expect(permissionHint("owner", "codex")).toContain("sandbox_mode");
     expect(permissionHint("unknown_mode", "claude")).toBe("");
   });

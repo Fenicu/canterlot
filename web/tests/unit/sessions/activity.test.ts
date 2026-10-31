@@ -106,6 +106,12 @@ describe("sessions/activity", () => {
       }).text,
     ).toContain("Остановлена: лимит Codex до");
     expect(
+      line({
+        state: "quota_paused",
+        evidence: { reason: "limit_reached", provider: "opencode" },
+      }).text,
+    ).toBe("Остановлена: лимит OpenCode");
+    expect(
       line({ state: "failed", evidence: { reason: "owner_lost" } }),
     ).toEqual({
       text: "Сбой: потерян владелец исполнения",

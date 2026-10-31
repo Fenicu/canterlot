@@ -76,6 +76,11 @@ export function defaultModelId(
     : (models[0]?.id ?? "");
 }
 
+/** У модели без вариантов усилие одно: выбирать нечего. Иначе выбор остаётся за владельцем. */
+export function soleEffort(efforts: string[], current: string): string {
+  return efforts.length === 1 ? (efforts[0] ?? current) : current;
+}
+
 function submittedWorkdir(path: string): string {
   return path.trim().replace(/(?<=.)\/+$/, "");
 }

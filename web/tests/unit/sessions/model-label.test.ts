@@ -7,6 +7,13 @@ describe("sessions/model label", () => {
     expect(modelLabel("fable[1m]")).toBe("Fable 1M");
   });
 
+  it("model_label_hides_the_provider_of_a_qualified_id", () => {
+    expect(modelLabel("opencode-go/muse-spark-1.3-contributor")).toBe(
+      "muse-spark-1.3-contributor",
+    );
+    expect(modelLabel("openrouter/anthropic/fable")).toBe("anthropic/fable");
+  });
+
   it("model_label_leaves_other_ids_as_they_are", () => {
     expect(modelLabel("opus")).toBe("opus");
     expect(modelLabel("gpt-6.1-sol")).toBe("gpt-6.1-sol");

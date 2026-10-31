@@ -12,9 +12,11 @@
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
 	import { updateSettings, updateCrunch, type SettingsPatch } from './controls';
 	import { listPresets } from '#lib/api/client.js';
+	import { untrack } from 'svelte';
 	import type { components } from '#lib/api/generated/openapi.js';
 	import { ApiError } from '#lib/api/http.js';
 	import { shouldShowApplyNewVersion } from '../presets/presetsModel.js';
+	import { soleEffort } from '../sessions/newSessionModel.js';
 	import Button from '#lib/ui/Button.svelte';
 	import IconButton from '#lib/ui/IconButton.svelte';
 	import Select from '#lib/ui/Select.svelte';
@@ -158,6 +160,13 @@
 	// Available efforts for selected model
 	const currentModelRecord = $derived(availableModels.find((m) => m.id === selectedModel));
 	const availableEfforts = $derived(currentModelRecord?.efforts ?? ['low', 'medium', 'high']);
+
+	$effect(() => {
+		const efforts = availableEfforts;
+		untrack(() => {
+			selectedEffort = soleEffort(efforts, selectedEffort);
+		});
+	});
 
 	// Available permission modes
 	const availablePermissionModes = $derived(

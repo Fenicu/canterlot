@@ -12,6 +12,7 @@ import {
 import {
   defaultModelId,
   NewSessionModel,
+  soleEffort,
   prefillWorkdir,
   soleMachine,
   type Field,
@@ -348,5 +349,18 @@ describe("sessions/new", () => {
     expect(hits).toBe(2);
     expect(keys[0]).toBe(keys[1]);
     expect(new Set(keys).size).toBe(1);
+  });
+});
+
+describe("sessions/new session efforts", () => {
+  it("a_model_with_one_effort_needs_no_choice", () => {
+    expect(soleEffort(["default"], "high")).toBe("default");
+    expect(soleEffort(["default"], "")).toBe("default");
+  });
+
+  it("a_choice_stays_with_the_owner", () => {
+    expect(soleEffort(["low", "high"], "high")).toBe("high");
+    expect(soleEffort(["low", "high"], "")).toBe("");
+    expect(soleEffort([], "high")).toBe("high");
   });
 });

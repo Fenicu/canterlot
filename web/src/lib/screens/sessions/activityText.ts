@@ -1,4 +1,4 @@
-import { failureLabel } from "#lib/format/labels.js";
+import { failureLabel, providerLabel } from "#lib/format/labels.js";
 import { fmt } from "#lib/format/ru.js";
 
 export type Tone = "accent" | "default" | "warning" | "danger";
@@ -126,7 +126,7 @@ function quota(
   if (evidence.reason === "weekly_reserve")
     return { text: "Ожидание: недельный лимит", tone: "warning", live: false };
   if (evidence.reason === "limit_reached") {
-    const who = evidence.provider === "codex" ? "Codex" : "Claude";
+    const who = providerLabel(evidence.provider ?? "claude");
     const when = Number.isFinite(until) ? fmt.resetAt(until, now) : "";
     return {
       text: when

@@ -7,7 +7,7 @@
   import type { Runtime } from '#lib/app/runtime.js';
   import { isTouchPrimary } from '#lib/composer/sendRules.js';
   import { browserRuntime } from '#lib/screens/chat/open.js';
-  import { DEFAULT_PERMISSION_MODE, effortLabel, permissionHint, permissionLabel } from '#lib/format/labels.js';
+  import { DEFAULT_PERMISSION_MODE, NO_MODELS_HINT, effortLabel, permissionHint, permissionLabel } from '#lib/format/labels.js';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
   import Select from '#lib/ui/Select.svelte';
@@ -15,7 +15,7 @@
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
-  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleMachine } from './newSessionModel';
+  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
@@ -150,6 +150,13 @@
     });
   });
 
+  $effect(() => {
+    const list = efforts;
+    untrack(() => {
+      effort = soleEffort(list, effort);
+    });
+  });
+
   async function send() {
     if (!model || !gate.ok) return;
     error = '';
@@ -181,6 +188,7 @@
       <Select label="Модель" options={modelOptions} bind:value={modelId} />
       <Select label="Усилие" options={effortOptions} bind:value={effort} />
     </div>
+    {#if harness && models.length === 0}<p class="hint">{NO_MODELS_HINT}</p>{/if}
     {#if permissionOptions.length > 0}
       <Select label="Режим разрешений" options={permissionOptions} bind:value={permission} hint={permissionHint(permission, provider)} />
     {/if}
