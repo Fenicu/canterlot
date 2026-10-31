@@ -108,9 +108,14 @@ async fn hung_version_check_is_cut_off_with_its_group() {
 
 #[cfg(feature = "synthetic-adapter")]
 mod fake {
-    use canterlot_worker::adapter::opencode::replay::Script;
-    use serde_json::Value;
+    use canterlot_worker::adapter::opencode::{
+        http::Http,
+        orphans,
+        replay::{Reply, Script},
+    };
+    use serde_json::{Value, json};
     use std::{
+        collections::HashSet,
         io::{BufRead, BufReader, Write},
         process::{Child, Command, Stdio},
         time::Duration,
@@ -183,6 +188,47 @@ mod fake {
             }
             request.send().await.unwrap().status()
         })
+    }
+
+    fn shell_list(pid: u32, stall_ms: u64) -> Reply {
+        Reply {
+            body: Some(json!({"data": [{
+                "status": "running", "pid": pid, "metadata": {"sessionID": "ses_1"}}]})),
+            stall_ms,
+            ..Default::default()
+        }
+    }
+
+    // Снимки идут по очереди: более ранний и медленный не затирает более новый.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn older_shell_snapshot_never_overwrites_a_newer_one() {
+        let own = std::process::id();
+        let mut script = Script::default();
+        script.set_route(
+            "GET",
+            "/api/shell",
+            vec![
+                shell_list(own, 300),
+                Reply {
+                    body: Some(json!({"data": []})),
+                    ..Default::default()
+                },
+            ],
+        );
+        let server = Server::start(&script);
+        let http = Http::new(server.url.clone(), PASSWORD.into())
+            .await
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let journal = orphans::Journal::new(orphans::journal_path(dir.path(), "ses_1"));
+        let owners = HashSet::from(["ses_1".to_owned()]);
+        let older = tokio::spawn(journal.clone().record(http.clone(), owners.clone()));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        journal.clone().record(http, owners).await;
+        older.await.unwrap();
+        let written: Value =
+            serde_json::from_slice(&std::fs::read(journal.path()).unwrap()).unwrap();
+        assert_eq!(written, json!([]), "the later snapshot stays");
     }
 
     #[test]

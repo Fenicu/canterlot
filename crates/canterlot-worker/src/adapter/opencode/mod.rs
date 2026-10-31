@@ -429,6 +429,8 @@ pub struct OpenCodeAdapter {
     refusals: JoinSet<()>,
     /// Снимки фоновых команд для журнала сирот.
     shell_journal: JoinSet<()>,
+    /// Журнал сирот живой сессии: снимки идут строго по очереди.
+    orphan_journal: Option<orphans::Journal>,
     session: String,
     mode: PermissionMode,
     /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
@@ -486,6 +488,7 @@ impl OpenCodeAdapter {
             requests: Requests::default(),
             refusals: JoinSet::new(),
             shell_journal: JoinSet::new(),
+            orphan_journal: None,
             session: String::new(),
             mode: PermissionMode::Owner,
             rules_dirty: false,
@@ -1293,11 +1296,12 @@ impl OpenCodeAdapter {
             .chain([self.session.clone()])
             .collect();
         while self.shell_journal.try_join_next().is_some() {}
-        self.shell_journal.spawn(orphans::record(
-            http,
-            self.orphan_journal(&self.session),
-            owners,
-        ));
+        let path = self.orphan_journal(&self.session);
+        let journal = self
+            .orphan_journal
+            .get_or_insert_with(|| orphans::Journal::new(path));
+        self.shell_journal
+            .spawn(journal.clone().record(http, owners));
     }
 
     // Запись осталась только после падения и сервера, и супервизора: дерево процессов уже не

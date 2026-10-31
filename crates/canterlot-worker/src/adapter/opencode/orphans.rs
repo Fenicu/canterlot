@@ -10,8 +10,10 @@ use std::{
     collections::HashSet,
     fs, io,
     path::{Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
+use tokio::sync::Mutex;
 
 const LIST_WAIT: Duration = Duration::from_secs(5);
 /// В `shell.created` идентификатора процесса нет, а в списке он появляется не сразу.
@@ -64,33 +66,56 @@ fn write(path: &Path, entries: &[Entry]) -> io::Result<()> {
     fs::rename(temporary, path)
 }
 
-/// Снимок работающих команд сессии. Устаревшая запись безвредна: процесс сверяется при чтении.
-pub async fn record(http: Http, path: PathBuf, owners: HashSet<String>) {
-    let mut pids = Vec::new();
-    for delay in ATTEMPTS {
-        tokio::time::sleep(delay).await;
-        let Ok(list) = http.get("/api/shell", LIST_WAIT).await else {
-            return;
-        };
-        let (found, complete) = running(&list, &owners);
-        pids = found;
-        if complete {
-            break;
+/// Журнал сессии. Снимки идут строго по очереди: чтение и запись под одной блокировкой, иначе
+/// более старый снимок мог бы затереть более новый, а общий `.tmp` смешал бы две записи.
+#[derive(Clone)]
+pub struct Journal {
+    path: PathBuf,
+    turn: Arc<Mutex<()>>,
+}
+
+impl Journal {
+    pub fn new(path: PathBuf) -> Self {
+        Self {
+            path,
+            turn: Arc::default(),
         }
     }
-    let _ = tokio::task::spawn_blocking(move || {
-        let entries: Vec<Entry> = pids
-            .into_iter()
-            .filter_map(|pid| {
-                Some(Entry {
-                    pid,
-                    start_ticks: start_ticks(pid).ok()?,
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Снимок работающих команд сессии. Устаревшая запись безвредна: процесс сверяется при чтении.
+    pub async fn record(self, http: Http, owners: HashSet<String>) {
+        let _turn = self.turn.lock().await;
+        let mut pids = Vec::new();
+        for delay in ATTEMPTS {
+            tokio::time::sleep(delay).await;
+            let Ok(list) = http.get("/api/shell", LIST_WAIT).await else {
+                return;
+            };
+            let (found, complete) = running(&list, &owners);
+            pids = found;
+            if complete {
+                break;
+            }
+        }
+        let path = self.path.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let entries: Vec<Entry> = pids
+                .into_iter()
+                .filter_map(|pid| {
+                    Some(Entry {
+                        pid,
+                        start_ticks: start_ticks(pid).ok()?,
+                    })
                 })
-            })
-            .collect();
-        write(&path, &entries)
-    })
-    .await;
+                .collect();
+            write(&path, &entries)
+        })
+        .await;
+    }
 }
 
 fn kill_group(entry: &Entry) -> bool {
