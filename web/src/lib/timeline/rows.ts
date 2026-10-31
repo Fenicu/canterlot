@@ -80,6 +80,7 @@ export function buildRows(
   let card: Row | null = null;
   let day = "";
   const seenDays = new Set<string>();
+  const seenRuns = new Set<string>();
   const now = opts?.now ?? Date.now();
   for (const entry of source) {
     if (entry.kind === "input" && entry.input.placement !== "feed") continue;
@@ -117,14 +118,22 @@ export function buildRows(
       card.entries.push(entry);
       continue;
     }
+    // Карточку узнают по ходу: её первая строка меняется, когда приходит старшая страница.
+    const base: string = `answer:${run || entry.block.id}`;
     card = {
-      key: `answer:${entry.block.id}`,
+      key: seenRuns.has(base) ? `${base}:${entry.key}` : base,
       kind: "answer",
       entries: [entry],
     };
+    seenRuns.add(base);
     rows.push(card);
   }
   return rows;
+}
+
+/** Последняя запись ленты: новое сообщение меняет её, а старшая страница и пересборка карточки нет. */
+export function tailKey(rows: Row[]): string {
+  return rows.findLast((row) => row.entries.length > 0)?.entries.at(-1)?.key ?? "";
 }
 
 function descendants(

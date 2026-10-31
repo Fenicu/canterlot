@@ -106,6 +106,28 @@ export interface Anchor {
   offsetWithin: number;
 }
 
+export interface ViewAnchor {
+  /** Самая глубокая строка, которую пересекает верхний край окна. */
+  key: string;
+  /** Её строка ленты: без неё положение восстанавливается по высотам. */
+  row: string;
+  top: number;
+}
+
+export function viewAnchor(el: HTMLElement): ViewAnchor | null {
+  const edge = el.getBoundingClientRect().top;
+  let best: HTMLElement | null = null;
+  let row: HTMLElement | null = null;
+  for (const node of el.querySelectorAll<HTMLElement>('[data-key]')) {
+    if (best && !best.contains(node)) break;
+    if (node.getBoundingClientRect().bottom <= edge) continue;
+    best = node;
+    row ??= node;
+  }
+  if (!best || !row) return null;
+  return { key: best.dataset.key ?? '', row: row.dataset.key ?? '', top: best.getBoundingClientRect().top - edge };
+}
+
 export function captureAnchor(ix: HeightIndex, keys: string[], scrollTop: number): Anchor | null {
   if (keys.length === 0) return null;
   let index = Math.min(keys.length - 1, Math.max(0, ix.indexAt(Math.max(0, scrollTop))));

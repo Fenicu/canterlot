@@ -9,14 +9,17 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
-  import { blockLinks, buildRows, dayStart, shownInCard, type Row } from '#lib/timeline/rows.js';
+  import { FeedFolds } from '#lib/timeline/folds.svelte.js';
+  import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
     captureAnchor,
     restoreAnchor,
     rowEstimate,
-    visibleRange
+    viewAnchor,
+    visibleRange,
+    type ViewAnchor
   } from '#lib/timeline/virtual.js';
 
   let {
@@ -40,12 +43,14 @@
   const typical = new SvelteMap<string, number>();
   let observer: ResizeObserver | null = null;
   let previous: string[] = [];
-  let lock: { key: string; top: number; until: number } | null = null;
+  let previousTail = '';
+  // Пока владелец читает, эта строка стоит на месте, что бы ни менялось выше и ниже неё.
+  let held: ViewAnchor | null = null;
   let ownedTop: number | null = null;
-  let seen = 0;
   let settling = false;
   let measuring = false;
-  let queued: { key: string; height: number; node?: HTMLElement }[] = [];
+  let queued: { key: string; height: number }[] = [];
+  const folds = new FeedFolds();
   const PIN_PX = 48;
 
   const today = $derived(dayStart(now));
@@ -85,9 +90,13 @@
     range = next;
   }
 
-  function applyHeight(key: string, height: number, node?: HTMLElement): void {
+  function hold(): void {
+    held = host && !controller?.pinned ? viewAnchor(host) : null;
+  }
+
+  function applyHeight(key: string, height: number): void {
     if (measuring) {
-      queued.push({ key, height, node });
+      queued.push({ key, height });
       return;
     }
     const prev = known.get(key);
@@ -106,14 +115,12 @@
       known.set(key, height);
       ix.set(index, height);
       layout(list, host.scrollTop, host.clientHeight || 1);
-      if (Math.abs(delta) < 1) return;
-      if (controller.pinned) controller.onContentChange('resize');
-      else if (node && node.getBoundingClientRect().top < host.getBoundingClientRect().top - 1) scrollTo(host.scrollTop + delta);
+      if (Math.abs(delta) >= 1 && controller.pinned) controller.onContentChange('resize');
     } finally {
       measuring = false;
       const pending = queued;
       queued = [];
-      for (const item of pending) applyHeight(item.key, item.height, item.node);
+      for (const item of pending) applyHeight(item.key, item.height);
       settle();
     }
   }
@@ -129,7 +136,7 @@
           continue;
         }
         const key = node.dataset.key;
-        if (key) applyHeight(key, node.getBoundingClientRect().height, node);
+        if (key) applyHeight(key, node.getBoundingClientRect().height);
       }
     });
     return observer;
@@ -140,7 +147,7 @@
     current.observe(node);
     const key = node.dataset.key ?? '';
     const height = node.getBoundingClientRect().height;
-    if (key && height) applyHeight(key, height, node);
+    if (key && height) applyHeight(key, height);
     return { destroy: () => current.unobserve(node) };
   }
 
@@ -207,34 +214,21 @@
     return [...el.querySelectorAll<HTMLElement>('[data-key]')].find((item) => item.dataset.key === key);
   }
 
-  $effect.pre(() => {
-    const list = rows;
-    const el = host;
-    if (!el || !controller || controller.pinned) return;
-    const keys = list.map((row) => row.key);
-    const prepended = previous.length > 0 && keys.length > previous.length && contentKey(keys) !== contentKey(previous) && keys[keys.length - 1] === previous[previous.length - 1];
-    if (!prepended) return;
-    const anchor = captureAnchor(ix, previous, el.scrollTop);
-    const node = anchor ? rowNode(el, anchor.key) : undefined;
-    if (!anchor || !node) return;
-    lock = { key: anchor.key, top: node.getBoundingClientRect().top - el.getBoundingClientRect().top, until: performance.now() + 1500 };
-  });
-
   async function settle(): Promise<void> {
-    if (!lock || !host || !controller || settling) return;
-    if (performance.now() > lock.until) {
-      lock = null;
-      return;
-    }
+    if (!held || !host || !controller || settling) return;
     settling = true;
     try {
       for (let pass = 0; pass < 8; pass++) {
         // Высоты и распорки должны попасть в DOM до следующего измерения якоря.
         await tick();
-        if (!lock || !host || !controller) return;
-        const node = rowNode(host, lock.key);
-        if (!node) return;
-        const drift = node.getBoundingClientRect().top - host.getBoundingClientRect().top - lock.top;
+        if (!held || !host || !controller || controller.pinned) return;
+        const node = rowNode(host, held.key);
+        if (!node) {
+          // Строка ушла из своей карточки: окно держится за то, что видно теперь.
+          if (rowNode(host, held.row)) hold();
+          return;
+        }
+        const drift = node.getBoundingClientRect().top - host.getBoundingClientRect().top - held.top;
         if (Math.abs(drift) < 1) return;
         scrollTo(host.scrollTop + drift);
         layout(rows, host.scrollTop, host.clientHeight || 1);
@@ -250,33 +244,40 @@
     controller.ownScroll(top);
   }
 
-  $effect(() => {
+  // До отрисовки: окно считается по индексам, и старшая страница иначе на такт сняла бы с экрана строку, которую читают.
+  $effect.pre(() => {
     const list = rows;
     const el = host;
-    const keys = list.map((row) => row.key);
     if (!el || !controller) return;
-    const prepended = previous.length > 0 && keys.length > previous.length && contentKey(keys) !== contentKey(previous) && keys[keys.length - 1] === previous[previous.length - 1];
-    const grew = previous.length > 0 && keys[keys.length - 1] !== previous[previous.length - 1];
-    const anchor = prepended ? captureAnchor(ix, previous, el.scrollTop) : null;
-    untrack(() => layout(list, el.scrollTop, el.clientHeight || 1));
-    previous = keys;
-    requestAnimationFrame(() => {
-      if (!controller) return;
-      const nudge = (): void => {
-        if (!controller || !anchor || !lock) return;
-        const node = rowNode(el, anchor.key);
-        if (!node) scrollTo(restoreAnchor(ix, keys, anchor));
+    untrack(() => {
+      const keys = list.map((row) => row.key);
+      const prepended = previous.length > 0 && keys.length > previous.length && contentKey(keys) !== contentKey(previous) && keys[keys.length - 1] === previous[previous.length - 1];
+      const tail = tailKey(list);
+      const grew = previous.length > 0 && tail !== previousTail;
+      const anchor = prepended && held ? captureAnchor(ix, previous, el.scrollTop) : null;
+      previous = keys;
+      previousTail = tail;
+      layout(list, el.scrollTop, el.clientHeight || 1);
+      const target = anchor ? restoreAnchor(ix, keys, anchor) : null;
+      if (target !== null) layout(list, target, el.clientHeight || 1);
+      void tick().then(() => {
+        if (target !== null) scrollTo(target);
         settle();
-      };
-      if (lock) nudge();
-      else if (grew) controller.onContentChange('tail-growth');
-      const retry = (left: number): void => {
-        requestAnimationFrame(() => {
+      });
+      requestAnimationFrame(() => {
+        if (grew) controller?.onContentChange('tail-growth');
+        if (!anchor) return;
+        const nudge = (): void => {
+          if (!held) return;
+          if (!rowNode(el, held.row)) scrollTo(restoreAnchor(ix, keys, anchor));
+          settle();
+        };
+        const retry = (left: number): void => {
           nudge();
-          if (lock && left > 0) retry(left - 1);
-        });
-      };
-      retry(12);
+          if (left > 0) requestAnimationFrame(() => retry(left - 1));
+        };
+        retry(12);
+      });
     });
   });
 
@@ -291,11 +292,8 @@
     const onScroll = () => {
       if (!host) return;
       const top = host.scrollTop;
-      const own = ownedTop !== null && Math.abs(top - ownedTop) <= 1;
-      const jumped = Math.abs(top - seen) > 400;
-      seen = top;
-      if (own) ownedTop = null;
-      else if (lock && jumped) lock = null;
+      if (ownedTop !== null && Math.abs(top - ownedTop) <= 1) ownedTop = null;
+      else hold();
       layout(rows, top, host.clientHeight || 1);
       settle();
       const overflow = host.scrollHeight - host.clientHeight;
@@ -333,7 +331,7 @@
         {:else if row.kind === 'request' && row.entries[0]?.kind === 'request'}
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} />
         {:else if row.kind === 'answer'}
-          <AnswerCard entries={row.entries} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+          <AnswerCard cardKey={row.key} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
         {/if}
       </div>
     {/each}

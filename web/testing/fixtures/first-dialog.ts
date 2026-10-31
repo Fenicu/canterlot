@@ -118,3 +118,48 @@ export async function playFirstDialog(
 	for (const block of open.splice(0)) append('block_incomplete', { block_id: block, rev: 1, reason: 'turn_ended' }, '2026-10-31T10:24:25.200Z');
 	api.hub.flush();
 }
+
+const realBlock = (seq: string): HistoryBlock => firstDialogBlock((block) => block.created_seq === seq);
+const REAL_STEPS: [string, string][] = [['89', '91'], ['103', '105'], ['120', '122'], ['142', '144']];
+
+export interface LongTurn {
+	id: string;
+	items: HistoryItem[];
+}
+
+/** Длинный ход из настоящих строк диалога: `shape` говорит, чем разбавлены вызовы, как в рабочей сессии на сотню с лишним строк. */
+export function seedLongTurn(api: FakeHubApi, steps: number, shape: 'steps' | 'text_between'): LongTurn {
+	const id = dialogConversation(api);
+	const run = api.id();
+	// История сидится отдельно от журнала: первое живое событие получает seq 1 и встаёт за ней.
+	let seq = -10_000;
+	let at = Date.parse('2026-10-31T10:21:00.000Z');
+	const tick = (): { created_seq: string; created_at: string; started_at: string; finished_at: string } => {
+		seq += 1;
+		at += 1500;
+		const stamp = new Date(at).toISOString();
+		return { created_seq: String(seq), created_at: stamp, started_at: stamp, finished_at: stamp };
+	};
+	const copy = (block: HistoryBlock, parent: string | null): HistoryBlock => ({
+		...block,
+		...tick(),
+		id: api.id(),
+		input_command_id: run,
+		parent_block_id: parent
+	});
+	const input = FIRST_DIALOG.find((item) => item.kind === 'input') as HistoryInput;
+	const items: HistoryItem[] = [{ ...input, id: api.id(), idempotency_key: api.id(), created_seq: '-10000', feed_seq: '-10000' }];
+	items.push(copy(realBlock('20'), null));
+	for (let step = 0; step < steps; step++) {
+		const [callSeq, resultSeq] = REAL_STEPS[step % REAL_STEPS.length] as [string, string];
+		if (shape === 'steps' && step % 4 === 1) items.push(copy(realBlock('128'), null));
+		if (shape === 'text_between') items.push({ ...copy(realBlock('95'), null), content: `Шаг ${step}: готово.` });
+		const call = copy(realBlock(callSeq), null);
+		items.push(call, copy(realBlock(resultSeq), call.id));
+	}
+	items.push(copy(realBlock('253'), null));
+	api.histories.set(id, items);
+	for (const item of items) if (item.kind === 'block') api.blocks.set(item.id, { text: item.content, rev: item.rev, state: item.state });
+	api.bindConversation(id);
+	return { id, items };
+}

@@ -4,6 +4,7 @@
   import type { BlockPage } from '#lib/stores/blocks.js';
   import RequestCard from '#lib/requests/RequestCard.svelte';
   import type { TimelineEntry } from '#lib/stores/timeline.js';
+  import type { FeedFolds } from '#lib/timeline/folds.svelte.js';
   import { agentTitle, toolTitle } from '#lib/timeline/present.js';
   import { isSubagentCall, shownInCard, type BlockLinks } from '#lib/timeline/rows.js';
   import LiveLine from '#lib/timeline/LiveLine.svelte';
@@ -15,7 +16,9 @@
   import IconButton from '#lib/ui/IconButton.svelte';
 
   let {
+    cardKey,
     entries,
+    folds,
     links,
     harness,
     activeRun = null,
@@ -24,7 +27,9 @@
     onInfo,
     load
   }: {
+    cardKey: string;
     entries: TimelineEntry[];
+    folds: FeedFolds;
     links: BlockLinks;
     harness?: { title?: string; provider?: string } | null;
     /** Ход, который идёт сейчас: вызов без результата в нём ещё работает. */
@@ -35,11 +40,8 @@
     load: (blockId: string, offset: number) => Promise<BlockPage>;
   } = $props();
 
-  let expanded = $state(false);
   const all = $derived(entries.flatMap((entry) => (entry.kind === 'block' ? [entry.block] : [])));
   const blocks = $derived(entries.filter((entry) => entry.kind !== 'block' || shownInCard(entry.block)));
-  const hidden = $derived(Math.max(0, blocks.length - 40));
-  const shown = $derived(!expanded && blocks.length > 60 ? [...blocks.slice(0, 20), ...blocks.slice(-20)] : blocks);
   const head = $derived(all[0]);
   const streaming = $derived(all.some((block) => block.state === 'streaming'));
   const active = $derived(all.findLast((block) => block.state === 'streaming'));
@@ -47,6 +49,7 @@
   const phase = $derived(active?.kind === 'tool_call' || active?.kind === 'tool_result' ? 'tool' : active?.kind === 'reasoning' ? 'thinking' : 'working');
   const agent = $derived(agentTitle(head?.agent ?? '', harness));
   const working = $derived(activeRun !== null && head?.inputCommandId === activeRun);
+  const view = $derived(folds.view(cardKey, blocks, working || streaming));
 </script>
 
 <article class="card">
@@ -56,7 +59,11 @@
       <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
     </header>
   {/if}
-  {#each shown as entry (entry.key)}
+  {#each view.shown as entry (entry.key)}
+    {#if entry.key === view.seam}
+      <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
+    {/if}
+    <div class="entry" data-key={entry.key}>
     {#if entry.kind === 'request'}
       <RequestCard request={entry.request} onDecision={async () => undefined} />
     {:else if entry.kind === 'block'}
@@ -75,10 +82,8 @@
         {#if block.state === 'incomplete' && block.incompleteReason}<p class="incomplete">{blockEndLabel(block.incompleteReason)}</p>{/if}
       {/if}
     {/if}
+    </div>
   {/each}
-  {#if !expanded && blocks.length > 60}
-    <button type="button" class="more" onclick={() => { expanded = true; }}>Показать ещё {hidden} {fmt.plural(hidden, ['блок', 'блока', 'блоков'])}</button>
-  {/if}
   {#if streaming && head}
     <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
   {/if}
@@ -99,6 +104,7 @@
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   header :global(button) { color: var(--secondary); }
+  .entry { min-width: 0; }
   .incomplete { margin: 0; color: var(--warning); font-size: var(--fs-sm); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); color: var(--accent-link); font-size: var(--fs-sm); }
 </style>

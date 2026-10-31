@@ -1,7 +1,7 @@
 import type { Page } from '@playwright/test';
 import { FakeHub, FakeHubApi } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
-import { FIRST_DIALOG, FIRST_QUESTION, dialogConversation, playFirstDialog, seedFirstDialog } from '../../testing/fixtures/first-dialog';
+import { FIRST_DIALOG, FIRST_QUESTION, dialogConversation, playFirstDialog, seedFirstDialog, seedLongTurn } from '../../testing/fixtures/first-dialog';
 import { expect, test } from './fixtures';
 
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
@@ -254,4 +254,107 @@ test('header_is_flat_and_its_controls_line_up_with_the_content', async ({ page }
     expect(box.width).toBeGreaterThanOrEqual(44);
     expect(box.height).toBeGreaterThanOrEqual(44);
   }
+});
+
+async function longTurn(page: Page, steps: number, shape: 'steps' | 'text_between') {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const turn = seedLongTurn(api, steps, shape);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${turn.id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.card').first()).toBeVisible({ timeout: 15_000 });
+  return { hub, api, ...turn };
+}
+
+/** Что видно сверху окна: ключ первой строки карточки и её положение. */
+const topRow = (page: Page) => page.locator('.feed').evaluate((feed) => {
+  const edge = feed.getBoundingClientRect().top;
+  const rows = [...feed.querySelectorAll<HTMLElement>('.card [data-key]')];
+  const row = rows.find((item) => item.getBoundingClientRect().top >= edge);
+  return row ? { key: row.dataset.key ?? '', y: row.getBoundingClientRect().top } : null;
+});
+
+const shownKeys = (page: Page) => page.locator('.feed').evaluate((feed) => [...feed.querySelectorAll<HTMLElement>('.card [data-key]')].map((row) => row.dataset.key ?? ''));
+
+test('reading_a_long_turn_up_and_down_loses_no_row_and_keeps_the_anchor', async ({ page }) => {
+  test.setTimeout(60_000);
+  await longTurn(page, 96, 'text_between');
+  const feed = page.locator('.feed');
+  await expect(feed).toHaveAttribute('data-loaded', '100');
+  await page.locator('.card').first().evaluate((card) => { (card as HTMLElement & { mark?: boolean }).mark = true; });
+  const seam = page.getByRole('button', { name: /Показать ещё \d+ шаг/ });
+
+  // Первый экран над разрезом: эти строки владелец читает, пока грузится старшая страница.
+  await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 1400; });
+  await expect(feed).not.toHaveAttribute('data-pinned', '');
+  const head = await shownKeys(page);
+  for (let pass = 0; pass < 30 && (await feed.getAttribute('data-loaded')) !== '291'; pass++) {
+    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await page.waitForTimeout(60);
+    const anchor = await topRow(page);
+    expect(anchor).not.toBeNull();
+    await page.waitForTimeout(160);
+    await expect.poll(async () => {
+      const box = await page.locator(`[data-key="${anchor?.key}"]`).boundingBox();
+      return Math.abs((box?.y ?? -9999) - (anchor?.y ?? 0));
+    }).toBeLessThanOrEqual(1);
+  }
+  await expect(feed).toHaveAttribute('data-loaded', '291');
+  const after = await shownKeys(page);
+  expect(head.filter((key) => !after.includes(key))).toEqual([]);
+  expect(await page.locator('.card').first().evaluate((card) => (card as HTMLElement & { mark?: boolean }).mark)).toBe(true);
+  await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toHaveCount(0);
+
+  await feed.evaluate((el) => { el.scrollTop = el.scrollHeight; });
+  await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toHaveCount(0);
+  await feed.evaluate((el) => { el.scrollTop = 0; });
+  expect((await shownKeys(page)).length).toBe(after.length);
+});
+
+test('the_restore_button_stands_at_the_cut_and_opens_rows_in_place', async ({ page }) => {
+  const { items } = await longTurn(page, 60, 'text_between');
+  const seam = page.getByRole('button', { name: /Показать ещё \d+ шаг/ });
+  await expect(seam).toBeAttached();
+  const place = await seam.evaluate((button) => {
+    const row = (node: Element | null) => node?.querySelector<HTMLElement>('[data-key]')?.dataset.key ?? (node as HTMLElement | null)?.dataset.key ?? '';
+    return { before: row(button.previousElementSibling), after: row(button.nextElementSibling) };
+  });
+  const order = items.flatMap((item) => (item.kind === 'block' && !item.parent_block_id ? [`block:${item.id}`] : []));
+  expect(place.before).not.toBe('');
+  expect(order.indexOf(place.after)).toBeGreaterThan(order.indexOf(place.before) + 1);
+  await seam.scrollIntoViewIfNeeded();
+  const spot = (await seam.boundingBox())?.y ?? 0;
+  await seam.click();
+  await expect(seam).toHaveCount(0);
+  const opened = await page.locator(`[data-key="${order[order.indexOf(place.before) + 1]}"]`).boundingBox();
+  expect(Math.abs((opened?.y ?? -9999) - spot)).toBeLessThanOrEqual(20);
+});
+
+test('tail_growth_and_an_opened_row_do_not_move_what_the_reader_is_looking_at', async ({ page }) => {
+  const { hub, api, id, items } = await longTurn(page, 30, 'text_between');
+  const feed = page.locator('.feed');
+  await feed.evaluate((el) => { el.scrollTop = el.scrollHeight - el.clientHeight - 700; });
+  await expect(feed).not.toHaveAttribute('data-pinned', '');
+  await page.waitForTimeout(100);
+  const anchor = await topRow(page);
+  const run = (items.at(-1) as { input_command_id: string }).input_command_id;
+  const scope = `conversation:${id}`;
+  for (let extra = 0; extra < 3; extra++) {
+    const block_id = api.id();
+    hub.append(scope, { kind: 'block_started', conversation_id: id, payload: { block_id, rev: 0, kind: 'text', input_command_id: run, parent_block_id: null, agent: 'orchestrator', model: 'claude-opus-5-5', tool_name: null, summary: null, approved_by: null } });
+    hub.append(scope, { kind: 'block_delta', conversation_id: id, payload: { block_id, base_rev: 0, rev: 1, append: 'Новая строка хвоста\n\n'.repeat(6) } });
+    hub.flush();
+  }
+  await expect(page.getByRole('button', { name: 'К новым сообщениям' })).toBeVisible();
+  const held = await page.locator(`[data-key="${anchor?.key}"]`).boundingBox();
+  expect(Math.abs((held?.y ?? -9999) - (anchor?.y ?? 0))).toBeLessThanOrEqual(1);
+  const row = page.locator('.tool .head').filter({ hasText: 'Read' }).last();
+  await row.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(100);
+  const before = await row.boundingBox();
+  await row.click();
+  await page.waitForTimeout(300);
+  const after = await row.boundingBox();
+  expect(Math.abs((after?.y ?? -9999) - (before?.y ?? 0))).toBeLessThanOrEqual(1);
 });
