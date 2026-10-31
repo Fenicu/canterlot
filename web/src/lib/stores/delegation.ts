@@ -16,7 +16,7 @@ function iso(ms: number | null): string | null {
 	return new Date(ms).toISOString();
 }
 
-const DELEGATING = new Set(['agent', 'task', 'spawn_agent', 'delegate']);
+const DELEGATING = new Set(['agent', 'task', 'spawn_agent', 'subagent', 'delegate']);
 
 const hubState = (state: string): string => (state === 'streaming' ? 'running' : state === 'final' ? 'done' : 'incomplete');
 

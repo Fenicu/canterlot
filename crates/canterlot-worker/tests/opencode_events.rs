@@ -788,3 +788,260 @@ fn steps_seen_at_resume_are_not_counted_by_the_next_gap() {
     assert_eq!(usage[0].input_tokens, 100);
     assert_eq!(usage[0].output_tokens, 10);
 }
+
+const SUBAGENT_CALL_MESSAGE: &str = "msg_18f9fff3a001cN2CMuCCo0DcTD";
+const SUBAGENT_CALL: &str = "call_0_1793410989907";
+const CHILD_STEP: &str = "msg_18f9fffa4001TOgiNGtYYfC18X";
+
+struct Started {
+    id: Uuid,
+    kind: String,
+    parent: Option<Uuid>,
+    agent: String,
+    command: Option<Uuid>,
+}
+
+fn started(out: &[AdapterEvent]) -> Vec<Started> {
+    out.iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind,
+                parent,
+                agent,
+                input_command_id,
+                ..
+            } => Some(Started {
+                id: *block_id,
+                kind: format!("{kind:?}"),
+                parent: *parent,
+                agent: agent.clone(),
+                command: *input_command_id,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+// Обработчик инструментов отдаёт начало вызова отдельно: в ленту оно попадает через адаптер.
+fn flat_events(translated: Vec<Translated>) -> Vec<AdapterEvent> {
+    translated
+        .into_iter()
+        .filter_map(|item| match item {
+            Translated::Event(event) | Translated::ToolCall { event, .. } => Some(event),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn child_blocks_go_into_the_lane_of_the_subagent_call() {
+    let events = stream("subagent");
+    let root = session_of(&events);
+    let (mut translator, command) = translator(&events);
+    let out = flat_events(feed_all(&mut translator, &events));
+    let blocks = started(&out);
+    let call = block_id(&root, SUBAGENT_CALL_MESSAGE, "tool", SUBAGENT_CALL);
+    let child_reasoning = block_id(&root, CHILD_STEP, "reasoning", "0");
+    let child_tool = block_id(&root, CHILD_STEP, "tool", "call_0_1793410990014");
+    let child_result = block_id(&root, CHILD_STEP, "tool_result", "call_0_1793410990014");
+    for id in [child_reasoning, child_tool] {
+        let block = blocks.iter().find(|block| block.id == id).expect("block");
+        assert_eq!(block.parent, Some(call), "{}", block.kind);
+        assert_eq!(block.agent, "general");
+        assert_eq!(block.command, Some(command));
+    }
+    let result = blocks
+        .iter()
+        .find(|block| block.id == child_result)
+        .expect("result");
+    assert_eq!(result.parent, Some(child_tool));
+    assert_eq!(result.agent, "general");
+    let own = blocks.iter().find(|block| block.id == call).expect("call");
+    assert_eq!((own.parent, own.agent.as_str()), (None, "orchestrator"));
+}
+
+#[test]
+fn background_child_gets_its_own_lane_and_agent() {
+    let events = stream("subagent");
+    let root = session_of(&events);
+    let (mut translator, _) = translator(&events);
+    let out = flat_events(feed_all(&mut translator, &events));
+    let blocks = started(&out);
+    let background = block_id(
+        &root,
+        "msg_18fa0006a001a9L2TIpCXYNl5y",
+        "tool",
+        "call_0_1793410990206",
+    );
+    let text = block_id(&root, "msg_18fa000d8001PvufCICZzuOtVQ", "text", "0");
+    let block = blocks.iter().find(|block| block.id == text).expect("text");
+    assert_eq!(block.parent, Some(background));
+    assert_eq!(block.agent, "explore");
+}
+
+#[test]
+fn child_activity_does_not_change_the_phase_of_the_main_agent() {
+    let events = stream("subagent");
+    let (mut translator, _) = translator(&events);
+    let child_events: Vec<Value> = events
+        .iter()
+        .filter(|event| {
+            event["data"]["sessionID"]
+                .as_str()
+                .is_some_and(|session| session.starts_with("ses_e7060007"))
+                && event["type"] != "session.created"
+        })
+        .cloned()
+        .collect();
+    translator.feed(&events[1]);
+    feed_all(
+        &mut translator,
+        &events
+            .iter()
+            .filter(|event| event["type"] == "session.created")
+            .cloned()
+            .collect::<Vec<_>>(),
+    );
+    let out = adapter_events(feed_all(&mut translator, &child_events));
+    assert!(
+        !out.iter()
+            .any(|event| matches!(event, AdapterEvent::Phase { .. })),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn child_tokens_are_counted_under_its_agent_and_never_touch_the_context() {
+    let events = stream("subagent");
+    let (mut translator, command) = translator(&events);
+    let until_parent_step: Vec<Value> = events
+        .iter()
+        .take_while(|event| event["data"]["assistantMessageID"] != "msg_18fa000b3001xwxVXXMjgMrquJ")
+        .cloned()
+        .collect();
+    feed_all(&mut translator, &until_parent_step);
+    let AdapterEvent::RunFinished {
+        usage,
+        context_tokens,
+        ..
+    } = translator.finish_run(command)
+    else {
+        panic!("run must finish");
+    };
+    let line = |agent: &str| {
+        usage
+            .iter()
+            .find(|entry| entry.agent == agent)
+            .unwrap_or_else(|| panic!("{agent}: {usage:?}"))
+            .clone()
+    };
+    assert_eq!(
+        line("general"),
+        ModelUsage {
+            model: "fake/fake-1".into(),
+            agent: "general".into(),
+            input_tokens: 140,
+            output_tokens: 40,
+            cache_read_tokens: 60,
+            cache_write_tokens: 0,
+        }
+    );
+    assert_eq!(line("orchestrator").input_tokens, 140, "two parent steps");
+    assert_eq!(context_tokens, 100, "last step of the main agent");
+}
+
+#[test]
+fn child_of_a_child_stays_in_its_parents_lane_chain() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.begin_run(Some(Uuid::now_v7()));
+    let progress = |session: &str, message: &str, id: &str, child: &str| {
+        json!({"type": "session.tool.progress", "data": {
+            "sessionID": session, "assistantMessageID": message, "id": id,
+            "metadata": {"sessionID": child, "status": "running"}}})
+    };
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": "ses_a", "parentID": root, "agent": "general"}}));
+    translator.feed(&progress(root, "msg_1", "call_1", "ses_a"));
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": "ses_b", "parentID": "ses_a", "agent": "explore"}}));
+    translator.feed(&progress("ses_a", "msg_2", "call_2", "ses_b"));
+    let out = flat_events(
+        translator.feed(&json!({"type": "session.text.started", "data": {
+        "sessionID": "ses_b", "assistantMessageID": "msg_3", "ordinal": 0}})),
+    );
+    let blocks = started(&out);
+    assert_eq!(
+        blocks[0].parent,
+        Some(block_id(root, "msg_2", "tool", "call_2"))
+    );
+    assert_eq!(blocks[0].agent, "explore");
+}
+
+#[test]
+fn result_of_the_call_names_a_child_whose_progress_was_lost() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.add_child("ses_a".to_owned());
+    translator.feed(&json!({"type": "session.tool.input.started", "data": {
+        "sessionID": root, "assistantMessageID": "msg_1", "id": "call_1", "name": "subagent"}}));
+    translator.feed(&json!({"type": "session.tool.success", "data": {
+        "sessionID": root, "assistantMessageID": "msg_1", "id": "call_1", "content": [],
+        "metadata": {"sessionID": "ses_a", "status": "completed"}}}));
+    let out = flat_events(
+        translator.feed(&json!({"type": "session.text.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "ordinal": 0}})),
+    );
+    assert_eq!(
+        started(&out)[0].parent,
+        Some(block_id(root, "msg_1", "tool", "call_1"))
+    );
+}
+
+#[test]
+fn child_with_an_unknown_lane_still_shows_its_blocks() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    translator.add_child("ses_a".to_owned());
+    let out = flat_events(
+        translator.feed(&json!({"type": "session.text.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "ordinal": 0}})),
+    );
+    let blocks = started(&out);
+    assert_eq!(blocks[0].parent, None);
+    assert_eq!(blocks[0].agent, "subagent");
+}
+
+#[test]
+fn background_child_keeps_its_open_blocks_over_the_end_of_the_run() {
+    let root = "ses_root";
+    let mut translator = Translator::new(root, HashMap::new());
+    let command = Uuid::now_v7();
+    translator.begin_run(Some(command));
+    translator.feed(&json!({"type": "session.created", "data": {
+        "sessionID": "ses_a", "parentID": root, "agent": "general"}}));
+    translator.feed(&json!({"type": "session.step.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "agent": "general",
+        "model": {"id": "other", "providerID": "fake"}}}));
+    translator.feed(&json!({"type": "session.tool.input.started", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "id": "call_1", "name": "shell"}}));
+    translator.feed(&json!({"type": "session.tool.called", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "id": "call_1",
+        "input": {"command": "sleep 5"}}}));
+    let _ = translator.finish_run(command);
+    let out = flat_events(
+        translator.feed(&json!({"type": "session.tool.success", "data": {
+        "sessionID": "ses_a", "assistantMessageID": "msg_2", "id": "call_1",
+        "content": [{"type": "text", "text": "done"}], "metadata": {"exit": 0}}})),
+    );
+    let call = block_id(root, "msg_2", "tool", "call_1");
+    assert!(
+        !started(&out).iter().any(|block| block.id == call),
+        "the call must not start twice: {out:?}"
+    );
+    let result = started(&out);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].kind, "ToolResult");
+    assert_eq!(result[0].agent, "general");
+}

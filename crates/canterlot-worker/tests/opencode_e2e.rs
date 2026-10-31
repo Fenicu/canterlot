@@ -944,6 +944,71 @@ async fn tools_reach_the_journal_with_exit_status_and_mark() {
     env.fake().wait_gone().await;
 }
 
+// Субагенты по боевому пути: дорожки потомков в журнале, расход под именем агента,
+// фоновый потомок живёт дольше периода родителя.
+#[tokio::test]
+async fn subagent_blocks_reach_the_journal_in_their_lanes() {
+    let script = Script::from_capture("subagent", None)
+        .with_canterlot_mcp("connected")
+        .with_recorded_models()
+        .with_recorded_agents();
+    let mut env = Env::new(Some(script)).await;
+    env.start("bypass").await;
+    env.wait_running().await;
+    let input = env.deliver("delegate").await;
+    env.wait("the run after the background child", |bodies| {
+        bodies
+            .iter()
+            .filter(|body| matches!(body, Body::RunFinished(_)))
+            .count()
+            >= 2
+    })
+    .await;
+    let blocks: Vec<_> = env
+        .bodies
+        .iter()
+        .filter_map(|body| match body {
+            Body::BlockStarted(fact) => Some(fact),
+            _ => None,
+        })
+        .collect();
+    let calls: Vec<_> = blocks
+        .iter()
+        .filter(|block| block.tool_name == "subagent")
+        .collect();
+    assert_eq!(calls.len(), 2);
+    let lane = |agent: &str| -> Vec<_> {
+        blocks
+            .iter()
+            .filter(|block| block.agent == agent && block.kind != "tool_result")
+            .collect()
+    };
+    assert_eq!(lane("general").len(), 3, "reasoning, shell, text");
+    assert!(
+        lane("general")
+            .iter()
+            .all(|block| block.parent_block_id == calls[0].block_id)
+    );
+    assert_eq!(lane("explore").len(), 1);
+    assert_eq!(lane("explore")[0].parent_block_id, calls[1].block_id);
+    let first = env
+        .bodies
+        .iter()
+        .find_map(|body| match body {
+            Body::RunFinished(fact) if fact.input_command_id == input.to_string() => Some(fact),
+            _ => None,
+        })
+        .unwrap();
+    let general = first
+        .usage
+        .iter()
+        .find(|line| line.agent == "general")
+        .expect("usage of the child");
+    assert_eq!(general.input_tokens, 140);
+    env.stop().await;
+    env.fake().wait_gone().await;
+}
+
 fn permission_turn() -> Script {
     Script::from_capture("permissions", None)
         .first_run()
