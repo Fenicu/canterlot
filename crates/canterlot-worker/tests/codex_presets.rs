@@ -436,6 +436,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
         effort: String::new(),
         permission_mode: "ask".into(),
         instructions: clean_spec(),
+        isolate_mcp: false,
     };
     let error = adapter.start(&spec, &group).await.expect_err("no rollout");
     assert!(
