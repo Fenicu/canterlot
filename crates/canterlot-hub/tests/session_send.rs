@@ -58,6 +58,7 @@ impl Fx {
                 config: Arc::new(config),
                 settle: SettleConfig { idle_quiet: QUIET },
                 dispatcher: None,
+                shutdown: tokio_util::sync::CancellationToken::new(),
             },
             pool,
             owner: seed.owner_id,

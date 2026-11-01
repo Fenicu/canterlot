@@ -33,6 +33,7 @@ impl Fx {
                     idle_quiet: Duration::from_secs(5),
                 },
                 dispatcher: None,
+                shutdown: tokio_util::sync::CancellationToken::new(),
             },
             pool,
             owner: seed.owner_id,

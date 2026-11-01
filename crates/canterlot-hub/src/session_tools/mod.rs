@@ -13,11 +13,13 @@ pub mod send;
 pub mod settle;
 pub mod subs;
 pub mod summary;
+pub mod wait;
 
 use std::sync::Arc;
 
 use serde_json::Value;
 use sqlx::PgPool;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use self::settle::SettleConfig;
@@ -184,6 +186,8 @@ pub struct ToolContext {
     pub config: Arc<SessionToolsConfig>,
     pub settle: SettleConfig,
     pub dispatcher: Option<Dispatcher>,
+    /// Останов хаба: долгие вызовы (`sessions.wait`) возвращаются, не дожидаясь срока.
+    pub shutdown: CancellationToken,
 }
 
 /// Вызывающий: всё выведено из живого исполнения, не из аргументов.
@@ -209,6 +213,7 @@ pub async fn call(
         "sessions.send" => send::send(context, caller, arguments).await,
         "sessions.subscribe" => send::subscribe(context, caller, arguments).await,
         "sessions.unsubscribe" => send::unsubscribe(context, caller, arguments).await,
+        "sessions.wait" => wait::wait(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

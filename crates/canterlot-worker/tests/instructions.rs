@@ -700,7 +700,11 @@ mod manager_tests {
         }
 
         async fn wait_text(&mut self, needle: &str) -> String {
-            let deadline = tokio::time::Instant::now() + WAIT;
+            self.wait_text_within(needle, WAIT).await
+        }
+
+        async fn wait_text_within(&mut self, needle: &str, limit: Duration) -> String {
+            let deadline = tokio::time::Instant::now() + limit;
             loop {
                 let bodies = self.pump(Duration::from_millis(200)).await;
                 for body in bodies {
@@ -791,6 +795,25 @@ mod manager_tests {
         ) -> Result<AgentCallResponse, tonic::Status> {
             Ok(AgentCallResponse {
                 result_json: self.result_json.clone(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// Хаб отвечает не сразу: так выглядит долгое ожидание сессии.
+    struct SlowCaller {
+        delay: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl AgentCaller for SlowCaller {
+        async fn call(
+            &self,
+            _request: AgentCallRequest,
+        ) -> Result<AgentCallResponse, tonic::Status> {
+            tokio::time::sleep(self.delay).await;
+            Ok(AgentCallResponse {
+                result_json: r#"{"state":"idle","timed_out":false}"#.into(),
                 ..Default::default()
             })
         }
@@ -927,6 +950,116 @@ mod manager_tests {
         assert!(
             matches!(slow, AgentCallResult::Err { ref code, .. } if code == "hub_timeout"),
             "{slow:?}"
+        );
+    }
+
+    /// Ожидание дольше прежних 20 с проходит и через управляющую службу, и через менеджер.
+    async fn long_wait_round_trip(hub_delay: Duration, timeout_seconds: u64) {
+        let mut env = Env::new().await;
+        env.manager()
+            .set_agent_caller(Some(Arc::new(SlowCaller { delay: hub_delay })));
+        let preset_id = Uuid::now_v7().to_string();
+        env.start(Some(preset_instructions(&preset_id, 1, "один")))
+            .await;
+        let step = format!(
+            r#"{{"agent_call":{{"tool":"sessions.wait","arguments":{{"session_id":"{}","timeout_seconds":{timeout_seconds}}}}}}}"#,
+            Uuid::now_v7()
+        );
+        env.send(deliver_command(
+            Uuid::now_v7(),
+            1,
+            env.execution,
+            1,
+            env.conversation,
+            &script(&step),
+            None,
+        ))
+        .await;
+        let text = env
+            .wait_text_within("timed_out", hub_delay + Duration::from_secs(30))
+            .await;
+        assert!(text.contains(r#""state":"idle""#), "{text}");
+        assert!(!text.contains("hub_timeout"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn wait_uses_longer_supervisor_deadline() {
+        // Больше AGENT_CALL_TIMEOUT (20 с) и срока RPC (15 с), но меньше срока ожидания.
+        long_wait_round_trip(Duration::from_secs(22), 30).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "60 с реального времени; запускать вручную"]
+    async fn sixty_second_wait_returns_without_hub_timeout() {
+        long_wait_round_trip(Duration::from_secs(60), 70).await;
+    }
+
+    #[test]
+    fn deadlines_follow_the_wait_timeout_and_nothing_else() {
+        use canterlot_worker::exec::{AGENT_CALL_RPC_TIMEOUT, AGENT_CALL_TIMEOUT, deadline_for};
+        use serde_json::json;
+
+        let wait = |arguments| deadline_for("sessions.wait", &arguments);
+        let at_least = |deadlines: canterlot_worker::exec::CallDeadlines, seconds: u64| {
+            deadlines.rpc >= Duration::from_secs(seconds + 10)
+                && deadlines.supervisor > deadlines.rpc
+        };
+        assert!(at_least(wait(json!({"timeout_seconds": 60})), 60));
+        assert!(at_least(wait(json!({"timeout_seconds": 300})), 300));
+        assert!(at_least(wait(json!({})), 120), "default is 120 s");
+        assert!(at_least(wait(json!({"timeout_seconds": 1})), 1));
+        // Ненормальные значения хаб отвергнет сам; срок не должен ни расти, ни падать ниже разумного.
+        assert!(at_least(wait(json!({"timeout_seconds": 9999})), 300));
+        assert!(at_least(wait(json!({"timeout_seconds": "abc"})), 120));
+        assert!(at_least(wait(json!({"timeout_seconds": -5})), 120));
+        for tool in [
+            "sessions.list",
+            "sessions.send",
+            "presets.list",
+            "sessions.waitx",
+        ] {
+            let short = deadline_for(tool, &json!({"timeout_seconds": 300}));
+            assert_eq!(short.rpc, AGENT_CALL_RPC_TIMEOUT, "{tool}");
+            assert_eq!(short.supervisor, AGENT_CALL_TIMEOUT, "{tool}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn other_tools_keep_short_deadline() {
+        use canterlot_worker::adapter::AgentCallResult;
+        use serde_json::json;
+
+        let hanging = |tool: &str, arguments| {
+            tokio::spawn(agent_call(
+                Some(Arc::new(HangCaller) as Arc<dyn AgentCaller>),
+                Uuid::now_v7(),
+                1,
+                Uuid::now_v7(),
+                tool.into(),
+                arguments,
+            ))
+        };
+        let short = hanging("sessions.list", json!({}));
+        let wait = hanging(
+            "sessions.wait",
+            json!({"session_id": Uuid::now_v7(), "timeout_seconds": 60}),
+        );
+        tokio::time::advance(Duration::from_secs(16)).await;
+        let slow = short.await.unwrap();
+        assert!(
+            matches!(slow, AgentCallResult::Err { ref code, .. } if code == "hub_timeout"),
+            "{slow:?}"
+        );
+        tokio::time::advance(Duration::from_secs(50)).await;
+        assert!(
+            !wait.is_finished(),
+            "wait still has its own 60 s plus slack"
+        );
+        tokio::time::advance(Duration::from_secs(20)).await;
+        let late = wait.await.unwrap();
+        assert!(
+            matches!(late, AgentCallResult::Err { ref code, .. } if code == "hub_timeout"),
+            "{late:?}"
         );
     }
 
