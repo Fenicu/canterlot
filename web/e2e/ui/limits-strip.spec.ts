@@ -2,7 +2,7 @@ import type { Page } from '@playwright/test';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { FakeHub, FakeHubApi, seedConversation } from '../../testing/fake-hub';
-import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
+import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/http-playwright';
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect, test } from './fixtures';
 
@@ -176,4 +176,87 @@ test('chat_header_strip_is_compact_and_follows_new_readings_while_the_chat_is_op
   hub.flush();
   await expect(strip.locator('.meter').first()).toContainText('30%');
   await shot(page, 'chat-header-strip');
+});
+
+function withoutFiveHour(api: FakeHubApi): void {
+  const row = claude(api);
+  row.five_hour = null;
+  row.five_hour_absent = true;
+}
+
+test('a_provider_without_a_five_hour_limit_shows_one_balanced_meter', async ({ page }) => {
+  await boot(page, withoutFiveHour);
+  const strip = page.locator('.limits').first();
+  const claudeRow = strip.locator('.row').nth(0);
+  await expect(claudeRow).toContainText('Claude');
+  await expect(claudeRow.locator('.meter')).toHaveCount(1);
+  await expect(claudeRow.locator('.meter')).toContainText('нед');
+  await expect(claudeRow.locator('.meter')).toContainText('4%');
+  await expect(claudeRow).not.toContainText('5ч');
+  await expect(claudeRow).not.toContainText('устарело');
+  // Другой провайдер сохраняет оба счётчика.
+  await expect(strip.locator('.row').nth(1).locator('.meter')).toHaveCount(2);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-one-meter');
+  await strip.locator('summary').click();
+  await expect(claudeRow.locator('.reset')).toHaveCount(1);
+  await shot(page, 'strip-one-meter-open');
+  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await shot(page, 'strip-one-meter-open');
+});
+
+test('the_five_hour_meter_disappears_and_returns_with_the_hub_events', async ({ page }) => {
+  const { hub, api } = await boot(page);
+  const strip = page.locator('.limits').first();
+  const claudeRow = strip.locator('.row').nth(0);
+  await expect(claudeRow.locator('.meter')).toHaveCount(2);
+  const five = claude(api).five_hour!;
+  const change = (used: number | null) => hub.append('conversations', {
+    kind: 'limits_changed',
+    payload: {
+      provider: 'claude',
+      window: 'five_hour',
+      used_permille: used,
+      resets_at: used === null ? null : five.resets_at,
+      observed_at: new Date().toISOString(),
+      weekly_reserve_active: false,
+      weekly_reserve_resets_at: null
+    }
+  });
+  change(null);
+  hub.flush();
+  await expect(claudeRow.locator('.meter')).toHaveCount(1);
+  await expect(claudeRow).not.toContainText('5ч');
+  change(200);
+  hub.flush();
+  await expect(claudeRow.locator('.meter')).toHaveCount(2);
+  await expect(claudeRow.locator('.meter').first()).toContainText('80%');
+});
+
+test('chat_header_and_limits_tab_hide_the_missing_five_hour_window', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const ids = seedMockupSessions(api);
+  withoutFiveHour(api);
+  const id = seedConversation(api, { title: 'Без пятичасового', harness: { id: 'claude', title: 'Claude', provider: 'claude' } });
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  const header = page.locator('.chat-header .limits');
+  await expect(header.locator('.meter')).toHaveCount(1);
+  await expect(header).toContainText('нед');
+  await expect(header).not.toContainText('5ч');
+  await shot(page, 'chat-header-one-meter');
+
+  await installChatRoutes(page, hub, api, ids.pinned);
+  await seedSecondaryScreens(page, api, ids, null);
+  await page.goto('/limits');
+  await expect(page.locator('[data-layout]')).toBeVisible();
+  const card = page.locator('main .current section').filter({ hasText: 'Claude сейчас' });
+  await expect(card).toContainText('/ нед');
+  await expect(card).not.toContainText('/ 5ч');
+  await expect(page.locator('main .current section').filter({ hasText: 'Codex сейчас' })).toContainText('/ 5ч');
+  await shot(page, 'limits-tab-one-meter');
 });

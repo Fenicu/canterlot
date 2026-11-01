@@ -12,6 +12,8 @@ export interface ProviderLimits {
   weekly?: LimitWindow | null;
   weekly_reserve_active: boolean;
   weekly_reserve_resets_at?: string | null;
+  /** У провайдера нет пятичасового окна (план без этого лимита): счётчик не показывается. */
+  five_hour_absent?: boolean;
 }
 
 export interface LimitThresholds {
@@ -30,6 +32,8 @@ export const NO_LIMIT_DATA = "нет данных";
 export const STALE_DATA = "устарело";
 
 export interface MeterView {
+  /** Окна у провайдера нет: счётчик не рисуется, «устарело» не ставится. */
+  absent: boolean;
   /** Хаб знает это окно. */
   known: boolean;
   /** Остаток для полоски, 0..100. */
@@ -84,7 +88,8 @@ export function dayClock(ts: number, now: number): string {
     : `${shortWeekday(ts)} ${fmt.clock(ts)}`;
 }
 
-const ABSENT: MeterView = {
+const NOT_SEEN: MeterView = {
+  absent: false,
   known: false,
   fill: 0,
   text: NO_LIMIT_DATA,
@@ -99,7 +104,7 @@ export function windowText(
   now: number,
   options?: { staleAfterMs?: number },
 ): MeterView {
-  if (!window) return ABSENT;
+  if (!window) return NOT_SEEN;
   const observedAt = Date.parse(window.observed_at);
   const staleAfterMs = options?.staleAfterMs ?? 180_000;
   const resetAt = window.resets_at ? Date.parse(window.resets_at) : Number.NaN;
@@ -109,6 +114,7 @@ export function windowText(
     (Number.isFinite(resetAt) && resetAt <= now);
   const remaining = remainingPct(window.used_permille);
   return {
+    absent: false,
     known: true,
     fill: remaining,
     text: stale ? STALE_DATA : remainingText(window.used_permille),
@@ -126,7 +132,9 @@ export function limitView(
   cfg: LimitThresholds,
 ): LimitView {
   const options = { staleAfterMs: cfg.stale_after_secs * 1000 };
-  const five = windowText(provider.five_hour, now, options);
+  const five: MeterView = provider.five_hour_absent && !provider.five_hour
+    ? { ...NOT_SEEN, absent: true, text: "" }
+    : windowText(provider.five_hour, now, options);
   const week = windowText(provider.weekly, now, options);
   let tone: LimitView["tone"] = "default";
   if (provider.weekly_reserve_active) tone = "reserve";

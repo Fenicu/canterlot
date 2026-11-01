@@ -1265,6 +1265,48 @@ describe("stores task 4", () => {
     ).toBe(20);
   });
 
+  it("limits_changed_without_a_value_marks_the_five_hour_window_absent_and_a_value_brings_it_back", () => {
+    const list = listOf();
+    const week = {
+      used_permille: 540,
+      resets_at: null,
+      observed_at: "2026-10-28T12:00:00.000Z",
+    };
+    list.limits = [
+      {
+        provider: "claude",
+        five_hour: { ...week, used_permille: 440 },
+        weekly: week,
+        weekly_reserve_active: false,
+      },
+    ];
+    const change = (used: number | null, seq: string) => ({
+      event: ev(
+        "limits_changed",
+        {
+          provider: "claude",
+          window: "five_hour",
+          used_permille: used,
+          resets_at: null,
+          observed_at: "2026-10-28T12:05:00.000Z",
+          weekly_reserve_active: false,
+          weekly_reserve_resets_at: null,
+        },
+        seq,
+      ),
+      overlap: false,
+    });
+    list.applier.applyEvents([change(null, "4")]);
+    const gone = list.limits.find((item) => item.provider === "claude")!;
+    expect(gone.five_hour).toBeNull();
+    expect(gone.five_hour_absent).toBe(true);
+    expect(gone.weekly!.used_permille).toBe(540);
+    list.applier.applyEvents([change(100, "5")]);
+    const back = list.limits.find((item) => item.provider === "claude")!;
+    expect(back.five_hour!.used_permille).toBe(100);
+    expect(back.five_hour_absent).toBe(false);
+  });
+
   it("conversation_updated_moves_items_between_filters", async () => {
     const list = listOf();
     list.applier.applySnapshot(

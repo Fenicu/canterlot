@@ -133,4 +133,33 @@ describe("sessions/limits", () => {
     expect(partial.five).toMatchObject({ text: "66%" });
     expect(partial.week).toMatchObject({ known: false, text: "нет данных", fill: 0 });
   });
+
+  it("an_absent_five_hour_window_has_no_meter_and_no_stale_mark", () => {
+    const claude: ProviderLimits = {
+      provider: "claude",
+      weekly_reserve_active: false,
+      five_hour: null,
+      five_hour_absent: true,
+      weekly: { used_permille: 460, resets_at: at(31, 4, 0), observed_at: new Date(NOW - 60_000).toISOString() },
+    };
+    const strip = limitStrip([claude, provider("codex", 100, 100)], NOW, cfg);
+    const row = strip.rows[0]!;
+    expect(row).toMatchObject({ empty: false });
+    expect(row.five.absent).toBe(true);
+    expect(row.week).toMatchObject({ text: "54%", fill: 54, stale: false });
+    expect(strip.rows[1]!.five.absent).toBe(false);
+    // Отсутствующее окно не окрашивает полосу и не даёт «устарело».
+    expect(strip.tone).toBe("default");
+  });
+
+  it("an_unknown_five_hour_window_without_the_absence_mark_still_says_no_data", () => {
+    const row = limitStrip([provider("claude", null, 460)], NOW, cfg).rows[0]!;
+    expect(row.five).toMatchObject({ absent: false, known: false, text: "нет данных" });
+  });
+
+  it("a_provider_with_only_an_absent_window_and_no_weekly_reading_stays_a_no_data_row", () => {
+    const only: ProviderLimits = { provider: "claude", weekly_reserve_active: false, five_hour: null, five_hour_absent: true, weekly: null };
+    expect(limitStrip([only], NOW, cfg).rows[0]).toMatchObject({ empty: true });
+  });
 });
+

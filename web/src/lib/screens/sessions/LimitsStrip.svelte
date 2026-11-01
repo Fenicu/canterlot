@@ -86,7 +86,7 @@
               {#if row.empty}
                 <span class="none">нет данных</span>
               {:else}
-                {@render meter('5ч', row.label, row.five)}
+                {#if !row.five.absent}{@render meter('5ч', row.label, row.five)}{/if}
                 {@render meter('нед', row.label, row.week)}
                 {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
               {/if}

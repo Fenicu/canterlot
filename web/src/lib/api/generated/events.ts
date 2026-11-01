@@ -706,7 +706,7 @@ export interface LimitsChanged {
   payload: {
     provider: string;
     window: "five_hour" | "weekly";
-    used_permille: number;
+    used_permille: number | null;
     resets_at: Time | null;
     observed_at: Time;
     weekly_reserve_active: boolean;

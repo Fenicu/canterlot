@@ -19,7 +19,7 @@ export function chartModel(series: Series[], days: string[], zone: string) {
       return map;
     };
     const five = points(item.five_hour); const weekly = points(item.weekly);
-    return { provider: item.provider, days: days.map(day => ({ day, five: five.get(day) ?? null, weekly: weekly.get(day) ?? null })) };
+    return { provider: item.provider, hasFive: five.size > 0, days: days.map(day => ({ day, five: five.get(day) ?? null, weekly: weekly.get(day) ?? null })) };
   });
 }
 export { providerLabel as providerName } from '#lib/format/labels.js';

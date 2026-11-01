@@ -1592,6 +1592,8 @@ export interface components {
         };
         ProviderView: {
             five_hour?: components["schemas"]["WindowView"] | null;
+            /** @description У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается. */
+            five_hour_absent: boolean;
             provider: string;
             weekly?: components["schemas"]["WindowView"] | null;
             weekly_reserve_active: boolean;
