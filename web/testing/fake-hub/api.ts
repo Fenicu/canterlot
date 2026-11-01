@@ -69,6 +69,10 @@ export class FakeHubApi {
 	/** `null`: встроенный список по умолчанию, как у хаба. */
 	spawnWhitelist: { harness: string; model: string }[] | null = null;
 	readonly spawnWhitelistKeys: string[] = [];
+	/** Вызовы приёма результата: ключ идемпотентности и `force`, как их прислал клиент. */
+	readonly acceptCalls: { id: string; force: boolean; key: string }[] = [];
+	/** Рабочая копия с правками: приём без `force` оставляет её и переводит в `dirty`. */
+	acceptFindsDirtyCopy = false;
 	readonly defaultSpawnWhitelist = [
 		{ harness: 'claude', model: 'opus' },
 		{ harness: 'claude', model: 'default' }

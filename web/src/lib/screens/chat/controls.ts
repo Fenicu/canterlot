@@ -69,3 +69,11 @@ export async function updateSettings(
 ) {
   return client.patchSettings(conversationId, body, key);
 }
+
+export async function acceptSession(
+  conversationId: string,
+  opts?: { force?: boolean; key?: string },
+) {
+  const key = opts?.key ?? crypto.randomUUID();
+  return client.accept(conversationId, { force: opts?.force ?? false }, key);
+}

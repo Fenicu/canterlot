@@ -518,6 +518,22 @@ export function interrupt(
   );
 }
 
+export function accept(
+  conversationId: string,
+  body: Body<operations["post__api_v1_conversations__id__accept"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["post__api_v1_conversations__id__accept"]>>
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/accept`,
+    body,
+    keyed(key, opts),
+  );
+}
+
 export function resume(
   conversationId: string,
   body: Body<operations["post__api_v1_conversations__id__resume"]>,

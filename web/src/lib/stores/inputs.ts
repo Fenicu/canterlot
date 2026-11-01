@@ -1,3 +1,7 @@
+import type { components } from '#lib/api/generated/openapi.js';
+
+export type InputOrigin = components['schemas']['InputOrigin'];
+
 export type InputUiState =
 	| 'saving'
 	| 'queued'
@@ -34,6 +38,8 @@ export interface InputView {
 	feedSeq: string | null;
 	createdAt: number | null;
 	retryOf: string | null;
+	/** Отправитель, если ввод пришёл от другой сессии; у ввода владельца пусто. */
+	origin: InputOrigin | null;
 	localOnly: boolean;
 	/** Пузырь стоит в ленте до ответа хаба: сообщение отправлено с этого устройства и ничто не мешает ему уйти. */
 	optimistic: boolean;
@@ -78,6 +84,7 @@ export function freshInput(key: string, text: string, createdAt: number, attachm
 		feedSeq: null,
 		createdAt,
 		retryOf: null,
+		origin: null,
 		localOnly: true,
 		optimistic: false,
 		stripUntil: null

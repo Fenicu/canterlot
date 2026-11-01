@@ -19,6 +19,7 @@
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 	import { runningCount } from '#lib/stores/delegation.js';
 	import { liveNodes } from './delegationNodes';
+	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
 
 	interface DetailLike {
 		title?: string;
@@ -41,7 +42,9 @@
 		onOpenSheet,
 		onOpenSettings,
 		onOpenDiagnostics,
-		onOpenDelegation
+		onOpenDelegation,
+		onAccept,
+		parentTitle = null
 	}: {
 		chat: ChatStore;
 		providers?: ProviderLimits[];
@@ -51,6 +54,9 @@
 		onOpenSettings?: () => void;
 		onOpenDiagnostics?: () => void;
 		onOpenDelegation?: () => void;
+		onAccept?: () => void;
+		/** Название сессии, запустившей эту; пусто, пока список её не знает. */
+		parentTitle?: string | null;
 	} = $props();
 
 	let menuOpen = $state(false);
@@ -60,6 +66,8 @@
 	let actionError = $state<string | null>(null);
 
 	const detail = $derived(chat.detail as DetailLike | null);
+	const parentId = $derived(((chat.detail as AcceptDetail | null)?.parent_id) ?? null);
+	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
 	const settings = $derived(chat.settings as SettingsLike | null);
 
 	const title = $derived(detail?.title || 'Сессия');
@@ -160,6 +168,11 @@
 					<span class="skeleton" style:width="var(--bar-74)"></span>
 				{/if}
 			</div>
+			{#if parentId}
+				<div class="parent-row">
+					<a class="parent-link" data-parent-link href={resolve(`c/${parentId}`)}>Запущена сессией {parentTitle || 'без названия'}</a>
+				</div>
+			{/if}
 		</div>
 
 		<div class="header-actions">
@@ -234,6 +247,10 @@
 				{/if}
 
 				<div class="menu-divider" role="separator"></div>
+
+				{#if accept.available && onAccept}
+					<MenuItem icon="trash" onclick={() => { menuOpen = false; onAccept(); }}>{ACCEPT_LABEL}</MenuItem>
+				{/if}
 
 				{#if isLive}
 					<MenuItem icon="stop" onclick={() => void handleStop(false)}>Остановить</MenuItem>
@@ -325,6 +342,23 @@
 		white-space: nowrap;
 		overflow: hidden;
 		text-overflow: ellipsis;
+	}
+	.parent-row {
+		min-width: 0;
+		padding-left: calc(var(--mark-large) + var(--s3));
+	}
+	.parent-link {
+		display: block;
+		min-height: var(--target);
+		line-height: var(--target);
+		font-size: var(--fs-sm);
+		color: var(--accent-link);
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
+	}
+	.parent-link:focus-visible {
+		outline: var(--focus-width) solid var(--accent);
 	}
 	.header-actions {
 		display: flex;

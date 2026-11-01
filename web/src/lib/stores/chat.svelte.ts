@@ -27,6 +27,7 @@ import {
   marksFor,
   placeInput,
   type AttachmentRef,
+  type InputOrigin,
   type InputUiState,
   type InputView,
 } from "./inputs";
@@ -88,6 +89,7 @@ export interface HistoryInput {
   feed_seq?: string | null;
   created_at: string;
   retry_of?: string | null;
+  origin?: InputOrigin | null;
 }
 
 export type HistoryRequest = components["schemas"]["RequestItemView"] & {
@@ -914,6 +916,7 @@ export class ChatStore {
       this.inputs.get(payload.idempotency_key) ??
       freshInput(payload.idempotency_key, "", this.deps.clock.now());
     existing.id = payload.input_id;
+    existing.origin = payload.origin ?? null;
     existing.text = textOf(payload.content as HistoryInput["content"]);
     const rawContent =
       (payload.content as Array<Partial<AttachmentRef> & { type: string }> | undefined) ?? [];
@@ -1228,6 +1231,7 @@ export class ChatStore {
     input.createdSeq = item.created_seq;
     input.createdAt = Date.parse(item.created_at);
     input.retryOf = item.retry_of ?? null;
+    input.origin = item.origin ?? null;
     if (item.feed_seq) input.feedSeq = item.feed_seq;
     this.inputs.set(input.key, input);
     this.deps.ops.settle(input.key);

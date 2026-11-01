@@ -15,10 +15,17 @@ export type RequestClientState =
   | 'not_applied'
   | 'closed';
 
+export type RequestKind = 'permission' | 'question' | 'spawn_approval';
+
+/** Неизвестный вид запроса остаётся вопросом, а карточка одобрения запуска имеет свой вид. */
+export function requestKind(raw: unknown): RequestKind {
+  return raw === 'permission' || raw === 'spawn_approval' ? raw : 'question';
+}
+
 export interface RequestItem {
   id: string;
   conversationId: string;
-  kind: 'permission' | 'question';
+  kind: RequestKind;
   state: RequestClientState;
   payload: unknown;
   winnerDecision?: unknown;
@@ -83,7 +90,7 @@ export class RequestsModel {
       const id = String(r.id ?? r.request_id ?? '');
       if (!id) continue;
       const conversationId = String(r.conversation_id ?? r.conversationId ?? this.conversationId ?? '');
-      const kind = (r.kind === 'permission' ? 'permission' : 'question') as 'permission' | 'question';
+      const kind = requestKind(r.kind);
       const payload = r.request_payload ?? r.payload ?? {};
       const rawState = String(r.state ?? 'open');
       let state: RequestClientState = 'open';
@@ -142,7 +149,7 @@ export class RequestsModel {
     const id = String(payload.request_id ?? payload.id ?? '');
     if (!id) return;
     const conversationId = String(ev.conversation_id ?? payload.conversation_id ?? this.conversationId ?? '');
-    const kind = (payload.kind === 'permission' ? 'permission' : 'question') as 'permission' | 'question';
+    const kind = requestKind(payload.kind);
     const requestPayload = payload.payload ?? payload;
 
     const existing = this.items.get(id);

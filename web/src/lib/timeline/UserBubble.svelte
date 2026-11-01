@@ -14,6 +14,7 @@
   import type { InputView } from '#lib/stores/inputs.js';
   import { retryAsNew, returnToDraft } from '#lib/timeline/QueueActions.js';
   import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
+  import { originLabel } from '#lib/timeline/origin.js';
 
   let { input, chat, agentWorking = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean } = $props();
   let ask = $state<string | null>(null);
@@ -76,10 +77,12 @@
       { duration: durationMs('--duration-enter'), easing: root.getPropertyValue('--ease-enter').trim() || 'ease-out' }
     );
   }
+  const from = $derived(originLabel(input.origin));
   const stamp = $derived(input.state === 'accepted' && input.createdAt !== null ? ` · ${fmt.clock(input.createdAt)}` : '');
 </script>
 
-<article class="bubble" data-state={input.state} data-optimistic={input.optimistic ? '' : undefined} use:enter>
+<article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} use:enter>
+  {#if from}<p class="origin">{from}</p>{/if}
   <p class="text">{input.text}</p>
   {#if input.attachments.length > 0}
     <ul class="files">
@@ -145,6 +148,8 @@
     flex-direction: column;
     gap: var(--s3);
   }
+  .bubble[data-origin] { --st-surface: var(--raised); background: var(--raised); }
+  .origin { color: var(--secondary); font-size: var(--fs-sm); font-weight: var(--weight-medium); }
   .bubble[data-state='rejected'] { background: var(--danger-soft); }
   p { margin: 0; overflow-wrap: anywhere; }
   .text { white-space: pre-wrap; }

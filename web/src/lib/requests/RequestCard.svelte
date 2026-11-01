@@ -4,6 +4,8 @@
   import type { Stage, StageState } from '#lib/ui/stage-track.js';
   import PermissionCard from './PermissionCard.svelte';
   import QuestionCard from './QuestionCard.svelte';
+  import SpawnApprovalCard from './SpawnApprovalCard.svelte';
+  import { spawnApprovalView } from './spawnApprovalView';
   import type { RequestItem } from '#lib/stores/requests.svelte.js';
   import type { DecisionBody } from '#lib/api/client.js';
 
@@ -102,6 +104,7 @@
   const subject = $derived.by(() => {
     const payload = (request.payload ?? {}) as Record<string, unknown>;
     if (request.kind === 'permission') return String(payload.tool_name ?? '');
+    if (request.kind === 'spawn_approval') return spawnApprovalView(payload).facts.slice(0, 2).map((fact) => fact.value).join(' · ');
     const nested = payload.payload as Record<string, unknown> | undefined;
     const first = ((payload.questions ?? nested?.questions) as Array<Record<string, unknown>> | undefined)?.[0];
     return String(first?.text ?? first?.question ?? payload.text ?? payload.question ?? '');
@@ -109,7 +112,7 @@
 
   const answerText = $derived.by(() => {
     const winner = request.winnerDecision as Record<string, unknown> | undefined;
-    if (request.kind === 'permission') {
+    if (request.kind === 'permission' || request.kind === 'spawn_approval') {
       if (winner?.behavior === 'allow') return 'Разрешено';
       if (winner?.behavior === 'deny') return 'Отклонено';
       return 'Решение применено';
@@ -156,11 +159,13 @@
 
 {#if request.state === 'applied'}
   <div class="applied" data-collapsed={shown ? undefined : 'true'} data-expanded={shown ? 'true' : undefined}>
-    <StepHead name={request.kind === 'permission' ? 'Разрешение' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
+    <StepHead name={request.kind === 'permission' ? 'Разрешение' : request.kind === 'spawn_approval' ? 'Запуск сессии' : 'Вопрос'} detail={subject} status={answerText} state="answer" open={shown} ontoggle={toggle} />
     {#if shown}
       <div class="applied-body">
         {#if request.kind === 'permission'}
           <PermissionCard {request} {onDecision} disabled={true} />
+        {:else if request.kind === 'spawn_approval'}
+          <SpawnApprovalCard {request} {onDecision} disabled={true} />
         {:else}
           <QuestionCard {request} {onDecision} disabled={true} readonly />
         {/if}
@@ -195,6 +200,8 @@
 
     {#if request.kind === 'permission'}
       <PermissionCard {request} {onDecision} disabled={request.state !== 'open'} />
+    {:else if request.kind === 'spawn_approval'}
+      <SpawnApprovalCard {request} {onDecision} disabled={request.state !== 'open'} />
     {:else}
       <QuestionCard {request} {onDecision} disabled={request.state !== 'open'} />
     {/if}

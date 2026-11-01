@@ -18,6 +18,11 @@
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
 	import DelegationSheet from './DelegationSheet.svelte';
+	import WorktreeNotice from './WorktreeNotice.svelte';
+	import ConfirmDialog from '#lib/ui/ConfirmDialog.svelte';
+	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
+	import { acceptSession } from './controls';
+	import { errorText } from '#lib/api/errors.js';
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
@@ -76,6 +81,22 @@
 	let showDelegation = $state(false);
 	let showSheet = $state(false);
 	const listRow = $derived(runtime?.list.items.get(chat.id) ?? null);
+	const parentTitle = $derived.by(() => {
+		const parentId = (chat.detail as AcceptDetail | null)?.parent_id;
+		return parentId ? (runtime?.list.items.get(parentId)?.title ?? null) : null;
+	});
+	const accept = $derived(acceptView(chat.detail as AcceptDetail | null));
+	let showAccept = $state(false);
+	let acceptError = $state<string | null>(null);
+
+	async function runAccept(force: boolean) {
+		acceptError = null;
+		try {
+			await acceptSession(chat.id, { force });
+		} catch (err: unknown) {
+			acceptError = errorText(err, 'Не удалось принять результат');
+		}
+	}
 	let infoRunId = $state<string | null>(null);
 
 	onMount(async () => {
@@ -120,6 +141,11 @@
 		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
 		onOpenDelegation={() => (showDelegation = true)}
+		onAccept={() => {
+			acceptError = null;
+			showAccept = true;
+		}}
+		{parentTitle}
 	/>
 
 	<Timeline
@@ -153,11 +179,31 @@
 		</div>
 	{/if}
 
+	{#if accept.dirty}
+		<WorktreeNotice error={acceptError} onforce={() => (showAccept = true)} />
+	{:else if acceptError}
+		<p class="accept-error" role="alert">{acceptError}</p>
+	{/if}
+
 	<PauseCards {chat} {now} />
 
 	<PendingStrip {chat} />
 
 	<Composer {chat} />
+
+	{#if showAccept}
+		<ConfirmDialog
+			title={ACCEPT_LABEL}
+			body={accept.body}
+			confirmLabel={accept.confirmLabel}
+			danger
+			onconfirm={() => {
+				showAccept = false;
+				void runAccept(accept.force);
+			}}
+			onclose={() => (showAccept = false)}
+		/>
+	{/if}
 
 	{#if showSettings}
 		<Sheet open title="Настройки сессии" onclose={() => (showSettings = false)}>
@@ -244,6 +290,11 @@
 		overflow-wrap: anywhere;
 	}
 
+	.accept-error {
+		margin: var(--s0) var(--gutter) var(--s3);
+		font-size: var(--fs-meta);
+		color: var(--danger);
+	}
 	.request-cards-slot,
 	.request-card-slot {
 		padding: var(--s3) var(--gutter);

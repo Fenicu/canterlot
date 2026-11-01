@@ -598,6 +598,60 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ status: 200, headers: headers(), json: { status: 'stopping' } });
   });
 
+  await page.route('**/api/v1/conversations/*/accept', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    const body = (route.request().postDataJSON() ?? {}) as { force?: boolean };
+    const force = Boolean(body.force);
+    api.acceptCalls.push({ id, force, key });
+    const detail = api.details.get(id);
+    const worktree = detail?.worktree as { branch: string; state: string; path: string } | null | undefined;
+    if (!detail?.parent_id) {
+      await route.fulfill({ status: 409, headers: headers(), json: errorBody('not_delegated', 'Сессия не запущена агентом') });
+      return;
+    }
+    if (worktree?.state === 'removed') {
+      await route.fulfill({ status: 409, headers: headers(), json: errorBody('worktree_removed', 'Рабочая копия уже убрана') });
+      return;
+    }
+    const dirty = worktree !== null && worktree !== undefined && !force && api.acceptFindsDirtyCopy;
+    const next = dirty ? { ...worktree, state: 'dirty' } : worktree ? { ...worktree, state: 'removed' } : null;
+    detail.worktree = next;
+    const row = api.list.get(id);
+    if (!dirty) {
+      detail.archived = true;
+      if (row) row.archived = true;
+    }
+    hub.append(`conversation:${id}`, {
+      kind: 'conversation_updated',
+      conversation_id: id,
+      payload: {
+        id,
+        title: String(detail.title ?? ''),
+        title_source: 'user',
+        color: (detail.color as string | null | undefined) ?? null,
+        pinned: Boolean(detail.pinned),
+        archived: Boolean(detail.archived),
+        groups: (detail.groups as string[] | undefined) ?? [],
+        machine: detail.machine as { id: string; name: string },
+        harness: detail.harness as { id: string; title: string; provider: string },
+        workdir: String(detail.workdir ?? ''),
+        created_at: String(detail.created_at ?? ''),
+        counts: recount(api),
+        parent_id: detail.parent_id as string,
+        spawn_depth: Number(detail.spawn_depth ?? 0),
+        worktree: next
+      }
+    });
+    hub.flush();
+    await route.fulfill({ status: 200, headers: headers(), json: { state: dirty ? 'removing' : 'done' } });
+  });
+
   await page.route('**/api/v1/conversations/*/resume', async (route) => {
     if (route.request().method() !== 'POST') return route.fallback();
     const id = new URL(route.request().url()).pathname.split('/').at(-2) ?? '';
