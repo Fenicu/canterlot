@@ -64,7 +64,7 @@ test('manifest_and_icons_are_served_with_credentials_and_valid', async ({ page }
     }));
     return { manifest, icons };
   });
-  expect(result.manifest).toMatchObject({ name: 'canterlot', scope: '/', share_target: { action: '/_share' } });
+  expect(result.manifest).toMatchObject({ name: 'Canterlot', scope: '/', share_target: { action: '/_share' } });
   expect(result.icons).toEqual([[192, 192], [512, 512], [512, 512]]);
   await expect(page.locator('meta[name="theme-color"]')).not.toHaveAttribute('content', '');
 });

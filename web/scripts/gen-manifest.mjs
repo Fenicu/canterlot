@@ -7,7 +7,7 @@ export function darkTokens(css) {
 export function manifest(css) {
   const tokens = darkTokens(css);
   return {
-    id: '/', start_url: '/', scope: '/', name: 'canterlot', short_name: 'canterlot', lang: 'ru', display: 'standalone',
+    id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone',
     theme_color: tokens.bg, background_color: tokens.bg,
     icons: [
       { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },

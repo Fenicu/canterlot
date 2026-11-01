@@ -39,7 +39,7 @@
 	});
 </script>
 
-<svelte:head><title>Субагент · canterlot</title></svelte:head>
+<svelte:head><title>Субагент · Canterlot</title></svelte:head>
 <main id="main" class="lane-route">
 	{#key id}
 		{#if chat && chat.id === id && chat.gone}

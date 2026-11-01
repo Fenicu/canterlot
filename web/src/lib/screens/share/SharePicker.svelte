@@ -53,7 +53,7 @@
 <main id="main" tabindex="-1" data-secondary-ready={!loading ? '' : undefined}>
   <SecondaryHeader title="Отправить в canterlot" />
   <div class="secondary-body"><div class="secondary-content">
-    {#if inactive}<p>Приложение ещё не готово принять файл: откройте canterlot и поделитесь ещё раз</p><a href={resolve('/sessions')}>Открыть canterlot</a>
+    {#if inactive}<p>Приложение ещё не готово принять файл: откройте Canterlot и поделитесь ещё раз</p><a href={resolve('/sessions')}>Открыть canterlot</a>
     {:else if loading}<p>Открываю переданные данные…</p>
     {:else}
       {#if error}<p class="error" role="alert">{error}</p>{/if}

@@ -218,7 +218,7 @@
 
 <svelte:element this={main ? 'main' : 'div'} bind:this={listNode} id={main ? 'main' : undefined} class="list" data-list-ready={ready ? '' : undefined}>
   <div class="bar">
-    <p class="brand">canterlot</p>
+    <p class="brand">Canterlot</p>
 
     <IconButton
       icon="search"

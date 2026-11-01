@@ -32,7 +32,7 @@
   const options = [{ value: 'one', label: 'Первый' }, { value: 'two', label: 'Второй' }, { value: 'three', label: 'Третий' }];
   const stages = [{ id: 'saved', label: 'сохранено' }, { id: 'machine', label: 'на машине' }, { id: 'sending', label: 'передаётся' }, { id: 'accepted', label: 'принято' }, { id: 'working', label: 'агент работает' }];
 </script>
-<svelte:head><title>Проверка примитивов · canterlot</title></svelte:head>
+<svelte:head><title>Проверка примитивов · Canterlot</title></svelte:head>
 {#if import.meta.env.VITE_UI_TESTS === '1'}
   <TopBar title="Проверка примитивов" subtitle="Тестовая страница">{#snippet actions()}<IconButton icon="moon" label="Сменить тему" onclick={() => theme.toggle()} />{/snippet}</TopBar>
   <main id="main" tabindex="-1">

@@ -48,7 +48,7 @@ const bootNew = (page: Page, theme?: Theme) => bootScreen(page, named('07-new-se
 const bootChat = (page: Page, theme?: Theme) => bootScreen(page, named('02-chat'), theme, size(page));
 
 function titleClashes(page: Page): Promise<string[]> {
-  return list(page).getByText('canterlot', { exact: true }).first().evaluate((title) => {
+  return list(page).getByText('Canterlot', { exact: true }).first().evaluate((title) => {
     const range = document.createRange();
     range.selectNodeContents(title);
     const text = range.getBoundingClientRect();
