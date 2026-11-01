@@ -1,7 +1,7 @@
 import type { BackgroundFact } from "#lib/stores/background.svelte.js";
 import type { BlockModel } from "#lib/stores/blocks.js";
 import { harnessLabel, modelLabel } from "#lib/format/labels.js";
-import { isLaunchResult, isMainAgent, toolFailed, toolTitle } from "#lib/timeline/present.js";
+import { isLaunchResult, isMainAgent, toolFailed, toolInterrupted, toolTitle } from "#lib/timeline/present.js";
 
 export interface LaneModelResult {
   title: string;
@@ -56,7 +56,7 @@ export function laneModel(
     if (isStreaming) {
       status = "Работает параллельно с основным агентом";
       running = true;
-    } else if (root.state === "incomplete" || root.state === "stale" || background?.state === "stopped") {
+    } else if (root.state === "incomplete" || root.state === "stale" || background?.state === "stopped" || toolInterrupted(result)) {
       status = "Прервано";
       running = false;
     } else if (toolFailed(result) || background?.state === "failed") {

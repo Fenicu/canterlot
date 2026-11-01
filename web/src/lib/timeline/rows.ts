@@ -29,7 +29,7 @@ export interface BlockLinks {
   background(id: string): BackgroundFact | null;
 }
 
-const SUBAGENT_TOOLS = new Set(["Agent", "Task"]);
+const SUBAGENT_TOOLS = new Set(["Agent", "Task", "spawn_agent"]);
 
 export function isSubagentCall(block: BlockModel): boolean {
   return block.kind === "tool_call" && SUBAGENT_TOOLS.has(block.toolName ?? "");

@@ -21,7 +21,7 @@ const DELEGATING = new Set(['agent', 'task', 'spawn_agent', 'subagent', 'delegat
 
 const hubState = (state: string): string => (state === 'streaming' ? 'running' : state === 'final' ? 'done' : 'incomplete');
 
-/** Как у хаба: вызов субагента Claude Code финален сразу, его состояние читается отсюда. */
+/** Как у хаба: вызов субагента финален сразу, его состояние читается отсюда. */
 export interface SubagentFacts {
 	background: ReadonlyMap<string, BackgroundFact>;
 	/** Исполнение живо: вызов без результата ещё работает. */
@@ -38,15 +38,15 @@ function subagentState(block: BlockModel, result: BlockModel | undefined, facts:
 	}
 	if (result) {
 		if (result.state === 'streaming') return { state: 'running', finishedAt: null };
-		const state = result.state !== 'final' ? 'incomplete' : result.summary === TOOL_FAILED ? 'failed' : 'done';
+		const state = result.state !== 'final' ? 'incomplete' : (RESULT_STATE[result.summary ?? ''] ?? 'done');
 		return { state, finishedAt: result.finishedAt ?? block.finishedAt };
 	}
 	if (hubState(block.state) === 'incomplete' || !facts.live) return { state: 'incomplete', finishedAt: block.finishedAt };
 	return { state: 'running', finishedAt: null };
 }
 
-const SUBAGENT_CALLS = new Set(['agent', 'task']);
-const TOOL_FAILED = 'error';
+const SUBAGENT_CALLS = new Set(['agent', 'task', 'spawn_agent']);
+const RESULT_STATE: Record<string, string> = { error: 'failed', interrupted: 'stopped' };
 const TOOL_LAUNCHED = 'async_launched';
 
 /**

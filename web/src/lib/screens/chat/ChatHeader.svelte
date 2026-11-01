@@ -19,6 +19,7 @@
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 	import { runningCount } from '#lib/stores/delegation.js';
 	import { liveNodes } from './delegationNodes';
+	import { isSubagentCall } from '#lib/timeline/rows.js';
 	import { ACCEPT_LABEL, acceptView, type AcceptDetail } from './accept';
 
 	interface DetailLike {
@@ -60,7 +61,7 @@
 	} = $props();
 
 	let menuOpen = $state(false);
-	const delegated = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.toolName === 'Agent'));
+	const delegated = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && isSubagentCall(entry.block)));
 	const running = $derived(!pane.desktop && delegated ? runningCount(liveNodes(chat)) : 0);
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);

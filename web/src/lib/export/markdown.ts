@@ -1,16 +1,17 @@
 import type { BlockModel } from "#lib/stores/blocks.js";
+import { isSubagentCall } from "#lib/timeline/rows.js";
 
 export function answerToMarkdown(blocks: BlockModel[]): string {
   const lines: string[] = [];
   const mainAgent = blocks.find(
-    (b) => b.parentId === null && b.toolName !== "Agent",
+    (b) => b.parentId === null && !isSubagentCall(b),
   )?.agent;
 
   for (const block of blocks) {
     // Omit subagents (blocks with a parentId, or Agent delegation tools, or subagent tasks)
     if (
       block.parentId !== null ||
-      block.toolName === "Agent" ||
+      isSubagentCall(block) ||
       (mainAgent && block.agent && block.agent !== mainAgent)
     ) {
       continue;

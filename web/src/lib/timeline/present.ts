@@ -18,6 +18,7 @@ const TOOL_FAILED_MARK = "error";
 const CLI_ERROR_OPEN = "<tool_use_error>";
 /** Так воркер помечает ответ CLI на запуск фоновой задачи: это ещё не результат. */
 const TOOL_LAUNCHED_MARK = "async_launched";
+const TOOL_INTERRUPTED_MARK = "interrupted";
 
 export function isLaunchResult(result: BlockModel | null): boolean {
   // Сводка приходит с финалом блока и сама по себе не реактивна.
@@ -154,6 +155,11 @@ export function toolTiming(
     startedAt,
     finishedAt: null,
   };
+}
+
+/** Субагент оборван: его ход кончился без итога, но это не ошибка. */
+export function toolInterrupted(result: BlockModel | null): boolean {
+  return result?.summary === TOOL_INTERRUPTED_MARK;
 }
 
 export function toolFailed(result: BlockModel | null): boolean {
@@ -313,7 +319,7 @@ export function subagentCopy(
       ? "error"
       : running
         ? "running"
-        : result
+        : result && !toolInterrupted(result)
           ? "done"
           : "stopped";
   const doing = action ? toolTitle(action) : null;

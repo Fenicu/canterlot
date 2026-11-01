@@ -117,6 +117,16 @@ describe('delegation state', () => {
 		});
 	});
 
+	it('codex_spawn_runs_until_the_result_of_its_child', () => {
+		const facts = { background: none, live: true };
+		const spawn = call();
+		spawn.toolName = 'spawn_agent';
+		expect(buildDelegation([spawn], facts)[0]?.state).toBe('running');
+		expect(buildDelegation([spawn, result(null)], facts)[0]?.state).toBe('done');
+		expect(buildDelegation([spawn, result('error')], facts)[0]?.state).toBe('failed');
+		expect(buildDelegation([spawn, result('interrupted')], facts)[0]?.state).toBe('stopped');
+	});
+
 	it('other_harnesses_keep_the_call_state', () => {
 		expect(buildDelegation([call()])[0]?.state).toBe('done');
 	});
