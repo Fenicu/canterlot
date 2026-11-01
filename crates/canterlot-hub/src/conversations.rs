@@ -1485,10 +1485,13 @@ pub async fn drop_rejected_settings_in_tx(
 const SETTINGS_UNAVAILABLE: &str = "settings_unavailable";
 
 /// Причины отказа воркера, вызванные самими настройками ввода.
-pub const SETTINGS_REJECTION_REASONS: [&str; 3] = [
+pub const SETTINGS_REJECTION_REASONS: [&str; 6] = [
     SETTINGS_UNAVAILABLE,
     "effort_change_unsupported",
     "permission_mode_needs_restart",
+    "instructions_change_failed",
+    "codex_home_failed",
+    "codex_home_unusable",
 ];
 
 /// Отклонённые воркером настройки снимаются с ожидания, иначе каждый следующий ввод

@@ -1671,7 +1671,13 @@ async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
         executions,
         model::ExecutionState,
     };
-    for reason in ["effort_change_unsupported", "permission_mode_needs_restart"] {
+    for reason in [
+        "effort_change_unsupported",
+        "permission_mode_needs_restart",
+        "instructions_change_failed",
+        "codex_home_failed",
+        "codex_home_unusable",
+    ] {
         let seed = testkit::seed(&pool).await;
         testkit::seed_catalog(&pool, seed.machine_id).await;
         sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
