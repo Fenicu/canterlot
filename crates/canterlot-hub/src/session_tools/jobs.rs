@@ -114,15 +114,9 @@ async fn deliver(
             content: vec![ContentBlock::Text { text }],
             received_at: now,
             correlation_id,
+            origin,
         },
     )
     .await?;
-    if let Some(origin) = origin {
-        sqlx::query("update inputs set origin=$2 where id=$1")
-            .bind(submitted.input_id)
-            .bind(origin)
-            .execute(&mut *conn)
-            .await?;
-    }
     Ok(JobOutcome::Done(json!({"input_id":submitted.input_id})))
 }

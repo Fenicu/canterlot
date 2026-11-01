@@ -153,6 +153,19 @@ pub struct AttributeView {
     pub harness: HarnessRef,
     pub workdir: String,
     pub created_at: String,
+    #[serde(default)]
+    pub parent_id: Option<Uuid>,
+    #[serde(default)]
+    pub spawn_depth: i32,
+    #[serde(default)]
+    pub worktree: Option<WorktreeView>,
+}
+/// Рабочая копия делегированной сессии: остальное из `conversations.worktree` хабу для себя.
+#[derive(Clone, Serialize, Deserialize, ToSchema)]
+pub struct WorktreeView {
+    pub branch: String,
+    pub state: String,
+    pub path: String,
 }
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 pub struct ActivityView {
@@ -327,6 +340,11 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             },
             workdir: row.try_get("workdir")?,
             created_at: time(row.try_get("created_at")?),
+            parent_id: row.try_get("parent_conversation_id")?,
+            spawn_depth: row.try_get("spawn_depth")?,
+            worktree: row
+                .try_get::<Option<Value>, _>("worktree")?
+                .and_then(|worktree| serde_json::from_value(worktree).ok()),
         },
         model: row.try_get("effective_model")?,
         effort: row.try_get("effective_effort")?,
@@ -436,6 +454,52 @@ pub async fn list(conn: &mut PgConnection, q: &ListQuery) -> Result<ListPage, sq
         next_cursor,
         counts: counts(conn, q.owner_id).await?,
     })
+}
+/// Список для инструмента агента: `family` сужает его до семьи делегированной сессии.
+pub(crate) struct AgentListQuery {
+    pub owner_id: Uuid,
+    pub family: Option<Vec<Uuid>>,
+    pub state: Option<activity::ActivityState>,
+    pub include_archived: bool,
+    pub limit: i64,
+}
+pub(crate) async fn agent_list(
+    conn: &mut PgConnection,
+    q: &AgentListQuery,
+) -> Result<Vec<ListItem>, sqlx::Error> {
+    let mut sql = sqlx::QueryBuilder::new(SELECT);
+    sql.push(" where c.owner_id=").push_bind(q.owner_id);
+    if let Some(family) = &q.family {
+        sql.push(" and c.id=any(")
+            .push_bind(family.clone())
+            .push(")");
+    }
+    if !q.include_archived {
+        sql.push(" and c.archived_at is null");
+    }
+    if let Some(state) = q.state {
+        sql.push(" and coalesce(d.activity_state,'idle')=")
+            .push_bind(state.as_str());
+    }
+    sql.push(" order by c.last_activity_at desc nulls last,c.id limit ")
+        .push_bind(q.limit);
+    sql.build()
+        .fetch_all(conn)
+        .await?
+        .iter()
+        .map(item)
+        .collect()
+}
+pub(crate) async fn list_item(
+    conn: &mut PgConnection,
+    owner: Uuid,
+    id: Uuid,
+) -> Result<Option<ListItem>, sqlx::Error> {
+    load_row(conn, owner, id)
+        .await?
+        .as_ref()
+        .map(item)
+        .transpose()
 }
 pub(crate) async fn snapshot_items(
     conn: &mut PgConnection,
@@ -1747,6 +1811,7 @@ pub async fn submit_message_in_tx(
             content: req.content.clone(),
             received_at: req.received_at,
             correlation_id,
+            origin: None,
         },
         &req.attachment_ids,
         req.retry_of,

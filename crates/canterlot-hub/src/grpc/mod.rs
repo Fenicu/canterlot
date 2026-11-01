@@ -91,6 +91,8 @@ pub struct HubGrpc {
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
     pub session_tools: Arc<crate::config::SessionToolsConfig>,
+    pub settle: crate::session_tools::settle::SettleConfig,
+    pub dispatcher: Option<crate::dispatcher::Dispatcher>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
     fetch_slots: attachments::FetchSlots,
     media_slots: media::UploadSlots,
@@ -290,6 +292,8 @@ impl HubGrpc {
             timers,
             ingest,
             session_tools: Default::default(),
+            settle: (&crate::config::ActivityConfig::default()).into(),
+            dispatcher: None,
             blobs: None,
             fetch_slots: Default::default(),
             media_slots: Default::default(),
@@ -301,6 +305,16 @@ impl HubGrpc {
 
     pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {
         self.session_tools = Arc::new(config);
+        self
+    }
+
+    pub fn with_activity(mut self, config: &crate::config::ActivityConfig) -> Self {
+        self.settle = config.into();
+        self
+    }
+
+    pub fn with_dispatcher(mut self, dispatcher: crate::dispatcher::Dispatcher) -> Self {
+        self.dispatcher = Some(dispatcher);
         self
     }
 

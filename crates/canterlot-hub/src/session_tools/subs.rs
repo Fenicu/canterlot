@@ -75,6 +75,36 @@ pub async fn subscribe_explicit_in_tx(
     Ok(current.map(|(state, _)| state))
 }
 
+/// Отписка забирает и событие, которое уже ждёт в заданиях: подписчик больше о нём не просил.
+/// Сначала подписка: оценка держит её строку, поэтому её задание к этому моменту уже видно.
+pub async fn unsubscribe_in_tx(
+    conn: &mut PgConnection,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    reason: &str,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update session_subscriptions set closed_at=clock_timestamp(),closed_reason=$3
+         where subscriber_id=$1 and target_id=$2 and closed_at is null",
+    )
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(reason)
+    .execute(&mut *conn)
+    .await?;
+    sqlx::query(
+        "update scheduled_jobs set state='cancelled',result=$3,updated_at=clock_timestamp()
+         where kind='session_task' and state='pending' and conversation_id=$1
+           and payload->>'action'='event' and payload->>'target_id'=$2",
+    )
+    .bind(subscriber_id)
+    .bind(target_id.to_string())
+    .bind(json!({"reason": reason}))
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
 pub async fn current_in_tx(
     conn: &mut PgConnection,

@@ -121,7 +121,18 @@ export interface InputQueued {
     idempotency_key: string;
     state: "queued";
     content: ContentBlock[];
+    origin?: InputOrigin | null;
   };
+}
+export interface InputOrigin {
+  kind: "message" | "spawn" | "event";
+  from?: Uuid;
+  title?: string;
+  harness?: string;
+  model?: string;
+  chain_depth: number;
+  sha256?: string;
+  sender_deleted?: boolean;
 }
 export interface InputStateChanged {
   v: 1;
@@ -491,6 +502,13 @@ export interface ConversationCreated {
     };
     last_activity_at: Time | null;
     counts: Counts;
+    parent_id?: Uuid | null;
+    spawn_depth?: number;
+    worktree?: {
+      branch: string;
+      state: string;
+      path: string;
+    } | null;
   };
 }
 export interface Activity {
@@ -544,6 +562,13 @@ export interface ConversationUpdated {
     workdir: string;
     created_at: Time;
     counts: Counts;
+    parent_id?: Uuid | null;
+    spawn_depth?: number;
+    worktree?: {
+      branch: string;
+      state: string;
+      path: string;
+    } | null;
   };
 }
 export interface ConversationDeleted {

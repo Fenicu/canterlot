@@ -196,6 +196,7 @@ impl Fixture {
                 content: vec![ContentBlock::Text { text: "e2e".into() }],
                 received_at: chrono::Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await

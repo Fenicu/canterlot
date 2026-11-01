@@ -12,7 +12,7 @@ use crate::{
     conversations, events,
     events::{NewEvent, Scope},
     executions, idempotency, scheduler,
-    session_tools::subs,
+    session_tools::{origin, subs},
 };
 
 #[derive(Debug, Error)]
@@ -205,6 +205,7 @@ async fn delete_in_tx(
     .execute(&mut *conn)
     .await?;
     subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
+    origin::scrub_sender_in_tx(conn, id).await?;
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;
     announce(conn, owner_id, id, correlation_id).await?;

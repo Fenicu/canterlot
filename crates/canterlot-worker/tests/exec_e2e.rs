@@ -500,6 +500,7 @@ impl Fixture {
                 content: vec![ContentBlock::Text { text }],
                 received_at: chrono::Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await
@@ -2261,6 +2262,7 @@ async fn nul_in_one_session_leaves_the_machine_stream_running(pool: PgPool) {
             content: vec![ContentBlock::Text { text: script }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -2381,6 +2383,7 @@ async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_runnin
             content: vec![ContentBlock::Text { text: script }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await

@@ -853,6 +853,11 @@ async fn modes_become_session_rules() {
                 {"action": "todowrite", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_limits", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_presets_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_sessions_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_inspect", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_subscribe", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_unsubscribe", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_wait", "resource": "*", "effect": "allow"},
             ]),
         ),
         (
@@ -860,9 +865,14 @@ async fn modes_become_session_rules() {
             json!([
                 {"action": "*", "resource": "*", "effect": "ask"},
                 {"action": "question", "resource": "*", "effect": "allow"},
+                {"action": "todowrite", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_limits", "resource": "*", "effect": "allow"},
                 {"action": "canterlot_canterlot_presets_list", "resource": "*", "effect": "allow"},
-                {"action": "todowrite", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_sessions_list", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_inspect", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_subscribe", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_unsubscribe", "resource": "*", "effect": "allow"},
+                {"action": "canterlot_session_wait", "resource": "*", "effect": "allow"},
             ]),
         ),
     ] {
@@ -872,6 +882,44 @@ async fn modes_become_session_rules() {
         let requests = bench.fake.requests();
         let create = find(&requests, "POST", "/api/session").unwrap();
         assert_eq!(create["body"]["permissions"], rules, "{mode}");
+        bench.close(CloseMode::Graceful).await;
+    }
+}
+
+#[tokio::test]
+async fn session_tools_follow_the_mode() {
+    for (mode, default, read_like) in [("ask", "ask", "allow"), ("read_only", "deny", "allow")] {
+        let mut bench = Bench::new(session_only());
+        bench.spec.permission_mode = mode.into();
+        bench.start_ok().await;
+        let requests = bench.fake.requests();
+        let create = find(&requests, "POST", "/api/session").unwrap();
+        let rules = create["body"]["permissions"].as_array().unwrap().clone();
+        // В OpenCode действует последнее совпавшее правило.
+        let effect = |tool: &str| {
+            rules
+                .iter()
+                .rev()
+                .find(|rule| rule["action"] == tool || rule["action"] == "*")
+                .unwrap()["effect"]
+                .clone()
+        };
+        for tool in [
+            "canterlot_sessions_list",
+            "canterlot_session_inspect",
+            "canterlot_session_subscribe",
+            "canterlot_session_unsubscribe",
+            "canterlot_session_wait",
+        ] {
+            assert_eq!(effect(tool), read_like, "{mode} {tool}");
+        }
+        for tool in [
+            "canterlot_session_send",
+            "canterlot_session_spawn",
+            "canterlot_session_accept",
+        ] {
+            assert_eq!(effect(tool), default, "{mode} {tool}");
+        }
         bench.close(CloseMode::Graceful).await;
     }
 }
@@ -4423,7 +4471,15 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "canterlot_limits",
             "canterlot_presets_list",
             "canterlot_preset_save",
-            "canterlot_preset_apply"
+            "canterlot_preset_apply",
+            "sessions_list",
+            "session_inspect",
+            "session_send",
+            "session_spawn",
+            "session_subscribe",
+            "session_unsubscribe",
+            "session_wait",
+            "session_accept"
         ]
     );
     bench.close(CloseMode::Graceful).await;

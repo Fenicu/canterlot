@@ -5,16 +5,23 @@
 //! ни в журнал, ни в `Debug` они не попадают. `grpc/agent.rs` только раздаёт вызовы,
 //! поэтому каждый инструмент живёт в своём файле этого модуля.
 
+pub mod access;
 pub mod jobs;
+pub mod origin;
+pub mod read;
+pub mod send;
 pub mod settle;
 pub mod subs;
 pub mod summary;
+
+use std::sync::Arc;
 
 use serde_json::Value;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::config::SessionToolsConfig;
+use self::settle::SettleConfig;
+use crate::{config::SessionToolsConfig, dispatcher::Dispatcher};
 
 /// Имена хаба для инструментов; на стороне модели к ним добавляются префиксы harness.
 pub const TOOLS: &[&str] = &[
@@ -55,10 +62,11 @@ pub enum ToolErrorCode {
     NotDelegated,
     TextTooLarge,
     InvalidArguments,
+    Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -79,6 +87,7 @@ impl ToolErrorCode {
         Self::NotDelegated,
         Self::TextTooLarge,
         Self::InvalidArguments,
+        Self::Internal,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -103,6 +112,7 @@ impl ToolErrorCode {
             Self::NotDelegated => "not_delegated",
             Self::TextTooLarge => "text_too_large",
             Self::InvalidArguments => "invalid_arguments",
+            Self::Internal => "internal_error",
         }
     }
 
@@ -128,6 +138,7 @@ impl ToolErrorCode {
             Self::NotDelegated => "The session was not started by an agent",
             Self::TextTooLarge => "The text is too large",
             Self::InvalidArguments => "Invalid arguments",
+            Self::Internal => "The hub could not complete the call, try later",
         }
     }
 }
@@ -154,6 +165,27 @@ impl ToolError {
     }
 }
 
+/// Текст ошибки базы может цитировать данные: наружу идёт только код.
+impl From<sqlx::Error> for ToolError {
+    fn from(error: sqlx::Error) -> Self {
+        tracing::error!(
+            kind = "session_tool_db_error",
+            error = %crate::dberr::describe(&error),
+            "session tool failed"
+        );
+        Self::new(ToolErrorCode::Internal)
+    }
+}
+
+/// Что нужно инструментам от хаба.
+#[derive(Clone)]
+pub struct ToolContext {
+    pub pool: PgPool,
+    pub config: Arc<SessionToolsConfig>,
+    pub settle: SettleConfig,
+    pub dispatcher: Option<Dispatcher>,
+}
+
 /// Вызывающий: всё выведено из живого исполнения, не из аргументов.
 #[derive(Debug, Clone, Copy)]
 pub struct Caller {
@@ -166,11 +198,24 @@ pub struct Caller {
 
 /// Раздача вызова; пока инструмент не готов, отвечает `unknown_tool`.
 pub async fn call(
-    _pool: &PgPool,
-    _config: &SessionToolsConfig,
-    _caller: &Caller,
-    _tool: &str,
-    _arguments: Value,
+    context: &ToolContext,
+    caller: &Caller,
+    tool: &str,
+    arguments: Value,
 ) -> Result<Value, ToolError> {
-    Err(ToolError::new(ToolErrorCode::UnknownTool))
+    match tool {
+        "sessions.list" => read::list(context, caller, arguments).await,
+        "sessions.inspect" => read::inspect(context, caller, arguments).await,
+        "sessions.send" => send::send(context, caller, arguments).await,
+        "sessions.subscribe" => send::subscribe(context, caller, arguments).await,
+        "sessions.unsubscribe" => send::unsubscribe(context, caller, arguments).await,
+        _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
+    }
+}
+
+/// Аргументы только известной формы; текст ошибки разбора цитирует их и наружу не идёт.
+pub(crate) fn parse_arguments<T: serde::de::DeserializeOwned>(
+    arguments: Value,
+) -> Result<T, ToolError> {
+    serde_json::from_value(arguments).map_err(|_| ToolError::new(ToolErrorCode::InvalidArguments))
 }

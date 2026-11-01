@@ -4632,8 +4632,19 @@
           "machine": {
             "$ref": "#/components/schemas/MachineRef"
           },
+          "parent_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
           "pinned": {
             "type": "boolean"
+          },
+          "spawn_depth": {
+            "type": "integer",
+            "format": "int32"
           },
           "title": {
             "type": "string"
@@ -4643,6 +4654,16 @@
           },
           "workdir": {
             "type": "string"
+          },
+          "worktree": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WorktreeView"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -6516,6 +6537,60 @@
           }
         ]
       },
+      "InputOrigin": {
+        "type": "object",
+        "description": "Форма `inputs.origin` для клиентов. После удаления отправителя остаются только\n`kind`, `chain_depth` и `sender_deleted`.",
+        "required": [
+          "kind",
+          "chain_depth"
+        ],
+        "properties": {
+          "chain_depth": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "harness": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "type": "string"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sender_deleted": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "sha256": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "InputState": {
         "type": "string",
         "enum": [
@@ -6571,6 +6646,17 @@
           },
           "idempotency_key": {
             "type": "string"
+          },
+          "origin": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/InputOrigin",
+                "description": "От какой сессии пришёл ввод; у ввода владельца пусто."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "retry_of": {
             "type": [
@@ -8945,6 +9031,26 @@
             "items": {
               "type": "string"
             }
+          }
+        }
+      },
+      "WorktreeView": {
+        "type": "object",
+        "description": "Рабочая копия делегированной сессии: остальное из `conversations.worktree` хабу для себя.",
+        "required": [
+          "branch",
+          "state",
+          "path"
+        ],
+        "properties": {
+          "branch": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
           }
         }
       },

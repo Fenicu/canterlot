@@ -523,6 +523,16 @@
               "items": {
                 "$ref": "#/$defs/ContentBlock"
               }
+            },
+            "origin": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/InputOrigin"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2358,6 +2368,47 @@
             },
             "counts": {
               "$ref": "#/$defs/Counts"
+            },
+            "parent_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "spawn_depth": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "worktree": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "state",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -2532,6 +2583,47 @@
             },
             "counts": {
               "$ref": "#/$defs/Counts"
+            },
+            "parent_id": {
+              "anyOf": [
+                {
+                  "$ref": "#/$defs/Uuid"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "spawn_depth": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "worktree": {
+              "anyOf": [
+                {
+                  "type": "object",
+                  "properties": {
+                    "branch": {
+                      "type": "string"
+                    },
+                    "state": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "branch",
+                    "state",
+                    "path"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "null"
+                }
+              ]
             }
           },
           "required": [
@@ -5687,6 +5779,45 @@
         "correlation_id",
         "kind",
         "payload"
+      ],
+      "additionalProperties": false
+    },
+    "InputOrigin": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": [
+            "message",
+            "spawn",
+            "event"
+          ]
+        },
+        "from": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "title": {
+          "type": "string"
+        },
+        "harness": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "chain_depth": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "sender_deleted": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "kind",
+        "chain_depth"
       ],
       "additionalProperties": false
     }

@@ -514,6 +514,7 @@ async fn idle_closes_and_send_rearms(pool: PgPool) {
             content: vec![ContentBlock::Text { text: "go".into() }],
             received_at: now,
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -672,6 +673,7 @@ async fn fill_queue(pool: &PgPool, p: &Pair) {
                 content: vec![ContentBlock::Text { text: "x".into() }],
                 received_at: Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await
@@ -709,7 +711,7 @@ async fn queue_full_retries(pool: PgPool) {
     let report = sch.tick(due).await.unwrap();
     assert_eq!(report.retried, 1);
     let (state, attempts, failures, run_at, result) = job_row(&pool).await;
-    assert_eq!((state.as_str(), attempts, failures), ("pending", 1, 1));
+    assert_eq!((state.as_str(), attempts, failures), ("pending", 1, 0));
     assert_eq!(
         run_at.timestamp_millis(),
         (due + TimeDelta::seconds(10)).timestamp_millis()
@@ -730,7 +732,7 @@ async fn queue_full_retries(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn queue_full_gives_up_after_max_attempts_like_a_message(pool: PgPool) {
+async fn queue_full_keeps_the_event_for_a_day(pool: PgPool) {
     let p = pair(&pool).await;
     let now = Utc::now();
     long_idle(&pool, p.target, now).await;
@@ -746,14 +748,26 @@ async fn queue_full_gives_up_after_max_attempts_like_a_message(pool: PgPool) {
             ..Default::default()
         },
     );
-    let due = now + TimeDelta::seconds(1);
-    assert_eq!(sch.tick(due).await.unwrap().retried, 1);
-    assert_eq!(
-        sch.tick(due + TimeDelta::seconds(10)).await.unwrap().failed,
-        1
-    );
+    let mut at = now + TimeDelta::seconds(1);
+    for _ in 0..6 {
+        assert_eq!(sch.tick(at).await.unwrap().retried, 1);
+        at += TimeDelta::seconds(10);
+    }
     let (state, attempts, failures, _, result) = job_row(&pool).await;
-    assert_eq!((state.as_str(), attempts, failures), ("failed", 2, 2));
+    assert_eq!((state.as_str(), attempts, failures), ("pending", 6, 0));
+    assert_eq!(result, Some(json!({"error":"queue_full"})));
+
+    // Другие отказы считаются по-прежнему: терпение относится только к полной очереди.
+    sqlx::query("update scheduled_jobs set created_at=$1 where kind='session_task'")
+        .bind(at - TimeDelta::hours(24) + TimeDelta::seconds(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(sch.tick(at).await.unwrap().retried, 1);
+    at += TimeDelta::seconds(10);
+    assert_eq!(sch.tick(at).await.unwrap().failed, 1, "the day is over");
+    let (state, attempts, failures, _, result) = job_row(&pool).await;
+    assert_eq!((state.as_str(), attempts, failures), ("failed", 8, 0));
     assert_eq!(result, Some(json!({"error":"queue_full"})));
 }
 
@@ -933,6 +947,7 @@ async fn spawn_approval_does_not_hold_the_queue_or_activity(pool: PgPool) {
             content: vec![ContentBlock::Text { text: "go".into() }],
             received_at: Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await

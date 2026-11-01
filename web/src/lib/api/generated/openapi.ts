@@ -840,10 +840,15 @@ export interface components {
             /** Format: uuid */
             id: string;
             machine: components["schemas"]["MachineRef"];
+            /** Format: uuid */
+            parent_id?: string | null;
             pinned: boolean;
+            /** Format: int32 */
+            spawn_depth?: number;
             title: string;
             title_source: string;
             workdir: string;
+            worktree?: components["schemas"]["WorktreeView"] | null;
         };
         Attributes: {
             archived?: boolean | null;
@@ -1308,6 +1313,22 @@ export interface components {
             /** @enum {string} */
             type: "attachment";
         });
+        /**
+         * @description Форма `inputs.origin` для клиентов. После удаления отправителя остаются только
+         *     `kind`, `chain_depth` и `sender_deleted`.
+         */
+        InputOrigin: {
+            /** Format: int32 */
+            chain_depth: number;
+            /** Format: uuid */
+            from?: string | null;
+            harness?: string | null;
+            kind: string;
+            model?: string | null;
+            sender_deleted?: boolean | null;
+            sha256?: string | null;
+            title?: string | null;
+        };
         /** @enum {string} */
         InputState: "queued" | "dispatched" | "on_machine" | "transmitting" | "accepted" | "acceptance_unconfirmed" | "cancelled" | "rejected";
         InputView: {
@@ -1319,6 +1340,7 @@ export interface components {
             /** Format: uuid */
             id: string;
             idempotency_key: string;
+            origin?: components["schemas"]["InputOrigin"] | null;
             /** Format: uuid */
             retry_of?: string | null;
             state: string;
@@ -1944,6 +1966,12 @@ export interface components {
         };
         Workdirs: {
             workdirs: string[];
+        };
+        /** @description Рабочая копия делегированной сессии: остальное из `conversations.worktree` хабу для себя. */
+        WorktreeView: {
+            branch: string;
+            path: string;
+            state: string;
         };
         WsView: {
             /** Format: int64 */

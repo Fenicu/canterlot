@@ -189,6 +189,7 @@ async fn settings_promotion_ignores_keys_changed_after_dispatch(pool: PgPool) {
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -348,6 +349,7 @@ async fn dispatch_revalidates_pending_settings_and_drops_invalid_keys_with_an_ev
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -429,6 +431,7 @@ async fn settings_change_applies_with_next_input_and_survives_redispatch(pool: P
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -626,6 +629,7 @@ async fn rejected_settings_do_not_poison_following_inputs(pool: PgPool) {
         }],
         received_at: chrono::Utc::now(),
         correlation_id: Uuid::now_v7(),
+        origin: None,
     };
     let first = submit::submit_input(&pool, mk("first")).await.unwrap();
     let second = submit::submit_input(&pool, mk("second")).await.unwrap();
@@ -820,6 +824,7 @@ async fn settings_survive_worker_restart_between_dispatch_and_accept(pool: PgPoo
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -1034,6 +1039,7 @@ async fn pending_settings_are_dropped_when_effective_model_disappears(pool: PgPo
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -1084,6 +1090,7 @@ async fn rejected_settings_report_sent_keys_and_preserve_newer_pending_values(po
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -1703,6 +1710,7 @@ async fn worker_rejection_of_unsupported_settings_drops_them(pool: PgPool) {
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         };
         let first = submit::submit_input(&pool, mk("first")).await.unwrap();
         let second = submit::submit_input(&pool, mk("second")).await.unwrap();

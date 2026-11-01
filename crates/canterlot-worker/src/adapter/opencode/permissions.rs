@@ -12,11 +12,24 @@ pub enum PermissionMode {
 }
 
 /// Чтение через MCP canterlot; сохранение и применение пресета решает режим, как у других.
-const LIMITS_TOOL: &str = "canterlot_canterlot_limits";
-const PRESETS_TOOL: &str = "canterlot_canterlot_presets_list";
+const READ_TOOLS: [&str; 7] = [
+    "canterlot_canterlot_limits",
+    "canterlot_canterlot_presets_list",
+    "canterlot_sessions_list",
+    "canterlot_session_inspect",
+    // Подписка и ожидание ничего не меняют у другой сессии; права на них проверяет хаб.
+    "canterlot_session_subscribe",
+    "canterlot_session_unsubscribe",
+    "canterlot_session_wait",
+];
 
 fn rule(action: &str, effect: &str) -> Value {
     json!({"action": action, "resource": "*", "effect": effect})
+}
+
+fn with_read_tools(mut rules: Vec<Value>) -> Vec<Value> {
+    rules.extend(READ_TOOLS.iter().map(|tool| rule(tool, "allow")));
+    rules
 }
 
 impl PermissionMode {
@@ -35,15 +48,13 @@ impl PermissionMode {
         let rules = match self {
             Self::Owner => return None,
             Self::Bypass => vec![rule("*", "allow")],
-            Self::Ask => vec![
+            Self::Ask => with_read_tools(vec![
                 rule("*", "ask"),
                 rule("question", "allow"),
-                rule(LIMITS_TOOL, "allow"),
-                rule(PRESETS_TOOL, "allow"),
                 rule("todowrite", "allow"),
-            ],
+            ]),
             // Список задан явно: всё, чего в нём нет, исчезает из инструментов модели.
-            Self::ReadOnly => vec![
+            Self::ReadOnly => with_read_tools(vec![
                 rule("*", "deny"),
                 rule("read", "allow"),
                 rule("glob", "allow"),
@@ -51,9 +62,7 @@ impl PermissionMode {
                 rule("question", "allow"),
                 rule("subagent", "allow"),
                 rule("todowrite", "allow"),
-                rule(LIMITS_TOOL, "allow"),
-                rule(PRESETS_TOOL, "allow"),
-            ],
+            ]),
         };
         Some(Value::Array(rules))
     }

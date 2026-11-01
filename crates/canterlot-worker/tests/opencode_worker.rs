@@ -251,6 +251,7 @@ impl Stack {
                 content: vec![ContentBlock::Text { text: text.into() }],
                 received_at: chrono::Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await
