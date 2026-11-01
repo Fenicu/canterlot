@@ -189,6 +189,27 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[job, owner, conversation],
     )
     .await;
+    // Потомок и подписки в обе стороны: после удаления остаются потомок без родителя и ничего больше.
+    let delegate = f.conversation().await;
+    exec(
+        pool,
+        "update conversations set parent_conversation_id=$1, spawn_depth=1 where id=$2",
+        &[conversation, delegate],
+    )
+    .await;
+    exec(
+        pool,
+        "insert into session_subscriptions(id,owner_id,subscriber_id,target_id)
+         values($1,$2,$3,$4),($5,$2,$4,$3)",
+        &[
+            Uuid::now_v7(),
+            owner,
+            conversation,
+            delegate,
+            Uuid::now_v7(),
+        ],
+    )
+    .await;
     exec(
         pool,
         "insert into scheduled_job_attachments(job_id,attachment_id) values($1,$2)",
@@ -632,7 +653,8 @@ async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
     assert_eq!(last["kind"], "conversation_deleted");
     assert_eq!(last["conversation_id"], victim.conversation.to_string());
     assert_eq!(last["payload"]["id"], victim.conversation.to_string());
-    assert_eq!(last["payload"]["counts"]["all"], 1);
+    // Остаются соседняя сессия и потомок удалённой.
+    assert_eq!(last["payload"]["counts"]["all"], 2);
     assert_eq!(last["scope_seq"], (head + 1).to_string());
     assert!(
         events[..events.len() - 1]
@@ -653,7 +675,9 @@ async fn other_devices_learn_through_the_event_flow(pool: PgPool) {
         .iter()
         .map(|item| item["id"].as_str().unwrap())
         .collect();
-    assert_eq!(ids, [other.to_string().as_str()]);
+    assert_eq!(ids.len(), 2, "the neighbour and the orphaned delegate");
+    assert!(ids.contains(&other.to_string().as_str()));
+    assert!(!ids.contains(&victim.conversation.to_string().as_str()));
     let scope_row: bool = sqlx::query_scalar(
         "select exists(select 1 from scope_counters where scope=$1 or scope like $2)",
     )

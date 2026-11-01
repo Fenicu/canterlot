@@ -40,6 +40,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "todo_v1",
     "compact_v1",
     "background_v1",
+    "session_tools_v1",
 ];
 
 #[derive(Clone)]

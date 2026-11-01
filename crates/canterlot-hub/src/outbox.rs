@@ -4,8 +4,8 @@ use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
         CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
-        Instructions, Interrupt, SettingsOverride, StartExecution, StopExecution, WithdrawInput,
-        command, control_down,
+        Instructions, Interrupt, RemoveWorktree, SettingsOverride, StartExecution, StopExecution,
+        WithdrawInput, WorktreeSpec, command, control_down,
     },
 };
 use prost::Message;
@@ -90,6 +90,24 @@ struct InstructionPayload {
     title: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorktreePayload {
+    source_workdir: String,
+    branch: String,
+    base: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoveWorktreePayload {
+    source_workdir: String,
+    path: String,
+    branch: String,
+    #[serde(default)]
+    force: bool,
+}
+
 fn instructions_proto(payload: &Option<InstructionPayload>) -> Option<Instructions> {
     payload.as_ref().map(|preset| Instructions {
         mode: preset.mode.clone(),
@@ -154,6 +172,13 @@ fn to_proto_with_capability(
     if row.kind == "compact_session" && !has(crate::session::CAPABILITY_COMPACT_V1) {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Старый воркер запустил бы сессию в исходном каталоге вместо рабочей копии.
+    if ((row.kind == "start_execution" && row.payload.get("worktree").is_some())
+        || row.kind == "remove_worktree")
+        && !has(crate::session::CAPABILITY_SESSION_TOOLS_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -172,6 +197,7 @@ fn to_proto_with_capability(
             crate::session::CAPABILITY_TODO_V1,
             crate::session::CAPABILITY_COMPACT_V1,
             crate::session::CAPABILITY_BACKGROUND_V1,
+            crate::session::CAPABILITY_SESSION_TOOLS_V1,
         ]
         .into_iter()
         .filter(|capability| has(capability))
@@ -253,6 +279,19 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 })
                 .transpose()?,
             capabilities: vec![],
+            worktree: row
+                .payload
+                .get("worktree")
+                .map(|value| {
+                    serde_json::from_value::<WorktreePayload>(value.clone())
+                        .map(|spec| WorktreeSpec {
+                            source_workdir: spec.source_workdir,
+                            branch: spec.branch,
+                            base: spec.base,
+                        })
+                        .map_err(|_| OutboxError::InvalidCommand)
+                })
+                .transpose()?,
         }),
         "cancel_input" => {
             let (target_command_id, target_dispatch_attempt) = target(&row.payload)?;
@@ -299,6 +338,16 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
         }
         "interrupt" => command::Kind::Interrupt(Interrupt {}),
         "compact_session" => command::Kind::CompactSession(CompactSession {}),
+        "remove_worktree" => {
+            let remove: RemoveWorktreePayload = serde_json::from_value(row.payload.clone())
+                .map_err(|_| OutboxError::InvalidCommand)?;
+            command::Kind::RemoveWorktree(RemoveWorktree {
+                source_workdir: remove.source_workdir,
+                path: remove.path,
+                branch: remove.branch,
+                force: remove.force,
+            })
+        }
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,

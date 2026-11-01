@@ -40,10 +40,61 @@ impl fmt::Debug for command::Kind {
             Self::WithdrawInput(input) => f.debug_tuple("WithdrawInput").field(input).finish(),
             Self::Interrupt(input) => f.debug_tuple("Interrupt").field(input).finish(),
             Self::CompactSession(input) => f.debug_tuple("CompactSession").field(input).finish(),
+            Self::RemoveWorktree(input) => f.debug_tuple("RemoveWorktree").field(input).finish(),
             Self::StartExecution(input) => f.debug_tuple("StartExecution").field(input).finish(),
             Self::DeliverDecision(input) => f.debug_tuple("DeliverDecision").field(input).finish(),
             Self::StopExecution(input) => f.debug_tuple("StopExecution").field(input).finish(),
         }
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::WorktreeSpec {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("WorktreeSpec")
+            .field("source_workdir_bytes", &self.source_workdir.len())
+            .field("branch_bytes", &self.branch.len())
+            .field("base_bytes", &self.base.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::RemoveWorktree {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RemoveWorktree")
+            .field("source_workdir_bytes", &self.source_workdir.len())
+            .field("path_bytes", &self.path.len())
+            .field("branch_bytes", &self.branch.len())
+            .field("force", &self.force)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::GitCommit {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitCommit")
+            .field("subject_bytes", &self.subject.len())
+            .finish_non_exhaustive()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::GitFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitFile")
+            .field("path_bytes", &self.path.len())
+            .field("status", &self.status)
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::GitFacts {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GitFacts")
+            .field("available", &self.available)
+            .field("dirty", &self.dirty)
+            .field("truncated", &self.truncated)
+            .field("commits", &self.commits.len())
+            .field("files", &self.files.len())
+            .finish_non_exhaustive()
     }
 }
 

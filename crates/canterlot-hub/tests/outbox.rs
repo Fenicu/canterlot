@@ -525,6 +525,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
             command::Kind::CompactSession(_) => assert_eq!(kind, "compact_session"),
             command::Kind::StopExecution(value) => assert!(value.force),
             command::Kind::DeliverDecision(_) => panic!("unexpected decision command"),
+            command::Kind::RemoveWorktree(_) => panic!("unexpected worktree command"),
         }
     }
     assert!(matches!(
@@ -1255,4 +1256,80 @@ async fn decision_command_the_outbox_cannot_send_closes_the_request(pool: PgPool
         state().await
     );
     stop(hub).await;
+}
+
+fn worktree_start() -> Value {
+    json!({
+        "harness": "synthetic",
+        "workdir": "/tmp/w",
+        "worktree": {"source_workdir": "/tmp/w", "branch": "canterlot/0190abcd", "base": "HEAD"},
+    })
+}
+
+fn remove_worktree() -> Value {
+    json!({"source_workdir": "/tmp/w", "path": "/data/worktrees/one", "branch": "canterlot/0190abcd", "force": false})
+}
+
+#[tokio::test]
+async fn worktree_commands_need_the_capability() {
+    use canterlot_hub::outbox::{OutboxError, to_proto_for_session};
+    let machine = Uuid::now_v7();
+    let registry = canterlot_hub::session::Registry::new(Default::default());
+    let row = |kind: &str, payload: Value| canterlot_hub::outbox::CommandRow {
+        machine_id: machine,
+        ..command_row(kind, payload)
+    };
+    {
+        let _old = registry.connect_for_tests(machine, &["pilot_v1".to_owned()]);
+        assert!(matches!(
+            to_proto_for_session(&row("start_execution", worktree_start()), &registry),
+            Err(OutboxError::CapabilityMissing)
+        ));
+        assert!(matches!(
+            to_proto_for_session(&row("remove_worktree", remove_worktree()), &registry),
+            Err(OutboxError::CapabilityMissing)
+        ));
+        // Обычный запуск без рабочей копии старого воркера не затрагивается.
+        let plain = row(
+            "start_execution",
+            json!({"harness": "synthetic", "workdir": "/tmp/w"}),
+        );
+        let command = to_proto_for_session(&plain, &registry).unwrap();
+        let Some(command::Kind::StartExecution(start)) = command.kind else {
+            panic!("start expected");
+        };
+        assert_eq!(start.worktree, None);
+        assert!(!start.capabilities.iter().any(|c| c == "session_tools_v1"));
+    }
+    let _new = registry.connect_for_tests(
+        machine,
+        &["pilot_v1".to_owned(), "session_tools_v1".to_owned()],
+    );
+    let command =
+        to_proto_for_session(&row("start_execution", worktree_start()), &registry).unwrap();
+    let Some(command::Kind::StartExecution(start)) = command.kind else {
+        panic!("start expected");
+    };
+    assert!(start.capabilities.iter().any(|c| c == "session_tools_v1"));
+    let spec = start.worktree.unwrap();
+    assert_eq!(
+        (
+            spec.source_workdir.as_str(),
+            spec.branch.as_str(),
+            spec.base.as_str()
+        ),
+        ("/tmp/w", "canterlot/0190abcd", "HEAD")
+    );
+    let command =
+        to_proto_for_session(&row("remove_worktree", remove_worktree()), &registry).unwrap();
+    let Some(command::Kind::RemoveWorktree(remove)) = command.kind else {
+        panic!("remove_worktree expected");
+    };
+    assert_eq!(remove.path, "/data/worktrees/one");
+    assert!(!remove.force);
+    let broken = row("remove_worktree", json!({"path": "/data/worktrees/one"}));
+    assert!(matches!(
+        to_proto_for_session(&broken, &registry),
+        Err(OutboxError::InvalidCommand)
+    ));
 }

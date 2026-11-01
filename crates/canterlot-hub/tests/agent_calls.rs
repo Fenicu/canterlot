@@ -511,3 +511,65 @@ async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
         "идентификатор вызова в журнале: {logs}"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn session_tool_stubs_answer_unknown_tool_after_the_liveness_check(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    for tool in canterlot_hub::session_tools::TOOLS {
+        let response = fx.agent(tool, json!({}), &Uuid::now_v7()).await;
+        assert_eq!(response.error_code, "unknown_tool", "{tool}");
+        assert!(response.result_json.is_empty(), "{tool}");
+        // Не объект: проверка аргументов общая для всех инструментов.
+        let response = fx.agent(tool, json!([]), &Uuid::now_v7()).await;
+        assert_eq!(response.error_code, "invalid_arguments", "{tool}");
+    }
+    let stale = WorkerData::agent_call(
+        &fx.grpc,
+        fx.request(
+            "sessions.list",
+            json!({}),
+            &Uuid::now_v7(),
+            Some((Uuid::now_v7(), 1)),
+            None,
+        ),
+    )
+    .await
+    .unwrap()
+    .into_inner();
+    assert_eq!(stale.error_code, "execution_not_live");
+}
+
+#[test]
+fn session_tool_error_codes_are_unique_snake_case_with_messages() {
+    use canterlot_hub::session_tools::ToolErrorCode;
+    let mut seen = std::collections::BTreeSet::new();
+    for code in ToolErrorCode::ALL {
+        let wire = code.as_str();
+        assert!(seen.insert(wire), "{wire} repeats");
+        assert!(wire.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        assert!(!code.default_message().is_empty());
+    }
+    for expected in [
+        "session_not_found",
+        "read_only_session",
+        "rate_limited",
+        "chain_depth_exceeded",
+        "spawn_depth_exceeded",
+        "harness_unknown",
+        "model_unknown",
+        "effort_not_allowed",
+        "workdir_not_allowed",
+        "permission_mode_too_wide",
+        "profile_unknown",
+        "machine_unavailable",
+        "capability_missing",
+        "queue_full",
+        "conversation_closed",
+        "not_parent",
+        "not_delegated",
+        "text_too_large",
+        "invalid_arguments",
+    ] {
+        assert!(seen.contains(expected), "{expected} missing");
+    }
+}

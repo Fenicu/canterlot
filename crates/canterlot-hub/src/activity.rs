@@ -213,6 +213,7 @@ pub fn extract_request_summary(
                     .map(str::to_string)
             }
         }
+        crate::requests::RequestKind::SpawnApproval => None,
         crate::requests::RequestKind::Permission => {
             if let Some(tool) = payload.get("tool_name").and_then(|v| v.as_str()) {
                 if let Some(cmd) = payload

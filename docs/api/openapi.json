@@ -5785,7 +5785,10 @@
           "preset_revision_conflict",
           "preset_title_taken",
           "preset_limit_reached",
-          "preset_invalid"
+          "preset_invalid",
+          "spawn_whitelist_invalid",
+          "not_delegated",
+          "worktree_removed"
         ]
       },
       "ErrorDetails": {

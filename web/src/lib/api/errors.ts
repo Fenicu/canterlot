@@ -242,6 +242,18 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Некорректные инструкции",
   },
+  spawn_whitelist_invalid: {
+    action: "none",
+    message: "Некорректный белый список",
+  },
+  not_delegated: {
+    action: "none",
+    message: "Сессия не запущена агентом",
+  },
+  worktree_removed: {
+    action: "none",
+    message: "Рабочая копия уже убрана",
+  },
 };
 
 export interface DescribedError {

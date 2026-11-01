@@ -225,10 +225,18 @@ async fn purge_rows(
         "delete from attachments where conversation_id=$1",
         "delete from queue_state where conversation_id=$1",
         "delete from idempotency_keys where conversation_id=$1",
+        "delete from session_subscriptions where subscriber_id=$1 or target_id=$1",
     ];
     for statement in BY_CONVERSATION.iter().copied() {
         sqlx::query(statement).bind(id).execute(&mut *conn).await?;
     }
+    // Потомки переживают родителя (D21): остаются сессиями без родителя.
+    sqlx::query(
+        "update conversations set parent_conversation_id=null where parent_conversation_id=$1",
+    )
+    .bind(id)
+    .execute(&mut *conn)
+    .await?;
     sqlx::query("update limit_snapshots set execution_id=null where execution_id=any($1)")
         .bind(execution_ids)
         .execute(&mut *conn)

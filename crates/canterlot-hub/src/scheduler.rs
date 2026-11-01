@@ -30,6 +30,7 @@ pub enum JobKind {
     Wake,
     LimitCheck,
     LimitRule,
+    SessionTask,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
@@ -737,6 +738,7 @@ impl Scheduler {
             "wake" => JobKind::Wake,
             "limit_check" => JobKind::LimitCheck,
             "limit_rule" => JobKind::LimitRule,
+            "session_task" => JobKind::SessionTask,
             _ => {
                 if let Err(error) = finish_limit(
                     &mut tx,
@@ -807,6 +809,7 @@ impl Scheduler {
                     .map(JobOutcome::Done)
                     .map_err(|e| sqlx::Error::Encode(Box::new(e)))
             }),
+            JobKind::SessionTask => crate::session_tools::run_job_in_tx(&mut tx, &claimed).await,
             JobKind::Message => unreachable!("message jobs are fired separately"),
         };
         let outcome = match outcome {

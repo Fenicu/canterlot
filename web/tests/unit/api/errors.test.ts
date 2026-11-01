@@ -61,6 +61,9 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "preset_title_taken",
   "preset_limit_reached",
   "preset_invalid",
+  "spawn_whitelist_invalid",
+  "not_delegated",
+  "worktree_removed",
 ];
 
 const VALID_ACTIONS: ErrorAction[] = [
@@ -100,7 +103,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(53);
+    expect(ALL_ERROR_CODES.length).toBe(56);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

@@ -40,6 +40,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ".canterlot.worker.v1.AgentCallResponse",
             ".canterlot.worker.v1.SuggestWorkdirs",
             ".canterlot.worker.v1.WorkdirSuggestions",
+            ".canterlot.worker.v1.WorktreeSpec",
+            ".canterlot.worker.v1.RemoveWorktree",
+            ".canterlot.worker.v1.GitCommit",
+            ".canterlot.worker.v1.GitFile",
+            ".canterlot.worker.v1.GitFacts",
         ])
         .build_server(true)
         .build_client(true)

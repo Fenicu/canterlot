@@ -168,6 +168,8 @@ message Command {
     StopExecution stop_execution = 15;
     DeliverDecision deliver_decision = 16;
     CompactSession compact_session = 17;
+    // Только при согласованной возможности session_tools_v1.
+    RemoveWorktree remove_worktree = 18;
   }
 }
 
@@ -215,6 +217,23 @@ message StartExecution {
   reserved 8;
   repeated string capabilities = 9;
   Instructions instructions = 10;
+  // Только при согласованной возможности session_tools_v1: воркер готовит рабочую копию до запуска.
+  WorktreeSpec worktree = 11;
+}
+
+// Изолированная рабочая копия git: путь воркер строит сам из корня рабочих копий.
+message WorktreeSpec {
+  string source_workdir = 1;
+  string branch = 2;
+  string base = 3;
+}
+
+// Убрать рабочую копию после приёма результата. Путь и ветку хаб берёт из своей записи.
+message RemoveWorktree {
+  string source_workdir = 1;
+  string path = 2;
+  string branch = 3;
+  bool force = 4;
 }
 
 message StopExecution {
@@ -263,6 +282,8 @@ message RecordBody {
     CompactionStatus compaction_status = 36;
     // Только при согласованной возможности background_v1.
     BackgroundWorkChanged background_work_changed = 37;
+    // Только при согласованной возможности session_tools_v1.
+    WorktreeRemoved worktree_removed = 38;
   }
 }
 
@@ -342,6 +363,39 @@ message RunFinished {
   uint64 machine_time_ms = 7;
   // Запуск без ввода, приписанный команде: расход добавляется к её законченному ходу.
   bool adopted = 8;
+  // Только при согласованной возможности session_tools_v1.
+  GitFacts git = 9;
+}
+
+message GitCommit {
+  string sha = 1;
+  string subject = 2;
+}
+
+message GitFile {
+  string path = 1;
+  string status = 2;
+}
+
+// Факты git на конец хода; пределы: 50 коммитов, 200 файлов, 32 КиБ в сумме.
+message GitFacts {
+  bool available = 1;
+  string head_before = 2;
+  string head_after = 3;
+  bool dirty = 4;
+  bool truncated = 5;
+  repeated GitCommit commits = 6;
+  repeated GitFile files = 7;
+}
+
+message WorktreeRemoved {
+  string command_id = 1;
+  uint32 dispatch_attempt = 2;
+  // removed | dirty | failed
+  string outcome = 3;
+  // Короткий код без путей.
+  string detail = 4;
+  bool branch_kept = 5;
 }
 
 message JournalClosed {
@@ -440,6 +494,8 @@ message MachineReport {
   string os = 8;
   // Домашний каталог пользователя воркера; пусто, если воркер его не знает.
   string home_dir = 9;
+  // Корень изолированных рабочих копий; пусто, если воркер их не поддерживает.
+  string worktree_root = 10;
 }
 
 message HarnessInfo {

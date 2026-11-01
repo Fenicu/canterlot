@@ -161,6 +161,9 @@ const CODES = new Set<ErrorCode>([
   "preset_title_taken",
   "preset_limit_reached",
   "preset_invalid",
+  "spawn_whitelist_invalid",
+  "not_delegated",
+  "worktree_removed",
 ]);
 
 const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;

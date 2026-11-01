@@ -868,6 +868,7 @@ fn pilot_records_roundtrip() {
         containment: "process_group".into(),
         os: "Debian 13 · 6.12".into(),
         home_dir: "/home/owner".into(),
+        worktree_root: "/data/worktrees".into(),
     };
     let metrics = MachineMetrics {
         machine_time_ms: 123456,
@@ -1096,6 +1097,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         context_window_tokens: 200000,
         duration_ms: 1234,
         machine_time_ms: 123456,
+        git: None,
     };
     assert_eq!(
         OldRunFinished::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1142,6 +1144,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         permission_mode: "bypass".into(),
         instructions: None,
         capabilities: vec!["pilot_v1".into()],
+        worktree: None,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1638,4 +1641,158 @@ fn background_work_changed_keeps_its_wire_shape() {
         !format!("{fact:?}").contains("секретное"),
         "the description is message-level data"
     );
+}
+
+// Поля межсессионных инструментов читаются только согласованным хабом: номера и формы неизменны.
+#[test]
+fn session_tools_messages_are_stable() {
+    use canterlot_proto::worker::v1::{
+        GitCommit, GitFacts, GitFile, MachineReport, RemoveWorktree, RunFinished, WorktreeRemoved,
+        WorktreeSpec,
+    };
+
+    let spec = WorktreeSpec {
+        source_workdir: "/secret/repo".into(),
+        branch: "canterlot/0190abcd".into(),
+        base: "HEAD".into(),
+    };
+    assert_eq!(spec.encode_to_vec()[0], 0x0A, "source_workdir is field 1");
+    assert_eq!(
+        spec.encode_to_vec()[14..16],
+        [0x12, 18],
+        "branch is field 2"
+    );
+    assert_roundtrip(spec.clone());
+    let start = StartExecution {
+        worktree: Some(spec.clone()),
+        ..Default::default()
+    };
+    assert_eq!(
+        start.encode_to_vec()[0],
+        0x5A,
+        "StartExecution.worktree is field 11"
+    );
+    assert_roundtrip(start.clone());
+    // Старый хаб и старый воркер пропускают незнакомое поле и читают остальное.
+    let old_wire = StartExecution {
+        harness: "synthetic".into(),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    let new_wire = StartExecution {
+        harness: "synthetic".into(),
+        worktree: Some(spec.clone()),
+        ..Default::default()
+    }
+    .encode_to_vec();
+    assert_eq!(&new_wire[..old_wire.len()], old_wire.as_slice());
+
+    let report = MachineReport {
+        worktree_root: "/data/worktrees".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        report.encode_to_vec()[0],
+        0x52,
+        "MachineReport.worktree_root is field 10"
+    );
+    assert_roundtrip(report);
+
+    let remove = RemoveWorktree {
+        source_workdir: "/secret/repo".into(),
+        path: "/secret/worktrees/one".into(),
+        branch: "canterlot/0190abcd".into(),
+        force: true,
+    };
+    let command = Command {
+        command_id: "command".into(),
+        kind: Some(command::Kind::RemoveWorktree(remove.clone())),
+        ..Default::default()
+    };
+    let wire = command.encode_to_vec();
+    let tag = wire
+        .iter()
+        .position(|byte| *byte == 0x92)
+        .expect("field 18");
+    assert_eq!(wire[tag + 1], 0x01, "Command.remove_worktree is field 18");
+    assert_roundtrip(command.clone());
+    assert_eq!(remove.encode_to_vec()[0], 0x0A, "source_workdir is field 1");
+    assert_eq!(
+        remove.encode_to_vec()[14..16],
+        [0x12, 21],
+        "path is field 2"
+    );
+    assert_eq!(
+        *remove.encode_to_vec().last().unwrap(),
+        1,
+        "force is field 4"
+    );
+
+    let removed = WorktreeRemoved {
+        command_id: "command".into(),
+        dispatch_attempt: 2,
+        outcome: "dirty".into(),
+        detail: "uncommitted".into(),
+        branch_kept: true,
+    };
+    let body = RecordBody {
+        body: Some(record_body::Body::WorktreeRemoved(removed.clone())),
+    };
+    assert_eq!(body.encode_to_vec()[..2], [0xB2, 0x02], "field 38");
+    assert_eq!(RecordBody::decode(&body.encode_to_vec()[..]).unwrap(), body);
+    assert_eq!(removed.encode_to_vec()[0], 0x0A);
+    assert_eq!(
+        removed.encode_to_vec()[9],
+        0x10,
+        "dispatch_attempt is field 2"
+    );
+    assert_eq!(
+        *removed.encode_to_vec().last().unwrap(),
+        1,
+        "branch_kept is field 5"
+    );
+
+    let facts = GitFacts {
+        available: true,
+        head_before: "1a2b3c4".into(),
+        head_after: "5d6e7f8".into(),
+        dirty: true,
+        truncated: true,
+        commits: vec![GitCommit {
+            sha: "5d6e7f8".into(),
+            subject: "секретная тема".into(),
+        }],
+        files: vec![GitFile {
+            path: "secret/path.rs".into(),
+            status: "M".into(),
+        }],
+    };
+    let bytes = facts.encode_to_vec();
+    assert_eq!(bytes[0], 0x08, "available is field 1");
+    assert!(bytes.contains(&0x32), "commits is field 6");
+    assert!(bytes.contains(&0x3A), "files is field 7");
+    assert_roundtrip(facts.clone());
+    let finished = RunFinished {
+        git: Some(facts.clone()),
+        ..Default::default()
+    };
+    assert_eq!(
+        finished.encode_to_vec()[0],
+        0x4A,
+        "RunFinished.git is field 9"
+    );
+    assert_roundtrip(finished.clone());
+
+    for text in [
+        format!("{spec:?}"),
+        format!("{start:?}"),
+        format!("{command:?}"),
+        format!("{remove:?}"),
+        format!("{facts:?}"),
+        format!("{finished:?}"),
+    ] {
+        for secret in ["secret", "секрет", "canterlot/0190abcd"] {
+            assert!(!text.contains(secret), "{secret} leaked into {text}");
+        }
+    }
 }

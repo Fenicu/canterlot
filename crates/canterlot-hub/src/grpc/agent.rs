@@ -147,6 +147,27 @@ async fn handle(
         "presets.apply" => {
             apply(&grpc.pool, owner_id, conversation_id, &call_id, arguments).await?
         }
+        tool if crate::session_tools::is_tool(tool) => {
+            let caller = crate::session_tools::Caller {
+                owner_id,
+                conversation_id,
+                execution_id,
+                machine_id,
+                call_id,
+            };
+            match crate::session_tools::call(
+                &grpc.pool,
+                &grpc.session_tools,
+                &caller,
+                tool,
+                arguments,
+            )
+            .await
+            {
+                Ok(result) => ok(result),
+                Err(error) => err(error.code.as_str(), error.message),
+            }
+        }
         _ => err("unknown_tool", "Неизвестный инструмент".into()),
     };
     tracing::info!(kind = "agent_call", tool = %body.tool, call_id = %call_id, execution_id = %execution_id, outcome = if response.error_code.is_empty() { "ok" } else { response.error_code.as_str() }, "agent call answered");

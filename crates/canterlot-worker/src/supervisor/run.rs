@@ -1797,6 +1797,7 @@ impl Supervisor {
                             cache_write_tokens: u.cache_write_tokens,
                         })
                         .collect(),
+                    git: None,
                     context_tokens,
                     context_window_tokens,
                     duration_ms,

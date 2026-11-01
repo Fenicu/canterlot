@@ -3,7 +3,12 @@ use canterlot_proto::{
     limits::{MAX_ATTACHMENT_BYTES, MAX_ATTACHMENTS_PER_INPUT},
     worker::v1::{HarnessInfo, MachineReport, ModelInfo},
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    fs::DirBuilder,
+    os::unix::fs::DirBuilderExt,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
 pub mod codexbar;
 pub mod limits;
 pub mod metrics;
@@ -59,6 +64,27 @@ pub fn build_report(config: &WorkerConfig, catalog: &[HarnessCatalog]) -> Machin
             .filter(|home| home.is_absolute())
             .and_then(|home| home.to_str().map(str::to_owned))
             .unwrap_or_default(),
+        worktree_root: worktree_root(&config.data_dir),
+    }
+}
+
+/// Корень изолированных рабочих копий: личный каталог воркера; пусто, если создать не удалось.
+pub fn worktree_root(data_dir: &Path) -> String {
+    let root = data_dir.join("worktrees");
+    let created = DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&root)
+        .and_then(|()| {
+            if root.is_dir() {
+                Ok(())
+            } else {
+                Err(std::io::ErrorKind::NotADirectory.into())
+            }
+        });
+    match (created, root.to_str()) {
+        (Ok(()), Some(text)) => text.to_owned(),
+        _ => String::new(),
     }
 }
 fn os_line() -> String {

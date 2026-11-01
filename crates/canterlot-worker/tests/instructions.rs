@@ -543,6 +543,7 @@ mod manager_tests {
                 permission_mode: "owner".into(),
                 instructions,
                 capabilities: vec!["pilot_v1".into()],
+                worktree: None,
             }),
         )
     }

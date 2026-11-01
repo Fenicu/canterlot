@@ -55,7 +55,7 @@
 | Разговор | `limit_reached` | Факт исчерпания окна |
 | Разговор | `scheduled_changed` | Отложенное сообщение |
 | Разговор | `attachment_state_changed` | Состояние вложения на хабе и на машине |
-| Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}` |
+| Разговор | `request_opened` | Запрос решения агента: `{request_id, kind, payload}`; `kind` равен `permission`, `question` или `spawn_approval` (запуск сессии вне белого списка владельца) |
 | Разговор | `request_closed` | Запрос закрыт: `{request_id, reason}`; `applied` — решение применено; `unconfirmed` — передача агенту могла состояться, доказательства нет (запрос в `decision_unconfirmed`, повтор запрещён; позднее доказательство присылает второе событие с `applied`); `execution_ended` и `owner_lost` — исполнение закончилось или сопровождение потеряно без закрытия запроса на машине (открытый запрос становится `closed_without_decision`, сохранённое решение `decision_not_applied`, дошедшее до машины или переданное `decision_unconfirmed`, удержание очереди снимается); `unsupported_command` и `resource_limit` — команду решения отверг хаб или воркер до передачи (запрос становится `decision_not_applied`); остальные причины передаёт воркер (например, `request_closed`, `stale_generation`, `cancelled`, `interrupted`). Поздние факты после терминального состояния и факты чужого решения событий не порождают |
 | Разговор | `request_decided` | Решение зафиксировано хабом: `{request_id, winner_decision_id, decision}`; ответ на секретный вопрос (`is_secret`) заменён на `"[redacted]"`, ключ вопроса сохраняется |
 | Разговор | `request_transmitting` | Решение передаётся агенту: `{request_id}`, один раз при переходе `decision_saved` в `decision_transmitting` |
@@ -151,6 +151,9 @@
 | `preset_title_taken` | 409 | `browser` | `never` | Пресет с таким названием уже есть |
 | `preset_limit_reached` | 409 | `browser` | `after_condition` | Слишком много пресетов |
 | `preset_invalid` | 422 | `browser` | `never` | Некорректный пресет |
+| `spawn_whitelist_invalid` | 422 | `browser` | `never` | Некорректный белый список |
+| `not_delegated` | 409 | `browser` | `never` | Сессия не запущена агентом |
+| `worktree_removed` | 409 | `delivery` | `never` | Рабочая копия уже убрана |
 
 Строки таблицы совпадают с перечислением `ErrorCode` хаба и со схемой `components.schemas.ErrorCode` в `docs/api/openapi.json`; тест `error_code_table_in_api_md_matches_the_enum_and_openapi` сверяет код, статус, `scope`, `retry` и сообщение. Код, который повторяется тем же ключом (`safe_same_key`), бывает только у 429, 500 и 503: условие проходит само. Отказ с другим статусом оставляет ключ свободным и сообщает в `retry`, что нужно для повтора. Каждая новая задача добавляет свои коды в перечисление и в эту таблицу в одном коммите.
 

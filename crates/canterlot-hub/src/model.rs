@@ -391,6 +391,7 @@ pub enum CommandKind {
     StopExecution,
     DeliverDecision,
     CompactSession,
+    RemoveWorktree,
 }
 
 impl CommandKind {
@@ -404,6 +405,7 @@ impl CommandKind {
             Self::StopExecution => "stop_execution",
             Self::DeliverDecision => "deliver_decision",
             Self::CompactSession => "compact_session",
+            Self::RemoveWorktree => "remove_worktree",
         }
     }
 }
@@ -421,6 +423,7 @@ impl FromStr for CommandKind {
             "stop_execution" => Ok(Self::StopExecution),
             "deliver_decision" => Ok(Self::DeliverDecision),
             "compact_session" => Ok(Self::CompactSession),
+            "remove_worktree" => Ok(Self::RemoveWorktree),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

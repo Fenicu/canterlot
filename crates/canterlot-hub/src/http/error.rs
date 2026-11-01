@@ -134,6 +134,9 @@ error_codes! {
     PresetTitleTaken => "preset_title_taken", 409, Browser, Never, "Пресет с таким названием уже есть";
     PresetLimitReached => "preset_limit_reached", 409, Browser, AfterCondition, "Слишком много пресетов";
     PresetInvalid => "preset_invalid", 422, Browser, Never, "Некорректный пресет";
+    SpawnWhitelistInvalid => "spawn_whitelist_invalid", 422, Browser, Never, "Некорректный белый список";
+    NotDelegated => "not_delegated", 409, Browser, Never, "Сессия не запущена агентом";
+    WorktreeRemoved => "worktree_removed", 409, Delivery, Never, "Рабочая копия уже убрана";
 }
 
 impl From<crate::conversations::SettingsError> for ApiError {

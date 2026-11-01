@@ -1780,6 +1780,7 @@ impl Actor {
                         .await
                 }
             }
+            Some(Kind::RemoveWorktree(_)) => reject_invalid(&self.shared, &command).await,
             Some(Kind::CompactSession(_)) => {
                 if live && command.execution_generation == self.generation {
                     if !self

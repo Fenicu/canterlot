@@ -658,3 +658,46 @@ async fn lock_order_requests_prevents_deadlocks_under_concurrent_turn_events(
 
     Ok(())
 }
+
+#[test]
+fn spawn_approval_kind_round_trips() {
+    assert_eq!(RequestKind::SpawnApproval.as_str(), "spawn_approval");
+    assert_eq!(
+        "spawn_approval".parse::<RequestKind>(),
+        Ok(RequestKind::SpawnApproval)
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_approval_request_is_stored_and_read_back(pool: PgPool) -> Result<(), sqlx::Error> {
+    let seed = testkit::seed(&pool).await;
+    let execution_id = Uuid::now_v7();
+    sqlx::query("insert into executions (id, conversation_id, generation, state) values ($1, $2, 1, 'running')")
+        .bind(execution_id)
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    let mut tx = pool.begin().await?;
+    let row = create_request_in_tx(
+        &mut tx,
+        &NewRequest {
+            id: Uuid::now_v7(),
+            conversation_id: seed.conversation_id,
+            execution_id,
+            generation: 1,
+            kind: RequestKind::SpawnApproval,
+            native_request_id: "spawn-1".into(),
+            request_payload: json!({"harness": "codex"}),
+        },
+    )
+    .await?;
+    tx.commit().await?;
+    assert_eq!(row.kind, RequestKind::SpawnApproval);
+    let stored: RequestRow = sqlx::query_as("select * from requests where id = $1")
+        .bind(row.id)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(stored.kind, RequestKind::SpawnApproval);
+    assert_eq!(stored.state, RequestState::Open);
+    Ok(())
+}

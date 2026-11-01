@@ -234,6 +234,7 @@ async fn model_enums_roundtrip(_pool: PgPool) {
         (CommandKind::Interrupt, "interrupt"),
         (CommandKind::StartExecution, "start_execution"),
         (CommandKind::StopExecution, "stop_execution"),
+        (CommandKind::RemoveWorktree, "remove_worktree"),
     ] {
         assert_eq!(value.as_str(), name);
         assert_text_roundtrip(value, name);
@@ -746,5 +747,121 @@ async fn approved_by_migration_rewrites_only_rows_it_normalizes(
             .fetch_one(&pool)
             .await?;
     assert_eq!(normalized, None);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn migration_adds_session_tools_schema(pool: PgPool) -> Result<(), sqlx::Error> {
+    let seed = testkit::seed(&pool).await;
+    let parent = seed.conversation_id;
+    let child = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
+
+    let defaults: (i32, Option<Uuid>, Option<Value>) = sqlx::query_as(
+        "select spawn_depth, parent_conversation_id, worktree from conversations where id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(defaults, (0, None, None));
+    let whitelist: Option<Value> =
+        sqlx::query_scalar("select spawn_whitelist from owners where id = $1")
+            .bind(seed.owner_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(whitelist, None);
+    sqlx::query("update conversations set parent_conversation_id = $2, spawn_depth = 1, worktree = $3 where id = $1")
+        .bind(child)
+        .bind(parent)
+        .bind(json!({"state": "active"}))
+        .execute(&pool)
+        .await?;
+    let negative = sqlx::query("update conversations set spawn_depth = -1 where id = $1")
+        .bind(child)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(negative.as_database_error().unwrap().is_check_violation());
+    sqlx::query("update machines set worktree_root = '/data/worktrees' where id = $1")
+        .bind(seed.machine_id)
+        .execute(&pool)
+        .await?;
+
+    let input = insert_input(&pool, &seed, 1, "queued").await?;
+    let origin: Option<Value> = sqlx::query_scalar("select origin from inputs where id = $1")
+        .bind(input)
+        .fetch_one(&pool)
+        .await?;
+    assert_eq!(origin, None);
+    sqlx::query("update inputs set origin = $2 where id = $1")
+        .bind(input)
+        .bind(json!({"kind": "message", "from": parent}))
+        .execute(&pool)
+        .await?;
+    let execution = execution_for_blocks(&pool, &seed).await?;
+    sqlx::query("select git from runs").fetch_all(&pool).await?;
+
+    let subscription = |subscriber: Uuid, target: Uuid| {
+        sqlx::query(
+            "insert into session_subscriptions (id, owner_id, subscriber_id, target_id) values ($1, $2, $3, $4)",
+        )
+        .bind(Uuid::now_v7())
+        .bind(seed.owner_id)
+        .bind(subscriber)
+        .bind(target)
+        .execute(&pool)
+    };
+    subscription(parent, child).await?;
+    let twice = subscription(parent, child).await.unwrap_err();
+    assert!(twice.as_database_error().unwrap().is_unique_violation());
+    subscription(child, parent).await?;
+    let row: (i32, Option<String>, bool) = sqlx::query_as(
+        "select chain_depth, last_fingerprint, closed_at is null from session_subscriptions where subscriber_id = $1",
+    )
+    .bind(parent)
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row, (0, None, true));
+
+    sqlx::query("insert into scheduled_jobs (id, kind, owner_id, conversation_id, run_at, payload) values ($1, 'session_task', $2, $3, clock_timestamp(), '{}')")
+        .bind(Uuid::now_v7())
+        .bind(seed.owner_id)
+        .bind(parent)
+        .execute(&pool)
+        .await?;
+    sqlx::query("insert into commands (id, machine_id, conversation_id, kind, payload, delivery_state) values ($1, $2, $3, 'remove_worktree', '{}', 'pending')")
+        .bind(Uuid::now_v7())
+        .bind(seed.machine_id)
+        .bind(parent)
+        .execute(&pool)
+        .await?;
+    let bogus = sqlx::query("insert into commands (id, machine_id, conversation_id, kind, payload, delivery_state) values ($1, $2, $3, 'bogus', '{}', 'pending')")
+        .bind(Uuid::now_v7())
+        .bind(seed.machine_id)
+        .bind(parent)
+        .execute(&pool)
+        .await
+        .unwrap_err();
+    assert!(bogus.as_database_error().unwrap().is_check_violation());
+    sqlx::query("insert into requests (id, conversation_id, execution_id, generation, kind, native_request_id, state, request_payload) values ($1, $2, $3, 1, 'spawn_approval', 'spawn-1', 'open', '{}')")
+        .bind(Uuid::now_v7())
+        .bind(parent)
+        .bind(execution)
+        .execute(&pool)
+        .await?;
+
+    let indexes: Vec<String> = sqlx::query_scalar(
+        "select indexname from pg_indexes where indexname in
+         ('conversations_parent', 'inputs_agent_origin', 'session_subscriptions_target') order by 1",
+    )
+    .fetch_all(&pool)
+    .await?;
+    assert_eq!(
+        indexes,
+        [
+            "conversations_parent",
+            "inputs_agent_origin",
+            "session_subscriptions_target"
+        ]
+    );
     Ok(())
 }

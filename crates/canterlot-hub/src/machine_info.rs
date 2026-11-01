@@ -31,6 +31,7 @@ fn replace_nul(report: &mut MachineReport) {
         &mut report.containment,
         &mut report.os,
         &mut report.home_dir,
+        &mut report.worktree_root,
     ];
     texts.extend(&mut report.allowed_roots);
     for harness in &mut report.harnesses {
@@ -66,8 +67,8 @@ pub async fn apply_report(
          from conversations c left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
          where c.machine_id=$1 and c.owner_id=$2 order by c.id",
     ).bind(machine_id).bind(owner_id).fetch_all(&mut *conn).await?;
-    sqlx::query("update machines set capabilities=array['pilot_v1'],worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,'') where id=$1")
- .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).execute(&mut *conn).await?;
+    sqlx::query("update machines set capabilities=array['pilot_v1'],worker_version=$2,allowed_roots=$3,containment=$4,os=$5,reported_at=clock_timestamp(),limits_ok=$6,home_dir=nullif($7,''),worktree_root=nullif($8,'') where id=$1")
+ .bind(machine_id).bind(&report.worker_version).bind(json!(report.allowed_roots)).bind(&report.containment).bind(&report.os).bind(report.max_attachment_bytes==MAX_ATTACHMENT_BYTES && report.max_attachments_per_input as usize==MAX_ATTACHMENTS_PER_INPUT).bind(&report.home_dir).bind(&report.worktree_root).execute(&mut *conn).await?;
     sqlx::query("delete from machine_harnesses where machine_id=$1")
         .bind(machine_id)
         .execute(&mut *conn)

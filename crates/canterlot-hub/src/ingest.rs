@@ -1556,6 +1556,8 @@ async fn apply_body(
         | Body::TodoUpdated(_)
         | Body::BackgroundWorkChanged(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
+        // Итог уборки рабочей копии разбирается вместе с самой уборкой.
+        Body::WorktreeRemoved(_) => {}
     }
     Ok(false)
 }

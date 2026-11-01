@@ -72,6 +72,7 @@ impl FromStr for RequestState {
 pub enum RequestKind {
     Permission,
     Question,
+    SpawnApproval,
 }
 
 impl RequestKind {
@@ -79,6 +80,7 @@ impl RequestKind {
         match self {
             Self::Permission => "permission",
             Self::Question => "question",
+            Self::SpawnApproval => "spawn_approval",
         }
     }
 }
@@ -90,6 +92,7 @@ impl FromStr for RequestKind {
         match value {
             "permission" => Ok(Self::Permission),
             "question" => Ok(Self::Question),
+            "spawn_approval" => Ok(Self::SpawnApproval),
             other => Err(format!("unknown request kind: {other}")),
         }
     }

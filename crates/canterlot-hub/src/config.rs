@@ -31,6 +31,8 @@ pub struct HubConfig {
     pub attachments: AttachmentsConfig,
     #[serde(default)]
     pub machines: MachinesConfig,
+    #[serde(default)]
+    pub session_tools: SessionToolsConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -406,6 +408,9 @@ pub struct ActivityConfig {
     pub tick: Duration,
     #[serde(with = "humantime_serde")]
     pub debounce: Duration,
+    /// Сколько `idle` без фоновой работы держится спокойно, прежде чем сессия считается устоявшейся.
+    #[serde(with = "humantime_serde")]
+    pub idle_quiet: Duration,
 }
 
 impl Default for ActivityConfig {
@@ -415,6 +420,39 @@ impl Default for ActivityConfig {
             stalled_tool: Duration::from_secs(1800),
             tick: Duration::from_secs(15),
             debounce: Duration::from_millis(250),
+            idle_quiet: Duration::from_secs(5),
+        }
+    }
+}
+
+/// Пределы межсессионных инструментов: глубина и частота сообщений и запусков.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SessionToolsConfig {
+    pub max_spawn_depth: u32,
+    pub max_chain_depth: u32,
+    pub pair_sends: u32,
+    #[serde(with = "humantime_serde")]
+    pub pair_window: Duration,
+    pub sender_sends: u32,
+    #[serde(with = "humantime_serde")]
+    pub sender_window: Duration,
+    pub parent_spawns: u32,
+    #[serde(with = "humantime_serde")]
+    pub spawn_window: Duration,
+}
+
+impl Default for SessionToolsConfig {
+    fn default() -> Self {
+        Self {
+            max_spawn_depth: 3,
+            max_chain_depth: 8,
+            pair_sends: 10,
+            pair_window: Duration::from_secs(600),
+            sender_sends: 30,
+            sender_window: Duration::from_secs(600),
+            parent_spawns: 10,
+            spawn_window: Duration::from_secs(3600),
         }
     }
 }

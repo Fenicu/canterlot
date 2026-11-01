@@ -158,6 +158,7 @@ pub fn finished(r: &Run, command: Uuid, ms: i64) -> Body {
             cache_read_tokens: 3,
             cache_write_tokens: 4,
         }],
+        git: None,
     })
 }
 pub fn observation(used: u32, ms: i64) -> LimitObservation {
@@ -199,6 +200,7 @@ pub fn report() -> MachineReport {
         containment: "process_group".into(),
         os: "linux".into(),
         home_dir: "/home/worker".into(),
+        worktree_root: String::new(),
     }
 }
 pub fn metrics(ms: u64) -> MachineMetrics {

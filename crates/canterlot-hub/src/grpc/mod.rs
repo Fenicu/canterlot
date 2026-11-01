@@ -22,8 +22,8 @@ use crate::{
     installation::Installation,
     session::{
         CAPABILITY_BACKGROUND_V1, CAPABILITY_COMPACT_V1, CAPABILITY_EXEC_V1,
-        CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, CAPABILITY_TODO_V1,
-        CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
+        CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_PILOT_V1, CAPABILITY_SESSION_TOOLS_V1,
+        CAPABILITY_TODO_V1, CAPABILITY_WORKDIR_SUGGEST_V1, Registry,
     },
 };
 
@@ -44,6 +44,7 @@ pub const KNOWN_OPTIONAL_CAPABILITIES: &[&str] = &[
     CAPABILITY_TODO_V1,
     CAPABILITY_COMPACT_V1,
     CAPABILITY_BACKGROUND_V1,
+    CAPABILITY_SESSION_TOOLS_V1,
     CAPABILITY_WORKDIR_SUGGEST_V1,
 ];
 
@@ -89,6 +90,7 @@ pub struct HubGrpc {
     pub installation: Installation,
     pub timers: HubTimers,
     pub ingest: Arc<dyn Ingest>,
+    pub session_tools: Arc<crate::config::SessionToolsConfig>,
     blobs: Option<Arc<dyn crate::attachments::BlobStore>>,
     fetch_slots: attachments::FetchSlots,
     media_slots: media::UploadSlots,
@@ -287,6 +289,7 @@ impl HubGrpc {
             installation,
             timers,
             ingest,
+            session_tools: Default::default(),
             blobs: None,
             fetch_slots: Default::default(),
             media_slots: Default::default(),
@@ -294,6 +297,11 @@ impl HubGrpc {
             faults: Default::default(),
             shutdown: CancellationToken::new(),
         }
+    }
+
+    pub fn with_session_tools(mut self, config: crate::config::SessionToolsConfig) -> Self {
+        self.session_tools = Arc::new(config);
+        self
     }
 
     pub fn with_blob_store(mut self, blobs: Arc<dyn crate::attachments::BlobStore>) -> Self {

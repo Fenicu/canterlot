@@ -427,3 +427,25 @@ fn real_cli_descendant_cpu_is_counted() {
     guard.cleanup();
     cli.wait().unwrap();
 }
+#[test]
+fn report_carries_a_private_worktree_root_under_the_data_dir() {
+    let dir = fixture();
+    let config = config(dir.path());
+    let root = dir.path().join("worktrees");
+    assert!(!root.exists());
+    let report = build_report(&config, &catalog());
+    assert_eq!(report.worktree_root, root.to_str().unwrap());
+    assert_eq!(fs::metadata(&root).unwrap().mode() & 0o777, 0o700);
+    // Повторный отчёт не меняет существующий каталог.
+    assert_eq!(
+        build_report(&config, &catalog()).worktree_root,
+        report.worktree_root
+    );
+}
+#[test]
+fn report_leaves_the_worktree_root_empty_when_it_cannot_be_created() {
+    let dir = fixture();
+    let config = config(dir.path());
+    fs::write(dir.path().join("worktrees"), "file").unwrap();
+    assert_eq!(build_report(&config, &catalog()).worktree_root, "");
+}

@@ -377,3 +377,44 @@ fn http_connection_limits_parse_and_reject_disabled_bounds() {
         assert!(HubConfig::load(&path).is_err(), "{extra}");
     }
 }
+
+#[test]
+fn session_tools_config_defaults_match_the_plan() {
+    use std::time::Duration as D;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("hub.toml");
+    fs::write(&path, PILOT_BASE).unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    let tools = config.session_tools;
+    assert_eq!(tools.max_spawn_depth, 3);
+    assert_eq!(tools.max_chain_depth, 8);
+    assert_eq!(
+        (tools.pair_sends, tools.pair_window),
+        (10, D::from_secs(600))
+    );
+    assert_eq!(
+        (tools.sender_sends, tools.sender_window),
+        (30, D::from_secs(600))
+    );
+    assert_eq!(
+        (tools.parent_spawns, tools.spawn_window),
+        (10, D::from_secs(3600))
+    );
+    assert_eq!(config.activity.idle_quiet, D::from_secs(5));
+
+    fs::write(
+        &path,
+        format!(
+            "{PILOT_BASE}[session_tools]\nmax_spawn_depth = 1\npair_window = '2m'\n[activity]\nidle_quiet = '9s'\n"
+        ),
+    )
+    .unwrap();
+    let config = HubConfig::load(&path).unwrap();
+    assert_eq!(config.session_tools.max_spawn_depth, 1);
+    assert_eq!(config.session_tools.pair_window, D::from_secs(120));
+    assert_eq!(config.session_tools.max_chain_depth, 8);
+    assert_eq!(config.activity.idle_quiet, D::from_secs(9));
+
+    fs::write(&path, format!("{PILOT_BASE}[session_tools]\nbogus = 1\n")).unwrap();
+    assert!(HubConfig::load(&path).is_err());
+}
