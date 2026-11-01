@@ -4,6 +4,7 @@
 #   scripts/check.sh --fast    быстрая для небольшой правки: fmt, clippy, тесты изменённых крейтов, web check и vitest по diff
 #   scripts/check.sh --all     полная без учёта путей
 #   scripts/check.sh --base REF  сравнивать с REF вместо main
+#   scripts/check.sh --fast -E EXPR  свой фильтр тестов nextest вместо выбора по diff (например 'binary(ws)')
 # Скрипт для рабочей копии берёт CANTERLOT_TEST_PG_PORT (своя тестовая PostgreSQL, scripts/test-db.sh).
 set -euo pipefail
 
@@ -13,11 +14,13 @@ source ~/.cargo/env
 mode=full
 all=0
 base_ref="${CHECK_BASE:-main}"
+custom_filter=""
 while (($#)); do
     case "$1" in
         --fast) mode=fast ;;
         --all) all=1 ;;
         --base) base_ref="${2:?--base требует ссылку}"; shift ;;
+        -E) custom_filter="${2:?-E требует выражение}"; shift ;;
         *) echo "Использование: scripts/check.sh [--fast] [--all] [--base REF]" >&2; exit 2 ;;
     esac
     shift
@@ -96,9 +99,9 @@ run_nextest() {
     local -a filter=()
     if [[ "$mode" == fast ]]; then
         profile=fast
-        if ((!unknown)); then
+        if ((!unknown)) || [[ -n "$custom_filter" ]]; then
             local expr
-            expr=$(nextest_filter)
+            expr=${custom_filter:-$(nextest_filter)}
             if [[ -z "$expr" ]]; then
                 echo "тестов для изменённых файлов нет"
                 return 0
