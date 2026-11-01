@@ -36,7 +36,7 @@ async fn refresh_asks_the_worker_once_and_throttles_the_repeat(pool: PgPool) {
     let message = session.commands.try_recv().expect("poll request");
     assert!(matches!(
         message.msg,
-        Some(control_down::Msg::PollLimits(p)) if p.provider == "claude"
+        Some(control_down::Msg::PollLimits(p)) if p.provider == "claude" && p.owner_refresh
     ));
 
     let (status, body) = post(&f).await;

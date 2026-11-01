@@ -14,6 +14,8 @@ use super::limits::{LimitsFetch, LimitsSource};
 const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 /// Повторный запуск раньше этого срока бессмыслен: CodexBar сам кеширует ответы провайдера.
 const MIN_GAP: Duration = Duration::from_secs(10);
+/// Потолок паузы после сбоев: окно лимита важнее, но точка usage держит блокировку после 429.
+const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 10080;
@@ -145,10 +147,19 @@ pub fn locate(configured: Option<&Path>) -> Option<PathBuf> {
 
 type Clock = Arc<dyn Fn() -> Instant + Send + Sync>;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Request {
+    Idle,
+    Hub,
+    Refresh,
+}
+
 #[derive(Default)]
 struct State {
     last_request: Option<Instant>,
     reported: Option<CodexBarError>,
+    failures: u32,
+    backoff_until: Option<Instant>,
 }
 
 /// Окна провайдера через `codexbar usage`: без запроса к модели, учётные данные
@@ -234,22 +245,51 @@ impl CodexBarLimitsSource {
         reading_from_output(provider, &bytes, super::now_ms())
     }
 
-    async fn poll_with(&self, provider: &str, idle: bool) -> LimitsFetch {
+    async fn fallback(&self, provider: &str, request: Request) -> LimitsFetch {
+        LimitsFetch {
+            observations: match &self.fallback {
+                Some(fallback) if request == Request::Idle => fallback.poll_idle(provider).await,
+                Some(fallback) => fallback.poll(provider).await,
+                None => Vec::new(),
+            },
+            absent: Vec::new(),
+        }
+    }
+
+    fn backoff(&self, failures: u32) -> Duration {
+        let factor = 1u32.checked_shl(failures).unwrap_or(u32::MAX);
+        self.interval
+            .saturating_mul(factor)
+            .min(MAX_BACKOFF.max(self.interval))
+    }
+
+    async fn poll_with(&self, provider: &str, request: Request) -> LimitsFetch {
         if !matches!(provider, "claude" | "codex") {
             return LimitsFetch::default();
         }
         let now = (self.clock)();
-        {
+        let backed_off = {
             let mut state = self.state.lock().expect("codexbar poll state");
             let since = |gap: Duration| {
                 state
                     .last_request
                     .is_some_and(|at| now.saturating_duration_since(at) < gap)
             };
-            if since(MIN_GAP) || (idle && since(self.interval)) {
+            if since(MIN_GAP) {
                 return LimitsFetch::default();
             }
-            state.last_request = Some(now);
+            let backed_off =
+                request != Request::Refresh && state.backoff_until.is_some_and(|until| now < until);
+            if !backed_off && request != Request::Refresh && since(self.interval) {
+                return LimitsFetch::default();
+            }
+            if !backed_off {
+                state.last_request = Some(now);
+            }
+            backed_off
+        };
+        if backed_off {
+            return self.fallback(provider, request).await;
         }
         let result = self.fetch(provider).await;
         {
@@ -271,17 +311,20 @@ impl CodexBarLimitsSource {
                     }
                 }
             }
+            if result
+                .as_ref()
+                .is_ok_and(|fetched| !fetched.observations.is_empty())
+            {
+                state.failures = 0;
+                state.backoff_until = None;
+            } else {
+                state.failures = state.failures.saturating_add(1);
+                state.backoff_until = Some(now + self.backoff(state.failures));
+            }
         }
         match result {
             Ok(fetched) if !fetched.observations.is_empty() => fetched,
-            _ => LimitsFetch {
-                observations: match &self.fallback {
-                    Some(fallback) if idle => fallback.poll_idle(provider).await,
-                    Some(fallback) => fallback.poll(provider).await,
-                    None => Vec::new(),
-                },
-                absent: Vec::new(),
-            },
+            _ => self.fallback(provider, request).await,
         }
     }
 }
@@ -289,14 +332,19 @@ impl CodexBarLimitsSource {
 #[async_trait::async_trait]
 impl LimitsSource for CodexBarLimitsSource {
     async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, false).await.observations
+        self.poll_with(provider, Request::Hub).await.observations
     }
 
     async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, true).await.observations
+        self.poll_with(provider, Request::Idle).await.observations
     }
 
     async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
-        self.poll_with(provider, idle).await
+        let request = if idle { Request::Idle } else { Request::Hub };
+        self.poll_with(provider, request).await
+    }
+
+    async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
+        self.poll_with(provider, Request::Refresh).await
     }
 }

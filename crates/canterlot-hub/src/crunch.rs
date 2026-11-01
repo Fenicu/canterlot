@@ -958,7 +958,7 @@ pub async fn request_poll(
     now: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
     Ok(
-        request_poll_outcome(pool, registry, provider, min_interval, now).await?
+        request_poll_outcome(pool, registry, provider, min_interval, false, now).await?
             == PollRequest::Sent,
     )
 }
@@ -968,6 +968,7 @@ pub async fn request_poll_outcome(
     registry: &Registry,
     provider: &str,
     min_interval: Duration,
+    owner_refresh: bool,
     now: DateTime<Utc>,
 ) -> Result<PollRequest, sqlx::Error> {
     let machines: Vec<Uuid> = sqlx::query_scalar(
@@ -997,6 +998,7 @@ pub async fn request_poll_outcome(
     permit.send(ControlDown {
         msg: Some(control_down::Msg::PollLimits(PollLimits {
             provider: provider.into(),
+            owner_refresh,
         })),
     });
     Ok(PollRequest::Sent)

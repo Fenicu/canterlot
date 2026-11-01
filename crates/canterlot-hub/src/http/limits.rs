@@ -172,8 +172,15 @@ async fn refresh(
     let now = Utc::now();
     let (mut requested, mut throttled) = (Vec::new(), false);
     for provider in providers {
-        match request_poll_outcome(&s.pool, &s.registry, &provider, REFRESH_MIN_INTERVAL, now)
-            .await?
+        match request_poll_outcome(
+            &s.pool,
+            &s.registry,
+            &provider,
+            REFRESH_MIN_INTERVAL,
+            true,
+            now,
+        )
+        .await?
         {
             PollRequest::Sent => requested.push(provider),
             PollRequest::Throttled => throttled = true,

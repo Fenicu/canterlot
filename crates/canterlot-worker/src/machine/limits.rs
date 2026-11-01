@@ -42,6 +42,10 @@ pub trait LimitsSource: Send + Sync {
             absent: Vec::new(),
         }
     }
+    /// Просьба владельца обновить сейчас (`PollLimits.owner_refresh`).
+    async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
+        self.poll_report(provider, false).await
+    }
 }
 pub struct NoLimitsSource;
 #[async_trait::async_trait]
@@ -352,5 +356,10 @@ impl LimitsSource for RoutedLimitsSource {
     async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
         let source = self.routes.get(provider).unwrap_or(&self.default).clone();
         source.poll_report(provider, idle).await
+    }
+
+    async fn poll_refresh(&self, provider: &str) -> LimitsFetch {
+        let source = self.routes.get(provider).unwrap_or(&self.default).clone();
+        source.poll_refresh(provider).await
     }
 }

@@ -505,6 +505,7 @@ impl ProtocolHub {
         self.send(ControlDown {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: provider.into(),
+                owner_refresh: false,
             })),
         })
         .await;

@@ -373,6 +373,7 @@ async fn empty_poll_sends_no_report() {
             hub.send(ControlDown {
                 msg: Some(control_down::Msg::PollLimits(PollLimits {
                     provider: provider.into(),
+                    owner_refresh: false,
                 })),
             })
             .await;
@@ -428,6 +429,7 @@ async fn absence_alone_is_reported_to_the_hub() {
         hub.send(ControlDown {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: "claude".into(),
+                owner_refresh: false,
             })),
         })
         .await;
@@ -505,6 +507,7 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         hub.send(ControlDown {
             msg: Some(control_down::Msg::PollLimits(PollLimits {
                 provider: "claude".into(),
+                owner_refresh: false,
             })),
         })
         .await;

@@ -515,6 +515,8 @@ message LimitsReport {
 
 message PollLimits {
   string provider = 1;
+  // Просьба владельца: воркер не ждёт ни интервала опроса, ни паузы после сбоев.
+  bool owner_refresh = 2;
 }
 
 message LimitsSnapshot {

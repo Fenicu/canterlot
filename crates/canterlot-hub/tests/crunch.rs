@@ -311,6 +311,7 @@ impl Env {
         let mut polls = Vec::new();
         self.received.retain(|(machine, message)| {
             if let Some(control_down::Msg::PollLimits(p)) = &message.msg {
+                assert!(!p.owner_refresh, "the crunch check is not an owner request");
                 polls.push((*machine, p.provider.clone()));
                 false
             } else {

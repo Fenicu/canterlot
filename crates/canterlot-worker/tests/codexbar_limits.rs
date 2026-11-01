@@ -11,11 +11,14 @@ use std::{
 };
 
 use canterlot_proto::worker::v1::{LimitObservation, LimitWindow};
-use canterlot_worker::machine::{
-    codexbar::{
-        CodexBarError, CodexBarLimitsSource, observations_from_output, reading_from_output,
+use canterlot_worker::{
+    config::MachineConfig,
+    machine::{
+        codexbar::{
+            CodexBarError, CodexBarLimitsSource, observations_from_output, reading_from_output,
+        },
+        limits::LimitsSource,
     },
-    limits::LimitsSource,
 };
 use tokio::time::Instant;
 
@@ -218,7 +221,7 @@ async fn poll_runs_codexbar_with_the_provider_and_json_format() {
 }
 
 #[tokio::test]
-async fn idle_polls_wait_for_the_interval_and_hub_polls_only_for_the_debounce() {
+async fn polls_wait_for_the_interval_and_only_the_owner_refresh_skips_it() {
     let dir = tempfile::tempdir().unwrap();
     let clock = TestClock::new();
     let source = source(printing(dir.path(), CODEX), &clock, None);
@@ -229,10 +232,17 @@ async fn idle_polls_wait_for_the_interval_and_hub_polls_only_for_the_debounce() 
         source.poll_idle("codex").await.is_empty(),
         "interval not over"
     );
-    // Запрос обновления от владельца интервал простоя не ждёт.
-    assert_eq!(source.poll("codex").await.len(), 2);
+    assert!(
+        source.poll("codex").await.is_empty(),
+        "the crunch check keeps the interval of the endpoint"
+    );
+    // Просьба владельца интервал не ждёт.
+    assert_eq!(source.poll_refresh("codex").await.observations.len(), 2);
     clock.advance(Duration::from_secs(5));
-    assert!(source.poll("codex").await.is_empty(), "debounce");
+    assert!(
+        source.poll_refresh("codex").await.observations.is_empty(),
+        "debounce"
+    );
     clock.advance(Duration::from_secs(200));
     assert!(
         source.poll_idle("codex").await.is_empty(),
@@ -241,6 +251,132 @@ async fn idle_polls_wait_for_the_interval_and_hub_polls_only_for_the_debounce() 
     clock.advance(Duration::from_secs(120));
     assert_eq!(source.poll_idle("codex").await.len(), 2);
     assert_eq!(calls(dir.path()).len(), 3);
+}
+
+fn counting_failure(dir: &Path) -> PathBuf {
+    executable(
+        dir,
+        &format!(
+            "echo run >> '{}'
+exit 3
+",
+            dir.join("args").display()
+        ),
+    )
+}
+
+fn poll_source(exe: PathBuf, clock: &TestClock, interval: u64) -> CodexBarLimitsSource {
+    let time = clock.0.clone();
+    CodexBarLimitsSource::new(Some(exe), Duration::from_secs(interval), None)
+        .with_clock(move || *time.lock().unwrap())
+}
+
+#[tokio::test]
+async fn failed_polls_back_off_exponentially_up_to_an_hour_and_success_ends_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = poll_source(counting_failure(dir.path()), &clock, 900);
+    let runs = || calls(dir.path()).len();
+
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 1);
+    clock.advance(Duration::from_secs(900));
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 1, "first failure doubles the interval");
+    source.poll("claude").await;
+    assert_eq!(runs(), 1, "a crunch check waits as well");
+    clock.advance(Duration::from_secs(900));
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 2);
+    clock.advance(Duration::from_secs(1800));
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 2, "second failure waits an hour");
+    clock.advance(Duration::from_secs(1800));
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 3);
+    clock.advance(Duration::from_secs(3600));
+    source.poll_idle("claude").await;
+    assert_eq!(runs(), 4, "the wait stops growing at an hour");
+}
+
+#[tokio::test]
+async fn success_after_failures_returns_to_the_plain_interval() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let exe = counting_failure(dir.path());
+    let source = poll_source(exe.clone(), &clock, 900);
+    source.poll_idle("codex").await;
+    clock.advance(Duration::from_secs(1800));
+    source.poll_idle("codex").await;
+    assert_eq!(calls(dir.path()).len(), 2);
+
+    fs::write(dir.path().join("out.json"), CODEX).unwrap();
+    fake_exec::write_executable(
+        &exe,
+        format!(
+            "#!/bin/sh
+cat '{}'
+",
+            dir.path().join("out.json").display()
+        ),
+        0o700,
+    );
+    clock.advance(Duration::from_secs(3600));
+    assert_eq!(source.poll_idle("codex").await.len(), 2);
+    clock.advance(Duration::from_secs(900));
+    assert_eq!(source.poll_idle("codex").await.len(), 2);
+}
+
+#[tokio::test]
+async fn owner_refresh_skips_the_backoff_but_not_its_own_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = poll_source(counting_failure(dir.path()), &clock, 900);
+    source.poll_idle("claude").await;
+    clock.advance(Duration::from_secs(5));
+    source.poll_refresh("claude").await;
+    assert_eq!(calls(dir.path()).len(), 1, "debounce");
+    clock.advance(Duration::from_secs(10));
+    source.poll_refresh("claude").await;
+    assert_eq!(calls(dir.path()).len(), 2);
+}
+
+#[tokio::test]
+async fn fallback_answers_while_codexbar_is_backed_off() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let fallback = Arc::new(Fallback::default());
+    let time = clock.0.clone();
+    let source = CodexBarLimitsSource::new(
+        Some(counting_failure(dir.path())),
+        Duration::from_secs(900),
+        Some(fallback.clone()),
+    )
+    .with_clock(move || *time.lock().unwrap());
+    assert_eq!(source.poll_idle("codex").await.len(), 1);
+    clock.advance(Duration::from_secs(900));
+    assert_eq!(source.poll_idle("codex").await.len(), 1);
+    assert_eq!(calls(dir.path()).len(), 1, "codexbar itself waits");
+    assert_eq!(
+        *fallback.0.lock().unwrap(),
+        vec!["idle:codex", "idle:codex"]
+    );
+}
+
+#[test]
+fn poll_interval_defaults_to_fifteen_minutes_with_the_same_floor() {
+    let default = MachineConfig::default();
+    assert_eq!(default.limits_poll_interval(), Duration::from_secs(900));
+    let low = MachineConfig {
+        limits_poll_interval: Duration::from_secs(60),
+        ..MachineConfig::default()
+    };
+    assert_eq!(low.limits_poll_interval(), Duration::from_secs(900));
+    let high = MachineConfig {
+        limits_poll_interval: Duration::from_secs(1800),
+        ..MachineConfig::default()
+    };
+    assert_eq!(high.limits_poll_interval(), Duration::from_secs(1800));
 }
 
 #[tokio::test]

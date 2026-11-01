@@ -411,6 +411,14 @@ type MetricsFuture = Pin<
     Box<dyn Future<Output = Result<MachineMetrics, crate::machine::metrics::MetricsError>> + Send>,
 >;
 
+/// Кто просит опрос лимитов: тик простоя, проверка пробуждения хаба или владелец кнопкой.
+#[derive(Clone, Copy)]
+enum PollKind {
+    Idle,
+    Hub,
+    OwnerRefresh,
+}
+
 struct Pending {
     message: ControlUp,
     seq: u64,
@@ -1102,7 +1110,7 @@ impl Worker {
         };
         let mut metrics_at = Instant::now() + self.config.machine.metrics_interval;
         // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
-        let mut polls: VecDeque<(String, bool)> = VecDeque::new();
+        let mut polls: VecDeque<(String, PollKind)> = VecDeque::new();
         let mut limits_outbound = None;
         type LimitsFuture =
             Pin<Box<dyn Future<Output = crate::machine::limits::LimitsFetch> + Send>>;
@@ -1150,11 +1158,15 @@ impl Worker {
         loop {
             if limits_operation.is_none()
                 && limits_outbound.is_none()
-                && let Some((provider, idle)) = polls.pop_front()
+                && let Some((provider, kind)) = polls.pop_front()
             {
                 let source = self.limits_source.clone();
                 limits_operation = Some(Box::pin(async move {
-                    source.poll_report(&provider, idle).await
+                    match kind {
+                        PollKind::Idle => source.poll_report(&provider, true).await,
+                        PollKind::Hub => source.poll_report(&provider, false).await,
+                        PollKind::OwnerRefresh => source.poll_refresh(&provider).await,
+                    }
                 }));
             }
             if suggest_operation.is_none()
@@ -1259,7 +1271,10 @@ impl Worker {
                 message = inbound.message(), if commands.len() < 32 && polls.len()<8 => {
                     let message = message.map_err(status_error)?.ok_or(WorkerError::Transport)?;
                     match message.msg {
-                        Some(control_down::Msg::PollLimits(request)) if pilot => {polls.push_back((request.provider, false));}
+                        Some(control_down::Msg::PollLimits(request)) if pilot => {
+                            let kind = if request.owner_refresh { PollKind::OwnerRefresh } else { PollKind::Hub };
+                            polls.push_back((request.provider, kind));
+                        }
                         Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
@@ -1363,7 +1378,7 @@ impl Worker {
                 }
                 due = idle_ticker.tick(), if pilot => {
                     for provider in due {
-                        if polls.len() < 8 && !polls.iter().any(|(queued, _)| *queued == provider) { polls.push_back((provider, true)); }
+                        if polls.len() < 8 && !polls.iter().any(|(queued, _)| *queued == provider) { polls.push_back((provider, PollKind::Idle)); }
                     }
                 }
                 fetched=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{

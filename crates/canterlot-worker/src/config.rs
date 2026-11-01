@@ -287,13 +287,13 @@ pub struct MachineConfig {
     pub metrics_interval: Duration,
     /// Путь к CodexBar; без него ищется `codexbar` в `PATH` и в `~/.local/bin`.
     pub codexbar_path: Option<PathBuf>,
-    /// Как часто опрашивать лимиты через CodexBar, не меньше минуты.
+    /// Как часто опрашивать лимиты через CodexBar, не меньше 15 минут: точка usage ограничена по частоте.
     #[serde(with = "humantime_serde")]
     pub limits_poll_interval: Duration,
 }
 
 impl MachineConfig {
-    pub const MIN_LIMITS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+    pub const MIN_LIMITS_POLL_INTERVAL: Duration = Duration::from_secs(900);
 
     pub fn limits_poll_interval(&self) -> Duration {
         self.limits_poll_interval
@@ -306,7 +306,7 @@ impl Default for MachineConfig {
         Self {
             metrics_interval: Duration::from_secs(30),
             codexbar_path: None,
-            limits_poll_interval: Duration::from_secs(300),
+            limits_poll_interval: Self::MIN_LIMITS_POLL_INTERVAL,
         }
     }
 }

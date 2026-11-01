@@ -911,6 +911,7 @@ fn pilot_records_roundtrip() {
     }
     let poll = PollLimits {
         provider: "codex".into(),
+        owner_refresh: true,
     };
     assert_roundtrip(poll.clone());
     let message = ControlDown {
