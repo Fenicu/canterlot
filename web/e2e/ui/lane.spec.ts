@@ -1,5 +1,6 @@
 import type { Page } from '@playwright/test';
-import { FakeHub, FakeHubApi, seedMachine } from '../../testing/fake-hub';
+import type { HistoryBlock } from '../../src/lib/stores/chat.svelte';
+import { FakeHub, FakeHubApi, seedConversation, seedMachine } from '../../testing/fake-hub';
 import { installChatRoutes } from '../../testing/fake-hub/http-playwright';
 import { FIRST_DIALOG, seedFirstDialog } from '../../testing/fixtures/first-dialog';
 import { seedMockup05, seedMockup11 } from '../../testing/fixtures/mockup-chat';
@@ -204,4 +205,132 @@ test('finished_lane_reads_as_done_with_named_steps_and_the_report_open', async (
 	await expect(page.locator('.live-line')).toContainText('Готово');
 	await expect(page.locator('.live-dot')).not.toHaveClass(/active/);
 	await expect(page.locator('.lane-screen .mark')).not.toHaveClass(/running/);
+});
+
+const MINUTE = 60_000;
+
+function agentCall(api: FakeHubApi, name: string, run: string, startMin: number, endMin: number | null, state: 'final' | 'streaming' | 'incomplete', seq: number): HistoryBlock[] {
+	const callId = api.id();
+	const childId = api.id();
+	const at = (min: number): string => new Date(Date.now() - min * MINUTE).toISOString();
+	const base = { kind: 'block' as const, content_truncated: false, rev: 1, model: 'haiku', summary: null, line_count: 1, input_command_id: run };
+	api.blocks.set(callId, { text: name, rev: 1, state });
+	api.blocks.set(childId, { text: 'шаг', rev: 1, state: 'final' });
+	return [
+		{ ...base, id: callId, block_kind: 'tool_call', content: name, content_bytes: name.length, created_seq: String(seq), created_at: at(startMin), state, agent: 'claude', tool_name: 'Agent', parent_block_id: null, summary: name, started_at: at(startMin), finished_at: endMin === null ? null : at(endMin) },
+		{ ...base, id: childId, block_kind: 'text', content: 'шаг', content_bytes: 6, created_seq: String(seq + 1), created_at: at(startMin), state: 'final', agent: name, tool_name: null, parent_block_id: callId }
+	];
+}
+
+async function bootCrowdedDelegation(page: Page, title: string) {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedConversation(api, { title, model: 'opus-5.5' });
+	const blocks: HistoryBlock[] = [];
+	let seq = 1;
+	for (let i = 0; i < 14; i++) {
+		const state = i === 3 ? 'incomplete' : 'final';
+		blocks.push(...agentCall(api, `старый-${i}`, 'run-1', 120 - i, 100 - i, state, seq));
+		seq += 2;
+	}
+	blocks.push(...agentCall(api, 'свежий', 'run-2', 6, 4, 'final', seq));
+	seq += 2;
+	blocks.push(...agentCall(api, 'идёт', 'run-2', 5, null, 'streaming', seq));
+	api.histories.set(id, blocks);
+	api.bindConversation(id);
+	await installChatRoutes(page, hub, api);
+	return { id };
+}
+
+test('delegation_collapses_old_subagents_into_a_row_and_opens_each_lane', async ({ page, isMobile }) => {
+	const { id } = await bootCrowdedDelegation(page, 'Восстановление потока после сна');
+	if (!isMobile) await page.setViewportSize({ width: 1440, height: 900 });
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	if (isMobile) await page.getByRole('button', { name: /^Делегирование/ }).click();
+	else await page.locator('.topbar').getByRole('button', { name: 'Делегирование' }).click();
+	const scope = isMobile ? page.getByRole('dialog', { name: 'Делегирование' }) : page.locator('[data-pane="lane"]');
+	await expect(scope).toBeVisible();
+
+	const names = scope.locator('.tree-node:not(.older-toggle) .subagent-name');
+	await expect(names).toHaveText(['идёт', 'свежий']);
+	const toggle = scope.getByRole('button', { name: /^Завершённые/ });
+	await expect(toggle).toHaveText('Завершённые · 14, прервано 1');
+	await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+	const danger = await page.evaluate(() => {
+		const probe = document.createElement('i');
+		probe.style.color = 'var(--danger)';
+		document.body.append(probe);
+		const value = getComputedStyle(probe).color;
+		probe.remove();
+		return value;
+	});
+	await expect(toggle.locator('.danger')).toHaveCSS('color', danger);
+
+	await toggle.click();
+	await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+	const older = scope.locator('.older .subagent-name');
+	await expect(older).toHaveCount(14);
+	await expect(older.first()).toHaveText('старый-13');
+	await expect(older.last()).toHaveText('старый-0');
+	await expect(scope.locator('.older').getByText('Прервано')).toHaveCount(1);
+
+	if (isMobile) {
+		await scope.locator('.tree-node').filter({ hasText: 'идёт' }).click();
+		await expect(page).toHaveURL(/\/c\/[^/]+\/lane\/[^/]+$/);
+		await expect(page.locator('.lane-screen[data-ready]')).toBeVisible();
+	} else {
+		await scope.locator('.tree-node').filter({ hasText: 'старый-2' }).click();
+		await expect(scope.locator('.selected-lane')).toBeVisible();
+	}
+});
+
+test('a_quiet_delegation_has_no_collapsed_row', async ({ page, isMobile }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedConversation(api, { title: 'Один субагент', model: 'opus-5.5' });
+	api.histories.set(id, agentCall(api, 'идёт', 'run-1', 2, null, 'streaming', 1));
+	api.bindConversation(id);
+	await installChatRoutes(page, hub, api);
+	if (!isMobile) await page.setViewportSize({ width: 1440, height: 900 });
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	if (isMobile) await page.getByRole('button', { name: 'Делегирование, работает 1' }).click();
+	else await page.locator('.topbar').getByRole('button', { name: 'Делегирование' }).click();
+	const scope = isMobile ? page.getByRole('dialog', { name: 'Делегирование' }) : page.locator('[data-pane="lane"]');
+	await expect(scope.locator('.subagent-name')).toHaveText(['идёт']);
+	await expect(scope.getByRole('button', { name: /^Завершённые/ })).toHaveCount(0);
+});
+
+test('phone_header_keeps_the_delegation_entry_with_a_long_title_at_384px', async ({ page, isMobile }) => {
+	test.skip(!isMobile, 'только телефон');
+	const { id } = await bootCrowdedDelegation(page, 'Очень длинное название сессии, которое никак не помещается в шапку телефона целиком');
+	await page.setViewportSize({ width: 384, height: 800 });
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	const entry = page.getByRole('button', { name: 'Делегирование, работает 1' });
+	await expect(entry).toBeVisible();
+	await expect(entry.locator('.running-count')).toHaveText('1');
+	const boxes = await page.evaluate(() => {
+		const rect = (selector: string) => document.querySelector(selector)?.getBoundingClientRect();
+		const title = rect('.header-title')!;
+		const actions = rect('.header-actions')!;
+		return { titleRight: title.right, titleWidth: title.width, actionsLeft: actions.left, actionsRight: actions.right, scroll: document.documentElement.scrollWidth, width: window.innerWidth };
+	});
+	expect(boxes.titleRight).toBeLessThanOrEqual(boxes.actionsLeft);
+	expect(boxes.titleWidth).toBeGreaterThan(120);
+	expect(boxes.actionsRight).toBeLessThanOrEqual(boxes.width);
+	expect(boxes.scroll).toBeLessThanOrEqual(boxes.width);
+	await page.screenshot({ path: 'test-results/delegation-header-384.png' });
+});
+
+test('phone_has_no_delegation_entry_without_subagents', async ({ page, isMobile }) => {
+	test.skip(!isMobile, 'только телефон');
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedConversation(api, { title: 'Без делегирования', model: 'opus-5.5' });
+	await installChatRoutes(page, hub, api);
+	await page.goto(`/c/${id}`);
+	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+	await expect(page.getByRole('button', { name: /^Делегирование/ })).toHaveCount(0);
 });

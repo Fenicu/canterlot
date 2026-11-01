@@ -17,6 +17,7 @@
 	import SessionSettings from './SessionSettings.svelte';
 	import Diagnostics from './Diagnostics.svelte';
 	import InfoSheet from './InfoSheet.svelte';
+	import DelegationSheet from './DelegationSheet.svelte';
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
@@ -70,6 +71,7 @@
 
 	let showSettings = $state(false);
 	let showDiagnostics = $state(false);
+	let showDelegation = $state(false);
 	let showSheet = $state(false);
 	const listRow = $derived(runtime?.list.items.get(chat.id) ?? null);
 	let infoRunId = $state<string | null>(null);
@@ -118,6 +120,7 @@
 			else showSettings = true;
 		}}
 		onOpenDiagnostics={() => (showDiagnostics = true)}
+		onOpenDelegation={() => (showDelegation = true)}
 	/>
 
 	<Timeline
@@ -183,6 +186,10 @@
 			{chat}
 			onclose={() => (showDiagnostics = false)}
 		/>
+	{/if}
+
+	{#if showDelegation && !pane.desktop}
+		<DelegationSheet {chat} onclose={() => (showDelegation = false)} />
 	{/if}
 
 	{#if infoRunId}
