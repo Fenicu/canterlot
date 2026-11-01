@@ -48,6 +48,7 @@ async fn snapshot_then_tail_loses_no_event_under_concurrent_writers(pool: PgPool
                         }],
                         received_at: Utc::now(),
                         correlation_id: Uuid::now_v7(),
+                        origin: None,
                     },
                 )
                 .await

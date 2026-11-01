@@ -276,6 +276,7 @@ async fn input(pool: &PgPool, hub: &TestHub, conversation_id: Uuid) -> Submitted
             }],
             received_at: Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -387,6 +388,7 @@ async fn submit_and_committed_receipts_trigger_without_waiting_for_sweep(pool: P
         }],
         received_at: Utc::now(),
         correlation_id: Uuid::now_v7(),
+        origin: None,
     };
     let first = hub.dispatcher.submit_input(&pool, submit()).await.unwrap();
     let command = worker.command().await;

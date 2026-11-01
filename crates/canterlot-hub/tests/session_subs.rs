@@ -514,6 +514,7 @@ async fn idle_closes_and_send_rearms(pool: PgPool) {
             content: vec![ContentBlock::Text { text: "go".into() }],
             received_at: now,
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -672,6 +673,7 @@ async fn fill_queue(pool: &PgPool, p: &Pair) {
                 content: vec![ContentBlock::Text { text: "x".into() }],
                 received_at: Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await
@@ -933,6 +935,7 @@ async fn spawn_approval_does_not_hold_the_queue_or_activity(pool: PgPool) {
             content: vec![ContentBlock::Text { text: "go".into() }],
             received_at: Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await

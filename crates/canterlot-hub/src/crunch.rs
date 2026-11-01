@@ -743,6 +743,7 @@ pub async fn handle_wake_in_tx(
             content: vec![ContentBlock::Text { text }],
             received_at: now,
             correlation_id,
+            origin: None,
         };
         match submit_input_in_tx(conn, &request).await {
             Ok(submitted) => input_id = Some(submitted.input_id),

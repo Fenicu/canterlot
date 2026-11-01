@@ -130,6 +130,7 @@ async fn cancel_replays_the_domain_outcome(pool: PgPool) {
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -1124,6 +1125,7 @@ async fn old_text_input_keys_still_replay_after_upgrade(pool: PgPool) {
             content: content.clone(),
             received_at: at,
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
@@ -1173,6 +1175,7 @@ async fn foreign_ids_are_not_found_on_every_control_endpoint(pool: PgPool) {
             }],
             received_at: chrono::Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await

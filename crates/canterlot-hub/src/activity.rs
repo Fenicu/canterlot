@@ -38,7 +38,7 @@ pub enum ActivityState {
 }
 
 impl ActivityState {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
             Self::Working => "working",

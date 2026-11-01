@@ -322,6 +322,7 @@ async fn large_tool_result_without_deltas_reaches_the_owner(pool: PgPool) {
                 }],
                 received_at: chrono::Utc::now(),
                 correlation_id: Uuid::now_v7(),
+                origin: None,
             },
         )
         .await

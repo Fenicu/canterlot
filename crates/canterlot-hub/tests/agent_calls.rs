@@ -453,36 +453,52 @@ async fn unknown_tool_and_bad_arguments_are_error_codes_not_status(pool: PgPool)
     assert_eq!(result.unwrap().into_inner().error_code, "too_large");
 }
 
-#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
-    use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
-    static BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
-    #[derive(Clone)]
-    struct Capture;
-    impl std::io::Write for Capture {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            BUFFER
-                .get_or_init(|| Mutex::new(Vec::new()))
-                .lock()
-                .unwrap()
-                .extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+static BUFFER: OnceLock<Mutex<Vec<u8>>> = OnceLock::new();
+#[derive(Clone)]
+struct Capture;
+impl std::io::Write for Capture {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        BUFFER
+            .get_or_init(|| Mutex::new(Vec::new()))
+            .lock()
+            .unwrap()
+            .extend_from_slice(bytes);
+        Ok(bytes.len())
     }
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
-        type Writer = Capture;
-        fn make_writer(&'a self) -> Capture {
-            Capture
-        }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
+}
+impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+    type Writer = Capture;
+    fn make_writer(&'a self) -> Capture {
+        Capture
+    }
+}
+fn capture_logs() {
     let _ = tracing_subscriber::fmt()
         .with_ansi(false)
         .with_writer(Capture)
         .try_init();
+}
+
+fn captured_logs() -> String {
+    String::from_utf8(
+        BUFFER
+            .get()
+            .expect("перехват журнала установлен")
+            .lock()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
+    capture_logs();
     let fx = Fx::new(pool).await;
     let marker = format!("СЕКРЕТ_АРГУМЕНТОВ_{}", Uuid::now_v7());
     let call_id = Uuid::now_v7();
@@ -496,15 +512,7 @@ async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
     assert_eq!(response.error_code, "", "{}", response.error_message);
     let list = fx.agent("presets.list", json!({}), &Uuid::now_v7()).await;
     assert_eq!(list.error_code, "");
-    let logs = String::from_utf8(
-        BUFFER
-            .get()
-            .expect("перехват журнала установлен")
-            .lock()
-            .unwrap()
-            .clone(),
-    )
-    .unwrap();
+    let logs = captured_logs();
     assert!(!logs.contains(&marker), "аргументы в журнале: {logs}");
     assert!(
         logs.contains(&call_id.to_string()),
@@ -516,9 +524,14 @@ async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
 async fn session_tool_stubs_answer_unknown_tool_after_the_liveness_check(pool: PgPool) {
     let fx = Fx::new(pool).await;
     for tool in canterlot_hub::session_tools::TOOLS {
-        let response = fx.agent(tool, json!({}), &Uuid::now_v7()).await;
-        assert_eq!(response.error_code, "unknown_tool", "{tool}");
-        assert!(response.result_json.is_empty(), "{tool}");
+        if matches!(
+            *tool,
+            "sessions.spawn" | "sessions.wait" | "sessions.accept"
+        ) {
+            let response = fx.agent(tool, json!({}), &Uuid::now_v7()).await;
+            assert_eq!(response.error_code, "unknown_tool", "{tool}");
+            assert!(response.result_json.is_empty(), "{tool}");
+        }
         // Не объект: проверка аргументов общая для всех инструментов.
         let response = fx.agent(tool, json!([]), &Uuid::now_v7()).await;
         assert_eq!(response.error_code, "invalid_arguments", "{tool}");
@@ -537,6 +550,44 @@ async fn session_tool_stubs_answer_unknown_tool_after_the_liveness_check(pool: P
     .unwrap()
     .into_inner();
     assert_eq!(stale.error_code, "execution_not_live");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn tool_failure_logs_no_text(pool: PgPool) {
+    capture_logs();
+    let fx = Fx::new(pool).await;
+    let marker = format!("СЕКРЕТ_ТЕКСТА_{}", Uuid::now_v7());
+    let cases = [
+        (
+            json!({"session_id": Uuid::now_v7(), "text": marker}),
+            "session_not_found",
+        ),
+        (
+            json!({"session_id": marker, "text": marker}),
+            "invalid_arguments",
+        ),
+        (
+            json!({"session_id": fx.conversation, "text": marker}),
+            "session_not_found",
+        ),
+        (
+            json!({"session_id": fx.conversation, "text": marker.repeat(2000)}),
+            "text_too_large",
+        ),
+    ];
+    let mut calls = Vec::new();
+    for (arguments, expected) in cases {
+        let call_id = Uuid::now_v7();
+        let response = fx.agent("sessions.send", arguments, &call_id).await;
+        assert_eq!(response.error_code, expected);
+        assert!(!response.error_message.contains(&marker));
+        calls.push(call_id);
+    }
+    let logs = captured_logs();
+    assert!(!logs.contains(&marker), "text in the log: {logs}");
+    for call_id in calls {
+        assert!(logs.contains(&call_id.to_string()));
+    }
 }
 
 #[test]

@@ -155,15 +155,13 @@ async fn handle(
                 machine_id,
                 call_id,
             };
-            match crate::session_tools::call(
-                &grpc.pool,
-                &grpc.session_tools,
-                &caller,
-                tool,
-                arguments,
-            )
-            .await
-            {
+            let context = crate::session_tools::ToolContext {
+                pool: grpc.pool.clone(),
+                config: grpc.session_tools.clone(),
+                settle: grpc.settle,
+                dispatcher: grpc.dispatcher.clone(),
+            };
+            match crate::session_tools::call(&context, &caller, tool, arguments).await {
                 Ok(result) => ok(result),
                 Err(error) => err(error.code.as_str(), error.message),
             }

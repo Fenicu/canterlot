@@ -250,7 +250,9 @@ async fn serve(
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
             .with_blob_store(blobs.clone())
-            .with_session_tools(session_tools);
+            .with_session_tools(session_tools)
+            .with_activity(&activity)
+            .with_dispatcher(dispatcher.clone());
     state.ingest = std::sync::Arc::new(
         ingest::Ingest::new(pool.clone())
             .with_dispatcher(dispatcher.clone())

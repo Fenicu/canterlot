@@ -250,7 +250,9 @@ pub async fn spawn_test_hub_with(pool: PgPool, options: TestHubOptions) -> TestH
     let (dispatcher, dispatch_rx) = dispatcher::Dispatcher::channel();
     let mut state =
         grpc::HubGrpc::new(pool.clone(), registry.clone(), installation, timers.clone())
-            .with_blob_store(blobs.clone());
+            .with_blob_store(blobs.clone())
+            .with_activity(&activity)
+            .with_dispatcher(dispatcher.clone());
     let ingest = ingest::Ingest::new(pool.clone())
         .with_dispatcher(dispatcher.clone())
         .with_registry(registry.clone())

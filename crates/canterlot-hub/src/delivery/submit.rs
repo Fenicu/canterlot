@@ -89,6 +89,8 @@ pub struct SubmitInput {
     pub content: Vec<ContentBlock>,
     pub received_at: DateTime<Utc>,
     pub correlation_id: Uuid,
+    /// Откуда пришёл ввод другой сессии; у ввода владельца пусто.
+    pub origin: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -552,8 +554,8 @@ async fn submit_attempt(
     .await?;
     let inserted = sqlx::query(
         "insert into inputs (id, conversation_id, owner_id, input_seq, idempotency_key,
-                             content, state, command_id, received_at, retry_of,client_idempotency_key,submission_hash)
-         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $5, $11)
+                             content, state, command_id, received_at, retry_of,client_idempotency_key,submission_hash,origin)
+         values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $5, $11, $12)
          on conflict (owner_id,client_idempotency_key) do nothing",
     )
     .bind(submitted.input_id)
@@ -567,6 +569,7 @@ async fn submit_attempt(
     .bind(req.received_at)
     .bind(retry_of)
     .bind(hash)
+    .bind(&req.origin)
     .execute(&mut *conn)
     .await?.rows_affected();
     if inserted == 0 {
@@ -621,6 +624,16 @@ async fn submit_attempt(
         content
     };
 
+    let mut payload = json!({
+        "input_id": submitted.input_id,
+        "input_seq": input_seq,
+        "idempotency_key": req.idempotency_key,
+        "state": submitted.state,
+        "content": content,
+    });
+    if let Some(origin) = &req.origin {
+        payload["origin"] = origin.clone();
+    }
     let event = events::append(
         conn,
         NewEvent {
@@ -630,13 +643,7 @@ async fn submit_attempt(
             kind: "input_queued",
             conversation_id: Some(req.conversation_id),
             execution_id: None,
-            payload: json!({
-                "input_id": submitted.input_id,
-                "input_seq": input_seq,
-                "idempotency_key": req.idempotency_key,
-                "state": submitted.state,
-                "content": content,
-            }),
+            payload,
             correlation_id: req.correlation_id,
         },
     )
@@ -728,6 +735,7 @@ impl fmt::Debug for SubmitInput {
             .field("content", &self.content)
             .field("received_at", &self.received_at)
             .field("correlation_id", &self.correlation_id)
+            .field("from_session", &self.origin.is_some())
             .finish()
     }
 }

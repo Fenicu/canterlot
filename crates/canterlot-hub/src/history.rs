@@ -44,6 +44,9 @@ pub struct InputView {
     pub feed_seq: Option<String>,
     pub created_at: String,
     pub retry_of: Option<Uuid>,
+    /// От какой сессии пришёл ввод; у ввода владельца пусто.
+    #[schema(value_type = Option<crate::session_tools::origin::InputOrigin>)]
+    pub origin: Option<Value>,
 }
 #[derive(Clone, Serialize, Deserialize, ToSchema)]
 pub struct AttachmentView {
@@ -104,7 +107,7 @@ pub struct RequestItemView {
 #[derive(Serialize, ToSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum TimelineItem {
-    Input(InputView),
+    Input(Box<InputView>),
     Block(Box<BlockView>),
     Request(Box<RequestItemView>),
 }
@@ -154,9 +157,10 @@ pub(crate) fn input_view(r: PgRow) -> Result<InputView, sqlx::Error> {
             .map(|n| n.to_string()),
         created_at: time(r.try_get("created_at")?),
         retry_of: r.try_get("retry_of")?,
+        origin: r.try_get("origin")?,
     })
 }
-fn prefix(text: &str, max: usize) -> &str {
+pub(crate) fn prefix(text: &str, max: usize) -> &str {
     let mut end = text.len().min(max);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -269,7 +273,7 @@ pub async fn page(
                     .bind(id)
                     .fetch_one(&mut *conn)
                     .await?;
-                items.push(TimelineItem::Input(input_view(r)?));
+                items.push(TimelineItem::Input(Box::new(input_view(r)?)));
             }
             "request" => {
                 items.push(TimelineItem::Request(Box::new(

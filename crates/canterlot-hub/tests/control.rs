@@ -34,6 +34,7 @@ async fn input(pool: &PgPool, seed: &Seed) -> SubmittedInput {
             }],
             received_at: Utc::now(),
             correlation_id: Uuid::now_v7(),
+            origin: None,
         },
     )
     .await
