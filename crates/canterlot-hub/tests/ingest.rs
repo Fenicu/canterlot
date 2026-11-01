@@ -519,6 +519,43 @@ async fn rejected_start_fails_execution(pool: PgPool) -> TestResult {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn start_failure_reaches_hub_as_outcome(pool: PgPool) -> TestResult {
+    for reason in [
+        "worktree_not_git",
+        "worktree_base_unknown",
+        "worktree_failed",
+    ] {
+        let seed = testkit::seed(&pool).await;
+        let execution =
+            executions::start(&pool, seed.owner_id, seed.conversation_id, Uuid::now_v7()).await?;
+        let outcome = Ingest::new(pool.clone())
+            .apply_batch(
+                seed.machine_id,
+                &seed.credential_digest(),
+                JournalKind::Cj,
+                &batch(
+                    Uuid::now_v7(),
+                    vec![record_body::Body::CommandRejected(CommandRejected {
+                        command_id: execution.command_id.to_string(),
+                        dispatch_attempt: 0,
+                        reason: reason.into(),
+                    })],
+                ),
+            )
+            .await?;
+        assert_eq!(outcome, IngestOutcome::Committed { up_to_seq: 1 });
+        let state: (String, String) = sqlx::query_as(
+            "select e.state, e.outcome from executions e join commands c on c.execution_id = e.id where c.id = $1",
+        )
+        .bind(execution.command_id)
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(state, ("failed".into(), reason.into()));
+    }
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn dispatch_deferred_requeues(pool: PgPool) -> TestResult {
     let (seed, _, input) = setup(&pool).await;
     let journal = Uuid::now_v7();

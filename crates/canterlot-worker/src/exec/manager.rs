@@ -19,8 +19,8 @@ use canterlot_proto::{
             AttachmentFailed, AttachmentReady, AttachmentRef, CancelInput, Command,
             CommandRejected, CompactionState, CompactionStatus, DecisionNotApplied, ExecutionState,
             InputCancelLost, InputCancelWon, InputDispatchDeferred, InputWithdrawn, InterruptState,
-            InterruptStatus, MediaHeader, StartExecution, WithdrawInput, command::Kind,
-            content_block, record_body::Body,
+            InterruptStatus, MediaHeader, RemoveWorktree, StartExecution, WithdrawInput,
+            WorktreeRemoved, command::Kind, content_block, record_body::Body,
         },
     },
 };
@@ -96,6 +96,8 @@ pub(super) struct SpawnRequest {
     pub command: Command,
     pub start: StartExecution,
     pub workdir: PathBuf,
+    /// Проверенный исходный каталог, если рабочую копию надо подготовить перед запуском.
+    pub source: Option<PathBuf>,
     pub conversation_id: Uuid,
 }
 
@@ -347,12 +349,27 @@ pub(super) async fn verify(
     Ok(linked)
 }
 
+/// Каталоги проверенного запуска: `source` задан только для изолированной рабочей копии.
+pub(super) struct Validated {
+    pub workdir: PathBuf,
+    pub source: Option<PathBuf>,
+}
+
+fn under_roots(roots: &[PathBuf], path: &Path) -> Option<PathBuf> {
+    let path = fs::canonicalize(path).ok()?;
+    roots
+        .iter()
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .any(|root| path.starts_with(root))
+        .then_some(path)
+}
+
 pub(super) async fn validate(
     shared: &Shared,
     command: &Command,
     start: &StartExecution,
     conversation_id: Uuid,
-) -> Result<Result<PathBuf, &'static str>, ExecError> {
+) -> Result<Result<Validated, &'static str>, ExecError> {
     if !shared.enabled.load(Ordering::Relaxed) {
         return Ok(Err("hub_capability_missing"));
     }
@@ -383,17 +400,32 @@ pub(super) async fn validate(
     }
     let workdir = start.workdir.clone();
     let roots = shared.config.allowed_workdir_roots.clone();
-    let canonical = tokio::task::spawn_blocking(move || {
-        let workdir = fs::canonicalize(workdir).ok()?;
-        roots
-            .iter()
-            .filter_map(|root| fs::canonicalize(root).ok())
-            .any(|root| workdir.starts_with(root))
-            .then_some(workdir)
+    let source = start
+        .worktree
+        .as_ref()
+        .map(|spec| spec.source_workdir.clone());
+    let data_dir = match source {
+        Some(_) => Some(shared.data_dir().await?.clone()),
+        None => None,
+    };
+    let canonical = tokio::task::spawn_blocking(move || match (source, data_dir) {
+        (Some(source), Some(data_dir)) => {
+            let source = under_roots(&roots, Path::new(&source))?;
+            let root = PathBuf::from(crate::machine::worktree_root(&data_dir));
+            let target = crate::worktree::resolve_target(&root, Path::new(&workdir))?;
+            Some(Validated {
+                workdir: target,
+                source: Some(source),
+            })
+        }
+        _ => Some(Validated {
+            workdir: under_roots(&roots, Path::new(&workdir))?,
+            source: None,
+        }),
     })
     .await
     .map_err(|_| ExecError::Shutdown)?;
-    let Some(workdir) = canonical else {
+    let Some(validated) = canonical else {
         return Ok(Err("workdir_not_allowed"));
     };
     let conversation = conversation_id.to_string();
@@ -413,7 +445,42 @@ pub(super) async fn validate(
     if command.execution_generation <= stored.max(known) {
         return Ok(Err("generation_mismatch"));
     }
-    Ok(Ok(workdir))
+    Ok(Ok(validated))
+}
+
+/// Уборка рабочей копии не привязана к исполнению: итог идёт в CJ, команда гасится вместе с ним.
+pub(super) async fn remove_worktree(
+    shared: &Shared,
+    command: &Command,
+    request: &RemoveWorktree,
+) -> Result<(), ExecError> {
+    let data_dir = shared.data_dir().await?.clone();
+    let roots = shared.config.allowed_workdir_roots.clone();
+    let source = request.source_workdir.clone();
+    let (root, source) = tokio::task::spawn_blocking(move || {
+        (
+            PathBuf::from(crate::machine::worktree_root(&data_dir)),
+            under_roots(&roots, Path::new(&source)),
+        )
+    })
+    .await
+    .map_err(|_| ExecError::Shutdown)?;
+    let done = match source {
+        Some(source) => crate::worktree::remove(&root, &source, request).await,
+        None => crate::worktree::Removed::failed("source_not_allowed"),
+    };
+    shared
+        .cj(
+            vec![Body::WorktreeRemoved(WorktreeRemoved {
+                command_id: command.command_id.clone(),
+                dispatch_attempt: command.dispatch_attempt,
+                outcome: done.outcome.into(),
+                detail: done.detail.into(),
+                branch_kept: done.branch_kept,
+            })],
+            terminal_self(command),
+        )
+        .await
 }
 
 pub(super) async fn reject(
@@ -823,6 +890,7 @@ impl Actor {
             command,
             start,
             workdir,
+            source,
             conversation_id,
         } = request;
         self.start_command = Some((command.command_id.clone(), command.dispatch_attempt));
@@ -841,6 +909,20 @@ impl Actor {
         if self.stop_pending() {
             self.cancel_start().await?;
             return Ok(false);
+        }
+        if let (Some(spec), Some(source)) = (&start.worktree, &source) {
+            // Подготовка идёт в акторе: медленная распаковка не задерживает остальные команды.
+            if let Err(reason) = crate::worktree::prepare(&workdir, source, spec).await {
+                return self.spawn_failed(&command, false, reason).await;
+            }
+            self.drain_mailbox();
+            if *self.shutdown.borrow() {
+                return Ok(false);
+            }
+            if self.stop_pending() {
+                self.cancel_start().await?;
+                return Ok(false);
+            }
         }
         let id = self.id;
         let timers = self.shared.config.supervisor.clone();
