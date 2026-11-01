@@ -1,6 +1,11 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_prost_build::configure()
         .extern_path(".canterlot.worker.v1", "crate::worker::v1")
+        // Размер варианта растёт с аддитивными полями команды: форму oneof не меняем.
+        .type_attribute(
+            ".canterlot.worker.ipc.v1.ControlToSupervisor.msg",
+            "#[allow(clippy::large_enum_variant)]",
+        )
         .build_server(false)
         .build_client(false)
         .skip_debug([
