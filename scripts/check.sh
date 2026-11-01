@@ -58,7 +58,7 @@ printf 'режим: %s, Rust: %s, web: %s\n' "$mode" "$((want_rust))" "$((want_w
 
 # --- Rust ---
 nextest_filter() {
-    # Выражение nextest для изменённых крейтов и тех, кто от них зависит.
+    # Выражение nextest для изменённых крейтов; зависимые от них проверяет полный прогон.
     local expr="" path crate rest name
     declare -A src_changed=() test_bins=()
     while IFS= read -r path; do
@@ -80,7 +80,7 @@ nextest_filter() {
         esac
     done <<<"$changed"
     for crate in "${!src_changed[@]}"; do
-        expr+="${expr:+ | }rdeps($crate)"
+        expr+="${expr:+ | }package($crate)"
     done
     for crate in "${!test_bins[@]}"; do
         [[ -n "${src_changed[$crate]:-}" ]] && continue
