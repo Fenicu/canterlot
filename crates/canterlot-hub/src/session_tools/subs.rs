@@ -84,12 +84,15 @@ pub async fn unsubscribe_in_tx(
     reason: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
-        "update session_subscriptions set closed_at=clock_timestamp(),closed_reason=$3
-         where subscriber_id=$1 and target_id=$2 and closed_at is null",
+        "update session_subscriptions
+         set closed_at=coalesce(closed_at,clock_timestamp()),closed_reason=$3
+         where subscriber_id=$1 and target_id=$2
+           and (closed_at is null or closed_reason=$4)",
     )
     .bind(subscriber_id)
     .bind(target_id)
     .bind(reason)
+    .bind(Settled::Idle.as_str())
     .execute(&mut *conn)
     .await?;
     sqlx::query(
@@ -125,6 +128,14 @@ pub async fn close_for_accept_in_tx(
     .bind(conversation_id)
     .bind(reason)
     .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "update session_subscriptions set closed_reason=$2 where target_id=$1 and closed_reason=$3",
+    )
+    .bind(conversation_id)
+    .bind(reason)
+    .bind(Settled::Idle.as_str())
+    .execute(&mut *conn)
     .await?;
     let pending: Vec<Uuid> = sqlx::query_scalar(
         "select id from scheduled_jobs
@@ -168,6 +179,23 @@ pub struct ClosedSubscriber {
     pub owner_id: Uuid,
     pub subscriber_id: Uuid,
     pub chain_depth: i32,
+}
+
+/// Цель работает дальше без нового ввода: подписчик услышал `idle`, но это был не конец.
+/// Подписка открывается снова со своей глубиной и окном, следующий итог дойдёт до него.
+pub async fn reopen_for_wake_turn_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "update session_subscriptions set closed_at=null,closed_reason=null
+         where target_id=$1 and closed_reason=$2",
+    )
+    .bind(target_id)
+    .bind(Settled::Idle.as_str())
+    .execute(conn)
+    .await?;
+    Ok(())
 }
 
 /// Осевшее состояние цели на момент чтения.

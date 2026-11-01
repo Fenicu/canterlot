@@ -662,6 +662,87 @@ async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool)
     );
 }
 
+/// Цель осела, подписка закрыта итогом `idle`.
+async fn reported_idle(pool: &PgPool, p: &Pair, now: DateTime<Utc>) {
+    start(pool, p.owner, p.target).await;
+    long_idle(pool, p.target, now).await;
+    subscribe(pool, p).await;
+    refresh_at(pool, p.target, now).await;
+    assert_eq!(
+        subscription(pool, p.subscriber, p.target).await["closed_reason"],
+        "idle"
+    );
+}
+
+async fn wake_turn(pool: &PgPool, id: Uuid, running: bool) {
+    sqlx::query(
+        "update executions set wake_turn=$2,last_event_at=clock_timestamp()
+         where conversation_id=$1",
+    )
+    .bind(id)
+    .bind(running)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wake_turn_after_the_report_reopens_the_subscription(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    reported_idle(&pool, &p, now).await;
+
+    wake_turn(&pool, p.target, true).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(10)).await;
+    assert!(subscription(&pool, p.subscriber, p.target).await["closed_at"].is_null());
+    assert_eq!(jobs(&pool, p.subscriber).await.len(), 1);
+
+    wake_turn(&pool, p.target, false).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(20)).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(30)).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 2, "the wake turn gets its own report");
+    assert_eq!(fired[1]["state"], "idle");
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "idle"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wake_turn_does_not_reopen_what_the_subscriber_gave_up(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    reported_idle(&pool, &p, now).await;
+    let mut tx = pool.begin().await.unwrap();
+    subs::unsubscribe_in_tx(&mut tx, p.subscriber, p.target, "unsubscribed")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    wake_turn(&pool, p.target, true).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(10)).await;
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "unsubscribed"
+    );
+
+    sqlx::query("update session_subscriptions set closed_reason='idle'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    let others = subs::close_for_accept_in_tx(&mut tx, p.target, Some(p.subscriber), "accepted")
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert!(others.is_empty(), "a closed subscription is told nothing");
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(20)).await;
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "accepted"
+    );
+}
+
 async fn delete(pool: &PgPool, p: &Pair, id: Uuid, key: &str) -> Result<(), deletion::DeleteError> {
     let directory = tempfile::tempdir().unwrap();
     let (_, blobs) = testkit::test_blob_store(directory.path());

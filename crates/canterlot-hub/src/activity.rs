@@ -691,6 +691,14 @@ async fn evaluate_subscriptions(
     since: DateTime<Utc>,
     thresholds: &Thresholds,
 ) -> Result<bool, sqlx::Error> {
+    if inputs.wake_turn
+        && matches!(
+            activity.state,
+            ActivityState::Working | ActivityState::Stalled
+        )
+    {
+        subs::reopen_for_wake_turn_in_tx(conn, conversation_id).await?;
+    }
     let facts = SettleFacts {
         now: inputs.now,
         since,
