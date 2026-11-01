@@ -55,6 +55,7 @@
 		color: var(--danger);
 	}
 	.state-text {
+		font-variant-numeric: tabular-nums;
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
