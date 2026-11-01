@@ -1133,6 +1133,9 @@ impl CodexAdapter {
     /// Остановить текущий app-server и забыть состояние его соединения.
     async fn discard_server(&mut self) {
         self.stop_old_server().await;
+        if let Some(translator) = self.translator.as_mut() {
+            self.events.extend(translator.abandon_children());
+        }
         self.requests.next_generation();
         self.rpc = RpcClient::new();
         self.responses.clear();

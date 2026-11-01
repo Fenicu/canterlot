@@ -6,7 +6,7 @@ use super::super::labels::command_label;
 use super::super::{AdapterEvent, BlockKind, MediaSource, ModelUsage, Phase, TodoItem, TodoStatus};
 use super::rpc::RpcId;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
@@ -14,6 +14,14 @@ use uuid::Uuid;
 /// Потолки диагностик неизвестных методов те же, что у OpenCode.
 const MAX_UNKNOWN_METHODS: usize = 64;
 const MAX_METHOD_CHARS: usize = 64;
+
+/// Кадры тредов, которых ещё нет: потомок обгоняет своё объявление (живой
+/// `thread/status/changed` идёт раньше `subAgentActivity`).
+const MAX_ORPHAN_FRAMES: usize = 512;
+/// Имя потомка без `agentPath`: режим v1 и `thread/started` без роли.
+const UNNAMED_CHILD: &str = "subagent";
+const RESULT_FAILED: &str = "error";
+const RESULT_INTERRUPTED: &str = "interrupted";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum TurnStatus {
@@ -185,6 +193,10 @@ struct ChildInfo {
     agent: String,
     model: String,
     parent: Option<Uuid>,
+    /// Агент, чей вызов породил потомка: его имя у блока результата.
+    spawner: String,
+    /// Итог хода потомка ещё не показан.
+    running: bool,
 }
 
 struct OpenBlock {
@@ -232,6 +244,11 @@ pub struct Translator {
     retry_count: u32,
     approval_items: HashSet<String>,
     unknown_methods: HashSet<String>,
+    orphans: HashMap<String, Vec<(String, Value)>>,
+    orphan_frames: usize,
+    replay: VecDeque<(String, Value)>,
+    unattributed_methods: HashSet<String>,
+    late_usage_noted: bool,
 }
 
 impl fmt::Debug for Translator {
@@ -279,6 +296,11 @@ impl Translator {
             retry_count: 0,
             approval_items: HashSet::new(),
             unknown_methods: HashSet::new(),
+            orphans: HashMap::new(),
+            orphan_frames: 0,
+            replay: VecDeque::new(),
+            unattributed_methods: HashSet::new(),
+            late_usage_noted: false,
         }
     }
 
@@ -350,6 +372,80 @@ impl Translator {
     }
 
     pub fn feed(&mut self, method: &str, params: &Value) -> Vec<Translated> {
+        if let Some(held) = self.hold_orphan(method, params) {
+            return held;
+        }
+        let mut out = self.translate(method, params);
+        while let Some((method, params)) = self.replay.pop_front() {
+            out.extend(self.translate(&method, &params));
+        }
+        out
+    }
+
+    // Кадр треда, которого ещё нет: ждёт своего потомка до конца главного хода.
+    fn hold_orphan(&mut self, method: &str, params: &Value) -> Option<Vec<Translated>> {
+        let thread = Self::thread_of(params)?;
+        if thread == self.main_thread_id
+            || self.children.contains_key(thread)
+            || method == "serverRequest/resolved"
+        {
+            return None;
+        }
+        if self.active_turn.is_none() || self.orphan_frames >= MAX_ORPHAN_FRAMES {
+            return Some(self.unattributed(method, params));
+        }
+        self.orphans
+            .entry(thread.to_owned())
+            .or_default()
+            .push((method.to_owned(), params.clone()));
+        self.orphan_frames += 1;
+        Some(vec![Translated::Ignored])
+    }
+
+    fn unattributed(&mut self, method: &str, params: &Value) -> Vec<Translated> {
+        let name: String = method.chars().take(MAX_METHOD_CHARS).collect();
+        if self.unattributed_methods.len() >= MAX_UNKNOWN_METHODS
+            || !self.unattributed_methods.insert(name.clone())
+        {
+            return vec![Translated::Ignored];
+        }
+        vec![Translated::Event(AdapterEvent::Diagnostic {
+            kind: "unattributed_thread_frame",
+            event_type: name,
+            required: false,
+            field_names: object_field_names(params),
+        })]
+    }
+
+    fn flush_orphans(&mut self) -> Vec<Translated> {
+        let frames: Vec<_> = self.orphans.drain().flat_map(|(_, held)| held).collect();
+        self.orphan_frames = 0;
+        frames
+            .iter()
+            .flat_map(|(method, params)| self.unattributed(method, params))
+            .collect()
+    }
+
+    fn adopt_child(&mut self, thread_id: &str, child: ChildInfo) {
+        self.children.insert(thread_id.to_owned(), child);
+        if let Some(held) = self.orphans.remove(thread_id) {
+            self.orphan_frames -= held.len();
+            self.replay.extend(held);
+        }
+    }
+
+    // Потомок живёт и после главного хода, но занятой сессию уже не делает.
+    fn translate(&mut self, method: &str, params: &Value) -> Vec<Translated> {
+        let mut out = self.route(method, params);
+        if self.active_turn.is_none()
+            && Self::thread_of(params).is_some_and(|thread| self.children.contains_key(thread))
+        {
+            out.retain(|item| !matches!(item, Translated::Event(AdapterEvent::Phase { .. })));
+        }
+        out
+    }
+
+    fn route(&mut self, method: &str, params: &Value) -> Vec<Translated> {
         match method {
             "turn/started" => self.on_turn_started(params),
             "turn/completed" => self.on_turn_completed(params),
@@ -438,6 +534,11 @@ impl Translator {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if !self.is_main(params) {
+            if let Some(child) =
+                Self::thread_of(params).and_then(|thread| self.children.get_mut(thread))
+            {
+                child.running = true;
+            }
             return vec![Translated::Ignored];
         }
         self.phase = Phase::Generating;
@@ -455,8 +556,89 @@ impl Translator {
 
     fn on_turn_completed(&mut self, params: &Value) -> Vec<Translated> {
         if !self.is_main(params) {
-            return vec![Translated::Ignored];
+            return self.on_child_turn_completed(params);
         }
+        let mut out = self.main_turn_completed(params);
+        out.extend(self.flush_orphans());
+        out
+    }
+
+    // Итог потомка: результат вызова, как у Claude Code. Состояние в панели идёт от него.
+    fn on_child_turn_completed(&mut self, params: &Value) -> Vec<Translated> {
+        let Some(child) = Self::thread_of(params).and_then(|id| self.children.get_mut(id)) else {
+            return vec![Translated::Ignored];
+        };
+        child.running = false;
+        let Some(call) = child.parent else {
+            return vec![Translated::Ignored];
+        };
+        let (spawner, model) = (child.spawner.clone(), child.model.clone());
+        let turn = params.get("turn").unwrap_or(&Value::Null);
+        let summary =
+            match parse_turn_status(turn.get("status").and_then(Value::as_str).unwrap_or("")) {
+                TurnStatus::Failed => Some(RESULT_FAILED),
+                TurnStatus::Interrupted => Some(RESULT_INTERRUPTED),
+                _ => None,
+            };
+        self.spawn_result(call, &spawner, &model, final_message(turn), summary)
+            .into()
+    }
+
+    fn spawn_result(
+        &self,
+        call: Uuid,
+        spawner: &str,
+        model: &str,
+        text: String,
+        summary: Option<&str>,
+    ) -> [Translated; 2] {
+        let block_id = Uuid::now_v7();
+        [
+            self.started(
+                block_id,
+                BlockKind::ToolResult,
+                spawner,
+                model,
+                Some(call),
+                None,
+                None,
+                None,
+            ),
+            Translated::Event(AdapterEvent::BlockFinal {
+                block_id,
+                text,
+                summary: summary.map(str::to_owned),
+            }),
+        ]
+    }
+
+    /// Сервер сменился: потомки умерли с ним, и `turn/completed` от них не придёт.
+    pub fn abandon_children(&mut self) -> Vec<AdapterEvent> {
+        let mut gone = Vec::new();
+        for child in self.children.values_mut().filter(|child| child.running) {
+            child.running = false;
+            if let Some(call) = child.parent {
+                gone.push((call, child.spawner.clone(), child.model.clone()));
+            }
+        }
+        gone.into_iter()
+            .flat_map(|(call, spawner, model)| {
+                self.spawn_result(
+                    call,
+                    &spawner,
+                    &model,
+                    String::new(),
+                    Some(RESULT_INTERRUPTED),
+                )
+            })
+            .filter_map(|item| match item {
+                Translated::Event(event) => Some(event),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn main_turn_completed(&mut self, params: &Value) -> Vec<Translated> {
         let turn = params.get("turn").unwrap_or(&Value::Null);
         let turn_id = turn
             .get("id")
@@ -608,7 +790,7 @@ impl Translator {
             return vec![self.context_maintenance()];
         }
         if item_type == "subAgentActivity" {
-            return self.on_sub_agent_item(item);
+            return self.on_sub_agent_item(item, agent, &model, parent, command_id);
         }
         let block_id = Uuid::now_v7();
         let mut out = Vec::new();
@@ -686,7 +868,7 @@ impl Translator {
             "collabAgentToolCall" => {
                 let (name, summary, model_override) = collab_summary(item);
                 let model = model_override.unwrap_or(model);
-                self.note_spawned(item, block_id);
+                self.note_spawned(item, block_id, agent);
                 out.push(self.started(
                     block_id,
                     BlockKind::ToolCall,
@@ -1008,14 +1190,29 @@ impl Translator {
                 }));
             }
             "collabAgentToolCall" | "webSearch" | "imageView" => {
+                let mut text = String::new();
                 if item_type == "collabAgentToolCall" {
-                    self.note_spawned(item, block.block_id);
+                    self.note_spawned(item, block.block_id, &block.agent);
+                    if is_spawn(item) {
+                        let prompt = item.get("prompt").and_then(Value::as_str);
+                        text = prompt.unwrap_or_default().to_owned();
+                    }
                 }
                 out.push(Translated::Event(AdapterEvent::BlockFinal {
                     block_id: block.block_id,
-                    text: String::new(),
+                    text,
                     summary: None,
                 }));
+                if is_spawn(item) && item.get("status").and_then(Value::as_str) == Some("failed") {
+                    let result = self.spawn_result(
+                        block.block_id,
+                        &block.agent,
+                        &block.model,
+                        String::new(),
+                        Some(RESULT_FAILED),
+                    );
+                    out.extend(result);
+                }
                 if matches!(item_type, "collabAgentToolCall") {
                     out.push(self.item_completed(item));
                 }
@@ -1363,9 +1560,14 @@ impl Translator {
             return vec![Translated::Ignored];
         }
         // Расход ребёнка засчитывается, пока жив главный ход.
-        if self.active_turn.is_some()
-            && let Some(child) = self.children.get(thread_id)
-        {
+        if self.active_turn.is_none() {
+            if self.children.contains_key(thread_id) && !self.late_usage_noted {
+                self.late_usage_noted = true;
+                return vec![self.optional("child_usage_outside_turn")];
+            }
+            return vec![Translated::Ignored];
+        }
+        if let Some(child) = self.children.get(thread_id) {
             let key = (child.agent.clone(), child.model.clone());
             let acc = self.usage.entry(key.clone()).or_insert(UsageAcc {
                 agent: key.0,
@@ -1417,38 +1619,44 @@ impl Translator {
         vec![Translated::Event(AdapterEvent::TodoUpdated { lane, items })]
     }
 
+    // В 0.164 потомок этого кадра не шлёт; остаётся для имени, если он появится.
     fn on_thread_started(&mut self, params: &Value) -> Vec<Translated> {
         let thread = params.get("thread").unwrap_or(&Value::Null);
         let id = thread.get("id").and_then(Value::as_str).unwrap_or_default();
-        let parent = thread.get("parentThreadId").and_then(Value::as_str);
-        match parent {
-            // Главный поток уже известен из конструктора.
-            None if id == self.main_thread_id => vec![Translated::Ignored],
-            None => vec![Translated::Ignored],
-            Some(_) => {
-                let agent = thread
-                    .get("agentRole")
-                    .and_then(Value::as_str)
-                    .or_else(|| thread.get("agentNickname").and_then(Value::as_str))
-                    .unwrap_or("subagent")
-                    .to_owned();
-                let model = thread
-                    .get("model")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&self.model)
-                    .to_owned();
-                let parent_block = self.spawn_parents.get(id).copied();
-                self.children.insert(
-                    id.to_owned(),
-                    ChildInfo {
-                        agent,
-                        model,
-                        parent: parent_block,
-                    },
-                );
+        if thread
+            .get("parentThreadId")
+            .and_then(Value::as_str)
+            .is_none()
+        {
+            return if id == self.main_thread_id {
                 vec![Translated::Ignored]
-            }
+            } else {
+                self.unattributed("thread/started", params)
+            };
         }
+        let name = thread
+            .get("agentRole")
+            .and_then(Value::as_str)
+            .or_else(|| thread.get("agentNickname").and_then(Value::as_str))
+            .map(str::to_owned);
+        let model = thread
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        if let Some(child) = self.children.get_mut(id) {
+            child.agent = name.unwrap_or_else(|| child.agent.clone());
+            child.model = model.unwrap_or_else(|| child.model.clone());
+            return vec![Translated::Ignored];
+        }
+        let child = ChildInfo {
+            agent: name.unwrap_or_else(|| UNNAMED_CHILD.to_owned()),
+            model: model.unwrap_or_else(|| self.model.clone()),
+            parent: self.spawn_parents.get(id).copied(),
+            spawner: "orchestrator".to_owned(),
+            running: true,
+        };
+        self.adopt_child(id, child);
+        vec![Translated::Ignored]
     }
 
     fn on_thread_closed(&mut self, params: &Value) -> Vec<Translated> {
@@ -1488,39 +1696,91 @@ impl Translator {
         vec![Translated::Ignored]
     }
 
-    // Id потомка может появиться только к завершению вызова, и потомок к тому
-    // времени уже зарегистрирован: родитель ставится и ему.
-    fn note_spawned(&mut self, item: &Value, block_id: Uuid) {
-        if item.get("tool").and_then(Value::as_str) != Some("spawnAgent") {
+    // Режим v1: id потомка приходит только к завершению вызова, модель там же.
+    fn note_spawned(&mut self, item: &Value, block_id: Uuid, spawner: &str) {
+        if !is_spawn(item) {
             return;
         }
-        for child_id in item
+        let model = requested_model(item).unwrap_or(&self.model).to_owned();
+        let receivers = item
             .get("receiverThreadIds")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
-            .filter_map(Value::as_str)
-        {
+            .filter_map(Value::as_str);
+        for child_id in receivers {
             self.spawn_parents.insert(child_id.to_owned(), block_id);
             if let Some(child) = self.children.get_mut(child_id) {
                 child.parent = Some(block_id);
+                child.spawner = spawner.to_owned();
+                continue;
             }
+            let child = ChildInfo {
+                agent: UNNAMED_CHILD.to_owned(),
+                model: model.clone(),
+                parent: Some(block_id),
+                spawner: spawner.to_owned(),
+                running: true,
+            };
+            self.adopt_child(child_id, child);
         }
     }
 
-    // Элемент ThreadItem схемы 0.164: статус субагента, а не вызов инструмента.
-    fn on_sub_agent_item(&mut self, item: &Value) -> Vec<Translated> {
+    // Режим v2: элемент сообщает о потомке, вызова инструмента в кадрах нет, поэтому
+    // вызов делает сам переводчик. Текст задачи в 0.164 зашифрован, имя берётся из пути.
+    fn on_sub_agent_item(
+        &mut self,
+        item: &Value,
+        agent: &str,
+        model: &str,
+        parent: Option<Uuid>,
+        command_id: Option<Uuid>,
+    ) -> Vec<Translated> {
+        let path = item.get("agentPath").and_then(Value::as_str);
+        let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
+        let mut out = Vec::new();
+        if let Some(thread) = item.get("agentThreadId").and_then(Value::as_str) {
+            let known = self.children.get(thread);
+            if known.is_none() || (kind == "started" && known.is_some_and(|c| c.parent.is_none())) {
+                let block_id = Uuid::now_v7();
+                out.push(self.started(
+                    block_id,
+                    BlockKind::ToolCall,
+                    agent,
+                    model,
+                    parent,
+                    command_id,
+                    Some("spawn_agent"),
+                    None,
+                ));
+                out.push(Translated::Event(AdapterEvent::BlockFinal {
+                    block_id,
+                    text: path.unwrap_or_default().to_owned(),
+                    summary: None,
+                }));
+                let child = ChildInfo {
+                    agent: known
+                        .map(|child| child.agent.clone())
+                        .unwrap_or_else(|| agent_name(path)),
+                    model: requested_model(item).unwrap_or(model).to_owned(),
+                    parent: Some(block_id),
+                    spawner: agent.to_owned(),
+                    running: true,
+                };
+                self.adopt_child(thread, child);
+            }
+        }
         let name = item
             .get("agentThreadId")
             .and_then(Value::as_str)
             .and_then(|thread| self.children.get(thread))
-            .map_or("subagent", |child| child.agent.as_str());
-        let kind = item.get("kind").and_then(Value::as_str).unwrap_or_default();
-        vec![Translated::Event(AdapterEvent::Phase {
+            .map_or(UNNAMED_CHILD, |child| child.agent.as_str());
+        out.push(Translated::Event(AdapterEvent::Phase {
             phase: Phase::Generating,
             tool_name: None,
             summary: Some(format!("Субагент {name}: {kind}")),
-        })]
+        }));
+        out
     }
 
     fn on_sub_agent_activity(&mut self, params: &Value) -> Vec<Translated> {
@@ -1732,11 +1992,48 @@ fn collab_summary(item: &Value) -> (String, String, Option<String>) {
                 .and_then(Value::as_str)
                 .map(cut120)
                 .unwrap_or_default(),
-            item.get("model").and_then(Value::as_str).map(str::to_owned),
+            requested_model(item).map(str::to_owned),
         ),
         Some(tool) => (tool.to_owned(), String::new(), None),
         None => ("collabAgentToolCall".into(), String::new(), None),
     }
+}
+
+fn is_spawn(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("collabAgentToolCall")
+        && item.get("tool").and_then(Value::as_str) == Some("spawnAgent")
+}
+
+// На старте spawnAgent модель пустая, настоящая приходит с завершением.
+fn requested_model(item: &Value) -> Option<&str> {
+    item.get("model")
+        .and_then(Value::as_str)
+        .filter(|model| !model.is_empty())
+}
+
+fn agent_name(path: Option<&str>) -> String {
+    path.and_then(|path| path.rsplit('/').next())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(UNNAMED_CHILD)
+        .to_owned()
+}
+
+// Последнее сообщение потомка, иначе текст ошибки хода.
+fn final_message(turn: &Value) -> String {
+    let items = turn.get("items").and_then(Value::as_array);
+    items
+        .into_iter()
+        .flatten()
+        .rev()
+        .find(|item| item.get("type").and_then(Value::as_str) == Some("agentMessage"))
+        .and_then(|item| item.get("text").and_then(Value::as_str))
+        .or_else(|| {
+            turn.get("error")
+                .and_then(|error| error.get("message"))
+                .and_then(Value::as_str)
+        })
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn mcp_result_text(item: &Value) -> String {

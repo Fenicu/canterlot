@@ -455,10 +455,14 @@ fn phases_follow_status_flags_and_awaiting_input_waits_for_turn_end() {
 #[test]
 fn retrying_errors_become_phase_summaries_and_final_error_is_kept() {
     let frames = codex::replay("service_failure");
+    // В записи два запуска: повторы в первом треде, отказ модели во втором.
+    let mut retrying = Translator::new("01a171c3-ac8d-7682-9fc0-125ff2c04433", "gpt-6-luna");
+    retrying.begin_turn("01a171c3-b957-78d3-85c8-1af41fdc61fd", command_id());
+    let retried = feed_frames(&mut retrying, &frames);
     let mut translator = Translator::new("01a171c6-1373-7730-9f41-665a0cd58fb2", "gpt-6-luna");
     translator.begin_turn("01a171c6-16c1-7103-9495-c288ebdf54e3", command_id());
     let out = feed_frames(&mut translator, &frames);
-    let summaries: Vec<String> = events_of(&out)
+    let summaries: Vec<String> = events_of(&retried)
         .iter()
         .filter_map(|e| match e {
             AdapterEvent::Phase {
@@ -1132,7 +1136,14 @@ fn plan_of_a_foreign_thread_is_ignored_and_text_stays_out_of_debug() {
         "turn/plan/updated",
         &plan_update("thread-other", plan.clone()),
     );
-    assert!(events_of(&out).is_empty(), "{out:?}");
+    assert!(todo_events(&out).is_empty(), "{out:?}");
+    assert_eq!(
+        diagnostics(&events_of(&out)),
+        [(
+            "unattributed_thread_frame".to_owned(),
+            "turn/plan/updated".to_owned()
+        )]
+    );
     let out = translator.feed("turn/plan/updated", &plan_update("thread-main", plan));
     assert_eq!(todo_events(&out).len(), 1);
     assert!(!format!("{out:?}").contains(marker), "{out:?}");
@@ -1200,7 +1211,8 @@ fn unknown_notification_carries_param_names_and_never_values() {
     let secret = "sk-live-SECRET-0123456789";
     let mut translator = Translator::new("01a171c1-daf4-7b03-9198-680fc7eb0395", "gpt-6-luna");
     let params = serde_json::json!({
-        "threadId": "t", "apiKey": secret, "nested": {"password": secret}, "list": [secret],
+        "threadId": "01a171c1-daf4-7b03-9198-680fc7eb0395", "apiKey": secret,
+        "nested": {"password": secret}, "list": [secret],
     });
     let out = translator.feed("thread/futureThing", &params);
     let diagnostics: Vec<&AdapterEvent> = out
@@ -1304,6 +1316,415 @@ fn async_question_stays_a_text_block_and_raises_a_diagnostic() {
         [(
             "codex_async_question".to_owned(),
             "codex_async_question".to_owned()
+        )]
+    );
+}
+
+// --- субагенты: настоящие кадры 0.164, thread/started потомка не приходит ---
+
+const V2_MAIN: &str = "01a196cc-ca97-7d43-93e6-a7e30f1cf261";
+const V2_TURN: &str = "01a196cc-caf5-76c2-b655-aeafe76b84fa";
+const V1_MAIN: &str = "01a196cb-4cb9-7f73-96ef-5462ba5d6a1a";
+const V1_TURN: &str = "01a196cc-3ec9-7b30-abfe-cbbac2c028aa";
+const LATE_MAIN: &str = "01a196cf-4e55-71e0-a23e-aa1bcde289f6";
+const LATE_TURN: &str = "01a196cf-4e70-7e82-9f5f-12ad7315cd1e";
+
+struct SpawnCall {
+    block: Uuid,
+    agent: String,
+    summary: Option<String>,
+    model: String,
+}
+
+fn spawn_calls(events: &[&AdapterEvent]) -> Vec<SpawnCall> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name,
+                agent,
+                summary,
+                model,
+                ..
+            } if tool_name.as_deref() == Some("spawn_agent") => Some(SpawnCall {
+                block: *block_id,
+                agent: agent.clone(),
+                summary: summary.clone(),
+                model: model.clone(),
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn child_blocks(events: &[&AdapterEvent], call: Uuid) -> Vec<(BlockKind, String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::BlockStarted {
+                kind,
+                parent: Some(parent),
+                agent,
+                model,
+                ..
+            } if *parent == call && agent != "orchestrator" => {
+                Some((kind.clone(), agent.clone(), model.clone()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+// Итог потомка: блок результата под вызовом и его финал.
+fn spawn_result(events: &[&AdapterEvent], call: Uuid) -> Option<(String, Option<String>, String)> {
+    let (block, agent) = events.iter().find_map(|event| match event {
+        AdapterEvent::BlockStarted {
+            block_id,
+            kind: BlockKind::ToolResult,
+            parent: Some(parent),
+            agent,
+            ..
+        } if *parent == call => Some((*block_id, agent.clone())),
+        _ => None,
+    })?;
+    events.iter().find_map(|event| match event {
+        AdapterEvent::BlockFinal {
+            block_id,
+            text,
+            summary,
+        } if *block_id == block => Some((text.clone(), summary.clone(), agent.clone())),
+        _ => None,
+    })
+}
+
+#[test]
+fn subagent_from_activity_item_gets_a_call_a_lane_and_a_result() {
+    let mut translator = Translator::new(V2_MAIN, "gpt-6-luna");
+    translator.begin_turn(V2_TURN, command_id());
+    let out = feed_frames(&mut translator, &codex::replay("subagent_live_v2"));
+    let events = events_of(&out);
+    let calls = spawn_calls(&events);
+    assert_eq!(calls.len(), 1, "{out:?}");
+    assert_eq!(calls[0].agent, "orchestrator");
+    assert_eq!(
+        calls[0].summary, None,
+        "the task text is encrypted in 0.164"
+    );
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockFinal { block_id, text, .. }
+            if *block_id == calls[0].block && text == "/root/lister"
+    )));
+    let lane = child_blocks(&events, calls[0].block);
+    assert!(
+        lane.iter()
+            .all(|(_, agent, model)| agent == "lister" && model == "gpt-6-luna"),
+        "{lane:?}"
+    );
+    assert!(
+        lane.iter()
+            .any(|(kind, ..)| matches!(kind, BlockKind::ToolCall))
+    );
+    assert!(
+        lane.iter()
+            .any(|(kind, ..)| matches!(kind, BlockKind::Text))
+    );
+    assert_eq!(
+        spawn_result(&events, calls[0].block),
+        Some(("listed".to_owned(), None, "orchestrator".to_owned()))
+    );
+    assert_eq!(diagnostics(&events), []);
+    match translator.finish_turn() {
+        AdapterEvent::RunFinished { usage, .. } => {
+            let child = usage
+                .iter()
+                .find(|entry| entry.agent == "lister")
+                .expect("child usage");
+            assert_eq!(child.model, "gpt-6-luna");
+            assert_eq!(child.output_tokens, 38);
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn subagent_from_spawn_tool_call_has_its_model_prompt_and_lane() {
+    let mut translator = Translator::new(V1_MAIN, "gpt-5.6-luna");
+    translator.begin_turn(V1_TURN, command_id());
+    let out = feed_frames(&mut translator, &codex::replay("subagent_live_v1"));
+    let events = events_of(&out);
+    let calls = spawn_calls(&events);
+    assert_eq!(calls.len(), 1, "{out:?}");
+    assert_eq!(
+        calls[0].summary.as_deref(),
+        Some("Run the shell command `ls`, then reply with exactly the word `listed`.")
+    );
+    assert_ne!(
+        calls[0].model, "",
+        "model is empty only in the started frame"
+    );
+    let lane = child_blocks(&events, calls[0].block);
+    assert!(
+        lane.iter()
+            .all(|(_, agent, model)| agent == "subagent" && model == "gpt-5.6-luna"),
+        "{lane:?}"
+    );
+    assert!(
+        lane.iter()
+            .any(|(kind, ..)| matches!(kind, BlockKind::ToolCall))
+    );
+    assert_eq!(
+        spawn_result(&events, calls[0].block).map(|(text, ..)| text),
+        Some("listed".to_owned())
+    );
+    assert_eq!(diagnostics(&events), []);
+}
+
+#[test]
+fn child_frames_ahead_of_the_receiver_id_keep_their_order_and_lane() {
+    let mut translator = Translator::new("thread-main", "gpt-5.6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed("item/started", &spawn_item("inProgress", &[]));
+    let call = spawn_calls(&events_of(&out))[0].block;
+    let early = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-child-1", "turnId": "turn-child", "item": {
+            "id": "msg-c1", "type": "agentMessage", "text": ""}}),
+    );
+    assert!(events_of(&early).is_empty(), "{early:?}");
+    let out = translator.feed(
+        "item/completed",
+        &spawn_item("completed", &["thread-child-1"]),
+    );
+    let events = events_of(&out);
+    assert_eq!(child_blocks(&events, call).len(), 1, "{out:?}");
+    assert_eq!(diagnostics(&events), []);
+}
+
+#[test]
+fn subagent_outliving_the_turn_stays_attributed_and_leaves_the_phase_alone() {
+    let mut translator = Translator::new(LATE_MAIN, "gpt-6-luna");
+    translator.begin_turn(LATE_TURN, command_id());
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut ended = false;
+    for frame in codex::replay("subagent_live_outlives_turn") {
+        let Frame::Out(data) = frame else { continue };
+        let method = data["method"].as_str().unwrap().to_owned();
+        let out = translator.feed(&method, &data["params"]);
+        let finished = out
+            .iter()
+            .any(|item| matches!(item, Translated::TurnCompleted { .. }));
+        if ended {
+            after.extend(out);
+        } else {
+            before.extend(out);
+        }
+        if finished {
+            translator.finish_turn();
+            ended = true;
+        }
+    }
+    let calls = spawn_calls(&events_of(&before));
+    assert_eq!(calls.len(), 1);
+    let late = events_of(&after);
+    assert_eq!(
+        spawn_result(&late, calls[0].block).map(|(text, ..)| text),
+        Some("woke".to_owned()),
+        "{after:?}"
+    );
+    assert!(
+        !late.iter().any(|e| matches!(e, AdapterEvent::Phase { .. })),
+        "the idle session must not look busy: {after:?}"
+    );
+    assert_eq!(
+        diagnostics(&late),
+        [(
+            "child_usage_outside_turn".to_owned(),
+            "child_usage_outside_turn".to_owned()
+        )]
+    );
+}
+
+fn activity(thread: &str, turn: &str, child: &str, kind: &str) -> Value {
+    json!({"threadId": thread, "turnId": turn, "item": {
+        "id": format!("act-{child}-{kind}"), "type": "subAgentActivity", "kind": kind,
+        "agentThreadId": child, "agentPath": "/root/a", "model": "gpt-6-luna"}})
+}
+
+fn child_turn_end(child: &str, status: &str, error: Value) -> Value {
+    json!({"threadId": child, "turn": {"id": "turn-child", "status": status, "error": error,
+        "items": [{"type": "agentMessage", "id": "m", "text": "partial"}]}})
+}
+
+#[test]
+fn child_turn_status_reaches_the_result_block() {
+    for (status, error, summary) in [
+        ("failed", json!({"message": "boom"}), Some("error")),
+        ("interrupted", Value::Null, Some("interrupted")),
+        ("completed", Value::Null, None),
+    ] {
+        let mut translator = Translator::new("thread-main", "gpt-6-luna");
+        translator.begin_turn("turn-main", command_id());
+        let out = translator.feed(
+            "item/started",
+            &activity("thread-main", "turn-main", "child", "started"),
+        );
+        let call = spawn_calls(&events_of(&out))[0].block;
+        let out = translator.feed("turn/completed", &child_turn_end("child", status, error));
+        let (text, got, _) = spawn_result(&events_of(&out), call).expect("result");
+        assert_eq!(text, "partial");
+        assert_eq!(got.as_deref(), summary, "{status}");
+    }
+}
+
+#[test]
+fn failed_spawn_tool_call_reports_an_error_result() {
+    let mut translator = Translator::new("thread-main", "gpt-5.6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed("item/started", &spawn_item("inProgress", &[]));
+    let call = spawn_calls(&events_of(&out))[0].block;
+    let out = translator.feed("item/completed", &spawn_item("failed", &[]));
+    let (_, summary, _) = spawn_result(&events_of(&out), call).expect("result");
+    assert_eq!(summary.as_deref(), Some("error"));
+}
+
+#[test]
+fn nested_subagent_hangs_under_the_call_of_its_parent() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed(
+        "item/started",
+        &activity("thread-main", "turn-main", "child", "started"),
+    );
+    let outer = spawn_calls(&events_of(&out))[0].block;
+    let out = translator.feed(
+        "item/started",
+        &activity("child", "turn-child", "grandchild", "started"),
+    );
+    let events = events_of(&out);
+    let inner = spawn_calls(&events);
+    assert_eq!(inner.len(), 1);
+    assert_eq!(inner[0].agent, "a");
+    assert!(events.iter().any(|e| matches!(
+        e,
+        AdapterEvent::BlockStarted { block_id, parent: Some(parent), .. }
+            if *block_id == inner[0].block && *parent == outer
+    )));
+}
+
+#[test]
+fn activity_of_an_unknown_child_adopts_it() {
+    // Потомок прошлого процесса вернулся через followup_task.
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed(
+        "item/started",
+        &activity("thread-main", "turn-main", "child", "interacted"),
+    );
+    assert_eq!(spawn_calls(&events_of(&out)).len(), 1, "{out:?}");
+}
+
+#[test]
+fn restart_closes_the_calls_of_running_children() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = translator.feed(
+        "item/started",
+        &activity("thread-main", "turn-main", "child", "started"),
+    );
+    let call = spawn_calls(&events_of(&out))[0].block;
+    let closed = translator.abandon_children();
+    let closed: Vec<&AdapterEvent> = closed.iter().collect();
+    assert_eq!(
+        spawn_result(&closed, call)
+            .and_then(|(_, summary, _)| summary)
+            .as_deref(),
+        Some("interrupted")
+    );
+    assert!(translator.abandon_children().is_empty());
+}
+
+#[test]
+fn unattributed_thread_frames_end_in_one_diagnostic_per_method() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let delta = json!({"threadId": "stranger", "turnId": "t", "itemId": "i", "delta": "secret"});
+    for _ in 0..3 {
+        let held = translator.feed("item/agentMessage/delta", &delta);
+        assert!(events_of(&held).is_empty(), "{held:?}");
+    }
+    let out = translator.feed(
+        "turn/completed",
+        &json!({"threadId": "thread-main",
+            "turn": {"id": "turn-main", "status": "completed", "items": []}}),
+    );
+    let events = events_of(&out);
+    let found: Vec<_> = events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Diagnostic {
+                kind,
+                event_type,
+                field_names,
+                ..
+            } => Some((*kind, event_type.clone(), field_names.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 1, "{out:?}");
+    assert_eq!(found[0].0, "unattributed_thread_frame");
+    assert_eq!(found[0].1, "item/agentMessage/delta");
+    assert!(found[0].2.contains(&"delta".to_owned()));
+    assert!(!format!("{found:?}").contains("secret"));
+}
+
+#[test]
+fn unattributed_frames_outside_a_turn_are_reported_at_once() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "stranger", "turnId": "t", "item": {
+            "id": "m", "type": "agentMessage", "text": ""}}),
+    );
+    assert_eq!(
+        diagnostics(&events_of(&out)),
+        [(
+            "unattributed_thread_frame".to_owned(),
+            "item/started".to_owned()
+        )]
+    );
+}
+
+#[test]
+fn unattributed_buffer_is_bounded() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let delta = json!({"threadId": "stranger", "turnId": "t", "itemId": "i", "delta": "x"});
+    let mut reported = 0;
+    for _ in 0..2_000 {
+        reported += diagnostics(&events_of(
+            &translator.feed("item/agentMessage/delta", &delta),
+        ))
+        .len();
+    }
+    assert_eq!(reported, 1, "overflow is reported, not silently dropped");
+}
+
+#[test]
+fn another_thread_without_a_parent_raises_a_diagnostic() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    let out = translator.feed(
+        "thread/started",
+        &json!({"thread": {"id": "other", "parentThreadId": null}}),
+    );
+    assert_eq!(
+        diagnostics(&events_of(&out)),
+        [(
+            "unattributed_thread_frame".to_owned(),
+            "thread/started".to_owned()
         )]
     );
 }
