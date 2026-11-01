@@ -192,6 +192,10 @@ fn validate_refs(
         .map_err(|_| ScheduleError::InvalidContent("invalid_content"))
 }
 
+/// Переполненная очередь подписчика не повод потерять итог другой сессии: такое задание
+/// ждёт её разбора, пока срок не выйдет, и в счёт отказов не идёт.
+const SESSION_TASK_QUEUE_PATIENCE: TimeDelta = TimeDelta::hours(24);
+
 #[derive(Clone, sqlx::FromRow)]
 struct JobRow {
     id: Uuid,
@@ -204,6 +208,7 @@ struct JobRow {
     attempts: i32,
     failures: i32,
     result: Option<Value>,
+    created_at: DateTime<Utc>,
 }
 impl JobRow {
     fn message(&self) -> Result<ScheduledMessage, sqlx::Error> {
@@ -618,14 +623,20 @@ impl Scheduler {
             }
         };
         if let Some(mut current) = current {
-            current.failures = current.failures.saturating_add(1);
+            let waits_for_queue = current.kind == "session_task" && reason == "queue_full";
+            if !waits_for_queue {
+                current.failures = current.failures.saturating_add(1);
+            }
             if matches!(current.kind.as_str(), "message" | "session_task") {
                 current.attempts = current.attempts.saturating_add(1);
             }
             let release_job = matches!(current.kind.as_str(), "wake" | "limit_check");
-            if permanent
-                || (!release_job && current.failures as u32 >= self.service.config.max_attempts)
-            {
+            let exhausted = if waits_for_queue {
+                now - current.created_at >= SESSION_TASK_QUEUE_PATIENCE
+            } else {
+                !release_job && current.failures as u32 >= self.service.config.max_attempts
+            };
+            if permanent || exhausted {
                 if current.kind == "message" {
                     if let Err(error) = self
                         .finish(&mut tx, current, "failed", json!({"error":reason}))
@@ -1019,6 +1030,7 @@ mod tests {
             attempts: 0,
             failures: 0,
             result: None,
+            created_at: chrono::Utc::now(),
         };
         sqlx::query(
             "insert into scheduled_jobs (id, owner_id, conversation_id, kind, run_at, payload, attempts, failures)
