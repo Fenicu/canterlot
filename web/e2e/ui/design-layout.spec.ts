@@ -311,6 +311,8 @@ test.describe('листы и панели', () => {
     const body = dialog.locator('.body');
     const title = dialog.getByRole('heading', { name: 'Настройки сессии' });
     const footer = dialog.locator('.footer-action');
+    // Лист въезжает снизу: заголовок сравнивается только после конца анимации.
+    await dialog.evaluate((node) => Promise.all(node.getAnimations().map((animation) => animation.finished)));
     const top = (await title.boundingBox())!.y;
     await body.evaluate((node) => { node.scrollTop = node.scrollHeight; });
     expect((await title.boundingBox())!.y).toBe(top);
