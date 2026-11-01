@@ -1,5 +1,6 @@
 import { providerLabel } from '#lib/format/labels.js';
 import type { components } from '#lib/api/generated/openapi.js';
+import { remainingPct } from '#lib/stores/limits.js';
 type Series = components['schemas']['ProviderSeries'];
 type Usage = components['schemas']['UsageDay'];
 
@@ -14,11 +15,11 @@ export function chartModel(series: Series[], days: string[], zone: string) {
   return series.map(item => {
     const points = (values: Series['five_hour']) => {
       const map = new Map<string, number>();
-      for (const point of [...values].sort((a, b) => Date.parse(a.observed_at) - Date.parse(b.observed_at))) map.set(localDay(new Date(point.observed_at), zone), Math.max(0, Math.min(100, point.used_permille / 10)));
+      for (const point of [...values].sort((a, b) => Date.parse(a.observed_at) - Date.parse(b.observed_at))) map.set(localDay(new Date(point.observed_at), zone), remainingPct(point.used_permille));
       return map;
     };
     const five = points(item.five_hour); const weekly = points(item.weekly);
-    return { provider: item.provider, days: days.map(day => ({ day, five: five.get(day) ?? null, weekly: weekly.get(day) ?? null })) };
+    return { provider: item.provider, hasFive: five.size > 0, days: days.map(day => ({ day, five: five.get(day) ?? null, weekly: weekly.get(day) ?? null })) };
   });
 }
 export { providerLabel as providerName } from '#lib/format/labels.js';

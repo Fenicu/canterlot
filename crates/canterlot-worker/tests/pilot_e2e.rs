@@ -464,6 +464,7 @@ impl Pilot {
             data_dir: root.path().join("store"),
             machine: MachineConfig {
                 metrics_interval: options.metrics_interval,
+                ..Default::default()
             },
             attachments: Default::default(),
             claude_code: None,

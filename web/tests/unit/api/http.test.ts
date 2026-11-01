@@ -348,7 +348,11 @@ describe("api/http", () => {
       new Uint8Array([1]),
     );
     await http("POST", "/api/v1/conversations/c-1/read?seq=10", { seq: "10" });
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await http("POST", "/api/v1/limits/refresh");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    await expect(http("POST", "/api/v1/limits/refresh-all")).rejects.toThrow(
+      /idempotencyKey/,
+    );
   });
 
   it("malformed_error_envelope_is_an_unknown_outcome", async () => {

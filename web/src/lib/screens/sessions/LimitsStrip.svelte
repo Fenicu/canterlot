@@ -1,8 +1,13 @@
 <script lang="ts">
+  import { onDestroy } from 'svelte';
   import { resolve } from '$app/paths';
   import Icon from '#lib/ui/Icon.svelte';
+  import Gauge from '#lib/ui/Gauge.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
+  import { refreshLimits } from '#lib/api/client.js';
+  import { ApiError } from '#lib/api/http.js';
   import { limitStrip } from './limitsText';
-  import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
+  import type { LimitThresholds, MeterView, ProviderLimits } from '#lib/stores/limits.js';
 
   let {
     providers,
@@ -18,32 +23,86 @@
     compact?: boolean;
   } = $props();
 
+  const WAIT_FOR_READING_MS = 10_000;
   const view = $derived(limitStrip(providers, now, thresholds, { prefer }));
   const shown = $derived(compact ? view.rows.slice(0, 1) : view.rows);
+
+  let pending = $state(false);
+  let note = $state('');
+  let baseline = 0;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  function finish(message: string): void {
+    clearTimeout(timer);
+    pending = false;
+    note = message;
+  }
+
+  // Новое показание приходит событием хаба: оно и закрывает ожидание.
+  $effect(() => {
+    if (pending && view.updatedAt > baseline) finish('');
+  });
+
+  async function refresh(): Promise<void> {
+    if (pending) return;
+    pending = true;
+    note = '';
+    baseline = view.updatedAt;
+    try {
+      await refreshLimits();
+    } catch (error) {
+      finish(failure(error));
+      return;
+    }
+    timer = setTimeout(() => finish('Новых данных пока нет'), WAIT_FOR_READING_MS);
+  }
+
+  function failure(error: unknown): string {
+    if (error instanceof ApiError && error.code === 'too_many_requests') return 'Недавно уже обновляли, повторите через несколько секунд';
+    if (error instanceof ApiError && error.code === 'machine_unavailable') return 'Воркер недоступен';
+    return 'Не удалось обновить лимиты';
+  }
+
+  onDestroy(() => clearTimeout(timer));
 </script>
+
+{#snippet meter(tag: string, name: string, m: MeterView)}
+  <span class="meter" data-stale={m.stale || undefined} data-known={m.known}>
+    <span class="tag">{tag}</span>
+    <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
+    <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span>{m.text}</b>
+    {#if m.reset}<span class="reset">{m.reset}</span>{/if}
+  </span>
+{/snippet}
 
 {#if providers.length > 0}
   <details class="limits" data-tone={view.tone}>
     <summary>
       <span class="rows">
-        {#each shown as row (row.label)}
-          {#if row.empty}
-            <span class="row">{compact ? 'Лимиты' : row.label} · нет данных</span>
-          {:else}
-            <span class="row">{compact ? 'Лимиты ·' : row.label} <span class="pair">5ч <b class:hot={row.hot.fiveHour}>{row.fiveHour}</b></span> · <span class="pair">неделя <b class:hot={row.hot.weekly}>{row.weekly}</b></span>{row.reserve ? ' · ' : ''}{#if row.reserve}<span class="reserve">резерв</span>{/if}</span>
-          {/if}
+        {#each shown as row (row.provider)}
+          <span class="row">
+            <span class="name">{compact ? 'Лимиты' : row.label}</span>
+            <span class="meters">
+              {#if row.empty}
+                <span class="none">нет данных</span>
+              {:else}
+                {#if !row.five.absent}{@render meter('5ч', row.label, row.five)}{/if}
+                {@render meter('нед', row.label, row.week)}
+                {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
+              {/if}
+            </span>
+          </span>
         {/each}
       </span>
       <span class="chevron"><Icon name="down" /></span>
     </summary>
     <div class="open">
-      <p>{view.details}</p>
-
-      {#if view.staleNote}
-        <p>{view.staleNote}</p>
-      {/if}
-
-      <a href={resolve('limits')}>История лимитов</a>
+      <div class="status">
+        <span class="updated">{view.updated || 'данных пока нет'}</span>
+        <span class="refresh" class:pending><IconButton icon="retry" label={pending ? 'Обновляю лимиты' : 'Обновить лимиты'} inert={pending} onclick={refresh} /></span>
+        <a href={resolve('limits')}>История лимитов</a>
+      </div>
+      <p class="note" role="status">{note}</p>
     </div>
   </details>
 {/if}
@@ -67,15 +126,28 @@
   }
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
-  .rows { display: flex; flex-wrap: wrap; gap: var(--s1) var(--s6); min-width: 0; }
-  :global([data-pane='list']) .rows { flex-direction: column; }
-  .pair { white-space: nowrap; }
-  b { font-weight: var(--weight-semibold); }
-  .hot, .reserve { color: var(--warning); }
+  .rows { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
+  .row { display: grid; grid-template-columns: calc(var(--s2) * 11) 1fr; align-items: baseline; gap: var(--s1) var(--s4); }
+  .meters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s5); min-width: 0; }
+  .limits[open] .meters { flex-direction: column; align-items: flex-start; }
+  .meter { display: inline-flex; align-items: center; gap: var(--s2); white-space: nowrap; --gauge-width: calc(var(--s4) * 4); }
+  .tag { color: var(--muted); font-size: var(--fs-xs); min-width: calc(var(--s4) * 3); }
+  .bar { display: inline-flex; }
+  .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; min-width: calc(var(--s4) * 3.5); }
+  .pct[data-tone='warning'], .reserve { color: var(--warning); }
+  .pct[data-tone='danger'] { color: var(--danger); }
+  .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
+  .none { color: var(--muted); }
+  .reset { display: none; color: var(--muted); }
+  .limits[open] .reset { display: inline; }
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }
   .chevron :global(svg) { width: var(--icon-small); height: var(--icon-small); }
   .limits[open] .chevron { transform: rotate(180deg); }
   .open { padding-bottom: var(--s4); }
-  p { margin: 0 0 var(--s2); white-space: pre-line; color: var(--secondary); }
+  .status { display: flex; align-items: center; gap: var(--s4); color: var(--secondary); }
+  .status a { margin-inline-start: auto; }
+  .refresh.pending :global(svg) { animation: spin var(--duration-stage-spin) var(--ease-stage-spin) infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .note { margin: var(--s0); min-height: var(--s0); color: var(--secondary); }
   a { display: inline-flex; align-items: center; min-height: var(--target); color: var(--accent-link); }
 </style>

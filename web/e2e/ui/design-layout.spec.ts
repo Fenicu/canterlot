@@ -437,12 +437,13 @@ test.describe('лимиты и баннеры', () => {
     return { hub, api, ids };
   }
 
-  test('limits_strip_colours_only_the_hot_value_and_keeps_providers_apart', async ({ page }) => {
+  test('limits_strip_colours_only_the_low_value_and_keeps_providers_apart', async ({ page }) => {
     await list(page);
     const strip = page.locator('.limits').first();
     await expect(strip.locator('.row')).toHaveCount(2);
-    await expect(strip.locator('b.hot')).toHaveText(['96%']);
-    await expect(strip.locator('.pair')).toHaveCount(4);
+    await expect(strip.locator('.pct[data-tone="danger"]')).toHaveText([/4%/]);
+    await expect(strip.locator('.pct[data-tone="warning"]')).toHaveCount(0);
+    await expect(strip.locator('.meter')).toHaveCount(4);
     await strip.locator('summary').click();
     const radius = await strip.evaluate((node) => parseFloat(getComputedStyle(node).borderTopLeftRadius));
     expect(radius).toBeLessThan(40);

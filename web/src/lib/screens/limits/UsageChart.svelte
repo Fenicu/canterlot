@@ -2,31 +2,32 @@
   import type { components } from '#lib/api/generated/openapi.js';
   import { chartModel, providerName } from './model.js';
   import { styleProperty } from '#lib/ui/style-property.js';
-  let { series, days, zone }: { series: components['schemas']['ProviderSeries'][]; days: string[]; zone: string } = $props();
-  const model = $derived(chartModel(series, days, zone));
-  const summary = $derived(`Дневные снимки лимитов. ${model.map(p => {
+  let { series, days, zone, noFiveHour = [] }: { series: components['schemas']['ProviderSeries'][]; days: string[]; zone: string; noFiveHour?: string[] } = $props();
+  // У провайдера без пятичасового окна 5ч рисуется только пока в показанных днях есть снимки этого окна.
+  const model = $derived(chartModel(series, days, zone).map(p => ({ ...p, showFive: p.hasFive || !noFiveHour.includes(p.provider) })));
+  const summary = $derived(`Дневные снимки лимитов, осталось. ${model.map(p => {
     const range = (values: (number | null)[]) => {
       const known = values.filter((v): v is number => v !== null);
       return known.length ? `от ${Math.min(...known).toLocaleString('ru-RU')} до ${Math.max(...known).toLocaleString('ru-RU')}%` : 'нет данных';
     };
-    return `${providerName(p.provider)}: 5 часов ${range(p.days.map(d => d.five))}, неделя ${range(p.days.map(d => d.weekly))}`;
+    return `${providerName(p.provider)}: ${p.showFive ? `5 часов ${range(p.days.map(d => d.five))}, ` : ''}неделя ${range(p.days.map(d => d.weekly))}`;
   }).join('. ')}`);
 </script>
 <div class="chart" role="img" aria-label={summary}>
   <div class="legend" aria-hidden="true">
-    {#each model as provider (provider.provider)}<span><i class:codex={provider.provider === 'codex'}></i>{providerName(provider.provider)} · 5ч</span><span><i class="week" class:codex={provider.provider === 'codex'}></i>неделя</span>{/each}
+    {#each model as provider (provider.provider)}{#if provider.showFive}<span><i class:codex={provider.provider === 'codex'}></i>{providerName(provider.provider)} · 5ч</span><span><i class="week" class:codex={provider.provider === 'codex'}></i>неделя</span>{:else}<span><i class="week" class:codex={provider.provider === 'codex'}></i>{providerName(provider.provider)} · неделя</span>{/if}{/each}
   </div>
   <div class="chart-wrap" aria-hidden="true"><div class="axis"><span>100%</span><span>50%</span><span>0</span></div><div class="plot">
     {#each days as day, index (day)}<div class="day"><div class="bars">
       {#each model as provider (provider.provider)}
         {@const point = provider.days[index]!}
-        <span class="bar" class:codex={provider.provider === 'codex'} class:missing={point.five === null} data-series="five" use:styleProperty={{ name: '--fill', value: `${point.five ?? 0}%` }}></span>
+        {#if provider.showFive}<span class="bar" class:codex={provider.provider === 'codex'} class:missing={point.five === null} data-series="five" use:styleProperty={{ name: '--fill', value: `${point.five ?? 0}%` }}></span>{/if}
         <span class="bar week" class:codex={provider.provider === 'codex'} class:missing={point.weekly === null} data-series="weekly" use:styleProperty={{ name: '--fill', value: `${point.weekly ?? 0}%` }}></span>
       {/each}
     </div><small>{Number(day.slice(-2))}</small></div>{/each}
   </div></div>
 </div>
-<div class="sr-only"><table aria-label="Дневные снимки лимитов"><thead><tr><th>День</th><th>Провайдер</th><th>5 часов</th><th>Неделя</th></tr></thead><tbody>
+<div class="sr-only"><table aria-label="Дневные снимки лимитов"><thead><tr><th>День</th><th>Провайдер</th><th>5 часов, осталось</th><th>Неделя, осталось</th></tr></thead><tbody>
   {#each model as provider (provider.provider)}{#each provider.days as day (day.day)}<tr><th>{day.day}</th><td>{providerName(provider.provider)}</td><td>{day.five === null ? 'Нет данных' : `${day.five.toLocaleString('ru-RU')}%`}</td><td>{day.weekly === null ? 'Нет данных' : `${day.weekly.toLocaleString('ru-RU')}%`}</td></tr>{/each}{/each}
 </tbody></table></div>
 <style>

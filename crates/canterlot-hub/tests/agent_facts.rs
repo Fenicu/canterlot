@@ -720,6 +720,7 @@ async fn observation_time_is_machine_time_converted_with_the_session_offset(
         c.tx.send(ControlUp {
             msg: Some(control_up::Msg::LimitsReport(LimitsReport {
                 observations: vec![observation(if skew < 0 { 960 } else { 970 }, machine_ms)],
+                ..Default::default()
             })),
         })
         .await?;
@@ -838,6 +839,7 @@ async fn limits_report_from_poll_is_stored_with_poll_source(pool: PgPool) -> Tes
     c.tx.send(ControlUp {
         msg: Some(control_up::Msg::LimitsReport(LimitsReport {
             observations: vec![observation(920, Utc::now().timestamp_millis())],
+            ..Default::default()
         })),
     })
     .await?;
@@ -1143,6 +1145,55 @@ async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot(
+    pool: PgPool,
+) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let earlier = Utc::now() - Duration::minutes(30);
+    record(&pool, &s, &obs(&s, 530, earlier)).await;
+    let mut five = obs(&s, 440, earlier);
+    five.window = Window::FiveHour;
+    record(&pool, &s, &five).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let mut c = connect(&hub, &s, Uuid::now_v7(), true, now_ms).await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: Vec::new(),
+            absent: vec![canterlot_proto::worker::v1::LimitAbsence {
+                provider: "claude".into(),
+                window: LimitWindow::FiveHour as i32,
+                observed_machine_ms: now_ms + 1000,
+            }],
+        })),
+    })
+    .await?;
+    wait_until(
+        &pool,
+        "select count(*) from provider_limits where five_hour_absent_at is not null",
+    )
+    .await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineReport(report())),
+    })
+    .await?;
+    let down = tokio::time::timeout(WAIT, c.stream.message())
+        .await??
+        .unwrap();
+    let Some(control_down::Msg::LimitsSnapshot(snapshot)) = down.msg else {
+        panic!("snapshot")
+    };
+    assert_eq!(
+        snapshot.current.len(),
+        1,
+        "only the weekly window is sent on"
+    );
+    assert_eq!(snapshot.current[0].window, LimitWindow::Weekly as i32);
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn start_execution_carries_pilot_v1_only_when_the_sending_session_negotiated_it(
     pool: PgPool,
 ) -> TestResult {
@@ -1423,6 +1474,25 @@ async fn an_equal_newer_reading_refreshes_the_time_without_limits_changed(
     );
     let moved = record(&pool, &s, &obs(&s, 961, later + Duration::minutes(1))).await;
     assert!(moved.provider_changed);
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_equal_reading_after_a_pause_still_emits_limits_changed(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    let at = DateTime::from_timestamp_micros(Utc::now().timestamp_micros()).unwrap();
+    record(&pool, &s, &obs(&s, 960, at)).await;
+    let later = at + Duration::minutes(5);
+    let r = record(&pool, &s, &obs(&s, 960, later)).await;
+    assert!(!r.provider_changed);
+    assert!(r.refreshed);
+    assert_eq!(
+        count(
+            &pool,
+            "select count(*) from events where kind='limits_changed'"
+        )
+        .await,
+        2
+    );
     Ok(())
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

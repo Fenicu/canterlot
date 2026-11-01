@@ -19,12 +19,12 @@ describe('Task 9b', () => {
     expect(diskView({ label: 'root_0', free_bytes: 150, total_bytes: 1000 }, ['/srv'], 85)).toMatchObject({ warn: true, label: '/srv', pct: 85 });
     expect(diskView({ label: 'data', free_bytes: 0, total_bytes: 0 }, [], 85).pct).toBeNull();
   });
-  it('limits_chart_model_scales_both_series', () => {
+  it('limits_chart_model_shows_the_remaining_share_of_both_series', () => {
     const days = ['2026-10-28', '2026-10-29'];
     const series = [{ provider: 'claude', five_hour: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 340, used_pct: 34 }], weekly: [{ observed_at: '2026-10-29T12:00:00Z', used_permille: 960, used_pct: 96 }] }];
     const model = chartModel(series, days, 'UTC');
     expect(model[0]?.days[0]).toMatchObject({ five: null, weekly: null });
-    expect(model[0]?.days[1]).toMatchObject({ five: 34, weekly: 96 });
+    expect(model[0]?.days[1]).toMatchObject({ five: 66, weekly: 4 });
   });
   it('usage_table_orders_by_weekly_delta_and_marks_estimates_and_agent_rows', () => {
     const rows = usageRows([usage({ weekly_delta_permille: 2, agent: 'agent-1', model: 'haiku', overlapped_runs: 1 }), usage({ weekly_delta_permille: 32 }), usage({ day: '2026-10-28' })], '2026-10-29', new Map([['abcdef12-0000', { title: 'Поток' }]]));

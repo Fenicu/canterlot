@@ -1265,6 +1265,48 @@ describe("stores task 4", () => {
     ).toBe(20);
   });
 
+  it("limits_changed_without_a_value_marks_the_five_hour_window_absent_and_a_value_brings_it_back", () => {
+    const list = listOf();
+    const week = {
+      used_permille: 540,
+      resets_at: null,
+      observed_at: "2026-10-28T12:00:00.000Z",
+    };
+    list.limits = [
+      {
+        provider: "claude",
+        five_hour: { ...week, used_permille: 440 },
+        weekly: week,
+        weekly_reserve_active: false,
+      },
+    ];
+    const change = (used: number | null, seq: string) => ({
+      event: ev(
+        "limits_changed",
+        {
+          provider: "claude",
+          window: "five_hour",
+          used_permille: used,
+          resets_at: null,
+          observed_at: "2026-10-28T12:05:00.000Z",
+          weekly_reserve_active: false,
+          weekly_reserve_resets_at: null,
+        },
+        seq,
+      ),
+      overlap: false,
+    });
+    list.applier.applyEvents([change(null, "4")]);
+    const gone = list.limits.find((item) => item.provider === "claude")!;
+    expect(gone.five_hour).toBeNull();
+    expect(gone.five_hour_absent).toBe(true);
+    expect(gone.weekly!.used_permille).toBe(540);
+    list.applier.applyEvents([change(100, "5")]);
+    const back = list.limits.find((item) => item.provider === "claude")!;
+    expect(back.five_hour!.used_permille).toBe(100);
+    expect(back.five_hour_absent).toBe(false);
+  });
+
   it("conversation_updated_moves_items_between_filters", async () => {
     const list = listOf();
     list.applier.applySnapshot(
@@ -1676,19 +1718,19 @@ describe("stores task 4", () => {
     expect(store.items.get(machine.id)?.home_dir).toBe("/home/owner");
   });
 
-  it("limit_view_marks_warning_from_configured_thresholds_reserve_and_stale_observations", () => {
+  it("limit_view_marks_low_remaining_reserve_and_stale_observations", () => {
     const now = Date.parse("2026-10-28T12:00:00.000Z");
     const cfg = {
       stale_after_secs: 60,
-      warn_pcts: [70, 90],
-      weekly_reserve_pct: 20,
+      warn_pcts: [80, 95],
+      weekly_reserve_pct: 95,
     };
     const fresh = "2026-10-28T11:59:30.000Z";
     const warning = limitView(
       {
         provider: "anthropic",
         five_hour: {
-          used_permille: 700,
+          used_permille: 850,
           resets_at: "2026-10-30T09:00:00.000Z",
           observed_at: fresh,
         },
@@ -1699,20 +1741,21 @@ describe("stores task 4", () => {
       cfg,
     );
     expect(warning.tone).toBe("warning");
-    expect(warning.fiveHour).toBe("70%");
+    expect(warning.five.text).toBe("15%");
+    expect(warning.week.text).toBe("90%");
     expect(warning.stale).toBe(false);
     const reserve = limitView(
       {
         provider: "anthropic",
         weekly_reserve_active: true,
         five_hour: { used_permille: 10, resets_at: null, observed_at: fresh },
-        weekly: { used_permille: 40, resets_at: null, observed_at: fresh },
+        weekly: { used_permille: 960, resets_at: null, observed_at: fresh },
       },
       now,
       cfg,
     );
     expect(reserve.tone).toBe("reserve");
-    expect(reserve.weekly).toBe("4%");
+    expect(reserve.week.text).toBe("4%");
     const stale = limitView(
       {
         provider: "anthropic",
@@ -2280,7 +2323,7 @@ describe("stores task 4", () => {
     expect(timeline.hasOlder).toBe(true);
   });
 
-  it("window_text_flags_stale_and_hot_correctly", () => {
+  it("window_text_flags_stale_and_low_remaining_correctly", () => {
     const now = Date.parse("2026-10-28T12:00:00.000Z");
     const freshWindow: LimitWindow = {
       observed_at: "2026-10-28T11:59:50.000Z",
@@ -2289,16 +2332,17 @@ describe("stores task 4", () => {
     };
     const view = windowText(freshWindow, now);
     expect(view.stale).toBe(false);
-    expect(view.hot).toBe(false);
+    expect(view.tone).toBe("normal");
+    expect(view.text).toBe("85%");
 
-    const hotWindow: LimitWindow = {
+    const lowWindow: LimitWindow = {
       observed_at: "2026-10-28T11:59:50.000Z",
       resets_at: "2026-10-28T15:00:00.000Z",
       used_permille: 850,
     };
-    const hotView = windowText(hotWindow, now);
-    expect(hotView.stale).toBe(false);
-    expect(hotView.hot).toBe(true);
+    const lowView = windowText(lowWindow, now);
+    expect(lowView.stale).toBe(false);
+    expect(lowView.tone).toBe("warning");
 
     const staleWindow: LimitWindow = {
       observed_at: "2026-10-28T11:50:00.000Z",

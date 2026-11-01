@@ -971,8 +971,7 @@ impl Ingest {
                             .map_err(pilot_error)?;
                     Ok((
                         at.is_none(),
-                        result
-                            .provider_changed
+                        (result.provider_changed || result.refreshed)
                             .then_some((observation.provider, observation.window)),
                         at.is_none(),
                     ))
@@ -2041,6 +2040,19 @@ impl crate::grpc::Ingest for Ingest {
             ));
         }
         observations.sort_by(|(a, _), (b, _)| a.provider.cmp(&b.provider));
+        // Отсутствие окна принимается только со сверенными часами: без них не понять, не устарел ли отчёт.
+        let absences: Vec<(String, chrono::DateTime<chrono::Utc>)> = report
+            .absent
+            .into_iter()
+            .filter(|a| a.window == canterlot_proto::worker::v1::LimitWindow::FiveHour as i32)
+            .filter_map(|a| {
+                let at = self
+                    .registry
+                    .as_ref()
+                    .and_then(|r| r.to_hub_time(machine_id, a.observed_machine_ms))?;
+                Some((a.provider, at))
+            })
+            .collect();
         let pool = self.pool.clone();
         let limits = self.limits.clone();
         let outcome = crate::db::in_tx(&pool, move |conn| {
@@ -2051,8 +2063,9 @@ impl crate::grpc::Ingest for Ingest {
                     .await?;
                 let providers: BTreeSet<_> = observations
                     .iter()
-                    .filter(|(o, _)| limits::known_provider(&o.provider))
                     .map(|(o, _)| o.provider.as_str())
+                    .chain(absences.iter().map(|(provider, _)| provider.as_str()))
+                    .filter(|provider| limits::known_provider(provider))
                     .collect();
                 for provider in providers {
                     limits::lock_provider(&mut *conn, provider).await?;
@@ -2065,7 +2078,7 @@ impl crate::grpc::Ingest for Ingest {
                     }
                     let recorded =
                         limits::record_in_tx(&mut *conn, &o, now, &limits, mapped).await?;
-                    if recorded.provider_changed {
+                    if recorded.provider_changed || recorded.refreshed {
                         changed.insert((o.provider, o.window));
                     }
                     if !mapped {
@@ -2075,6 +2088,19 @@ impl crate::grpc::Ingest for Ingest {
                 for (provider, window) in &changed {
                     limits::emit_changed(&mut *conn, owner, provider, *window, Uuid::now_v7())
                         .await?;
+                }
+                for (provider, at) in absences {
+                    if limits::known_provider(&provider) {
+                        limits::record_absence_in_tx(
+                            &mut *conn,
+                            owner,
+                            &provider,
+                            limits::Window::FiveHour,
+                            at,
+                            Uuid::now_v7(),
+                        )
+                        .await?;
+                    }
                 }
                 if unmapped > 0 {
                     events::append(

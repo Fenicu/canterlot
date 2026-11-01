@@ -460,29 +460,31 @@ impl Worker {
         let mut idle_ticker = crate::machine::limits::IdleTicker::default();
         let mut routes: HashMap<String, Arc<dyn crate::machine::limits::LimitsSource>> =
             HashMap::new();
-        if let Some(claude) = &config.claude_code {
-            idle_ticker.register("claude", claude.oauth_poll_interval());
-            routes.insert(
-                "claude".into(),
-                Arc::new(crate::machine::limits::ClaudeOAuthLimitsSource::new(
-                    claude,
-                    live_limits.clone(),
-                )),
-            );
+        let codexbar_path = config.machine.codexbar_path.clone();
+        let limits_interval = config.machine.limits_poll_interval();
+        let codexbar = |fallback: Option<Arc<dyn crate::machine::limits::LimitsSource>>| {
+            Arc::new(crate::machine::codexbar::CodexBarLimitsSource::new(
+                codexbar_path.clone(),
+                limits_interval,
+                fallback,
+            )) as Arc<dyn crate::machine::limits::LimitsSource>
+        };
+        if config.claude_code.is_some() {
+            idle_ticker.register("claude", limits_interval);
+            routes.insert("claude".into(), codexbar(None));
         }
         if let Some(codex) = &config.codex {
-            idle_ticker.register("codex", crate::machine::limits::CODEX_IDLE_TICK_INTERVAL);
+            idle_ticker.register("codex", limits_interval);
             let cache_for_hub = limits_cache.clone();
             let hub_age: crate::machine::limits::HubLimitsAge =
                 Arc::new(move |provider| cache_for_hub.get(provider).map(|c| c.received_at));
-            routes.insert(
-                "codex".into(),
+            let probe: Arc<dyn crate::machine::limits::LimitsSource> =
                 Arc::new(crate::machine::limits::CodexRateLimitsSource::new(
                     codex,
                     live_limits.clone(),
                     hub_age,
-                )),
-            );
+                ));
+            routes.insert("codex".into(), codexbar(Some(probe)));
         }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
@@ -1102,7 +1104,8 @@ impl Worker {
         // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
         let mut polls: VecDeque<(String, bool)> = VecDeque::new();
         let mut limits_outbound = None;
-        type LimitsFuture = Pin<Box<dyn Future<Output = Vec<LimitObservation>> + Send>>;
+        type LimitsFuture =
+            Pin<Box<dyn Future<Output = crate::machine::limits::LimitsFetch> + Send>>;
         let mut limits_operation: Option<LimitsFuture> = None;
         // Ждёт только последний запрос: пока идёт листинг, ввод уже ушёл дальше.
         let mut suggest_next: Option<SuggestWorkdirs> = None;
@@ -1151,11 +1154,7 @@ impl Worker {
             {
                 let source = self.limits_source.clone();
                 limits_operation = Some(Box::pin(async move {
-                    if idle {
-                        source.poll_idle(&provider).await
-                    } else {
-                        source.poll(&provider).await
-                    }
+                    source.poll_report(&provider, idle).await
                 }));
             }
             if suggest_operation.is_none()
@@ -1367,10 +1366,10 @@ impl Worker {
                         if polls.len() < 8 && !polls.iter().any(|(queued, _)| *queued == provider) { polls.push_back((provider, true)); }
                     }
                 }
-                observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
+                fetched=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
-                    if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});}
+                    if !fetched.observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations:fetched.observations,absent:fetched.absent}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});

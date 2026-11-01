@@ -165,6 +165,7 @@ const CODES = new Set<ErrorCode>([
 
 const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;
 const MARK_READ = /^\/api\/v1\/conversations\/[^/]+\/read$/;
+const LIMITS_REFRESH = /^\/api\/v1\/limits\/refresh$/;
 
 export function requestPathname(path: string): string {
   const bare = path.split("#")[0]?.split("?")[0] ?? path;
@@ -180,6 +181,7 @@ function isMutationExempt(method: HttpMethod, path: string): boolean {
   const pathname = requestPathname(path);
   if (method === "PATCH" && CONTENT_PATCH.test(pathname)) return true;
   if (method === "POST" && MARK_READ.test(pathname)) return true;
+  if (method === "POST" && LIMITS_REFRESH.test(pathname)) return true;
   return false;
 }
 

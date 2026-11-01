@@ -4,6 +4,7 @@ use canterlot_proto::{
     worker::v1::{HarnessInfo, MachineReport, ModelInfo},
 };
 use std::time::{SystemTime, UNIX_EPOCH};
+pub mod codexbar;
 pub mod limits;
 pub mod metrics;
 pub mod workdirs;

@@ -891,6 +891,11 @@ fn pilot_records_roundtrip() {
     };
     let limits = LimitsReport {
         observations: vec![observation],
+        absent: vec![canterlot_proto::worker::v1::LimitAbsence {
+            provider: "claude".into(),
+            window: LimitWindow::FiveHour as i32,
+            observed_machine_ms: 1_700_000_000_000,
+        }],
     };
     assert_roundtrip(report.clone());
     assert_roundtrip(metrics.clone());

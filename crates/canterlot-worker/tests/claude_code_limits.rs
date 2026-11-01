@@ -1,12 +1,10 @@
 #![forbid(unsafe_code)]
 
 //! Лимиты Claude Code (план 2a, Task 6): события потока, упор в лимит,
-//! редкий опрос OAuth и тикер опроса. Сеть и настоящий `claude` не нужны:
-//! записи этапа 0, собранные фикстуры и локальная HTTP-заглушка.
+//! и тикер опроса. Сеть и настоящий `claude` не нужны: записи этапа 0 и собранные фикстуры.
 
 use std::{
     fs,
-    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -24,17 +22,11 @@ use canterlot_worker::{
         },
     },
     config::{ClaudeCodeConfig, ConfigErrorCategory},
-    machine::limits::{ClaudeOAuthLimitsSource, LimitsSource, LiveLimits, OAuthPollError},
+    machine::limits::LimitsSource,
     session::{SessionState, Worker},
 };
 use serde_json::json;
-use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
-    net::TcpListener,
-    sync::watch,
-    task::JoinHandle,
-    time::Instant,
-};
+use tokio::{sync::watch, time::Instant};
 
 #[path = "support/fixtures.rs"]
 mod fixtures;
@@ -47,11 +39,7 @@ mod support;
 #[path = "support/fake_exec.rs"]
 mod fake_exec;
 
-const FAKE_TOKEN: &str = "sk-ant-oat01-canterlot-fake-token-for-tests";
-const FAR_FUTURE_MS: u64 = 4_102_444_800_000;
-const HALF_HOUR: Duration = Duration::from_secs(1800);
 const FIRST_TICK: Duration = Duration::from_secs(60);
-const WARNING_SCENARIO: &str = "CANTERLOT_OAUTH_WARNING_SCENARIO";
 
 type Fact = (&'static str, LimitWindow, Option<u16>, Option<u64>);
 
@@ -261,505 +249,7 @@ fn retried_429_without_usage_limit_is_not_a_limit_fact() {
     assert!(tracker.on_turn_error(None, None).is_none());
 }
 
-// --- опрос OAuth ---
-
-struct Stub {
-    url: String,
-    requests: Arc<Mutex<Vec<String>>>,
-    task: JoinHandle<()>,
-}
-
-impl Stub {
-    async fn start(responses: Vec<(u16, String)>) -> Self {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let url = format!("http://{}/api/oauth/usage", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::new()));
-        let seen = requests.clone();
-        let task = tokio::spawn(async move {
-            let mut responses = responses.into_iter();
-            while let Ok((mut socket, _)) = listener.accept().await {
-                let mut head = Vec::new();
-                let mut buffer = [0_u8; 1024];
-                while !head.windows(4).any(|w| w == b"\r\n\r\n") {
-                    let read = socket.read(&mut buffer).await.unwrap_or(0);
-                    if read == 0 {
-                        break;
-                    }
-                    head.extend_from_slice(&buffer[..read]);
-                }
-                seen.lock()
-                    .unwrap()
-                    .push(String::from_utf8_lossy(&head).into_owned());
-                let (status, body) = responses.next().unwrap_or((500, String::new()));
-                let reply = format!(
-                    "HTTP/1.1 {status} Stub\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                let _ = socket.write_all(reply.as_bytes()).await;
-                let _ = socket.shutdown().await;
-            }
-        });
-        Self {
-            url,
-            requests,
-            task,
-        }
-    }
-
-    fn count(&self) -> usize {
-        self.requests.lock().unwrap().len()
-    }
-}
-
-impl Drop for Stub {
-    fn drop(&mut self) {
-        self.task.abort();
-    }
-}
-
-fn credentials(dir: &Path, token: &str, expires_at: u64) -> std::path::PathBuf {
-    let path = dir.join(".credentials.json");
-    fs::write(
-        &path,
-        json!({"claudeAiOauth": {
-            "accessToken": token,
-            "refreshToken": "fake-refresh-token-for-tests",
-            "expiresAt": expires_at,
-            "scopes": ["user:inference", "user:profile"],
-            "subscriptionType": "max"
-        }})
-        .to_string(),
-    )
-    .unwrap();
-    path
-}
-
-struct TestClock(Arc<Mutex<Instant>>);
-
-impl TestClock {
-    fn new() -> Self {
-        Self(Arc::new(Mutex::new(Instant::now())))
-    }
-    fn advance(&self, by: Duration) {
-        *self.0.lock().unwrap() += by;
-    }
-    fn now(&self) -> Instant {
-        *self.0.lock().unwrap()
-    }
-}
-
-fn source(
-    credentials_path: &Path,
-    stub: &Stub,
-    clock: &TestClock,
-    live: LiveLimits,
-) -> ClaudeOAuthLimitsSource {
-    let config = ClaudeCodeConfig {
-        credentials_path: Some(credentials_path.to_path_buf()),
-        ..ClaudeCodeConfig::default()
-    };
-    let time = clock.0.clone();
-    ClaudeOAuthLimitsSource::new(&config, live)
-        .with_endpoint(&stub.url)
-        .with_clock(move || *time.lock().unwrap())
-}
-
-fn usage_body(five_hour: f64, seven_day: f64) -> String {
-    json!({
-        "five_hour": {"utilization": five_hour, "resets_at": "2026-10-28T22:30:00.943648+00:00"},
-        "seven_day": {"utilization": seven_day, "resets_at": "2026-11-03T04:00:00+03:00"}
-    })
-    .to_string()
-}
-
-fn observed(observations: &[LimitObservation]) -> Vec<(String, i32, u32, u64)> {
-    observations
-        .iter()
-        .map(|o| {
-            assert!(o.observed_machine_ms > 0);
-            (
-                o.provider.clone(),
-                o.window,
-                o.used_permille,
-                o.resets_at_ms,
-            )
-        })
-        .collect()
-}
-
-#[tokio::test]
-async fn oauth_poll_parses_windows_from_stub() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    // Формы ответа из тестов CodexBar для той же точки: проценты, ISO-8601 с `Z` или смещением.
-    let stub = Stub::start(vec![
-        (
-            200,
-            json!({
-                "five_hour": {"utilization": 12.5, "resets_at": "2025-12-25T12:00:00.000Z"},
-                "seven_day": {"utilization": 30},
-                "seven_day_opus": {"utilization": 99.0, "resets_at": null},
-                "seven_day_sonnet": null
-            })
-            .to_string(),
-        ),
-        (
-            200,
-            json!({
-                "five_hour": {"utilization": 0.5, "resets_at": "2026-07-03T00:30:00.282668+00:00"},
-                "seven_day": {"utilization": null, "resets_at": "2026-07-08T00:30:00+00:00"}
-            })
-            .to_string(),
-        ),
-    ])
-    .await;
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, LiveLimits::default());
-
-    assert!(source.poll("codex").await.is_empty());
-    assert!(source.poll_idle("codex").await.is_empty());
-    assert_eq!(stub.count(), 0);
-
-    assert_eq!(
-        observed(&source.poll_idle("claude").await),
-        vec![
-            (
-                "claude".to_owned(),
-                ProtoWindow::FiveHour as i32,
-                125,
-                1_766_664_000_000,
-            ),
-            // Без `resets_at` сброс неизвестен.
-            ("claude".to_owned(), ProtoWindow::Weekly as i32, 300, 0),
-        ]
-    );
-    let request = stub.requests.lock().unwrap()[0].to_lowercase();
-    assert!(request.starts_with("get /api/oauth/usage http/1.1\r\n"));
-    assert!(request.contains(&format!(
-        "authorization: bearer {}\r\n",
-        FAKE_TOKEN.to_lowercase()
-    )));
-    assert!(request.contains("anthropic-version: oauth-2025-04-20\r\n"));
-
-    // 0.5 — это полпроцента; окно без `utilization` пропускается.
-    clock.advance(HALF_HOUR);
-    assert_eq!(
-        observed(&source.poll_idle("claude").await),
-        vec![(
-            "claude".to_owned(),
-            ProtoWindow::FiveHour as i32,
-            5,
-            1_783_038_600_282,
-        )]
-    );
-    assert_eq!(stub.count(), 2);
-}
-
-#[tokio::test]
-async fn oauth_poll_respects_interval_and_backs_off_after_429() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    let ok = || (200, usage_body(10.0, 20.0));
-    let limited = || (429, r#"{"error":"rate_limited"}"#.to_owned());
-    let stub = Stub::start(vec![ok(), limited(), limited(), limited(), limited(), ok()]).await;
-    let live = LiveLimits::default();
-    // Запись без машинного времени свежей не считается.
-    live.note_observation(&LimitObservation {
-        provider: "claude".into(),
-        ..Default::default()
-    });
-    assert_eq!(live.last("claude"), None);
-    // Живое исполнение только что прислало лимиты (так отмечает пересылка SJ).
-    live.note_observation(&LimitObservation {
-        provider: "claude".into(),
-        observed_machine_ms: canterlot_worker::machine::now_ms(),
-        ..Default::default()
-    });
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, live.clone());
-    let start = clock.now();
-    let at = |offset: Duration| {
-        let target = start + offset;
-        let now = clock.now();
-        assert!(target >= now);
-        clock.advance(target - now);
-    };
-    let i = HALF_HOUR;
-
-    // Показание свежее интервала: опрос не нужен.
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 0);
-
-    at(i);
-    assert_eq!(source.poll_idle("claude").await.len(), 2);
-    at(2 * i - Duration::from_secs(1));
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 1, "second poll inside the interval");
-
-    // Первый 429: пауза удваивается от интервала.
-    at(2 * i);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 2);
-    at(4 * i - Duration::from_secs(1));
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 2);
-    at(4 * i);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 3);
-    // Третий 429 подряд упирается в потолок 4 часа и дальше не растёт.
-    at(8 * i);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 4);
-    let cap = Duration::from_secs(4 * 3600);
-    at(8 * i + cap);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 5);
-    at(8 * i + 2 * cap - Duration::from_secs(1));
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 5);
-    at(8 * i + 2 * cap);
-    assert_eq!(source.poll_idle("claude").await.len(), 2);
-    assert_eq!(stub.count(), 6);
-    // Успех сбрасывает паузу к обычному интервалу.
-    at(8 * i + 2 * cap + i - Duration::from_secs(1));
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 6);
-}
-
-#[tokio::test]
-async fn hub_requested_poll_bypasses_idle_interval_but_honours_backoff() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    let ok = || (200, usage_body(10.0, 20.0));
-    let limited = || (429, r#"{"error":"rate_limited"}"#.to_owned());
-    let stub = Stub::start(vec![ok(), ok(), limited(), ok()]).await;
-    let clock = TestClock::new();
-    let live = LiveLimits::default();
-    let source = source(&path, &stub, &clock, live.clone());
-    let start = clock.now();
-    let at = |offset: Duration| {
-        let target = start + offset;
-        let now = clock.now();
-        assert!(target >= now);
-        clock.advance(target - now);
-    };
-    let s = Duration::from_secs;
-    let i = HALF_HOUR;
-
-    assert_eq!(source.poll_idle("claude").await.len(), 2);
-    // Проверка пробуждения хаба не ждёт интервала простоя, но не чаще раза в 60 с.
-    at(s(59));
-    assert!(source.poll("claude").await.is_empty());
-    assert_eq!(stub.count(), 1, "debounced within 60 s");
-    at(s(60));
-    assert_eq!(source.poll("claude").await.len(), 2);
-    assert_eq!(stub.count(), 2);
-    // Свежее показание живого исполнения запрос хаба тоже не останавливает.
-    live.note("claude", clock.now());
-    at(s(120));
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 2, "idle poll keeps its interval");
-    assert!(source.poll("claude").await.is_empty());
-    assert_eq!(stub.count(), 3, "429");
-    // Пауза после 429 действует и на запросы хаба.
-    at(s(120) + 2 * i - s(1));
-    assert!(source.poll("claude").await.is_empty());
-    assert_eq!(stub.count(), 3);
-    at(s(120) + 2 * i);
-    assert_eq!(source.poll("claude").await.len(), 2);
-    assert_eq!(stub.count(), 4);
-}
-
-#[tokio::test]
-async fn expired_token_skips_request_and_never_refreshes() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, 1_000);
-    let before = fs::read(&path).unwrap();
-    let modified = fs::metadata(&path).unwrap().modified().unwrap();
-    let stub = Stub::start(vec![(200, usage_body(10.0, 20.0))]).await;
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, LiveLimits::default());
-
-    assert!(source.poll_idle("claude").await.is_empty());
-    clock.advance(HALF_HOUR);
-    assert!(source.poll("claude").await.is_empty());
-    assert_eq!(source.fetch().await.unwrap_err(), OAuthPollError::Expired);
-    assert_eq!(stub.count(), 0, "no request with an expired token");
-    assert_eq!(fs::read(&path).unwrap(), before);
-    assert_eq!(fs::metadata(&path).unwrap().modified().unwrap(), modified);
-
-    fs::write(&path, r#"{"other":{}}"#).unwrap();
-    assert_eq!(
-        source.fetch().await.unwrap_err(),
-        OAuthPollError::Credentials
-    );
-    fs::remove_file(&path).unwrap();
-    assert_eq!(
-        source.fetch().await.unwrap_err(),
-        OAuthPollError::Credentials
-    );
-    assert_eq!(stub.count(), 0);
-}
-
-#[derive(Clone, Default)]
-struct LogBuffer(Arc<Mutex<Vec<u8>>>);
-
-impl std::io::Write for LogBuffer {
-    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl LogBuffer {
-    fn lines(&self, level: &str) -> Vec<String> {
-        String::from_utf8(self.0.lock().unwrap().clone())
-            .unwrap()
-            .lines()
-            .filter(|line| line.contains(level))
-            .map(str::to_owned)
-            .collect()
-    }
-}
-
-// Подписчик действует в своём потоке, а кеш интереса tracing общий на процесс: соседний
-// тест закрыл бы вызов для всех, поэтому сценарий идёт отдельным процессом.
-#[test]
-fn poll_failure_warns_once_until_its_reason_changes() {
-    let output = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "poll_failure_warning_scenario"])
-        .env(WARNING_SCENARIO, "1")
-        .output()
-        .unwrap();
-    let text = String::from_utf8_lossy(&output.stdout);
-    assert!(output.status.success(), "{text}");
-    assert!(text.contains("1 passed"), "{text}");
-}
-
-#[tokio::test]
-async fn poll_failure_warning_scenario() {
-    if std::env::var_os(WARNING_SCENARIO).is_none() {
-        return;
-    }
-    let logs = LogBuffer::default();
-    let writer = logs.clone();
-    let _guard = tracing::subscriber::set_default(
-        tracing_subscriber::fmt()
-            .without_time()
-            .with_ansi(false)
-            .with_target(false)
-            .with_writer(move || writer.clone())
-            .finish(),
-    );
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, 1_000);
-    let limited = || (429, r#"{"error":"rate_limited"}"#.to_owned());
-    let stub = Stub::start(vec![(200, usage_body(10.0, 20.0)), limited(), limited()]).await;
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, LiveLimits::default());
-    let long_past_backoff = Duration::from_secs(5 * 3600);
-
-    assert!(source.poll_idle("claude").await.is_empty());
-    clock.advance(HALF_HOUR);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(logs.lines("WARN").len(), 1, "repeat stays quiet");
-    assert!(logs.lines("WARN")[0].contains("claude oauth token expired"));
-
-    credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    clock.advance(HALF_HOUR);
-    assert_eq!(source.poll_idle("claude").await.len(), 2);
-    assert_eq!(logs.lines("recovered").len(), 1);
-
-    clock.advance(HALF_HOUR);
-    assert!(source.poll_idle("claude").await.is_empty());
-    clock.advance(long_past_backoff);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(stub.count(), 3);
-    assert_eq!(logs.lines("WARN").len(), 2, "new reason warns once");
-    assert!(logs.lines("WARN")[1].contains("rate limited"));
-
-    credentials(dir.path(), FAKE_TOKEN, 1_000);
-    clock.advance(long_past_backoff);
-    assert!(source.poll_idle("claude").await.is_empty());
-    assert_eq!(logs.lines("WARN").len(), 3);
-    assert!(logs.lines("WARN")[2].contains("claude oauth token expired"));
-
-    let text = logs.lines("").join("\n");
-    assert!(!text.contains(FAKE_TOKEN), "{text}");
-}
-
-#[tokio::test]
-async fn usage_response_without_windows_is_an_invalid_body() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    let stub = Stub::start(vec![(
-        200,
-        json!({"five_hour": null, "seven_day": {"utilization": null}}).to_string(),
-    )])
-    .await;
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, LiveLimits::default());
-    assert_eq!(source.fetch().await.unwrap_err(), OAuthPollError::Body);
-}
-
-#[tokio::test]
-async fn token_never_appears_in_debug_or_errors() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = credentials(dir.path(), FAKE_TOKEN, FAR_FUTURE_MS);
-    let echo = format!(r#"{{"error":"bad token {FAKE_TOKEN}"}}"#);
-    let stub = Stub::start(vec![
-        (401, echo.clone()),
-        (500, echo.clone()),
-        (200, format!("not json {FAKE_TOKEN}")),
-        (429, echo),
-    ])
-    .await;
-    let clock = TestClock::new();
-    let source = source(&path, &stub, &clock, LiveLimits::default());
-
-    let mut errors = Vec::new();
-    for _ in 0..4 {
-        errors.push(source.fetch().await.unwrap_err());
-    }
-    assert_eq!(
-        errors,
-        vec![
-            OAuthPollError::Rejected(401),
-            OAuthPollError::Status(500),
-            OAuthPollError::Body,
-            OAuthPollError::RateLimited,
-        ]
-    );
-    // Токен действительно уходил в запрос, но только туда.
-    assert_eq!(stub.count(), 4);
-    assert!(stub.requests.lock().unwrap()[0].contains(FAKE_TOKEN));
-
-    fs::write(
-        &path,
-        format!(r#"{{"claudeAiOauth":{{"accessToken":"{FAKE_TOKEN}","expiresAt":1}}}}"#),
-    )
-    .unwrap();
-    errors.push(source.fetch().await.unwrap_err());
-    fs::write(&path, format!("{{broken {FAKE_TOKEN}")).unwrap();
-    errors.push(source.fetch().await.unwrap_err());
-    assert_eq!(
-        &errors[4..],
-        &[OAuthPollError::Expired, OAuthPollError::Credentials]
-    );
-
-    let mut text = format!("{source:?}");
-    for error in &errors {
-        text.push_str(&format!("{error} {error:?} "));
-    }
-    let boxed: Box<dyn std::error::Error> = Box::new(errors[0]);
-    text.push_str(&boxed.to_string());
-    assert!(!text.contains(FAKE_TOKEN), "{text}");
-    assert!(!text.contains("canterlot-fake-token"), "{text}");
-}
+// --- флаг платного опроса ---
 
 #[test]
 fn paid_model_poll_flag_is_rejected_in_pilot() {
@@ -793,24 +283,11 @@ data_dir = "data"
 
     fs::write(
         &path,
-        format!(
-            "{base}\n[claude_code]\nallow_paid_model_poll = false\noauth_poll_interval_s = 60\n"
-        ),
+        format!("{base}\n[claude_code]\nallow_paid_model_poll = false\n"),
     )
     .unwrap();
     let config = canterlot_worker::config::load(&path).unwrap();
-    let claude = config.claude_code.unwrap();
-    assert!(!claude.allow_paid_model_poll);
-    assert_eq!(claude.oauth_poll_interval(), Duration::from_secs(900));
-
-    fs::write(&path, format!("{base}\n[claude_code]\n")).unwrap();
-    let claude = canterlot_worker::config::load(&path)
-        .unwrap()
-        .claude_code
-        .unwrap();
-    assert!(!claude.allow_paid_model_poll);
-    assert_eq!(claude.oauth_poll_interval(), HALF_HOUR);
-    assert_eq!(claude.credentials_path, None);
+    assert!(!config.claude_code.unwrap().allow_paid_model_poll);
 }
 
 // --- тикер опроса без живых сессий ---
@@ -910,6 +387,66 @@ async fn empty_poll_sends_no_report() {
     .await;
 }
 
+/// Источник, который знает только об отсутствии пятичасового окна.
+struct AbsenceOnlySource;
+
+#[async_trait::async_trait]
+impl LimitsSource for AbsenceOnlySource {
+    async fn poll(&self, _provider: &str) -> Vec<LimitObservation> {
+        Vec::new()
+    }
+    async fn poll_report(
+        &self,
+        provider: &str,
+        _idle: bool,
+    ) -> canterlot_worker::machine::limits::LimitsFetch {
+        canterlot_worker::machine::limits::LimitsFetch {
+            observations: Vec::new(),
+            absent: vec![canterlot_proto::worker::v1::LimitAbsence {
+                provider: provider.to_owned(),
+                window: ProtoWindow::FiveHour as i32,
+                observed_machine_ms: 7,
+            }],
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn absence_alone_is_reported_to_the_hub() {
+    frozen_clock::run(async {
+        let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+            capabilities: vec!["pilot_v1".into()],
+            ..Default::default()
+        })
+        .await;
+        let worker =
+            Worker::new(hub.config.clone(), store).with_limits_source(Arc::new(AbsenceOnlySource));
+        let mut state = worker.state();
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(worker.run(shutdown));
+        state.wait_for(|s| *s == SessionState::Live).await.unwrap();
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::PollLimits(PollLimits {
+                provider: "claude".into(),
+            })),
+        })
+        .await;
+        let absent = loop {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(Msg::LimitsReport(report)) = message.msg
+            {
+                assert!(report.observations.is_empty());
+                break report.absent;
+            }
+        };
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].window, ProtoWindow::FiveHour as i32);
+        stop.send(true).unwrap();
+        join.await.unwrap().unwrap();
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn idle_ticker_requests_a_claude_poll_each_interval() {
     frozen_clock::run(async {
@@ -929,9 +466,9 @@ async fn idle_ticker_requests_a_claude_poll_each_interval() {
         fake_exec::write_executable(&executable, "#!/bin/sh\nprintf '2.1.311\\n'\n", 0o700);
         hub.config.claude_code = Some(ClaudeCodeConfig {
             executable,
-            oauth_poll_interval_s: 900,
             ..ClaudeCodeConfig::default()
         });
+        hub.config.machine.limits_poll_interval = Duration::from_secs(900);
         let interval = Duration::from_secs(900);
         let source = Arc::new(CountingSource::default());
         let worker = Worker::new(hub.config.clone(), store).with_limits_source(source.clone());

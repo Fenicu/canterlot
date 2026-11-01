@@ -285,12 +285,28 @@ pub fn read_token(path: &Path) -> Result<String, ConfigError> {
 pub struct MachineConfig {
     #[serde(with = "humantime_serde")]
     pub metrics_interval: Duration,
+    /// Путь к CodexBar; без него ищется `codexbar` в `PATH` и в `~/.local/bin`.
+    pub codexbar_path: Option<PathBuf>,
+    /// Как часто опрашивать лимиты через CodexBar, не меньше минуты.
+    #[serde(with = "humantime_serde")]
+    pub limits_poll_interval: Duration,
+}
+
+impl MachineConfig {
+    pub const MIN_LIMITS_POLL_INTERVAL: Duration = Duration::from_secs(60);
+
+    pub fn limits_poll_interval(&self) -> Duration {
+        self.limits_poll_interval
+            .max(Self::MIN_LIMITS_POLL_INTERVAL)
+    }
 }
 
 impl Default for MachineConfig {
     fn default() -> Self {
         Self {
             metrics_interval: Duration::from_secs(30),
+            codexbar_path: None,
+            limits_poll_interval: Duration::from_secs(300),
         }
     }
 }
@@ -302,8 +318,6 @@ pub struct ClaudeCodeConfig {
     pub executable: PathBuf,
     // claude_md_excludes удалён планом 2c (задача 6): список исключений
     // вычисляется при каждом запуске (owner_instruction_excludes).
-    pub oauth_poll_interval_s: u64,
-    pub credentials_path: Option<PathBuf>,
     pub allow_paid_model_poll: bool,
 }
 
@@ -311,31 +325,8 @@ impl Default for ClaudeCodeConfig {
     fn default() -> Self {
         Self {
             executable: PathBuf::from("claude"),
-            oauth_poll_interval_s: 1800,
-            credentials_path: None,
             allow_paid_model_poll: false,
         }
-    }
-}
-
-impl ClaudeCodeConfig {
-    pub const MIN_OAUTH_POLL_INTERVAL_S: u64 = 900;
-
-    pub fn oauth_poll_interval(&self) -> Duration {
-        Duration::from_secs(
-            self.oauth_poll_interval_s
-                .max(Self::MIN_OAUTH_POLL_INTERVAL_S),
-        )
-    }
-
-    pub fn credentials_file(&self) -> PathBuf {
-        self.credentials_path.clone().unwrap_or_else(|| {
-            let home = std::env::var_os("HOME")
-                .map(PathBuf::from)
-                .unwrap_or_default();
-            claude_config_dir(&home, std::env::var_os("CLAUDE_CONFIG_DIR").as_deref())
-                .join(".credentials.json")
-        })
     }
 }
 

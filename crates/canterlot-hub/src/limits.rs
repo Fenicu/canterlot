@@ -65,8 +65,12 @@ pub struct Observation {
 pub struct Recorded {
     pub snapshot_stored: bool,
     pub provider_changed: bool,
+    /// Равное показание поверх давно не обновлявшегося: клиенту нужна новая отметка времени.
+    pub refreshed: bool,
     pub stale: bool,
 }
+/// Равные показания чаще этого срока событие не порождают, иначе опрос каждые несколько минут забил бы ленту.
+const REFRESH_EVENT_GAP: chrono::Duration = chrono::Duration::seconds(120);
 #[derive(Debug, Serialize)]
 pub struct ProviderLimits {
     pub provider: String,
@@ -74,6 +78,9 @@ pub struct ProviderLimits {
     pub five_hour: Option<WindowState>,
     pub weekly_reserve_active: bool,
     pub weekly_reserve_resets_at: Option<DateTime<Utc>>,
+    /// У провайдера нет пятичасового окна: клиенты прячут счётчик, история остаётся.
+    pub five_hour_absent: bool,
+    pub five_hour_absent_at: Option<DateTime<Utc>>,
 }
 #[derive(Debug, Serialize)]
 pub struct WindowState {
@@ -120,7 +127,7 @@ pub async fn record_observation_in_tx(
     correlation_id: Uuid,
 ) -> Result<Recorded, sqlx::Error> {
     let result = record_in_tx(conn, o, now, config, true).await?;
-    if result.provider_changed {
+    if result.provider_changed || result.refreshed {
         emit_changed(conn, owner_id, &o.provider, o.window, correlation_id).await?;
     }
     Ok(result)
@@ -162,20 +169,35 @@ pub(crate) async fn record_in_tx(
         Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",
     }).bind(&o.provider).fetch_optional(&mut *conn).await?;
     let (used, reset, seen) = current.unwrap_or_default();
-    let newer = mapped && seen.is_none_or(|seen| seen < observed_at);
+    let absent_at: Option<DateTime<Utc>> = if o.window == Window::FiveHour {
+        sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
+            .bind(&o.provider)
+            .fetch_one(&mut *conn)
+            .await?
+    } else {
+        None
+    };
+    let newer = mapped
+        && seen.is_none_or(|seen| seen < observed_at)
+        && absent_at.is_none_or(|absent| absent < observed_at);
     if newer {
         sqlx::query(match o.window {
             Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,updated_at=$5 where provider=$1",
-            Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,updated_at=$5 where provider=$1",
+            Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,five_hour_absent_at=null,updated_at=$5 where provider=$1",
         }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(now).execute(&mut *conn).await?;
     }
     if newer && o.window == Window::Weekly {
         weekly_stage(conn, o, observed_at, now, config).await?;
     }
+    // Возвращение окна после отметки об отсутствии клиентам тоже нужно показать.
+    let changed =
+        used != Some(i32::from(o.used_permille)) || reset != o.resets_at || absent_at.is_some();
     Ok(Recorded {
         snapshot_stored: store,
-        provider_changed: newer
-            && (used != Some(i32::from(o.used_permille)) || reset != o.resets_at),
+        provider_changed: newer && changed,
+        refreshed: newer
+            && !changed
+            && seen.is_some_and(|seen| observed_at - seen >= REFRESH_EVENT_GAP),
         stale: !newer,
     })
 }
@@ -243,11 +265,71 @@ pub(crate) async fn emit_changed(
             Window::Weekly => p.weekly,
             Window::FiveHour => p.five_hour,
         };
-        if let Some(s) = state {
-            events::append(conn,NewEvent{scope:Scope::Conversations{owner_id},kind:"limits_changed",conversation_id:None,execution_id:None,payload:json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true)),"observed_at":s.observed_at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":p.weekly_reserve_resets_at.map(|at|at.to_rfc3339_opts(chrono::SecondsFormat::Millis,true))}),correlation_id}).await?;
+        let wire = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let reserve = p.weekly_reserve_resets_at.map(wire);
+        // Отсутствующее окно уходит клиентам событием без значения: `used_permille` и `resets_at` равны null.
+        let payload = match (state, p.five_hour_absent_at) {
+            (Some(s), _) => Some(
+                json!({"provider":provider,"window":window,"used_permille":s.used_permille,"resets_at":s.resets_at.map(wire),"observed_at":wire(s.observed_at),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve}),
+            ),
+            (None, Some(absent)) if window == Window::FiveHour => Some(
+                json!({"provider":provider,"window":window,"used_permille":null,"resets_at":null,"observed_at":wire(absent),"weekly_reserve_active":p.weekly_reserve_active,"weekly_reserve_resets_at":reserve}),
+            ),
+            _ => None,
+        };
+        if let Some(payload) = payload {
+            events::append(
+                conn,
+                NewEvent {
+                    scope: Scope::Conversations { owner_id },
+                    kind: "limits_changed",
+                    conversation_id: None,
+                    execution_id: None,
+                    payload,
+                    correlation_id,
+                },
+            )
+            .await?;
         }
     }
     Ok(())
+}
+/// Записывает, что у провайдера нет пятичасового окна. Возвращает `true`, если клиентам нужно событие.
+/// История снимков не трогается; показание окна, наблюдённое позже, снимает отметку.
+pub async fn record_absence_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    provider: &str,
+    window: Window,
+    observed_at: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    if window != Window::FiveHour || !known_provider(provider) {
+        return Err(sqlx::Error::InvalidArgument("invalid limit absence".into()));
+    }
+    let observed_at = DateTime::from_timestamp_micros(observed_at.timestamp_micros())
+        .ok_or_else(|| sqlx::Error::InvalidArgument("invalid observation time".into()))?;
+    lock_provider(conn, provider).await?;
+    let (seen, absent): (Option<DateTime<Utc>>, Option<DateTime<Utc>>) = sqlx::query_as(
+        "select five_hour_observed_at,five_hour_absent_at from provider_limits where provider=$1",
+    )
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await?;
+    // Более позднее показание окна сильнее устаревшего отчёта об отсутствии.
+    if seen.is_some_and(|seen| seen >= observed_at) || absent.is_some_and(|at| at >= observed_at) {
+        return Ok(false);
+    }
+    sqlx::query("update provider_limits set five_hour_used_permille=null,five_hour_resets_at=null,five_hour_observed_at=null,five_hour_absent_at=$2,updated_at=clock_timestamp() where provider=$1")
+        .bind(provider)
+        .bind(observed_at)
+        .execute(&mut *conn)
+        .await?;
+    let first = absent.is_none();
+    if first {
+        emit_changed(conn, owner_id, provider, window, correlation_id).await?;
+    }
+    Ok(first)
 }
 pub async fn on_limit_reached_in_tx(
     conn: &mut PgConnection,
@@ -350,6 +432,10 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                 five_hour: state("five_hour")?,
                 weekly_reserve_active: r.try_get("weekly_reserve_active")?,
                 weekly_reserve_resets_at: r.try_get("weekly_reserve_resets_at")?,
+                five_hour_absent: r
+                    .try_get::<Option<DateTime<Utc>>, _>("five_hour_absent_at")?
+                    .is_some(),
+                five_hour_absent_at: r.try_get("five_hour_absent_at")?,
             })
         })
         .collect()

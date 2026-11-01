@@ -594,10 +594,10 @@ test('phone_navigation_list_chat_back_preserves_list_scroll', async ({ page }) =
   await expect.poll(() => scroller.evaluate((node) => node.scrollTop)).toBeGreaterThan(100);
 });
 
-test('limits_strip_warns_at_80_and_shows_the_reserve_variant', async ({ page }) => {
+test('limits_strip_warns_below_20_remaining_and_shows_the_reserve_variant', async ({ page }) => {
   const { hub, api, ids } = await boot(page);
-  await expect(page.getByText(/96%/)).toBeVisible();
-  await expect(page.locator('.limits[data-tone="warning"]')).toBeVisible();
+  await expect(page.locator('.limits .pct[data-tone="danger"]')).toHaveText(/4%/);
+  await expect(page.locator('.limits[data-tone="danger"]')).toBeVisible();
   const claude = api.limits.find((item) => item.provider === 'claude');
   if (claude) claude.weekly_reserve_active = true;
   const row = api.list.get(ids.pinned);
@@ -631,9 +631,11 @@ test('limits_strip_warns_at_80_and_shows_the_reserve_variant', async ({ page }) 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(`/c/${ids.pinned}`);
   const strip = page.locator('[data-pane="list"] .limits summary');
-  await expect(strip).toContainText('Claude 5ч');
-  await expect(strip).toContainText('неделя 96%');
-  await expect(strip).toContainText('Codex 5ч');
+  await expect(strip).toContainText('Claude');
+  await expect(strip.locator('.meter').first()).toContainText('5ч');
+  await expect(strip).toContainText('нед');
+  await expect(strip).toContainText('4%');
+  await expect(strip).toContainText('Codex');
   await expect(strip.locator('.reserve')).toHaveText(['резерв']);
 });
 
