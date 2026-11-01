@@ -22,8 +22,6 @@ use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Stdio, time:
 use tokio::{net::UnixStream, process::Child, time::timeout};
 use uuid::Uuid;
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 
@@ -236,7 +234,6 @@ fn permission() -> Value {
 
 #[tokio::test]
 async fn supervisor_fsyncs_transmission_started_before_adapter_delivery() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(Some("after_decision_intention")).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
@@ -272,7 +269,6 @@ async fn supervisor_fsyncs_transmission_started_before_adapter_delivery() {
 
 #[tokio::test]
 async fn at_most_one_decision_transmission_under_replayed_command() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     let decision = Harness::allow(&request, 7);
@@ -296,7 +292,6 @@ async fn at_most_one_decision_transmission_under_replayed_command() {
 
 #[tokio::test]
 async fn mismatched_generation_rejects_decision_without_calling_adapter() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 6)))
@@ -311,7 +306,6 @@ async fn mismatched_generation_rejects_decision_without_calling_adapter() {
 
 #[tokio::test]
 async fn turn_interrupt_while_request_pending_records_request_closed() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::Interrupt(InterruptRequest {
@@ -329,7 +323,6 @@ async fn turn_interrupt_while_request_pending_records_request_closed() {
 
 #[tokio::test]
 async fn disconnection_pauses_agent_under_wait_policy_without_timeout() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.conn.take();
@@ -353,7 +346,6 @@ async fn disconnection_pauses_agent_under_wait_policy_without_timeout() {
 
 #[tokio::test]
 async fn supervisor_restart_reannounces_open_requests_from_sj() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     // Запрос уже подтверждён хабом; восстановление обязано объявить его новым фактом SJ.
@@ -387,7 +379,6 @@ async fn supervisor_restart_reannounces_open_requests_from_sj() {
 
 #[tokio::test]
 async fn synthetic_adapter_pauses_on_permission_and_resumes_on_allow() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     assert!(!h.sj().iter().any(|b| matches!(b, Body::RunFinished(_))));
@@ -402,7 +393,6 @@ async fn synthetic_adapter_pauses_on_permission_and_resumes_on_allow() {
 
 #[tokio::test]
 async fn oversized_permission_is_journaled_as_a_marked_preview() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h
         .start(json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":400_000}},{"delta":"resumed"}]))
@@ -430,7 +420,6 @@ async fn oversized_permission_is_journaled_as_a_marked_preview() {
 
 #[tokio::test]
 async fn payload_within_the_limit_stays_unmarked() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     h.start(json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":1000}}]))
         .await;
@@ -444,7 +433,6 @@ async fn payload_within_the_limit_stays_unmarked() {
 
 #[tokio::test]
 async fn payload_without_a_preview_is_denied_and_never_reaches_the_journal() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     h.launch(
         json!([{"request_large":{"tool_name":"Write","repeat":"щ","times":400_000,"bare":true}},{"delta":"resumed"}]),
@@ -471,7 +459,6 @@ async fn payload_without_a_preview_is_denied_and_never_reaches_the_journal() {
 
 #[tokio::test]
 async fn oversized_block_summary_does_not_stop_the_supervisor() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     h.launch(
         json!([{"large_summary":{"repeat":"щ","times":600_000}},{"delta":"after"}]),
@@ -495,7 +482,6 @@ async fn oversized_block_summary_does_not_stop_the_supervisor() {
 
 #[tokio::test]
 async fn request_outside_a_turn_is_denied_and_leaves_no_awaiting_phase() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     h.launch(json!([{"late_request":{"tool_name":"Bash"}}]), "synthetic")
         .await;
@@ -520,7 +506,6 @@ async fn request_outside_a_turn_is_denied_and_leaves_no_awaiting_phase() {
 
 #[tokio::test]
 async fn request_spanning_the_end_of_a_turn_is_denied_when_the_turn_ends() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h
         .start(json!([{"open_request":{"tool_name":"Bash"}},{"delta":"done"}]))
@@ -541,7 +526,6 @@ async fn request_spanning_the_end_of_a_turn_is_denied_when_the_turn_ends() {
 
 #[tokio::test]
 async fn synthetic_adapter_pauses_on_multi_question_and_resumes_on_answers() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let questions = json!({"questions":[{"id":"q2","text":"Same text?","options":["Keep (Recommended)","No"]},{"id":"q1","text":"Same text?","options":["A","B"],"multi_select":true},{"id":"q3","text":"Free?","options":[],"allow_custom":true},{"id":"q4","text":"Last?","options":["Raw"]}]});
     let request = h
@@ -565,7 +549,6 @@ async fn synthetic_adapter_pauses_on_multi_question_and_resumes_on_answers() {
 
 #[tokio::test]
 async fn journal_write_failure_prevents_adapter_decision_delivery() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     // Ошибка открытия активного сегмента при записи намерения.
@@ -587,7 +570,6 @@ async fn journal_write_failure_prevents_adapter_decision_delivery() {
 
 #[tokio::test]
 async fn invalid_question_answers_do_not_consume_the_request() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(json!([{"ask_question":{"questions":[{"id":"q1","text":"Deploy?","options":["yes","no"]}]}}])).await;
     let invalid: DecisionPayload =
@@ -610,7 +592,6 @@ async fn invalid_question_answers_do_not_consume_the_request() {
 
 #[tokio::test]
 async fn synthetic_codex_enables_default_questions_and_experimental_api() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     h.start_profile(permission(), "synthetic-codex").await;
     let frames = h.stdin();
@@ -630,7 +611,6 @@ async fn synthetic_codex_enables_default_questions_and_experimental_api() {
 
 #[tokio::test]
 async fn applied_decision_without_record_is_never_retransmitted_after_restart() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(Some("after_decision_adapter_before_record")).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
@@ -665,7 +645,6 @@ async fn applied_decision_without_record_is_never_retransmitted_after_restart() 
 
 #[tokio::test]
 async fn permission_deny_is_proven_as_applied() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::decision(
@@ -706,7 +685,6 @@ async fn synthetic_codex_requires_default_input_flag() {
 
 #[tokio::test]
 async fn sigkill_between_intention_and_adapter_never_transmits_after_recovery() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(Some("hold:after_decision_intention")).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
@@ -742,7 +720,6 @@ async fn sigkill_between_intention_and_adapter_never_transmits_after_recovery() 
 
 #[tokio::test]
 async fn terminal_requests_are_not_reannounced_after_supervisor_restart() {
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::DeliverDecision(Harness::allow(&request, 7)))
@@ -770,7 +747,6 @@ async fn terminal_requests_are_not_reannounced_after_supervisor_restart() {
 #[tokio::test]
 async fn stale_generation_after_journal_closed_does_not_extend_sj() {
     use canterlot_proto::worker::ipc::{StopRequest, decision_outcome::Outcome};
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::Stop(StopRequest {
@@ -811,7 +787,6 @@ async fn stale_generation_after_journal_closed_does_not_extend_sj() {
 #[tokio::test]
 async fn closed_session_journal_stays_closed_after_supervisor_restart() {
     use canterlot_proto::worker::ipc::StopRequest;
-    let _gate = e2e_gate::acquire().await;
     let mut h = Harness::new(None).await;
     let request = h.start(permission()).await;
     h.send(down::Msg::Stop(StopRequest {

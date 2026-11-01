@@ -3,8 +3,6 @@
 //! Картинки, на которые смотрел агент (pilot.md §5.7): настоящий хаб, управляющая служба,
 //! сопровождение и синтетический CLI; загрузка PutMedia и ссылка BlockMedia в SJ.
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/attachments.rs"]
 mod fixture;
 #[allow(dead_code)]
@@ -158,7 +156,6 @@ fn hub_blob(f: &Fixture, id: Uuid) -> PathBuf {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn media_is_referenced_only_after_durable_publish(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let steps = Arc::new(Steps::default());
     let f = Fixture::with_trace(&pool, steps.clone()).await;
     let bytes = png(16, 9, 600_000);
@@ -213,7 +210,6 @@ async fn media_is_referenced_only_after_durable_publish(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = png(8, 6, 1_000_000);
     let path = image(&f, "resume.png", &bytes);
@@ -248,7 +244,6 @@ async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgP
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn hub_restart_during_media_upload_completes_after_reconnect(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = png(30, 20, 1_500_000);
     let path = image(&f, "restart.png", &bytes);
@@ -305,7 +300,6 @@ async fn hub_restart_during_media_upload_completes_after_reconnect(pool: PgPool)
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn oversized_or_non_image_media_is_skipped_with_path_kept(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let big = image(&f, "huge.png", &png(4, 4, 0));
     fs::OpenOptions::new()
@@ -368,7 +362,6 @@ async fn oversized_or_non_image_media_is_skipped_with_path_kept(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn media_upload_does_not_starve_control_or_sj(pool: PgPool) {
-    let _permit = e2e_gate::acquire_exclusive().await;
     let f = Fixture::new(&pool).await;
     let bytes = png(64, 48, 16 * 1024 * 1024);
     let path = image(&f, "large.png", &bytes);

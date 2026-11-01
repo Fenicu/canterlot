@@ -28,8 +28,6 @@ use sqlx::PgPool;
 use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/process_guard.rs"]
 mod process_guard;
 use process_guard::ProcessGuard;
@@ -133,7 +131,6 @@ fn with_autonomous_run(mut script: Script) -> Script {
 struct Stack {
     pool: PgPool,
     hub: TestHub,
-    _gate: tokio::sync::SemaphorePermit<'static>,
     _root: tempfile::TempDir,
     guard: ProcessGuard,
     fake: Fake,
@@ -146,7 +143,6 @@ struct Stack {
 
 impl Stack {
     async fn start(pool: PgPool, script: Script) -> Self {
-        let gate = e2e_gate::acquire().await;
         let timers = HubTimers {
             dispatch_sweep: Duration::from_millis(20),
             ..Default::default()
@@ -212,7 +208,6 @@ impl Stack {
         Self {
             pool,
             hub,
-            _gate: gate,
             _root: root,
             guard,
             fake,

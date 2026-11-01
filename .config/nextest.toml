@@ -1,0 +1,36 @@
+# Все тесты всех бинарников идут одним пулом: процесс на тест, поэтому лимиты внутри процесса
+# (семафоры, RUST_TEST_THREADS) здесь не работают, ограничения задают группы ниже.
+nextest-version = "0.9.100"
+
+[test-groups]
+# Тесты, поднимающие настоящее сопровождение (supervisor), воркер и хаб в одном процессе.
+heavy-e2e = { max-threads = 24 }
+# Замеряют, что большая передача не душит управляющий канал: нужны тихой машине, идут по одному
+# и вместе с threads-required забирают долю пула.
+starvation = { max-threads = 1 }
+
+[profile.default]
+fail-fast = false
+status-level = "retry"
+final-status-level = "flaky"
+failure-output = "immediate-final"
+slow-timeout = { period = "20s", terminate-after = 9 }
+
+[profile.default.junit]
+path = "junit.xml"
+store-success-output = false
+
+[[profile.default.overrides]]
+filter = 'package(canterlot-worker) & (binary(attachments) | binary(claude_code_large_result) | binary(e2e) | binary(exec_attachments) | binary(exec_e2e) | binary(exec_media) | binary(opencode_worker) | binary(pilot_e2e) | binary(session_tools_e2e) | binary(supervisor) | binary(supervisor_requests))'
+test-group = "heavy-e2e"
+slow-timeout = { period = "30s", terminate-after = 8 }
+
+[[profile.default.overrides]]
+filter = 'package(canterlot-worker) & (test(=large_attachment_does_not_starve_control_session) | test(=media_upload_does_not_starve_control_or_sj) | test(=large_answer_backlog_does_not_starve_control_session))'
+test-group = "starvation"
+threads-required = 12
+slow-timeout = { period = "30s", terminate-after = 8 }
+
+# Карантин нестабильных тестов. Повтор разрешён только здесь: запись с причиной и ссылкой на
+# .superpowers/carry/flaky-tests.md. Повтор виден в выводе как TRY n и итоговый FLAKY.
+# Список пуст, пока в Rust нет подтверждённых нестабильных тестов.

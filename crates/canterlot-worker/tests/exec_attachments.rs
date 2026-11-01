@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/attachments.rs"]
 mod fixture;
 #[allow(dead_code)]
@@ -32,7 +30,6 @@ async fn transmission_waits_for_attachments_under_strace(pool: PgPool) {
 }
 
 async fn transmission_waits_for_attachments(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let first = f.ready(&vec![3; 1024 * 1024]).await;
     let second = f.ready(&vec![7; 1024 * 1024]).await;
@@ -50,7 +47,6 @@ async fn transmission_waits_for_attachments(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = vec![11; 4 * 1024 * 1024];
     let id = f.ready(&bytes).await;
@@ -132,7 +128,6 @@ async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting(pool
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stop_execution_is_handled_while_a_fetch_is_in_progress(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     for force in [false, true] {
         let f = Fixture::new(&pool).await;
         let id = f.ready(&vec![1; 1024 * 1024]).await;
@@ -161,7 +156,6 @@ async fn stop_execution_is_handled_while_a_fetch_is_in_progress(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let pause = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -191,7 +185,6 @@ async fn cancel_while_waiting_for_attachments_wins_and_nothing_is_transmitted(po
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut f = Fixture::new_with_gate(&pool, true).await;
     let id = f.ready(b"published").await;
     let input = f.submit(&[id], "hello").await;
@@ -230,7 +223,6 @@ async fn redelivered_attempt_does_not_refetch_published_files(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
-    let _permit = e2e_gate::acquire_exclusive().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![37; 48 * 1024 * 1024]).await;
     let first = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -285,7 +277,6 @@ async fn large_attachment_does_not_starve_control_session(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn agent_reads_the_published_file_checksum(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let bytes = b"agent verifies attachment";
     let id = f.ready(bytes).await;
@@ -298,7 +289,6 @@ async fn agent_reads_the_published_file_checksum(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn attachment_dir_is_under_execution_dir_not_workdir(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(b"private").await;
     let input = f.submit(&[id], "hello").await;
@@ -325,7 +315,6 @@ async fn attachment_dir_is_under_execution_dir_not_workdir(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn attachment_failure_is_reported_and_input_rejected_without_transmission(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let pause = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -353,7 +342,6 @@ async fn attachment_failure_is_reported_and_input_rejected_without_transmission(
 
 #[tokio::test]
 async fn attachment_records_are_not_written_for_a_session_without_pilot_v1() {
-    let _permit = e2e_gate::acquire().await;
     use canterlot_proto::worker::v1::*;
     use canterlot_worker::{session::Worker, store::WorkerStore};
     let (mut hub, _) = support::ProtocolHub::start(support::Behavior {
@@ -456,7 +444,6 @@ async fn attachment_records_are_not_written_for_a_session_without_pilot_v1() {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn withdraw_while_fetching_removes_temp_and_never_transmits(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = Fixture::new(&pool).await;
     let id = f.ready(&vec![1; 1024 * 1024]).await;
     let first = f.hub().faults.pause_next(Point::BeforeFetchChunk);
@@ -495,7 +482,6 @@ async fn withdraw_while_fetching_removes_temp_and_never_transmits(pool: PgPool) 
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_restart_mid_fetch_preserves_temp_and_resumes(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut f = Fixture::new(&pool).await;
     let bytes = vec![91; 4 * 1024 * 1024];
     let id = f.ready(&bytes).await;
@@ -526,7 +512,6 @@ async fn worker_restart_mid_fetch_preserves_temp_and_resumes(pool: PgPool) {
 
 #[test]
 fn execution_directory_parents_are_synced_before_ownership_and_readiness() {
-    let _permit = e2e_gate::acquire_blocking();
     let root = tempfile::tempdir().unwrap();
     let trace = root.path().join("syscalls");
     let status = std::process::Command::new("strace")

@@ -4,8 +4,6 @@
 //! Межсессионные инструменты целиком: настоящий хаб, воркер, сопровождение и синтетические CLI.
 //! Оркестратор и потомок управляются скриптами, каждый сценарий сверяет поток WSS с журналом.
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/fake_exec.rs"]
 mod fake_exec;
 #[path = "support/pilot.rs"]
@@ -375,7 +373,6 @@ impl Bench {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn spawn_isolated_commit_summary_accept_cleanup(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -476,7 +473,6 @@ async fn spawn_isolated_commit_summary_accept_cleanup(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -534,7 +530,6 @@ async fn dirty_worktree_waits_for_force_and_keeps_unmerged_commits(pool: PgPool)
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn accept_of_a_working_child_stops_it_and_reports_only_the_removal(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let orchestrator = b.session("synthetic", &repo).await;
@@ -579,7 +574,6 @@ async fn accept_of_a_working_child_stops_it_and_reports_only_the_removal(pool: P
 /// Потомок сам запускает потомка: тот строится от ветки родителя, в той же группе видимости.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn nested_isolated_spawn_builds_on_the_parents_branch(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let repo = b.repo("repo");
     let root = b.session("synthetic", &repo).await;
@@ -625,7 +619,6 @@ async fn nested_isolated_spawn_builds_on_the_parents_branch(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn failed_worktree_reaches_the_parent(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -684,7 +677,6 @@ async fn result_waits_for_orchestrator(b: &Bench, orchestrator: Uuid, gate: &Pat
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn subscription_survives_orchestrator_restart(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let orchestrator = b.session("synthetic", &work).await;
@@ -697,7 +689,6 @@ async fn subscription_survives_orchestrator_restart(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn subscription_survives_killed_orchestrator(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let orchestrator = b.session("synthetic", &work).await;
@@ -718,7 +709,6 @@ async fn subscription_survives_killed_orchestrator(pool: PgPool) {
 /// адаптера и сопровождение. Владелец решает по HTTP, итог приходит родителю обычным вводом.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn approval_end_to_end_over_http_and_mcp(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let cli = tempfile::tempdir().unwrap();
     let executable = cli.path().join("fake-cli");
     fake_exec::write_executable(&executable, include_str!("support/fake_claude.py"), 0o700);
@@ -812,7 +802,6 @@ async fn approval_end_to_end_over_http_and_mcp(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     b.whitelist(json!([])).await;
     let work = b.p.work.clone();
@@ -910,7 +899,6 @@ async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) 
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn all_three_harness_names_reach_the_same_tools(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     for harness in HARNESSES {
@@ -1003,7 +991,6 @@ async fn all_three_harness_names_reach_the_same_tools(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn stop_of_child_notifies_parent(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1029,7 +1016,6 @@ async fn stop_of_child_notifies_parent(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn loop_is_stopped_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let first = b.session("synthetic", &work).await;
@@ -1076,7 +1062,6 @@ async fn loop_is_stopped_end_to_end(pool: PgPool) {
 /// события глубиной не ловится, его держит предел частоты пары.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let first = b.session("synthetic", &work).await;
@@ -1127,7 +1112,6 @@ async fn event_after_message_lowers_depth_and_the_rate_limit_stops_the_loop(pool
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn send_to_a_stopped_target_is_heard_after_the_owner_resumes_it(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let sender = b.session("synthetic", &work).await;
@@ -1164,7 +1148,6 @@ async fn send_to_a_stopped_target_is_heard_after_the_owner_resumes_it(pool: PgPo
 /// отсчитываться от конца фона, иначе родитель получит итог первого хода и оглохнет.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wake_turn_right_after_background_is_the_reported_result(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1196,7 +1179,6 @@ async fn wake_turn_right_after_background_is_the_reported_result(pool: PgPool) {
 /// Ход пробуждения начался уже после окна тишины: первый итог ушёл, и второй не должен пропасть.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn wake_turn_after_the_quiet_window_is_still_heard(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
@@ -1231,7 +1213,6 @@ async fn wake_turn_after_the_quiet_window_is_still_heard(pool: PgPool) {
 /// итог один, следующее сообщение доходит до нового процесса.
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn deferred_restart_keeps_the_session_and_its_subscription(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;

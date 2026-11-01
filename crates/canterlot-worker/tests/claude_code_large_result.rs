@@ -27,8 +27,6 @@ use sqlx::PgPool;
 use tokio::{sync::watch, time::timeout};
 use uuid::Uuid;
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/fake_exec.rs"]
 mod fake_exec;
 #[path = "support/process_guard.rs"]
@@ -213,7 +211,6 @@ fn sha_hex(text: &str) -> String {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn large_tool_result_without_deltas_reaches_the_owner(pool: PgPool) {
-    let _gate = e2e_gate::acquire().await;
     let timers = HubTimers {
         dispatch_sweep: Duration::from_millis(20),
         ..Default::default()

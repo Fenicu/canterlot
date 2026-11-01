@@ -431,8 +431,6 @@ async fn relative_execution_directory_produces_an_absolute_agent_path() {
 }
 
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 #[path = "support/attachments.rs"]
 mod execution_fixture;
@@ -440,7 +438,6 @@ mod execution_fixture;
 #[cfg(all(feature = "synthetic-adapter", feature = "fault-injection"))]
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn terminal_execution_attachment_dir_is_removed_after_ack(pool: sqlx::PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let f = execution_fixture::Fixture::new(&pool).await;
     let id = f.ready(b"cleanup").await;
     let input = f.submit(&[id], "hello").await;

@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 #![cfg(all(feature = "fault-injection", feature = "synthetic-adapter"))]
 
-#[path = "support/e2e_gate.rs"]
-mod e2e_gate;
 #[path = "support/pilot.rs"]
 mod pilot;
 #[path = "support/process_guard.rs"]
@@ -29,7 +27,6 @@ use uuid::Uuid;
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn pilot_flow_over_http_and_wss(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
 
     let machines = p.get("/api/v1/machines").await;
@@ -317,7 +314,6 @@ async fn pilot_flow_over_http_and_wss(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn crunch_five_hour_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -450,7 +446,6 @@ async fn crunch_five_hour_end_to_end(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn weekly_reserve_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -641,7 +636,6 @@ async fn weekly_reserve_end_to_end(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let interval = ms(500);
     let p = Pilot::new(
         &pool,
@@ -819,7 +813,6 @@ async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn scheduled_message_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -918,7 +911,6 @@ async fn scheduled_message_end_to_end(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn internal_kinds_never_leave_the_hub_over_wss_in_the_full_flow(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     ws.subscribe("list", "conversations").await;
@@ -1079,7 +1071,6 @@ fn png(width: u32, height: u32, tail: usize) -> Vec<u8> {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn view_image_step_shows_media_on_the_tool_block_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let mut ws = p.ws().await;
     let id = p.create("synthetic", false).await;
@@ -1254,7 +1245,6 @@ async fn echo_turn(pilot: &Pilot, conversation: Uuid, text: &str) -> (Uuid, Stri
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let preset = p
         .post(
@@ -1336,7 +1326,6 @@ async fn preset_change_reaches_the_adapter_from_the_next_turn(pool: PgPool) {
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let id = p.create("synthetic", false).await;
     let submitted = p
@@ -1427,7 +1416,6 @@ async fn permission_decision_reaches_the_agent_and_is_applied(pool: PgPool) {
 /// вызов `presets.apply` ставит подвешенную смену, следующий ход видит ревизию.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
-    let _permit = e2e_gate::acquire().await;
     let p = Pilot::new(&pool, PilotOptions::default()).await;
     let preset = p
         .post(
