@@ -556,6 +556,7 @@ test('unread_dot_and_counts_update_from_events', async ({ page }) => {
   });
   hub.flush();
   await expect(page.locator(`[data-session="${ids.plain}"]`)).toContainText('Непрочитанных: 3');
+  await expect(page.locator(`[data-session="${ids.plain}"] .activity`)).toHaveText(/ · \d{2}:\d{2}$/);
   api.counts = { ...api.counts, all: 11 };
   hub.append('conversations', {
     kind: 'conversation_updated',

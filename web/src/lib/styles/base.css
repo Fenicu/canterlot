@@ -1,5 +1,6 @@
 * { box-sizing: border-box; scrollbar-width: thin; }
-html { background: var(--bg); font-size: calc(100% * var(--ui-scale)); scrollbar-color: var(--control-line) var(--transparent); }
+html { overscroll-behavior: none; background: var(--bg); font-size: calc(100% * var(--ui-scale)); scrollbar-color: var(--control-line) var(--transparent); }
+html:not(:has([data-harness])) { overflow: hidden; }
 body { margin: var(--s0); color: var(--text); background: var(--bg); font: var(--weight-normal) var(--fs-body)/var(--lh-body) var(--font-sans); }
 button, input, select, textarea { font: inherit; color: inherit; }
 ::placeholder { color: var(--muted); opacity: var(--opacity-high); }

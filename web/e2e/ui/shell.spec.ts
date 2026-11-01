@@ -34,6 +34,44 @@ test('desktop_three_pane_layout_at_1440_and_two_pane_at_1024', async ({ page }) 
   await expect(page.locator('[data-pane="chat"]')).toBeVisible();
 });
 
+test('phone_document_does_not_scroll_and_dock_stays_in_viewport_after_reload', async ({ page }) => {
+  test.skip(test.info().project.name !== 'phone', 'проверка телефонной раскладки');
+  await boot(page);
+  const probe = () => page.evaluate(() => {
+    const root = document.scrollingElement as HTMLElement;
+    const dock = document.querySelector('.dock')!.getBoundingClientRect();
+    return {
+      scrollTop: root.scrollTop,
+      scrollHeight: root.scrollHeight,
+      innerHeight: window.innerHeight,
+      dockBottom: dock.bottom,
+      shellPosition: getComputedStyle(document.querySelector('.shell')!).position,
+      overflow: getComputedStyle(document.documentElement).overflowY,
+      overscroll: getComputedStyle(document.documentElement).overscrollBehaviorY
+    };
+  });
+  const expectPinned = async () => {
+    const state = await probe();
+    expect(state.scrollTop).toBe(0);
+    expect(state.scrollHeight).toBeLessThanOrEqual(state.innerHeight);
+    expect(state.dockBottom).toBeLessThanOrEqual(state.innerHeight);
+    expect(state.shellPosition).toBe('fixed');
+    expect(state.overflow).toBe('hidden');
+    expect(state.overscroll).toBe('none');
+  };
+  await expectPinned();
+  await page.evaluate(() => window.scrollTo(0, 500));
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expect(page.locator('.dock')).toBeVisible();
+  await expectPinned();
+  await page.setViewportSize({ width: 384, height: 832 });
+  await expectPinned();
+  await page.reload();
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  await expectPinned();
+});
+
 test('connection_banner_follows_transport_state_and_announces_politely', async ({ page }) => {
   const { hub } = await boot(page);
   hub.acceptConnections = false;
