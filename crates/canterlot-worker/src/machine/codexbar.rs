@@ -1,4 +1,4 @@
-use canterlot_proto::worker::v1::{LimitObservation, LimitWindow};
+use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation, LimitWindow};
 use serde_json::Value;
 use std::{
     fmt,
@@ -9,7 +9,7 @@ use std::{
 };
 use tokio::{io::AsyncReadExt, process::Command, time::Instant};
 
-use super::limits::LimitsSource;
+use super::limits::{LimitsFetch, LimitsSource};
 
 const RUN_TIMEOUT: Duration = Duration::from_secs(20);
 /// Повторный запуск раньше этого срока бессмыслен: CodexBar сам кеширует ответы провайдера.
@@ -49,6 +49,17 @@ pub fn observations_from_output(
     stdout: &[u8],
     now_ms: u64,
 ) -> Result<Vec<LimitObservation>, CodexBarError> {
+    Ok(reading_from_output(provider, stdout, now_ms)?.observations)
+}
+
+/// Показания и отсутствующие окна одного чтения. Пятичасовое окно считается отсутствующим только
+/// по полному чтению: другие окна провайдера прочитаны, а строки на 300 минут нет вовсе.
+/// Чтение с пятичасовой строкой без значения неполное и ничего не скрывает.
+pub fn reading_from_output(
+    provider: &str,
+    stdout: &[u8],
+    now_ms: u64,
+) -> Result<LimitsFetch, CodexBarError> {
     let value: Value = serde_json::from_slice(stdout).map_err(|_| CodexBarError::Output)?;
     let entry = value
         .as_array()
@@ -65,12 +76,16 @@ pub fn observations_from_output(
         .and_then(super::limits::rfc3339_ms)
         .map_or(now_ms, |at| at.min(now_ms));
     let mut observations: Vec<LimitObservation> = Vec::new();
+    let mut five_hour_row = false;
     for slot in ["primary", "secondary", "tertiary"] {
         let Some(row) = usage.get(slot).filter(|row| row.is_object()) else {
             continue;
         };
         let window = match row.get("windowMinutes").and_then(Value::as_u64) {
-            Some(FIVE_HOUR_MINUTES) => LimitWindow::FiveHour,
+            Some(FIVE_HOUR_MINUTES) => {
+                five_hour_row = true;
+                LimitWindow::FiveHour
+            }
             Some(WEEK_MINUTES) => LimitWindow::Weekly,
             _ => continue,
         };
@@ -96,7 +111,19 @@ pub fn observations_from_output(
             observed_machine_ms: seen_ms,
         });
     }
-    Ok(observations)
+    let absent = if !five_hour_row && !observations.is_empty() {
+        vec![LimitAbsence {
+            provider: provider.to_owned(),
+            window: LimitWindow::FiveHour as i32,
+            observed_machine_ms: seen_ms,
+        }]
+    } else {
+        Vec::new()
+    };
+    Ok(LimitsFetch {
+        observations,
+        absent,
+    })
 }
 
 /// Исполняемый файл CodexBar: заданный путь, иначе `PATH`, иначе `~/.local/bin`.
@@ -163,7 +190,7 @@ impl CodexBarLimitsSource {
     }
 
     /// Один запуск без учёта интервала.
-    pub async fn fetch(&self, provider: &str) -> Result<Vec<LimitObservation>, CodexBarError> {
+    pub async fn fetch(&self, provider: &str) -> Result<LimitsFetch, CodexBarError> {
         let executable = locate(self.configured.as_deref()).ok_or(CodexBarError::Missing)?;
         let mut child = crate::adapter::spawn_with_retry_io(|| {
             let mut command = Command::new(&executable);
@@ -204,12 +231,12 @@ impl CodexBarLimitsSource {
         let bytes = tokio::time::timeout(RUN_TIMEOUT, run)
             .await
             .map_err(|_| CodexBarError::Timeout)??;
-        observations_from_output(provider, &bytes, super::now_ms())
+        reading_from_output(provider, &bytes, super::now_ms())
     }
 
-    async fn poll_with(&self, provider: &str, idle: bool) -> Vec<LimitObservation> {
+    async fn poll_with(&self, provider: &str, idle: bool) -> LimitsFetch {
         if !matches!(provider, "claude" | "codex") {
-            return Vec::new();
+            return LimitsFetch::default();
         }
         let now = (self.clock)();
         {
@@ -220,7 +247,7 @@ impl CodexBarLimitsSource {
                     .is_some_and(|at| now.saturating_duration_since(at) < gap)
             };
             if since(MIN_GAP) || (idle && since(self.interval)) {
-                return Vec::new();
+                return LimitsFetch::default();
             }
             state.last_request = Some(now);
         }
@@ -246,11 +273,14 @@ impl CodexBarLimitsSource {
             }
         }
         match result {
-            Ok(observations) if !observations.is_empty() => observations,
-            _ => match &self.fallback {
-                Some(fallback) if idle => fallback.poll_idle(provider).await,
-                Some(fallback) => fallback.poll(provider).await,
-                None => Vec::new(),
+            Ok(fetched) if !fetched.observations.is_empty() => fetched,
+            _ => LimitsFetch {
+                observations: match &self.fallback {
+                    Some(fallback) if idle => fallback.poll_idle(provider).await,
+                    Some(fallback) => fallback.poll(provider).await,
+                    None => Vec::new(),
+                },
+                absent: Vec::new(),
             },
         }
     }
@@ -259,10 +289,14 @@ impl CodexBarLimitsSource {
 #[async_trait::async_trait]
 impl LimitsSource for CodexBarLimitsSource {
     async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, false).await
+        self.poll_with(provider, false).await.observations
     }
 
     async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
-        self.poll_with(provider, true).await
+        self.poll_with(provider, true).await.observations
+    }
+
+    async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
+        self.poll_with(provider, idle).await
     }
 }

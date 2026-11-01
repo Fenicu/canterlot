@@ -387,6 +387,66 @@ async fn empty_poll_sends_no_report() {
     .await;
 }
 
+/// Источник, который знает только об отсутствии пятичасового окна.
+struct AbsenceOnlySource;
+
+#[async_trait::async_trait]
+impl LimitsSource for AbsenceOnlySource {
+    async fn poll(&self, _provider: &str) -> Vec<LimitObservation> {
+        Vec::new()
+    }
+    async fn poll_report(
+        &self,
+        provider: &str,
+        _idle: bool,
+    ) -> canterlot_worker::machine::limits::LimitsFetch {
+        canterlot_worker::machine::limits::LimitsFetch {
+            observations: Vec::new(),
+            absent: vec![canterlot_proto::worker::v1::LimitAbsence {
+                provider: provider.to_owned(),
+                window: ProtoWindow::FiveHour as i32,
+                observed_machine_ms: 7,
+            }],
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn absence_alone_is_reported_to_the_hub() {
+    frozen_clock::run(async {
+        let (mut hub, store) = support::ProtocolHub::start(support::Behavior {
+            capabilities: vec!["pilot_v1".into()],
+            ..Default::default()
+        })
+        .await;
+        let worker =
+            Worker::new(hub.config.clone(), store).with_limits_source(Arc::new(AbsenceOnlySource));
+        let mut state = worker.state();
+        let (stop, shutdown) = watch::channel(false);
+        let join = tokio::spawn(worker.run(shutdown));
+        state.wait_for(|s| *s == SessionState::Live).await.unwrap();
+        hub.send(ControlDown {
+            msg: Some(control_down::Msg::PollLimits(PollLimits {
+                provider: "claude".into(),
+            })),
+        })
+        .await;
+        let absent = loop {
+            if let support::Observed::Control(message) = hub.event().await
+                && let Some(Msg::LimitsReport(report)) = message.msg
+            {
+                assert!(report.observations.is_empty());
+                break report.absent;
+            }
+        };
+        assert_eq!(absent.len(), 1);
+        assert_eq!(absent[0].window, ProtoWindow::FiveHour as i32);
+        stop.send(true).unwrap();
+        join.await.unwrap().unwrap();
+    })
+    .await;
+}
+
 #[tokio::test(start_paused = true)]
 async fn idle_ticker_requests_a_claude_poll_each_interval() {
     frozen_clock::run(async {

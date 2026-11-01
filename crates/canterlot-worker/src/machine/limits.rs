@@ -1,4 +1,4 @@
-use canterlot_proto::worker::v1::LimitObservation;
+use canterlot_proto::worker::v1::{LimitAbsence, LimitObservation};
 use std::{
     collections::HashMap,
     fmt,
@@ -16,6 +16,13 @@ const CODEX_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type HubLimitsAge = Arc<dyn Fn(&str) -> Option<Instant> + Send + Sync>;
 
+/// Результат опроса: показания окон и окна, которых у провайдера нет.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LimitsFetch {
+    pub observations: Vec<LimitObservation>,
+    pub absent: Vec<LimitAbsence>,
+}
+
 #[async_trait::async_trait]
 pub trait LimitsSource: Send + Sync {
     /// Запрос хаба (`PollLimits`, проверка пробуждения «кранча»).
@@ -23,6 +30,17 @@ pub trait LimitsSource: Send + Sync {
     /// Тик опроса без живых сессий; источник со своим интервалом простоя переопределяет его.
     async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
         self.poll(provider).await
+    }
+    /// Опрос вместе с отсутствующими окнами; источники без такой возможности отдают только показания.
+    async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
+        LimitsFetch {
+            observations: if idle {
+                self.poll_idle(provider).await
+            } else {
+                self.poll(provider).await
+            },
+            absent: Vec::new(),
+        }
     }
 }
 pub struct NoLimitsSource;
@@ -329,5 +347,10 @@ impl LimitsSource for RoutedLimitsSource {
     async fn poll_idle(&self, provider: &str) -> Vec<LimitObservation> {
         let source = self.routes.get(provider).unwrap_or(&self.default).clone();
         source.poll_idle(provider).await
+    }
+
+    async fn poll_report(&self, provider: &str, idle: bool) -> LimitsFetch {
+        let source = self.routes.get(provider).unwrap_or(&self.default).clone();
+        source.poll_report(provider, idle).await
     }
 }

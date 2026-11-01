@@ -1183,7 +1183,11 @@ async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_work
     let Some(control_down::Msg::LimitsSnapshot(snapshot)) = down.msg else {
         panic!("snapshot")
     };
-    assert_eq!(snapshot.current.len(), 1, "only the weekly window is sent on");
+    assert_eq!(
+        snapshot.current.len(),
+        1,
+        "only the weekly window is sent on"
+    );
     assert_eq!(snapshot.current[0].window, LimitWindow::Weekly as i32);
     hub.shutdown.send(()).unwrap();
     hub.join.await??;

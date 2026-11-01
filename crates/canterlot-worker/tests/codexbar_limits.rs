@@ -12,7 +12,9 @@ use std::{
 
 use canterlot_proto::worker::v1::{LimitObservation, LimitWindow};
 use canterlot_worker::machine::{
-    codexbar::{CodexBarError, CodexBarLimitsSource, observations_from_output},
+    codexbar::{
+        CodexBarError, CodexBarLimitsSource, observations_from_output, reading_from_output,
+    },
     limits::LimitsSource,
 };
 use tokio::time::Instant;
@@ -249,7 +251,7 @@ async fn missing_binary_and_failures_fall_back_when_there_is_a_fallback() {
     let none = source(dir.path().join("absent"), &clock, None);
     assert!(none.poll("claude").await.is_empty());
     assert_eq!(
-        none.fetch("claude").await.unwrap_err(),
+        none.fetch("claude").await.map(|_| ()).unwrap_err(),
         CodexBarError::Missing
     );
 
@@ -268,14 +270,14 @@ async fn missing_binary_and_failures_fall_back_when_there_is_a_fallback() {
     let failing = executable(dir.path(), "echo boom >&2\nexit 3\n");
     let failed = source(failing.clone(), &clock, None);
     assert_eq!(
-        failed.fetch("claude").await.unwrap_err(),
+        failed.fetch("claude").await.map(|_| ()).unwrap_err(),
         CodexBarError::Status(3)
     );
 
     let garbage = executable(dir.path(), "echo '<html>'\n");
     let bad = source(garbage, &clock, None);
     assert_eq!(
-        bad.fetch("claude").await.unwrap_err(),
+        bad.fetch("claude").await.map(|_| ()).unwrap_err(),
         CodexBarError::Output
     );
 }
@@ -288,4 +290,65 @@ async fn output_of_a_working_program_wins_over_the_fallback() {
     let source = source(printing(dir.path(), CODEX), &clock, Some(fallback.clone()));
     assert_eq!(source.poll_idle("codex").await.len(), 2);
     assert!(fallback.0.lock().unwrap().is_empty());
+}
+
+fn absent_windows(body: &str, provider: &str) -> Vec<i32> {
+    reading_from_output(provider, body.as_bytes(), NOW_MS)
+        .unwrap()
+        .absent
+        .iter()
+        .map(|a| a.window)
+        .collect()
+}
+
+#[test]
+fn a_full_reading_without_a_five_hour_window_marks_it_absent() {
+    // Claude без пятичасового лимита: окно только недельное.
+    assert_eq!(absent_windows(CLAUDE_WEEKLY_ONLY, "claude"), vec![FIVE]);
+    let reading = reading_from_output("claude", CLAUDE_WEEKLY_ONLY.as_bytes(), NOW_MS).unwrap();
+    assert_eq!(reading.absent[0].provider, "claude");
+    assert_eq!(
+        reading.absent[0].observed_machine_ms,
+        reading.observations[0].observed_machine_ms
+    );
+    // Пятичасовое окно есть: отсутствия нет.
+    assert!(absent_windows(CODEX, "codex").is_empty());
+}
+
+#[test]
+fn a_partial_or_empty_reading_never_marks_a_window_absent() {
+    // Недельного окна тоже нет: чтение неполное, ничего не скрываем.
+    let nothing =
+        r#"[{"provider":"claude","usage":{"primary":{"usedPercent":null,"windowMinutes":300}}}]"#;
+    assert!(absent_windows(nothing, "claude").is_empty());
+    let unknown =
+        r#"[{"provider":"claude","usage":{"primary":{"usedPercent":5,"windowMinutes":1440}}}]"#;
+    assert!(absent_windows(unknown, "claude").is_empty());
+    // Пятичасовая строка есть, но без процента: окно существует, чтение неполное.
+    let broken_five = r#"[{"provider":"claude","usage":{
+        "primary":{"usedPercent":null,"windowMinutes":300},
+        "secondary":{"usedPercent":53,"windowMinutes":10080}}}]"#;
+    assert!(absent_windows(broken_five, "claude").is_empty());
+}
+
+#[tokio::test]
+async fn poll_report_carries_the_absence_and_a_failed_run_carries_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = source(printing(dir.path(), CLAUDE_WEEKLY_ONLY), &clock, None);
+    let fetched = source.poll_report("claude", false).await;
+    assert_eq!(
+        rows(&fetched.observations),
+        vec![(WEEK, 540, WEEK_RESET_MS)]
+    );
+    assert_eq!(
+        fetched.absent.iter().map(|a| a.window).collect::<Vec<_>>(),
+        vec![FIVE]
+    );
+
+    let failing = executable(dir.path(), "exit 3\n");
+    let failed = self::source(failing, &clock, None)
+        .poll_report("claude", false)
+        .await;
+    assert!(failed.observations.is_empty() && failed.absent.is_empty());
 }

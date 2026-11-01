@@ -186,3 +186,17 @@ fn limits_tool_reports_codex_windows_or_no_data() {
     );
     assert_eq!(empty, "no limit data yet in this session");
 }
+
+#[test]
+fn limits_tool_omits_a_window_the_provider_does_not_have() {
+    let text = mcp::limits_tool_text(
+        &LimitsSnapshot {
+            provider: "claude".into(),
+            current: vec![observation("weekly", 540, 1793062800000)],
+            weekly_reserve_active: false,
+        },
+        "claude",
+    );
+    assert!(text.contains("weekly window 54% used"), "{text}");
+    assert!(!text.contains("five-hour"), "{text}");
+}

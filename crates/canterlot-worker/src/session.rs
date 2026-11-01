@@ -1062,7 +1062,8 @@ impl Worker {
         // Провайдер и источник запроса: `true` — тикер простоя, `false` — запрос хаба.
         let mut polls: VecDeque<(String, bool)> = VecDeque::new();
         let mut limits_outbound = None;
-        type LimitsFuture = Pin<Box<dyn Future<Output = Vec<LimitObservation>> + Send>>;
+        type LimitsFuture =
+            Pin<Box<dyn Future<Output = crate::machine::limits::LimitsFetch> + Send>>;
         let mut limits_operation: Option<LimitsFuture> = None;
         // Ждёт только последний запрос: пока идёт листинг, ввод уже ушёл дальше.
         let mut suggest_next: Option<SuggestWorkdirs> = None;
@@ -1111,11 +1112,7 @@ impl Worker {
             {
                 let source = self.limits_source.clone();
                 limits_operation = Some(Box::pin(async move {
-                    if idle {
-                        source.poll_idle(&provider).await
-                    } else {
-                        source.poll(&provider).await
-                    }
+                    source.poll_report(&provider, idle).await
                 }));
             }
             if suggest_operation.is_none()
@@ -1327,10 +1324,10 @@ impl Worker {
                         if polls.len() < 8 && !polls.iter().any(|(queued, _)| *queued == provider) { polls.push_back((provider, true)); }
                     }
                 }
-                observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
+                fetched=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
-                    if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:Default::default()}))});}
+                    if !fetched.observations.is_empty() || !fetched.absent.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations:fetched.observations,absent:fetched.absent}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});
