@@ -241,8 +241,14 @@ async fn rollback(target: &Path, source: &Path, branch: &str) {
     if !git_ok(source, args!["worktree", "remove", "--force", "--", target]).await {
         let _ = fs::remove_dir_all(target);
     }
-    let _ = git_ok(source, args!["worktree", "prune"]).await;
+    forget_missing(source, target).await;
     let _ = git_ok(source, args!["branch", "-D", "--", branch]).await;
+}
+
+/// Метаданные пропавшей копии убирает только её собственная запись: `prune` чистил бы
+/// и чужие записи репозитория, например рабочие копии владельца с удалёнными каталогами.
+async fn forget_missing(source: &Path, target: &Path) {
+    let _ = git_ok(source, args!["worktree", "remove", "--force", "--", target]).await;
 }
 
 /// Убирает копию, а ветку только если в ней нет коммитов, которых нет больше нигде.
@@ -264,7 +270,7 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
         return Removed::failed("source_not_git");
     };
     if fs::symlink_metadata(&target).is_err() {
-        let _ = git_ok(source, args!["worktree", "prune"]).await;
+        forget_missing(source, &target).await;
     } else {
         if !is_worktree_of(&target, &common).await {
             return Removed::failed("not_a_worktree");

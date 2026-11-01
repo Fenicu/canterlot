@@ -540,3 +540,35 @@ async fn remove_is_idempotent() {
         1
     );
 }
+
+#[tokio::test]
+async fn removing_a_lost_copy_leaves_foreign_stale_entries_alone() {
+    let fixture = Fixture::new();
+    let foreign = fixture.target("owner-own");
+    git(
+        &fixture.source,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "owner-branch",
+            foreign.to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(&foreign).unwrap();
+    let lost = fixture.target("r10");
+    let spec = fixture.spec("canterlot/0190abea");
+    prepare(&lost, &fixture.source, &spec).await.unwrap();
+    fs::remove_dir_all(&lost).unwrap();
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&lost, &spec.branch, false),
+    )
+    .await;
+    assert_eq!(done.outcome, "removed");
+    let listed = git(&fixture.source, &["worktree", "list", "--porcelain"]);
+    assert!(listed.contains("owner-own"), "{listed}");
+    assert!(!listed.contains("r10"), "{listed}");
+}
