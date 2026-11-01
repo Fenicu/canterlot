@@ -20,6 +20,7 @@ enum Frame {
     Ready(String),
     Accepted(Uuid),
     Interrupted(Uuid),
+    RestartDue(bool),
     Event(AdapterEvent),
 }
 
@@ -150,7 +151,11 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
             };
             AdapterEvent::Media { block_id, source }
         }
-        "restart_due" => AdapterEvent::DeferredRestartDue,
+        "restart_due" => {
+            return Ok(Frame::RestartDue(
+                value["restart"].as_bool().unwrap_or(false),
+            ));
+        }
         "background_work" => {
             let background = &value["background"];
             let tasks = background["tasks"]
@@ -266,6 +271,8 @@ pub struct SyntheticAdapter {
     pending_calls: std::collections::HashSet<Uuid>,
     /// Вводы с `Undetermined`: позднее `accepted` становится `InputAccepted`.
     unconfirmed: std::collections::HashSet<Uuid>,
+    /// Отложенная смена настроек перезапускает CLI, как у настоящего адаптера.
+    deferred_restart: bool,
     /// Поколение процесса CLI: кадры заменённого процесса отбрасываются,
     /// иначе его выход завершил бы исполнение после перезапуска.
     generation: u64,
@@ -295,6 +302,7 @@ impl SyntheticAdapter {
             native_id: None,
             pending_calls: std::collections::HashSet::new(),
             unconfirmed: std::collections::HashSet::new(),
+            deferred_restart: false,
             generation: 0,
         }
     }
@@ -463,6 +471,11 @@ impl SyntheticAdapter {
         }
     }
     fn queue(&mut self, frame: Frame) {
+        if let Frame::RestartDue(restart) = frame {
+            self.deferred_restart = restart;
+            self.pending.push_back(AdapterEvent::DeferredRestartDue);
+            return;
+        }
         if let Frame::Accepted(command_id) = frame
             && self.unconfirmed.remove(&command_id)
         {
@@ -702,7 +715,7 @@ impl Adapter for SyntheticAdapter {
         let model = self.settings.model.clone().unwrap_or_default();
         self.pending.push_back(AdapterEvent::BlockStarted {
             block_id,
-            kind: BlockKind::Text,
+            kind: BlockKind::ToolResult,
             input_command_id: None,
             parent: None,
             agent: "main".into(),
@@ -771,7 +784,20 @@ impl Adapter for SyntheticAdapter {
         }
     }
 
-    async fn apply_deferred(&mut self, _group: &dyn Containment) {
+    async fn apply_deferred(&mut self, group: &dyn Containment) {
+        if std::mem::take(&mut self.deferred_restart) {
+            let model = self.settings.model.clone().unwrap_or_default();
+            let Some(instructions) = self.settings.instructions.clone() else {
+                return;
+            };
+            if self
+                .restart_cli(group, &model, &instructions)
+                .await
+                .is_err()
+            {
+                return;
+            }
+        }
         self.pending.push_back(AdapterEvent::Diagnostic {
             kind: "deferred_restart_applied",
             event_type: "deferred_restart_applied".into(),

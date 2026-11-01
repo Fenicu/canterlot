@@ -1475,7 +1475,7 @@ async fn synthetic_agent_call_applies_a_preset_end_to_end(pool: PgPool) {
     until("agent call answered", async || {
         p.history(id).await.iter().any(|item| {
             item["kind"] == "block"
-                && item["block_kind"] == "text"
+                && item["block_kind"] == "tool_result"
                 && item["state"] == "final"
                 && item["content"]
                     .as_str()

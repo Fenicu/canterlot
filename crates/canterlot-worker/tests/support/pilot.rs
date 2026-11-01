@@ -21,7 +21,10 @@ use canterlot_hub::{
     },
 };
 use canterlot_worker::{
-    config::{ExecutionConfig, MachineConfig, SupervisorTimers, WorkerConfig, WorkerTimers},
+    config::{
+        ClaudeCodeConfig, ExecutionConfig, MachineConfig, SupervisorTimers, WorkerConfig,
+        WorkerTimers,
+    },
     session::{SessionState, Worker, WorkerError},
     store::WorkerStore,
 };
@@ -366,6 +369,7 @@ pub struct PilotOptions {
     pub limits: LimitsConfig,
     pub activity: ActivityConfig,
     pub metrics_interval: Duration,
+    pub claude_code: Option<ClaudeCodeConfig>,
 }
 
 impl Default for PilotOptions {
@@ -384,6 +388,7 @@ impl Default for PilotOptions {
                 ..Default::default()
             },
             metrics_interval: Duration::from_secs(30),
+            claude_code: None,
         }
     }
 }
@@ -463,7 +468,7 @@ impl Pilot {
                 ..Default::default()
             },
             attachments: Default::default(),
-            claude_code: None,
+            claude_code: options.claude_code,
             codex: None,
             timers: WorkerTimers {
                 heartbeat: ms(100),

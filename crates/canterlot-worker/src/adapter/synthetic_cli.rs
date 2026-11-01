@@ -35,9 +35,15 @@
 //! {"background":{"tasks":[{"task_id":"a1","kind":"agent","state":"running",
 //! "description":"…"}],"wake_turn":false}} — фоновые задачи, как их сообщает адаптер.
 //! {"restart_due":true} — смена настроек дождалась конца фоновой работы; с "after_turn":true
-//! это приходит сразу после конца хода.
+//! это приходит сразу после конца хода, с "restart":true адаптер перезапускает CLI.
 //! {"wake_turn":true} после конца хода начинает ход без ввода, как Claude Code по завершении
 //! фоновой задачи: `run_adopted`, затем фаза; ход кончается по `interrupt`.
+//! {"after_turn":[…]} — шаги после конца хода, пока CLI ждёт ввод; среди них {"adopt":true}
+//! начинает ход без ввода, который кончается вместе со шагами.
+//! {"git_commit":{"path":"a.txt","content":"…","subject":"…"}} пишет файл и коммитит его в
+//! рабочем каталоге, {"write_file":{"path":"a.txt","content":"…"}} только пишет,
+//! {"wait_file":"<путь>"} ждёт появления файла, {"script_file":"<путь>"} исполняет шаги из файла.
+//! Ввод со служебной строкой хаба (`[canterlot] …`) выполняет первую строку-скрипт своего текста.
 //! Начальные delay/hang/exit исполняются до accepted; обычный текст: три delta.
 
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
@@ -153,8 +159,10 @@ struct Lane {
 struct Turn {
     decisions: mpsc::UnboundedReceiver<(String, DecisionPayload)>,
     late_request: Option<Value>,
+    after_turn: Vec<Value>,
     wake_turn: bool,
     restart_due: bool,
+    adopted: bool,
     command: Uuid,
     files: Vec<LocalFile>,
     instructions: Option<InstructionSpec>,
@@ -271,6 +279,34 @@ async fn text_delta(turn: &mut Turn, lane: &mut Lane, text: &str) -> io::Result<
 async fn completed(command: Uuid, usage: Vec<ModelUsage>, context_tokens: u64) -> io::Result<()> {
     emit(json!({"type":"completed","input_command_id":command,"usage":usage,"context_tokens":context_tokens,"context_window_tokens":200000})).await
 }
+async fn git(arguments: &[&str]) -> io::Result<()> {
+    let status = tokio::process::Command::new("git")
+        .args([
+            "-c",
+            "user.name=synthetic",
+            "-c",
+            "user.email=synthetic@canterlot.invalid",
+        ])
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other("git step failed"))
+    }
+}
+
+async fn write_step_file(spec: &Value) -> io::Result<()> {
+    let path = spec["path"]
+        .as_str()
+        .ok_or_else(|| io::Error::other("invalid file step"))?;
+    tokio::fs::write(path, spec["content"].as_str().unwrap_or_default()).await
+}
+
 async fn detach() -> io::Result<()> {
     let mut launcher = tokio::process::Command::new(std::env::current_exe()?);
     launcher
@@ -303,6 +339,15 @@ fn run_steps<'a>(
             if step["hang"].as_bool() == Some(true) {
                 std::future::pending::<()>().await;
             }
+            if let Some(path) = step["script_file"].as_str() {
+                let bytes = tokio::fs::read(path).await?;
+                let steps: Vec<Value> = serde_json::from_slice(&bytes)
+                    .map_err(|_| io::Error::other("invalid script file"))?;
+                if let Some(code) = run_steps(turn, lane, steps, depth + 1).await? {
+                    return Ok(Some(code));
+                }
+                continue;
+            }
             if let Some(code) = step["exit"].as_i64() {
                 return Ok(Some(i32::try_from(code).unwrap_or(1)));
             }
@@ -326,12 +371,36 @@ fn run_steps<'a>(
                 if step.get("after_turn").is_some() {
                     turn.restart_due = true;
                 } else {
-                    emit(json!({"type":"restart_due"})).await?;
+                    emit(json!({"type":"restart_due", "restart":step["restart"]})).await?;
                 }
             } else if let Some(background) = step.get("background") {
                 emit(json!({"type":"background_work", "background":background})).await?;
             } else if step.get("wake_turn").is_some() {
                 turn.wake_turn = true;
+            } else if let Some(steps) = step["after_turn"].as_array() {
+                turn.after_turn.clone_from(steps);
+            } else if step["adopt"].as_bool() == Some(true) {
+                emit(json!({"type":"run_adopted", "input_command_id":turn.command})).await?;
+                emit(json!({"type":"background_work", "background":{"tasks":[],"wake_turn":true}}))
+                    .await?;
+                phase(Phase::Generating).await?;
+                turn.adopted = true;
+            } else if let Some(path) = step["wait_file"].as_str() {
+                while !tokio::fs::try_exists(path).await? {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            } else if let Some(spec) = step.get("write_file") {
+                write_step_file(spec).await?;
+            } else if let Some(spec) = step.get("git_commit") {
+                write_step_file(spec).await?;
+                git(&["add", "-A"]).await?;
+                git(&[
+                    "commit",
+                    "-q",
+                    "-m",
+                    spec["subject"].as_str().unwrap_or("synthetic"),
+                ])
+                .await?;
             } else if let Some(items) = step.get("todo") {
                 let items: Vec<super::TodoItem> = serde_json::from_value(items.clone())
                     .map_err(|_| io::Error::other("invalid todo"))?;
@@ -613,6 +682,53 @@ fn run_steps<'a>(
         Ok(None)
     })
 }
+/// Первая строка-скрипт в тексте хаба: бриф, сообщение другой сессии или итог в событии.
+fn script_of(text: &str) -> Option<&str> {
+    if text.starts_with(SCRIPT_START) {
+        return Some(text);
+    }
+    if !text.starts_with("[canterlot]") {
+        return None;
+    }
+    text.lines().find(|line| line.starts_with(SCRIPT_START))
+}
+
+/// Шаги после конца хода идут рядом с ожиданием ввода, как сообщения CLI между ходами.
+async fn run_after_turn(command: Uuid, model: String, steps: Vec<Value>) -> io::Result<()> {
+    let (_decisions, receiver) = mpsc::unbounded_channel();
+    let mut turn = Turn {
+        decisions: receiver,
+        late_request: None,
+        after_turn: Vec::new(),
+        wake_turn: false,
+        restart_due: false,
+        adopted: false,
+        command,
+        files: Vec::new(),
+        instructions: None,
+        accepted: true,
+        usage: Default::default(),
+        output_chars: 0,
+        exhausted: false,
+    };
+    let mut lane = Lane {
+        agent: "main".into(),
+        model,
+        parent: None,
+        text_id: None,
+        accumulated: String::new(),
+    };
+    run_steps(&mut turn, &mut lane, steps, 0).await?;
+    close_text(&mut lane).await?;
+    if turn.adopted {
+        completed(command, Vec::new(), 0).await?;
+        emit(json!({"type":"background_work", "background":{"tasks":[],"wake_turn":false}}))
+            .await?;
+        phase(Phase::AwaitingInput).await?;
+    }
+    Ok(())
+}
+
 fn hex_empty() -> String {
     Sha256::digest(b"")
         .iter()
@@ -620,6 +736,8 @@ fn hex_empty() -> String {
         .map(|b| format!("{b:02x}"))
         .collect()
 }
+
+const SCRIPT_START: &str = "{\"synthetic\":";
 
 struct TurnInput {
     command: Uuid,
@@ -641,9 +759,9 @@ async fn run_turn(
         files,
         instructions,
     } = input;
-    let steps = if text.starts_with("{\"synthetic\":") {
+    let steps = if let Some(script) = script_of(&text) {
         let value: Value =
-            serde_json::from_str(&text).map_err(|_| io::Error::other("invalid script"))?;
+            serde_json::from_str(script).map_err(|_| io::Error::other("invalid script"))?;
         value["synthetic"]
             .as_array()
             .cloned()
@@ -655,8 +773,10 @@ async fn run_turn(
     let mut turn = Turn {
         decisions,
         late_request: None,
+        after_turn: Vec::new(),
         wake_turn: false,
         restart_due: false,
+        adopted: false,
         command,
         files,
         instructions,
@@ -696,6 +816,7 @@ async fn run_turn(
         );
     }
     let late_request = turn.late_request.take();
+    let after_turn = std::mem::take(&mut turn.after_turn);
     let waking = turn.wake_turn;
     let restart_due = turn.restart_due;
     let usage: Vec<_> = turn.usage.into_values().collect();
@@ -720,6 +841,13 @@ async fn run_turn(
         wake_turn.set(Some(command));
         emit(json!({"type":"run_adopted", "input_command_id":command})).await?;
         phase(Phase::Generating).await?;
+    }
+    if !after_turn.is_empty() {
+        let model = model.to_owned();
+        tokio::spawn(async move {
+            // Стоп процесса обрывает шаги; ошибка записи здесь значит только это.
+            let _ = run_after_turn(command, model, after_turn).await;
+        });
     }
     Ok(None)
 }
