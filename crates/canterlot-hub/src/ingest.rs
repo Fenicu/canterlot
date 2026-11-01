@@ -2314,6 +2314,17 @@ async fn apply_journal_body(
         }
         return Ok(Some(false));
     }
+    // Доказательство даёт только управляющая служба: журнал сопровождения его не заменит.
+    if let Body::ExecutionState(fact) = body
+        && fact.outcome == canterlot_proto::OWNER_RECLAIMED
+    {
+        if kind != JournalKind::Cj {
+            return Ok(Some(true));
+        }
+        return apply_owner_reclaimed(conn, machine_id, fact, correlation_id)
+            .await
+            .map(Some);
+    }
     if let Body::JournalOpened(fact) = body {
         if kind != JournalKind::Sj || seq != 1 {
             return Err(IngestError::InvalidRecord);
@@ -2513,6 +2524,32 @@ async fn apply_journal_body(
     Ok(Some(matches!(outcome, BlockOutcome::Ignored(_))))
 }
 
+async fn apply_owner_reclaimed(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    fact: &canterlot_proto::worker::v1::ExecutionState,
+    correlation_id: Uuid,
+) -> Result<bool, IngestError> {
+    let execution_id = parse_id(&fact.execution_id)?;
+    let Some(run) = owned_execution(conn, machine_id, execution_id, Some(fact.generation)).await?
+    else {
+        return Ok(true);
+    };
+    let Some(target) = executions::reclaim_target(conn, run.conversation_id, execution_id).await?
+    else {
+        return Ok(true);
+    };
+    apply_execution_fact(
+        conn,
+        execution_id,
+        target,
+        Some(canterlot_proto::OWNER_RECLAIMED),
+        correlation_id,
+    )
+    .await?;
+    Ok(false)
+}
+
 /// Исполнение решения из CJ: запрос машины с тем же решением-победителем.
 async fn decision_execution(
     conn: &mut PgConnection,
@@ -2588,20 +2625,25 @@ async fn apply_request_opened(
         return Ok(true);
     }
     let req_uuid = Uuid::parse_str(&fact.request_id).ok();
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "select id from requests where (execution_id = $1 and native_request_id = $2) or ($3 is not null and id = $3)",
+    let existing: Option<(Uuid, String)> = sqlx::query_as(
+        "select id, state from requests where (execution_id = $1 and native_request_id = $2) or ($3 is not null and id = $3)",
     )
     .bind(run.execution_id)
     .bind(&fact.request_id)
     .bind(req_uuid)
     .fetch_optional(&mut *conn)
     .await?;
+    let reopened = match &existing {
+        Some((id, state)) => {
+            if !closed_by_owner_loss(conn, run, *id, state).await? {
+                return Ok(true);
+            }
+            Some(*id)
+        }
+        None => None,
+    };
 
-    if existing.is_some() {
-        return Ok(true);
-    }
-
-    let id = req_uuid.unwrap_or_else(Uuid::now_v7);
+    let id = reopened.or(req_uuid).unwrap_or_else(Uuid::now_v7);
     let kind = fact
         .kind
         .parse::<crate::requests::RequestKind>()
@@ -2615,28 +2657,40 @@ async fn apply_request_opened(
     strip_nul(&mut payload_val);
     let generation = i64::try_from(fact.generation).map_err(|_| IngestError::InvalidRecord)?;
 
-    // Явной блокировки разговора нет: пакет SJ уже мог добавить события (шаг 12),
-    // а вставка с FK берёт совместимый FOR KEY SHARE.
-    sqlx::query(
-        "insert into requests (
-            id, conversation_id, execution_id, generation,
-            kind, native_request_id, state, request_payload,
-            created_at, updated_at
-        ) values (
-            $1, $2, $3, $4,
-            $5, $6, 'open', $7,
-            clock_timestamp(), clock_timestamp()
-        )",
-    )
-    .bind(id)
-    .bind(run.conversation_id)
-    .bind(run.execution_id)
-    .bind(generation)
-    .bind(kind)
-    .bind(&fact.request_id)
-    .bind(&payload_val)
-    .execute(&mut *conn)
-    .await?;
+    if reopened.is_some() {
+        // Сопровождение всё ещё ждёт ответа, а прежнее решение до агента не дошло.
+        sqlx::query(
+            "update requests set state = 'open', winner_decision_id = null, decision_payload = null,
+                 idempotency_key = null, updated_at = clock_timestamp()
+             where id = $1",
+        )
+        .bind(id)
+        .execute(&mut *conn)
+        .await?;
+    } else {
+        // Явной блокировки разговора нет: пакет SJ уже мог добавить события (шаг 12),
+        // а вставка с FK берёт совместимый FOR KEY SHARE.
+        sqlx::query(
+            "insert into requests (
+                id, conversation_id, execution_id, generation,
+                kind, native_request_id, state, request_payload,
+                created_at, updated_at
+            ) values (
+                $1, $2, $3, $4,
+                $5, $6, 'open', $7,
+                clock_timestamp(), clock_timestamp()
+            )",
+        )
+        .bind(id)
+        .bind(run.conversation_id)
+        .bind(run.execution_id)
+        .bind(generation)
+        .bind(kind)
+        .bind(&fact.request_id)
+        .bind(&payload_val)
+        .execute(&mut *conn)
+        .await?;
+    }
 
     let queue_row: Option<QueueRowTuple> = sqlx::query_as(
         "select pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt
@@ -2703,6 +2757,33 @@ async fn apply_request_opened(
         .await?;
 
     Ok(false)
+}
+
+/// Запрос закрыт хабом при потере владельца, а не фактом сопровождения.
+async fn closed_by_owner_loss(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    request_id: Uuid,
+    state: &str,
+) -> Result<bool, IngestError> {
+    if !matches!(state, "closed_without_decision" | "decision_not_applied") {
+        return Ok(false);
+    }
+    Ok(sqlx::query_scalar(
+        "select exists(select 1 from events
+         where scope = $1 and execution_id = $2 and kind = 'request_closed'
+           and payload->>'request_id' = $3 and payload->>'reason' = 'owner_lost')",
+    )
+    .bind(
+        Scope::Conversation {
+            id: run.conversation_id,
+        }
+        .key(),
+    )
+    .bind(run.execution_id)
+    .bind(request_id.to_string())
+    .fetch_one(conn)
+    .await?)
 }
 
 struct LockedRequest {

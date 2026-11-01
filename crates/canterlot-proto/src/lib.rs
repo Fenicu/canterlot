@@ -10,6 +10,9 @@ pub mod worker {
     }
 }
 
+/// `outcome` факта CJ: управляющая служба заново подтвердила то же живое сопровождение.
+pub const OWNER_RECLAIMED: &str = "owner_reclaimed";
+
 pub mod harness;
 pub mod limits;
 pub mod requests;

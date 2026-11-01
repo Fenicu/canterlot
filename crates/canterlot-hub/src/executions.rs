@@ -1,3 +1,4 @@
+use canterlot_proto::OWNER_RECLAIMED;
 use serde_json::json;
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
@@ -343,6 +344,14 @@ pub async fn set_state_in_tx(
     if !legal_transition(from, to, outcome) {
         return Err(ExecutionError::InvalidTransition { from, to });
     }
+    let reclaimed = outcome == Some(OWNER_RECLAIMED);
+    let outcome = outcome.filter(|_| !reclaimed);
+    if reclaimed {
+        queue
+            .pause_reasons
+            .0
+            .retain(|reason| *reason != PauseReason::OwnerLost);
+    }
     let mut slot = queue.slot()?;
     if matches!(
         to,
@@ -440,6 +449,48 @@ pub async fn set_state_in_tx(
     Ok(())
 }
 
+/// Состояние, в которое возвращается исполнение из `owner_lost`, пока владение доказуемо.
+/// `None`, если вернуть нечего: исполнение не потеряно или журнал закрыт, то есть группа
+/// завершилась. Без истории в событиях (срок хранения вышел) остаётся `running`.
+pub async fn reclaim_target(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+) -> Result<Option<ExecutionState>, sqlx::Error> {
+    let lost: Option<bool> = sqlx::query_scalar(
+        "select e.state = 'owner_lost'
+                and not exists(select 1 from journal_cursors j
+                               where j.execution_id = e.id and j.closed)
+         from executions e where e.id = $1",
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if lost != Some(true) {
+        return Ok(None);
+    }
+    let previous: Option<String> = sqlx::query_scalar(
+        "select payload->>'state' from events
+         where scope = $1 and execution_id = $2 and kind = 'execution_state_changed'
+           and payload->>'state' in ('created', 'starting', 'running', 'stopping')
+         order by scope_seq desc limit 1",
+    )
+    .bind(
+        Scope::Conversation {
+            id: conversation_id,
+        }
+        .key(),
+    )
+    .bind(execution_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    Ok(Some(
+        previous
+            .and_then(|state| state.parse().ok())
+            .unwrap_or(ExecutionState::Running),
+    ))
+}
+
 pub async fn live(
     conn: &mut PgConnection,
     conversation_id: Uuid,
@@ -492,6 +543,11 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
             | (Starting, Running | Stopping | OwnerLost, None)
             | (Running, Stopping | OwnerLost, None)
             | (Stopping, OwnerLost, None)
+            | (
+                OwnerLost,
+                Created | Starting | Running | Stopping,
+                Some(OWNER_RECLAIMED)
+            )
             | (
                 Starting | Running | Stopping | OwnerLost,
                 Stopped,
