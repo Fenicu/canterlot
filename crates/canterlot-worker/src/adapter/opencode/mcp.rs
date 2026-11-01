@@ -67,6 +67,18 @@ pub fn has_foreign_server(list: &Value) -> bool {
         })
 }
 
+/// Сам canterlot в списке: только такой ответ подтверждает, что список настоящий и уже собран.
+/// Сразу после старта он бывает пуст, а `has_foreign_server` на незнакомой форме молчит.
+pub fn lists_own_server(list: &Value) -> bool {
+    list.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|servers| {
+            servers
+                .iter()
+                .any(|server| server.get("name").and_then(Value::as_str) == Some(SERVER_NAME))
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,6 +95,16 @@ mod tests {
         assert_eq!(state_of(&list("canterlot", "needs_auth")), McpState::Failed);
         assert_eq!(state_of(&list("other", "connected")), McpState::Pending);
         assert_eq!(state_of(&json!({"data": []})), McpState::Pending);
+    }
+
+    #[test]
+    fn only_a_list_with_canterlot_counts_as_proof() {
+        let own = json!({"name": "canterlot", "status": {"status": "pending"}});
+        assert!(lists_own_server(&json!({"data": [own]})));
+        assert!(!lists_own_server(&json!({"data": []})));
+        assert!(!lists_own_server(&json!({"data": {"canterlot": {}}})));
+        assert!(!lists_own_server(&json!({"servers": [own]})));
+        assert!(!lists_own_server(&json!([])));
     }
 
     #[test]

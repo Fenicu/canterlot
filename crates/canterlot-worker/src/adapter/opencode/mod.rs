@@ -724,22 +724,26 @@ impl OpenCodeAdapter {
 
     async fn wait_mcp(&mut self) -> Result<(), AdapterError> {
         let limit = Instant::now() + self.ready_wait;
-        let state = loop {
-            let state = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
+        let (state, proven) = loop {
+            let (state, proven) = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
                 Ok(list) if self.isolate_mcp && mcp::has_foreign_server(&list) => {
                     return Err(AdapterError::StartFailed("mcp_isolation_failed"));
                 }
-                Ok(list) => mcp::state_of(&list),
+                Ok(list) => (mcp::state_of(&list), mcp::lists_own_server(&list)),
                 Err(HttpError::Lost) => {
                     return Err(AdapterError::StartFailed("server_unreachable"));
                 }
-                Err(_) => McpState::Pending,
+                Err(_) => (McpState::Pending, false),
             };
             if state != McpState::Pending || Instant::now() >= limit {
-                break state;
+                break (state, proven);
             }
             tokio::time::sleep(POLL_EVERY).await;
         };
+        // Как у Codex: для делегированной сессии отсутствие проверки значит отказ, а не успех.
+        if self.isolate_mcp && !proven {
+            return Err(AdapterError::StartFailed("mcp_isolation_failed"));
+        }
         if state == McpState::Connected {
             tokio::time::sleep(MCP_SETTLE).await;
         } else {

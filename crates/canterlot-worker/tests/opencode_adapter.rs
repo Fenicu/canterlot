@@ -1130,6 +1130,93 @@ async fn pending_mcp_past_the_deadline_is_a_diagnostic() {
     bench.close(CloseMode::Graceful).await;
 }
 
+/// Делегированная сессия с заданным ответом `/api/mcp` и коротким сроком ожидания.
+fn isolated(replies: Vec<Reply>) -> Bench {
+    let mut script = session_only();
+    script.set_route("GET", "/api/mcp", replies);
+    let mut bench = Bench::new(script);
+    bench.spec.isolate_mcp = true;
+    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench
+}
+
+fn mcp_reply(body: Value) -> Reply {
+    Reply {
+        body: Some(body),
+        ..Reply::default()
+    }
+}
+
+#[tokio::test]
+async fn isolated_start_fails_closed_without_proof_of_the_server_list() {
+    let refused = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "Failure"})),
+        ..Reply::default()
+    };
+    for (name, reply) in [
+        ("the list is refused", refused),
+        ("unknown shape", mcp_reply(json!({"servers": []}))),
+        (
+            "data is no list",
+            mcp_reply(json!({"data": {"canterlot": {}}})),
+        ),
+        ("the list stays empty", mcp_reply(json!({"data": []}))),
+    ] {
+        let mut bench = isolated(vec![reply]);
+        assert_eq!(bench.fail_reason().await, "mcp_isolation_failed", "{name}");
+    }
+}
+
+#[tokio::test]
+async fn isolated_start_refuses_a_foreign_server() {
+    let mut bench = isolated(vec![mcp_reply(json!({"data": [
+        {"name": "canterlot", "status": {"status": "connected"}},
+        {"name": "nanokvm", "status": {"status": "pending"}},
+    ]}))]);
+    assert_eq!(bench.fail_reason().await, "mcp_isolation_failed");
+}
+
+#[tokio::test]
+async fn isolated_start_goes_on_when_the_list_proves_there_is_only_canterlot() {
+    let mut bench = isolated(vec![mcp_reply(json!({"data": [
+        {"name": "canterlot", "status": {"status": "pending"}},
+    ]}))]);
+    bench.start_ok().await;
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Diagnostic {
+            kind: "mcp_unavailable",
+            required: false,
+            ..
+        }
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
+#[tokio::test]
+async fn owner_session_still_starts_when_the_server_list_is_refused() {
+    let mut script = session_only();
+    let refused = Reply {
+        status: 500,
+        body: Some(json!({"_tag": "Failure"})),
+        ..Reply::default()
+    };
+    script.set_route("GET", "/api/mcp", vec![refused]);
+    let mut bench = Bench::new(script);
+    bench.adapter.set_ready_wait(Duration::from_millis(300));
+    bench.start_ok().await;
+    assert!(matches!(
+        bench.event().await,
+        AdapterEvent::Diagnostic {
+            kind: "mcp_unavailable",
+            required: false,
+            ..
+        }
+    ));
+    bench.close(CloseMode::Graceful).await;
+}
+
 #[tokio::test]
 async fn agents_are_polled_until_the_location_is_up() {
     let mut bench = Bench::new(session_only());
