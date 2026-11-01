@@ -1280,12 +1280,12 @@ impl CodexAdapter {
         }
     }
 
-    /// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
     /// Свой дом нужен всем режимам, кроме «Как у владельца»; делегированной сессии нужен и ему.
     fn wants_home(&self, mode: InstructionMode) -> bool {
         mode != InstructionMode::Owner || self.isolate_mcp
     }
 
+    /// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
     fn prepare_home(&mut self, mode: InstructionMode) -> Result<CodexHome, &'static str> {
         let home_error = |error| match error {
             HomeError::Unusable => "codex_home_unusable",
