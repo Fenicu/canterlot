@@ -411,6 +411,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
     std::fs::create_dir_all(&owner).unwrap();
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
         claude_code: None,
         codex: Some(CodexConfig {
