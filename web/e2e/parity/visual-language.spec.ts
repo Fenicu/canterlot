@@ -7,24 +7,25 @@ import { bootScreen, SCREENS, type Theme } from './states';
 const THEMES: Theme[] = ['dark', 'light'];
 const COLOR_TOKENS = [...readFileSync(resolve(process.cwd(), 'src/lib/styles/tokens.css'), 'utf8').matchAll(/(--[a-z0-9-]+):\s*(?:#|rgb|hsl|oklch|color-mix)/g)].map((match) => match[1]!);
 
-test('axe_has_no_serious_violations_on_every_route_in_both_themes', async ({ page }) => {
-  test.setTimeout(480_000);
-  for (const screen of SCREENS) {
-    for (const theme of THEMES) {
+// Каждая пара «экран, тема» отдельным тестом: проверки идут параллельно, а падение называет экран.
+for (const screen of SCREENS) {
+  for (const theme of THEMES) {
+    test(`axe_has_no_serious_violations_on_every_route_in_both_themes: ${screen.name} ${theme}`, async ({ page }) => {
+      test.setTimeout(120_000);
       await bootScreen(page, screen, theme);
       const results = await new AxeBuilder({ page }).analyze();
       const serious = results.violations
         .filter((violation) => violation.impact === 'serious' || violation.impact === 'critical')
         .map((violation) => `${violation.id} (${violation.impact}): ${violation.nodes.slice(0, 3).map((node) => node.target.join(' ')).join(' | ')}`);
       expect(serious, `${screen.name} (${theme})`).toEqual([]);
-    }
+    });
   }
-});
+}
 
-test('no_horizontal_scroll_at_360_320_and_text_200_percent_on_every_route', async ({ page }) => {
-  test.setTimeout(480_000);
-  for (const screen of SCREENS.filter((item) => item.viewport.width < 1000)) {
-    for (const width of [360, 320]) {
+for (const screen of SCREENS.filter((item) => item.viewport.width < 1000)) {
+  for (const width of [360, 320]) {
+    test(`no_horizontal_scroll_at_360_320_and_text_200_percent_on_every_route: ${screen.name} ${width}`, async ({ page }) => {
+      test.setTimeout(120_000);
       await bootScreen(page, screen, 'dark', { width, height: 740 });
       // Текст 200 %: растёт только размер шрифта корня, вьюпорт не меняется.
       await page.evaluate(() => document.documentElement.style.setProperty('font-size', '200%', 'important'));
@@ -39,9 +40,9 @@ test('no_horizontal_scroll_at_360_320_and_text_200_percent_on_every_route', asyn
         return { scrollWidth: doc.scrollWidth, clientWidth: doc.clientWidth, wide };
       });
       expect(overflow.scrollWidth, `${screen.name} at ${width}px with 200% text: ${overflow.wide.join(', ')}`).toBeLessThanOrEqual(overflow.clientWidth);
-    }
+    });
   }
-});
+}
 
 test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
   test.setTimeout(120_000);
@@ -119,12 +120,13 @@ test('keyboard_only_flow_reaches_send_sheets_and_back', async ({ page }) => {
 
 interface Audit { rule: string; where: string; count: number; example: string }
 
-test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
-  test.setTimeout(480_000);
-  const problems: string[] = [];
-  const observed = new Map<string, string>();
-  for (const screen of SCREENS) {
-    for (const theme of THEMES) {
+// Каждая пара «экран, тема» отдельным тестом: проверки идут параллельно, а падение называет экран.
+for (const screen of SCREENS) {
+  for (const theme of THEMES) {
+    test(`visual_language_invariants_hold_on_every_screen: ${screen.name} ${theme}`, async ({ page }) => {
+      test.setTimeout(120_000);
+      const problems: string[] = [];
+      const observed = new Map<string, string>();
       await bootScreen(page, screen, theme);
       const found: Audit[] = await page.evaluate((colorTokens) => {
         const rules = new Map<string, Audit>();
@@ -214,8 +216,8 @@ test('visual_language_invariants_hold_on_every_screen', async ({ page }) => {
         return [...rules.values()];
       }, COLOR_TOKENS);
       for (const item of found) observed.set(`${item.rule} | ${item.where}`, `${screen.name} (${theme}): x${item.count}, ${item.example}`);
-    }
+      for (const [key, example] of observed) problems.push(`${key}: ${example}`);
+      expect(problems, problems.join('\n')).toEqual([]);
+    });
   }
-  for (const [key, example] of observed) problems.push(`${key}: ${example}`);
-  expect(problems, problems.join('\n')).toEqual([]);
-});
+}
