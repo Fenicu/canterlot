@@ -762,6 +762,7 @@ fn ownership_roundtrip() {
         ipc_protocol_version: 1,
         phase: OwnershipPhase::Attached as i32,
         released_reason: "normal_exit".into(),
+        reclaimed_cj_seq: 7,
     });
     for (number, name) in ["UNSPECIFIED", "SPAWNING", "ATTACHED", "RELEASED"]
         .into_iter()
