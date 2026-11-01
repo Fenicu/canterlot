@@ -22,7 +22,7 @@ test('manifest_is_generated_from_tokens_and_valid', async () => {
   const css = readFileSync('src/lib/styles/tokens.css', 'utf8');
   const m = manifest(css);
   expect(JSON.parse(readFileSync('build/manifest.webmanifest', 'utf8'))).toEqual(m);
-  expect(m).toMatchObject({ id: '/', start_url: '/', scope: '/', name: 'canterlot', short_name: 'canterlot', lang: 'ru', display: 'standalone', theme_color: css.match(/--bg:\s*([^;]+)/)?.[1], background_color: css.match(/--bg:\s*([^;]+)/)?.[1], shortcuts: [{ name: 'Новая сессия', url: '/new' }] });
+  expect(m).toMatchObject({ id: '/', start_url: '/', scope: '/', name: 'Canterlot', short_name: 'Canterlot', lang: 'ru', display: 'standalone', theme_color: css.match(/--bg:\s*([^;]+)/)?.[1], background_color: css.match(/--bg:\s*([^;]+)/)?.[1], shortcuts: [{ name: 'Новая сессия', url: '/new' }] });
   expect(m.share_target).toEqual({ action: '/_share', method: 'POST', enctype: 'multipart/form-data', params: { title: 'title', text: 'text', url: 'url', files: [{ name: 'files', accept: ['*/*'] }] } });
   expect(m.share_target.action.startsWith(m.scope)).toBe(true);
   expect(m.icons).toHaveLength(3);
