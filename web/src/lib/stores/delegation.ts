@@ -94,6 +94,69 @@ export function buildDelegation(blocks: Iterable<BlockModel>, facts?: SubagentFa
 		});
 }
 
+const FINISHED = new Set(['done', 'final', 'completed', 'failed', 'error', 'aborted', 'stopped', 'incomplete']);
+const INTERRUPTED = new Set(['failed', 'error', 'aborted', 'stopped', 'incomplete']);
+
+export function isRunning(node: DelegationNode): boolean {
+	return !FINISHED.has(node.state);
+}
+
+export function runningCount(nodes: readonly DelegationNode[]): number {
+	return nodes.filter(isRunning).length;
+}
+
+export function interruptedCount(nodes: readonly DelegationNode[]): number {
+	return nodes.filter((node) => INTERRUPTED.has(node.state)).length;
+}
+
+/** Снимок хаба дополняется живыми узлами: у одного блока побеждает живой. */
+export function mergeNodes(server: readonly DelegationNode[], live: readonly DelegationNode[]): DelegationNode[] {
+	const map = new Map<string, DelegationNode>();
+	for (const node of server) map.set(node.block_id, node);
+	for (const node of live) map.set(node.block_id, node);
+	return [...map.values()];
+}
+
+/**
+ * Начало последнего хода: хода (`inputCommandId`) у самого нового блока, от первого блока этого хода.
+ * Фоновая работа, разбудившая сессию, получает ход последней команды, так что границы хода едины для всех.
+ */
+export function latestTurnStart(blocks: Iterable<BlockModel>): number | null {
+	let newest: BlockModel | null = null;
+	const list: BlockModel[] = [];
+	for (const block of blocks) {
+		if (block.inputCommandId === null) continue;
+		list.push(block);
+		if (!newest || BigInt(block.createdSeq) > BigInt(newest.createdSeq)) newest = block;
+	}
+	if (!newest) return null;
+	const run = newest.inputCommandId;
+	let start = Infinity;
+	for (const block of list) if (block.inputCommandId === run) start = Math.min(start, block.startedAt ?? block.createdAt);
+	return start;
+}
+
+export interface DelegationGroups {
+	/** Работающие, затем закончившие в последнем ходе. */
+	shown: DelegationNode[];
+	/** Всё остальное завершённое, новые сверху. */
+	older: DelegationNode[];
+	/** Сколько из `older` оборвано или упало. */
+	interrupted: number;
+}
+
+const stamp = (value: string | null): number => (value ? Date.parse(value) : 0);
+const endOf = (node: DelegationNode): number => stamp(node.finished_at ?? node.started_at);
+
+export function groupDelegation(nodes: readonly DelegationNode[], turnStart: number | null): DelegationGroups {
+	const running = nodes.filter(isRunning).sort((a, b) => stamp(a.started_at) - stamp(b.started_at));
+	const done = nodes.filter((node) => !isRunning(node));
+	const fresh = (node: DelegationNode): boolean => turnStart !== null && endOf(node) >= turnStart;
+	const recent = done.filter(fresh).sort((a, b) => stamp(a.started_at) - stamp(b.started_at));
+	const older = done.filter((node) => !fresh(node)).sort((a, b) => endOf(b) - endOf(a));
+	return { shown: [...running, ...recent], older, interrupted: interruptedCount(older) };
+}
+
 export function laneBlocks(blocks: Iterable<BlockModel>, rootBlockId: string): BlockModel[] {
 	const list = [...blocks];
 	const children = new Map<string, BlockModel[]>();
