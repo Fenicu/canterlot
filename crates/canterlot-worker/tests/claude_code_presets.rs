@@ -387,7 +387,10 @@ for line in sys.stdin:
     # чтение при старте процесса гоняло бы со стартом интерпретатора.
     usage = json.loads((d / 'usage.json').read_text()) if (d / 'usage.json').exists() else {}
     if v.get('type') == 'control_request':
-        emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': v['request_id'], 'response': {}}})
+        if (d / 'refuse-control').exists():
+            emit({'type': 'control_response', 'response': {'subtype': 'error', 'request_id': v['request_id'], 'error': 'refused'}})
+        else:
+            emit({'type': 'control_response', 'response': {'subtype': 'success', 'request_id': v['request_id'], 'response': {}}})
         continue
     emit({'type': 'system', 'subtype': 'init', 'session_id': sid, 'model': 'claude-haiku-test',
           'permissionMode': 'default',
@@ -677,6 +680,114 @@ async fn later_settings_change_replaces_the_deferred_one() {
         "новый текст",
         "the latest change wins"
     );
+}
+
+fn stdin_values(h: &RestartHarness, pid: u32) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(h.dir.path().join(format!("stdin-{pid}.log")))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+fn mode_and_preset(mode: &str) -> SettingsChange {
+    SettingsChange {
+        permission_mode: Some(mode.into()),
+        ..change(clean_spec())
+    }
+}
+
+// Фон закончился: ход с пустым списком и выдержка, после которой перезапуск уже возможен.
+async fn end_background_work(h: &mut RestartHarness) {
+    background_frames(h, serde_json::json!([]));
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    tokio::time::sleep(Duration::from_millis(2_200)).await;
+}
+
+#[tokio::test]
+async fn narrowed_mode_applies_now_and_only_the_preset_restart_waits_for_background_work() {
+    let mut h = RestartHarness::new().await;
+    background_frames(&h, running_task());
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    let out = h.transmit(Some(mode_and_preset("read_only"))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    assert_eq!(h.spawns().len(), 1, "background work keeps the process");
+    let lines = stdin_values(&h, h.old_pid);
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert_eq!(lines[1]["type"], "control_request");
+    assert_eq!(lines[1]["request"]["subtype"], "set_permission_mode");
+    assert_eq!(lines[1]["request"]["mode"], "plan");
+    assert_eq!(lines[2]["type"], "user", "the mode goes before the message");
+    let events = h.until_finished().await;
+    assert_eq!(warnings(&events), 1, "the preset still waits");
+
+    end_background_work(&mut h).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    let spawns = h.spawns();
+    assert_eq!(spawns.len(), 2, "the restart went ahead: {spawns:?}");
+    let (_, args) = spawns.iter().find(|(pid, _)| *pid != h.old_pid).unwrap();
+    let flag = args.iter().position(|a| a == "--permission-mode").unwrap();
+    assert_eq!(args[flag + 1], "plan", "the restart keeps the narrow mode");
+}
+
+#[tokio::test]
+async fn mode_the_cli_cannot_take_alone_refuses_the_input_and_defers_nothing() {
+    let mut h = RestartHarness::new().await;
+    background_frames(&h, running_task());
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    let out = h.transmit(Some(mode_and_preset("bypass"))).await;
+    match out {
+        TransmitOutcome::Rejected(reason) => assert_eq!(reason, "permission_mode_needs_restart"),
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+    assert_eq!(h.stdin_lines(h.old_pid), 1, "nothing reached the CLI");
+
+    end_background_work(&mut h).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(h.spawns().len(), 1, "a refused change restarts nothing");
+}
+
+#[tokio::test]
+async fn mode_refused_by_the_cli_is_not_deferred_with_the_preset() {
+    let mut h = RestartHarness::new().await;
+    background_frames(&h, running_task());
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    std::fs::write(h.dir.path().join("refuse-control"), "1").unwrap();
+    let out = h.transmit(Some(mode_and_preset("read_only"))).await;
+    match out {
+        TransmitOutcome::Rejected(reason) => assert_eq!(reason, "permission_mode_change_failed"),
+        other => panic!("unexpected outcome: {other:?}"),
+    }
+    std::fs::remove_file(h.dir.path().join("refuse-control")).unwrap();
+
+    end_background_work(&mut h).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(h.spawns().len(), 1, "a refused change restarts nothing");
 }
 
 #[tokio::test]

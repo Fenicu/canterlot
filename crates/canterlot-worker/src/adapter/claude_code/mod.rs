@@ -733,15 +733,21 @@ impl ClaudeCodeAdapter {
             return TransmitOutcome::Rejected(reason.into());
         }
         // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода. Пока идёт
-        // фоновая работа, смена ждёт, а сообщение идёт сразу: CLI примет его и с задачами в фоне.
+        // фоновая работа, ждёт только перезапуск. Модель и режим уходят управляющими запросами
+        // перед сообщением: хаб покажет их сразу, и агент не должен работать шире показанного.
         let own_restart = input
             .settings
             .as_ref()
             .is_some_and(|change| process::needs_restart(&self.instructions, change));
         let mut settings = input.settings.clone();
+        let mut restart_later = None;
         if self.background_busy() {
-            if own_restart {
-                self.defer_restart(settings.take().unwrap_or_default());
+            if let Some(change) = settings.as_mut().filter(|_| own_restart) {
+                restart_later = Some(SettingsChange {
+                    effort: change.effort.take(),
+                    instructions: change.instructions.take(),
+                    ..SettingsChange::default()
+                });
             }
         } else if let Some(change) = self
             .take_deferred(input.settings.as_ref())
@@ -792,6 +798,10 @@ impl ClaudeCodeAdapter {
                         written = true;
                         limit = Instant::now() + self.deadline;
                     }
+                }
+                // Отказ управляющего запроса отклоняет ввод целиком, перезапуск ждёт только принятый.
+                if written && let Some(change) = restart_later.take() {
+                    self.defer_restart(change);
                 }
                 if !matches!(
                     timeout_at(limit, self.cli.as_mut().unwrap().write_line(&line)).await,
