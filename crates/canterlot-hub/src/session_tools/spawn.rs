@@ -701,7 +701,7 @@ pub(crate) async fn queue_decision_in_tx(
     .await
 }
 
-fn note_job(text: String, origin: Value) -> Value {
+pub(super) fn note_job(text: String, origin: Value) -> Value {
     json!({"action": "note", "text": text, "origin": origin})
 }
 
@@ -919,21 +919,46 @@ pub(crate) async fn close_job(
     let Ok(close) = serde_json::from_value::<CloseJob>(job.payload.clone()) else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
+    let closed = close_request_in_tx(
+        conn,
+        parent_id,
+        close.request_id,
+        &close.state,
+        &close.reason,
+        correlation_id,
+    )
+    .await?;
+    Ok(JobOutcome::Done(if closed {
+        json!({"request_id": close.request_id})
+    } else {
+        json!({"skipped": true})
+    }))
+}
+
+/// Только сохранённое решение закрывается: открытый запрос и закрытый другим путём не трогаются.
+async fn close_request_in_tx(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+    request_id: Uuid,
+    state: &str,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
     send::lock_queue(conn, parent_id).await?;
     let row: Option<(RequestState, Uuid)> = sqlx::query_as(
         "select state,execution_id from requests
          where id=$1 and conversation_id=$2 for update",
     )
-    .bind(close.request_id)
+    .bind(request_id)
     .bind(parent_id)
     .fetch_optional(&mut *conn)
     .await?;
     let Some((RequestState::DecisionSaved, execution_id)) = row else {
-        return Ok(JobOutcome::Done(json!({"skipped": true})));
+        return Ok(false);
     };
     sqlx::query("update requests set state=$2,updated_at=clock_timestamp() where id=$1")
-        .bind(close.request_id)
-        .bind(&close.state)
+        .bind(request_id)
+        .bind(state)
         .execute(&mut *conn)
         .await?;
     events::append(
@@ -943,10 +968,80 @@ pub(crate) async fn close_job(
             kind: "request_closed",
             conversation_id: Some(parent_id),
             execution_id: Some(execution_id),
-            payload: json!({"request_id": close.request_id, "reason": close.reason}),
+            payload: json!({"request_id": request_id, "reason": reason}),
             correlation_id,
         },
     )
     .await?;
-    Ok(JobOutcome::Done(json!({"request_id": close.request_id})))
+    Ok(true)
+}
+
+const REASON_JOB_FAILED: &str = "job_failed";
+
+/// Задание запуска исчерпало попытки: решение владельца не выполнено, и запрос не должен
+/// висеть в `decision_saved`. Закрывается он здесь же, родитель получает сообщение.
+pub(crate) async fn abandon_spawn_in_tx(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+    payload: &Value,
+    now: DateTime<Utc>,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let Ok(SpawnJob { request_id }) = serde_json::from_value(payload.clone()) else {
+        return Ok(());
+    };
+    let closed = close_request_in_tx(
+        conn,
+        parent_id,
+        request_id,
+        RequestState::DecisionNotApplied.as_str(),
+        REASON_JOB_FAILED,
+        correlation_id,
+    )
+    .await?;
+    if !closed {
+        return Ok(());
+    }
+    let depth: Option<i32> = sqlx::query_scalar(
+        "select (request_payload->>'chain_depth')::int from requests where id=$1",
+    )
+    .bind(request_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    let owner: Uuid = sqlx::query_scalar("select owner_id from conversations where id=$1")
+        .bind(parent_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let resolution = failed(request_id, depth.unwrap_or(0), REASON_JOB_FAILED);
+    subs::insert_job(
+        conn,
+        owner,
+        parent_id,
+        now,
+        &note_job(resolution.text, resolution.origin),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Закрывающее задание исчерпало попытки: итог уже выбран заданием запуска, закрытие тот же.
+pub(crate) async fn abandon_close_in_tx(
+    conn: &mut PgConnection,
+    parent_id: Uuid,
+    payload: &Value,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let Ok(close) = serde_json::from_value::<CloseJob>(payload.clone()) else {
+        return Ok(());
+    };
+    close_request_in_tx(
+        conn,
+        parent_id,
+        close.request_id,
+        &close.state,
+        &close.reason,
+        correlation_id,
+    )
+    .await?;
+    Ok(())
 }

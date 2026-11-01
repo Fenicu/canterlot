@@ -1293,6 +1293,18 @@ async fn apply_body(
                         correlation_id,
                     )
                     .await?;
+                } else if target.kind == "remove_worktree" {
+                    // Отказ воркера не должен оставить копию в `removing` навсегда.
+                    crate::session_tools::accept::apply_removal_in_tx(
+                        conn,
+                        machine_id,
+                        command_id,
+                        dispatch_attempt,
+                        crate::session_tools::accept::Removal::Failed,
+                        "rejected",
+                        correlation_id,
+                    )
+                    .await?;
                 } else {
                     complete_rejected(conn, command_id, dispatch_attempt, &fact.reason).await?;
                 }
@@ -1559,8 +1571,27 @@ async fn apply_body(
         | Body::TodoUpdated(_)
         | Body::BackgroundWorkChanged(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
-        // Итог уборки рабочей копии разбирается вместе с самой уборкой.
-        Body::WorktreeRemoved(_) => {}
+        Body::WorktreeRemoved(fact) => {
+            use crate::session_tools::accept::{Removal, apply_removal_in_tx};
+            let removal = match fact.outcome.as_str() {
+                "removed" => Removal::Removed {
+                    branch_kept: fact.branch_kept,
+                },
+                "dirty" => Removal::Dirty,
+                "failed" => Removal::Failed,
+                _ => return Err(IngestError::InvalidRecord),
+            };
+            return Ok(apply_removal_in_tx(
+                conn,
+                machine_id,
+                parse_id(&fact.command_id)?,
+                attempt(fact.dispatch_attempt)?,
+                removal,
+                &fact.detail,
+                correlation_id,
+            )
+            .await?);
+        }
     }
     Ok(false)
 }

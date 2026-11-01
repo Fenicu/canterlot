@@ -5,6 +5,7 @@
 //! ни в журнал, ни в `Debug` они не попадают. `grpc/agent.rs` только раздаёт вызовы,
 //! поэтому каждый инструмент живёт в своём файле этого модуля.
 
+pub mod accept;
 pub mod access;
 pub mod jobs;
 pub mod origin;
@@ -218,6 +219,7 @@ pub async fn call(
         "sessions.subscribe" => send::subscribe(context, caller, arguments).await,
         "sessions.unsubscribe" => send::unsubscribe(context, caller, arguments).await,
         "sessions.wait" => wait::wait(context, caller, arguments).await,
+        "sessions.accept" => accept::accept(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

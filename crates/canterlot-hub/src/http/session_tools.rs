@@ -2,21 +2,27 @@
 
 use super::{
     AppState,
-    auth::{IdempotencyKey, Owner},
+    auth::{Correlation, IdempotencyKey, Owner},
     error::{ApiError, ErrorCode},
-    extract::ApiJson,
+    extract::{ApiJson, ApiPath},
 };
 use crate::{
     idempotency,
-    session_tools::whitelist::{self, WhitelistEntry, WhitelistView},
+    session_tools::{
+        accept::{self, AcceptState},
+        whitelist::{self, WhitelistEntry, WhitelistView},
+    },
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use utoipa_axum::{router::OpenApiRouter, routes};
+use uuid::Uuid;
 
 pub fn routes() -> OpenApiRouter<AppState> {
-    OpenApiRouter::new().routes(routes!(read, replace))
+    OpenApiRouter::new()
+        .routes(routes!(read, replace))
+        .routes(routes!(accept_session))
 }
 
 #[derive(Serialize, Deserialize, ToSchema)]
@@ -69,4 +75,31 @@ async fn replace(
     )
     .await?;
     Ok(Json(outcome.value))
+}
+
+#[derive(Default, Serialize, Deserialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct AcceptBody {
+    /// Убрать рабочую копию, даже если в ней есть незафиксированные изменения.
+    #[serde(default)]
+    pub force: bool,
+}
+
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct AcceptView {
+    pub state: AcceptState,
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/accept",tag="session_tools",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),request_body=AcceptBody,responses((status=200,description="Приём результата делегированной сессии начат",body=AcceptView)))]
+async fn accept_session(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+    Correlation(c): Correlation,
+    ApiJson(body): ApiJson<AcceptBody>,
+) -> Result<Json<AcceptView>, ApiError> {
+    let state = accept::accept_for_owner(&s.pool, o.owner_id, id, body.force, &key, c).await?;
+    accept::wake(Some(&s.dispatcher), &s.pool, id);
+    Ok(Json(AcceptView { state }))
 }

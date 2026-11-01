@@ -12,7 +12,7 @@ use crate::{
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
     session::Registry,
-    session_tools::{spawn, summary},
+    session_tools::{accept, spawn, summary},
 };
 
 #[derive(Deserialize)]
@@ -75,6 +75,9 @@ pub async fn run_in_tx(
         }
         Some("spawn") => spawn::run_job(conn, job, subscriber, registry, now, correlation_id).await,
         Some("spawn_close") => spawn::close_job(conn, job, subscriber, correlation_id).await,
+        Some("cleanup") => {
+            Ok(accept::cleanup_job(conn, job, subscriber, now, correlation_id).await?)
+        }
         Some(_) => Ok(JobOutcome::Cancelled("unsupported")),
         None => Ok(JobOutcome::Cancelled("invalid_payload")),
     }
@@ -134,4 +137,31 @@ async fn deliver(
     )
     .await?;
     Ok(JobOutcome::Done(json!({"input_id":submitted.input_id})))
+}
+
+/// Задание исчерпало попытки или признано негодным: то, что оно должно было закрыть, закрывается
+/// здесь, в той же транзакции. Остальным видам задания закрывать нечего.
+pub async fn abandon_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Option<Uuid>,
+    payload: &Value,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let Some(conversation) = conversation_id else {
+        return Ok(());
+    };
+    let correlation_id = Uuid::now_v7();
+    match payload.get("action").and_then(Value::as_str) {
+        Some("spawn") => {
+            spawn::abandon_spawn_in_tx(conn, conversation, payload, now, correlation_id).await
+        }
+        Some("spawn_close") => {
+            spawn::abandon_close_in_tx(conn, conversation, payload, correlation_id).await
+        }
+        Some("cleanup") => {
+            accept::abandon_cleanup_in_tx(conn, owner_id, conversation, now, correlation_id).await
+        }
+        _ => Ok(()),
+    }
 }

@@ -952,6 +952,83 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/accept": {
+      "post": {
+        "tags": [
+          "session_tools"
+        ],
+        "operationId": "post__api_v1_conversations__id__accept",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AcceptBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Приём результата делегированной сессии начат",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AcceptView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/blocks/{block_id}": {
       "get": {
         "tags": [
@@ -4520,6 +4597,35 @@
   },
   "components": {
     "schemas": {
+      "AcceptBody": {
+        "type": "object",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "Убрать рабочую копию, даже если в ней есть незафиксированные изменения."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AcceptState": {
+        "type": "string",
+        "enum": [
+          "stopping",
+          "removing",
+          "done"
+        ]
+      },
+      "AcceptView": {
+        "type": "object",
+        "required": [
+          "state"
+        ],
+        "properties": {
+          "state": {
+            "$ref": "#/components/schemas/AcceptState"
+          }
+        }
+      },
       "ActivityConfigView": {
         "type": "object",
         "required": [

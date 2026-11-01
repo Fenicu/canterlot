@@ -451,37 +451,15 @@ pub async fn request_stop_execution(
     let idempotency_key = idempotency_key.to_owned();
     crate::db::in_tx(pool, move |conn| {
         Box::pin(async move {
-            let mut queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
             if let Some(outcome) =
                 lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
             {
                 return Ok(outcome);
             }
-            mark_owner_stop(&mut *conn, conversation_id, true).await?;
-            crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id)
-                .await?;
-            if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
-                queue.pause_reasons.0.push(PauseReason::UserStop);
-            }
-            let slot = queue.slot()?;
-            queue.save(&mut *conn, &slot, None, correlation_id).await?;
-            let live = executions::live(&mut *conn, conversation_id).await?;
-            let outcome = if let Some((execution_id, generation, _)) = live {
-                enqueue_stop(&mut *conn, conversation_id, execution_id, generation, force).await?
-            } else {
-                StopExecutionOutcome::NothingToStop
-            };
-            withdraw_dispatch(&mut *conn, &slot).await?;
-            events::append(
-                &mut *conn,
-                queue_event(
-                    &queue,
-                    "queue_paused",
-                    live.map(|(id, _, _)| id),
-                    correlation_id,
-                ),
-            )
-            .await?;
+            let outcome =
+                stop_locked_in_tx(&mut *conn, queue, conversation_id, force, correlation_id)
+                    .await?;
             record(
                 &mut *conn,
                 owner_id,
@@ -496,6 +474,52 @@ pub async fn request_stop_execution(
         })
     })
     .await
+}
+
+/// Остановка исполнения в чужой транзакции, без ключа идемпотентности: повтор ничего не меняет.
+pub(crate) async fn stop_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    force: bool,
+    correlation_id: Uuid,
+) -> Result<StopExecutionOutcome, ControlError> {
+    let queue = lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+    stop_locked_in_tx(conn, queue, conversation_id, force, correlation_id).await
+}
+
+async fn stop_locked_in_tx(
+    conn: &mut PgConnection,
+    mut queue: LockedQueue,
+    conversation_id: Uuid,
+    force: bool,
+    correlation_id: Uuid,
+) -> Result<StopExecutionOutcome, ControlError> {
+    mark_owner_stop(&mut *conn, conversation_id, true).await?;
+    crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id).await?;
+    if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
+        queue.pause_reasons.0.push(PauseReason::UserStop);
+    }
+    let slot = queue.slot()?;
+    queue.save(&mut *conn, &slot, None, correlation_id).await?;
+    let live = executions::live(&mut *conn, conversation_id).await?;
+    let outcome = if let Some((execution_id, generation, _)) = live {
+        enqueue_stop(&mut *conn, conversation_id, execution_id, generation, force).await?
+    } else {
+        StopExecutionOutcome::NothingToStop
+    };
+    withdraw_dispatch(&mut *conn, &slot).await?;
+    events::append(
+        &mut *conn,
+        queue_event(
+            &queue,
+            "queue_paused",
+            live.map(|(id, _, _)| id),
+            correlation_id,
+        ),
+    )
+    .await?;
+    Ok(outcome)
 }
 
 pub(crate) async fn withdraw_dispatch(

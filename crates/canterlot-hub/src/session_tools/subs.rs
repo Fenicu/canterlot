@@ -105,6 +105,71 @@ pub async fn unsubscribe_in_tx(
     Ok(())
 }
 
+/// Приём результата закрывает подписки в обе стороны: сама принятая сессия ни о ком не ждёт,
+/// а принявший родитель о ней больше не спрашивает. Ожидающие события для них отменяются,
+/// чтобы остановка при приёме не вернулась родителю как новый итог. Чужие подписчики и их
+/// ожидающие события не трогаются: возвращается список закрытых чужих подписок, им надо
+/// сообщить о приёме отдельно. Задания в работе пропускаются: порядок блокировок
+/// у них другой, а доставка одного события безвредна.
+pub async fn close_for_accept_in_tx(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    parent: Option<Uuid>,
+    reason: &str,
+) -> Result<Vec<ClosedSubscriber>, sqlx::Error> {
+    let closed: Vec<(Uuid, Uuid, Uuid, i32)> = sqlx::query_as(
+        "update session_subscriptions set closed_at=clock_timestamp(),closed_reason=$2
+         where (target_id=$1 or subscriber_id=$1) and closed_at is null
+         returning owner_id,subscriber_id,target_id,chain_depth",
+    )
+    .bind(conversation_id)
+    .bind(reason)
+    .fetch_all(&mut *conn)
+    .await?;
+    let pending: Vec<Uuid> = sqlx::query_scalar(
+        "select id from scheduled_jobs
+         where kind='session_task' and state='pending' and payload->>'action'='event'
+           and (conversation_id=$1
+                or (payload->>'target_id'=$2 and conversation_id is not distinct from $3))
+         for update skip locked",
+    )
+    .bind(conversation_id)
+    .bind(conversation_id.to_string())
+    .bind(parent)
+    .fetch_all(&mut *conn)
+    .await?;
+    sqlx::query(
+        "update scheduled_jobs set state='cancelled',result=$2,updated_at=clock_timestamp()
+         where id=any($1)",
+    )
+    .bind(&pending)
+    .bind(json!({"reason": reason}))
+    .execute(conn)
+    .await?;
+    Ok(closed
+        .into_iter()
+        .filter(|(_, subscriber, target, _)| {
+            *target == conversation_id
+                && *subscriber != conversation_id
+                && Some(*subscriber) != parent
+        })
+        .map(
+            |(owner_id, subscriber_id, _, chain_depth)| ClosedSubscriber {
+                owner_id,
+                subscriber_id,
+                chain_depth,
+            },
+        )
+        .collect())
+}
+
+/// Подписчик принятой сессии, не принимавший её сам.
+pub struct ClosedSubscriber {
+    pub owner_id: Uuid,
+    pub subscriber_id: Uuid,
+    pub chain_depth: i32,
+}
+
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
 pub async fn current_in_tx(
     conn: &mut PgConnection,

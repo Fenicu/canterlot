@@ -27,6 +27,8 @@ pub enum ExecutionError {
     ConversationNotFound,
     #[error("conversation closed")]
     ConversationClosed,
+    #[error("worktree already removed")]
+    WorktreeRemoved,
     #[error("invalid execution transition from {from:?} to {to:?}")]
     InvalidTransition {
         from: ExecutionState,
@@ -192,6 +194,15 @@ pub async fn start_in_tx(
     if queue.closed {
         return Err(ExecutionError::ConversationClosed);
     }
+    // Копию убирают или уже убрали: запуск в ней создал бы пустой каталог вместо работы.
+    let worktree = row.try_get::<Option<serde_json::Value>, _>("worktree")?;
+    if worktree
+        .as_ref()
+        .and_then(|worktree| worktree["state"].as_str())
+        .is_some_and(|state| !matches!(state, "active" | "dirty"))
+    {
+        return Err(ExecutionError::WorktreeRemoved);
+    }
     if let Some((execution_id, _, _)) = live(conn, conversation_id).await? {
         return Err(ExecutionError::AlreadyLive { execution_id });
     }
@@ -240,7 +251,7 @@ pub async fn start_in_tx(
     let mut payload = json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
         "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
         "native_conversation_id":native});
-    if let Some(worktree) = row.try_get::<Option<serde_json::Value>, _>("worktree")? {
+    if let Some(worktree) = worktree {
         payload["worktree"] = json!({
             "source_workdir": worktree["source_workdir"],
             "branch": worktree["branch"],

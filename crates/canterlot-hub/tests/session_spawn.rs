@@ -2,7 +2,7 @@ use std::{collections::BTreeSet, sync::Arc};
 
 use axum::http::Method;
 use canterlot_hub::{
-    config::{LimitsConfig, SessionToolsConfig},
+    config::{LimitsConfig, SchedulerConfig, SessionToolsConfig},
     dispatcher::Dispatcher,
     executions, http,
     model::ExecutionState,
@@ -1283,4 +1283,61 @@ fn spawn_spec_debug_hides_the_brief() {
     .unwrap();
     let printed = format!("{spec:?}");
     assert!(!printed.contains("секрет"), "{printed}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_job_that_exhausts_attempts_closes_the_request(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    // Закрывающее задание не вставляется: задание запуска падает на каждой попытке.
+    sqlx::query(
+        "create function block_close() returns trigger language plpgsql as $$
+         begin
+           if new.payload->>'action' = 'spawn_close' then raise exception 'blocked'; end if;
+           return new;
+         end $$",
+    )
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "create trigger block_close before insert on scheduled_jobs
+         for each row execute function block_close()",
+    )
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    let request = fx.pending(outside()).await;
+    fx.decide(request, PermissionBehavior::Allow).await;
+    assert_eq!(fx.request_state(request).await, "decision_saved");
+
+    let (dispatcher, _) = Dispatcher::channel();
+    let flaky = Scheduler::new(
+        fx.pool.clone(),
+        dispatcher,
+        SchedulerConfig {
+            max_attempts: 2,
+            retry_queue_full: std::time::Duration::from_secs(1),
+            ..Default::default()
+        },
+    )
+    .with_limits(fx.context.registry.clone(), LimitsConfig::default());
+    flaky.tick(Utc::now()).await.unwrap();
+    assert_eq!(fx.request_state(request).await, "decision_saved");
+    flaky
+        .tick(Utc::now() + chrono::TimeDelta::hours(1))
+        .await
+        .unwrap();
+
+    assert_eq!(fx.request_state(request).await, "decision_not_applied");
+    assert_eq!(
+        fx.closed_reason(request).await.as_deref(),
+        Some("job_failed")
+    );
+    assert!(fx.child().await.is_none(), "nothing was started");
+    fx.tick().await;
+    let notes = fx.notes().await;
+    assert!(
+        notes.iter().any(|note| note.contains("could not start")),
+        "{notes:?}"
+    );
 }

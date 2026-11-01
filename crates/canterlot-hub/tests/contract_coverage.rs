@@ -312,6 +312,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
     let doomed = testkit::seed_conversation(&pool, owner, machine).await;
     let resume_id = testkit::seed_conversation(&pool, owner, machine).await;
     let stuck = testkit::seed_conversation(&pool, owner, machine).await;
+    let delegated = testkit::seed_conversation(&pool, owner, machine).await;
+    sqlx::query("update conversations set parent_conversation_id=$2,spawn_depth=1 where id=$1")
+        .bind(delegated)
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
     sqlx::query("update conversations set model='synthetic-small',effort='high' where id=$1")
         .bind(id)
         .execute(&pool)
@@ -473,6 +480,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             format!("/api/v1/conversations/{id}/crunch"),
             Some(json!({"enabled":true})),
             Some(json!({"enabled":false})),
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/accept",
+            format!("/api/v1/conversations/{delegated}/accept"),
+            Some(json!({"force":false})),
+            Some(json!({"force":true})),
         ),
         case(
             Method::PUT,

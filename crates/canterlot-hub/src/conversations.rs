@@ -1252,7 +1252,7 @@ pub(crate) async fn create_in_tx(
     })
 }
 
-async fn update_attributes_in_tx(
+pub(crate) async fn update_attributes_in_tx(
     conn: &mut PgConnection,
     owner_id: Uuid,
     id: Uuid,

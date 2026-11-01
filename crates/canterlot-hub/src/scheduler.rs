@@ -663,6 +663,20 @@ impl Scheduler {
                         let _ = tx.rollback().await;
                         return Err(error);
                     }
+                    // Запрос и уборка закрываются вместе с заданием, иначе они зависли бы навсегда.
+                    if current.kind == "session_task"
+                        && let Err(error) = crate::session_tools::jobs::abandon_in_tx(
+                            &mut tx,
+                            current.owner_id,
+                            current.conversation_id,
+                            &current.payload,
+                            now,
+                        )
+                        .await
+                    {
+                        let _ = tx.rollback().await;
+                        return Err(error);
+                    }
                 }
                 report.failed += 1;
             } else {

@@ -415,8 +415,21 @@ impl From<ExecutionError> for ApiError {
             ExecutionError::AlreadyLive { .. } => ApiError::new(ErrorCode::ExecutionAlreadyLive),
             ExecutionError::ConversationNotFound => ApiError::new(ErrorCode::NotFound),
             ExecutionError::ConversationClosed => ApiError::new(ErrorCode::ConversationClosed),
+            ExecutionError::WorktreeRemoved => ApiError::new(ErrorCode::WorktreeRemoved),
             ExecutionError::InvalidTransition { .. } => ApiError::new(ErrorCode::InvalidState),
             ExecutionError::Db(error) => error.into(),
+        }
+    }
+}
+
+impl From<crate::session_tools::accept::AcceptError> for ApiError {
+    fn from(error: crate::session_tools::accept::AcceptError) -> Self {
+        use crate::session_tools::accept::AcceptError as E;
+        match error {
+            E::NotFound | E::NotParent => ApiError::new(ErrorCode::NotFound),
+            E::NotDelegated => ApiError::new(ErrorCode::NotDelegated),
+            E::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
+            E::Db(error) => error.into(),
         }
     }
 }
