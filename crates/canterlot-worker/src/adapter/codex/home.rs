@@ -1,7 +1,9 @@
 //! Собственный CODEX_HOME canterlot: символические ссылки на записи дома
 //! владельца без файлов инструкций, SQLite, блокировок и каталогов демонов,
 //! плюс общий AGENTS.md canterlot. Файлы владельца никогда не открываются:
-//! читаются только имена записей, создаются только ссылки.
+//! читаются только имена записей, создаются только ссылки. Исключение: изолированный дом
+//! делегированной сессии (D24) читает `config.toml` владельца и кладёт его копию без
+//! `mcp_servers`.
 
 use crate::config::CodexConfig;
 use std::ffi::OsString;
@@ -41,14 +43,34 @@ pub enum TempDirPolicy {
 }
 
 const AGENTS_MD: &str = "AGENTS.md";
+const CONFIG_TOML: &str = "config.toml";
 const LOCK_FILE: &str = ".canterlot-home.lock";
 const LINK_TMP_PREFIX: &str = ".canterlot-link-";
+
+/// Вид дома canterlot. Изолированные дома служат делегированным сессиям (D24): конфиг
+/// владельца в них не ссылка, а копия без `mcp_servers`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum HomeKind {
+    #[default]
+    Shared,
+    /// Свой `AGENTS.md` canterlot, как у общего дома.
+    Isolated,
+    /// «Как у владельца»: `AGENTS.md` владельца по ссылке, своего нет.
+    IsolatedOwner,
+}
+
+impl HomeKind {
+    pub fn is_isolated(self) -> bool {
+        self != Self::Shared
+    }
+}
 
 /// Дом canterlot: путь и дом владельца, чьи записи ссылаются.
 #[derive(Clone, Debug)]
 pub struct CodexHome {
     pub path: PathBuf,
     pub owner_home: PathBuf,
+    pub kind: HomeKind,
 }
 
 /// Отчёт связывания: сколько создано, перевязано, убрано и конфликты.
@@ -67,8 +89,15 @@ pub enum HomeError {
     Io(std::io::Error),
 }
 
-fn excluded(name: &std::ffi::OsStr) -> bool {
+fn excluded(name: &std::ffi::OsStr, kind: HomeKind) -> bool {
     let bytes = name.as_bytes();
+    if kind.is_isolated() && bytes == CONFIG_TOML.as_bytes() {
+        return true;
+    }
+    let instructions = bytes == AGENTS_MD.as_bytes() || bytes == b"AGENTS.override.md";
+    if kind == HomeKind::IsolatedOwner && instructions {
+        return false;
+    }
     if EXCLUDED_NAMES.iter().any(|n| bytes == n.as_bytes()) {
         return true;
     }
@@ -80,9 +109,9 @@ fn excluded(name: &std::ffi::OsStr) -> bool {
 
 /// Ссылка убирается, только если имя исключено, это остаток перевязки или цели
 /// точно нет: другие ошибки metadata (EACCES) о цели ничего не говорят.
-fn removable_link(name: &std::ffi::OsStr, link: &Path) -> bool {
+fn removable_link(name: &std::ffi::OsStr, link: &Path, kind: HomeKind) -> bool {
     use std::io::ErrorKind;
-    excluded(name)
+    excluded(name, kind)
         || name.as_bytes().starts_with(LINK_TMP_PREFIX.as_bytes())
         || std::fs::metadata(link).is_err_and(|error| {
             matches!(error.kind(), ErrorKind::NotFound | ErrorKind::NotADirectory)
@@ -200,7 +229,32 @@ impl CodexHome {
         {
             return Err(HomeError::Unusable);
         }
-        Ok(Self { path, owner_home })
+        Ok(Self {
+            path,
+            owner_home,
+            kind: HomeKind::Shared,
+        })
+    }
+
+    /// Отдельный дом для делегированной сессии рядом с общим: общий остаётся ссылкой на конфиг
+    /// владельца и сессиям владельца не мешает.
+    pub fn isolated(self, owner_instructions: bool) -> Self {
+        let (suffix, kind) = if owner_instructions {
+            ("-isolated-owner", HomeKind::IsolatedOwner)
+        } else {
+            ("-isolated", HomeKind::Isolated)
+        };
+        let mut name = self
+            .path
+            .file_name()
+            .map(OsString::from)
+            .unwrap_or_default();
+        name.push(suffix);
+        Self {
+            path: self.path.with_file_name(name),
+            kind,
+            ..self
+        }
     }
 
     /// Связать записи дома владельца под flock; общий AGENTS.md перезаписывается,
@@ -247,7 +301,7 @@ impl CodexHome {
             Err(error) => return Err(HomeError::Io(error)),
         }
         for name in &entries {
-            if excluded(name) {
+            if excluded(name, self.kind) {
                 continue;
             }
             let dest = self.path.join(name);
@@ -283,7 +337,7 @@ impl CodexHome {
         for entry in std::fs::read_dir(&self.path).map_err(HomeError::Io)? {
             let entry = entry.map_err(HomeError::Io)?;
             let name = entry.file_name();
-            if name == AGENTS_MD || name == LOCK_FILE {
+            if (name == AGENTS_MD && self.kind != HomeKind::IsolatedOwner) || name == LOCK_FILE {
                 continue;
             }
             let file_type = entry.file_type().map_err(HomeError::Io)?;
@@ -294,26 +348,48 @@ impl CodexHome {
         }
         for name in &current {
             let dest = self.path.join(name);
-            if removable_link(name, &dest) {
+            if removable_link(name, &dest, self.kind) {
                 std::fs::remove_file(&dest).map_err(HomeError::Io)?;
                 report.removed += 1;
             }
         }
-        // Общий AGENTS.md canterlot: атомарно и только при отличии.
-        let agents_path = self.path.join(AGENTS_MD);
-        let same = std::fs::read(&agents_path)
-            .map(|bytes| bytes == agents_md.as_bytes())
-            .unwrap_or(false);
-        if !same {
-            let tmp = self
-                .path
-                .join(format!("{AGENTS_MD}.tmp-{}", std::process::id()));
-            std::fs::write(&tmp, agents_md.as_bytes()).map_err(HomeError::Io)?;
-            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
-                .map_err(HomeError::Io)?;
-            std::fs::rename(&tmp, &agents_path).map_err(HomeError::Io)?;
+        // У «Как у владельца» инструкции владельца по ссылке, своего AGENTS.md нет.
+        if self.kind != HomeKind::IsolatedOwner {
+            self.write_atomic(AGENTS_MD, agents_md)?;
+        }
+        if self.kind.is_isolated() {
+            self.write_atomic(CONFIG_TOML, &self.config_without_mcp()?)?;
         }
         Ok(report)
+    }
+
+    /// Конфиг владельца без серверов MCP (D24). Читается только он; не разобрался или не
+    /// читается - дом непригоден, молча копировать целиком нельзя.
+    fn config_without_mcp(&self) -> Result<String, HomeError> {
+        let text = match std::fs::read_to_string(self.owner_home.join(CONFIG_TOML)) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(error) => return Err(HomeError::Io(error)),
+        };
+        let mut config: toml::Table = text.parse().map_err(|_| HomeError::Unusable)?;
+        config.remove("mcp_servers");
+        toml::to_string(&config).map_err(|_| HomeError::Unusable)
+    }
+
+    /// Файл дома canterlot: атомарно и только при отличии.
+    fn write_atomic(&self, name: &str, text: &str) -> Result<(), HomeError> {
+        let path = self.path.join(name);
+        let same = std::fs::read(&path)
+            .map(|bytes| bytes == text.as_bytes())
+            .unwrap_or(false);
+        if !same {
+            let tmp = self.path.join(format!("{name}.tmp-{}", std::process::id()));
+            std::fs::write(&tmp, text.as_bytes()).map_err(HomeError::Io)?;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))
+                .map_err(HomeError::Io)?;
+            std::fs::rename(&tmp, &path).map_err(HomeError::Io)?;
+        }
+        Ok(())
     }
 }
 

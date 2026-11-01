@@ -4,7 +4,7 @@
 #![forbid(unsafe_code)]
 
 use canterlot_worker::adapter::codex::home::{
-    CodexHome, EXCLUDED_NAMES, EXCLUDED_SUFFIXES, HomeError, LinkReport, TempDirPolicy,
+    CodexHome, EXCLUDED_NAMES, EXCLUDED_SUFFIXES, HomeError, HomeKind, LinkReport, TempDirPolicy,
 };
 use canterlot_worker::config::CodexConfig;
 use std::ffi::OsString;
@@ -318,6 +318,7 @@ fn missing_path_behind_a_symlink_into_temp_is_refused() {
     let home = CodexHome {
         path: alias.join("missing").join("home"),
         owner_home: owner,
+        kind: HomeKind::Shared,
     };
     let refused = matches!(
         home.prepare(BLOCK, TempDirPolicy::Refuse),
@@ -497,4 +498,120 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+fn fake_owner_with_nanokvm(owner: &Path) {
+    place_owner(owner);
+    std::fs::write(
+        owner.join("config.toml"),
+        "model = \"x\"\napproval_policy = \"never\"\n\n[mcp_servers.nanokvm]\ncommand = \"/bin/true\"\n\n[mcp_servers.other]\nurl = \"https://example.invalid\"\n\n[projects.\"/w\"]\ntrust_level = \"trusted\"\n",
+    )
+    .unwrap();
+}
+
+#[test]
+fn isolated_home_copies_the_owner_config_without_mcp_servers() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_nanokvm(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let shared = resolve(&canterlot, &owner);
+    shared.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    assert!(
+        canterlot.join("config.toml").is_symlink(),
+        "the shared home of an owner-started session follows the owner"
+    );
+
+    let home = shared.clone().isolated(false);
+    assert_eq!(
+        home.path,
+        owner.parent().unwrap().join("canterlot-isolated")
+    );
+    assert_eq!(home.kind, HomeKind::Isolated);
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    let config = home.path.join("config.toml");
+    assert!(!config.is_symlink(), "a real file, not a link to the owner");
+    let text = std::fs::read_to_string(&config).unwrap();
+    assert!(
+        !text.contains("nanokvm") && !text.contains("mcp_servers"),
+        "{text}"
+    );
+    let parsed: toml::Table = text.parse().unwrap();
+    assert_eq!(parsed["model"].as_str(), Some("x"));
+    assert_eq!(parsed["approval_policy"].as_str(), Some("never"));
+    assert_eq!(
+        parsed["projects"]["/w"]["trust_level"].as_str(),
+        Some("trusted")
+    );
+    assert_eq!(
+        std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    // Остальное по-прежнему ссылки на владельца, а своё AGENTS.md - блок canterlot.
+    assert!(home.path.join("auth.json").is_symlink());
+    assert_eq!(
+        std::fs::read_to_string(home.path.join("AGENTS.md")).unwrap(),
+        BLOCK
+    );
+    // Файл владельца не тронут.
+    assert!(
+        std::fs::read_to_string(owner.join("config.toml"))
+            .unwrap()
+            .contains("nanokvm")
+    );
+}
+
+#[test]
+fn isolated_home_follows_the_owner_config_on_every_prepare() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_nanokvm(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner).isolated(false);
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    std::fs::write(
+        owner.join("config.toml"),
+        "model = \"y\"\n[mcp_servers.late]\ncommand = \"x\"\n",
+    )
+    .unwrap();
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    let text = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
+    assert!(
+        text.contains("model = \"y\"") && !text.contains("late"),
+        "{text}"
+    );
+}
+
+#[test]
+fn isolated_home_refuses_an_unreadable_owner_config() {
+    let (_td, owner) = owner_home();
+    place_owner(&owner);
+    std::fs::write(owner.join("config.toml"), "= broken [").unwrap();
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner).isolated(false);
+    assert!(matches!(
+        home.prepare(BLOCK, TempDirPolicy::Allow),
+        Err(HomeError::Unusable)
+    ));
+    assert!(!home.path.join("config.toml").exists());
+}
+
+#[test]
+fn isolated_owner_home_links_the_owner_instructions_and_has_no_mcp_config() {
+    let (_td, owner) = owner_home();
+    fake_owner_with_nanokvm(&owner);
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let home = resolve(&canterlot, &owner).isolated(true);
+    assert_eq!(
+        home.path,
+        owner.parent().unwrap().join("canterlot-isolated-owner")
+    );
+    home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
+    assert!(home.path.join("AGENTS.md").is_symlink());
+    assert!(home.path.join("AGENTS.override.md").is_symlink());
+    assert!(
+        !std::fs::read_to_string(home.path.join("config.toml"))
+            .unwrap()
+            .contains("nanokvm")
+    );
+    // SQLite и блокировки по-прежнему не ссылаются.
+    assert!(!home.path.join("state_5.sqlite").exists());
 }
