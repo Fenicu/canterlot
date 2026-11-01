@@ -148,6 +148,23 @@ fn settled_holds_idle_inside_quiet_window() {
 }
 
 #[test]
+fn settled_restarts_the_quiet_window_on_any_event() {
+    let now = Utc::now();
+    let mut facts = old_facts(now);
+    facts.last_event_at = Some(now - TimeDelta::seconds(2));
+    assert_eq!(
+        settle::settled(&idle_activity(None), &queue(0, vec![]), &facts, &config()),
+        None,
+        "background work has just ended: a wake turn may still start"
+    );
+    facts.last_event_at = Some(now - TimeDelta::seconds(6));
+    assert_eq!(
+        settle::settled(&idle_activity(None), &queue(0, vec![]), &facts, &config()),
+        Some(Settled::Idle)
+    );
+}
+
+#[test]
 fn settled_maps_the_other_states_directly() {
     let now = Utc::now();
     let working = Activity {
@@ -328,6 +345,12 @@ async fn delivered(pool: &PgPool, conversation: Uuid) -> Vec<(String, Value, Str
 
 /// Разговор давно простаивает: окно тишины уже прошло.
 async fn long_idle(pool: &PgPool, id: Uuid, now: DateTime<Utc>) {
+    sqlx::query("update executions set last_event_at=$2 where conversation_id=$1")
+        .bind(id)
+        .bind(now - TimeDelta::hours(1))
+        .execute(pool)
+        .await
+        .unwrap();
     refresh_at(pool, id, now - TimeDelta::hours(1)).await;
 }
 

@@ -99,7 +99,11 @@ pub fn settled(
             if background > 0 && background_alive {
                 return None;
             }
-            let quiet_from = f.last_turn_at.map_or(f.since, |at| at.max(f.since));
+            // Ход пробуждения начинается сразу за концом фона: от него тоже отсчитывается тишина.
+            let quiet_from = [f.last_turn_at, f.last_event_at]
+                .into_iter()
+                .flatten()
+                .fold(f.since, DateTime::max);
             // Время из будущего считается окном тишины: событие не уходит раньше срока.
             let quiet = (f.now - quiet_from)
                 .to_std()
