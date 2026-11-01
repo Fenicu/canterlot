@@ -5,11 +5,13 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use axum::http::Method;
 use canterlot_hub::{
+    delivery::{ContentBlock, SubmitInput, submit_input},
     events::{self, NewEvent, Scope},
     executions,
     ingest::{Ingest, IngestOutcome, JournalKind},
     machines,
     model::ExecutionState,
+    session_tools::{self, Caller, ToolContext, settle::SettleConfig},
     testkit::{self, TestResponse},
 };
 use canterlot_proto::worker::v1::*;
@@ -482,6 +484,156 @@ async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool
             .await
             .unwrap();
     assert_eq!(presets, 2, "a preset outlives the session that created it");
+}
+
+/// Вводы, которые разговор оставил в других сессиях: сообщение, бриф и событие подписки.
+async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) {
+    let context = ToolContext {
+        pool: f.pool.clone(),
+        config: Default::default(),
+        settle: SettleConfig {
+            idle_quiet: std::time::Duration::from_secs(5),
+        },
+        dispatcher: None,
+    };
+    let caller = Caller {
+        owner_id: f.owner,
+        conversation_id: sender,
+        execution_id: Uuid::now_v7(),
+        machine_id: f.machine,
+        call_id: Uuid::now_v7(),
+    };
+    session_tools::call(
+        &context,
+        &caller,
+        "sessions.send",
+        json!({"session_id": receiver, "text": "тело сообщения"}),
+    )
+    .await
+    .unwrap();
+    for (kind, text) in [
+        (
+            "spawn",
+            format!(
+                "[canterlot] You were started by session \"{title}\" (id {sender}). \
+                 It is an agent, not the owner.\n\nтело брифа"
+            ),
+        ),
+        (
+            "event",
+            format!("[canterlot] Session \"{title}\" (id {sender}) is now idle.\n\nитог {title}"),
+        ),
+    ] {
+        submit_input(
+            &f.pool,
+            SubmitInput {
+                owner_id: f.owner,
+                conversation_id: receiver,
+                idempotency_key: Uuid::now_v7().to_string(),
+                content: vec![ContentBlock::Text { text }],
+                received_at: chrono::Utc::now(),
+                correlation_id: Uuid::now_v7(),
+                origin: Some(json!({"kind": kind, "from": sender, "title": title,
+                                    "harness": "synthetic", "model": "secret-model",
+                                    "chain_depth": 3})),
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_deleted_sender_leaves_no_name_in_other_sessions(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let (sender, receiver, other) = (
+        f.conversation().await,
+        f.conversation().await,
+        f.conversation().await,
+    );
+    let title = format!("секретный заголовок {sender}");
+    for (id, name) in [(sender, title.as_str()), (other, "сосед")] {
+        sqlx::query("update conversations set title=$2,model='secret-model' where id=$1")
+            .bind(id)
+            .bind(name)
+            .execute(&f.pool)
+            .await
+            .unwrap();
+    }
+    sent_to_others(&f, sender, receiver, &title).await;
+    sent_to_others(&f, other, receiver, "сосед").await;
+    let needles = vec![title.clone(), sender.to_string()];
+    assert!(mentions(&f.pool, &needles).await.contains_key("inputs"));
+
+    let response = delete(&f, sender, "delete-sender").await;
+    assert_eq!(response.status, 204, "{:?}", response.body);
+
+    let mut left = mentions(&f.pool, &needles).await;
+    assert_eq!(
+        left.remove("conversation_tombstones").map(|t| t.len()),
+        Some(1)
+    );
+    let announced = left.remove("events").unwrap_or_default();
+    assert_eq!(announced.len(), 1, "only the deletion event: {announced:?}");
+    assert!(announced[0].contains("conversation_deleted"));
+    assert!(left.is_empty(), "the name survives in {left:?}");
+
+    let rows: Vec<(Value, Value, Value)> = sqlx::query_as(
+        "select i.content,i.origin,c.payload->'content' from inputs i
+         join commands c on c.id=i.command_id
+         where i.conversation_id=$1 and i.origin ? 'sender_deleted' order by i.input_seq",
+    )
+    .bind(receiver)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    let texts: Vec<&str> = rows
+        .iter()
+        .map(|(content, _, _)| content[0]["text"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "[canterlot] Message from a session that was deleted. \
+             This is another agent, not the owner.\n\nтело сообщения",
+            "[canterlot] You were started by a session that was deleted. \
+             It was an agent, not the owner.\n\nтело брифа",
+            "[canterlot] A session this conversation heard from was deleted.",
+        ]
+    );
+    let kinds = ["message", "spawn", "event"];
+    for ((content, origin, command), kind) in rows.iter().zip(kinds) {
+        assert_eq!(
+            content, command,
+            "the queued command is what the agent gets"
+        );
+        let depth = if kind == "message" { 1 } else { 3 };
+        assert_eq!(
+            origin,
+            &json!({"kind": kind, "chain_depth": depth, "sender_deleted": true})
+        );
+    }
+    let queued: Vec<Value> = sqlx::query_scalar(
+        "select payload from events where conversation_id=$1 and kind='input_queued'
+         and payload->'origin' ? 'sender_deleted' order by scope_seq",
+    )
+    .bind(receiver)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(queued.len(), 3);
+    assert_eq!(queued[0]["content"], rows[0].0);
+
+    let neighbour: i64 = sqlx::query_scalar(
+        "select count(*) from inputs where conversation_id=$1 and origin->>'title'='сосед'
+         and origin->>'from'=$2",
+    )
+    .bind(receiver)
+    .bind(other.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(neighbour, 3, "another sender keeps its name");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

@@ -1,13 +1,16 @@
 //! Откуда пришёл ввод другой сессии: объект `inputs.origin` и видимая модели первая строка.
+//! Строка с названием отправителя и его идентификатор живут только в этих двух местах и в
+//! копиях ввода, поэтому удаление отправителя вычищает их отсюда же.
 
 use std::fmt;
 
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use sqlx::PgConnection;
 use uuid::Uuid;
 
-use crate::attachments::blobstore::hex;
+use crate::{attachments::blobstore::hex, delivery::ContentBlock, events::Scope};
 
 pub const KIND_EVENT: &str = "event";
 const KIND_MESSAGE: &str = "message";
@@ -84,4 +87,92 @@ pub fn message_text(sender: &Sender, text: &str) -> String {
         sender.harness,
         sender.model,
     )
+}
+
+/// Что остаётся от ввода, когда его отправитель удалён. Текст сообщения и бриф остаются:
+/// это ввод другой сессии, на него она и отвечала. Событие состоит из данных удалённой сессии
+/// целиком, поэтому от него остаётся только факт.
+fn scrubbed_text(kind: &str, text: &str) -> String {
+    let body = text.split_once("\n\n").map(|(_, body)| body);
+    match (kind, body) {
+        ("message", Some(body)) => format!(
+            "[canterlot] Message from a session that was deleted. \
+             This is another agent, not the owner.\n\n{body}"
+        ),
+        ("spawn", Some(body)) => format!(
+            "[canterlot] You were started by a session that was deleted. \
+             It was an agent, not the owner.\n\n{body}"
+        ),
+        _ => "[canterlot] A session this conversation heard from was deleted.".to_owned(),
+    }
+}
+
+fn scrubbed_content(kind: &str, content: &[ContentBlock]) -> Vec<ContentBlock> {
+    content
+        .iter()
+        .map(|block| match block {
+            ContentBlock::Text { text } => ContentBlock::Text {
+                text: scrubbed_text(kind, text),
+            },
+            attachment => attachment.clone(),
+        })
+        .collect()
+}
+
+#[derive(sqlx::FromRow)]
+struct SentInput {
+    id: Uuid,
+    conversation_id: Uuid,
+    command_id: Uuid,
+    content: sqlx::types::Json<Vec<ContentBlock>>,
+    origin: Value,
+}
+
+/// Удаление отправителя: у чужих вводов пропадают его название, идентификатор и модель,
+/// глубина цепочки остаётся. Только строки, очередь получателя не блокируется.
+pub async fn scrub_sender_in_tx(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
+    let rows: Vec<SentInput> = sqlx::query_as(
+        "select id,conversation_id,command_id,content,origin from inputs
+         where origin->>'from'=$1 and conversation_id<>$2 order by id",
+    )
+    .bind(sender.to_string())
+    .bind(sender)
+    .fetch_all(&mut *conn)
+    .await?;
+    for row in rows {
+        let kind = row.origin["kind"].as_str().unwrap_or_default();
+        let content = json!(scrubbed_content(kind, &row.content));
+        let origin = json!({
+            "kind": kind,
+            "chain_depth": row.origin["chain_depth"],
+            "sender_deleted": true,
+        });
+        sqlx::query("update inputs set content=$2,origin=$3 where id=$1")
+            .bind(row.id)
+            .bind(&content)
+            .bind(&origin)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query("update commands set payload=jsonb_set(payload,'{content}',$2) where id=$1")
+            .bind(row.command_id)
+            .bind(&content)
+            .execute(&mut *conn)
+            .await?;
+        sqlx::query(
+            "update events set payload=payload||jsonb_build_object('content',$3::jsonb,'origin',$4::jsonb)
+             where scope=$1 and kind='input_queued' and payload->>'input_id'=$2",
+        )
+        .bind(
+            Scope::Conversation {
+                id: row.conversation_id,
+            }
+            .key(),
+        )
+        .bind(row.id.to_string())
+        .bind(&content)
+        .bind(&origin)
+        .execute(&mut *conn)
+        .await?;
+    }
+    Ok(())
 }
