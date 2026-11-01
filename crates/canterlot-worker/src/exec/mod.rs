@@ -632,7 +632,7 @@ impl ExecutionManager {
                     attached.push(id);
                 }
                 Err(error) => {
-                    tracing::warn!(execution_id = %id, error_kind = ?std::mem::discriminant(&error), "ownership not verified");
+                    tracing::warn!(execution_id = %id, reason = %error, "ownership not verified");
                     manager::report_owner_lost(&self.shared, id, record.generation).await?;
                 }
             }

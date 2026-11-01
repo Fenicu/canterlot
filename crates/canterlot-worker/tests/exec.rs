@@ -721,6 +721,46 @@ async fn control_restart_reattaches_live_supervisor() {
     env.stop().await;
 }
 
+#[derive(Clone, Default)]
+struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn ownership_not_verified_logs_the_reason() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    env.close_manager().await;
+    fs::write(Path::new(&record.exec_dir).join("spec.toml"), "[broken").unwrap();
+    env.reopen();
+    let logs = LogBuffer::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let guard = tracing::subscriber::set_default(subscriber);
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    drop(guard);
+    let logs = String::from_utf8(logs.0.lock().unwrap().clone()).unwrap();
+    assert!(
+        logs.contains("ownership not verified")
+            && logs.contains("supervisor verification failed: spec"),
+        "{logs}"
+    );
+}
+
 #[tokio::test]
 async fn unverifiable_ownership_is_reported_owner_lost_never_restarted() {
     let mut env = Env::new().await;
