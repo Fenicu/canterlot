@@ -9,6 +9,7 @@ import type { LimitsView } from "#lib/api/config.js";
 import type { AttachmentRef } from "#lib/stores/inputs.js";
 import { freshInput } from "#lib/stores/inputs.js";
 import { utf8Length } from "#lib/stores/blocks.js";
+import { attachmentKind } from "#lib/timeline/attachments.js";
 import { UploadLimitError } from "#lib/uploads/uploader.js";
 import { validateScheduleTime } from "#lib/composer/schedule.js";
 
@@ -137,10 +138,10 @@ export class ComposerModel {
     const attachmentRefs: AttachmentRef[] = readyUploads.map((u) => ({
       attachment_id: u.attachmentId ?? u.id,
       name: u.name,
-      mime: "application/octet-stream",
+      mime: u.mime || "application/octet-stream",
       size: u.size,
       sha256: "",
-      image: false,
+      image: attachmentKind({ name: u.name, mime: u.mime ?? "", image: false }) === "image",
     }));
 
     const key = crypto.randomUUID();

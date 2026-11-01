@@ -807,29 +807,33 @@ export class ChatStore {
     existing.id = payload.input_id;
     existing.text = textOf(payload.content as HistoryInput["content"]);
     const rawContent =
-      (payload.content as
-        Array<{ type: string; attachment_id?: string }> | undefined) ?? [];
+      (payload.content as Array<Partial<AttachmentRef> & { type: string }> | undefined) ?? [];
     const attBlocks = rawContent.filter(
       (b) => b.type === "attachment" && typeof b.attachment_id === "string",
     );
     if (attBlocks.length > 0) {
       existing.attachments = attBlocks.map((b) => {
-        const registered = this.attachments.get(b.attachment_id!);
-        if (registered) {
-          return {
-            attachment_id: String(registered.attachment_id ?? b.attachment_id),
-            name: typeof registered.name === "string" ? registered.name : "",
-            mime: typeof registered.mime === "string" ? registered.mime : "",
-            size: typeof registered.size === "number" ? registered.size : 0,
-            sha256:
-              typeof registered.sha256 === "string" ? registered.sha256 : "",
-            image: Boolean(registered.image),
-          };
-        }
-        const prior = existing.attachments.find(
-          (a) => a.attachment_id === b.attachment_id,
+        const id = b.attachment_id!;
+        const registered = this.attachments.get(id) ?? {};
+        const prior = existing.attachments.find((a) => a.attachment_id === id);
+        // Событие готовности вложения может не нести имени: известное раньше не затирается пустым.
+        const text = (key: "name" | "mime" | "sha256"): string => {
+          const known = [registered[key], prior?.[key], b[key]].find(
+            (value) => typeof value === "string" && value !== "",
+          );
+          return typeof known === "string" ? known : "";
+        };
+        const size = [registered.size, prior?.size, b.size].find(
+          (value) => typeof value === "number" && value > 0,
         );
-        return prior ?? blankAttachment(b.attachment_id!);
+        return {
+          attachment_id: id,
+          name: text("name"),
+          mime: text("mime"),
+          size: typeof size === "number" ? size : 0,
+          sha256: text("sha256"),
+          image: Boolean(registered.image ?? prior?.image ?? b.image),
+        };
       });
     }
     existing.state = "queued";

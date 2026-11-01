@@ -30,6 +30,7 @@ export interface Upload {
   id: string;
   conversationId: string;
   name: string;
+  mime?: string;
   size: number;
   phase: UploadPhase;
   sent: number;
@@ -41,6 +42,7 @@ interface StoredUpload {
   id: string;
   conversationId: string;
   name: string;
+  mime?: string;
   size: number;
   phase: UploadPhase;
   sent: number;
@@ -114,6 +116,7 @@ export class UploadManager {
       id: crypto.randomUUID(),
       conversationId,
       name: attachmentName(file.name),
+      mime: file.type,
       size: file.size,
       phase: "queued",
       sent: 0,
@@ -352,6 +355,7 @@ export class UploadManager {
           id: record.id,
           conversationId: record.conversationId,
           name: record.name,
+          mime: record.mime ?? record.file.type,
           size: record.size,
           phase: record.phase,
           sent: record.sent ?? record.offset ?? 0,

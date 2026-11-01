@@ -236,6 +236,56 @@ describe("optimistic send", () => {
   });
 });
 
+describe("attachments of an own message", () => {
+  const ATT = "00000000-0000-4000-8000-0000000000a1";
+
+  it("a_ready_event_without_a_name_does_not_blank_the_file_the_owner_just_attached", () => {
+    const chat = chatOf();
+    const view = freshInput("k1", "с файлом", 1, [
+      { attachment_id: ATT, name: "shot.png", mime: "image/png", size: 4096, sha256: "", image: true },
+    ]);
+    chat.admitLocal(view);
+    chat.applier.applyEvents([
+      {
+        event: ev("attachment_state_changed", { input_id: INPUT, attachment_id: ATT, machine_state: "pending", machine_reason: null }, "2"),
+        overlap: false,
+      },
+      {
+        event: ev(
+          "input_queued",
+          { input_id: INPUT, input_seq: "4", idempotency_key: "k1", state: "queued", content: [{ type: "text", text: "с файлом" }, { type: "attachment", attachment_id: ATT }] },
+          "4",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(chat.inputs.get("k1")!.attachments).toEqual([
+      { attachment_id: ATT, name: "shot.png", mime: "image/png", size: 4096, sha256: "", image: true },
+    ]);
+  });
+
+  it("a_message_from_another_device_takes_the_file_description_from_its_content_block", () => {
+    const chat = chatOf();
+    chat.applier.applyEvents([
+      {
+        event: ev(
+          "input_queued",
+          {
+            input_id: INPUT,
+            input_seq: "4",
+            idempotency_key: "k2",
+            state: "queued",
+            content: [{ type: "attachment", attachment_id: ATT, name: "clip.mp4", mime: "video/mp4", size: 9000, sha256: "ab", image: false }],
+          },
+          "4",
+        ),
+        overlap: false,
+      },
+    ]);
+    expect(chat.inputs.get("k2")!.attachments[0]).toMatchObject({ name: "clip.mp4", mime: "video/mp4", size: 9000 });
+  });
+});
+
 describe("timeline local entries", () => {
   const block = (seq: string): TimelineEntry =>
     ({ kind: "block", key: `block:${seq}`, seq, block: { createdSeq: seq } as never }) as TimelineEntry;
