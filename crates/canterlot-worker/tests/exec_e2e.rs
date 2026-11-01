@@ -297,10 +297,10 @@ impl Fixture {
         for (key, value) in env {
             script.push_str(&format!("export {key}='{value}'\n"));
         }
-        script.push_str(&format!(
-            "exec '{}' \"$@\"\n",
-            env!("CARGO_BIN_EXE_canterlot-worker")
-        ));
+        // Сопровождение старого релиза под новым воркером: README, «Проверки».
+        let supervisor = std::env::var("CANTERLOT_E2E_SUPERVISOR_BIN")
+            .unwrap_or_else(|_| env!("CARGO_BIN_EXE_canterlot-worker").to_owned());
+        script.push_str(&format!("exec '{supervisor}' \"$@\"\n"));
         fake_exec::write_executable(&wrapper, script, 0o700);
         let config = WorkerConfig {
             machine: Default::default(),
@@ -1402,6 +1402,166 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
     assert_eq!(fixture.input_state(input.input_id).await, "accepted");
     assert_eq!(fixture.slot().await, "running");
     assert_eq!(fixture.cli_receipts(input.command_id), [1]);
+    fixture.assert_contiguous().await;
+    fixture.finish().await;
+}
+
+const SPEC_B644882: &str = include_str!("fixtures/spec/b644882ac458.toml");
+
+impl Fixture {
+    /// Повторяет сбой обновления: новый воркер не читает спеку и докладывает `owner_lost`.
+    async fn lose_owner_to_a_bad_spec(&mut self) -> String {
+        let spec = self.exec_dir().join("spec.toml");
+        let text = fs::read_to_string(&spec).unwrap();
+        self.stop_worker().await;
+        fs::write(&spec, "[broken").unwrap();
+        self.start_worker().await;
+        self.wait_state("owner_lost").await;
+        assert!(self.paused("owner_lost").await);
+        text
+    }
+
+    async fn request_state(&self) -> Option<String> {
+        sqlx::query_scalar("select state from requests where execution_id = $1")
+            .bind(self.execution)
+            .fetch_optional(&self.pool)
+            .await
+            .unwrap()
+    }
+
+    /// Исправленный воркер: спека осталась от старого релиза, сопровождение то же.
+    async fn restart_fixed_worker(&mut self, spec: &str) {
+        self.stop_worker().await;
+        let mut table: toml::Table = toml::from_str(spec).unwrap();
+        let frozen: toml::Table = toml::from_str(SPEC_B644882).unwrap();
+        for key in ["claude_code", "codex", "opencode"] {
+            table.insert(key.into(), frozen[key].clone());
+        }
+        fs::write(
+            self.exec_dir().join("spec.toml"),
+            toml::to_string(&table).unwrap(),
+        )
+        .unwrap();
+        self.start_worker().await;
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn lost_owner_returns_with_buffered_journal_and_queued_input(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    let mut steps = vec![json!({"delta":"a"}), json!({"delay_ms":1500})];
+    let mut expected = String::from("a");
+    for index in 0..60 {
+        let delta = format!("b{index:02}|");
+        expected.push_str(&delta);
+        steps.push(json!({"delta":delta}));
+        steps.push(json!({"delay_ms":20}));
+    }
+    let first = fixture.submit(json!({"synthetic":steps}).to_string()).await;
+    fixture.wait_deltas(1).await;
+    let spec = fixture.lose_owner_to_a_bad_spec().await;
+    let queued = fixture
+        .submit(json!({"synthetic":[{"delta":"queued"},{"hang":true}]}).to_string())
+        .await;
+    sleep(Duration::from_millis(300)).await;
+    assert_eq!(fixture.input_state(queued.input_id).await, "queued");
+    until("output buffered while lost", async || {
+        fixture.sj_snapshot().is_some_and(|(_dir, journal)| {
+            journal
+                .read_from(journal.first_seq(), usize::MAX)
+                .unwrap()
+                .iter()
+                .any(|record| {
+                    RecordBody::decode(record.payload.as_slice())
+                        .ok()
+                        .and_then(|body| body.body)
+                        .is_some_and(|body| matches!(body, Body::RunFinished(_)))
+                })
+        })
+    })
+    .await;
+    let before = fixture.event_count("block_delta").await;
+
+    fixture.restart_fixed_worker(&spec).await;
+    assert_eq!(fixture.state().await, "running");
+    assert!(!fixture.paused("owner_lost").await);
+    fixture.assert_same_processes(identities);
+    assert_eq!(fixture.input_state(first.input_id).await, "accepted");
+    until("buffered journal shipped", async || {
+        sqlx::query_scalar::<_, bool>(
+            "select exists(select 1 from blocks where execution_id = $1 and state = 'final' and content = $2)",
+        )
+        .bind(fixture.execution)
+        .bind(&expected)
+        .fetch_one(&fixture.pool)
+        .await
+        .unwrap()
+    })
+    .await;
+    assert!(fixture.event_count("block_delta").await > before);
+    until("queued input delivered", async || {
+        fixture.input_state(queued.input_id).await == "accepted"
+    })
+    .await;
+    assert_eq!(fixture.event_count("execution_fact_rejected").await, 0);
+    fixture.assert_contiguous().await;
+    fixture.assert_same_processes(identities);
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn request_waiting_through_the_loss_is_answered_after_the_return(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    let steps = json!([
+        {"request_permission":{"tool_name":"Bash","command":"cargo test","args":{}}},
+        {"delta":"resumed"},
+    ]);
+    fixture.submit(json!({"synthetic":steps}).to_string()).await;
+    until("request opened", async || {
+        fixture.request_state().await.as_deref() == Some("open")
+    })
+    .await;
+    let spec = fixture.lose_owner_to_a_bad_spec().await;
+    assert_eq!(
+        fixture.request_state().await.as_deref(),
+        Some("closed_without_decision")
+    );
+    fixture.restart_fixed_worker(&spec).await;
+    assert_eq!(fixture.state().await, "running");
+    until("request reopened", async || {
+        fixture.request_state().await.as_deref() == Some("open")
+    })
+    .await;
+    let (request, generation): (Uuid, i64) =
+        sqlx::query_as("select id, generation from requests where execution_id = $1")
+            .bind(fixture.execution)
+            .fetch_one(&fixture.pool)
+            .await
+            .unwrap();
+    let mut tx = fixture.pool.begin().await.unwrap();
+    canterlot_hub::requests::save_decision_in_tx(
+        &mut tx,
+        fixture.conversation,
+        request,
+        generation,
+        &canterlot_proto::requests::DecisionPayload::Permission {
+            behavior: canterlot_proto::requests::PermissionBehavior::Allow,
+            message: None,
+        },
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    until("decision applied", async || {
+        fixture.request_state().await.as_deref() == Some("decision_applied")
+    })
+    .await;
+    fixture.assert_same_processes(identities);
     fixture.assert_contiguous().await;
     fixture.finish().await;
 }

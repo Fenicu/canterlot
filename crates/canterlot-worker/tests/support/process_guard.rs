@@ -14,9 +14,15 @@ pub struct ProcessGuard {
 
 impl ProcessGuard {
     pub fn new(root: &Path) -> Self {
-        let executable = fs::canonicalize(env!("CARGO_BIN_EXE_canterlot-worker")).unwrap();
-        let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
-        assert!(executable.starts_with(fs::canonicalize(target).unwrap()));
+        let executable = match std::env::var_os("CANTERLOT_E2E_SUPERVISOR_BIN") {
+            Some(path) => fs::canonicalize(path).unwrap(),
+            None => {
+                let own = fs::canonicalize(env!("CARGO_BIN_EXE_canterlot-worker")).unwrap();
+                let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target");
+                assert!(own.starts_with(fs::canonicalize(target).unwrap()));
+                own
+            }
+        };
         Self {
             root: root.to_path_buf(),
             executable,
