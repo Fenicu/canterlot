@@ -485,6 +485,8 @@ pub struct OpenCodeAdapter {
     mode: PermissionMode,
     /// На сервере могли остаться другие правила: перед вводом они ставятся заново.
     rules_dirty: bool,
+    /// Режим только что вышел из `read_only`: первому вводу после этого нужно напоминание.
+    exit_note: bool,
     model: String,
     effort: String,
     /// То же для модели.
@@ -542,6 +544,7 @@ impl OpenCodeAdapter {
             session: String::new(),
             mode: PermissionMode::Owner,
             rules_dirty: false,
+            exit_note: false,
             model: String::new(),
             effort: String::new(),
             model_dirty: false,
@@ -689,10 +692,18 @@ impl OpenCodeAdapter {
     ) -> Result<String, AdapterError> {
         let failed = |_| AdapterError::StartFailed("resume_failed");
         let path = format!("/api/session/{native}");
-        self.http()?
+        let stored = self
+            .http()?
             .get(&path, REQUEST_WAIT)
             .await
             .map_err(failed)?;
+        // Режим мог смениться, пока исполнение стояло: модель увидит тот же `<system-update>`.
+        if self.mode != PermissionMode::ReadOnly
+            && stored.pointer("/data/permissions")
+                == Some(&PermissionMode::ReadOnly.session_rules())
+        {
+            self.exit_note = true;
+        }
         let body = json!({"permissions": self.mode.session_rules()});
         self.http()?
             .patch(&path, &body, REQUEST_WAIT)
@@ -1581,6 +1592,7 @@ impl OpenCodeAdapter {
             return;
         }
         if found {
+            self.exit_note = false;
             self.prove_late(lookup.command);
         } else {
             // Записи нет, но и доказательства отказа нет: ввод остаётся неподтверждённым.
@@ -1738,6 +1750,7 @@ impl OpenCodeAdapter {
         if input.attempt > 1 {
             match input::find_input(&http, &self.session, &id).await {
                 Ok(true) => {
+                    self.exit_note = false;
                     self.delivery.last = Some(command);
                     self.finish_without_turn(command);
                     return TransmitOutcome::Accepted(Proof {
@@ -1753,6 +1766,7 @@ impl OpenCodeAdapter {
                 }
             }
         }
+        let previous_mode = self.mode;
         let previous = Settings {
             mode: self.mode,
             model: self.model.clone(),
@@ -1771,9 +1785,20 @@ impl OpenCodeAdapter {
         let Some(http) = self.http.clone() else {
             return TransmitOutcome::Undetermined;
         };
+        let note_owed = self.exit_note;
         if let Err(reason) = self.apply_settings(&http, input.settings.as_ref()).await {
             self.restore_settings(previous);
             return TransmitOutcome::Rejected(reason.into());
+        }
+        // Сервер сам вернёт Code Mode как `<system-update>`; напоминание уходит только модели.
+        match (previous_mode, self.mode) {
+            (_, PermissionMode::ReadOnly) => self.exit_note = false,
+            (PermissionMode::ReadOnly, _) => self.exit_note = true,
+            _ => {}
+        }
+        let mut body = body;
+        if self.exit_note {
+            input::add_note(&mut body, input::READ_ONLY_EXIT_NOTE);
         }
         // Супервизор не узнал о запуске без ввода раньше ввода: сервер сольёт их в один период.
         let adopted = self.delivery.adopted.take();
@@ -1787,6 +1812,7 @@ impl OpenCodeAdapter {
         let path = format!("/api/session/{}/prompt", self.session);
         match http.post(&path, &body, self.deadline).await {
             Ok(reply) if input::accepted_id(&reply) == Some(id.as_str()) => {
+                self.exit_note = false;
                 self.delivery.last = Some(command);
                 TransmitOutcome::Accepted(Proof {
                     command_id: command,
@@ -1802,6 +1828,7 @@ impl OpenCodeAdapter {
                     translator.begin_run(adopted);
                 }
                 self.restore_settings(previous);
+                self.exit_note = note_owed;
                 // Период без ввода не должен застать режим, который хаб не принял. Не вышло:
                 // правила остаются помеченными и ставятся перед следующим вводом.
                 let _ = self.apply_mode(&http, self.mode).await;
