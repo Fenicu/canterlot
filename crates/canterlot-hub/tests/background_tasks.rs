@@ -624,6 +624,59 @@ async fn delegation_sync_agent_running_until_tool_result(pool: PgPool) {
     assert_eq!(node(&pool, &seed, call).await, ("done".into(), true));
 }
 
+async fn codex_session(pool: &PgPool, seed: &Seed) {
+    sqlx::query("update conversations set harness='codex' where id=$1")
+        .bind(seed.conversation_id)
+        .execute(pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegation_of_codex_follows_the_result_of_the_spawn(pool: PgPool) {
+    let seed = testkit::seed(&pool).await;
+    codex_session(&pool, &seed).await;
+    let run = running(&pool, &seed).await;
+    let journal = Uuid::now_v7();
+    let call = Uuid::now_v7();
+    let mut bodies = vec![opened(&run)];
+    bodies.extend(block(call, None, "tool_call", "spawn_agent", ""));
+    apply(&pool, &seed, &records(journal, 1, bodies)).await;
+    assert_eq!(node(&pool, &seed, call).await, ("running".into(), false));
+    apply(
+        &pool,
+        &seed,
+        &records(
+            journal,
+            4,
+            block(Uuid::now_v7(), Some(call), "tool_result", "", ""),
+        ),
+    )
+    .await;
+    assert_eq!(node(&pool, &seed, call).await, ("done".into(), true));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegation_of_codex_shows_failed_and_interrupted_children(pool: PgPool) {
+    for (summary, state) in [("error", "failed"), ("interrupted", "stopped")] {
+        let seed = testkit::seed(&pool).await;
+        codex_session(&pool, &seed).await;
+        let run = running(&pool, &seed).await;
+        let call = Uuid::now_v7();
+        let mut bodies = vec![opened(&run)];
+        bodies.extend(block(call, None, "tool_call", "spawn_agent", ""));
+        bodies.extend(block(
+            Uuid::now_v7(),
+            Some(call),
+            "tool_result",
+            "",
+            summary,
+        ));
+        apply(&pool, &seed, &records(Uuid::now_v7(), 1, bodies)).await;
+        assert_eq!(node(&pool, &seed, call).await, (state.into(), true));
+    }
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn delegation_of_other_harnesses_keeps_the_call_state(pool: PgPool) {
     let seed = testkit::seed(&pool).await;

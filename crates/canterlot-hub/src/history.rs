@@ -526,8 +526,8 @@ pub struct DelegationNode {
     #[serde(with = "crate::model::optional_utc_time")]
     pub finished_at: Option<DateTime<Utc>>,
 }
-/// Вызов субагента Claude Code финален сразу после записи входа: его конец говорит только о
-/// том, что вызов сделан. Состояние даёт фоновая задача, а без неё настоящий результат вызова.
+/// Вызов субагента финален сразу после записи входа: его конец говорит только о том, что вызов
+/// сделан. Состояние даёт фоновая задача, а без неё настоящий результат вызова.
 fn subagent_state(
     r: &sqlx::postgres::PgRow,
     call: &'static str,
@@ -545,11 +545,12 @@ fn subagent_state(
         return Ok((state, ended.or(finished_at)));
     }
     if let Some(result) = r.try_get::<Option<&str>, _>("result_state")? {
-        let failed = r.try_get::<Option<&str>, _>("result_summary")? == Some("error");
-        let state = match result {
-            "streaming" => return Ok(("running", None)),
-            "final" if failed => "failed",
-            "final" => "done",
+        let summary = r.try_get::<Option<&str>, _>("result_summary")?;
+        let state = match (result, summary) {
+            ("streaming", _) => return Ok(("running", None)),
+            ("final", Some("error")) => "failed",
+            ("final", Some("interrupted")) => "stopped",
+            ("final", _) => "done",
             _ => "incomplete",
         };
         let ended = r.try_get::<Option<DateTime<Utc>>, _>("result_finished_at")?;
@@ -571,7 +572,7 @@ pub async fn delegation(
         return Ok(None);
     }
     let rows=sqlx::query("select b.*,child.agent child_agent,child.model child_model,
-            c.harness='claude_code' tracked,
+            c.harness harness,
             b.execution_id=live.id is true live,
             t.state task_state,t.ended_at task_ended_at,
             result.state result_state,result.summary result_summary,result.finished_at result_finished_at
@@ -591,10 +592,11 @@ pub async fn delegation(
                 _ => "incomplete",
             };
             let finished_at: Option<DateTime<Utc>> = r.try_get("finished_at")?;
-            let subagent_call = r.try_get::<bool, _>("tracked")?
-                && tool_name
-                    .as_deref()
-                    .is_some_and(|name| matches!(name.to_lowercase().as_str(), "agent" | "task"));
+            let name = tool_name.as_deref().unwrap_or_default().to_lowercase();
+            let subagent_call = matches!(
+                (r.try_get::<&str, _>("harness")?, name.as_str()),
+                ("claude_code", "agent" | "task") | ("codex", "spawn_agent")
+            );
             let (state, finished_at) = if subagent_call {
                 subagent_state(&r, call, finished_at)?
             } else {
