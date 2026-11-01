@@ -106,10 +106,9 @@ run_nextest() {
             [[ "$expr" != all ]] && filter=(-E "$expr")
         fi
     fi
-    # Большая часть теста уходит на ожидание, поэтому потоков вдвое больше ядер.
     local status=0
     cargo nextest run --workspace --all-features --profile "$profile" \
-        --test-threads "${CANTERLOT_TEST_THREADS:-$(($(nproc) * 2))}" "${filter[@]}" || status=$?
+        --test-threads "${CANTERLOT_TEST_THREADS:-$(nproc)}" "${filter[@]}" || status=$?
     python3 scripts/slowest-tests.py "target/nextest/$profile/junit.xml" 8 || true
     return "$status"
 }
