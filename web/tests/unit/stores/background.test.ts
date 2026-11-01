@@ -98,6 +98,25 @@ describe('delegation state', () => {
 		});
 	});
 
+	it('names_the_subagent_by_its_own_blocks_not_by_the_launch_result', () => {
+		const main = call();
+		main.agent = 'orchestrator';
+		main.model = 'claude-opus-5-5';
+		const launch = result('async_launched');
+		launch.agent = 'orchestrator';
+		launch.model = 'claude-opus-5-5';
+		const inner = new BlockModel('i1', 'tool_call');
+		inner.parentId = 'b1';
+		inner.agent = 'general-purpose';
+		inner.model = 'claude-sonnet-5-5';
+		inner.createdSeq = '3';
+		expect(buildDelegation([main, launch])[0]?.subagent).toBeNull();
+		expect(buildDelegation([main, launch, inner])[0]?.subagent).toEqual({
+			name: 'general-purpose',
+			model: 'claude-sonnet-5-5'
+		});
+	});
+
 	it('other_harnesses_keep_the_call_state', () => {
 		expect(buildDelegation([call()])[0]?.state).toBe('done');
 	});

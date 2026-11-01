@@ -299,6 +299,7 @@ async fn foreign_conversation_reads_are_not_found(pool: PgPool) {
             "/snapshot".into(),
             "/history".into(),
             "/delegation".into(),
+            format!("/lanes/{}", Uuid::now_v7()),
             format!("/blocks/{}", Uuid::now_v7()),
             format!("/runs/{}", Uuid::now_v7()),
         ] {
@@ -400,6 +401,11 @@ async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task(poo
     let parent = f.block(e, 1, "tool_call", "args").await;
     let child = f.block(e, 2, "text", "answer").await;
     let later = f.block(e, 3, "text", "answer").await;
+    sqlx::query("update blocks set agent='Main',model='main-model' where block_id=$1")
+        .bind(parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     sqlx::query("update blocks set parent_block_id=$2 where block_id=any($1)")
         .bind(vec![child, later])
         .bind(parent)
@@ -427,6 +433,159 @@ async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task(poo
             .unwrap();
         assert_eq!(f.get(&p).await[0]["state"], wire);
     }
+}
+/// Фоновый агент: первым ребёнком вызова идёт результат запуска основного агента,
+/// настоящее имя и модель субагента приходят с его собственными блоками позже.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegation_names_the_subagent_not_the_launch_result(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let call = f.block(e, 1, "tool_call", "args").await;
+    let launch = f.block(e, 2, "tool_result", "launched").await;
+    let inner = f.block(e, 3, "tool_call", "ls").await;
+    let later = f.block(e, 4, "text", "answer").await;
+    sqlx::query("update blocks set agent='orchestrator',model='opus-main' where block_id=any($1)")
+        .bind(vec![call, launch])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update blocks set summary='async_launched' where block_id=$1")
+        .bind(launch)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update blocks set agent='general-purpose',model='sonnet-sub' where block_id=any($1)",
+    )
+    .bind(vec![inner, later])
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    sqlx::query("update blocks set parent_block_id=$2 where block_id=any($1)")
+        .bind(vec![launch, inner, later])
+        .bind(call)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let r = f.get(&f.path("/delegation")).await;
+    assert_eq!(
+        r[0]["subagent"],
+        json!({"name":"general-purpose","model":"sonnet-sub"})
+    );
+    sqlx::query("delete from blocks where block_id=any($1)")
+        .bind(vec![inner, later])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert!(f.get(&f.path("/delegation")).await[0]["subagent"].is_null());
+}
+async fn adopt(f: &Fixture, parent: Uuid, children: &[Uuid]) {
+    sqlx::query("update blocks set parent_block_id=$2 where block_id=any($1)")
+        .bind(children)
+        .bind(parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lane_pages_the_whole_subtree_newest_first_without_gaps(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let call = f.block(e, 1, "tool_call", "agent").await;
+    let other = f.block(e, 2, "tool_call", "other agent").await;
+    let mut lane = Vec::new();
+    // Ветка старше окна ленты: шаги, их результаты и вложенный субагент с потомком.
+    for n in 0..7 {
+        let step = f.block(e, 10 + n * 10, "tool_call", "step").await;
+        let result = f.block(e, 11 + n * 10, "tool_result", "out").await;
+        adopt(&f, call, &[step]).await;
+        adopt(&f, step, &[result]).await;
+        lane.extend([step, result]);
+    }
+    let nested = f.block(e, 100, "tool_call", "nested").await;
+    let deep = f.block(e, 101, "text", "deep").await;
+    adopt(&f, call, &[nested]).await;
+    adopt(&f, nested, &[deep]).await;
+    lane.extend([nested, deep]);
+    let alien = f.block(e, 50, "text", "other branch").await;
+    adopt(&f, other, &[alien]).await;
+    let mut before = None::<String>;
+    let mut got: Vec<Uuid> = Vec::new();
+    let mut pages = 0;
+    loop {
+        let p = f
+            .get(&f.path(&format!(
+                "/lanes/{call}?limit=4{}",
+                before
+                    .as_ref()
+                    .map(|n| format!("&before={n}"))
+                    .unwrap_or_default()
+            )))
+            .await;
+        assert_eq!(p["root"]["id"], call.to_string());
+        assert!(p["items"].as_array().unwrap().len() <= 4);
+        let mut ids: Vec<Uuid> = p["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().parse().unwrap())
+            .collect();
+        ids.extend(got);
+        got = ids;
+        pages += 1;
+        before = p["next_before"].as_str().map(str::to_owned);
+        if before.is_none() {
+            break;
+        }
+    }
+    assert_eq!(pages, 4);
+    assert_eq!(
+        got, lane,
+        "ascending order, nothing foreign, nothing missing"
+    );
+    assert!(!got.contains(&call) && !got.contains(&alien));
+    let tail = f.get(&f.path(&format!("/lanes/{call}"))).await;
+    assert_eq!(tail["items"].as_array().unwrap().len(), 16);
+    assert!(tail["next_before"].is_null());
+    assert_eq!(tail["items"][15]["id"], deep.to_string());
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lane_of_a_leaf_is_just_the_root_and_bad_requests_are_rejected(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let leaf = f.block(e, 1, "tool_call", "leaf").await;
+    let p = f.get(&f.path(&format!("/lanes/{leaf}"))).await;
+    assert_eq!(p["root"]["id"], leaf.to_string());
+    assert_eq!(p["items"], json!([]));
+    assert!(p["next_before"].is_null());
+    for query in [
+        "limit=0",
+        "limit=201",
+        "before=x",
+        "before=1&after=2",
+        "x=1",
+    ] {
+        let r = f
+            .client
+            .send(
+                Method::GET,
+                &f.path(&format!("/lanes/{leaf}?{query}")),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(r.status.as_u16(), 400, "{query}");
+    }
+    let r = f
+        .client
+        .send(
+            Method::GET,
+            &f.path(&format!("/lanes/{}", Uuid::now_v7())),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(r.status.as_u16(), 404);
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn input_items_expose_the_idempotency_key_to_the_owner_only(pool: PgPool) {

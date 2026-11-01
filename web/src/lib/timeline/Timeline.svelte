@@ -7,6 +7,7 @@
   import { probe } from '#lib/perf/probe.js';
   import type { BlockPage } from '#lib/stores/blocks.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
+  import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
@@ -26,12 +27,15 @@
     chat,
     onInfo,
     now = Date.now(),
-    laneRoot
+    laneRoot,
+    feed
   }: {
     chat: ChatStore;
     onInfo?: (runId: string) => void;
     now?: number;
     laneRoot?: string;
+    /** Записи ветки субагента; без него лента показывает окно разговора. */
+    feed?: TimelineSource;
   } = $props();
   let host = $state<HTMLDivElement | null>(null);
   let controller = $state<ScrollController | null>(null);
@@ -55,8 +59,10 @@
   const OLDER_PAGE = 100;
 
   const today = $derived(dayStart(now));
-  const links = $derived(blockLinks(chat.timeline.entries, chat.backgroundFacts));
-  const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot, links }));
+  const entries = $derived(feed ? feed.entries : chat.timeline.entries);
+  const hasOlder = $derived(feed ? feed.hasOlder : chat.timeline.hasOlder);
+  const links = $derived(blockLinks(entries, chat.backgroundFacts));
+  const rows = $derived(buildRows(entries, { now: today, laneRoot, links }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
   // Своё сообщение возвращает ленту к хвосту: плашка «К новым сообщениям» нужна только для чужих.
@@ -76,13 +82,13 @@
     probe.count('timeline_render');
     node.setAttribute('data-renders', String(Number(node.getAttribute('data-renders') ?? '0') + 1));
   });
-  const streaming = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
-  const failed = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
+  const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
+  const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;
-    return chat.timeline.entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
+    return entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
   });
 
   function layout(list: Row[], top: number, viewport: number): void {
@@ -185,9 +191,9 @@
   }
 
   async function pullOlder(): Promise<void> {
-    if (loading || !chat.timeline.hasOlder) return;
+    if (loading || !hasOlder) return;
     loading = true;
-    try { await chat.loadOlder(); }
+    try { await (feed ? feed.loadOlder() : chat.loadOlder()); }
     finally { loading = false; }
   }
 
@@ -285,7 +291,7 @@
         if (target !== null) scrollTo(target);
         settle();
         // Свёрнутый ход может уместиться в окно: тогда старшую страницу не вызвать прокруткой.
-        const room = !laneRoot && chat.timeline.entries.length + OLDER_PAGE <= chat.timeline.maxLoaded;
+        const room = feed ? feed.hasOlder : !laneRoot && chat.timeline.entries.length + OLDER_PAGE <= chat.timeline.maxLoaded;
         if (room && el.scrollHeight - el.clientHeight <= PIN_PX) void pullOlder();
       });
       requestAnimationFrame(() => {
@@ -339,7 +345,7 @@
     role="log"
     aria-live="off"
     aria-busy={streaming}
-    data-loaded={chat.timeline.entries.length}
+    data-loaded={entries.length}
     data-pinned={controller?.pinned ? '' : undefined}
     data-rows={windowRows.length}
     data-renders="0"
@@ -362,7 +368,7 @@
     <div class="pad" style:height={`${range.padBottom}px`}></div>
     {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
   </div>
-  {#if chat.timeline.tailDetached}
+  {#if !feed && chat.timeline.tailDetached}
     <button type="button" class="jump" onclick={() => chat.reloadTail()}>К последним сообщениям</button>
   {:else if controller?.showJump}
     <button type="button" class="jump" onclick={() => controller?.jumpToBottom()}>К новым сообщениям</button>

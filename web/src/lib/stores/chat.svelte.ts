@@ -31,6 +31,7 @@ import {
   type InputView,
 } from "./inputs";
 import { LOCAL_SEQ, TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
+import { rawCell } from "./cell.svelte.js";
 import { RequestsModel, isDocked } from "./requests.svelte";
 import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
@@ -101,6 +102,13 @@ export interface HistoryPage {
   next_after?: string | null;
 }
 
+/** Страница ленты одного субагента: корень и потомки по возрастанию номера, без корня. */
+export interface LanePage {
+  root: Omit<HistoryBlock, "kind">;
+  items: Omit<HistoryBlock, "kind">[];
+  next_before?: string | null;
+}
+
 export interface ChatApi {
   conversationSnapshot(
     id: string,
@@ -109,6 +117,12 @@ export interface ChatApi {
     id: string,
     query?: { before?: string; after?: string; limit?: number },
   ): Promise<HistoryPage>;
+  /** Страница ленты субагента; без `before` отдаёт самых новых потомков. */
+  lane?(
+    id: string,
+    blockId: string,
+    query?: { before?: string; limit?: number },
+  ): Promise<LanePage>;
   events(scope: string, after: string, limit: number): Promise<RangeResult>;
   markRead(id: string, seq: string): Promise<void>;
 }
@@ -274,6 +288,8 @@ export class ChatStore {
   } | null = null;
   #hold = false;
   #held: HubEvent[] = [];
+  #lanes = new SvelteMap<string, number>();
+  #laneLive = rawCell<TimelineEntry[]>([]);
   #readSeq = 0n;
   #readAt = -10_000;
   #noteTimers = new SvelteMap<string, () => void>();
@@ -371,6 +387,7 @@ export class ChatStore {
     this.background.clear();
     this.diagnostics.length = 0;
     this.#held = [];
+    this.#laneLive.set([]);
     this.detail = null;
     this.execution = null;
     this.activity = null;
@@ -385,6 +402,34 @@ export class ChatStore {
     });
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
+  }
+
+  /**
+   * Одна страница ленты субагента. Блоки попадают в общую карту, как при чтении истории,
+   * но лента разговора и её окно не меняются; записи возвращаются для ленты субагента.
+   */
+  async loadLane(
+    rootId: string,
+    before?: string,
+  ): Promise<{ entries: TimelineEntry[]; nextBefore: string | null }> {
+    const fetchLane = this.deps.api.lane;
+    if (!fetchLane) throw new Error("lane_unavailable");
+    const page = await fetchLane.call(this.deps.api, this.id, rootId, { before });
+    const entries = [page.root, ...page.items].map((item) => {
+      const known = this.blocks.get(item.id);
+      // Живое событие могло обогнать ответ: более новую ревизию не затирает снимок.
+      const block =
+        known && known.rev >= item.rev && known.state !== "stale"
+          ? known
+          : this.#blockFromHistory({ ...item, kind: "block" }, false);
+      return {
+        kind: "block" as const,
+        key: `block:${block.id}`,
+        seq: block.createdSeq || item.created_seq,
+        block,
+      };
+    });
+    return { entries, nextBefore: page.next_before ?? null };
   }
 
   async loadNewer(): Promise<void> {
@@ -540,6 +585,11 @@ export class ChatStore {
       return;
     }
     if (this.#hold || this.timeline.tailDetached) {
+      // Открытая лента субагента живёт независимо от прокрутки ленты разговора.
+      if (!this.#hold && this.#inOpenLane(event)) {
+        this.#dispatch(event);
+        return;
+      }
       this.#held.push(event);
       if (
         this.timeline.tailDetached &&
@@ -550,6 +600,47 @@ export class ChatStore {
       return;
     }
     this.#dispatch(event);
+  }
+
+  /** Лента субагента открыта: её блоки применяются сразу, пока лента разговора оторвана от хвоста. */
+  watchLane(rootId: string): () => void {
+    this.#lanes.set(rootId, (this.#lanes.get(rootId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this.#lanes.get(rootId) ?? 1) - 1;
+      if (left > 0) this.#lanes.set(rootId, left);
+      else this.#lanes.delete(rootId);
+      if (this.#lanes.size === 0) this.#laneLive.set([]);
+    };
+  }
+
+  /** Записи блоков открытых лент, пришедших живыми, пока лента разговора оторвана от хвоста. */
+  get laneLive(): TimelineEntry[] {
+    return this.#laneLive.get();
+  }
+
+  #inOpenLane(event: HubEvent): boolean {
+    if (this.#lanes.size === 0) return false;
+    if (event.kind === "block_started")
+      return this.#underOpenLane(event.payload.parent_block_id);
+    if (
+      event.kind === "block_delta" ||
+      event.kind === "block_final" ||
+      event.kind === "block_incomplete"
+    )
+      return this.#underOpenLane(event.payload.block_id);
+    return false;
+  }
+
+  #underOpenLane(start: string | null): boolean {
+    let id = start;
+    for (let depth = 0; id && depth < 64; depth += 1) {
+      if (this.#lanes.has(id)) return true;
+      id = this.blocks.get(id)?.parentId ?? null;
+    }
+    return false;
   }
 
   #flushHeld(): void {
@@ -799,13 +890,20 @@ export class ChatStore {
     }
     if (event.kind === "block_started") {
       const block = this.blocks.get(event.payload.block_id);
-      if (block)
-        this.timeline.upsert({
+      if (block) {
+        const entry: TimelineEntry = {
           kind: "block",
           key: `block:${block.id}`,
           seq: block.createdSeq,
           block,
-        });
+        };
+        this.timeline.upsert(entry);
+        if (
+          this.timeline.tailDetached &&
+          this.#underOpenLane(event.payload.parent_block_id)
+        )
+          this.#laneLive.set([...this.#laneLive.get(), entry]);
+      }
     }
   }
 

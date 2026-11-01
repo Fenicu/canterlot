@@ -45,6 +45,21 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
       });
       return;
     }
+    if (route.request().method() === 'GET' && kind === 'lanes') {
+      const limit = url.searchParams.get('limit');
+      try {
+        await route.fulfill({
+          json: await api.lane(id, parts[6] ?? '', {
+            before: url.searchParams.get('before') ?? undefined,
+            limit: limit ? Number(limit) : undefined
+          }),
+          headers
+        });
+      } catch {
+        await route.fulfill({ status: 404, headers, json: { error: { code: 'not_found', message: 'Block not found' } } });
+      }
+      return;
+    }
     if (route.request().method() === 'GET' && kind === 'blocks') {
       const blockId = parts[6] ?? '';
       const offset = Number(url.searchParams.get('offset') ?? 0);

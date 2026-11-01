@@ -767,6 +767,28 @@ fn openapi_documents_optional_history_query() {
 }
 
 #[test]
+fn openapi_documents_lane_page_with_optional_query() {
+    let document = serde_json::to_value(openapi::document()).unwrap();
+    let operation = &document["paths"]["/api/v1/conversations/{id}/lanes/{block_id}"]["get"];
+    let parameters = operation["parameters"].as_array().unwrap();
+    for name in ["before", "limit"] {
+        let parameter = parameters.iter().find(|p| p["name"] == name).unwrap();
+        assert_eq!(parameter["in"], "query", "{name}");
+        assert_ne!(parameter["required"], true, "{name}");
+    }
+    let schema = &document["components"]["schemas"]["LanePage"];
+    for field in ["root", "items"] {
+        assert!(
+            schema["required"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(field)),
+            "{field}"
+        );
+    }
+}
+
+#[test]
 fn openapi_operation_ids_are_unique_for_type_generation() {
     let document = serde_json::to_value(openapi::document()).unwrap();
     let mut seen = BTreeSet::new();
