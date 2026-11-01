@@ -432,6 +432,7 @@ impl RestartHarness {
         std::fs::create_dir_all(workdir.join(".git")).unwrap();
         let context = AdapterContext {
             transmit_deadline: WAIT,
+            ready_deadline: WAIT,
             exec_dir: dir.path().join("exec"),
             claude_code: Some(ClaudeCodeConfig {
                 executable: exe,
@@ -1137,6 +1138,7 @@ for line in sys.stdin:
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
         claude_code: Some(ClaudeCodeConfig {
             executable: exe,
@@ -1220,6 +1222,7 @@ sys.stdout.flush()
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
         claude_code: Some(ClaudeCodeConfig {
             executable: exe,
@@ -1287,6 +1290,7 @@ for line in sys.stdin:
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
         claude_code: Some(ClaudeCodeConfig {
             executable: exe,

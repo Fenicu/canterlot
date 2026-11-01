@@ -196,6 +196,7 @@ impl PresetHarness {
         let canterlot = dir.path().join("codex-home");
         let context = AdapterContext {
             transmit_deadline: WAIT,
+            ready_deadline: WAIT,
             exec_dir: dir.path().join("exec"),
             claude_code: None,
             codex: Some(CodexConfig {

@@ -87,6 +87,7 @@ async fn restart_is_bounded_when_stdout_outlives_the_killed_cli() {
     std::fs::create_dir_all(workdir.join(".git")).unwrap();
     let context = AdapterContext {
         transmit_deadline: Duration::from_secs(20),
+        ready_deadline: Duration::from_secs(20),
         exec_dir: dir.path().join("exec"),
         claude_code: Some(ClaudeCodeConfig {
             executable: exe,

@@ -1190,6 +1190,7 @@ impl Supervisor {
         let timers = self.spec.timers.clone();
         let context = AdapterContext {
             transmit_deadline: timers.transmit_deadline,
+            ready_deadline: timers.ready_deadline,
             exec_dir: self.exec_dir.clone(),
             claude_code: self.spec.claude_code.clone(),
             codex: self.spec.codex.clone(),
@@ -1910,15 +1911,7 @@ impl Supervisor {
                     &field_names,
                 )))?;
                 if required {
-                    self.begin_stop(
-                        match kind {
-                            "auth_required" => StopCause::AuthRequired,
-                            "cli_too_old" | "session_id_mismatch" => StopCause::CliIncompatible,
-                            "mcp_unavailable" | "restart_failed" => StopCause::StartFailed,
-                            _ => StopCause::ProtocolIncompatible,
-                        },
-                        false,
-                    )?;
+                    self.begin_stop(required_diagnostic_cause(kind), false)?;
                 }
             }
             AdapterEvent::ProcessExited { code, signal } => {
@@ -2408,9 +2401,32 @@ impl Supervisor {
     }
 }
 
+/// Причина остановки по обязательной диагностике адаптера; неизвестная трактуется как несовместимость.
+fn required_diagnostic_cause(kind: &str) -> StopCause {
+    match kind {
+        "auth_required" => StopCause::AuthRequired,
+        "cli_too_old" | "session_id_mismatch" => StopCause::CliIncompatible,
+        // CLI не прислал init в срок запуска: протокол не нарушен, процесс не поднялся.
+        "mcp_unavailable" | "restart_failed" | "cli_init_missing" => StopCause::StartFailed,
+        _ => StopCause::ProtocolIncompatible,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_init_stops_as_start_failure_not_protocol_incompatibility() {
+        assert!(matches!(
+            required_diagnostic_cause("cli_init_missing"),
+            StopCause::StartFailed
+        ));
+        assert!(matches!(
+            required_diagnostic_cause("unknown_required_event"),
+            StopCause::ProtocolIncompatible
+        ));
+    }
 
     #[test]
     fn real_name_survives_for_kinds_that_carry_one() {

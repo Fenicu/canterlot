@@ -212,6 +212,7 @@ impl Fake {
         std::os::unix::fs::symlink(repo_fixtures(), dir.path().join("fixtures")).unwrap();
         let context = AdapterContext {
             transmit_deadline,
+            ready_deadline: transmit_deadline,
             exec_dir: dir.path().join("exec"),
             claude_code: None,
             codex: Some(CodexConfig {
@@ -432,6 +433,7 @@ fn registry_builds_codex_adapter_from_context() {
     let dir = TempDir::new().unwrap();
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().into(),
         claude_code: None,
         codex: Some(CodexConfig::default()),
@@ -468,6 +470,7 @@ fn registry_builds_codex_adapter_from_context() {
             "codex",
             &AdapterContext {
                 transmit_deadline: WAIT,
+                ready_deadline: WAIT,
                 exec_dir: dir.path().into(),
                 claude_code: None,
                 codex: None,
@@ -1802,6 +1805,7 @@ async fn start_refused_when_cli_missing_or_old_or_broken() {
         }
         let context = AdapterContext {
             transmit_deadline: WAIT,
+            ready_deadline: WAIT,
             exec_dir: dir.path().join("exec"),
             claude_code: None,
             codex: Some(CodexConfig {
@@ -1852,6 +1856,7 @@ async fn start_fails_when_app_server_exits_at_once() {
     );
     let context = AdapterContext {
         transmit_deadline: WAIT,
+        ready_deadline: WAIT,
         exec_dir: dir.path().join("exec"),
         claude_code: None,
         codex: Some(CodexConfig {
@@ -2596,6 +2601,7 @@ async fn live_smoke() {
     assert!(catalog.models.iter().any(|entry| entry.id == model));
     let context = AdapterContext {
         transmit_deadline: Duration::from_secs(60),
+        ready_deadline: Duration::from_secs(60),
         exec_dir: dir.path().join("exec"),
         claude_code: None,
         codex: Some(config),
@@ -2819,6 +2825,7 @@ async fn live_smoke() {
     .expect("live close works");
     let context = AdapterContext {
         transmit_deadline: Duration::from_secs(60),
+        ready_deadline: Duration::from_secs(60),
         exec_dir: dir.path().join("exec2"),
         claude_code: None,
         codex: Some(CodexConfig::default()),
@@ -2898,6 +2905,7 @@ async fn live_smoke() {
         "codex",
         &AdapterContext {
             transmit_deadline: Duration::from_secs(60),
+            ready_deadline: Duration::from_secs(60),
             exec_dir: smoke_home.join("exec"),
             claude_code: None,
             codex: Some(home_config()),
@@ -2938,6 +2946,7 @@ async fn live_smoke() {
         "codex",
         &AdapterContext {
             transmit_deadline: Duration::from_secs(60),
+            ready_deadline: Duration::from_secs(60),
             exec_dir: smoke_home.join("exec-two"),
             claude_code: None,
             codex: Some(home_config()),

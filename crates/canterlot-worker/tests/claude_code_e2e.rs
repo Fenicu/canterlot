@@ -4,7 +4,7 @@ use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior
 use canterlot_worker::{
     adapter::{
         self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, InstructionMode,
-        InstructionSpec, StartSpec, Transmission, TransmitOutcome,
+        InstructionSpec, SettingsChange, StartSpec, Transmission, TransmitOutcome,
         claude_code::version::CliVersion,
     },
     config::ClaudeCodeConfig,
@@ -65,6 +65,9 @@ struct Fake {
 
 impl Fake {
     fn new(turns: Vec<Vec<Value>>) -> Self {
+        Self::with_timers(turns, WAIT, WAIT)
+    }
+    fn with_timers(turns: Vec<Vec<Value>>, transmit: Duration, ready: Duration) -> Self {
         let dir = TempDir::new().unwrap();
         let exe = dir.path().join("fake-cli");
         fake_exec::write_executable(&exe, FAKE, 0o700);
@@ -76,7 +79,8 @@ impl Fake {
             .unwrap();
         }
         let context = AdapterContext {
-            transmit_deadline: WAIT,
+            transmit_deadline: transmit,
+            ready_deadline: ready,
             exec_dir: dir.path().join("exec"),
             claude_code: Some(ClaudeCodeConfig {
                 executable: exe,
@@ -2060,4 +2064,162 @@ async fn replay_read_image_and_limits_through_the_adapter() {
             );
         }
     }
+}
+
+fn answer_turn() -> Vec<Value> {
+    vec![
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ]
+}
+
+fn events_of(events: &[AdapterEvent], kind: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, AdapterEvent::Diagnostic { kind: k, .. } if *k == kind))
+        .count()
+}
+
+#[tokio::test]
+async fn slow_init_within_ready_deadline_is_not_a_protocol_failure() {
+    let mut f = Fake::with_timers(
+        vec![answer_turn()],
+        Duration::from_millis(300),
+        Duration::from_secs(20),
+    );
+    std::fs::write(f.dir.path().join("init-delay"), "1200").unwrap();
+    f.start().await;
+    let id = Uuid::now_v7();
+    f.send(&tx(id)).await;
+    let events = f.finish().await;
+    assert_eq!(events_of(&events, "cli_init_missing"), 0, "{events:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn absent_init_at_ready_deadline_stops_as_start_failure_cause() {
+    let mut f = Fake::with_timers(
+        vec![answer_turn()],
+        Duration::from_millis(200),
+        Duration::from_millis(900),
+    );
+    std::fs::write(f.dir.path().join("init-delay"), "30000").unwrap();
+    f.start().await;
+    let began = std::time::Instant::now();
+    let out = f.adapter.transmit(&tx(Uuid::now_v7()), &f.group).await;
+    assert!(matches!(out, TransmitOutcome::Undetermined), "{out:?}");
+    assert!(
+        began.elapsed() >= Duration::from_millis(800),
+        "{:?}",
+        began.elapsed()
+    );
+    let mut seen = vec![];
+    while let Ok(e) = tokio::time::timeout(Duration::from_millis(200), f.adapter.next_event()).await
+    {
+        seen.push(e);
+    }
+    assert_eq!(events_of(&seen, "cli_init_missing"), 1, "{seen:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn restart_waits_for_the_new_process_to_start() {
+    let mut f = Fake::with_timers(
+        vec![answer_turn()],
+        Duration::from_millis(300),
+        Duration::from_secs(20),
+    );
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    f.finish().await;
+    std::fs::write(f.dir.path().join("init-delay"), "1200").unwrap();
+    let mut change = tx(Uuid::now_v7());
+    change.settings = Some(SettingsChange {
+        instructions: Some(InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 1,
+            title: String::new(),
+        }),
+        ..Default::default()
+    });
+    f.send(&change).await;
+    let events = f.finish().await;
+    assert_eq!(events_of(&events, "cli_init_missing"), 0, "{events:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn running_turn_answered_before_init_waits_for_init_instead_of_failing() {
+    let mut f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"assistant","message":{"role":"assistant","content":[],"model":"claude-haiku-test"},"user_message_uuids":["@input"]}),
+            json!("@sleep:700"),
+        ]],
+        Duration::from_millis(200),
+        Duration::from_secs(20),
+    );
+    std::fs::write(f.dir.path().join("init-mode"), "after").unwrap();
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    let mut seen = vec![];
+    while let Ok(e) = tokio::time::timeout(Duration::from_millis(300), f.adapter.next_event()).await
+    {
+        seen.push(e);
+    }
+    assert_eq!(events_of(&seen, "cli_init_missing"), 0, "{seen:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn finished_turn_without_init_does_not_wait_for_the_ready_deadline() {
+    let mut f = Fake::with_timers(
+        vec![answer_turn()],
+        Duration::from_millis(200),
+        Duration::from_secs(20),
+    );
+    std::fs::write(f.dir.path().join("init-mode"), "none").unwrap();
+    f.start().await;
+    let began = std::time::Instant::now();
+    f.send(&tx(Uuid::now_v7())).await;
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        began.elapsed()
+    );
+    let mut seen = vec![];
+    while let Ok(e) = tokio::time::timeout(Duration::from_millis(200), f.adapter.next_event()).await
+    {
+        seen.push(e);
+    }
+    assert_eq!(events_of(&seen, "cli_init_missing"), 1, "{seen:?}");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn running_turn_without_init_is_accepted_at_ready_deadline_with_a_diagnostic() {
+    let mut f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"assistant","message":{"role":"assistant","content":[],"model":"claude-haiku-test"},"user_message_uuids":["@input"]}),
+            json!("@sleep:5000"),
+        ]],
+        Duration::from_millis(200),
+        Duration::from_millis(900),
+    );
+    std::fs::write(f.dir.path().join("init-mode"), "none").unwrap();
+    f.start().await;
+    let began = std::time::Instant::now();
+    f.send(&tx(Uuid::now_v7())).await;
+    assert!(
+        began.elapsed() >= Duration::from_millis(800),
+        "{:?}",
+        began.elapsed()
+    );
+    let mut seen = vec![];
+    while let Ok(e) = tokio::time::timeout(Duration::from_millis(200), f.adapter.next_event()).await
+    {
+        seen.push(e);
+    }
+    assert_eq!(events_of(&seen, "cli_init_missing"), 1, "{seen:?}");
+    f.close().await;
 }

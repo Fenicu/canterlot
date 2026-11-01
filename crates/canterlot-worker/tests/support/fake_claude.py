@@ -20,7 +20,10 @@ for n,line in enumerate(sys.stdin,1):
     v=json.loads(line)
     if v.get('type')=='control_request':
         emit({'type':'control_response','response':{'subtype':'success','request_id':v['request_id'],'response':{}}}); continue
-    emit({'type':'system','subtype':'init','session_id':sid,'model':'claude-haiku-test','permissionMode':'default','mcp_servers':[{'name':'canterlot','status':'connected'}]})
+    if (d/'init-delay').exists(): time.sleep(int((d/'init-delay').read_text())/1000)
+    init_mode=(d/'init-mode').read_text() if (d/'init-mode').exists() else 'before'
+    init={'type':'system','subtype':'init','session_id':sid,'model':'claude-haiku-test','permissionMode':'default','mcp_servers':[{'name':'canterlot','status':'connected'}]}
+    if init_mode=='before': emit(init)
     frames=json.loads((d/('turn'+str(n)+'.json')).read_text())
     for frame in frames:
         if frame=='@probe':
@@ -42,5 +45,6 @@ for n,line in enumerate(sys.stdin,1):
             # "@input" в user_message_uuids заменяется uuid присланного ввода: хаб выдаёт его сам.
             if isinstance(frame,dict) and frame.get('user_message_uuids')==['@input']: frame=dict(frame,user_message_uuids=[v['uuid']])
             emit(frame)
+    if init_mode=='after': emit(init)
 if relay is not None:
     relay.stdin.close(); relay.wait(timeout=10)
