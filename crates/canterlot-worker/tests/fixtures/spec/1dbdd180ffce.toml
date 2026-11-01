@@ -1,0 +1,26 @@
+ipc_socket = "/run/user/1000/canterlot/01a193a4-8249-7024-ba2e-000000000001.sock"
+execution_id = "01a193a4-8249-7024-ba2e-000000000001"
+generation = 1
+conversation_id = "01a193a4-8249-7024-ba2e-000000000002"
+protocol_version = 1
+
+[claude_code]
+allow_paid_model_poll = false
+executable = "claude"
+
+[codex]
+executable = "codex"
+rate_limits_poll_interval_s = 300
+
+[opencode]
+default_model = "opencode-go/fixture"
+executable = "opencode"
+providers = []
+refuse_paths = []
+
+[timers]
+attach_wait = "30000ms"
+ready_deadline = "30000ms"
+stop_grace = "5000ms"
+stop_retry = "2000ms"
+transmit_deadline = "10000ms"

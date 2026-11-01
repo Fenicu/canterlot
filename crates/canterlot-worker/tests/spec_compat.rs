@@ -8,21 +8,26 @@ use std::path::Path;
 use uuid::Uuid;
 
 const B644882: &str = include_str!("fixtures/spec/b644882ac458.toml");
+const R1DBDD18: &str = include_str!("fixtures/spec/1dbdd180ffce.toml");
+/// Новые первыми: спеку читает сопровождение своего релиза, и читает строго.
+const FROZEN: [&str; 2] = [R1DBDD18, B644882];
 
 #[test]
-fn frozen_spec_of_b644882_loads() {
-    let spec: PersistedSpec = toml::from_str(B644882).unwrap();
-    assert_eq!(
-        spec.execution_id,
-        Uuid::parse_str("01a193a4-8249-7024-ba2e-000000000001").unwrap()
-    );
-    assert_eq!(spec.generation, 1);
-    assert_eq!(
-        spec.ipc_socket.as_deref(),
-        Some(Path::new(
-            "/run/user/1000/canterlot/01a193a4-8249-7024-ba2e-000000000001.sock"
-        ))
-    );
+fn frozen_specs_load() {
+    for frozen in FROZEN {
+        let spec: PersistedSpec = toml::from_str(frozen).unwrap();
+        assert_eq!(
+            spec.execution_id,
+            Uuid::parse_str("01a193a4-8249-7024-ba2e-000000000001").unwrap()
+        );
+        assert_eq!(spec.generation, 1);
+        assert_eq!(
+            spec.ipc_socket.as_deref(),
+            Some(Path::new(
+                "/run/user/1000/canterlot/01a193a4-8249-7024-ba2e-000000000001.sock"
+            ))
+        );
+    }
 }
 
 #[test]
@@ -93,23 +98,46 @@ async fn new_control_side_speaks_to_the_old_release_binary() {
     std::fs::create_dir(&dir).unwrap();
     std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
     let (execution, socket) = (Uuid::now_v7(), dir.join("ipc.sock"));
-    let mut spec: toml::Table = toml::from_str(B644882).unwrap();
-    spec.insert("execution_id".into(), execution.to_string().into());
-    spec.insert(
-        "ipc_socket".into(),
-        socket.to_str().unwrap().to_owned().into(),
-    );
-    std::fs::write(dir.join("spec.toml"), toml::to_string(&spec).unwrap()).unwrap();
     let secret = [7u8; 32];
     std::fs::write(dir.join("secret"), secret).unwrap();
     std::fs::set_permissions(dir.join("secret"), std::fs::Permissions::from_mode(0o600)).unwrap();
-    let mut child = tokio::process::Command::new(binary)
-        .args(["supervise", "--exec-dir"])
-        .arg(&dir)
-        .stdin(std::process::Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
+    // Строгая спека чужого релиза завершает сопровождение до сокета: это не провал проверки,
+    // провал только если бинарник не принял ни одну.
+    let mut accepted = None;
+    for frozen in FROZEN {
+        let mut spec: toml::Table = toml::from_str(frozen).unwrap();
+        spec.insert("execution_id".into(), execution.to_string().into());
+        spec.insert(
+            "ipc_socket".into(),
+            socket.to_str().unwrap().to_owned().into(),
+        );
+        std::fs::write(dir.join("spec.toml"), toml::to_string(&spec).unwrap()).unwrap();
+        let mut child = tokio::process::Command::new(&binary)
+            .args(["supervise", "--exec-dir"])
+            .arg(&dir)
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let listening = timeout(WAIT, async {
+            loop {
+                if socket.exists() {
+                    return true;
+                }
+                if child.try_wait().unwrap().is_some() {
+                    return false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
         .unwrap();
+        if listening {
+            accepted = Some(child);
+            break;
+        }
+    }
+    let mut child = accepted.expect("the release accepts one of the frozen specs");
 
     for attempt in 0..2 {
         let stream = timeout(WAIT, async {
