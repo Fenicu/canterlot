@@ -510,6 +510,12 @@ impl ProtocolHub {
         .await;
     }
 
+    #[allow(dead_code)]
+    pub async fn fail_data(&self, status: Status) {
+        let sender = self.data_downstream.lock().unwrap().clone().unwrap();
+        sender.send(Err(status)).await.unwrap();
+    }
+
     pub async fn send_data(&self, message: DataDown) {
         let sender = self.data_downstream.lock().unwrap().clone().unwrap();
         sender.send(Ok(message)).await.unwrap();

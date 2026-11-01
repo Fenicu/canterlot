@@ -74,8 +74,26 @@ impl LimitsCache {
 #[derive(Clone, Default)]
 pub(super) struct JournalDiagnostics(
     std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
+    std::sync::Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
 );
 impl JournalDiagnostics {
+    /// Журнал, чью запись хаб не принимает, ждёт нового сеанса: новая версия хаба или воркера
+    /// начинает именно его. Диапазон не подтверждён и остаётся в журнале.
+    pub(super) fn refused(&self, journal: Uuid, reason: &str) {
+        if self
+            .1
+            .lock()
+            .expect("journal diagnostics lock")
+            .insert(journal)
+        {
+            tracing::error!(journal_id=%journal,kind="journal_refused",reason,"hub refused a journal record; journal parked until the next session");
+        }
+    }
+
+    pub(super) fn parked(&self) -> std::collections::HashSet<Uuid> {
+        self.1.lock().expect("journal diagnostics lock").clone()
+    }
+
     pub(super) fn withheld(&self, journal: Uuid) {
         if self
             .0
@@ -86,6 +104,20 @@ impl JournalDiagnostics {
             tracing::warn!(journal_id=%journal,kind="journal_withheld","journal capability missing");
         }
     }
+}
+
+/// Отказ определяется записью журнала: повтор упрётся в неё же до обновления хаба или воркера.
+fn refused_record(message: &str) -> bool {
+    matches!(
+        message,
+        "unknown_record"
+            | "invalid_record"
+            | "rejected_value"
+            | "foreign_journal"
+            | "foreign_execution"
+            | "journal_kind_mismatch"
+            | "execution"
+    )
 }
 
 pub fn try_send_metrics(tx: &mpsc::Sender<ControlUp>, metrics: MachineMetrics) -> bool {
@@ -648,6 +680,7 @@ impl Worker {
             .to_string();
         let mut cap = self.config.timers.backoff_min;
         let mut read_retries = 0;
+        let mut refusal = None;
         loop {
             if *shutdown.borrow() {
                 self.transition(SessionState::Disconnected);
@@ -671,7 +704,15 @@ impl Worker {
             self.manager.as_ref().unwrap().set_agent_caller(None);
             let error = result.err().unwrap_or(WorkerError::Transport);
             let last_error = error.kind();
-            if let WorkerError::Hub { code, .. } = &error {
+            if live_since.is_some() {
+                refusal = None;
+            }
+            if let WorkerError::Hub { code, message } = &error {
+                if refused_record(message) && refusal.as_ref() != Some(message) {
+                    tracing::error!(kind = "journal_refused", reason = %message,
+                        "hub refused a journal record; retrying until hub or worker is updated");
+                    refusal = Some(message.clone());
+                }
                 tracing::warn!(error_kind = ?last_error, code = ?code, "session attempt failed");
             } else {
                 tracing::warn!(error_kind = ?last_error, "session attempt failed");

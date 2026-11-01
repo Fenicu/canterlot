@@ -126,6 +126,60 @@ async fn stop_hub(hub: TestHub) {
         .unwrap();
 }
 
+// Настоящие хаб и воркер: запись вида, которого хаб не знает, остаётся на машине, а сверка стоит.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn cj_record_the_hub_cannot_read_stops_the_session_and_stays_on_the_worker(pool: PgPool) {
+    use canterlot_journal::{Journal, JournalOptions};
+    use canterlot_worker::session::ErrorKind;
+    let hub = spawn_test_hub(pool.clone(), hub_timers()).await;
+    let (_directory, config, store) = fixture(&pool, &hub).await;
+    let machine = config.machine_id;
+    let journal = store.cj_journal_id().unwrap();
+    drop(store);
+    let (mut cj, _) =
+        Journal::open(&config.data_dir.join("cj"), JournalOptions::default()).unwrap();
+    // Поле 99 в oneof: так выглядит запись воркера новее хаба.
+    cj.append(&[0x98, 0x06, 0x01]).unwrap();
+    drop(cj);
+    let store = WorkerStore::open(&config.data_dir).unwrap();
+    let (stop, mut state, join) = start(config.clone(), store);
+    timeout(Duration::from_secs(8), async {
+        loop {
+            if matches!(
+                *state.borrow_and_update(),
+                SessionState::Backoff {
+                    last_error: ErrorKind::Hub(tonic::Code::InvalidArgument)
+                }
+            ) {
+                break;
+            }
+            state.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    assert!(!hub.registry.is_reconciled(machine));
+    let stopped: Vec<(String, i64, String)> =
+        sqlx::query_as("select kind, seq, reason from journal_stops where journal_id = $1")
+            .bind(journal)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert_eq!(stopped, [("cj".to_owned(), 1, "unknown_record".to_owned())]);
+    let events: i64 = sqlx::query_scalar(
+        "select count(*) from events where kind = 'machine_journal_stops_changed'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(events, 1);
+    stop_worker(stop, join).await;
+    stop_hub(hub).await;
+    let store = WorkerStore::open(&config.data_dir).unwrap();
+    let cursor = store.cj_cursor().unwrap();
+    assert_eq!((cursor.last_seq, cursor.acked_seq_known_to_worker), (1, 0));
+}
+
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn worker_connects_and_goes_live(pool: PgPool) {
     let hub = spawn_test_hub(pool.clone(), hub_timers()).await;

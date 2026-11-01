@@ -83,6 +83,11 @@ impl IngestError {
     fn is_record_fault(&self) -> bool {
         matches!(self, Self::InvalidRecord | Self::RejectedValue)
     }
+
+    /// Запись не применена, и повтор без обновления хаба или воркера даст тот же итог.
+    fn stops_journal(&self) -> bool {
+        !matches!(self, Self::Database | Self::CredentialRevoked)
+    }
 }
 
 impl From<sqlx::Error> for IngestError {
@@ -547,6 +552,7 @@ impl Ingest {
                     got_seq: record.seq,
                 });
             }
+            progress.refused_seq = Some(record.seq);
             let seq = match i64::try_from(record.seq).map_err(|_| IngestError::InvalidRecord) {
                 Ok(seq) => seq,
                 Err(error) => {
@@ -600,6 +606,7 @@ impl Ingest {
                         return Err(error.into());
                     }
             tx.commit().await?;
+            progress.refused_seq = None;
             up_to_seq = record.seq;
             last_digest = digest;
             if ignored {
@@ -1723,6 +1730,103 @@ impl Ingest {
         Ok(contained)
     }
 
+    /// Стоп журнала выглядит снаружи как пропавшая машина, поэтому он один раз записывается
+    /// и показывается владельцу. Запись остаётся неподтверждённой и не пропускается.
+    async fn note_journal_stop(
+        &self,
+        machine_id: Uuid,
+        kind: JournalKind,
+        batch: &JournalRecords,
+        seq: u64,
+        error: &IngestError,
+    ) -> Result<(), IngestError> {
+        let journal_id = parse_id(&batch.journal_id)?;
+        let stored_seq = i64::try_from(seq).map_err(|_| IngestError::InvalidRecord)?;
+        let reason = error.to_string();
+        let event_type = format!("{reason} seq={seq}");
+        let noted = crate::db::in_tx::<bool, IngestError, _>(&self.pool, move |conn| {
+            Box::pin(async move {
+                let changed = sqlx::query(
+                    "insert into journal_stops (journal_id, machine_id, kind, seq, reason)
+                     values ($1, $2, $3, $4, $5)
+                     on conflict (journal_id) do update
+                       set seq = excluded.seq, reason = excluded.reason,
+                           stopped_at = clock_timestamp()
+                     where journal_stops.machine_id = excluded.machine_id
+                       and (journal_stops.seq, journal_stops.reason)
+                           is distinct from (excluded.seq, excluded.reason)",
+                )
+                .bind(journal_id)
+                .bind(machine_id)
+                .bind(kind.as_str())
+                .bind(stored_seq)
+                .bind(&reason)
+                .execute(&mut *conn)
+                .await?
+                .rows_affected();
+                if changed == 0 {
+                    return Ok(false);
+                }
+                let correlation_id = Uuid::now_v7();
+                let execution: Option<Uuid> = sqlx::query_scalar(
+                    "select execution_id from journal_cursors where journal_id = $1",
+                )
+                .bind(journal_id)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
+                if let Some(execution) = execution
+                    && let Some(run) =
+                        owned_execution(&mut *conn, machine_id, execution, None).await?
+                {
+                    execution_event(
+                        &mut *conn,
+                        &run,
+                        "adapter_diagnostic",
+                        json!({"kind": "journal_stopped", "event_type": event_type}),
+                        correlation_id,
+                    )
+                    .await?;
+                }
+                emit_journal_stops(&mut *conn, machine_id, correlation_id).await?;
+                Ok(true)
+            })
+        })
+        .await?;
+        if noted {
+            tracing::error!(kind = "journal_stopped", machine_id = %machine_id,
+                journal_id = %journal_id, journal_kind = kind.as_str(), seq, error = %error,
+                "journal ingestion stopped until hub or worker is updated");
+        }
+        Ok(())
+    }
+
+    async fn clear_journal_stop(
+        &self,
+        journal_id: &str,
+        up_to_seq: u64,
+    ) -> Result<(), IngestError> {
+        let journal_id = parse_id(journal_id)?;
+        let up_to_seq = i64::try_from(up_to_seq).map_err(|_| IngestError::InvalidRecord)?;
+        let machine: Option<Uuid> = sqlx::query_scalar(
+            "delete from journal_stops where journal_id = $1 and seq <= $2 returning machine_id",
+        )
+        .bind(journal_id)
+        .bind(up_to_seq)
+        .fetch_optional(&self.pool)
+        .await?;
+        let Some(machine_id) = machine else {
+            return Ok(());
+        };
+        crate::db::in_tx::<(), IngestError, _>(&self.pool, move |conn| {
+            Box::pin(emit_journal_stops(conn, machine_id, Uuid::now_v7()))
+        })
+        .await?;
+        tracing::info!(kind = "journal_resumed", machine_id = %machine_id,
+            journal_id = %journal_id, "journal ingestion resumed");
+        Ok(())
+    }
+
     async fn range_ack(
         &self,
         machine_id: Uuid,
@@ -1735,7 +1839,9 @@ impl Ingest {
                 .apply_batch_report(machine_id, credential, kind, &batch)
                 .await;
             let refused = match (&result, progress.refused_seq) {
-                (Err(error), Some(seq)) if error.is_record_fault() => Some((error, seq)),
+                (Err(error), Some(seq)) if kind == JournalKind::Sj && error.is_record_fault() => {
+                    Some((error, seq))
+                }
                 _ => None,
             };
             let Some((error, seq)) = refused else {
@@ -1749,6 +1855,16 @@ impl Ingest {
                 break (result, progress);
             }
         };
+        if let (Err(error), Some(seq)) = (&result, progress.refused_seq)
+            && error.stops_journal()
+            && self
+                .note_journal_stop(machine_id, kind, &batch, seq, error)
+                .await
+                .is_err()
+        {
+            tracing::warn!(kind = "journal_stop_database", machine_id = %machine_id,
+                "journal stop not recorded");
+        }
         if let Some(up_to_seq) = progress.prefix {
             return Ok(canterlot_proto::worker::v1::JournalRangeAck {
                 journal_id: batch.journal_id,
@@ -1773,6 +1889,14 @@ impl Ingest {
         })?;
         match outcome {
             IngestOutcome::Committed { up_to_seq } => {
+                if self
+                    .clear_journal_stop(&batch.journal_id, up_to_seq)
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!(kind = "journal_stop_database", machine_id = %machine_id,
+                        "journal stop not cleared");
+                }
                 Ok(canterlot_proto::worker::v1::JournalRangeAck {
                     journal_id: batch.journal_id,
                     up_to_seq,
@@ -1781,6 +1905,49 @@ impl Ingest {
             IngestOutcome::Gap { .. } => Err(tonic::Status::failed_precondition("journal_gap")),
         }
     }
+}
+
+/// Виды журналов машины, приём которых стоит. Запись о стопе живёт вне транзакции пакета,
+/// поэтому истиной остаётся курсор: прошедший её журнал больше не стоит.
+pub(crate) async fn stopped_journals(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+) -> Result<Vec<String>, sqlx::Error> {
+    sqlx::query_scalar(
+        "select distinct s.kind from journal_stops s
+         left join journal_cursors c on c.journal_id = s.journal_id
+         where s.machine_id = $1 and s.seq > coalesce(c.committed_seq, 0)
+           and not coalesce(c.discarded, false)
+         order by s.kind",
+    )
+    .bind(machine_id)
+    .fetch_all(conn)
+    .await
+}
+
+async fn emit_journal_stops(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let owner_id: Uuid = sqlx::query_scalar("select owner_id from machines where id = $1")
+        .bind(machine_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let stopped = stopped_journals(&mut *conn, machine_id).await?;
+    events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Machines { owner_id },
+            kind: "machine_journal_stops_changed",
+            conversation_id: None,
+            execution_id: None,
+            payload: json!({"machine_id": machine_id, "stopped": stopped}),
+            correlation_id,
+        },
+    )
+    .await?;
+    Ok(())
 }
 
 #[tonic::async_trait]

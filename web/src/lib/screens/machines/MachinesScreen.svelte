@@ -10,7 +10,7 @@
   import Segmented from '#lib/ui/Segmented.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import MetricCard from './MetricCard.svelte';
-  import { diskView, machineStatus, machineWarnings } from './model.js';
+  import { diskView, journalStops, machineStatus, machineWarnings } from './model.js';
   import '../secondary.css';
 
   let runtime = $state<Runtime | null>(null);
@@ -58,7 +58,10 @@
           {/each}
           {#each warnings as warning (warning)}<p class="notice">{warning}</p>{/each}
           <MetricCard title="Нагрузка" value={loadText(metrics.load1_centi)} caption={`1 / 5 / 15 мин: ${loadText(metrics.load1_centi)} · ${loadText(metrics.load5_centi)} · ${loadText(metrics.load15_centi)}`} />
-        {:else}<p>Метрики ещё не поступили. Ожидаю сигнал машины</p>{/if}
+        {:else}
+          <p>Метрики ещё не поступили. Ожидаю сигнал машины</p>
+          {#each journalStops(machine?.warnings ?? []) as warning (warning)}<p class="notice">{warning}</p>{/each}
+        {/if}
       </div>
       <h2>Сессии на машине</h2>
       {#each sessions as session (session.id)}<a class="session-link" href={resolve('/c/[id]', { id: session.id })}>{session.title}{#if session.detail}<small>{session.detail.harness.title} · {modelLabel(session.detail.model)}</small>{/if}</a>{:else}<p class="note">На этой машине пока нет сессий</p>{/each}

@@ -121,6 +121,9 @@
       "$ref": "#/$defs/machine_metrics"
     },
     {
+      "$ref": "#/$defs/machine_journal_stops_changed"
+    },
+    {
       "$ref": "#/$defs/hidden"
     },
     {
@@ -4689,6 +4692,95 @@
       ],
       "additionalProperties": false
     },
+    "machine_journal_stops_changed": {
+      "type": "object",
+      "properties": {
+        "v": {
+          "const": 1
+        },
+        "id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "scope": {
+          "$ref": "#/$defs/Scope"
+        },
+        "scope_seq": {
+          "$ref": "#/$defs/Seq"
+        },
+        "scope_seq_from": {
+          "$ref": "#/$defs/Seq"
+        },
+        "committed_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "committed_at_from": {
+          "$ref": "#/$defs/Time"
+        },
+        "conversation_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "execution_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Uuid"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "correlation_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "kind": {
+          "const": "machine_journal_stops_changed"
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "machine_id": {
+              "$ref": "#/$defs/Uuid"
+            },
+            "stopped": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "cj",
+                  "sj"
+                ]
+              }
+            }
+          },
+          "required": [
+            "machine_id",
+            "stopped"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "v",
+        "id",
+        "scope",
+        "scope_seq",
+        "scope_seq_from",
+        "committed_at",
+        "committed_at_from",
+        "conversation_id",
+        "execution_id",
+        "correlation_id",
+        "kind",
+        "payload"
+      ],
+      "additionalProperties": false
+    },
     "hidden": {
       "type": "object",
       "properties": {
@@ -4964,6 +5056,9 @@
                 },
                 {
                   "$ref": "#/$defs/machine_metrics"
+                },
+                {
+                  "$ref": "#/$defs/machine_journal_stops_changed"
                 },
                 {
                   "$ref": "#/$defs/hidden"

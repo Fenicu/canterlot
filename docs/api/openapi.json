@@ -6871,7 +6871,9 @@
         "enum": [
           "disk_usage_high",
           "metrics_stale",
-          "limits_mismatch"
+          "limits_mismatch",
+          "cj_journal_stopped",
+          "sj_journal_stopped"
         ]
       },
       "MachinesSnapshot": {

@@ -48,6 +48,7 @@ export type ServerOp =
         | MachineAvailabilityChanged
         | MachineReportUpdated
         | MachineMetrics
+        | MachineJournalStopsChanged
         | Hidden
         | PhaseChanged
         | Oversized
@@ -969,6 +970,23 @@ export interface MachineMetrics {
     load15_centi: number;
     disks: {}[];
     executions: {}[];
+  };
+}
+export interface MachineJournalStopsChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "machine_journal_stops_changed";
+  payload: {
+    machine_id: Uuid;
+    stopped: ("cj" | "sj")[];
   };
 }
 export interface Hidden {

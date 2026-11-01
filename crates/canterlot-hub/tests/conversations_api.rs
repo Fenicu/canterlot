@@ -1049,6 +1049,54 @@ async fn machines_endpoint_flags_limits_mismatch_and_stale_metrics(pool: PgPool)
         .await;
     assert_eq!(m["warnings"], json!(["metrics_stale", "limits_mismatch"]));
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn machines_endpoint_shows_a_journal_stop_until_its_cursor_passes(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    metrics(&f, 2000, 1).await;
+    let (cj, sj) = (Uuid::now_v7(), Uuid::now_v7());
+    for (journal, kind) in [(cj, "cj"), (sj, "sj")] {
+        sqlx::query(
+            "insert into journal_stops(journal_id,machine_id,kind,seq,reason)
+             values($1,$2,$3,5,'unknown_record')",
+        )
+        .bind(journal)
+        .bind(f.machine)
+        .bind(kind)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    }
+    let path = format!("/api/v1/machines/{}", f.machine);
+    let warnings = |m: Value| m["warnings"].clone();
+    assert_eq!(
+        warnings(f.request(Method::GET, &path, None, 200).await),
+        json!(["cj_journal_stopped", "sj_journal_stopped"])
+    );
+    // Журнал удалённого разговора больше не придёт: стоять нечему.
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq,closed,discarded)
+         values($1,$2,'sj',1,true,true)",
+    )
+    .bind(f.machine)
+    .bind(sj)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    // Курсор и строка стопа не в одной транзакции: сбой между ними не оставит ложного стопа.
+    sqlx::query(
+        "insert into journal_cursors(machine_id,journal_id,kind,committed_seq)
+         values($1,$2,'cj',5)",
+    )
+    .bind(f.machine)
+    .bind(cj)
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        warnings(f.request(Method::GET, &path, None, 200).await),
+        json!([])
+    );
+}
 async fn limits_fixture(f: &Fixture) {
     let id = f.create(json!({"start":true})).await;
     sqlx::query("insert into provider_limits(provider,weekly_used_permille,weekly_observed_at,five_hour_used_permille,five_hour_observed_at,weekly_reserve_active) values('claude',954,clock_timestamp(),123,clock_timestamp(),true) on conflict(provider) do update set weekly_used_permille=excluded.weekly_used_permille,weekly_observed_at=excluded.weekly_observed_at,five_hour_used_permille=excluded.five_hour_used_permille,five_hour_observed_at=excluded.five_hour_observed_at,weekly_reserve_active=true").execute(&f.pool).await.unwrap();

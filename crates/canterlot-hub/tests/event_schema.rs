@@ -188,6 +188,23 @@ async fn attach_and_submit(f: &Fixture) {
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
     let f = Fixture::new(pool.clone()).await;
+    let refused = canterlot_proto::worker::v1::JournalRecords {
+        journal_id: Uuid::now_v7().to_string(),
+        records: vec![canterlot_proto::worker::v1::JournalRecord {
+            seq: 1,
+            body: Some(Default::default()),
+        }],
+    };
+    let stopped = canterlot_hub::testkit::seed(&pool).await;
+    let refused_status = canterlot_hub::grpc::Ingest::cj_records(
+        &canterlot_hub::ingest::Ingest::new(pool.clone()),
+        stopped.machine_id,
+        &stopped.credential_digest(),
+        refused,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(refused_status.message(), "unknown_record");
     f.input("schema").await;
     conversations::update_attributes(
         &pool,
@@ -561,6 +578,7 @@ async fn emitted_event_payloads_match_published_schema(pool: PgPool) {
         "machine_report_updated",
         "machine_availability_changed",
         "machine_metrics",
+        "machine_journal_stops_changed",
         "execution_state_changed",
         "phase_changed",
         "block_started",

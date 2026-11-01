@@ -1391,7 +1391,7 @@ export interface components {
             worker_version?: string | null;
         };
         /** @enum {string} */
-        MachineWarning: "disk_usage_high" | "metrics_stale" | "limits_mismatch";
+        MachineWarning: "disk_usage_high" | "metrics_stale" | "limits_mismatch" | "cj_journal_stopped" | "sj_journal_stopped";
         MachinesSnapshot: {
             items: components["schemas"]["MachineView"][];
         };

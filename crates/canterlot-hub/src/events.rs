@@ -264,6 +264,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "machine_availability_changed",
     "machine_report_updated",
     "machine_metrics",
+    "machine_journal_stops_changed",
     "hidden",
     "oversized",
 ];
