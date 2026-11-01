@@ -1622,6 +1622,91 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/lanes/{block_id}": {
+      "get": {
+        "tags": [
+          "history"
+        ],
+        "operationId": "get__api_v1_conversations__id__lanes__block_id_",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "block_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Страница ленты субагента: корень и потомки от нового к старому",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LanePage"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/queue/continue": {
       "post": {
         "tags": [
@@ -6792,6 +6877,32 @@
           "cancelled",
           "failed"
         ]
+      },
+      "LanePage": {
+        "type": "object",
+        "description": "Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине.",
+        "required": [
+          "root",
+          "items"
+        ],
+        "properties": {
+          "items": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BlockView"
+            },
+            "description": "Потомки корня по возрастанию `created_seq`; сам корень сюда не входит."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "root": {
+            "$ref": "#/components/schemas/BlockView"
+          }
+        }
       },
       "LimitThresholdsView": {
         "type": "object",

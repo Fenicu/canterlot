@@ -440,6 +440,74 @@ pub async fn run_info(
         compactions: None,
     }))
 }
+/// Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине.
+#[derive(Serialize, ToSchema)]
+pub struct LanePage {
+    pub root: BlockView,
+    /// Потомки корня по возрастанию `created_seq`; сам корень сюда не входит.
+    pub items: Vec<BlockView>,
+    pub next_before: Option<String>,
+}
+const LANE_KEYS_SQL: &str = "with recursive lane(block_id) as (
+ select block_id from blocks where conversation_id=$1 and parent_block_id=$2
+ union
+ select b.block_id from blocks b join lane l on b.parent_block_id=l.block_id where b.conversation_id=$1
+)
+select b.block_id,b.created_seq from blocks b join lane l on l.block_id=b.block_id
+ where b.block_id<>$2 and b.conversation_id=$1 and (not $3 or b.created_seq<$4)
+ order by b.created_seq desc limit $5";
+/// Один субагент целиком, страницами от нового к старому: лента разговора держит только хвост,
+/// а старые ветки в ней не лежат.
+pub async fn lane(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    root_id: Uuid,
+    before: Option<i64>,
+    limit: i64,
+) -> Result<Option<LanePage>, sqlx::Error> {
+    if !(1..=200).contains(&limit) {
+        return Err(sqlx::Error::InvalidArgument("invalid lane limit".into()));
+    }
+    if !owned(conn, owner_id, conversation_id).await? {
+        return Ok(None);
+    }
+    let known: bool = sqlx::query_scalar(
+        "select exists(select 1 from blocks where block_id=$1 and conversation_id=$2)",
+    )
+    .bind(root_id)
+    .bind(conversation_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !known {
+        return Ok(None);
+    }
+    let mut keys = sqlx::query(LANE_KEYS_SQL)
+        .bind(conversation_id)
+        .bind(root_id)
+        .bind(before.is_some())
+        .bind(before.unwrap_or_default())
+        .bind(limit + 1)
+        .fetch_all(&mut *conn)
+        .await?;
+    let more = keys.len() > limit as usize;
+    keys.truncate(limit as usize);
+    keys.reverse();
+    let first = keys.first().map(|r| r.get::<i64, _>("created_seq"));
+    let mut items = Vec::with_capacity(keys.len());
+    for key in keys {
+        items.push(block_view(conn, key.try_get("block_id")?).await?);
+    }
+    Ok(Some(LanePage {
+        root: block_view(conn, root_id).await?,
+        items,
+        next_before: if more {
+            first.map(|n| n.to_string())
+        } else {
+            None
+        },
+    }))
+}
 #[derive(Serialize, ToSchema)]
 pub struct SubagentRef {
     pub name: String,

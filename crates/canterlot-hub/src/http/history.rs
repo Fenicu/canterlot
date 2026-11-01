@@ -6,7 +6,10 @@ use super::{
 };
 use crate::{
     events::{self, ReadAfter, Scope, WireEvent},
-    history::{self, BlockPage, DelegationNode, HistoryCursor, HistoryError, HistoryPage, RunInfo},
+    history::{
+        self, BlockPage, DelegationNode, HistoryCursor, HistoryError, HistoryPage, LanePage,
+        RunInfo,
+    },
 };
 use axum::{Json, extract::State};
 use serde::{Deserialize, Serialize};
@@ -19,6 +22,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(block))
         .routes(routes!(run))
         .routes(routes!(delegation))
+        .routes(routes!(lane))
         .routes(routes!(range))
 }
 #[derive(Deserialize, IntoParams)]
@@ -33,6 +37,13 @@ pub struct HistoryParams {
 #[serde(deny_unknown_fields)]
 pub struct BlockParams {
     pub offset: Option<i64>,
+    pub limit: Option<i64>,
+}
+#[derive(Deserialize, IntoParams)]
+#[serde(deny_unknown_fields)]
+#[into_params(parameter_in = Query)]
+pub struct LaneParams {
+    pub before: Option<String>,
     pub limit: Option<i64>,
 }
 #[derive(Deserialize, IntoParams)]
@@ -153,6 +164,31 @@ async fn delegation(
                 .execute(&mut *conn)
                 .await?;
             history::delegation(&mut *conn, o.owner_id, id)
+                .await?
+                .ok_or_else(missing)
+        })
+    })
+    .await?;
+    Ok(Json(result))
+}
+#[utoipa::path(get,path="/api/v1/conversations/{id}/lanes/{block_id}",tag="history",params(("id"=Uuid,Path),("block_id"=Uuid,Path),LaneParams),responses((status=200,description="Страница ленты субагента: корень и потомки от нового к старому",body=LanePage)))]
+async fn lane(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath((id, root)): ApiPath<(Uuid, Uuid)>,
+    ApiQuery(p): ApiQuery<LaneParams>,
+) -> Result<Json<LanePage>, ApiError> {
+    let limit = p.limit.unwrap_or(100);
+    if !(1..=200).contains(&limit) {
+        return Err(invalid());
+    }
+    let before = p.before.as_deref().map(history_key).transpose()?;
+    let result = crate::db::in_tx(&s.pool, move |conn| {
+        Box::pin(async move {
+            sqlx::query("set transaction isolation level repeatable read read only")
+                .execute(&mut *conn)
+                .await?;
+            history::lane(&mut *conn, o.owner_id, id, root, before, limit)
                 .await?
                 .ok_or_else(missing)
         })

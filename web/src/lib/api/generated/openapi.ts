@@ -256,6 +256,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/lanes/{block_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_conversations__id__lanes__block_id_"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/queue/continue": {
         parameters: {
             query?: never;
@@ -1363,6 +1379,13 @@ export interface components {
         };
         /** @enum {string} */
         JobState: "pending" | "fired" | "cancelled" | "failed";
+        /** @description Страница ленты одного субагента: корень (вызов) и его потомки по любой глубине. */
+        LanePage: {
+            /** @description Потомки корня по возрастанию `created_seq`; сам корень сюда не входит. */
+            items: components["schemas"]["BlockView"][];
+            next_before?: string | null;
+            root: components["schemas"]["BlockView"];
+        };
         LimitThresholdsView: {
             /** Format: int64 */
             stale_after_secs: number;
@@ -2879,6 +2902,45 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["StopOutcome"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_conversations__id__lanes__block_id_: {
+        parameters: {
+            query?: {
+                before?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                id: string;
+                block_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Страница ленты субагента: корень и потомки от нового к старому */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["LanePage"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
