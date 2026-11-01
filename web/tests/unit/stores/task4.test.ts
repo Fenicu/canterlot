@@ -1600,7 +1600,7 @@ describe("stores task 4", () => {
     const startedAt = Date.parse("2026-10-28T12:00:00.000Z");
     const root = new BlockModel(rootId, "tool_call");
     root.toolName = "Agent";
-    root.agent = "researcher";
+    root.agent = "orchestrator";
     root.model = "opus";
     root.summary = "найти";
     root.startedAt = startedAt;
@@ -1613,7 +1613,7 @@ describe("stores task 4", () => {
     child.summary = "файл";
     child.startedAt = startedAt;
     child.state = "final";
-    // Хаб отдаёт только вызовы субагентов; имя и модель берутся у первого дочернего блока.
+    // Хаб отдаёт только вызовы субагентов; имя и модель берутся у первого дочернего блока другого агента.
     const expected = [
       {
         block_id: rootId,

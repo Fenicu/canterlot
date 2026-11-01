@@ -51,7 +51,7 @@ const TOOL_LAUNCHED = 'async_launched';
 
 /**
  * Вызовы субагентов по блокам ленты, как их отдаёт хаб: вызов делегирования, имя и модель
- * берутся у первого дочернего блока. Без `facts` состояние вызова приводится к running / done /
+ * берутся у первого дочернего блока другого агента. Без `facts` состояние вызова приводится к running / done /
  * incomplete, с ними у вызовов Agent и Task идёт от фоновой задачи и настоящего результата.
  */
 export function buildDelegation(blocks: Iterable<BlockModel>, facts?: SubagentFacts): DelegationNode[] {
@@ -77,7 +77,8 @@ export function buildDelegation(blocks: Iterable<BlockModel>, facts?: SubagentFa
 		.sort(order)
 		.map((block) => {
 			const own = [...(children.get(block.id) ?? [])].sort(order);
-			const first = own[0];
+			// Первым идёт результат запуска основного агента: субагента называют его собственные блоки.
+			const first = own.find((child) => child.agent !== block.agent);
 			const result = own.findLast((child) => child.kind === 'tool_result' && child.summary !== TOOL_LAUNCHED);
 			const tracked = facts && SUBAGENT_CALLS.has((block.toolName ?? '').toLowerCase());
 			const end = tracked ? subagentState(block, result, facts) : { state: hubState(block.state), finishedAt: block.finishedAt };

@@ -509,7 +509,7 @@ pub async fn delegation(
             result.state result_state,result.summary result_summary,result.finished_at result_finished_at
         from blocks b
         join conversations c on c.id=b.conversation_id
-        left join lateral (select agent,model from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id order by c.created_seq,c.block_id limit 1) child on true
+        left join lateral (select agent,model from blocks c where c.parent_block_id=b.block_id and c.conversation_id=b.conversation_id and c.agent<>b.agent order by c.created_seq,c.block_id limit 1) child on true
         left join lateral (select e.id from executions e where e.conversation_id=b.conversation_id and e.state in ('created','starting','running','stopping') limit 1) live on true
         left join background_tasks t on t.conversation_id=b.conversation_id and t.block_id=b.block_id
         left join lateral (select r.state,r.summary,r.finished_at from blocks r where r.parent_block_id=b.block_id and r.conversation_id=b.conversation_id and r.kind='tool_result' and r.summary is distinct from 'async_launched' order by r.created_seq desc,r.block_id limit 1) result on true

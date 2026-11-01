@@ -400,6 +400,11 @@ async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task(poo
     let parent = f.block(e, 1, "tool_call", "args").await;
     let child = f.block(e, 2, "text", "answer").await;
     let later = f.block(e, 3, "text", "answer").await;
+    sqlx::query("update blocks set agent='Main',model='main-model' where block_id=$1")
+        .bind(parent)
+        .execute(&f.pool)
+        .await
+        .unwrap();
     sqlx::query("update blocks set parent_block_id=$2 where block_id=any($1)")
         .bind(vec![child, later])
         .bind(parent)
@@ -427,6 +432,49 @@ async fn delegation_tree_lists_subagent_calls_with_state_name_model_and_task(poo
             .unwrap();
         assert_eq!(f.get(&p).await[0]["state"], wire);
     }
+}
+/// Фоновый агент: первым ребёнком вызова идёт результат запуска основного агента,
+/// настоящее имя и модель субагента приходят с его собственными блоками позже.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegation_names_the_subagent_not_the_launch_result(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let e = f.execution().await;
+    let call = f.block(e, 1, "tool_call", "args").await;
+    let launch = f.block(e, 2, "tool_result", "launched").await;
+    let inner = f.block(e, 3, "tool_call", "ls").await;
+    let later = f.block(e, 4, "text", "answer").await;
+    sqlx::query("update blocks set agent='orchestrator',model='opus-main' where block_id=any($1)")
+        .bind(vec![call, launch])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update blocks set summary='async_launched' where block_id=$1")
+        .bind(launch)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update blocks set agent='general-purpose',model='sonnet-sub' where block_id=any($1)")
+        .bind(vec![inner, later])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    sqlx::query("update blocks set parent_block_id=$2 where block_id=any($1)")
+        .bind(vec![launch, inner, later])
+        .bind(call)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let r = f.get(&f.path("/delegation")).await;
+    assert_eq!(
+        r[0]["subagent"],
+        json!({"name":"general-purpose","model":"sonnet-sub"})
+    );
+    sqlx::query("delete from blocks where block_id=any($1)")
+        .bind(vec![inner, later])
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    assert!(f.get(&f.path("/delegation")).await[0]["subagent"].is_null());
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn input_items_expose_the_idempotency_key_to_the_owner_only(pool: PgPool) {
