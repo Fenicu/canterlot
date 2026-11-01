@@ -45,6 +45,7 @@
   const ix = new HeightIndex(rowEstimate);
   const known = new SvelteMap<string, number>();
   const typical = new SvelteMap<string, number>();
+  const guessed = new SvelteMap<string, number>();
   let observer: ResizeObserver | null = null;
   let previous: string[] = [];
   let previousTail = '';
@@ -91,9 +92,19 @@
     return entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
   });
 
+  // Оценка непромеренной строки назначается один раз: иначе каждый замер живой карточки сдвигал бы все строки выше экрана и сбивал прокрутку.
+  function guess(row: Row): number {
+    let height = guessed.get(row.key);
+    if (height === undefined) {
+      height = typical.get(row.kind) ?? rowEstimate(row.kind);
+      guessed.set(row.key, height);
+    }
+    return height;
+  }
+
   function layout(list: Row[], top: number, viewport: number): void {
     ix.setCount(list.length);
-    list.forEach((row, index) => ix.set(index, known.get(row.key) ?? typical.get(row.kind) ?? rowEstimate(row.kind)));
+    list.forEach((row, index) => ix.set(index, known.get(row.key) ?? guess(row)));
     let next = visibleRange(ix, top, viewport, viewport * 1.5);
     if (next.end - next.start > 80) {
       const focus = ix.indexAt(top + viewport / 2);
@@ -136,7 +147,7 @@
         known.set(key, height);
         return;
       }
-      const baseline = prev ?? typical.get(list[index]!.kind) ?? rowEstimate(list[index]!.kind);
+      const baseline = prev ?? guess(list[index]!);
       typical.set(list[index]!.kind, height);
       const delta = height - baseline;
       known.set(key, height);
