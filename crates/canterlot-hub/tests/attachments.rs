@@ -1734,7 +1734,7 @@ async fn download_requires_owner_and_sets_safe_headers(pool: PgPool) {
         "attachment; filename*=UTF-8''%D0%BE%D1%82%D1%87%D1%91%D1%82%201.png"
     );
     assert_eq!(h["content-security-policy"], "sandbox");
-    assert_eq!(h["cache-control"], "private, no-store");
+    assert_eq!(h["cache-control"], "private, max-age=86400, immutable");
     assert_eq!(h["content-length"], png.len().to_string());
 
     let stranger = TestClient::in_process(canterlot_hub::http::router(f.state.clone()))

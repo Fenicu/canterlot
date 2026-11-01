@@ -9,7 +9,7 @@
 - Время передаётся в RFC 3339 UTC с миллисекундами, например `2026-10-27T12:00:00.000Z`.
 - `used_permille` имеет диапазон 0..=1000. Отображаемое `used_pct` равно `used_permille / 10` с одним десятичным знаком; пороги конфигурации задаются в процентах.
 - Смещения текста (`offset`, `next_offset`, `content_bytes`) измеряются байтами UTF-8. Срез начинается и заканчивается на границе символа; смещение внутри символа отклоняется с `400 invalid_offset`.
-- Каждый ответ `/api/` содержит `Cache-Control: no-store` и `X-Server-Time-Ms` (целые миллисекунды часов хаба).
+- Каждый ответ `/api/`, кроме содержимого готового вложения, содержит `Cache-Control: no-store`; `X-Server-Time-Ms` есть в каждом (целые миллисекунды часов хаба).
 
 ## Области подписки
 
@@ -90,7 +90,7 @@
 - Изменяющий запрос (любой метод, кроме `GET` и `HEAD`) несёт `Origin` из `[http].allowed_origins` и `X-Canterlot-Client: 1`; запрос с `Upgrade` (WSS) несёт разрешённый `Origin`. Нарушение даёт `403 origin_rejected` до проверки личности и до обработчика. `OPTIONS` всегда `405 method_not_allowed`; заголовков `Access-Control-*` хаб не отправляет.
 - Каждый изменяющий запрос несёт `Idempotency-Key` по шаблону `^[A-Za-z0-9_-]{1,256}$`. Ключи с `:` (пространства `sched:` и `wake:`) принадлежат хабу и отклоняются с `400 invalid_request`.
 - Тело JSON не больше `[http].max_json_body_bytes` (512 КиБ); превышение даёт `413 resource_limit`.
-- Каждый ответ `/api/` несёт `Cache-Control: no-store` и `X-Server-Time-Ms`; каждый ответ несёт `X-Correlation-Id`. `GET /healthz` и `GET /readyz` не требуют личности и сообщают `ok` либо `not_ready` с причиной `database` или `service` и именами недоступных фоновых служб.
+- Каждый ответ `/api/`, кроме содержимого готового вложения, несёт `Cache-Control: no-store`, а `X-Server-Time-Ms` несут все; каждый ответ несёт `X-Correlation-Id`. `GET /healthz` и `GET /readyz` не требуют личности и сообщают `ok` либо `not_ready` с причиной `database` или `service` и именами недоступных фоновых служб.
 
 ## Errors
 
@@ -317,7 +317,7 @@
 
 Отложенное сообщение хранит ссылки в `scheduled_job_attachments`, и сборщик их учитывает. Отправка перепроверяет готовность: снятое вложение переводит задание в `failed` с `attachment_unavailable`. Отмена, отказ и отправка задания снимают его ссылки в той же транзакции.
 
-Выдача доступна только владельцу. `Content-Type` берётся из списка `image/png`, `image/jpeg`, `image/gif`, `image/webp` при совпадающей сигнатуре файла, иначе `application/octet-stream`; ответ несёт `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment; filename*=UTF-8''<имя в процентной кодировке>`, `Content-Security-Policy: sandbox`, `Cache-Control: private, no-store`. Незавершённое вложение даёт `409 attachment_not_ready`, снятое `409 attachment_unavailable`.
+Выдача доступна только владельцу. `Content-Type` берётся из списка `image/png`, `image/jpeg`, `image/gif`, `image/webp` при совпадающей сигнатуре файла, иначе `application/octet-stream`; ответ несёт `X-Content-Type-Options: nosniff`, `Content-Disposition: attachment; filename*=UTF-8''<имя в процентной кодировке>`, `Content-Security-Policy: sandbox`, `Cache-Control: private, max-age=86400, immutable`: готовое вложение неизменно, а плитки ленты при прокрутке монтируются заново. Незавершённое вложение даёт `409 attachment_not_ready`, снятое `409 attachment_unavailable`.
 
 Сборщик (`canterlot:attachment-gc`, раз в `gc_interval`, отсрочка `gc_grace` = 24 ч) переводит загрузки без активности в `failed(upload_expired)` и удаляет staging после commit, переводит готовые вложения без ссылок в `released` и удаляет blob после commit, удаляет файлы staging без записи `created`/`uploading` и blob без записи `created`/`uploading`/`ready`, если они старше отсрочки. Каждое решение берёт строку `for update skip locked` и перепроверяет состояние, время и ссылки после блокировки. Тело загрузки, которое пишется в любом процессе с общим томом, сборщик не трогает.
 

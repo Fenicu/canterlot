@@ -275,9 +275,10 @@ async fn download(
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static("sandbox"),
     );
+    // Готовое вложение неизменно, а строки ленты при прокрутке монтируются заново.
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("private, no-store"),
+        HeaderValue::from_static("private, max-age=86400, immutable"),
     );
     Ok((StatusCode::OK, headers, Body::from_stream(stream)).into_response())
 }
