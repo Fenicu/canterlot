@@ -13,6 +13,9 @@ if (isStackOrPerf && existsSync(STACK_INFO_FILE)) {
   } catch {}
 }
 
+const requestedWorkers = process.env.PW_WORKERS;
+const workers = requestedWorkers ? (requestedWorkers.endsWith('%') ? requestedWorkers : Number(requestedWorkers)) : '50%';
+
 const phone = { ...devices['Pixel 7'], browserName: 'chromium' as const };
 const LAYOUT_SPEC = /desktop-layout\.spec\.ts$/;
 const firefoxLayout = (name: string, width: number, height: number) => ({
@@ -27,8 +30,9 @@ export default defineConfig({
   testDir: './e2e',
   // Проект budget зависит от phone и desktop, поэтому прогон `e2e/ui` тянул бы за собой и сквозные наборы, которым нужен стенд.
   testIgnore: isStackOrPerf ? LAYOUT_SPEC : ['**/e2e/stack/**', '**/e2e/perf/**', LAYOUT_SPEC],
-  fullyParallel: false,
-  workers: isStackOrPerf ? 1 : 4,
+  // Тесты независимы: пара «проект, тест» занимает воркер сама. Стенд и перф делят одно состояние и идут по одному.
+  fullyParallel: !isStackOrPerf,
+  workers: isStackOrPerf ? 1 : workers,
   globalSetup: isStackOrPerf ? './e2e/stack/global-setup.ts' : undefined,
   globalTeardown: isStackOrPerf ? './e2e/stack/global-teardown.ts' : undefined,
   use: { baseURL: origin, trace: 'retain-on-failure' },
@@ -37,7 +41,7 @@ export default defineConfig({
     : { command: 'node e2e/edge/serve.mjs', url: origin, reuseExistingServer: false },
   projects: [
     { name: 'phone', grepInvert: /render_budget_during_long_stream/, use: phone },
-    { name: 'desktop', workers: isStackOrPerf ? 1 : 2, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
+    { name: 'desktop', workers: isStackOrPerf ? 1 : undefined, use: { browserName: 'firefox', viewport: { width: 1440, height: 900 } } },
     firefoxLayout('layout-1024', 1024, 768),
     firefoxLayout('layout-1440', 1440, 900),
     firefoxLayout('layout-2560', 2560, 1440),
