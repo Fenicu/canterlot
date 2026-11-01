@@ -729,6 +729,42 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: { id } });
   });
 
+  await page.route('**/api/v1/machines', async (route) => {
+    if (route.request().method() !== 'GET') return route.fallback();
+    await route.fulfill({ headers: headers(), json: [...api.machines.values()] });
+  });
+
+  await page.route('**/api/v1/spawn-whitelist', async (route) => {
+    const method = route.request().method();
+    if (method === 'GET') {
+      await route.fulfill({ headers: headers(), json: api.spawnWhitelistView() });
+      return;
+    }
+    if (method !== 'PUT') return route.fallback();
+    const key = route.request().headers()['idempotency-key'];
+    if (!key) {
+      await route.fulfill({ status: 400, headers: headers(), json: errorBody('invalid_request', 'Нужен Idempotency-Key') });
+      return;
+    }
+    api.spawnWhitelistKeys.push(key);
+    const body = route.request().postDataJSON() as { entries: { harness?: string; model?: string }[] | null };
+    const entries = body.entries;
+    const seen = new Set<string>();
+    const valid = entries === null || (Array.isArray(entries) && entries.length <= 64 && entries.every((entry) => {
+      if (!entry.harness || !entry.model || entry.model.length > 256) return false;
+      const token = `${entry.harness}/${entry.model}`;
+      if (seen.has(token)) return false;
+      seen.add(token);
+      return true;
+    }));
+    if (!valid) {
+      await route.fulfill({ status: 422, headers: headers(), json: errorBody('spawn_whitelist_invalid', 'Некорректный белый список') });
+      return;
+    }
+    api.spawnWhitelist = entries as { harness: string; model: string }[] | null;
+    await route.fulfill({ headers: headers(), json: api.spawnWhitelistView() });
+  });
+
   await page.route('**/api/v1/presets', async (route) => {
     const method = route.request().method();
     if (method === 'GET') {

@@ -15,6 +15,7 @@
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import Button from '#lib/ui/Button.svelte';
   import Segmented from '#lib/ui/Segmented.svelte';
+  import SpawnWhitelist from './SpawnWhitelist.svelte';
   import { motionPref, saveMotion, type MotionPref } from './preferences.js';
   import '../secondary.css';
 
@@ -76,6 +77,7 @@
         <section><h2>Подключение</h2><p>Логин: <strong>{login}</strong></p><p>{connectionText}</p>{#if sync}<p class="note">Последняя синхронизация: {fmt.clock(sync)}</p>{/if}</section>
         <section><h2>Предупреждения о лимитах</h2><div class="card"><p>Предупредить при {config.limit_thresholds.warn_pcts.join('%, ')}%</p><p>Резерв владельца {config.limit_thresholds.weekly_reserve_pct}%</p><p class="note">Для 5 часов и недели, Claude и Codex. Кранч ждёт сброса, сохраняя резерв владельца</p></div><a href={resolve('/limits')}>История лимитов</a></section>
         <section><a href={resolve('/machines')}>Машины</a></section>
+        <SpawnWhitelist />
         <section><h2>О приложении</h2><p>canterlot</p>{#if canInstall}<button type="button" onclick={() => { void installation().prompt().catch(() => error = 'Не удалось установить приложение. Повторите в меню браузера'); }}>Установить приложение</button>{/if}<p>Обновление: {updateState === 'idle' ? 'Установлена текущая версия' : updateState === 'applying' ? 'Обновляю…' : 'Доступна новая версия'}</p>{#if update}<button type="button" onclick={updateAction}>{updateState === 'idle' ? 'Проверить обновления' : 'Обновить приложение'}</button>{/if}</section>
       </div></div>
     {/if}
