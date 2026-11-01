@@ -66,6 +66,13 @@ export class FakeHubApi {
 	limits: ProviderLimits[] = [];
 	truncated = false;
 	presets = new Map<string, FakePreset>();
+	/** `null`: встроенный список по умолчанию, как у хаба. */
+	spawnWhitelist: { harness: string; model: string }[] | null = null;
+	readonly spawnWhitelistKeys: string[] = [];
+	readonly defaultSpawnWhitelist = [
+		{ harness: 'claude', model: 'opus' },
+		{ harness: 'claude', model: 'default' }
+	];
 	deletedPresets = new Map<string, FakePreset>();
 	decisionAutoProgress: boolean | 'transmitting' | 'saved' = true;
 	#seq = 0;
@@ -73,6 +80,14 @@ export class FakeHubApi {
 	constructor(readonly hub: FakeHub) {
 		this.hub.setSnapshot('conversations', () => this.listData());
 		this.hub.setSnapshot('machines', () => ({ items: [...this.machines.values()] }));
+	}
+
+	spawnWhitelistView(): { entries: { harness: string; model: string }[]; is_default: boolean; default_entries: { harness: string; model: string }[] } {
+		return {
+			entries: this.spawnWhitelist ?? this.defaultSpawnWhitelist,
+			is_default: this.spawnWhitelist === null,
+			default_entries: this.defaultSpawnWhitelist
+		};
 	}
 
 	/** Как настоящий хаб: строки исчезают, список узнаёт из `conversation_deleted`. */
