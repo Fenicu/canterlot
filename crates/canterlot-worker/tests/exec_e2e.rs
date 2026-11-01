@@ -1500,7 +1500,10 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
     let input = fixture.submit("hello".into()).await;
     fixture.wait_state("owner_lost").await;
     assert_eq!(transmissions(&fixture.sj().2, input.command_id), [1]);
-    assert_eq!(fixture.input_state(input.input_id).await, "on_machine");
+    // Намерение уходит хабу до первого байта, а сопровождение падает сразу за ним: дошло ли оно, гонка.
+    let unresolved = ["on_machine", "transmitting"];
+    let state = fixture.input_state(input.input_id).await;
+    assert!(unresolved.contains(&state.as_str()), "{state}");
     fixture.stop_worker().await;
     fixture.faults().drop_next_acks(0);
     fixture.start_worker().await;
@@ -1518,6 +1521,14 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
         matches!(r.body.as_ref().and_then(|b| b.body.as_ref()), Some(Body::DispatchDeferred(f)) if f.command_id == input.command_id.to_string())));
     drop(store);
     fixture.start_worker().await;
+    sleep(Duration::from_millis(500)).await;
+    let state = fixture.input_state(input.input_id).await;
+    assert!(unresolved.contains(&state.as_str()), "{state}");
+    assert_eq!(
+        transmissions(&fixture.sj().2, input.command_id),
+        [1],
+        "a started transmission is never repeated"
+    );
     fixture.finish().await;
 }
 
