@@ -12,7 +12,7 @@
   import { getEnterPref } from '#lib/composer/prefs.js';
   import { bindComposerRestore } from '#lib/composer/restore.js';
   import { bindReturned } from '#lib/composer/returned.js';
-  import { decideEnter, isTouchPrimary } from '#lib/composer/sendRules.js';
+  import { decideEnter, isTouchPrimary, turnIsLive } from '#lib/composer/sendRules.js';
   import { getRuntime } from '#lib/app/runtime.js';
   import { sessionUploads } from '#lib/screens/chat/open.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -60,15 +60,7 @@
   const reasonId = $props.id();
   const laterId = `${reasonId}-later`;
 
-  const activityState = $derived(
-    chat.activity && typeof chat.activity === 'object' && 'state' in chat.activity
-      ? String((chat.activity as { state?: unknown }).state ?? '')
-      : ''
-  );
-  const slotRunning = $derived(
-    typeof chat.queue.run_slot === 'object' && chat.queue.run_slot !== null && 'running' in chat.queue.run_slot
-  );
-  const turn = $derived((activityState === 'working' || activityState === 'stalled') && slotRunning);
+  const turn = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
   let armReset = false;
   const showInterrupt = $derived(turn || model.interruptLabel !== 'Прервать');
   const uploadsPending = $derived.by(() => {

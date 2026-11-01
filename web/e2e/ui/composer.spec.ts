@@ -322,6 +322,39 @@ test('interrupt_pill_shows_only_while_a_turn_runs_and_reports_progress', async (
   await expect.poll(() => hits.length).toBe(1);
 });
 
+test('interrupt_pill_shows_during_a_wake_turn_that_holds_no_slot', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  void api;
+  const hits = await watch(page, '**/api/v1/conversations/*/interrupt');
+  const scope = `conversation:${id}`;
+  const activity = (state: string, phase: string) => ({
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state, evidence: { phase }, since: AT },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: AT,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.append(scope, { kind: 'queue_state_changed', conversation_id: id, payload: { pause_reasons: [], hold_reasons: [], run_slot: 'free' } });
+  hub.append(scope, activity('working', 'starting'));
+  hub.flush();
+  const pill = page.getByRole('button', { name: 'Прервать' });
+  await expect(pill).toHaveCount(0);
+  hub.append(scope, activity('working', 'generating'));
+  hub.flush();
+  await expect(pill).toBeVisible();
+  hub.append(scope, activity('stalled', 'generating'));
+  hub.flush();
+  await expect(pill).toBeVisible();
+  await pill.click();
+  await expect.poll(() => hits.length).toBe(1);
+});
+
 test('interrupt_label_ends_on_every_terminal_status_with_its_own_text', async ({ page }) => {
   const { hub, api, id } = await boot(page);
   const scope = `conversation:${id}`;

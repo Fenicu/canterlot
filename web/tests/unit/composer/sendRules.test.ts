@@ -3,6 +3,7 @@ import {
   decideEnter,
   isTouchPrimary,
   setPointerTypeForTest,
+  turnIsLive,
   type KeyCtx,
 } from "#lib/composer/sendRules.js";
 import {
@@ -278,5 +279,22 @@ describe("composer/sendRules", () => {
 
     setPointerTypeForTest("mouse");
     expect(isTouchPrimary()).toBe(false);
+  });
+
+  it("turn_is_live_with_the_slot_or_in_a_model_phase_of_a_wake_turn", () => {
+    const running = { running: { input_id: "i" } };
+    const activity = (state: string, phase?: string) => ({ state, evidence: { phase } });
+    expect(turnIsLive(activity("working"), running)).toBe(true);
+    expect(turnIsLive(activity("stalled"), running)).toBe(true);
+    expect(turnIsLive(activity("working", "generating"), "free")).toBe(true);
+    expect(turnIsLive(activity("working", "running_tool"), "free")).toBe(true);
+    expect(turnIsLive(activity("working", "context_maintenance"), "free")).toBe(true);
+    expect(turnIsLive(activity("stalled", "generating"), "free")).toBe(true);
+    expect(turnIsLive(activity("working", "starting"), "free")).toBe(false);
+    expect(turnIsLive(activity("working", "stopping"), "free")).toBe(false);
+    expect(turnIsLive(activity("working", "awaiting_input"), { dispatched: {} })).toBe(false);
+    expect(turnIsLive(activity("idle", "generating"), "free")).toBe(false);
+    expect(turnIsLive(activity("waiting_for_user", "generating"), running)).toBe(false);
+    expect(turnIsLive(null, running)).toBe(false);
   });
 });

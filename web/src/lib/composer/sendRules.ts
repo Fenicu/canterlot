@@ -82,3 +82,14 @@ export function isTouchPrimary(): boolean {
 export function setPointerTypeForTest(type: 'touch' | 'mouse' | 'unknown'): void {
 	lastPointerType = type;
 }
+
+const MODEL_PHASES = new Set(['generating', 'running_tool', 'context_maintenance']);
+
+/** Идёт ход: занято место в очереди или модель работает в ходе, который CLI начал сам и без места. */
+export function turnIsLive(activity: unknown, runSlot: unknown): boolean {
+	if (typeof activity !== 'object' || activity === null) return false;
+	const { state, evidence } = activity as { state?: unknown; evidence?: { phase?: unknown } };
+	if (state !== 'working' && state !== 'stalled') return false;
+	if (typeof runSlot === 'object' && runSlot !== null && 'running' in runSlot) return true;
+	return MODEL_PHASES.has(String(evidence?.phase ?? ''));
+}
