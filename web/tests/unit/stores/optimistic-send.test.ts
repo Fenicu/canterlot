@@ -145,6 +145,56 @@ describe("optimistic send", () => {
     expect(chat.inputs.get("k1")).toBe(input);
   });
 
+  it("a_pause_after_the_send_moves_the_bubble_to_the_strip_where_it_can_be_cancelled", () => {
+    const chat = chatOf();
+    const input = send(chat, "k1");
+    chat.applier.applyEvents([queued("k1")]);
+    expect(keys(chat)).toEqual(["input:k1"]);
+    chat.applier.applyEvents([
+      {
+        event: ev("queue_state_changed", { pause_reasons: [{ reason: "machine_lost" }], hold_reasons: [], run_slot: "free" }, "5"),
+        overlap: false,
+      },
+    ]);
+    expect(input.optimistic).toBe(false);
+    expect(chat.strip()).toEqual([input]);
+    expect(keys(chat)).toEqual([]);
+  });
+
+  it("a_queue_resume_with_a_reason_left_moves_the_bubble_as_well", () => {
+    const chat = chatOf();
+    const input = send(chat, "k1");
+    chat.applier.applyEvents([queued("k1")]);
+    chat.applier.applyEvents([
+      { event: ev("queue_resumed", { pause_reasons: [{ reason: "limit_reached" }] }, "5"), overlap: false },
+    ]);
+    expect(input.optimistic).toBe(false);
+    expect(keys(chat)).toEqual([]);
+  });
+
+  it("an_own_slot_keeps_the_bubble_in_place", () => {
+    const chat = chatOf();
+    const input = send(chat, "k1");
+    chat.applier.applyEvents([queued("k1")]);
+    chat.applier.applyEvents([
+      {
+        event: ev("queue_state_changed", { pause_reasons: [], hold_reasons: [], run_slot: { dispatching: { input_id: INPUT, attempt: 1 } } }, "5"),
+        overlap: false,
+      },
+    ]);
+    expect(input.optimistic).toBe(true);
+    expect(keys(chat)).toEqual(["input:k1"]);
+  });
+
+  it("a_snapshot_without_the_queued_input_removes_its_bubble", () => {
+    const chat = chatOf();
+    send(chat, "k1");
+    chat.applier.applyEvents([queued("k1")]);
+    chat.applier.applySnapshot({ queue: { queued: [] } });
+    expect(chat.inputs.get("k1")).toBeUndefined();
+    expect(keys(chat)).toEqual([]);
+  });
+
   it("the_bubble_never_claims_a_stage_the_hub_has_not_reported", () => {
     const chat = chatOf();
     const input = send(chat, "k1");

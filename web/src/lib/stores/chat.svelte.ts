@@ -513,6 +513,14 @@ export class ChatStore {
     this.timeline.remove(`input:${input.key}`);
   }
 
+  /** Пауза, пришедшая после отправки: отменить ввод можно только из полосы. */
+  #demoteWaiting(): void {
+    for (const input of this.inputs.values()) {
+      if (input.optimistic && placeInput(input.state) === "strip" && this.#mustWait(input))
+        this.#demote(input);
+    }
+  }
+
   #applyBatch(batch: AppliedEvent[]): void {
     for (const item of batch) this.#take(item.event);
   }
@@ -587,14 +595,17 @@ export class ChatStore {
           this.queue.pause_reasons = event.payload.pause_reasons;
           this.queue.hold_reasons = event.payload.hold_reasons;
           this.queue.run_slot = event.payload.run_slot;
+          this.#demoteWaiting();
         }
         return;
       case "queue_paused":
         this.queuePausedCount += 1;
         return;
       case "queue_resumed":
-        if (event.kind === "queue_resumed")
+        if (event.kind === "queue_resumed") {
           this.queue.pause_reasons = event.payload.pause_reasons;
+          this.#demoteWaiting();
+        }
         return;
       case "execution_state_changed":
         if (event.kind === "execution_state_changed")
@@ -1000,8 +1011,11 @@ export class ChatStore {
       queued.map((view) => this.#inputFromHistory({ ...view, kind: "input" }).key),
     );
     for (const input of [...this.inputs.values()]) {
-      if (input.id && input.placement === "strip" && input.state !== "cancelled" && !held.has(input.key))
+      const waiting = input.placement === "strip" || (input.optimistic && input.state === "queued");
+      if (input.id && waiting && input.state !== "cancelled" && !held.has(input.key)) {
         this.inputs.delete(input.key);
+        this.timeline.remove(`input:${input.key}`);
+      }
     }
   }
 
