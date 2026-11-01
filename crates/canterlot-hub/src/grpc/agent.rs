@@ -161,6 +161,7 @@ async fn handle(
                 settle: grpc.settle,
                 dispatcher: grpc.dispatcher.clone(),
                 registry: grpc.registry.clone(),
+                shutdown: grpc.shutdown.clone(),
             };
             match crate::session_tools::call(&context, &caller, tool, arguments).await {
                 Ok(result) => ok(result),

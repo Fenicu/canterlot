@@ -59,8 +59,6 @@ use crate::{
 
 /// Картинки в подготовке и ожидании загрузки на одно исполнение; сверх этого событие пропускается.
 const MAX_PENDING_MEDIA: usize = 32;
-/// Ожидание ответа хаба на вызов инструмента агента.
-const AGENT_CALL_TIMEOUT: Duration = Duration::from_secs(20);
 /// Период уборки зомби усыновлённых процессов: они занимают лимит процессов владельца.
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 
@@ -1985,8 +1983,9 @@ impl Supervisor {
                     }
                     return Ok(());
                 }
-                self.agent_calls
-                    .insert(call_id, Instant::now() + AGENT_CALL_TIMEOUT);
+                // Ответа хаба ждём столько, сколько допускает инструмент: ожидание сессии длиннее прочих.
+                let deadline = crate::exec::deadline_for(&tool, &arguments).supervisor;
+                self.agent_calls.insert(call_id, Instant::now() + deadline);
                 self.send(up::Msg::AgentCall(
                     canterlot_proto::worker::ipc::AgentCall {
                         call_id: call_id.to_string(),

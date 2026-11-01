@@ -129,6 +129,7 @@ impl Fx {
                 },
                 dispatcher: None,
                 registry: registry.clone(),
+                shutdown: tokio_util::sync::CancellationToken::new(),
             },
             scheduler: Scheduler::new(pool.clone(), dispatcher, Default::default())
                 .with_limits(registry, LimitsConfig::default()),

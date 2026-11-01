@@ -496,6 +496,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
         },
         dispatcher: None,
         registry: canterlot_hub::session::Registry::new(Default::default()),
+        shutdown: tokio_util::sync::CancellationToken::new(),
     };
     let caller = Caller {
         owner_id: f.owner,

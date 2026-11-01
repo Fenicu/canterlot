@@ -34,6 +34,7 @@ impl Fx {
                 },
                 dispatcher: None,
                 registry: canterlot_hub::session::Registry::new(Default::default()),
+                shutdown: tokio_util::sync::CancellationToken::new(),
             },
             pool,
             owner: seed.owner_id,

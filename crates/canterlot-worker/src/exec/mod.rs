@@ -69,6 +69,43 @@ pub trait AgentCaller: Send + Sync {
 
 /// Срок RPC вызова инструмента агента по каналу данных.
 pub const AGENT_CALL_RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Срок управляющей службы: чуть дольше RPC, чтобы менеджер ответил первым.
+pub const AGENT_CALL_TIMEOUT: Duration = Duration::from_secs(20);
+
+const WAIT_TOOL: &str = "sessions.wait";
+const WAIT_DEFAULT_SECONDS: u64 = 120;
+const WAIT_MAX_SECONDS: u64 = 300;
+/// Запас сверх ожидания: опрос хаба, сеть и разбор ответа.
+const WAIT_RPC_SLACK: Duration = Duration::from_secs(10);
+const WAIT_SUPERVISOR_SLACK: Duration = Duration::from_secs(15);
+
+/// Сроки одного вызова: у каждого уровня свой, управляющая служба всегда позже менеджера.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallDeadlines {
+    pub supervisor: Duration,
+    pub rpc: Duration,
+}
+
+/// Блокирующее ожидание сессии держится столько, сколько просила модель, плюс запас;
+/// остальные инструменты отвечают быстро.
+pub fn deadline_for(tool: &str, arguments: &serde_json::Value) -> CallDeadlines {
+    if tool != WAIT_TOOL {
+        return CallDeadlines {
+            supervisor: AGENT_CALL_TIMEOUT,
+            rpc: AGENT_CALL_RPC_TIMEOUT,
+        };
+    }
+    let seconds = arguments
+        .get("timeout_seconds")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(WAIT_DEFAULT_SECONDS)
+        .clamp(1, WAIT_MAX_SECONDS);
+    let wait = Duration::from_secs(seconds);
+    CallDeadlines {
+        supervisor: wait + WAIT_SUPERVISOR_SLACK,
+        rpc: wait + WAIT_RPC_SLACK,
+    }
+}
 
 /// Выполняет вызов инструмента агента от имени исполнения: заполняет идентификатор
 /// и поколение из состояния управляющей службы. Без сессии хаба — быстрый отказ;
@@ -105,7 +142,7 @@ pub async fn agent_call(
     };
     let arguments_json = serde_json::to_string(&arguments).unwrap_or_default();
     let response = tokio::time::timeout(
-        AGENT_CALL_RPC_TIMEOUT,
+        deadline_for(&tool, &arguments).rpc,
         caller.call(AgentCallRequest {
             execution_id: execution_id.to_string(),
             generation,
