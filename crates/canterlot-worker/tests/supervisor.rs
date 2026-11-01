@@ -2133,6 +2133,24 @@ impl Harness {
             .await;
     }
 
+    async fn start_cli_session_tools(&mut self, session_tools_v1: bool) {
+        let workdir = self._root.path().to_string_lossy().into_owned();
+        self.send(down::Msg::StartCli(StartCli {
+            profile: "synthetic".into(),
+            workdir,
+            pilot_v1: true,
+            session_tools_v1,
+            instructions: Some(Instructions {
+                mode: "clean".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }))
+        .await;
+        self.next_message(|message| matches!(message, up::Msg::CliStarted(_)))
+            .await;
+    }
+
     async fn start_cli_pilot(&mut self, pilot_v1: bool) {
         let workdir = self._root.path().to_string_lossy().into_owned();
         self.send(down::Msg::StartCli(StartCli {
@@ -2500,6 +2518,88 @@ async fn deferred_restart_runs_only_between_turns() {
         .wait_records("applied", |b| applied(b) > 0 && run_finished(b, second))
         .await;
     assert_eq!(applied(&bodies), 1);
+    harness.shutdown().await;
+}
+
+fn git_in(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+        .args(["-c", "commit.gpgsign=false"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .output()
+        .expect("git runs");
+    assert!(out.status.success(), "git {args:?} failed");
+    String::from_utf8(out.stdout)
+        .expect("utf8")
+        .trim()
+        .to_string()
+}
+
+fn run_git_facts(bodies: &[Body], id: Uuid) -> Option<canterlot_proto::worker::v1::GitFacts> {
+    bodies.iter().find_map(|b| match b {
+        Body::RunFinished(f) if f.input_command_id == id.to_string() => Some(f.git.clone()),
+        _ => None,
+    })?
+}
+
+#[tokio::test]
+async fn run_finished_carries_git_facts_with_the_capability() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    let root = harness._root.path().to_path_buf();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    std::fs::write(root.join("base.txt"), "base").unwrap();
+    git_in(&root, &["add", "base.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "base"]);
+    let base = git_in(&root, &["rev-parse", "HEAD"]);
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(true).await;
+
+    let first = Uuid::now_v7();
+    harness.deliver(first, 1, "first").await;
+    let bodies = harness
+        .wait_records("first", |b| run_finished(b, first))
+        .await;
+    let facts = run_git_facts(&bodies, first).expect("git facts");
+    assert!(facts.available);
+    assert_eq!(facts.head_before, base);
+    assert_eq!(facts.head_after, base);
+    assert!(facts.commits.is_empty());
+
+    std::fs::write(root.join("work.txt"), "work").unwrap();
+    git_in(&root, &["add", "work.txt"]);
+    git_in(&root, &["commit", "-q", "-m", "work between turns"]);
+    let head = git_in(&root, &["rev-parse", "HEAD"]);
+    let second = Uuid::now_v7();
+    harness.deliver(second, 1, "second").await;
+    let bodies = harness
+        .wait_records("second", |b| run_finished(b, second))
+        .await;
+    let facts = run_git_facts(&bodies, second).expect("git facts");
+    assert_eq!(facts.head_before, base);
+    assert_eq!(facts.head_after, head);
+    assert_eq!(facts.commits.len(), 1);
+    assert_eq!(facts.commits[0].subject, "work between turns");
+    assert_eq!(facts.files.len(), 1);
+    assert_eq!(facts.files[0].path, "work.txt");
+    harness.shutdown().await;
+}
+
+#[tokio::test]
+async fn run_finished_has_no_git_facts_without_the_capability() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    let root = harness._root.path().to_path_buf();
+    git_in(&root, &["init", "-q", "-b", "main"]);
+    harness.attach_and_ship(0).await;
+    harness.start_cli_session_tools(false).await;
+    let id = Uuid::now_v7();
+    harness.deliver(id, 1, "turn").await;
+    let bodies = harness.wait_records("turn", |b| run_finished(b, id)).await;
+    assert!(run_git_facts(&bodies, id).is_none());
     harness.shutdown().await;
 }
 

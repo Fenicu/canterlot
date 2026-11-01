@@ -15,6 +15,7 @@ pub use crate::config::SupervisorTimers;
 
 mod blocks;
 mod bounds;
+pub mod git_facts;
 pub mod ipc;
 mod run;
 mod sj;

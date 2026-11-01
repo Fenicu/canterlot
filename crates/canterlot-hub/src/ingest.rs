@@ -1126,6 +1126,9 @@ fn bounded_metadata(body: &Body) -> Cow<'_, Body> {
                 usage.agent = bounded_text(&usage.agent, 128);
                 usage.model = bounded_text(&usage.model, 128);
             }
+            if let Some(git) = &mut f.git {
+                crate::runs::bound_git(git);
+            }
         }
         Body::RequestOpened(f) => blocks::replace_nul(&mut f.request_id),
         Body::RequestClosed(f) => blocks::replace_nul(&mut f.request_id),
