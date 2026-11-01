@@ -29,6 +29,7 @@ data_dir = "/tmp/data"
 fn context(opencode: Option<OpenCodeConfig>) -> AdapterContext {
     AdapterContext {
         transmit_deadline: Duration::from_secs(1),
+        ready_deadline: Duration::from_secs(1),
         exec_dir: PathBuf::from("/tmp/exec"),
         claude_code: None,
         codex: None,

@@ -871,6 +871,7 @@ pub fn registry_with_deadline(
         profile,
         &AdapterContext {
             transmit_deadline,
+            ready_deadline: transmit_deadline,
             exec_dir: PathBuf::new(),
             claude_code: None,
             codex: None,
@@ -881,6 +882,8 @@ pub fn registry_with_deadline(
 
 pub struct AdapterContext {
     pub transmit_deadline: Duration,
+    /// Срок запуска CLI: пока агент не показал себя, передача ждёт его, а не `transmit_deadline`.
+    pub ready_deadline: Duration,
     pub exec_dir: PathBuf,
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
     pub codex: Option<crate::config::CodexConfig>,
@@ -904,11 +907,14 @@ pub fn known_harness(profile: &str) -> bool {
 pub fn registry_with(profile: &str, ctx: &AdapterContext) -> Option<Box<dyn Adapter>> {
     if profile == "claude_code" {
         return ctx.claude_code.clone().map(|cfg| {
-            Box::new(claude_code::ClaudeCodeAdapter::new(
-                cfg,
-                ctx.exec_dir.clone(),
-                ctx.transmit_deadline,
-            )) as Box<dyn Adapter>
+            Box::new(
+                claude_code::ClaudeCodeAdapter::new(
+                    cfg,
+                    ctx.exec_dir.clone(),
+                    ctx.transmit_deadline,
+                )
+                .with_ready_deadline(ctx.ready_deadline),
+            ) as Box<dyn Adapter>
         });
     }
     if profile == "codex" {

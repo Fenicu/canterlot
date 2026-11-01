@@ -1457,6 +1457,7 @@ fn registry_builds_the_adapter_from_context_with_supervisor_paths() {
     use canterlot_worker::adapter::{AdapterContext, registry_with};
     let context = AdapterContext {
         transmit_deadline: Duration::from_secs(1),
+        ready_deadline: Duration::from_secs(1),
         exec_dir: PathBuf::from("/tmp/x"),
         claude_code: None,
         codex: None,

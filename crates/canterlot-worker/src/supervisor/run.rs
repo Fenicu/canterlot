@@ -1190,6 +1190,7 @@ impl Supervisor {
         let timers = self.spec.timers.clone();
         let context = AdapterContext {
             transmit_deadline: timers.transmit_deadline,
+            ready_deadline: timers.ready_deadline,
             exec_dir: self.exec_dir.clone(),
             claude_code: self.spec.claude_code.clone(),
             codex: self.spec.codex.clone(),

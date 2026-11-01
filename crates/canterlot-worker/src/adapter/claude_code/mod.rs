@@ -37,6 +37,8 @@ pub struct ClaudeCodeAdapter {
     cfg: ClaudeCodeConfig,
     exec_dir: PathBuf,
     deadline: Duration,
+    /// Срок до первого `system/init`: CLI шлёт его после первого ввода и после подключения серверов MCP.
+    ready_deadline: Duration,
     stop_grace: Duration,
     cli: Option<CliProcess>,
     broker: Option<Broker>,
@@ -58,6 +60,8 @@ pub struct ClaudeCodeAdapter {
     /// доказательство уходит событием `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
     initialized: bool,
+    /// Текущий процесс CLI уже прислал `system/init`; каждый запуск начинает с `false`.
+    cli_ready: bool,
     /// Запуск с `--resume`: беседа записана, хотя этот CLI ещё ни разу не ответил.
     resumed: bool,
     eof: bool,
@@ -77,6 +81,7 @@ impl ClaudeCodeAdapter {
             cfg,
             exec_dir,
             deadline,
+            ready_deadline: deadline,
             stop_grace: Duration::from_secs(5),
             cli: None,
             broker: None,
@@ -102,6 +107,7 @@ impl ClaudeCodeAdapter {
             requests: HashMap::new(),
             unconfirmed: HashSet::new(),
             initialized: false,
+            cli_ready: false,
             resumed: false,
             eof: false,
             exited: false,
@@ -111,6 +117,11 @@ impl ClaudeCodeAdapter {
             deferred_due: false,
             background_changed: None,
         }
+    }
+
+    pub fn with_ready_deadline(mut self, ready_deadline: Duration) -> Self {
+        self.ready_deadline = ready_deadline;
+        self
     }
 
     pub fn with_relay_executable(mut self, executable: PathBuf) -> Self {
@@ -244,6 +255,7 @@ impl ClaudeCodeAdapter {
                     self.diagnostic("cli_too_old", true);
                 }
                 self.initialized = true;
+                self.cli_ready = true;
                 self.permission_mode = permission_mode;
                 if session_id != self.native_id {
                     self.diagnostic("session_id_mismatch", true);
@@ -621,6 +633,7 @@ impl ClaudeCodeAdapter {
         };
         let started = (cli.pid, cli.start_ticks);
         self.cli = Some(cli);
+        self.cli_ready = false;
         if let Some(queue) = self.queue.as_mut() {
             queue.apply_restarted(&model, &effort, &permission_mode);
         }
@@ -672,6 +685,7 @@ impl ClaudeCodeAdapter {
             Some(cli) => {
                 let started = (cli.pid, cli.start_ticks);
                 self.cli = Some(cli);
+                self.cli_ready = false;
                 self.events.push_back(AdapterEvent::CliRestarted {
                     cli_pid: started.0,
                     cli_start_ticks: started.1,
@@ -780,19 +794,27 @@ impl ClaudeCodeAdapter {
             files: input.files.clone(),
             settings,
         });
-        let mut limit = Instant::now() + self.deadline;
+        let mut limit = Instant::now() + self.wait_bound();
         let mut written = false;
+        let mut ready_seen = self.cli_ready;
         loop {
+            // Срок запуска кончается с init: дальше ответ ждёт обычный срок передачи.
+            if self.cli_ready && !ready_seen {
+                ready_seen = true;
+                if written {
+                    limit = Instant::now() + self.deadline;
+                }
+            }
             let queue = self.queue.as_mut().unwrap();
             if queue.is_proven(input.command_id) {
-                if !self.initialized {
-                    self.diagnostic("cli_init_missing", true);
-                    return TransmitOutcome::Undetermined;
+                if self.cli_ready {
+                    return Self::accepted(input.command_id);
                 }
-                return TransmitOutcome::Accepted(Proof {
-                    command_id: input.command_id,
-                    kind: input::PROOF_KIND,
-                });
+                // Ход уже закончился без init: ждать нечего. Идущий ход ещё может получить init.
+                if !queue.is_active(input.command_id) {
+                    self.diagnostic("cli_init_missing", true);
+                    return Self::accepted(input.command_id);
+                }
             }
             if let Some(reason) = queue.take_rejection(input.command_id) {
                 return TransmitOutcome::Rejected(reason.into());
@@ -800,12 +822,15 @@ impl ClaudeCodeAdapter {
             if self.eof || self.exited {
                 return TransmitOutcome::Undetermined;
             }
-            if let Next::Write(line) = queue.next(self.limits.snapshot().weekly) {
+            // Ответ раньше init не отвергается: init может прийти следом, дольше срока его не ждут.
+            if !queue.is_proven(input.command_id)
+                && let Next::Write(line) = queue.next(self.limits.snapshot().weekly)
+            {
                 if let Some(active) = queue.active() {
                     self.parser.set_input_command(active.command_id);
                     if active.command_id == input.command_id && !written {
                         written = true;
-                        limit = Instant::now() + self.deadline;
+                        limit = Instant::now() + self.wait_bound();
                     }
                 }
                 // Отказ управляющего запроса отклоняет ввод целиком, перезапуск ждёт только принятый.
@@ -826,15 +851,34 @@ impl ClaudeCodeAdapter {
                     self.queue.as_mut().unwrap().control_timed_out();
                     continue;
                 }
-                if !self.initialized && written {
+                if !self.cli_ready && written {
                     self.diagnostic("cli_init_missing", true);
                 }
                 if written {
+                    if self.queue.as_ref().unwrap().is_proven(input.command_id) {
+                        return Self::accepted(input.command_id);
+                    }
                     return TransmitOutcome::Undetermined;
                 }
                 self.queue.as_mut().unwrap().withdraw(input.command_id);
                 return TransmitOutcome::Rejected("turn_active".into());
             }
+        }
+    }
+
+    fn accepted(command_id: Uuid) -> TransmitOutcome {
+        TransmitOutcome::Accepted(Proof {
+            command_id,
+            kind: input::PROOF_KIND,
+        })
+    }
+
+    /// Пока процесс не прислал init, ждут срок запуска; готовый процесс отвечает за срок передачи.
+    fn wait_bound(&self) -> Duration {
+        if self.cli_ready {
+            self.deadline
+        } else {
+            self.ready_deadline.max(self.deadline)
         }
     }
 
