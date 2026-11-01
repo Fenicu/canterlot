@@ -695,10 +695,15 @@ impl ClaudeCodeAdapter {
                 .is_some_and(|at| at.elapsed() < RESTART_SETTLE)
     }
 
-    /// Запомнить смену до конца фоновой работы. Новая смена поверх отложенной: поля новой главнее.
+    /// Запомнить смену до конца фоновой работы. Новая смена поверх отложенной: поля новой главнее,
+    /// а возврат к действующим инструкциям отменяет перезапуск.
     fn defer_restart(&mut self, change: SettingsChange) {
         match self.deferred.take() {
-            Some(known) => self.deferred = Some(merged(known, change)),
+            Some(known) => {
+                let change = merged(known, change);
+                self.deferred =
+                    process::needs_restart(&self.instructions, &change).then_some(change);
+            }
             None => {
                 self.deferred = Some(change);
                 tracing::info!(
@@ -742,7 +747,11 @@ impl ClaudeCodeAdapter {
         let mut settings = input.settings.clone();
         let mut restart_later = None;
         if self.background_busy() {
-            if let Some(change) = settings.as_mut().filter(|_| own_restart) {
+            let pending = self.deferred.is_some();
+            if let Some(change) = settings
+                .as_mut()
+                .filter(|change| own_restart || (pending && change.instructions.is_some()))
+            {
                 restart_later = Some(SettingsChange {
                     effort: change.effort.take(),
                     instructions: change.instructions.take(),

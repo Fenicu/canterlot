@@ -791,6 +791,22 @@ async fn mode_refused_by_the_cli_is_not_deferred_with_the_preset() {
 }
 
 #[tokio::test]
+async fn returning_to_the_running_instructions_cancels_the_deferred_restart() {
+    let mut h = RestartHarness::new().await;
+    deferred_change(&mut h).await;
+    let out = h.transmit(Some(change(owner_spec()))).await;
+    assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
+    h.until_finished().await;
+
+    end_background_work(&mut h).await;
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    assert_eq!(h.spawns().len(), 1, "the owner took the change back");
+}
+
+#[tokio::test]
 async fn instructions_change_restarts_cli_with_resume_before_the_input() {
     let mut h = RestartHarness::new().await;
     let first = h.transmit(None).await;
