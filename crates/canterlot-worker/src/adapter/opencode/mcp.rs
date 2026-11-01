@@ -55,6 +55,18 @@ pub fn state_of(list: &Value) -> McpState {
     }
 }
 
+/// Другие включённые серверы в ответе `GET /api/mcp`: делегированная сессия их иметь не должна.
+pub fn has_foreign_server(list: &Value) -> bool {
+    list.get("data")
+        .and_then(Value::as_array)
+        .is_some_and(|servers| {
+            servers.iter().any(|server| {
+                server.get("name").and_then(Value::as_str) != Some(SERVER_NAME)
+                    && server.pointer("/status/status").and_then(Value::as_str) != Some("disabled")
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -71,5 +83,21 @@ mod tests {
         assert_eq!(state_of(&list("canterlot", "needs_auth")), McpState::Failed);
         assert_eq!(state_of(&list("other", "connected")), McpState::Pending);
         assert_eq!(state_of(&json!({"data": []})), McpState::Pending);
+    }
+
+    #[test]
+    fn foreign_enabled_servers_are_found_by_name() {
+        let list = |entries: &[(&str, &str)]| json!({"data": entries.iter().map(|(name, status)| json!({"name": name, "status": {"status": status}})).collect::<Vec<_>>()});
+        assert!(!has_foreign_server(&list(&[("canterlot", "connected")])));
+        assert!(!has_foreign_server(&json!({"data": []})));
+        assert!(has_foreign_server(&list(&[
+            ("canterlot", "connected"),
+            ("nanokvm", "pending")
+        ])));
+        assert!(has_foreign_server(&list(&[("nanokvm", "failed")])));
+        assert!(!has_foreign_server(&list(&[
+            ("canterlot", "connected"),
+            ("nanokvm", "disabled")
+        ])));
     }
 }
