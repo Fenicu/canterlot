@@ -14,6 +14,7 @@ fn thresholds() -> Thresholds {
     Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
+        idle_quiet: Duration::from_secs(5),
     }
 }
 
@@ -221,6 +222,7 @@ fn stalled_thresholds_are_5_minutes_for_generation_and_30_for_tools_and_configur
         let custom = Thresholds {
             stalled_generating: Duration::from_secs(4000),
             stalled_tool: Duration::from_secs(4000),
+            idle_quiet: Duration::from_secs(5),
         };
         assert_eq!(activity::compute(&i, &custom).state, S::Working);
     }

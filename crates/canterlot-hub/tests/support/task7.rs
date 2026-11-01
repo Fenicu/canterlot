@@ -165,6 +165,7 @@ pub fn thresholds() -> canterlot_hub::activity::Thresholds {
     canterlot_hub::activity::Thresholds {
         stalled_generating: std::time::Duration::from_secs(300),
         stalled_tool: std::time::Duration::from_secs(1800),
+        idle_quiet: std::time::Duration::from_secs(5),
     }
 }
 pub fn empty() -> Value {

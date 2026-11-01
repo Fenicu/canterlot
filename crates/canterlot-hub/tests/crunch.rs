@@ -2667,6 +2667,7 @@ async fn lock_order_has_no_deadlocks_across_ingest_dispatch_scheduler_and_http(p
     let thresholds = activity::Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
+        idle_quiet: Duration::from_secs(5),
     };
     let machine_ms = Utc::now().timestamp_millis();
     let before = deadlocks(&pool).await;

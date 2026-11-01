@@ -407,6 +407,28 @@ impl fmt::Debug for ClaimedJob {
     }
 }
 
+/// Причина отказа в журнале задания и признак того, что повторять бесполезно.
+fn submit_failure(error: &SubmitError) -> (&'static str, bool) {
+    match error {
+        SubmitError::QueueFull { .. } => ("queue_full", false),
+        SubmitError::ConversationClosed => ("conversation_closed", true),
+        SubmitError::ConversationNotFound => ("conversation_not_found", true),
+        SubmitError::ResourceLimit { .. } => ("resource_limit", true),
+        SubmitError::InvalidContent { .. } => ("invalid_content", true),
+        SubmitError::InvalidRequest { .. } => ("invalid_request", true),
+        SubmitError::IdempotencyConflict => ("idempotency_conflict", true),
+        SubmitError::KeyRaceLost => ("key_race_lost", false),
+        SubmitError::Db(_) => ("database_error", false),
+        SubmitError::Attachment(error) => match error {
+            crate::attachments::AttachmentError::Db(_) => ("database_error", false),
+            crate::attachments::AttachmentError::CapabilityMissing => ("capability_missing", true),
+            crate::attachments::AttachmentError::LimitsMismatch => ("limits_mismatch", true),
+            crate::attachments::AttachmentError::Unsupported => ("attachment_unsupported", true),
+            _ => ("attachment_unavailable", true),
+        },
+    }
+}
+
 #[derive(Clone)]
 pub struct Scheduler {
     pool: PgPool,
@@ -565,30 +587,7 @@ impl Scheduler {
                 report.fired += 1;
             }
             Err(error) => {
-                let (reason, permanent) = match &error {
-                    SubmitError::QueueFull { .. } => ("queue_full", false),
-                    SubmitError::ConversationClosed => ("conversation_closed", true),
-                    SubmitError::ConversationNotFound => ("conversation_not_found", true),
-                    SubmitError::ResourceLimit { .. } => ("resource_limit", true),
-                    SubmitError::InvalidContent { .. } => ("invalid_content", true),
-                    SubmitError::InvalidRequest { .. } => ("invalid_request", true),
-                    SubmitError::IdempotencyConflict => ("idempotency_conflict", true),
-                    SubmitError::KeyRaceLost => ("key_race_lost", false),
-                    SubmitError::Db(_) => ("database_error", false),
-                    SubmitError::Attachment(error) => match error {
-                        crate::attachments::AttachmentError::Db(_) => ("database_error", false),
-                        crate::attachments::AttachmentError::CapabilityMissing => {
-                            ("capability_missing", true)
-                        }
-                        crate::attachments::AttachmentError::LimitsMismatch => {
-                            ("limits_mismatch", true)
-                        }
-                        crate::attachments::AttachmentError::Unsupported => {
-                            ("attachment_unsupported", true)
-                        }
-                        _ => ("attachment_unavailable", true),
-                    },
-                };
+                let (reason, permanent) = submit_failure(&error);
                 if let SubmitError::Db(error) = &error {
                     log_error(error);
                 }
@@ -620,7 +619,7 @@ impl Scheduler {
         };
         if let Some(mut current) = current {
             current.failures = current.failures.saturating_add(1);
-            if current.kind == "message" {
+            if matches!(current.kind.as_str(), "message" | "session_task") {
                 current.attempts = current.attempts.saturating_add(1);
             }
             let release_job = matches!(current.kind.as_str(), "wake" | "limit_check");
@@ -637,9 +636,10 @@ impl Scheduler {
                     }
                 } else {
                     if let Err(error) =
-                        sqlx::query("update scheduled_jobs set failures=$2 where id=$1")
+                        sqlx::query("update scheduled_jobs set failures=$2,attempts=$3 where id=$1")
                             .bind(current.id)
                             .bind(current.failures)
+                            .bind(current.attempts)
                             .execute(&mut *tx)
                             .await
                     {
@@ -809,7 +809,21 @@ impl Scheduler {
                     .map(JobOutcome::Done)
                     .map_err(|e| sqlx::Error::Encode(Box::new(e)))
             }),
-            JobKind::SessionTask => crate::session_tools::run_job_in_tx(&mut tx, &claimed).await,
+            JobKind::SessionTask => {
+                match crate::session_tools::jobs::run_in_tx(&mut tx, &claimed, now, correlation)
+                    .await
+                {
+                    Ok(outcome) => Ok(outcome),
+                    Err(SubmitError::Db(error)) => Err(error),
+                    Err(error) => {
+                        tx.rollback().await?;
+                        let (reason, permanent) = submit_failure(&error);
+                        self.record_failure(&job, now, reason, permanent, report)
+                            .await?;
+                        return Ok(());
+                    }
+                }
+            }
             JobKind::Message => unreachable!("message jobs are fired separately"),
         };
         let outcome = match outcome {
@@ -828,7 +842,7 @@ impl Scheduler {
                 tx.commit().await?;
                 report.fired += 1;
                 match kind {
-                    JobKind::Wake => {
+                    JobKind::Wake | JobKind::SessionTask => {
                         if let Some(id) = job.conversation_id {
                             self.dispatcher.trigger(id);
                         }

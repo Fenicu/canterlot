@@ -21,6 +21,7 @@ use uuid::Uuid;
 const THRESHOLDS: Thresholds = Thresholds {
     stalled_generating: Duration::from_secs(600),
     stalled_tool: Duration::from_secs(600),
+    idle_quiet: Duration::from_secs(5),
 };
 
 fn opened(execution: &executions::StartedExecution) -> Body {

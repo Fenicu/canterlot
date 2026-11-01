@@ -1,0 +1,225 @@
+//! Подписки на осевшее состояние другой сессии. Оценка идёт в транзакции проектора цели и
+//! не трогает очередь подписчика: событие доходит до неё заданием `session_task`.
+
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use serde_json::{Value, json};
+use sqlx::{PgConnection, types::Json};
+use uuid::Uuid;
+
+use super::settle::{self, SettleConfig, SettleFacts, Settled};
+use crate::activity::{self, Activity, ActivityState, Evidence, QueueFacts};
+
+/// Отпечаток события об удалении: цель исчезла, повторно оно не возникнет.
+const DELETED: &str = "deleted";
+
+async fn upsert(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    chain_depth: i32,
+    fingerprint: Option<&str>,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into session_subscriptions(id,owner_id,subscriber_id,target_id,chain_depth,last_fingerprint)
+         values($1,$2,$3,$4,$5,$6)
+         on conflict(subscriber_id,target_id) do update set
+           chain_depth=excluded.chain_depth,last_fingerprint=excluded.last_fingerprint,
+           armed_at=clock_timestamp(),closed_at=null,closed_reason=null",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner_id)
+    .bind(subscriber_id)
+    .bind(target_id)
+    .bind(chain_depth)
+    .bind(fingerprint)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// `session_send` и `session_spawn`: следующий осевший результат придёт, даже если совпадёт с прошлым.
+pub async fn subscribe_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    chain_depth: i32,
+) -> Result<(), sqlx::Error> {
+    upsert(conn, owner_id, subscriber_id, target_id, chain_depth, None).await
+}
+
+/// Явная подписка: об уже осевшем состоянии не сообщает, его видно в ответе инструмента.
+pub async fn subscribe_explicit_in_tx(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    target_id: Uuid,
+    chain_depth: i32,
+    now: DateTime<Utc>,
+    config: &SettleConfig,
+) -> Result<Option<Settled>, sqlx::Error> {
+    let current = current_in_tx(conn, target_id, now, config).await?;
+    let fingerprint = current.as_ref().map(|(_, value)| value.as_str());
+    upsert(
+        conn,
+        owner_id,
+        subscriber_id,
+        target_id,
+        chain_depth,
+        fingerprint,
+    )
+    .await?;
+    Ok(current.map(|(state, _)| state))
+}
+
+/// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
+pub async fn current_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+    config: &SettleConfig,
+) -> Result<Option<(Settled, String)>, sqlx::Error> {
+    let derived: Option<(Json<ActivityState>, Json<Evidence>, DateTime<Utc>)> = sqlx::query_as(
+        "select to_jsonb(activity_state),activity_evidence,activity_since
+         from conversation_derived where conversation_id=$1",
+    )
+    .bind(target_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((Json(state), Json(evidence), since)) = derived else {
+        return Ok(None);
+    };
+    let inputs = activity::load_inputs(conn, target_id, now, Duration::ZERO).await?;
+    let facts = SettleFacts {
+        now,
+        since,
+        last_turn_at: inputs.last_turn_at,
+        last_event_at: inputs.last_event_at,
+    };
+    let activity = Activity { state, evidence };
+    Ok(
+        settle::settled(&activity, &inputs.queue, &facts, config).map(|settled| {
+            (
+                settled,
+                settle::fingerprint(settled, since, inputs.last_turn_at),
+            )
+        }),
+    )
+}
+
+fn event_job(
+    subscription_id: Uuid,
+    target_id: Uuid,
+    state: &str,
+    fingerprint: &str,
+    armed_at: DateTime<Utc>,
+    chain_depth: i32,
+) -> Value {
+    json!({
+        "action": "event",
+        "subscription_id": subscription_id,
+        "target_id": target_id,
+        "state": state,
+        "fingerprint": fingerprint,
+        "armed_at": armed_at,
+        "chain_depth": chain_depth,
+    })
+}
+
+async fn insert_job(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    subscriber_id: Uuid,
+    run_at: DateTime<Utc>,
+    payload: &Value,
+) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
+         values($1,'session_task',$2,$3,$4,$5)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(owner_id)
+    .bind(subscriber_id)
+    .bind(run_at)
+    .bind(payload)
+    .execute(conn)
+    .await?;
+    Ok(())
+}
+
+/// Вызывается проектором цели под её очередью. Возвращает, создано ли задание:
+/// после commit планировщик надо разбудить.
+pub async fn evaluate_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    activity: &Activity,
+    queue: &QueueFacts,
+    facts: &SettleFacts,
+    config: &SettleConfig,
+) -> Result<bool, sqlx::Error> {
+    let Some(state) = settle::settled(activity, queue, facts, config) else {
+        return Ok(false);
+    };
+    let fingerprint = settle::fingerprint(state, facts.since, facts.last_turn_at);
+    // Удаление подписчика держит его строку и потом удаляет подписку: без блокировки строки
+    // разговора здесь вставка задания ждала бы его, а оно ждало бы подписку.
+    let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
+        "select s.id,s.owner_id,s.subscriber_id,s.chain_depth,s.armed_at
+         from session_subscriptions s join conversations c on c.id=s.subscriber_id
+         where s.target_id=$1 and s.closed_at is null and s.last_fingerprint is distinct from $2
+         for update of s for key share of c skip locked",
+    )
+    .bind(target_id)
+    .bind(&fingerprint)
+    .fetch_all(&mut *conn)
+    .await?;
+    let closes = state.closes_subscription();
+    for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
+        sqlx::query(
+            "update session_subscriptions set last_fingerprint=$2,
+               closed_at=case when $3 then clock_timestamp() end,
+               closed_reason=case when $3 then $4 end
+             where id=$1",
+        )
+        .bind(id)
+        .bind(&fingerprint)
+        .bind(closes)
+        .bind(state.as_str())
+        .execute(&mut *conn)
+        .await?;
+        let payload = event_job(
+            *id,
+            target_id,
+            state.as_str(),
+            &fingerprint,
+            *armed_at,
+            *chain_depth,
+        );
+        insert_job(conn, *owner_id, *subscriber_id, facts.now, &payload).await?;
+    }
+    Ok(!open.is_empty())
+}
+
+/// Удаление цели: сами подписки уйдут вместе с разговором. В задании только идентификатор,
+/// название удалённой сессии дальше не живёт.
+pub async fn on_target_deleted_in_tx(
+    conn: &mut PgConnection,
+    target_id: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let open: Vec<(Uuid, Uuid, Uuid, i32, DateTime<Utc>)> = sqlx::query_as(
+        "select id,owner_id,subscriber_id,chain_depth,armed_at from session_subscriptions
+         where target_id=$1 and subscriber_id<>$1 and closed_at is null",
+    )
+    .bind(target_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for (id, owner_id, subscriber_id, chain_depth, armed_at) in open {
+        let payload = event_job(id, target_id, DELETED, DELETED, armed_at, chain_depth);
+        insert_job(conn, owner_id, subscriber_id, now, &payload).await?;
+    }
+    Ok(())
+}

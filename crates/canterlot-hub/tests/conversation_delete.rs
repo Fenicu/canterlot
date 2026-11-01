@@ -459,6 +459,11 @@ async fn delete_leaves_no_row_in_any_table_that_references_the_conversation(pool
     let announced = left.remove("events").unwrap_or_default();
     assert_eq!(announced.len(), 1, "only the deletion event: {announced:?}");
     assert!(announced[0].contains("conversation_deleted"));
+    // Подписчик узнаёт об удалении: задание называет только идентификатор.
+    let told = left.remove("scheduled_jobs").unwrap_or_default();
+    assert_eq!(told.len(), 1, "the delegate's event: {told:?}");
+    assert!(told[0].contains("session_task") && told[0].contains("deleted"));
+    assert!(!told[0].contains("секретный"));
     assert!(left.is_empty(), "rows still reference it: {left:?}");
 
     assert_eq!(
@@ -798,7 +803,8 @@ async fn late_journal_records_are_acknowledged_and_change_nothing(pool: PgPool) 
     let left = mentions(&f.pool, &needles).await;
     assert_eq!(
         left.keys().collect::<Vec<_>>(),
-        ["conversation_tombstones", "events"]
+        ["conversation_tombstones", "events", "scheduled_jobs"],
+        "the job is the subscriber's event about the deletion"
     );
     let conversation_events: i64 =
         sqlx::query_scalar("select count(*) from events where scope like 'conversation:%'")

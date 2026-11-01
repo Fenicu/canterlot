@@ -19,6 +19,10 @@ use crate::{
     config::{ActivityConfig, MachinesConfig},
     events::{self, NewEvent, Scope},
     model::{CompactionProgress, ExecutionState, HoldReason, HoldView, PauseReason, RunSlot},
+    session_tools::{
+        settle::{SettleConfig, SettleFacts},
+        subs,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -114,12 +118,14 @@ pub struct Activity {
 pub struct Thresholds {
     pub stalled_generating: Duration,
     pub stalled_tool: Duration,
+    pub idle_quiet: Duration,
 }
 impl From<&ActivityConfig> for Thresholds {
     fn from(c: &ActivityConfig) -> Self {
         Self {
             stalled_generating: c.stalled_generating,
             stalled_tool: c.stalled_tool,
+            idle_quiet: c.idle_quiet,
         }
     }
 }
@@ -502,7 +508,8 @@ pub async fn load_inputs(
     };
     let open_requests_rows: Vec<(String, Value)> = sqlx::query_as(
         "select r.kind, r.request_payload from requests r join executions e on e.id = r.execution_id
-         where r.conversation_id = $1 and r.state = 'open' and e.state not in ('stopped', 'failed', 'owner_lost')
+         where r.conversation_id = $1 and r.state = 'open' and r.kind <> 'spawn_approval'
+           and e.state not in ('stopped', 'failed', 'owner_lost')
          order by r.created_at asc",
     )
     .bind(conversation_id)
@@ -579,7 +586,7 @@ pub async fn refresh_with_metrics(
     correlation_id: Uuid,
 ) -> Result<Refresh, sqlx::Error> {
     let thresholds = *thresholds;
-    crate::db::in_tx(pool, move |conn| {
+    let (refresh, fired) = crate::db::in_tx::<_, sqlx::Error, _>(pool, move |conn| {
         Box::pin(async move {
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(conversation_id)
@@ -634,7 +641,8 @@ pub async fn refresh_with_metrics(
         {
             sqlx::query("update conversation_derived d set updated_at=clock_timestamp() where d.conversation_id=$1 and d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||d.conversation_id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed'))")
                 .bind(conversation_id).execute(&mut *conn).await?;
-            return Ok(Refresh::Unchanged);
+            let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds).await?;
+            return Ok((Refresh::Unchanged, fired));
         }
     }
     sqlx::query("update conversations set last_activity_at=$2 where id=$1")
@@ -664,14 +672,44 @@ pub async fn refresh_with_metrics(
         )
         .await?;
     }
-    Ok(Refresh::Changed)
+    let fired = evaluate_subscriptions(&mut *conn, conversation_id, &activity, &inputs, since, &thresholds).await?;
+    Ok((Refresh::Changed, fired))
         })
     })
+    .await?;
+    if fired {
+        crate::scheduler::notify_pool(pool);
+    }
+    Ok(refresh)
+}
+
+async fn evaluate_subscriptions(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    activity: &Activity,
+    inputs: &ActivityInputs,
+    since: DateTime<Utc>,
+    thresholds: &Thresholds,
+) -> Result<bool, sqlx::Error> {
+    let facts = SettleFacts {
+        now: inputs.now,
+        since,
+        last_turn_at: inputs.last_turn_at,
+        last_event_at: inputs.last_event_at,
+    };
+    subs::evaluate_in_tx(
+        conn,
+        conversation_id,
+        activity,
+        &inputs.queue,
+        &facts,
+        &SettleConfig::from(thresholds),
+    )
     .await
 }
 
 async fn sweep(pool: &PgPool) -> Result<Vec<Uuid>, sqlx::Error> {
-    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed')) order by c.id").fetch_all(pool).await
+    sqlx::query_scalar("select c.id from conversations c left join conversation_derived d on d.conversation_id=c.id where d.conversation_id is null or d.activity_state in ('working','stalled','waiting_for_user') or exists(select 1 from session_subscriptions s where s.target_id=c.id and s.closed_at is null) or exists(select 1 from executions e where e.conversation_id=c.id and e.state in ('created','starting','running','stopping')) or d.updated_at < (select max(e.committed_at) from events e where e.scope='conversation:'||c.id::text and e.kind not in ('block_delta','derived_changed','scheduled_changed')) order by c.id").fetch_all(pool).await
 }
 
 pub async fn run(

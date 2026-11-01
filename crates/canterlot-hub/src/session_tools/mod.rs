@@ -5,11 +5,15 @@
 //! ни в журнал, ни в `Debug` они не попадают. `grpc/agent.rs` только раздаёт вызовы,
 //! поэтому каждый инструмент живёт в своём файле этого модуля.
 
+pub mod jobs;
+pub mod settle;
+pub mod subs;
+
 use serde_json::Value;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::{config::SessionToolsConfig, crunch::JobOutcome, scheduler::ClaimedJob};
+use crate::config::SessionToolsConfig;
 
 /// Имена хаба для инструментов; на стороне модели к ним добавляются префиксы harness.
 pub const TOOLS: &[&str] = &[
@@ -168,12 +172,4 @@ pub async fn call(
     _arguments: Value,
 ) -> Result<Value, ToolError> {
     Err(ToolError::new(ToolErrorCode::UnknownTool))
-}
-
-/// Задание `session_task`: обработчик придёт вместе с подписками.
-pub async fn run_job_in_tx(
-    _conn: &mut PgConnection,
-    _job: &ClaimedJob,
-) -> Result<JobOutcome, sqlx::Error> {
-    Ok(JobOutcome::Cancelled("unsupported"))
 }

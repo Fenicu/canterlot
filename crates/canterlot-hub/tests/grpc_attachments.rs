@@ -194,6 +194,7 @@ impl Fixture {
             &canterlot_hub::activity::Thresholds {
                 stalled_generating: config.stalled_generating,
                 stalled_tool: config.stalled_tool,
+                idle_quiet: config.idle_quiet,
             },
             Uuid::now_v7(),
         )

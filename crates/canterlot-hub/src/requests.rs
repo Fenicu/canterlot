@@ -589,7 +589,8 @@ pub(crate) async fn close_for_ended_execution_in_tx(
 }
 
 /// Открытые запросы живых исполнений разговора; запросы завершённых исполнений очередь не держат.
+/// Одобрение запуска ждёт владельца, не останавливая ход родителя.
 pub(crate) const LIVE_OPEN_REQUESTS: &str = "select count(*) from requests r
      join executions e on e.id = r.execution_id
-     where r.conversation_id = $1 and r.state = 'open'
+     where r.conversation_id = $1 and r.state = 'open' and r.kind <> 'spawn_approval'
        and e.state not in ('stopped', 'failed', 'owner_lost')";

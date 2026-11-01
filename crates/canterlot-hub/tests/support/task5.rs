@@ -18,6 +18,7 @@ pub fn thresholds() -> Thresholds {
     Thresholds {
         stalled_generating: Duration::from_secs(300),
         stalled_tool: Duration::from_secs(1800),
+        idle_quiet: Duration::from_secs(5),
     }
 }
 pub fn content() -> Vec<ContentBlock> {

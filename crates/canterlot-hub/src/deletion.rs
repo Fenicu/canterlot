@@ -1,6 +1,7 @@
 //! Удаление разговора (§14.1, R6). Пилот удаляет остановленный разговор одной транзакцией:
 //! локальную очистку на машине протокол пока не описывает, поэтому копии воркера остаются.
 
+use chrono::Utc;
 use serde_json::{Value, json};
 use sqlx::{PgConnection, PgPool};
 use thiserror::Error;
@@ -10,7 +11,8 @@ use crate::{
     attachments::BlobStore,
     conversations, events,
     events::{NewEvent, Scope},
-    executions, idempotency,
+    executions, idempotency, scheduler,
+    session_tools::subs,
 };
 
 #[derive(Debug, Error)]
@@ -94,7 +96,10 @@ pub async fn delete(
     )
     .await;
     match outcome {
-        Ok(done) if !done.replayed => free_files(blobs, files).await,
+        Ok(done) if !done.replayed => {
+            scheduler::notify_pool(pool);
+            free_files(blobs, files).await;
+        }
         Ok(_) => {}
         Err(DeleteError::NotFound) if tombstoned(pool, owner_id, id).await? => {
             return Err(DeleteError::Deleted);
@@ -199,6 +204,7 @@ async fn delete_in_tx(
     .bind(&execution_ids)
     .execute(&mut *conn)
     .await?;
+    subs::on_target_deleted_in_tx(conn, id, Utc::now()).await?;
     purge_rows(conn, id, &execution_ids).await?;
     purge_events(conn, owner_id, id, &execution_ids).await?;
     announce(conn, owner_id, id, correlation_id).await?;
