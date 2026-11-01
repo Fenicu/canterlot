@@ -550,3 +550,54 @@ function inputItem(api: FakeHubApi, key: string, state: string, seq: string, tex
     content: [{ type: 'text', text }], attachments: [], created_seq: seq, feed_seq: seq, created_at: AT
   };
 }
+
+const PNG_2X2 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEklEQVR4nGPQmNbz//9/BggFADYPCI8NpaO2AAAAAElFTkSuQmCC', 'base64');
+
+function withFiles(item: HistoryInput): HistoryInput {
+  item.attachments = [
+    { attachment_id: 'att-img', name: 'Screenshot.png', mime: 'image/png', size: 2048, sha256: '', image: true },
+    { attachment_id: 'att-big', name: 'huge.png', mime: 'image/png', size: 60 * 1024 * 1024, sha256: '', image: true },
+    { attachment_id: 'att-vid', name: 'screen-record.mp4', mime: 'video/mp4', size: 7 * 1024 * 1024, sha256: '', image: false },
+    { attachment_id: 'att-doc', name: 'report.pdf', mime: 'application/pdf', size: 1536, sha256: '', image: false }
+  ];
+  return item;
+}
+
+for (const theme of ['dark', 'light'] as const) {
+  test(`own_attachments_show_thumbnail_tiles_and_open_in_the_viewer_${theme}`, async ({ page }, info) => {
+    const fetched: string[] = [];
+    const { api, id } = await boot(page, 0);
+    await page.route('**/api/v1/attachments/*/content', async (route) => {
+      fetched.push(route.request().url());
+      await route.fulfill({ contentType: 'image/png', body: PNG_2X2 });
+    });
+    api.histories.set(id, [withFiles(inputItem(api, 'files', 'accepted', '1', 'с вложениями'))]);
+    api.bindConversation(id);
+    await page.evaluate((value) => localStorage.setItem('canterlot.theme', value), theme);
+    await page.reload();
+    const bubble = page.locator('.bubble', { hasText: 'с вложениями' });
+    await expect(bubble).toBeVisible();
+    const thumb = bubble.locator('img');
+    await expect(thumb).toHaveCount(1);
+    await expect(thumb).toHaveAttribute('src', '/api/v1/attachments/att-img/content');
+    await expect(thumb).toHaveAttribute('loading', 'lazy');
+    await expect.poll(() => thumb.evaluate((el: HTMLImageElement) => el.complete && el.naturalWidth)).toBe(2);
+    // Огромный оригинал, видео и документ не тянутся для миниатюры: байт вложений они не запрашивают.
+    expect(fetched.every((url) => url.includes('att-img'))).toBe(true);
+    await expect(bubble).toContainText('huge.png');
+    await expect(bubble).toContainText('60 МиБ');
+    await expect(bubble.locator('a[data-kind="video"]')).toContainText('screen-record.mp4');
+    await expect(bubble.locator('a[data-kind="video"]')).toContainText('7 МиБ');
+    await expect(bubble.getByRole('link', { name: /report\.pdf/ })).toContainText('1,5 КиБ');
+    const box = await bubble.boundingBox();
+    const viewport = page.viewportSize()!;
+    expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+    await page.screenshot({ path: `/tmp/shots-t10/attachments-${theme}-${info.project.name}.png` });
+    await bubble.getByRole('button', { name: 'Открыть картинку Screenshot.png' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toBeVisible();
+    await expect(dialog.locator('img')).toHaveAttribute('src', '/api/v1/attachments/att-img/content');
+    await expect(dialog).toContainText('Screenshot.png');
+    await page.screenshot({ path: `/tmp/shots-t10/attachments-viewer-${theme}-${info.project.name}.png` });
+  });
+}

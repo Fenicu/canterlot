@@ -32,6 +32,12 @@ function createMockDeps(overrides?: Partial<ComposerDeps>): {
 
   const chatMock = {
     inputs,
+    admitLocal: (view: InputView) => {
+      inputs.set(view.key, view);
+    },
+    discardLocal: (key: string) => {
+      inputs.delete(key);
+    },
     queue: { queued: 0, pause_reasons: [], hold_reasons: [], run_slot: null },
     activity: { state: "idle" },
   };
@@ -266,6 +272,22 @@ describe("composer/model", () => {
     expect(deps.probe?.mark).toHaveBeenCalledWith("send_pressed");
     expect(deps.probe?.mark).toHaveBeenCalledWith("input_painted");
     expect(model.text).toBe("");
+  });
+
+  it("the_local_bubble_carries_the_real_type_of_each_attached_file", async () => {
+    const { deps, inputs, uploadsList } = createMockDeps();
+    uploadsList.push(
+      { id: "u1", conversationId: "conv-1", name: "shot.png", mime: "image/png", size: 100, phase: "ready", sent: 100, attachmentId: "att-1" },
+      { id: "u2", conversationId: "conv-1", name: "notes.txt", mime: "text/plain", size: 10, phase: "ready", sent: 10, attachmentId: "att-2" },
+    );
+    const model = new ComposerModel(deps);
+    model.text = "с файлами";
+    await model.send();
+    const refs = [...inputs.values()][0]!.attachments;
+    expect(refs.map((ref) => [ref.attachment_id, ref.name, ref.mime, ref.image])).toEqual([
+      ["att-1", "shot.png", "image/png", true],
+      ["att-2", "notes.txt", "text/plain", false],
+    ]);
   });
 
   it("field_clears_with_the_local_item_before_the_journal_write_finishes", async () => {

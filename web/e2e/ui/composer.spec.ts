@@ -548,3 +548,113 @@ test('sent_attachment_leaves_the_tray_and_is_not_resent_or_deleted', async ({ pa
   expect((hits[1]?.body as { attachment_ids?: string[] }).attachment_ids).toBeUndefined();
   expect(deletes).toEqual([]);
 });
+
+async function advance(hub: FakeHub, id: string, key: string, inputId: string, states: { state: string; seq: string }[]) {
+  const scope = `conversation:${id}`;
+  // Номера событий хаба идут после всей загруженной истории, как у настоящего хаба.
+  for (let step = 0; step < 70; step++) hub.append(scope, { kind: 'filler', payload: {} });
+  hub.append(scope, {
+    kind: 'input_queued',
+    conversation_id: id,
+    payload: { input_id: inputId, input_seq: '100', idempotency_key: key, state: 'queued', content: [{ type: 'text', text: 'сразу в ленту' }] }
+  });
+  for (const step of states)
+    hub.append(scope, { kind: 'input_state_changed', conversation_id: id, payload: { input_id: inputId, state: step.state } });
+  hub.flush();
+}
+
+test('send_on_an_idle_session_puts_the_bubble_into_the_feed_without_a_chip_or_a_pill', async ({ page }) => {
+  const { hub, api, id } = await boot(page, { count: 12 });
+  const hits = await watch(page, '**/api/v1/conversations/*/inputs');
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  const pill = page.getByRole('button', { name: 'К новым сообщениям' });
+  await area.fill('сразу в ленту: по поводу того, как смотреть лимиты, есть CodexBar, текст на несколько строк');
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+  const bubble = page.locator('.bubble', { hasText: 'сразу в ленту' });
+  await expect(bubble).toBeVisible();
+  await expect(bubble).toContainText('Сохраняется');
+  await expect(page.locator('.strip .item')).toHaveCount(0);
+  await expect(pill).toHaveCount(0);
+  await expect.poll(() => hits.length).toBe(1);
+  const node = await bubble.elementHandle();
+  const inputId = api.id();
+  await advance(hub, id, hits[0]!.key, inputId, [{ state: 'dispatched', seq: '101' }, { state: 'on_machine', seq: '102' }]);
+  await expect(bubble).toContainText('На машине');
+  await expect(page.locator('.strip .item')).toHaveCount(0);
+  hub.append(`conversation:${id}`, { kind: 'input_state_changed', conversation_id: id, payload: { input_id: inputId, state: 'transmitting' } });
+  hub.flush();
+  await expect(bubble).toContainText('Передаётся');
+  await expect(page.locator('.bubble', { hasText: 'сразу в ленту' })).toHaveCount(1);
+  expect(await node!.evaluate((el) => el.isConnected)).toBe(true);
+  await expect(pill).toHaveCount(0);
+  await expect(page.locator('.feed')).toHaveAttribute('data-pinned', '');
+});
+
+test('send_during_a_running_turn_keeps_the_chip_and_no_early_bubble', async ({ page }) => {
+  const { hub, api, id } = await boot(page);
+  hub.append(`conversation:${id}`, {
+    kind: 'derived_changed',
+    conversation_id: id,
+    payload: {
+      conversation_id: id,
+      activity: { state: 'working', evidence: {}, since: AT },
+      unread_count: 0,
+      queue: { queued: 0, pause_reasons: [], hold_reasons: [] },
+      last_activity_at: AT,
+      settings: { model: 'opus', effort: 'medium', permission_mode: 'owner' },
+      crunch: { enabled: false }
+    }
+  });
+  hub.flush();
+  const hits = await watch(page, '**/api/v1/conversations/*/inputs');
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  await area.fill('ждёт ход');
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+  await expect.poll(() => hits.length).toBe(1);
+  await expect(page.locator('.strip .item', { hasText: 'ждёт ход' })).toBeVisible();
+  await expect(page.locator('.bubble', { hasText: 'ждёт ход' })).toHaveCount(0);
+  void api;
+});
+
+test('a_refused_send_removes_the_bubble_and_returns_the_text', async ({ page }) => {
+  await boot(page);
+  await page.route('**/api/v1/conversations/*/inputs', async (route) => {
+    if (route.request().method() !== 'POST') return route.fallback();
+    await route.fulfill({
+      status: 422,
+      headers: { 'X-Server-Time-Ms': String(Date.now()) },
+      json: { error: { code: 'invalid', message: 'Отклонено хабом', scope: 'delivery', retry: 'never', correlation_id: '00000000-0000-4000-8000-0000000000e3' } }
+    });
+  });
+  const area = page.getByRole('textbox', { name: 'Сообщение' });
+  await area.fill('не пройдёт');
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+  await expect(area).toHaveValue('не пройдёт');
+  await expect(page.locator('.bubble', { hasText: 'не пройдёт' })).toHaveCount(0);
+});
+
+async function sendWatchingMotion(page: Page) {
+  await page.getByRole('textbox', { name: 'Сообщение' }).fill('с движением');
+  await page.evaluate(() => {
+    const seen = { count: 0 };
+    (window as unknown as { __enter: typeof seen }).__enter = seen;
+    new MutationObserver(() => {
+      for (const el of document.querySelectorAll('.bubble')) seen.count = Math.max(seen.count, el.getAnimations().length);
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  await page.getByRole('button', { name: 'Отправить', exact: true }).click();
+  await expect(page.locator('.bubble', { hasText: 'с движением' })).toBeVisible();
+  await page.waitForTimeout(400);
+  return page.evaluate(() => (window as unknown as { __enter: { count: number } }).__enter.count);
+}
+
+test('the_bubble_enters_with_the_motion_tokens', async ({ page }) => {
+  await boot(page);
+  expect(await sendWatchingMotion(page)).toBeGreaterThan(0);
+});
+
+test('the_bubble_does_not_animate_under_reduced_motion', async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await boot(page);
+  expect(await sendWatchingMotion(page)).toBe(0);
+});

@@ -1216,6 +1216,66 @@ async fn local_command_output_becomes_a_text_block() {
     ));
 }
 
+/// Запись живого прогона с подменой: субагент открывает картинку, а не текстовый файл.
+fn subagent_reads_image(path: &str) -> Vec<Value> {
+    const PNG_1X1: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    let mut frames = out_frames(&captured("subagent_live"));
+    let mut swapped = (false, false);
+    for frame in &mut frames {
+        let in_lane = frame["parent_tool_use_id"].is_string();
+        if let Some(blocks) = frame["message"]["content"].as_array_mut() {
+            for block in blocks {
+                if in_lane
+                    && block["name"] == "Read"
+                    && block["input"]["file_path"] == "/tmp/canterlot-smoke/data/note.txt"
+                {
+                    block["input"]["file_path"] = json!(path);
+                    swapped.0 = true;
+                }
+                if in_lane
+                    && block["type"] == "tool_result"
+                    && block["tool_use_id"] == "toolu_01WWXmcuGU2rr6M4aTK1pt6w"
+                {
+                    block["content"] = json!([{"type":"image","source":{"type":"base64","media_type":"image/png","data":PNG_1X1}}]);
+                    swapped.1 = true;
+                }
+            }
+        }
+    }
+    assert_eq!(
+        swapped,
+        (true, true),
+        "the capture must hold the subagent Read"
+    );
+    frames
+}
+
+#[tokio::test]
+async fn image_read_by_a_subagent_reaches_the_preview_of_its_tool_block() {
+    let events = error_turn(subagent_reads_image("/tmp/canterlot-smoke/data/shot.png")).await;
+    let call = events
+        .iter()
+        .find_map(|e| match e {
+            AdapterEvent::BlockStarted {
+                block_id,
+                kind: BlockKind::ToolCall,
+                tool_name: Some(name),
+                agent,
+                ..
+            } if name == "Read" && agent == "Explore" => Some(*block_id),
+            _ => None,
+        })
+        .expect("subagent Read block");
+    let media: Vec<Uuid> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Media { block_id, .. } => Some(*block_id),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(media, [call], "media hangs on the subagent Read block");
+}
+
 #[tokio::test]
 async fn mid_turn_process_exit_is_reported() {
     let mut f = Fake::new(vec![vec![json!("@exit")]]);

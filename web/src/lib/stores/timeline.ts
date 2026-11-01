@@ -8,6 +8,13 @@ export type TimelineEntry =
 	| { kind: 'block'; key: string; seq: string; block: BlockModel }
 	| { kind: 'request'; key: string; seq: string; request: RequestItem };
 
+/** Порядковый номер сообщения, которого хаб ещё не принял в ленту: оно стоит в самом конце. */
+export const LOCAL_SEQ = '9223372036854775807';
+
+export function isLocalEntry(entry: TimelineEntry): boolean {
+	return entry.seq === LOCAL_SEQ;
+}
+
 export function cmpSeq(a: string, b: string): number {
 	const left = BigInt(a);
 	const right = BigInt(b);
@@ -29,6 +36,16 @@ export class TimelineModel {
 	clear(): void { this.#entries.set([]); this.hasOlder = false; this.tailDetached = false; this.newerCount = 0; }
 
 	applyHistoryPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
+		const locals = this.entries.filter(isLocalEntry);
+		this.#applyPage(items, dir);
+		if (locals.length === 0) return;
+		const present = new Set(this.entries.map((entry) => entry.key));
+		const missing = locals.filter((entry) => !present.has(entry.key));
+		if (missing.length > 0) this.#entries.set([...this.entries, ...missing]);
+	}
+
+	#applyPage(items: TimelineEntry[], dir: 'older' | 'newer' | 'tail'): void {
+		this.#entries.set(this.entries.filter((entry) => !isLocalEntry(entry)));
 		const incoming = [...items].sort((a, b) => cmpSeq(a.seq, b.seq));
 		if (dir === 'tail') {
 			const oldest = incoming[0]?.seq;
@@ -88,12 +105,11 @@ export class TimelineModel {
 	}
 
 	newestSeq(): string | null {
-		const last = this.entries[this.entries.length - 1];
-		return last?.seq ?? null;
+		return this.entries.findLast((entry) => !isLocalEntry(entry))?.seq ?? null;
 	}
 
 	oldestSeq(): string | null {
-		return this.entries[0]?.seq ?? null;
+		return this.entries.find((entry) => !isLocalEntry(entry))?.seq ?? null;
 	}
 }
 

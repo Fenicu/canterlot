@@ -557,7 +557,7 @@ Task 4 держит состояние сессии в `web/src/lib/stores`: т�
 - `storage/` — изоляция хранилища IndexedDB по `owner_id` пользователя (`owner.ts`) и типизированная обёртка транзакций `idb.ts`.
 - `stores/` — реактивные хранилища состояния Svelte 5 на рунах: чат и сессия (`chat.svelte.ts`), список задач агента (`todos.svelte.ts`), запросы агента и разрешения (`requests.svelte.ts`), список сессий (`list.svelte.ts`), машины (`machines.svelte.ts`), блоки ленты (`blocks.ts`), лимиты (`limits.ts`), вводы (`inputs.ts`).
 - `sync/` — постоянное WSS-соединение `ConnectionManager` (`connection.ts`), подписки на скоупы (`scope.ts`), дочитка пропусков по HTTP (`transport.ts`, `batcher.ts`) и экспоненциальный backoff (`backoff.ts`).
-- `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), полоса очереди (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
+- `timeline/` — виртуализированная лента сообщений (`Timeline.svelte`, `virtual.ts`, `rows.ts`), карточки ответов (`AnswerCard.svelte`), пузырь сообщения владельца с дорожкой доставки и вложениями (`UserBubble.svelte`, `AttachmentTile.svelte`), полоса очереди для ждущих ход или паузу (`PendingStrip.svelte`), управление якорем прокрутки (`scrollController.ts`) и действия очереди (`QueueActions.ts`).
 - `ui/` — библиотека дизайн-компонентов на CSS-токенах: `Button`, `IconButton`, `Sheet`, `Disclosure`, `Pill`, `Segmented`, `StageTrack`, `TopBar`, `BottomNav`, `icons.ts`.
 - `uploads/` — возобновляемая загрузка вложений частями (`manager.ts`, `uploader.ts`, `patch.ts`) с параллельным расчётом SHA-256 в веб-воркере (`hasher.ts`, `hash.worker.ts`).
 

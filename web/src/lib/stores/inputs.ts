@@ -35,6 +35,8 @@ export interface InputView {
 	createdAt: number | null;
 	retryOf: string | null;
 	localOnly: boolean;
+	/** Пузырь стоит в ленте до ответа хаба: сообщение отправлено с этого устройства и ничто не мешает ему уйти. */
+	optimistic: boolean;
 	rejection?: string;
 	stripUntil: number | null;
 }
@@ -77,6 +79,7 @@ export function freshInput(key: string, text: string, createdAt: number, attachm
 		createdAt,
 		retryOf: null,
 		localOnly: true,
+		optimistic: false,
 		stripUntil: null
 	};
 }

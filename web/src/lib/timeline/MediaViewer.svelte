@@ -6,19 +6,23 @@
 
   interface Shot {
     media_id: string;
+    /** Адрес, если картинка не из блока ответа: например вложение сообщения. */
+    src?: string;
     mime?: string;
-    width: number;
-    height: number;
+    width?: number;
+    height?: number;
+    /** Подпись под картинкой вместо размеров. */
+    caption?: string;
   }
 
-  let { shots, start = 0, title, onclose }: { shots: Shot[]; start?: number; title: string; onclose: () => void } = $props();
+  let { shots, start = 0, title, heading = 'Картинки ответа', onclose }: { shots: Shot[]; start?: number; title: string; heading?: string; onclose: () => void } = $props();
   let index = $state(untrack(() => start));
   const shot = $derived(shots[index] ?? shots[0]!);
-  const src = $derived(`/api/v1/media/${shot.media_id}`);
+  const src = $derived(shot.src ?? `/api/v1/media/${shot.media_id}`);
   const format = $derived((shot.mime ?? '').split('/')[1]?.toLocaleUpperCase('ru-RU') ?? '');
 </script>
 
-<Sheet open title="Картинки ответа" subtitle={title} {onclose}>
+<Sheet open title={heading} subtitle={title} {onclose}>
   <div class="viewer">
     <img {src} alt="" width={shot.width} height={shot.height} />
     {#if shots.length > 1}
@@ -29,7 +33,7 @@
       </div>
     {/if}
     <div class="info">
-      <span>{shot.width} × {shot.height}{format ? ` · ${format}` : ''}</span>
+      <span>{shot.caption ?? `${shot.width} × ${shot.height}${format ? ` · ${format}` : ''}`}</span>
       <!-- Адрес служебный, маршрутизатор здесь не участвует. -->
       <!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
       <a href={src} download><Icon name="download" />Сохранить</a>

@@ -14,6 +14,8 @@ export class ScrollController {
   readonly #el: HTMLElement;
   readonly #env: ScrollEnv;
   #last = 0;
+  #lastHeight = 0;
+  #lastView = 0;
   #target: number | null = null;
   #frame = 0;
   #observer: ResizeObserver | null = null;
@@ -23,6 +25,7 @@ export class ScrollController {
     this.#el = el;
     this.#env = env;
     this.#last = el.scrollTop;
+    this.#remember();
     this.#onScroll = () => this.#readScroll();
     el.addEventListener("scroll", this.#onScroll, { passive: true });
     if (typeof ResizeObserver !== "undefined") {
@@ -53,6 +56,7 @@ export class ScrollController {
     this.#target = top;
     this.#el.scrollTop = top;
     this.#last = this.#el.scrollTop;
+    this.#remember();
   }
 
   /** Владелец раскрыл строку: окно перестаёт следовать за хвостом до возвращения вниз. */
@@ -91,6 +95,12 @@ export class ScrollController {
     this.#frame = 0;
   }
 
+  /** Геометрия запоминается только вместе с положением: так подгонка scrollTop браузером видна как сжатие, а не как уход владельца. */
+  #remember(): void {
+    this.#lastHeight = this.#el.scrollHeight;
+    this.#lastView = this.#el.clientHeight;
+  }
+
   #gap(): number {
     return this.#el.scrollHeight - this.#el.clientHeight - this.#el.scrollTop;
   }
@@ -100,7 +110,13 @@ export class ScrollController {
     const gap = this.#gap();
     const own = this.#target !== null && Math.abs(top - this.#target) <= 1;
     this.#target = null;
-    const userUp = !own && top + 1 < this.#last;
+    // Окно стало выше (плашка над полем ввода ушла) или текст стал короче: браузер прижал scrollTop к новому пределу, а владелец не двигал ленту.
+    // Новый хвост мог появиться в том же кадре, поэтому предел считается по меньшей из двух высот.
+    const { scrollHeight: height, clientHeight: view } = this.#el;
+    const shrank = view > this.#lastView || height < this.#lastHeight;
+    const clamped = shrank && top >= Math.min(height, this.#lastHeight) - view - 1;
+    this.#remember();
+    const userUp = !own && !clamped && top + 1 < this.#last;
     this.#last = top;
     if (userUp) {
       this.#pinned.set(false);

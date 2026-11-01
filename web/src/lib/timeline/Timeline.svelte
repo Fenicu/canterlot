@@ -59,6 +59,14 @@
   const rows = $derived(buildRows(chat.timeline.entries, { now: today, laneRoot, links }));
   const windowRows = $derived(rows.slice(range.start, range.end));
   const lastInput = $derived(rows.findLast((row) => row.kind === 'input')?.key);
+  // Своё сообщение возвращает ленту к хвосту: плашка «К новым сообщениям» нужна только для чужих.
+  let seenSends = untrack(() => chat.ownSends);
+  $effect(() => {
+    const sends = chat.ownSends;
+    if (sends === seenSends) return;
+    seenSends = sends;
+    void tick().then(() => controller?.jumpToBottom());
+  });
   let seenRows: string | null = null;
   $effect(() => {
     const next = rows.map((row) => row.key).join('\n');
