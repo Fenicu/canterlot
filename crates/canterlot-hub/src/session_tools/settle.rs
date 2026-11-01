@@ -7,6 +7,7 @@ use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 use crate::{
     activity::{Activity, ActivityState, Evidence, QueueFacts, Thresholds},
     config::ActivityConfig,
+    model::RunSlot,
 };
 
 /// Фоновая работа, молчащая дольше этого, больше не держит сессию.
@@ -83,6 +84,8 @@ pub fn settled(
         ActivityState::QuotaPaused => Some(Settled::QuotaPaused),
         ActivityState::Failed => Some(Settled::Failed),
         ActivityState::Stopped => Some(Settled::Stopped),
+        // `sessions.wait` читает проекцию, которая отстаёт от очереди: занятый слот и есть работа.
+        ActivityState::Idle if !matches!(q.slot, RunSlot::Free) => None,
         ActivityState::Idle if q.queued > 0 => {
             (!q.pause_reasons.is_empty()).then_some(Settled::WaitingForUser)
         }

@@ -99,6 +99,28 @@ fn settled_reports_paused_queue_as_waiting() {
 }
 
 #[test]
+fn settled_ignores_idle_with_a_busy_slot() {
+    let now = Utc::now();
+    let input_id = Uuid::now_v7();
+    for slot in [
+        RunSlot::Dispatching {
+            input_id,
+            attempt: 1,
+        },
+        RunSlot::Running { input_id },
+    ] {
+        let busy = QueueFacts {
+            slot,
+            ..queue(0, vec![])
+        };
+        assert_eq!(
+            settle::settled(&idle_activity(None), &busy, &old_facts(now), &config()),
+            None
+        );
+    }
+}
+
+#[test]
 fn settled_holds_idle_with_background_work() {
     let now = Utc::now();
     let mut facts = old_facts(now);
@@ -660,6 +682,48 @@ async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool)
         1,
         "one report per stop"
     );
+}
+
+/// Ввод вышел из счётных состояний, а пересчёт проекции ещё не случился: она всё говорит `idle`.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn poll_of_a_stale_idle_does_not_settle_a_turn_in_progress(pool: PgPool) {
+    let p = pair(&pool).await;
+    let now = Utc::now();
+    start(&pool, p.owner, p.target).await;
+    long_idle(&pool, p.target, now).await;
+    let submitted = submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: p.owner,
+            conversation_id: p.target,
+            idempotency_key: "in-flight".into(),
+            content: vec![ContentBlock::Text { text: "go".into() }],
+            received_at: now,
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await
+    .unwrap();
+    sqlx::query("update inputs set state='transmitting' where id=$1")
+        .bind(submitted.input_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query(
+        "update queue_state set run_slot='running',run_slot_input_id=$2 where conversation_id=$1",
+    )
+    .bind(p.target)
+    .bind(submitted.input_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let mut conn = pool.acquire().await.unwrap();
+    let current = subs::current_in_tx(&mut conn, p.target, now, &config())
+        .await
+        .unwrap();
+    assert!(current.is_none(), "the turn has only just started");
 }
 
 /// Цель осела, подписка закрыта итогом `idle`.
