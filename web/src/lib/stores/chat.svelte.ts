@@ -30,7 +30,7 @@ import {
   type InputUiState,
   type InputView,
 } from "./inputs";
-import { TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
+import { LOCAL_SEQ, TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
 import { RequestsModel, isDocked } from "./requests.svelte";
 import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
@@ -164,6 +164,23 @@ function asState(value: string): InputUiState {
     : "queued";
 }
 
+/** Состояния, в которых сообщение уже отправлено, но ход по нему ещё не принят. */
+const ON_ITS_WAY: ReadonlySet<InputUiState> = new Set([
+  "saving",
+  "queued",
+  "dispatched",
+  "on_machine",
+  "transmitting",
+]);
+/** Эти удержания принадлежат самому сообщению и не делают его ждущим чужого хода. */
+const OWN_HOLDS: ReadonlySet<string> = new Set(["attachments_pending", "run_in_progress"]);
+
+function reasonOf(hold: unknown): string {
+  return typeof hold === "object" && hold !== null
+    ? String((hold as { reason?: unknown }).reason ?? "")
+    : "";
+}
+
 function textOf(content: HistoryInput["content"]): string {
   return content
     .filter((block) => block.type === "text")
@@ -245,6 +262,8 @@ export class ChatStore {
   following = true;
   deltaMarks: string[] = [];
   deltaSerial = $state(0);
+  /** Счётчик отправок с этого устройства: лента по нему возвращается к хвосту. */
+  ownSends = $state(0);
 
 
   readonly #sync: BlockSync;
@@ -325,7 +344,7 @@ export class ChatStore {
       this.#reviveNotes();
     });
     this.#stopRefused ??= this.deps.ops.onOrphanRefused((op) => {
-      this.inputs.delete(op.key);
+      this.discardLocal(op.key);
     });
     if (this.#sub) return;
     this.#sub = this.deps.connection.subscribe(scopeOf(this.id), this.applier);
@@ -430,6 +449,68 @@ export class ChatStore {
         input.placement === "strip" ||
         (input.state === "cancelled" && input.stripUntil !== null),
     );
+  }
+
+  /**
+   * Новое сообщение владельца. Если ничто не мешает уйти сразу, пузырь входит в ленту с первого
+   * кадра; ожидающее за ходом, паузой или другим сообщением остаётся плашкой над полем ввода.
+   */
+  admitLocal(view: InputView): void {
+    const free = this.#mayGoNow();
+    this.inputs.set(view.key, view);
+    this.ownSends += 1;
+    if (!free) return;
+    const input = this.inputs.get(view.key)!;
+    input.optimistic = true;
+    input.placement = "feed";
+    this.#seat(input, LOCAL_SEQ);
+  }
+
+  /** Сообщение, которое не ушло и возвращается автору: пузырь исчезает вместе с записью. */
+  discardLocal(key: string): void {
+    this.inputs.delete(key);
+    this.timeline.remove(`input:${key}`);
+  }
+
+  #mayGoNow(): boolean {
+    if (this.timeline.tailDetached) return false;
+    if (this.activity?.state !== "idle") return false;
+    if (this.queue.queued > 0) return false;
+    if (this.queue.pause_reasons.length > 0 || this.queue.hold_reasons.length > 0)
+      return false;
+    if (this.queue.run_slot && this.queue.run_slot !== "free") return false;
+    return ![...this.inputs.values()].some((input) => ON_ITS_WAY.has(input.state));
+  }
+
+  /** Причина, по которой отправленное сообщение уже не уходит само: чужой ход или пауза. */
+  #mustWait(input: InputView): boolean {
+    const slot = this.queue.run_slot;
+    const other =
+      slot && slot !== "free"
+        ? "running" in slot
+          ? slot.running.input_id
+          : slot.dispatching.input_id
+        : null;
+    return (
+      this.queue.pause_reasons.length > 0 ||
+      this.queue.hold_reasons.some((hold) => !OWN_HOLDS.has(reasonOf(hold))) ||
+      (other !== null && other !== input.id)
+    );
+  }
+
+  #seat(input: InputView, seq: string): void {
+    this.timeline.upsert({
+      kind: "input",
+      key: `input:${input.key}`,
+      seq,
+      input,
+    });
+  }
+
+  #demote(input: InputView): void {
+    input.optimistic = false;
+    input.placement = "strip";
+    this.timeline.remove(`input:${input.key}`);
   }
 
   #applyBatch(batch: AppliedEvent[]): void {
@@ -752,12 +833,16 @@ export class ChatStore {
       });
     }
     existing.state = "queued";
-    existing.placement = placeInput("queued");
     existing.marks = marksFor("queued");
     existing.localOnly = false;
     existing.createdSeq = payload.input_seq;
     this.inputs.set(existing.key, existing);
-    this.timeline.remove(`input:${existing.key}`);
+    const seated = this.inputs.get(existing.key)!;
+    if (seated.optimistic && this.#mustWait(seated)) this.#demote(seated);
+    else if (!seated.optimistic) {
+      seated.placement = placeInput("queued");
+      this.timeline.remove(`input:${seated.key}`);
+    }
     this.deps.ops.settle(existing.key);
   }
 
@@ -778,14 +863,20 @@ export class ChatStore {
     if (payload.cause === "cancel_requested") input.cancelRequested = true;
     assignFeedSeq(input, state, event.scope_seq);
     if (state === "cancelled") {
+      input.optimistic = false;
       input.placement = "strip";
       input.stripUntil = this.deps.clock.now() + 4000;
       this.timeline.remove(`input:${input.key}`);
       this.#armNote(input.key);
       return;
     }
-    input.placement = placeInput(state);
     input.stripUntil = null;
+    if (input.optimistic && placeInput(state) === "strip") {
+      if (this.#mustWait(input)) this.#demote(input);
+      return;
+    }
+    input.placement = placeInput(state);
+    if (input.placement === "feed") input.optimistic = false;
     if (input.placement === "feed" && input.feedSeq) {
       this.timeline.upsert({
         kind: "input",
@@ -1014,7 +1105,8 @@ export class ChatStore {
     input.text = textOf(item.content);
     input.attachments = item.attachments;
     input.state = state;
-    input.placement = placeInput(state);
+    if (item.feed_seq || placeInput(state) !== "strip") input.optimistic = false;
+    input.placement = input.optimistic ? "feed" : placeInput(state);
     input.marks = marksFor(state);
     input.localOnly = false;
     input.createdSeq = item.created_seq;

@@ -32,6 +32,12 @@ function createMockDeps(overrides?: Partial<ComposerDeps>): {
 
   const chatMock = {
     inputs,
+    admitLocal: (view: InputView) => {
+      inputs.set(view.key, view);
+    },
+    discardLocal: (key: string) => {
+      inputs.delete(key);
+    },
     queue: { queued: 0, pause_reasons: [], hold_reasons: [], run_slot: null },
     activity: { state: "idle" },
   };

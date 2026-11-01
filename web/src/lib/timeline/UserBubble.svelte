@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getRuntime } from '#lib/app/runtime.js';
+  import { durationMs } from '#lib/motion.js';
   import { rejectionLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import Button from '#lib/ui/Button.svelte';
@@ -44,10 +45,22 @@
       input.state === 'acceptance_unconfirmed' ||
       (input.state === 'accepted' && !agentWorking)
   );
+  const unsure = $derived(getRuntime().journal.ops.get(input.key)?.state === 'unknown');
+
+  // Входит только пузырь, который владелец отправил сейчас: ряды, вернувшиеся в окно при прокрутке, не оживают.
+  function enter(node: HTMLElement): void {
+    if (!input.optimistic || typeof node.animate !== 'function') return;
+    if (durationMs('--duration-enter') <= 0) return;
+    const root = getComputedStyle(document.documentElement);
+    node.animate(
+      [{ opacity: 0, transform: `translateY(${root.getPropertyValue('--shift-enter').trim() || '0px'})` }, { opacity: 1, transform: 'none' }],
+      { duration: durationMs('--duration-enter'), easing: root.getPropertyValue('--ease-enter').trim() || 'ease-out' }
+    );
+  }
   const stamp = $derived(input.state === 'accepted' && input.createdAt !== null ? ` · ${fmt.clock(input.createdAt)}` : '');
 </script>
 
-<article class="bubble" data-state={input.state}>
+<article class="bubble" data-state={input.state} data-optimistic={input.optimistic ? '' : undefined} use:enter>
   <p class="text">{input.text}</p>
   {#if input.attachments.length > 0}
     <ul class="files">
@@ -60,6 +73,10 @@
     <p class="status">{label}{stamp}</p>
   {:else}
     <StageTrack {stages} {index} state="active" form="compact" label="Доставка сообщения" status={label} />
+  {/if}
+  {#if unsure}
+    <p class="reason">Отправка не подтверждена, повторяю</p>
+    <div class="actions"><Button onclick={() => getRuntime().journal.retryNow(input.key)}>Повторить сейчас</Button></div>
   {/if}
   {#if input.state === 'acceptance_unconfirmed'}
     <div class="actions">

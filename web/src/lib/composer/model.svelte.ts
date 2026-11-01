@@ -146,10 +146,10 @@ export class ComposerModel {
     const key = crypto.randomUUID();
     const createdAt = this.deps.serverNow ? this.deps.serverNow() : Date.now();
 
-    // Шаг 1: локальный элемент в полосе (strip). Текст остаётся в черновике, пока операция не легла в журнал.
+    // Шаг 1: локальный элемент: пузырь в ленте, если сообщению ничто не мешает, иначе плашка. Текст остаётся в черновике, пока операция не легла в журнал.
     this.deps.probe?.mark("send_pressed");
     const localInput = freshInput(key, sendText, createdAt, attachmentRefs);
-    this.deps.chat.inputs.set(key, localInput);
+    this.deps.chat.admitLocal(localInput);
     this.errorMessage = null;
     this.deps.probe?.mark("input_painted");
 
@@ -169,7 +169,7 @@ export class ComposerModel {
         key,
       });
     } catch (err) {
-      this.deps.chat.inputs.delete(key);
+      this.deps.chat.discardLocal(key);
       this.#giveBack(sendText);
       this.errorMessage = "Не удалось сохранить на устройстве";
       throw err;
@@ -211,7 +211,7 @@ export class ComposerModel {
   #restore(key: string, text: string, detached: Upload[]): void {
     this.#giveBack(text);
     this.deps.drafts.set(this.deps.conversationId, { text: this.text });
-    this.deps.chat.inputs.delete(key);
+    this.deps.chat.discardLocal(key);
     this.deps.uploads.reattach(detached);
   }
 
