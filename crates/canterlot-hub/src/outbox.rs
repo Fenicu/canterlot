@@ -4,8 +4,8 @@ use canterlot_proto::{
     limits::{MAX_MESSAGE_BYTES, check_deliver_input},
     worker::v1::{
         CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
-        Instructions, Interrupt, RemoveWorktree, SettingsOverride, StartExecution, StopExecution,
-        WithdrawInput, WorktreeSpec, command, control_down,
+        Instructions, Interrupt, RemoveWorktree, ResolveOwnerLost, SettingsOverride,
+        StartExecution, StopExecution, WithdrawInput, WorktreeSpec, command, control_down,
     },
 };
 use prost::Message;
@@ -179,6 +179,9 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    if row.kind == "resolve_owner_lost" && !has(crate::session::CAPABILITY_OWNER_EXIT_V1) {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -348,6 +351,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 force: remove.force,
             })
         }
+        "resolve_owner_lost" => command::Kind::ResolveOwnerLost(ResolveOwnerLost {}),
         "stop_execution" => command::Kind::StopExecution(StopExecution {
             force: match row.payload.get("force") {
                 None => false,

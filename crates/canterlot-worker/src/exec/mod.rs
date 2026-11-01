@@ -29,11 +29,13 @@ use crate::{
     supervisor::ipc::IpcError,
 };
 
+mod group;
+mod lost;
 mod manager;
 mod procfs;
 mod spawn;
 
-use manager::{Actor, Msg, Start};
+use manager::{Msg, Start};
 
 pub struct SjRelay {
     pub journal_id: Uuid,
@@ -196,6 +198,9 @@ pub(crate) struct ExecInfo {
     pub acked_seq: u64,
     pub retired: bool,
     pub cj_terminal_seq: Option<u64>,
+    /// Журнал потерянного сопровождения: его точка продолжения нужна сессии, даже когда
+    /// исполнение для наблюдений уже списано.
+    pub lost_journal: bool,
 }
 
 #[derive(Clone, Default)]
@@ -328,7 +333,10 @@ impl Shared {
         Ok(())
     }
 
-    fn remember_cj_states(&self, states: Vec<(u64, canterlot_proto::worker::v1::ExecutionState)>) {
+    pub(crate) fn remember_cj_states(
+        &self,
+        states: Vec<(u64, canterlot_proto::worker::v1::ExecutionState)>,
+    ) {
         for (seq, state) in states {
             if let Ok(id) = Uuid::parse_str(&state.execution_id) {
                 let mut infos = self.infos.lock().expect("infos lock");
@@ -343,6 +351,7 @@ impl Shared {
                     acked_seq: 0,
                     retired: false,
                     cj_terminal_seq: None,
+                    lost_journal: false,
                 });
                 info.state = state.state;
                 info.outcome = state.outcome;
@@ -534,7 +543,7 @@ impl ExecutionManager {
         let infos = self.shared.infos.lock().expect("infos lock");
         let mut list: Vec<_> = infos
             .values()
-            .filter(|info| !info.retired && info.attached)
+            .filter(|info| (!info.retired && info.attached) || info.lost_journal)
             .filter_map(|info| {
                 info.sj_journal_id.map(|journal| JournalCursor {
                     journal_id: journal.to_string(),
@@ -629,11 +638,13 @@ impl ExecutionManager {
             };
             let reported = manager::is_reported(&record);
             let lost = reported || manager::is_orphaned(&record);
-            let verified = manager::verify(&self.shared, &record).await;
-            if let (true, Err(error)) = (reported, &verified) {
-                tracing::info!(execution_id = %id, reason = %error, "lost ownership not reclaimed");
-                continue;
-            }
+            let rebooted =
+                !record.boot_id.is_empty() && record.boot_id != *self.shared.boot_id().await?;
+            let verified = if rebooted {
+                Err(ExecError::Verify("boot_id"))
+            } else {
+                manager::verify(&self.shared, &record).await
+            };
             self.shared.remember_ownership(&record);
             let conversation_id = Uuid::parse_str(&record.conversation_id).unwrap_or_default();
             self.shared.infos.lock().expect("infos lock").insert(
@@ -641,14 +652,19 @@ impl ExecutionManager {
                 ExecInfo {
                     conversation_id,
                     generation: record.generation,
-                    state: "starting".into(),
+                    state: if lost {
+                        "owner_lost".into()
+                    } else {
+                        "starting".into()
+                    },
                     outcome: String::new(),
                     attached: false,
                     sj_journal_id: Uuid::parse_str(&record.sj_journal_id).ok(),
                     last_seq: 0,
                     acked_seq: 0,
-                    retired: false,
+                    retired: reported && verified.is_err(),
                     cj_terminal_seq: None,
+                    lost_journal: false,
                 },
             );
             match verified {
@@ -665,22 +681,27 @@ impl ExecutionManager {
                         info.sj_journal_id = Uuid::parse_str(&linked.attached.sj_journal_id).ok();
                         info.last_seq = linked.attached.last_sj_seq;
                         info.acked_seq = linked.attached.acked_sj_seq;
-                        if running {
-                            info.state = "running".into();
-                        }
+                        info.state = if running {
+                            "running".into()
+                        } else {
+                            "starting".into()
+                        };
                     });
                     self.spawn_actor(id, Start::Reattach(Box::new((linked, record))));
                     attached.push(id);
                 }
+                Err(_) if rebooted => {
+                    tracing::info!(execution_id = %id, kind = "boot_changed", "ownership belongs to a previous boot");
+                    lost::watch(&self.shared, record, Some(lost::MACHINE_REBOOTED));
+                }
                 Err(error) if lost => {
                     tracing::info!(execution_id = %id, reason = %error, "lost ownership not reclaimed");
-                    self.shared.with_info(id, |info| {
-                        info.state = "owner_lost".into();
-                    });
+                    lost::watch(&self.shared, record, None);
                 }
                 Err(error) => {
                     tracing::warn!(execution_id = %id, reason = %error, "ownership not verified");
                     manager::report_owner_lost(&self.shared, id, record.generation).await?;
+                    lost::watch(&self.shared, record, None);
                 }
             }
         }
@@ -825,6 +846,7 @@ impl ExecutionManager {
                     acked_seq: 0,
                     retired: false,
                     cj_terminal_seq: None,
+                    lost_journal: false,
                 },
             );
         }
@@ -878,21 +900,6 @@ impl ExecutionManager {
     }
 
     fn spawn_actor(&self, id: Uuid, start: Start) {
-        let generation = self
-            .shared
-            .infos
-            .lock()
-            .expect("infos lock")
-            .get(&id)
-            .map_or(0, |info| info.generation);
-        let (sender, receiver) = mpsc::unbounded_channel();
-        self.shared
-            .actors
-            .lock()
-            .expect("actors lock")
-            .insert(id, sender);
-        let actor = Actor::new(self.shared.clone(), id, generation, receiver);
-        let task = tokio::spawn(actor.run(start));
-        self.shared.tasks.lock().expect("tasks lock").push(task);
+        manager::spawn_actor(&self.shared, id, start);
     }
 }

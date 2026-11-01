@@ -496,6 +496,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
         ("interrupt", json!({})),
         ("compact_session", json!({})),
         ("stop_execution", json!({"force":true})),
+        ("resolve_owner_lost", json!({})),
     ];
     for (kind, payload) in cases {
         let row = command_row(kind, payload);
@@ -505,6 +506,7 @@ fn to_proto_maps_all_command_variants_and_rejects_unknown_kinds() {
         assert_eq!(command.execution_generation, 1);
         assert_eq!(command.dispatch_attempt, 1);
         match command.kind.unwrap() {
+            command::Kind::ResolveOwnerLost(_) => {}
             command::Kind::DeliverInput(value) => assert_eq!(value.content.len(), 1),
             command::Kind::StartExecution(value) => {
                 assert_eq!(

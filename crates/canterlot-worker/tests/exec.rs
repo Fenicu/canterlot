@@ -13,16 +13,18 @@ use canterlot_proto::worker::{
     ipc::{Ownership, OwnershipPhase},
     v1::{
         CancelInput, Command, ContentBlock, DeliverInput, Interrupt, InterruptState,
-        StartExecution, StopExecution, TextBlock, WithdrawInput, command::Kind, content_block,
-        record_body::Body,
+        ResolveOwnerLost, StartExecution, StopExecution, TextBlock, WithdrawInput, command::Kind,
+        content_block, record_body::Body,
     },
 };
 use canterlot_worker::{
     config::{ExecutionConfig, SupervisorTimers},
+    containment::{GROUP_FILE, GROUP_MARKER_ENV},
     exec::{ExecutionManager, SjRelay},
     session_store::StoreThread,
     store::{Accept, StoreError, WorkerStore},
 };
+use prost::Message;
 use tempfile::TempDir;
 use tokio::{sync::mpsc, time::timeout};
 use uuid::Uuid;
@@ -982,8 +984,7 @@ async fn second_loss_after_a_reclaim_is_reported_again() {
 
 #[tokio::test]
 async fn reclaim_needs_the_same_supervisor_boot_secret_and_generation() {
-    let tamper: [fn(&mut Ownership); 5] = [
-        |record| record.boot_id = Uuid::now_v7().to_string(),
+    let tamper: [fn(&mut Ownership); 4] = [
         |record| record.supervisor_start_ticks += 1,
         |record| record.supervisor_pid = std::process::id(),
         |record| record.secret_sha256[0] ^= 0xff,
@@ -1011,7 +1012,6 @@ async fn reclaim_needs_the_same_supervisor_boot_secret_and_generation() {
         assert_eq!(owner_reclaimed(&cj, env.execution), 0);
         assert_eq!(owner_lost(&cj, env.execution), 0, "not reported again");
         assert!(env.manager().observations().is_empty());
-        assert!(env.manager().journal_cursors().is_empty());
         assert_eq!(
             env.ownership(env.execution).await.unwrap().released_reason,
             "owner_lost_reported"
@@ -1038,6 +1038,9 @@ async fn dead_supervisor_is_never_reclaimed() {
     assert!(env.restart_with_spec(&spec).await.is_empty());
     assert_eq!(owner_reclaimed(&env.cj().await, env.execution), 0);
     assert!(env.manager().observations().is_empty());
+    env.hub_session();
+    env.wait_exit("supervisor_died").await;
+    env.assert_released("supervisor_died").await;
 }
 
 #[derive(Clone, Default)]
@@ -1216,6 +1219,514 @@ async fn supervisor_death_reports_owner_lost() {
     let observations = env.manager().observations();
     assert_eq!(observations[0].state, "owner_lost");
     assert!(!observations[0].supervisor_attached);
+}
+
+fn exit_of(cj: &[Body], id: Uuid) -> Option<(String, String)> {
+    cj.iter().find_map(|b| match b {
+        Body::ExecutionState(f)
+            if f.execution_id == id.to_string()
+                && matches!(f.state.as_str(), "stopped" | "failed") =>
+        {
+            Some((f.state.clone(), f.outcome.clone()))
+        }
+        _ => None,
+    })
+}
+
+fn resolve_command(execution: Uuid, generation: u64) -> Command {
+    command(
+        Uuid::now_v7(),
+        1,
+        execution,
+        generation,
+        Kind::ResolveOwnerLost(ResolveOwnerLost {}),
+    )
+}
+
+impl Env {
+    /// Оставляет потомка вне сессии CLI: он переживает и CLI, и сопровождение.
+    async fn detach_descendant(&mut self) -> u32 {
+        let input = Uuid::now_v7();
+        self.send(deliver_command(
+            input,
+            1,
+            self.execution,
+            1,
+            self.conversation,
+            &script(r#"{"detach_child":true}"#),
+        ))
+        .await;
+        self.wait("detached descendant", |b| finished(b, input))
+            .await;
+        processes()
+            .into_iter()
+            .find_map(|(pid, _, cmd)| {
+                (cmd.contains("__detach_sleep")
+                    && fs::read_link(format!("/proc/{pid}/cwd"))
+                        .is_ok_and(|cwd| cwd.starts_with(self.root.path())))
+                .then_some(pid)
+            })
+            .expect("detached CLI descendant")
+    }
+
+    async fn kill_supervisor(&mut self) -> Ownership {
+        let record = self.ownership(self.execution).await.unwrap();
+        assert!(self.guard.signal(
+            (record.supervisor_pid, record.supervisor_start_ticks),
+            rustix::process::Signal::KILL
+        ));
+        while ticks(record.supervisor_pid) == Some(record.supervisor_start_ticks)
+            && alive(record.supervisor_pid)
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        record
+    }
+
+    async fn wait_exit(&mut self, outcome: &str) -> Vec<Body> {
+        let id = self.execution;
+        let found = timeout(WAIT, async {
+            loop {
+                let cj = self.cj().await;
+                if exit_of(&cj, id).is_some_and(|(_, found)| found == outcome) {
+                    return cj;
+                }
+                self.pump(Duration::from_millis(50)).await;
+            }
+        })
+        .await;
+        found.unwrap_or_else(|_| panic!("timed out waiting for exit {outcome}"))
+    }
+
+    async fn assert_released(&self, outcome: &str) {
+        let record = self.ownership(self.execution).await.unwrap();
+        assert_eq!(record.phase, OwnershipPhase::Released as i32);
+        assert_eq!(record.released_reason, outcome);
+        assert!(!self.exec_dir().exists(), "execution directory is removed");
+    }
+}
+
+#[tokio::test]
+async fn cli_carries_the_group_marker_and_the_supervisor_records_the_members() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let cli = cli_children(record.supervisor_pid)[0];
+    let environ = fs::read(format!("/proc/{cli}/environ")).unwrap();
+    let expected = format!("{GROUP_MARKER_ENV}={}", env.execution).into_bytes();
+    assert!(
+        environ
+            .split(|byte| *byte == 0)
+            .any(|entry| entry == expected)
+    );
+    let path = env.exec_dir().join(GROUP_FILE);
+    timeout(WAIT, async {
+        loop {
+            let pairs: Vec<(u32, u64)> = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            if pairs.contains(&(cli, ticks(cli).unwrap())) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .unwrap();
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn killed_supervisor_with_an_empty_group_fails_and_frees_the_session() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.kill_supervisor().await;
+    let cj = env.wait_exit("supervisor_died").await;
+    assert_eq!(owner_lost(&cj, env.execution), 1, "owner_lost comes first");
+    env.assert_released("supervisor_died").await;
+    assert_eq!(
+        exit_of(&cj, env.execution).unwrap(),
+        ("failed".to_owned(), "supervisor_died".to_owned())
+    );
+    let first = env.execution;
+    env.execution = Uuid::now_v7();
+    env.start(2).await;
+    env.wait("a new execution runs", |b| {
+        b.iter().filter(|x| state(x, "running")).count() == 2
+    })
+    .await;
+    assert_eq!(exit_of(&env.cj().await, env.execution), None);
+    assert!(exit_of(&env.cj().await, first).is_some());
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn orphan_descendant_keeps_owner_lost_until_the_group_empties() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let detached = env.detach_descendant().await;
+    env.kill_supervisor().await;
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    assert_eq!(exit_of(&env.cj().await, id), None, "descendant is alive");
+    assert!(alive(detached), "nothing is killed without the owner");
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(detached).unwrap()).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    env.wait_exit("supervisor_died").await;
+    env.assert_released("supervisor_died").await;
+}
+
+#[tokio::test]
+async fn worker_restart_exits_a_supervisor_that_died_while_it_was_down() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    env.close_manager().await;
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    while alive(record.supervisor_pid) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    env.reopen();
+    env.hub_session();
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    let cj = env.wait_exit("supervisor_died").await;
+    assert_eq!(owner_lost(&cj, env.execution), 1);
+    env.assert_released("supervisor_died").await;
+}
+
+#[tokio::test]
+async fn live_supervisor_is_never_failed_and_keeps_the_reclaim_path() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    env.hub_session();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let id = env.execution;
+    assert_eq!(exit_of(&env.cj().await, id), None, "supervisor is alive");
+    assert!(alive(record.supervisor_pid));
+    assert!(alive(cli_children(record.supervisor_pid)[0]));
+    assert_eq!(env.restart_with_spec(&spec).await, vec![id]);
+    env.hub_session();
+    assert_eq!(owner_reclaimed(&env.cj().await, id), 1);
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        id,
+        1,
+        env.conversation,
+        &script(r#"{"delta":"alive"}"#),
+    ))
+    .await;
+    env.wait("the reclaimed session answers", |b| finished(b, input))
+        .await;
+    assert_eq!(exit_of(&env.cj().await, id), None);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn resolve_reclaims_a_live_supervisor_and_kills_nothing() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let cli = cli_children(record.supervisor_pid);
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    env.hub_session();
+    fs::write(env.exec_dir().join("spec.toml"), &spec).unwrap();
+    let id = env.execution;
+    let resolve = resolve_command(id, 1);
+    env.send(resolve.clone()).await;
+    env.wait_cj("reclaimed", |cj| owner_reclaimed(cj, id) == 1)
+        .await;
+    assert_eq!(exit_of(&env.cj().await, id), None);
+    assert!(alive(record.supervisor_pid));
+    assert_eq!(cli_children(record.supervisor_pid), cli, "CLI is untouched");
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        id,
+        1,
+        env.conversation,
+        &script(r#"{"delta":"alive"}"#),
+    ))
+    .await;
+    env.wait("the reclaimed session answers", |b| finished(b, input))
+        .await;
+    assert!(env.terminal(&resolve).await);
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn resolve_of_a_linked_supervisor_proves_it_instead_of_stopping_it() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let id = env.execution;
+    env.send(resolve_command(id, 1)).await;
+    env.wait_cj("reclaimed", |cj| owner_reclaimed(cj, id) == 1)
+        .await;
+    assert_eq!(exit_of(&env.cj().await, id), None);
+    assert!(alive(record.supervisor_pid));
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn late_input_for_a_released_execution_is_answered_not_kept() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    env.kill_supervisor().await;
+    env.wait_exit("supervisor_died").await;
+    let late = deliver_command(
+        Uuid::now_v7(),
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        "late",
+    );
+    env.send(late.clone()).await;
+    assert!(env.terminal(&late).await);
+    assert!(
+        env.cj()
+            .await
+            .iter()
+            .any(|b| matches!(b, Body::DispatchDeferred(f) if f.command_id == late.command_id))
+    );
+}
+
+#[tokio::test]
+async fn resolve_terminates_the_orphan_group_and_confirms_it_empty() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let detached = env.detach_descendant().await;
+    env.kill_supervisor().await;
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    let resolve = resolve_command(id, 1);
+    env.send(resolve.clone()).await;
+    env.wait_exit("supervisor_died").await;
+    assert!(!alive(detached), "the rest of the group is terminated");
+    env.assert_released("supervisor_died").await;
+    assert!(env.terminal(&resolve).await);
+}
+
+#[tokio::test]
+async fn group_of_an_old_supervisor_waits_for_the_owner_and_ends_admin_resolved() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    fs::remove_file(env.exec_dir().join(GROUP_FILE)).unwrap();
+    env.kill_supervisor().await;
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+    assert_eq!(
+        exit_of(&env.cj().await, id),
+        None,
+        "emptiness is not proven"
+    );
+    env.send(resolve_command(id, 1)).await;
+    let cj = env.wait_exit("admin_resolved").await;
+    assert_eq!(
+        exit_of(&cj, id).unwrap(),
+        ("failed".to_owned(), "admin_resolved".to_owned())
+    );
+    env.assert_released("admin_resolved").await;
+}
+
+#[tokio::test]
+async fn resolve_for_another_generation_changes_nothing() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let detached = env.detach_descendant().await;
+    env.kill_supervisor().await;
+    let id = env.execution;
+    env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
+        .await;
+    let stale = resolve_command(id, 7);
+    env.send(stale.clone()).await;
+    timeout(WAIT, async {
+        while !env.terminal(&stale).await {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(alive(detached));
+    assert_eq!(exit_of(&env.cj().await, id), None);
+}
+
+#[tokio::test]
+async fn reboot_stops_the_execution_with_the_real_reason() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    env.close_manager().await;
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    while alive(record.supervisor_pid) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    env.reopen();
+    record.boot_id = Uuid::now_v7().to_string();
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.hub_session();
+    assert!(env.manager().startup_verify().await.unwrap().is_empty());
+    let cj = env.wait_exit("machine_rebooted").await;
+    assert_eq!(
+        exit_of(&cj, env.execution).unwrap(),
+        ("stopped".to_owned(), "machine_rebooted".to_owned())
+    );
+    assert_eq!(owner_lost(&cj, env.execution), 0);
+    env.assert_released("machine_rebooted").await;
+}
+
+#[tokio::test]
+async fn reboot_also_exits_an_execution_already_reported_lost() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    let mut record = env.ownership(env.execution).await.unwrap();
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    while alive(record.supervisor_pid) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    record.boot_id = Uuid::now_v7().to_string();
+    env.thread()
+        .call(move |store| {
+            store.as_mut().unwrap().ownership_mut()?.append(record)?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    env.restart_with_spec(&spec).await;
+    env.hub_session();
+    env.wait_exit("machine_rebooted").await;
+    env.assert_released("machine_rebooted").await;
+}
+
+#[tokio::test]
+async fn dead_journal_reaches_the_hub_before_the_exit_fact() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let id = env.execution;
+    let record = env.ownership(id).await.unwrap();
+    env.close_manager().await;
+    // Канала нет, но команду сопровождение успевает получить только при живой службе,
+    // поэтому ввод отдаётся заранее, а его конец ложится в журнал уже без отправки.
+    env.reopen();
+    env.hub_session();
+    assert_eq!(env.manager().startup_verify().await.unwrap(), vec![id]);
+    env.auto_ack = false;
+    let input = Uuid::now_v7();
+    env.send(deliver_command(
+        input,
+        1,
+        id,
+        1,
+        env.conversation,
+        &script(r#"{"delay_ms":300},{"delta":"tail"}"#),
+    ))
+    .await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    env.close_manager().await;
+    let journal = env.exec_dir().join("sj");
+    let written = timeout(WAIT, async {
+        loop {
+            let reader = canterlot_journal::Journal::open_read_only(&journal).unwrap();
+            let bodies = reader.read_from(reader.first_seq(), usize::MAX).unwrap();
+            if bodies.iter().any(|record| {
+                matches!(
+                    canterlot_proto::worker::v1::RecordBody::decode(record.payload.as_slice())
+                        .unwrap()
+                        .body,
+                    Some(Body::RunFinished(ref f)) if f.input_command_id == input.to_string()
+                )
+            }) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    written.unwrap();
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    while alive(record.supervisor_pid) {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    env.reopen();
+    env.committed.clear();
+    env.seen.clear();
+    env.bodies.clear();
+    env.hub_session();
+    env.manager().startup_verify().await.unwrap();
+    env.wait("the tail of the dead journal", |b| finished(b, input))
+        .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(exit_of(&env.cj().await, id), None, "the hub has not acked");
+    let (journal_id, up_to) = env
+        .committed
+        .iter()
+        .map(|(journal, seq)| (*journal, *seq))
+        .next()
+        .unwrap();
+    env.manager().on_sj_ack(journal_id, up_to);
+    env.auto_ack = true;
+    env.wait_exit("supervisor_died").await;
 }
 
 #[tokio::test]
@@ -1781,15 +2292,11 @@ async fn wave_w_owner_lost_retires_only_after_cj_ack_across_restart() {
     env.hub_session();
     env.start(1).await;
     env.wait_running().await;
-    let record = env.ownership(env.execution).await.unwrap();
-    assert!(env.guard.signal(
-        (record.supervisor_pid, record.supervisor_start_ticks),
-        rustix::process::Signal::KILL
-    ));
+    env.detach_descendant().await;
+    env.kill_supervisor().await;
     let id = env.execution;
     env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
         .await;
-    assert!(env.manager().journal_cursors().is_empty());
     assert_eq!(env.manager().observations()[0].state, "owner_lost");
     env.close_manager().await;
     env.reopen();
@@ -1810,7 +2317,6 @@ async fn wave_w_owner_lost_retires_only_after_cj_ack_across_restart() {
     env.reopen();
     env.manager().startup_verify().await.unwrap();
     assert!(env.manager().observations().is_empty());
-    assert!(env.manager().journal_cursors().is_empty());
     assert!(env.ownership(id).await.is_some());
 }
 
@@ -1967,16 +2473,13 @@ async fn late_delivery_proof_records_input_accepted_after_unconfirmed() {
 }
 
 #[tokio::test]
-async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending() {
+async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending_until_the_exit() {
     let mut env = Env::new().await;
     env.hub_session();
     env.start(1).await;
     env.wait_running().await;
-    let record = env.ownership(env.execution).await.unwrap();
-    assert!(env.guard.signal(
-        (record.supervisor_pid, record.supervisor_start_ticks),
-        rustix::process::Signal::KILL
-    ));
+    let detached = env.detach_descendant().await;
+    env.kill_supervisor().await;
     let id = env.execution;
     env.wait_cj("owner lost", |cj| owner_lost(cj, id) == 1)
         .await;
@@ -2023,6 +2526,18 @@ async fn wave_w_dead_ownership_keeps_deliver_cancel_withdraw_pending() {
         b,
         Body::DispatchDeferred(_) | Body::CancelWon(_) | Body::InputWithdrawn(_)
     )));
+    rustix::process::kill_process(
+        rustix::process::Pid::from_raw(i32::try_from(detached).unwrap()).unwrap(),
+        rustix::process::Signal::KILL,
+    )
+    .unwrap();
+    env.hub_session();
+    let cj = env.wait_exit("supervisor_died").await;
+    assert!(
+        cj.iter()
+            .any(|b| matches!(b, Body::CancelWon(f) if f.command_id == target.to_string()))
+    );
+    assert_eq!(env.stored_commands().await, 0, "nothing stays in the inbox");
 }
 
 #[tokio::test]

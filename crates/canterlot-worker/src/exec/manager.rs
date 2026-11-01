@@ -33,7 +33,7 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{ExecError, Shared, SjRelay, open, procfs, spawn};
+use super::{ExecError, Shared, SjRelay, lost, open, procfs, spawn};
 use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
@@ -174,6 +174,126 @@ async fn ownership_update(
         shared.remember_ownership(&record);
     }
     Ok(())
+}
+
+/// Что из отправленных записей журнала касается команд, лежащих у управляющей службы.
+#[derive(Default)]
+struct Relayed {
+    terminal: Vec<(String, u32)>,
+    transmitted: Vec<String>,
+    decisions: Vec<(String, String)>,
+}
+
+impl Relayed {
+    fn note(&mut self, body: &Body) {
+        match body {
+            Body::DecisionApplied(f) => self
+                .decisions
+                .push((f.request_id.clone(), f.decision_id.clone())),
+            Body::DecisionNotApplied(f) => self
+                .decisions
+                .push((f.request_id.clone(), f.decision_id.clone())),
+            Body::DecisionUnconfirmed(f) => self
+                .decisions
+                .push((f.request_id.clone(), f.decision_id.clone())),
+            Body::InputAccepted(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::InputRejected(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::AcceptanceUnconfirmed(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::CancelLost(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::CancelWon(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::InputWithdrawn(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::DispatchDeferred(f) => self
+                .terminal
+                .push((f.command_id.clone(), f.dispatch_attempt)),
+            Body::TransmissionStarted(f) => self.transmitted.push(f.command_id.clone()),
+            _ => {}
+        }
+    }
+
+    async fn store(self, shared: &Shared, execution: Uuid) -> Result<(), ExecError> {
+        let Relayed {
+            mut terminal,
+            transmitted,
+            decisions,
+        } = self;
+        if terminal.is_empty() && transmitted.is_empty() && decisions.is_empty() {
+            return Ok(());
+        }
+        let execution = execution.to_string();
+        shared
+            .store
+            .call(move |store| {
+                let store = open(store)?;
+                if !decisions.is_empty() {
+                    for command in store.stored_commands()? {
+                        if command.execution_id == execution
+                            && let Some(Kind::DeliverDecision(decision)) = &command.kind
+                            && decisions.iter().any(|(request, id)| {
+                                request == &decision.request_id && id == &decision.decision_id
+                            })
+                        {
+                            terminal.push((command.command_id.clone(), command.dispatch_attempt));
+                        }
+                    }
+                }
+                for command_id in transmitted {
+                    store.note_transmitted(&command_id)?;
+                }
+                for (command_id, attempt) in terminal {
+                    store.mark_terminal(&command_id, attempt)?;
+                }
+                Ok(())
+            })
+            .await?;
+        Ok(())
+    }
+}
+
+/// Записи умершего сопровождения обновляют команды так же, как живые.
+pub(super) async fn store_relayed(
+    shared: &Shared,
+    execution: Uuid,
+    records: &[canterlot_proto::worker::v1::JournalRecord],
+) -> Result<(), ExecError> {
+    let mut relayed = Relayed::default();
+    for body in records
+        .iter()
+        .filter_map(|record| record.body.as_ref().and_then(|body| body.body.as_ref()))
+    {
+        relayed.note(body);
+    }
+    relayed.store(shared, execution).await
+}
+
+/// Регистрирует актор исполнения; новый отправитель заменяет прежний.
+pub(super) fn spawn_actor(shared: &Arc<Shared>, id: Uuid, start: Start) {
+    let generation = shared
+        .infos
+        .lock()
+        .expect("infos lock")
+        .get(&id)
+        .map_or(0, |info| info.generation);
+    let (sender, receiver) = mpsc::unbounded_channel();
+    shared
+        .actors
+        .lock()
+        .expect("actors lock")
+        .insert(id, sender);
+    let actor = Actor::new(shared.clone(), id, generation, receiver);
+    let task = tokio::spawn(actor.run(start));
+    shared.tasks.lock().expect("tasks lock").push(task);
 }
 
 pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
@@ -580,7 +700,12 @@ pub(super) async fn answer_without_execution(
             Some(id) => {
                 shared
                     .store
-                    .call(move |store| Ok(open(store)?.ownership().get(id).is_some()))
+                    .call(move |store| {
+                        Ok(open(store)?
+                            .ownership()
+                            .get(id)
+                            .is_some_and(|record| record.phase != OwnershipPhase::Released as i32))
+                    })
                     .await?
             }
             None => false,
@@ -671,6 +796,16 @@ pub(super) async fn answer_without_execution(
                     terminal_self(command),
                 )
                 .await
+        }
+        // Актор успел смениться наблюдателем между выбором адресата и отправкой.
+        Some(Kind::ResolveOwnerLost(_)) => {
+            let watcher =
+                id.and_then(|id| shared.actors.lock().expect("actors lock").get(&id).cloned());
+            if let Some(sender) = watcher {
+                let _ = sender.send(Msg::Command(command.clone()));
+                return Ok(());
+            }
+            shared.cj(vec![], terminal_self(command)).await
         }
         Some(Kind::StopExecution(_)) if known.is_none() => {
             shared
@@ -798,6 +933,17 @@ impl Actor {
             .lock()
             .expect("actors lock")
             .remove(&self.id);
+        let id = self.id;
+        if self.orphaned && !*self.shutdown.borrow() {
+            let record = self
+                .shared
+                .store
+                .call(move |store| Ok(open(store)?.ownership().get(id).cloned()))
+                .await;
+            if let Ok(Some(record)) = record {
+                lost::watch(&self.shared, record, None);
+            }
+        }
         if self.orphaned || self.released {
             self.rx.close();
             let mut rest: Vec<Command> = self.waiting.drain(..).collect();
@@ -812,7 +958,21 @@ impl Actor {
                 }
             }
             for command in rest {
-                let _ = answer_without_execution(&self.shared, &command).await;
+                let watcher = self
+                    .shared
+                    .actors
+                    .lock()
+                    .expect("actors lock")
+                    .get(&id)
+                    .cloned();
+                match watcher {
+                    Some(sender) => {
+                        let _ = sender.send(Msg::Command(command));
+                    }
+                    None => {
+                        let _ = answer_without_execution(&self.shared, &command).await;
+                    }
+                }
             }
         }
     }
@@ -1312,7 +1472,7 @@ impl Actor {
             let Some(journal) = self.journal_id else {
                 return Ok(());
             };
-            map.get(&journal).copied().unwrap_or(0)
+            map.get(&journal).copied().unwrap_or(self.acked_seq)
         };
         self.outbox.clear();
         if self.link.is_some() {
@@ -1625,52 +1785,24 @@ impl Actor {
         if Uuid::parse_str(&batch.journal_id).ok() != self.journal_id || batch.records.is_empty() {
             return Ok(());
         }
-        let mut terminal = Vec::new();
-        let mut transmitted = Vec::new();
-        let mut decisions = Vec::new();
+        let mut relayed = Relayed::default();
         for record in &batch.records {
             self.last_seq = self.last_seq.max(record.seq);
             let Some(body) = record.body.as_ref().and_then(|body| body.body.as_ref()) else {
                 continue;
             };
+            relayed.note(body);
             match body {
-                Body::DecisionApplied(f) => {
-                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
-                }
-                Body::DecisionNotApplied(f) => {
-                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
-                }
-                Body::DecisionUnconfirmed(f) => {
-                    decisions.push((f.request_id.clone(), f.decision_id.clone()))
-                }
-                Body::InputAccepted(fact) => {
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
-                }
-                Body::InputRejected(fact) => {
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
-                }
-                Body::AcceptanceUnconfirmed(fact) => {
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt))
-                }
-                Body::CancelLost(fact) => {
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt))
-                }
                 Body::CancelWon(fact) => {
                     if let Ok(id) = fact.command_id.parse() {
                         self.handed.remove(&(id, fact.dispatch_attempt));
                     }
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
                 }
                 Body::InputWithdrawn(fact) => {
                     if let Ok(id) = fact.command_id.parse() {
                         self.handed.remove(&(id, fact.dispatch_attempt));
                     }
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
                 }
-                Body::DispatchDeferred(fact) => {
-                    terminal.push((fact.command_id.clone(), fact.dispatch_attempt));
-                }
-                Body::TransmissionStarted(fact) => transmitted.push(fact.command_id.clone()),
                 Body::ExecutionState(fact) => {
                     let (state, outcome) = (fact.state.clone(), fact.outcome.clone());
                     self.shared.with_info(self.id, |info| {
@@ -1684,35 +1816,7 @@ impl Actor {
         }
         let last = self.last_seq;
         self.shared.with_info(self.id, |info| info.last_seq = last);
-        if !terminal.is_empty() || !transmitted.is_empty() || !decisions.is_empty() {
-            let execution = self.id.to_string();
-            self.shared
-                .store
-                .call(move |store| {
-                    let store = open(store)?;
-                    if !decisions.is_empty() {
-                        for command in store.stored_commands()? {
-                            if command.execution_id == execution
-                                && let Some(Kind::DeliverDecision(decision)) = &command.kind
-                                && decisions.iter().any(|(request, id)| {
-                                    request == &decision.request_id && id == &decision.decision_id
-                                })
-                            {
-                                terminal
-                                    .push((command.command_id.clone(), command.dispatch_attempt));
-                            }
-                        }
-                    }
-                    for command_id in transmitted {
-                        store.note_transmitted(&command_id)?;
-                    }
-                    for (command_id, attempt) in terminal {
-                        store.mark_terminal(&command_id, attempt)?;
-                    }
-                    Ok(())
-                })
-                .await?;
-        }
+        relayed.store(&self.shared, self.id).await?;
         if let Some(journal_id) = self.journal_id {
             self.outbox.push_back(SjRelay {
                 journal_id,
@@ -1864,6 +1968,13 @@ impl Actor {
                 }
             }
             Some(Kind::RemoveWorktree(_)) => reject_invalid(&self.shared, &command).await,
+            // Хаб считает исполнение потерянным, а связь с ним цела: это и есть доказательство.
+            Some(Kind::ResolveOwnerLost(_)) => {
+                if live && command.execution_generation == self.generation {
+                    reclaim_owner(&self.shared, self.id, self.generation).await?;
+                }
+                self.shared.cj(vec![], self_terminal).await
+            }
             Some(Kind::CompactSession(_)) => {
                 if live && command.execution_generation == self.generation {
                     if !self

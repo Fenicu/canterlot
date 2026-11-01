@@ -41,6 +41,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "compact_v1",
     "background_v1",
     "session_tools_v1",
+    "owner_exit_v1",
 ];
 
 #[derive(Clone)]

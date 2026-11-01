@@ -589,7 +589,7 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                 Some(OWNER_RECLAIMED)
             )
             | (
-                Starting | Running | Stopping | OwnerLost,
+                Created | Starting | Running | Stopping | OwnerLost,
                 Stopped,
                 Some("machine_rebooted")
             )

@@ -392,6 +392,7 @@ pub enum CommandKind {
     DeliverDecision,
     CompactSession,
     RemoveWorktree,
+    ResolveOwnerLost,
 }
 
 impl CommandKind {
@@ -406,6 +407,7 @@ impl CommandKind {
             Self::DeliverDecision => "deliver_decision",
             Self::CompactSession => "compact_session",
             Self::RemoveWorktree => "remove_worktree",
+            Self::ResolveOwnerLost => "resolve_owner_lost",
         }
     }
 }
@@ -424,6 +426,7 @@ impl FromStr for CommandKind {
             "deliver_decision" => Ok(Self::DeliverDecision),
             "compact_session" => Ok(Self::CompactSession),
             "remove_worktree" => Ok(Self::RemoveWorktree),
+            "resolve_owner_lost" => Ok(Self::ResolveOwnerLost),
             _ => Err(ModelError::UnknownValue {
                 kind: "command kind",
                 value: value.into(),

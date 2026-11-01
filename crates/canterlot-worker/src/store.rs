@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use canterlot_journal::{Journal, JournalError, JournalId, JournalOptions};
 use canterlot_proto::limits::{self, LimitError, MAX_MESSAGE_BYTES};
+use canterlot_proto::worker::ipc::OwnershipPhase;
 use canterlot_proto::worker::v1::{
     Command, CommandRejected, CommandStored, JournalCursor, JournalRecord, RecordBody, record_body,
 };
@@ -75,6 +76,7 @@ pub struct CommandState {
     pub class: ReceiptClass,
     pub inbox_seq: Option<u64>,
     pub terminal: bool,
+    pub transmitted: bool,
     pub pilot_v1: bool,
 }
 
@@ -564,6 +566,7 @@ impl WorkerStore {
                 class: entry.class.clone(),
                 inbox_seq: entry.inbox_seq,
                 terminal: entry.terminal,
+                transmitted: entry.transmitted,
                 pilot_v1: entry.pilot_v1,
             }))
     }
@@ -768,6 +771,7 @@ impl WorkerStore {
     fn retire_owner_lost(&mut self, execution: &str, seq: u64) -> Result<(), StoreError> {
         if let Some(mut record) = self.ownership.get(Uuid::parse_str(execution)?).cloned()
             && record.released_reason != "owner_lost_reported"
+            && record.phase != OwnershipPhase::Released as i32
             && seq > record.reclaimed_cj_seq
         {
             record.released_reason = "owner_lost_reported".into();
