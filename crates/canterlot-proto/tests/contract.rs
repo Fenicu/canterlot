@@ -1145,6 +1145,7 @@ fn n_minus_one_decoders_skip_new_fields() {
         instructions: None,
         capabilities: vec!["pilot_v1".into()],
         worktree: None,
+        isolate_mcp: false,
     };
     assert_eq!(
         OldStartExecution::decode(new.encode_to_vec().as_slice()).unwrap(),
@@ -1244,6 +1245,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         compact_v1: true,
         background_v1: true,
         session_tools_v1: true,
+        isolate_mcp: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1825,4 +1827,32 @@ fn run_finished_debug_has_no_paths() {
             assert!(!text.contains(secret), "{secret} leaked into {text}");
         }
     }
+}
+
+#[test]
+fn isolate_mcp_is_additive_on_both_hops() {
+    use canterlot_proto::worker::ipc;
+    let start = StartExecution {
+        isolate_mcp: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        start.encode_to_vec(),
+        [0x60, 1],
+        "StartExecution.isolate_mcp is field 12"
+    );
+    assert_roundtrip(start);
+    let cli = ipc::StartCli {
+        isolate_mcp: true,
+        ..Default::default()
+    };
+    assert_eq!(
+        cli.encode_to_vec(),
+        [0x70, 1],
+        "StartCli.isolate_mcp is field 14"
+    );
+    assert_roundtrip(cli);
+    // Старый получатель пропускает незнакомое поле; флаг по умолчанию не занимает байтов.
+    assert!(StartExecution::default().encode_to_vec().is_empty());
+    assert!(ipc::StartCli::default().encode_to_vec().is_empty());
 }

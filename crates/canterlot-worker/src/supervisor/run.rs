@@ -1203,6 +1203,14 @@ impl Supervisor {
             );
             return self.begin_stop(StopCause::StartFailed, false);
         };
+        if start.isolate_mcp && !adapter.isolates_mcp() {
+            tracing::warn!(
+                kind = "start_failed",
+                reason = "mcp_isolation_unsupported",
+                "adapter start failed"
+            );
+            return self.begin_stop(StopCause::StartFailed, false);
+        }
         adapter.set_stop_grace(timers.stop_grace);
         self.pilot_v1 = start.pilot_v1;
         self.todo_v1 = start.todo_v1;
@@ -1248,6 +1256,7 @@ impl Supervisor {
             effort: start.effort,
             permission_mode: start.permission_mode,
             instructions,
+            isolate_mcp: start.isolate_mcp,
         };
         let outcome = timeout(
             timers.ready_deadline,

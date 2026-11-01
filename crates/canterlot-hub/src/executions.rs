@@ -251,6 +251,14 @@ pub async fn start_in_tx(
     let mut payload = json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
         "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
         "native_conversation_id":native});
+    // Делегированной сессию делает глубина, а не родитель: потомок удалённого родителя остаётся таким.
+    let delegated = row
+        .try_get::<Option<Uuid>, _>("parent_conversation_id")?
+        .is_some()
+        || row.try_get::<i32, _>("spawn_depth")? > 0;
+    if delegated {
+        payload["isolate_mcp"] = json!(true);
+    }
     if let Some(worktree) = worktree {
         payload["worktree"] = json!({
             "source_workdir": worktree["source_workdir"],

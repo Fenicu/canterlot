@@ -75,6 +75,7 @@ impl Bench {
             effort: "high".into(),
             permission_mode: "bypass".into(),
             instructions: instructions(InstructionMode::Owner, ""),
+            isolate_mcp: false,
         };
         Self {
             fake,

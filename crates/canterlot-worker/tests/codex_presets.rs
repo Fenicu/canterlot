@@ -219,6 +219,7 @@ impl PresetHarness {
             effort: "low".into(),
             permission_mode: permission.into(),
             instructions,
+            isolate_mcp: false,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await

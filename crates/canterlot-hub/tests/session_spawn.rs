@@ -1341,3 +1341,53 @@ async fn spawn_job_that_exhausts_attempts_closes_the_request(pool: PgPool) {
         "{notes:?}"
     );
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delegated_start_carries_the_isolation_flag_on_every_start(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    // Владелец запустил родителя: у него флага нет.
+    let root: Value = sqlx::query_scalar(
+        "select payload from commands where conversation_id=$1 and kind='start_execution'",
+    )
+    .bind(f.parent)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert!(root.get("isolate_mcp").is_none(), "{root}");
+
+    let (child, _) = f.started(inside()).await;
+    assert_eq!(f.start_payload(child).await["isolate_mcp"], true);
+
+    // Возобновление: новое исполнение той же сессии, и после потери родителя.
+    let execution: Uuid = sqlx::query_scalar("select id from executions where conversation_id=$1")
+        .bind(child)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    executions::set_state(
+        &f.pool,
+        execution,
+        ExecutionState::Failed,
+        Some("start_rejected"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    sqlx::query("update conversations set parent_conversation_id=null where id=$1")
+        .bind(child)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    executions::start(&f.pool, f.owner, child, Uuid::now_v7())
+        .await
+        .unwrap();
+    let flags: Vec<Option<bool>> = sqlx::query_scalar(
+        "select (payload->'isolate_mcp')::boolean from commands
+         where conversation_id=$1 and kind='start_execution' order by execution_generation",
+    )
+    .bind(child)
+    .fetch_all(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(flags, vec![Some(true), Some(true)]);
+}

@@ -103,6 +103,7 @@ impl Fake {
                 revision: 0,
                 title: String::new(),
             },
+            isolate_mcp: false,
         };
         Self {
             dir,
@@ -1173,6 +1174,7 @@ while True:
                 revision: 0,
                 title: String::new(),
             },
+            isolate_mcp: false,
         };
         let _permit = CLI_GATE.lock().await;
         adapter.start(&spec, &group).await.unwrap();
@@ -1916,6 +1918,7 @@ async fn live_smoke() {
             revision: 0,
             title: String::new(),
         },
+        isolate_mcp: false,
     };
     tokio::time::timeout(WAIT, preset_adapter.start(&preset_spec, &preset_group))
         .await

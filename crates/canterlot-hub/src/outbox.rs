@@ -179,6 +179,13 @@ fn to_proto_with_capability(
     {
         return Err(OutboxError::CapabilityMissing);
     }
+    // Старый воркер не знает флага и загрузил бы MCP-серверы владельца в делегированную сессию.
+    if row.kind == "start_execution"
+        && isolate_mcp(&row.payload)
+        && !has(crate::session::CAPABILITY_SESSION_TOOLS_V1)
+    {
+        return Err(OutboxError::CapabilityMissing);
+    }
     if row.kind == "deliver_input"
         && !pilot
         && (row.payload.get("settings").is_some()
@@ -208,6 +215,13 @@ fn to_proto_with_capability(
         return Err(OutboxError::ResourceLimit);
     }
     Ok(command)
+}
+
+fn isolate_mcp(payload: &Value) -> bool {
+    payload
+        .get("isolate_mcp")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
@@ -279,6 +293,7 @@ pub fn to_proto(row: &CommandRow) -> Result<Command, OutboxError> {
                 })
                 .transpose()?,
             capabilities: vec![],
+            isolate_mcp: isolate_mcp(&row.payload),
             worktree: row
                 .payload
                 .get("worktree")

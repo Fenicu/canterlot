@@ -45,6 +45,8 @@ pub struct StartSpec {
     pub effort: String,
     pub permission_mode: String,
     pub instructions: InstructionSpec,
+    /// Делегированная сессия: ни один MCP-сервер владельца не грузится, остаётся только canterlot.
+    pub isolate_mcp: bool,
 }
 #[derive(Debug)]
 pub struct Started {
@@ -819,6 +821,11 @@ pub const DEFAULT_TRANSMIT_DEADLINE: Duration = Duration::from_secs(10);
 #[async_trait::async_trait]
 pub trait Adapter: Send {
     fn capabilities(&self) -> Capabilities;
+    /// Умеет ли адаптер запуститься без MCP-серверов владельца. Без этого делегированная
+    /// сессия не стартует: молчаливый запуск с серверами владельца запрещён.
+    fn isolates_mcp(&self) -> bool {
+        false
+    }
     async fn start(
         &mut self,
         spec: &StartSpec,

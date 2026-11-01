@@ -112,6 +112,7 @@ impl Live {
                 revision: 0,
                 title: String::new(),
             },
+            isolate_mcp: false,
         }
     }
 
