@@ -190,7 +190,7 @@ describe("optimistic send", () => {
     const chat = chatOf();
     send(chat, "k1");
     chat.applier.applyEvents([queued("k1")]);
-    chat.applier.applySnapshot({ queue: { queued: [] } });
+    chat.applier.applySnapshot({ queue: { queued: [] } }, "0");
     expect(chat.inputs.get("k1")).toBeUndefined();
     expect(keys(chat)).toEqual([]);
   });
