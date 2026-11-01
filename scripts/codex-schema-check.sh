@@ -7,7 +7,7 @@ source ~/.cargo/env 2>/dev/null || true
 
 codex="${CODEX_BIN:-codex}"
 manifest_dir="docs/stage0/evidence/codex/schema-0.164.0"
-tmp="$(mktemp -d /tmp/opencode/codex-schema.XXXXXX)"
+tmp="$(mktemp -d "${TMPDIR:-/tmp}/codex-schema.XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
 version="$("$codex" --version)"
@@ -24,6 +24,8 @@ for variant in stable experimental; do
         continue
     fi
     while read -r expected file; do
+        # Строки с # в манифесте: заголовок с версией и командой, не записи.
+        case "$expected" in \#* | "") continue ;; esac
         if [ ! -f "$tmp/$variant/$file" ]; then
             echo "missing file: $variant/$file"
             fail=1
