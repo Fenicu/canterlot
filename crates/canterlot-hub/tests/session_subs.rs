@@ -684,6 +684,92 @@ async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool)
     );
 }
 
+async fn lost(pool: &PgPool, p: &Pair, execution: Uuid) {
+    executions::set_state(
+        pool,
+        execution,
+        ExecutionState::OwnerLost,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    refresh_at(pool, p.target, Utc::now()).await;
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_lost_keeps_the_subscription_for_the_result_after_a_reclaim(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    subscribe(&pool, &p).await;
+    lost(&pool, &p, execution.execution_id).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 1, "the subscriber hears about the loss");
+    assert_eq!(fired[0]["state"], "failed");
+    assert!(
+        subscription(&pool, p.subscriber, p.target).await["closed_at"].is_null(),
+        "a reclaim can still bring the session back"
+    );
+    let mut conn = pool.acquire().await.unwrap();
+    let current = subs::current_in_tx(&mut conn, p.target, Utc::now(), &config())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(current.state.as_str(), "failed");
+    assert!(!current.closes, "session_wait must not close it either");
+    drop(conn);
+
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Running,
+        Some(canterlot_proto::OWNER_RECLAIMED),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    let now = Utc::now();
+    refresh_at(&pool, p.target, now).await;
+    finish_turn(&pool, &p, &execution, now).await;
+    refresh_at(&pool, p.target, now + TimeDelta::seconds(10)).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 2, "the result after the reclaim gets through");
+    assert_eq!(fired[1]["state"], "idle");
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "idle"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_exit_of_a_lost_session_gets_its_own_report(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    subscribe(&pool, &p).await;
+    lost(&pool, &p, execution.execution_id).await;
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Failed,
+        Some("admin_resolved"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    refresh_at(&pool, p.target, Utc::now()).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(
+        fired.len(),
+        2,
+        "the state name is the same, the news is not"
+    );
+    assert_eq!(fired[1]["state"], "failed");
+    assert_eq!(
+        subscription(&pool, p.subscriber, p.target).await["closed_reason"],
+        "failed"
+    );
+}
+
 /// Ввод вышел из счётных состояний, а пересчёт проекции ещё не случился: она всё говорит `idle`.
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn poll_of_a_stale_idle_does_not_settle_a_turn_in_progress(pool: PgPool) {

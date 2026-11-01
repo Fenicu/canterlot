@@ -138,6 +138,9 @@ pub struct ExecutionFacts {
     pub tool_name: Option<String>,
     pub summary: Option<String>,
 }
+/// Причина `failed`, из которой воркер ещё может вернуть исполнение.
+pub const OWNER_LOST: &str = "owner_lost";
+
 #[derive(Clone, Debug)]
 pub struct QueueFacts {
     pub slot: RunSlot,
@@ -289,7 +292,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
                 state: S::Failed,
                 evidence: Evidence::Failed {
                     reason: if e.state == ExecutionState::OwnerLost {
-                        "owner_lost".into()
+                        OWNER_LOST.into()
                     } else {
                         e.outcome.clone().unwrap_or_else(|| "failed".into())
                     },

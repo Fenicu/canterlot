@@ -539,6 +539,35 @@ async fn summary_variants_for_each_state(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn lost_session_says_it_may_come_back(pool: PgPool) {
+    let f = fixture(&pool).await;
+    set_activity(
+        &pool,
+        f.target,
+        S::Failed,
+        E::Failed {
+            reason: "owner_lost".into(),
+        },
+    )
+    .await;
+    let text = text_for(&pool, &f, "failed", None).await;
+    assert!(text.contains("Reason: owner_lost."), "{text}");
+    assert!(text.contains("you stay subscribed"), "{text}");
+
+    set_activity(
+        &pool,
+        f.target,
+        S::Failed,
+        E::Failed {
+            reason: "crashed".into(),
+        },
+    )
+    .await;
+    let text = text_for(&pool, &f, "failed", None).await;
+    assert!(!text.contains("you stay subscribed"), "{text}");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn summary_never_contains_secret_answer(pool: PgPool) {
     let f = fixture(&pool).await;
     let now = Utc::now();

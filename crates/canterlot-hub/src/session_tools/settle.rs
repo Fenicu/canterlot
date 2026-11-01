@@ -5,7 +5,7 @@ use std::time::Duration;
 use chrono::{DateTime, SecondsFormat, TimeDelta, Utc};
 
 use crate::{
-    activity::{Activity, ActivityState, Evidence, QueueFacts, Thresholds},
+    activity::{Activity, ActivityState, Evidence, OWNER_LOST, QueueFacts, Thresholds},
     config::ActivityConfig,
     model::RunSlot,
 };
@@ -20,6 +20,8 @@ pub enum Settled {
     Stalled,
     QuotaPaused,
     Failed,
+    /// Для подписчика это `failed`, но конца ещё нет: воркер может вернуть исполнение.
+    OwnerLost,
     Stopped,
 }
 
@@ -30,8 +32,17 @@ impl Settled {
             Self::WaitingForUser => "waiting_for_user",
             Self::Stalled => "stalled",
             Self::QuotaPaused => "quota_paused",
-            Self::Failed => "failed",
+            Self::Failed | Self::OwnerLost => "failed",
             Self::Stopped => "stopped",
+        }
+    }
+
+    /// Выход из `owner_lost` в `failed` не меняет ни имя состояния, ни `since`:
+    /// отпечаток различает их сам, иначе итог завершения не дошёл бы до подписчика.
+    fn fingerprint_name(self) -> &'static str {
+        match self {
+            Self::OwnerLost => OWNER_LOST,
+            other => other.as_str(),
         }
     }
 
@@ -82,7 +93,10 @@ pub fn settled(
         ActivityState::WaitingForUser => Some(Settled::WaitingForUser),
         ActivityState::Stalled => Some(Settled::Stalled),
         ActivityState::QuotaPaused => Some(Settled::QuotaPaused),
-        ActivityState::Failed => Some(Settled::Failed),
+        ActivityState::Failed => Some(match &a.evidence {
+            Evidence::Failed { reason } if reason == OWNER_LOST => Settled::OwnerLost,
+            _ => Settled::Failed,
+        }),
         ActivityState::Stopped => Some(Settled::Stopped),
         // `sessions.wait` читает проекцию, которая отстаёт от очереди: занятый слот и есть работа.
         ActivityState::Idle if !matches!(q.slot, RunSlot::Free) => None,
@@ -125,7 +139,7 @@ pub fn fingerprint(
     let at = |value: DateTime<Utc>| value.to_rfc3339_opts(SecondsFormat::Micros, true);
     format!(
         "{}|{}|{}",
-        state.as_str(),
+        state.fingerprint_name(),
         at(since),
         last_turn_at.map(at).unwrap_or_default()
     )

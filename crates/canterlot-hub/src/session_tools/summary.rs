@@ -12,7 +12,7 @@ use sqlx::{PgConnection, types::Json};
 use uuid::Uuid;
 
 use crate::{
-    activity::{Evidence, extract_request_summary},
+    activity::{Evidence, OWNER_LOST, extract_request_summary},
     requests::RequestKind,
 };
 
@@ -468,6 +468,9 @@ fn detail_section(detail: &Detail) -> String {
             instant(*last_event_at),
             yes_no(*process_alive),
             yes_no(*cpu_busy)
+        ),
+        Detail::Failed { reason } if reason == OWNER_LOST => format!(
+            "Reason: {reason}. The worker lost this session but may get it back; you stay subscribed.\n"
         ),
         Detail::Failed { reason } => format!("Reason: {reason}.\n"),
         Detail::QuotaPaused {
