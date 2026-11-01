@@ -1243,6 +1243,7 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
         todo_v1: true,
         compact_v1: true,
         background_v1: true,
+        session_tools_v1: true,
     });
     assert_roundtrip(ipc::CompactRequest {
         command_id: "command".into(),
@@ -1792,6 +1793,35 @@ fn session_tools_messages_are_stable() {
         format!("{finished:?}"),
     ] {
         for secret in ["secret", "секрет", "canterlot/0190abcd"] {
+            assert!(!text.contains(secret), "{secret} leaked into {text}");
+        }
+    }
+}
+
+#[test]
+fn run_finished_debug_has_no_paths() {
+    use canterlot_proto::worker::v1::{GitCommit, GitFacts, GitFile, RunFinished};
+
+    let finished = RunFinished {
+        git: Some(GitFacts {
+            available: true,
+            head_before: "1a2b3c4".into(),
+            head_after: "5d6e7f8".into(),
+            commits: vec![GitCommit {
+                sha: "5d6e7f8".into(),
+                subject: "private subject".into(),
+            }],
+            files: vec![GitFile {
+                path: "private/dir/file.rs".into(),
+                status: "M".into(),
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let body = record_body::Body::RunFinished(finished.clone());
+    for text in [format!("{finished:?}"), format!("{body:?}")] {
+        for secret in ["private", "file.rs", "5d6e7f8"] {
             assert!(!text.contains(secret), "{secret} leaked into {text}");
         }
     }

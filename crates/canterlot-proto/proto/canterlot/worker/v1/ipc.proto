@@ -72,6 +72,7 @@ message StartCli {
   bool todo_v1 = 10;
   bool compact_v1 = 11;
   bool background_v1 = 12;
+  bool session_tools_v1 = 13;
 }
 
 // Вызов инструмента агента: сопровождение → управляющий процесс → хаб и обратно.

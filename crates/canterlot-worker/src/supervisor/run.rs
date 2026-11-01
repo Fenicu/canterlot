@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::ExitCode,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -42,6 +42,7 @@ use super::{
     bounds::{
         MAX_REQUEST_ID_BYTES, bounded_background, bounded_json, bounded_record, bounded_todo,
     },
+    git_facts,
     ipc::{IpcConnection, IpcServer, constant_time_eq, read_message, write_message},
     sj::Sj,
 };
@@ -170,6 +171,9 @@ struct Supervisor {
     todo_v1: bool,
     compact_v1: bool,
     background_v1: bool,
+    session_tools_v1: bool,
+    /// HEAD рабочего каталога на конец прошлого хода (или на старт CLI).
+    git_head: Option<String>,
     background_drop_reported: bool,
     /// Потерю списка задач без возможности хаба показываем один раз, а не на каждое обновление.
     todo_drop_reported: bool,
@@ -332,6 +336,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         todo_v1: false,
         compact_v1: false,
         background_v1: false,
+        session_tools_v1: false,
+        git_head: None,
         background_drop_reported: false,
         todo_drop_reported: false,
         provider: String::new(),
@@ -1204,7 +1210,11 @@ impl Supervisor {
         self.todo_v1 = start.todo_v1;
         self.compact_v1 = start.compact_v1;
         self.background_v1 = start.background_v1;
+        self.session_tools_v1 = start.session_tools_v1;
         self.workdir = Some(PathBuf::from(&start.workdir));
+        if self.session_tools_v1 {
+            self.git_head = git_facts::head(Path::new(&start.workdir)).await;
+        }
         self.provider = canterlot_proto::harness::provider_of(&start.profile)
             .unwrap_or_default()
             .into();
@@ -1775,6 +1785,7 @@ impl Supervisor {
                 } else {
                     "interrupted"
                 };
+                let git = self.turn_git_facts().await;
                 let open = self.sj.open_requests();
                 self.close_blocks(reason)?;
                 self.close_requests(reason)?;
@@ -1797,7 +1808,7 @@ impl Supervisor {
                             cache_write_tokens: u.cache_write_tokens,
                         })
                         .collect(),
-                    git: None,
+                    git,
                     context_tokens,
                     context_window_tokens,
                     duration_ms,
@@ -2025,6 +2036,20 @@ impl Supervisor {
             block.sent(chunk);
         }
         Ok(())
+    }
+
+    /// Факты git на конец хода; без возможности хаба их нет вовсе. Недоступное чтение
+    /// оставляет прежний HEAD, и следующий ход покроет оба.
+    async fn turn_git_facts(&mut self) -> Option<canterlot_proto::worker::v1::GitFacts> {
+        if !self.session_tools_v1 {
+            return None;
+        }
+        let workdir = self.workdir.clone()?;
+        let facts = git_facts::collect(&workdir, self.git_head.as_deref()).await;
+        if facts.available {
+            self.git_head = Some(facts.head_after.clone());
+        }
+        Some(facts)
     }
 
     fn close_blocks(&mut self, reason: &str) -> Result<(), SupervisorError> {
