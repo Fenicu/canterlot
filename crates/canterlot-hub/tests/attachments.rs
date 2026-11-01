@@ -909,7 +909,7 @@ async fn upload_accepts_8_mib_chunks_and_config_announces_upload_chunk_bytes(poo
 async fn upload_body_over_a_socket_has_no_short_request_timeout(pool: PgPool) {
     let _shared = HEAVY.read().await;
     let mut http = testkit::test_http_config();
-    http.body_read_timeout = Duration::from_millis(300);
+    http.body_read_timeout = Duration::from_secs(1);
     let hub = testkit::spawn_test_hub_http(pool.clone(), Default::default(), http).await;
     let owner = hub.installation.owner_id;
     let machine = Uuid::now_v7();
@@ -932,10 +932,10 @@ async fn upload_body_over_a_socket_has_no_short_request_timeout(pool: PgPool) {
         .await;
     assert_eq!(created.status, 201);
     let id = id_of(&created);
-    let pieces: Vec<Bytes> = data.chunks(1024).map(Bytes::copy_from_slice).collect();
-    // Десять кадров с паузой 100 мс: тело дольше `body_read_timeout`, но без простоя.
+    let pieces: Vec<Bytes> = data.chunks(256).map(Bytes::copy_from_slice).collect();
+    // Сорок кадров с паузой 50 мс: тело дольше `body_read_timeout`, а простой в двадцать раз короче него.
     let slow = stream::iter(pieces).then(|piece| async move {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
         Ok::<_, std::io::Error>(piece)
     });
     let response = client

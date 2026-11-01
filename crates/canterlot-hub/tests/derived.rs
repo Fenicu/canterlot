@@ -119,20 +119,22 @@ async fn projector(
 #[sqlx::test(migrations = "./migrations")]
 async fn stalled_is_detected_by_the_tick_without_any_event(pool: PgPool) {
     let (s, e) = running(&pool).await;
-    let now = Utc::now();
-    sqlx::query("update executions set phase_at=$2,last_event_at=$2 where id=$1")
+    sqlx::query("update executions set phase_at=clock_timestamp(),last_event_at=clock_timestamp() where id=$1")
         .bind(e)
-        .bind(now)
         .execute(&pool)
         .await
         .unwrap();
     let config = ActivityConfig {
-        stalled_generating: Duration::from_millis(600),
         tick: Duration::from_millis(20),
         ..Default::default()
     };
     let (stop, task, _) = projector(&pool, config).await;
     until_state(&pool, s.conversation_id, "working").await;
+    sqlx::query("update executions set phase_at=clock_timestamp()-interval '10 minutes',last_event_at=clock_timestamp()-interval '10 minutes' where id=$1")
+        .bind(e)
+        .execute(&pool)
+        .await
+        .unwrap();
     until_state(&pool, s.conversation_id, "stalled").await;
     stop.send(true).unwrap();
     task.await.unwrap();

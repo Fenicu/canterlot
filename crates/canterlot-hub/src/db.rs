@@ -43,6 +43,13 @@ where
     }
 }
 
+/// Отдельный пул из одного соединения под LISTEN: долгоживущее соединение не отнимает слот у запросов.
+pub fn listener_pool(pool: &PgPool) -> PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy_with((*pool.connect_options()).clone())
+}
+
 /// Пулы sqlx::test создаются отдельно и не используют этот after_connect.
 pub async fn connect(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
     sqlx::postgres::PgPoolOptions::new()
@@ -54,4 +61,31 @@ pub async fn connect(url: &str) -> Result<sqlx::PgPool, sqlx::Error> {
         })
         .connect(url)
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::postgres::PgListener;
+
+    #[sqlx::test(migrations = false)]
+    async fn listeners_do_not_take_query_slots(pool: PgPool) {
+        let mut listeners = Vec::new();
+        for _ in 0..8 {
+            let mut listener = PgListener::connect_with(&listener_pool(&pool))
+                .await
+                .unwrap();
+            listener.listen("canterlot_events").await.unwrap();
+            listeners.push(listener);
+        }
+        let mut held = Vec::new();
+        for _ in 0..5 {
+            held.push(
+                tokio::time::timeout(std::time::Duration::from_secs(5), pool.acquire())
+                    .await
+                    .expect("query slot must stay free")
+                    .unwrap(),
+            );
+        }
+    }
 }

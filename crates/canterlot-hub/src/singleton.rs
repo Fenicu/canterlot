@@ -111,7 +111,7 @@ pub(crate) async fn supervise<F, Fut>(
     loop {
         let acquired = tokio::select! {biased;
             _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,
-            result=tokio::time::timeout(Duration::from_secs(2),Singleton::acquire(&options,service))=>result,
+            result=tokio::time::timeout(Duration::from_secs(10),Singleton::acquire(&options,service))=>result,
         };
         match acquired {
             Ok(Ok(Some(mut singleton))) => {

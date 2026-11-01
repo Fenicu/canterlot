@@ -386,10 +386,6 @@ async fn large_tool_result_without_deltas_reaches_the_owner(pool: PgPool) {
                 "{label}: checksum {checksum:?} does not match the text"
             ));
         }
-        // Финал крупнее порога хаб сверяет с дельтами, и расхождение здесь значит порчу текста.
-        // Мелкий финал без дельт хаб сверяет с пустым накоплением и сообщает о расхождении
-        // всегда: это отдельное известное поведение хаба, к крупным результатам не относится.
-        let strict = expected.len() > BLOCK_FINAL_INLINE_MAX_BYTES;
         let diagnostics: Vec<String> = sqlx::query_scalar(
             "select kind from events where execution_id = $1 and payload->>'block_id' = $2
              and kind in ('block_checksum_mismatch', 'block_revision_gap', 'block_incomplete',
@@ -402,7 +398,6 @@ async fn large_tool_result_without_deltas_reaches_the_owner(pool: PgPool) {
         .await
         .unwrap()
         .into_iter()
-        .filter(|kind| strict || kind != "block_checksum_mismatch")
         .collect();
         if !diagnostics.is_empty() {
             problems.push(format!("{label}: hub diagnostics {diagnostics:?}"));

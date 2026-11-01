@@ -177,7 +177,7 @@ async fn listen(pool: PgPool, bus: EventBus, mut shutdown: watch::Receiver<bool>
         let connection = tokio::select! {
             biased;
             _ = crate::dispatcher::wait_for_shutdown(&mut shutdown) => return,
-            result = async { let mut listener = PgListener::connect_with(&pool).await?; listener.eager_reconnect(false); listener.listen("canterlot_events").await?; Ok::<_,sqlx::Error>(listener) } => result,
+            result = async { let mut listener = PgListener::connect_with(&crate::db::listener_pool(&pool)).await?; listener.eager_reconnect(false); listener.listen("canterlot_events").await?; Ok::<_,sqlx::Error>(listener) } => result,
         };
         if let Ok(mut listener) = connection {
             bus.publish("*", "*", 0);

@@ -404,7 +404,7 @@ pub async fn run(
 }
 
 async fn listen(pool: &PgPool) -> Result<PgListener, sqlx::Error> {
-    let mut listener = PgListener::connect_with(pool).await?;
+    let mut listener = PgListener::connect_with(&crate::db::listener_pool(pool)).await?;
     listener.listen("canterlot_outbox").await?;
     Ok(listener)
 }

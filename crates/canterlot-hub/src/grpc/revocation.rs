@@ -9,9 +9,20 @@ pub(super) async fn start(pool: PgPool, registry: Registry) -> AbortOnDropHandle
     let task = AbortOnDropHandle::new(tokio::spawn(async move {
         let mut ready = Some(ready);
         loop {
-            let mut listener = match PgListener::connect_with(&pool).await {
-                Ok(mut listener) => {
-                    if listener.listen("canterlot_revoke").await.is_err() {
+            let mut listener =
+                match PgListener::connect_with(&crate::db::listener_pool(&pool)).await {
+                    Ok(mut listener) => {
+                        if listener.listen("canterlot_revoke").await.is_err() {
+                            tracing::warn!(
+                                kind = "revocation_listener_database",
+                                "revocation listener retry"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                            continue;
+                        }
+                        listener
+                    }
+                    Err(_) => {
                         tracing::warn!(
                             kind = "revocation_listener_database",
                             "revocation listener retry"
@@ -19,17 +30,7 @@ pub(super) async fn start(pool: PgPool, registry: Registry) -> AbortOnDropHandle
                         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
                         continue;
                     }
-                    listener
-                }
-                Err(_) => {
-                    tracing::warn!(
-                        kind = "revocation_listener_database",
-                        "revocation listener retry"
-                    );
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    continue;
-                }
-            };
+                };
             if let Some(ready) = ready.take() {
                 let _ = ready.send(());
             }

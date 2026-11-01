@@ -74,6 +74,10 @@ async fn until(what: &str, mut condition: impl AsyncFnMut() -> bool) {
     .unwrap_or_else(|_| panic!("timed out: {what}"));
 }
 
+fn script(steps: &str) -> String {
+    format!(r#"{{"synthetic":[{steps}]}}"#)
+}
+
 fn answer(count: usize, delay_ms: u64) -> (String, String) {
     let mut steps = Vec::new();
     let mut expected = String::new();
@@ -963,8 +967,12 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
     for profile in ["synthetic", "synthetic-exit-on-interrupt"] {
         let fixture = Fixture::new(&pool, profile, &[]).await;
         let identities = fixture.identities();
-        let (script, _) = answer(100, 80);
-        let first = fixture.submit(script).await;
+        // Ход держится до прерывания: скрипт со сроком обгонял прерывание под нагрузкой.
+        let first = fixture
+            .submit(script(
+                r#"{"delta":"0000λ|"},{"delta":"0001λ|"},{"delta":"0002λ|"},{"hang":true}"#,
+            ))
+            .await;
         let second = fixture.submit(answer(2, 0).0).await;
         fixture.wait_deltas(3).await;
         let before = fixture.faults().pause_next(Point::BeforeCommandSend);
@@ -999,6 +1007,10 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
             != Some(std::mem::discriminant(&command::Kind::DeliverInput(
                 Default::default()
             )))));
+        until("interrupt completion in SJ", async || {
+            fixture.sj().2.iter().any(|b| matches!(b, Body::InterruptStatus(f) if f.command_id == interrupt.to_string() && f.state == InterruptState::Completed as i32))
+        })
+        .await;
         let bodies = fixture.sj().2;
         assert_eq!(transmissions(&bodies, first.command_id), [1]);
         assert!(transmissions(&bodies, second.command_id).is_empty());
@@ -1009,7 +1021,6 @@ async fn interrupt_pauses_queue_first_and_nothing_transmits_after(pool: PgPool) 
                 .count(),
             1
         );
-        assert!(bodies.iter().any(|b| matches!(b, Body::InterruptStatus(f) if f.command_id == interrupt.to_string() && f.state == InterruptState::Completed as i32)));
         assert_eq!(fixture.cli_receipts(first.command_id), [1]);
         assert!(fixture.cli_receipts(second.command_id).is_empty());
         let states: Vec<String> =

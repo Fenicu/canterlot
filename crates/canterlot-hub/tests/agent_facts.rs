@@ -709,10 +709,17 @@ async fn observation_time_is_machine_time_converted_with_the_session_offset(
     let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
     for skew in [-600000, 600000] {
         let s = wire_seed(&pool).await;
-        let machine_ms = Utc::now().timestamp_millis() + skew;
+        let sent_at = Utc::now();
+        let machine_ms = sent_at.timestamp_millis() + skew;
         let c = connect(&hub, &s, Uuid::now_v7(), true, machine_ms as u64).await;
+        let connected = (Utc::now() - sent_at).num_milliseconds();
         let offset = hub.registry.clock_offset(s.machine_id).unwrap();
-        assert!((offset.num_milliseconds() + skew).abs() < 1000);
+        // Смещение = приём на хабе - время машины: к -skew добавляется только время самого соединения.
+        let error = offset.num_milliseconds() + skew;
+        assert!(
+            (-5..=connected + 5).contains(&error),
+            "offset error {error} ms, connect took {connected} ms"
+        );
         let at = hub
             .registry
             .to_hub_time(s.machine_id, machine_ms as u64)
