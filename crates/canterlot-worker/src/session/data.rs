@@ -264,9 +264,18 @@ async fn ship(
             batch = relay.recv(), if *active.borrow() && ready.is_empty() && pending.len() < 8 => {
                 let Some(batch) = batch else { return Err(WorkerError::Execution); };
                 let journal = batch.journal_id;
-                if withheld.contains(&journal){continue}
                 let after = sent.get(&journal).copied().unwrap_or(0);
+                let resent_up_to = batch.records.last().map_or(0, |r| r.seq);
                 let mut records: Vec<_> = batch.records.into_iter().filter(|r| r.seq > after).collect();
+                if records.is_empty() {
+                    // Всё это уже ушло при живом акторе, хаб ответил ему и второй раз не ответит.
+                    // Говорить за хаб можно только о том, что он правда подтвердил.
+                    if let Some(acked) = acknowledged.get(&journal).copied().filter(|a| *a >= resent_up_to) {
+                        manager.on_sj_resend_committed(journal, acked);
+                    }
+                    continue;
+                }
+                if withheld.contains(&journal){continue}
                 if !pilot && let Some(index)=records.iter().position(|r|r.body.as_ref().is_some_and(crate::store::requires_pilot)) {
                     records.truncate(index);
                     if withheld.insert(journal){diagnostics.withheld(journal);}

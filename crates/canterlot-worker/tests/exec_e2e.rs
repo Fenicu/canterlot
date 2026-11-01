@@ -1540,6 +1540,89 @@ async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve(pool: 
     fixture.finish().await;
 }
 
+/// Сопровождение умерло между фиксацией записи на хабе и сохранением подтверждения: запись
+/// закоммичена, воркер это знает, а на диске журнала её подтверждения нет.
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn exit_of_a_lost_session_survives_an_ack_the_supervisor_never_saved(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture.faults().drop_next_sj_acks(usize::MAX);
+    fixture
+        .submit(
+            json!({"synthetic":[{"detach_child":true},{"delta":"x"},{"hang":true}]}).to_string(),
+        )
+        .await;
+    fixture.wait_deltas(1).await;
+    let journal = fixture.sj().0;
+    let committed = async || -> u64 {
+        sqlx::query_scalar::<_, i64>(
+            "select committed_seq from journal_cursors where journal_id = $1",
+        )
+        .bind(journal)
+        .fetch_one(&pool)
+        .await
+        .unwrap() as u64
+    };
+    // Подтверждения задержаны, поэтому хвост журнала цел. Замороженное сопровождение их уже
+    // не прочитает: повтор диапазона доводит их до воркера, а на диск они не попадают.
+    assert!(fixture.guard.signal(identities.0, Signal::STOP));
+    until("hub committed the whole journal", async || {
+        committed().await == fixture.sj().1
+    })
+    .await;
+    let last = fixture.sj().1;
+    let journal_text = journal.to_string();
+    fixture.faults().drop_next_sj_acks(0);
+    until("the worker heard the ack of the last record", async || {
+        fixture.faults().acks().iter().any(|ack| {
+            !ack.dropped && ack.range.journal_id == journal_text && ack.range.up_to_seq == last
+        })
+    })
+    .await;
+    assert!(fixture.guard.signal(identities.0, Signal::KILL));
+    fixture.wait_state("owner_lost").await;
+    sleep(Duration::from_millis(500)).await;
+    let on_disk = Journal::open_read_only(&fixture.exec_dir().join("sj")).unwrap();
+    assert!(
+        on_disk.acked_seq() < last && on_disk.first_seq() <= on_disk.acked_seq() + 1,
+        "the state of the crash: {} acked of {last}, from {}",
+        on_disk.acked_seq(),
+        on_disk.first_seq()
+    );
+    drop(on_disk);
+    assert_eq!(committed().await, last);
+    let shipped = async || {
+        fixture
+            .faults()
+            .batches()
+            .iter()
+            .filter(|batch| batch.journal_id == journal_text)
+            .count()
+    };
+    let before = shipped().await;
+
+    control::request_resolve_owner_lost(
+        &fixture.pool,
+        fixture.owner,
+        fixture.conversation,
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.wait_state("failed").await;
+    assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
+    assert_eq!(committed().await, last, "no record is lost");
+    assert_eq!(
+        shipped().await,
+        before,
+        "the hub is not sent what it already has"
+    );
+    fixture.resume().await;
+    fixture.assert_answers().await;
+    fixture.finish().await;
+}
+
 const SPEC_B644882: &str = include_str!("fixtures/spec/b644882ac458.toml");
 
 impl Fixture {

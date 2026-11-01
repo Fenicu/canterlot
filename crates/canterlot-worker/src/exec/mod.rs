@@ -203,6 +203,31 @@ pub(crate) struct ExecInfo {
     pub lost_journal: bool,
 }
 
+#[cfg(test)]
+pub(crate) struct TestActor(mpsc::UnboundedReceiver<Msg>);
+
+#[cfg(test)]
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum TestSignal {
+    Ack(u64),
+    Replay(u64),
+}
+
+#[cfg(test)]
+impl TestActor {
+    pub(crate) fn signals(&mut self) -> Vec<TestSignal> {
+        let mut signals = Vec::new();
+        while let Ok(message) = self.0.try_recv() {
+            match message {
+                Msg::SjAck(up_to) => signals.push(TestSignal::Ack(up_to)),
+                Msg::Replay(committed) => signals.push(TestSignal::Replay(committed)),
+                _ => panic!("unexpected actor message"),
+            }
+        }
+        signals
+    }
+}
+
 #[derive(Clone, Default)]
 pub(crate) struct AdapterConfig {
     pub claude_code: Option<crate::config::ClaudeCodeConfig>,
@@ -572,6 +597,51 @@ impl ExecutionManager {
 
     pub fn on_sj_ack(&self, journal_id: Uuid, up_to: u64) {
         self.send_journal(journal_id, Msg::SjAck(up_to));
+    }
+
+    /// Сопровождение умерло, не сохранив подтверждение: наблюдатель перечитал с диска то, что
+    /// хаб уже зафиксировал, и без ответа ждал бы вечно. Живому журналу повтор не нужен: его
+    /// актор слышал ответ сам, а лишний дошёл бы до сопровождения.
+    pub fn on_sj_resend_committed(&self, journal_id: Uuid, up_to: u64) {
+        let lost = self
+            .shared
+            .infos
+            .lock()
+            .expect("infos lock")
+            .values()
+            .any(|info| info.lost_journal && info.sj_journal_id == Some(journal_id));
+        if lost {
+            self.send_journal(journal_id, Msg::SjAck(up_to));
+        }
+    }
+
+    /// Тестовый адресат журнала: запоминает, что до него дошло.
+    #[cfg(test)]
+    pub(crate) fn test_actor(&self, journal: Uuid, lost: bool) -> TestActor {
+        let id = Uuid::now_v7();
+        let (sender, rx) = mpsc::unbounded_channel();
+        self.shared.infos.lock().expect("infos lock").insert(
+            id,
+            ExecInfo {
+                conversation_id: Uuid::nil(),
+                generation: 1,
+                state: "owner_lost".into(),
+                outcome: String::new(),
+                attached: !lost,
+                sj_journal_id: Some(journal),
+                last_seq: 0,
+                acked_seq: 0,
+                retired: false,
+                cj_terminal_seq: None,
+                lost_journal: lost,
+            },
+        );
+        self.shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .insert(id, sender);
+        TestActor(rx)
     }
 
     pub(crate) fn replay_sj(&self, journal_id: Uuid, committed: u64) {
