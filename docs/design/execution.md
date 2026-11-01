@@ -4,7 +4,7 @@
 
 ## 1. Жизненный цикл исполнения (§5, §6.1, §9)
 
-Исполнение: одна попытка продолжить разговор в конкретном процессе агента. Источник истины для процессных фактов: воркер; хаб хранит последнее наблюдение и его давность. Все факты жизненного цикла от живого сопровождения, включая `execution_state`, `phase_changed`, `run_finished` и `journal_closed`, записываются в его `SJ` с fsync. Управляющая служба пишет такие факты в `CJ` только когда сопровождение не может их записать: `command_rejected` при отказе старта, `execution_state{stopped, start_cancelled}` до запуска сопровождения и `execution_state{owner_lost}`. Общего порядка между `CJ` и `SJ` нет (S-3). Поле записи протокола называется `execution_state`; сохранённое событие хаба — `execution_state_changed`. `created → owner_lost` допустим: запись принадлежности могла появиться до того, как хаб получил `starting` из `SJ`.
+Исполнение: одна попытка продолжить разговор в конкретном процессе агента. Источник истины для процессных фактов: воркер; хаб хранит последнее наблюдение и его давность. Все факты жизненного цикла от живого сопровождения, включая `execution_state`, `phase_changed`, `run_finished` и `journal_closed`, записываются в его `SJ` с fsync. Управляющая служба пишет такие факты в `CJ` только когда сопровождение не может их записать: `command_rejected` при отказе старта, `execution_state{stopped, start_cancelled}` до запуска сопровождения, `execution_state{owner_lost}` и доказательство владения `execution_state{running, owner_reclaimed}` (E-4). Общего порядка между `CJ` и `SJ` нет (S-3). Поле записи протокола называется `execution_state`; сохранённое событие хаба — `execution_state_changed`. `created → owner_lost` допустим: запись принадлежности могла появиться до того, как хаб получил `starting` из `SJ`.
 
 | Состояние | Описание (§6.1) | Смысл |
 | --- | --- | --- |
@@ -46,6 +46,7 @@ stateDiagram-v2
     stopping --> owner_lost: supervisor_lost
     owner_lost --> failed: group_empty_confirmed
     owner_lost --> failed: admin_resolved
+    owner_lost --> running: ownership_reclaimed
     starting --> stopped: boot_changed
     running --> stopped: boot_changed
     stopping --> stopped: boot_changed
@@ -71,6 +72,7 @@ stateDiagram-v2
 | `created`, `starting`, `running`, `stopping` | `supervisor_lost` | управляющая служба установила смерть сопровождения или не может его подтвердить (§5) | `CJ`, `PG-tx`: `owner_lost`, пауза `owner_lost`; владение каталогом `orphaned`; открытые запросы закрыты | `owner_lost` |
 | `owner_lost` | `group_empty_confirmed` | сверка: группа пуста | `CJ`, `PG-tx`: `failed(supervisor_died)`; владение освобождено | `failed` |
 | `owner_lost` | `admin_resolved` | явное административное решение после предупреждения | `CJ`, `PG-tx`: `failed(admin_resolved)` с флагом `termination_unconfirmed`; владение освобождено решением владельца | `failed` |
+| `owner_lost` | `ownership_reclaimed` | при старте управляющей службы `verifying → attached` (§5) доказал то же сопровождение: `boot_id`, PID и время старта, секрет IPC, поколение, `SJ`; журнал исполнения не закрыт | `CJ`: `execution_state{running, owner_reclaimed}` и отметка в записи принадлежности, до отправки `SJ`; `PG-tx`: состояние до потери (`running`, для потерянного при остановке `stopping`, при запуске `created` или `starting`), снять паузу `owner_lost`; владение каталогом снова `held`; запросы, закрытые потерей, открываются повторным `request_opened` из `SJ` | состояние до потери |
 | любое с записью принадлежности | `boot_changed` | `boot_id` записи ≠ текущему: все процессы прошлой загрузки завершены | `CJ`, `PG-tx`: `stopped(machine_rebooted)`; владение освобождено; передачи без результата → `acceptance_unconfirmed`, если `reconcile` не доказал иное | `stopped` |
 
 Отображение на CLI (факты этапа 0, README «Контракт адаптера»):
@@ -92,7 +94,7 @@ stateDiagram-v2
 - E-1: в разговоре не более одного нетерминального исполнения (`created` … `owner_lost`).
 - E-2: потеря связи, истечение heartbeat, ошибки и завершение RPC не переводят исполнение в терминальное состояние и не дают права запустить копию агента (AT-C-03, AT-H-04, §9.1).
 - E-3: после запуска сопровождения терминальное состояние наступает только по подтверждённо пустой группе ресурсов, смене `boot_id` или административному решению; `created` без сопровождения завершается только отказом или отменой старта.
-- E-4: из `owner_lost` нет пути в `running`. **Предложение**: восстановление управления живым CLI в первой версии не реализуется. Причина: каналы stdin/stdout CLI принадлежали умершему сопровождению и доказуемо не восстанавливаются, а §9.5 допускает это только при доказательстве.
+- E-4: из `owner_lost` в живое состояние возвращает только `ownership_reclaimed`: то же сопровождение живо и прошло все проверки §5, поэтому каналы CLI никуда не делись. Основание ставит только управляющая служба записью `CJ`: такая запись в `SJ` и обычный `execution_state{running}` игнорируются. Другое сопровождение, другая загрузка, мёртвый процесс или закрытый журнал пути назад не дают: каналы stdin/stdout CLI принадлежали умершему сопровождению и доказуемо не восстанавливаются (§9.5). Хаб применяет факт раньше записей `SJ`: сессия отправляет сверку и открывает канал данных только после подтверждения `CJ`. Проверка выполняется только при старте службы, повторных попыток в работе нет.
 - E-5: resume и новое исполнение запрещены, пока предыдущее исполнение разговора нетерминально, в том числе в `owner_lost` (AT-C-15).
 - E-6: PID без проверки группы ресурсов, времени старта и `boot_id` не используется ни для завершения, ни для присвоения процесса (AT-C-10).
 - E-7: исполнение никогда не запускается и не перезапускается автоматически: ни после ошибки, ни после перезагрузки, ни при несовместимом CLI (AT-A-14, AT-C-07, AT-F-10).
@@ -234,6 +236,7 @@ stateDiagram-v2
     held --> orphaned: owner_lost
     orphaned --> released: termination_confirmed
     orphaned --> released: admin_resolved
+    orphaned --> held: ownership_reclaimed
     released --> waiting: acquire_requested
     released --> [*]
 ```
@@ -249,6 +252,7 @@ stateDiagram-v2
 | `held` | `owner_lost` | | `CJ`: `orphaned` | `orphaned` |
 | `orphaned` | `termination_confirmed` | §9.5: группа подтверждённо пуста | `CJ`: освободить | `released` |
 | `orphaned` | `admin_resolved` | явное административное решение | `CJ`: освободить | `released` |
+| `orphaned` | `ownership_reclaimed` | то же сопровождение снова подтверждено (§1, E-4) | `CJ`: факт доказательства | `held` |
 
 **Предложение** для обоих адаптеров: `idle_proven` дополнительно требует, чтобы в группе ресурсов исполнения не осталось процессов, кроме снимка её членов на момент `adapter_ready` (по PID и времени старта): процесс CLI, Node-обёртка и вспомогательные процессы Codex, MCP-серверы, включая унаследованные от владельца (OD-3). Причина: учёт CLI покрывает только его собственные фоновые задачи, а потомки команд уходят в собственные группы процессов и в этот учёт не попадают ([отчёт Claude Code](../stage0/claude-code.md) §5, [отчёт Codex](../stage0/codex.md) §6), тогда как §9.5 не позволяет считать ненаблюдаемое остановленным. Без этого доказательства владение держится до остановки исполнения (W-5).
 
@@ -301,6 +305,7 @@ stateDiagram-v2
     verifying --> lost: supervisor_missing
     verifying --> boot_gone: boot_changed
     attached --> lost: supervisor_died
+    lost --> attached: ownership_reclaimed
     lost --> group_empty: group_verified_empty
     lost --> group_terminating: group_verified_nonempty
     lost --> undetermined: group_unverifiable
@@ -321,6 +326,7 @@ stateDiagram-v2
 | `verifying` | `boot_changed` | `boot_id` записи ≠ текущему | исполнение `stopped(machine_rebooted)` | `boot_gone` |
 | `verifying` | `supervisor_missing` | тот же `boot_id`, сопровождение не живо или не прошло проверку | исполнение `owner_lost` | `lost` |
 | `attached` | `supervisor_died` | pidfd сигнализирует выход, IPC закрыт | исполнение `owner_lost` | `lost` |
+| `lost` | `ownership_reclaimed` | служба перезапущена, проверки `verifying` пройдены тем же сопровождением: запись потери не отменяет доказательства. Причина потери в журнале службы: `ownership not verified` с `reason`; итог новой проверки: `lost ownership reclaimed` или `lost ownership not reclaimed` | `CJ`: `execution_state{running, owner_reclaimed}`; номер факта в записи принадлежности, более ранние `owner_lost` её уже не закрывают; `SJ` принимается в отправку | `attached` |
 | `lost` | `group_verified_empty` | группа существует и пуста | исполнение `failed(supervisor_died)` | `group_empty` |
 | `lost` | `group_verified_nonempty` | в группе есть процессы | **Предложение**: служба сама завершает только членов подтверждённой группы. Причина: CLI без сопровождения не может получить ввод или решение, а §9.5 требует подтвердить остановку старой группы (README, вопрос 4) | `group_terminating` |
 | `group_terminating` | `group_populated_false` | группа опустела | исполнение `failed(supervisor_died)` | `group_empty` |
@@ -333,7 +339,7 @@ stateDiagram-v2
 **Инварианты**
 
 - O-1: процесс завершается или присваивается только через подтверждённую группу ресурсов; посторонние процессы не затрагиваются (AT-C-10, AT-C-16).
-- O-2: пока принадлежность или завершение не установлены, исполнение остаётся `owner_lost`, владение каталогом сохраняется, resume и override запрещены (AT-C-15, AT-C-16).
+- O-2: пока принадлежность или завершение не установлены (§1, E-4), исполнение остаётся `owner_lost`, владение каталогом сохраняется, resume и override запрещены (AT-C-15, AT-C-16).
 - O-3: отсутствие наблюдаемости фоновой работы не считается доказательством остановки (§9.5).
 - O-4: restart управляющей службы не меняет PID и время старта сопровождения и CLI (AT-C-01).
 
