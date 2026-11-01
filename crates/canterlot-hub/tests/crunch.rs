@@ -1730,6 +1730,8 @@ fn new_conversation(env: &Env, start_execution: bool) -> NewConversation {
         group_ids: vec![],
         crunch: CrunchSetting::default(),
         start: start_execution,
+        parent: None,
+        worktree_source: None,
     }
 }
 

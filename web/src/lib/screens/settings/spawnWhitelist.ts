@@ -1,18 +1,8 @@
-// Логика редактора белого списка делегирования: записи, каталог машин, вызовы API.
-// Маршрутов ещё нет в сгенерированной схеме, поэтому типы и вызовы описаны здесь.
-import { http, type RequestOptions } from "#lib/api/http.js";
+// Логика редактора белого списка делегирования: записи и каталог машин.
 import type { components } from "#lib/api/generated/openapi.js";
 
-export interface WhitelistEntry {
-  harness: string;
-  model: string;
-}
-
-export interface WhitelistView {
-  entries: WhitelistEntry[];
-  is_default: boolean;
-  default_entries: WhitelistEntry[];
-}
+export type WhitelistEntry = components["schemas"]["WhitelistEntry"];
+export type WhitelistView = components["schemas"]["WhitelistView"];
 
 export type CatalogHarness = Pick<components["schemas"]["HarnessView"], "id" | "title"> & {
   models: Pick<components["schemas"]["ModelView"], "id" | "title">[];
@@ -35,15 +25,6 @@ export const DEFAULT_MODEL_LABEL = "Модель по умолчанию";
 export const NOT_IN_CATALOG = "Нет в каталоге машины";
 
 const same = (a: WhitelistEntry, b: WhitelistEntry): boolean => a.harness === b.harness && a.model === b.model;
-
-export function getSpawnWhitelist(opts?: RequestOptions) {
-  return http<WhitelistView>("GET", "/api/v1/spawn-whitelist", undefined, opts);
-}
-
-// entries === null сбрасывает список к встроенному.
-export function putSpawnWhitelist(entries: WhitelistEntry[] | null, key: string, opts?: RequestOptions) {
-  return http<WhitelistView>("PUT", "/api/v1/spawn-whitelist", { entries }, { ...opts, idempotencyKey: key });
-}
 
 // Каталоги нескольких машин сливаются: харнесс и модель берутся один раз.
 export function mergeCatalog(machines: { harnesses: CatalogHarness[] }[]): CatalogHarness[] {

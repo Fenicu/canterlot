@@ -33,6 +33,7 @@ impl Fx {
                     idle_quiet: Duration::from_secs(5),
                 },
                 dispatcher: None,
+                registry: canterlot_hub::session::Registry::new(Default::default()),
             },
             pool,
             owner: seed.owner_id,

@@ -350,12 +350,15 @@ fn validate_decision(
     use crate::requests::RequestKind;
     match (row.kind, decision) {
         // jsonb не принимает \u0000: без проверки решение падало бы в 500.
-        (RequestKind::Permission, DecisionBody::Permission { message, .. })
-            if message.as_deref().is_some_and(|text| text.contains('\0')) =>
-        {
+        (
+            RequestKind::Permission | RequestKind::SpawnApproval,
+            DecisionBody::Permission { message, .. },
+        ) if message.as_deref().is_some_and(|text| text.contains('\0')) => {
             Err(invalid_decision(None))
         }
-        (RequestKind::Permission, DecisionBody::Permission { .. }) => Ok(()),
+        (RequestKind::Permission | RequestKind::SpawnApproval, DecisionBody::Permission { .. }) => {
+            Ok(())
+        }
         (RequestKind::Question, DecisionBody::Question { answers }) => {
             let questions = row
                 .request_payload
@@ -596,6 +599,8 @@ async fn decision(
     .await?;
     if trigger {
         s.dispatcher.trigger(id);
+        // Решение об одобрении запуска ждёт в заданиях, а не в команде машине.
+        crate::scheduler::notify_pool(&s.pool);
     }
     Ok(Json(view))
 }
@@ -663,6 +668,8 @@ async fn create(
             group_ids: b.group_ids,
             crunch: b.crunch,
             start: b.start,
+            parent: None,
+            worktree_source: None,
         },
         &s.limits,
         c,

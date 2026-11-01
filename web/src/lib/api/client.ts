@@ -133,6 +133,21 @@ export function patchConversation(
   );
 }
 
+export function getSpawnWhitelist(
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["get__api_v1_spawn_whitelist"]>>> {
+  return http("GET", "/api/v1/spawn-whitelist", undefined, opts);
+}
+
+// entries: null возвращает встроенный список.
+export function putSpawnWhitelist(
+  body: Body<operations["put__api_v1_spawn_whitelist"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<HttpResponse<Ok<operations["put__api_v1_spawn_whitelist"]>>> {
+  return http("PUT", "/api/v1/spawn-whitelist", body, keyed(key, opts));
+}
+
 export function listGroups(
   query?: Query,
   opts?: RequestOptions,

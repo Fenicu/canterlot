@@ -168,6 +168,31 @@ fn window_start(now: DateTime<Utc>, window: std::time::Duration) -> DateTime<Utc
     now - TimeDelta::from_std(window).unwrap_or_else(|_| TimeDelta::days(365))
 }
 
+/// Запуски родителя за окно: созданные сессии и карточки, которые сессию не создали.
+pub async fn check_spawn_rate(
+    conn: &mut PgConnection,
+    config: &SessionToolsConfig,
+    parent: Uuid,
+    now: DateTime<Utc>,
+) -> Result<(), ToolError> {
+    let since = window_start(now, config.spawn_window);
+    let spawns: i64 = sqlx::query_scalar(
+        "select (select count(*) from conversations
+                  where parent_conversation_id=$1 and created_at>$2)
+              + (select count(*) from requests
+                  where conversation_id=$1 and kind='spawn_approval' and created_at>$2
+                    and not (state='decision_applied' and decision_payload->>'behavior'='allow'))",
+    )
+    .bind(parent)
+    .bind(since)
+    .fetch_one(conn)
+    .await?;
+    if spawns >= i64::from(config.parent_spawns) {
+        return Err(ToolError::new(ToolErrorCode::RateLimited));
+    }
+    Ok(())
+}
+
 /// События подписки не считаются: иначе последовательный оркестратор упёрся бы в свои же итоги.
 pub async fn check_rate(
     conn: &mut PgConnection,

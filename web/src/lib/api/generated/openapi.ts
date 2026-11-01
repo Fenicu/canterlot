@@ -723,6 +723,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/spawn-whitelist": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_spawn_whitelist"];
+        put: operations["put__api_v1_spawn_whitelist"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/ws": {
         parameters: {
             query?: never;
@@ -1936,6 +1952,19 @@ export interface components {
             runs: number;
             /** Format: int64 */
             weekly_delta_permille: number;
+        };
+        WhitelistBody: {
+            /** @description `null` возвращает встроенный список; поле обязательно, чтобы пустое тело его не сбрасывало. */
+            entries: components["schemas"]["WhitelistEntry"][] | null;
+        };
+        WhitelistEntry: {
+            harness: string;
+            model: string;
+        };
+        WhitelistView: {
+            default_entries: components["schemas"]["WhitelistEntry"][];
+            entries: components["schemas"]["WhitelistEntry"][];
+            is_default: boolean;
         };
         WindowView: {
             observed_at: string;
@@ -4342,6 +4371,78 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["Snapshot_MachinesSnapshot"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_spawn_whitelist: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Белый список делегирования */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitelistView"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    put__api_v1_spawn_whitelist: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["WhitelistBody"];
+            };
+        };
+        responses: {
+            /** @description Список сохранён */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WhitelistView"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

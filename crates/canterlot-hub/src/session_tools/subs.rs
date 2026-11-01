@@ -159,25 +159,26 @@ fn event_job(
     })
 }
 
-async fn insert_job(
+pub(super) async fn insert_job(
     conn: &mut PgConnection,
     owner_id: Uuid,
     subscriber_id: Uuid,
     run_at: DateTime<Utc>,
     payload: &Value,
-) -> Result<(), sqlx::Error> {
+) -> Result<Uuid, sqlx::Error> {
+    let id = Uuid::now_v7();
     sqlx::query(
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
          values($1,'session_task',$2,$3,$4,$5)",
     )
-    .bind(Uuid::now_v7())
+    .bind(id)
     .bind(owner_id)
     .bind(subscriber_id)
     .bind(run_at)
     .bind(payload)
     .execute(conn)
     .await?;
-    Ok(())
+    Ok(id)
 }
 
 /// Вызывается проектором цели под её очередью. Возвращает, создано ли задание:

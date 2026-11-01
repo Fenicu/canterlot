@@ -58,6 +58,7 @@ impl Fx {
                 config: Arc::new(config),
                 settle: SettleConfig { idle_quiet: QUIET },
                 dispatcher: None,
+                registry: canterlot_hub::session::Registry::new(Default::default()),
             },
             pool,
             owner: seed.owner_id,

@@ -1,13 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { listMachines } from '#lib/api/client.js';
+  import { getSpawnWhitelist, listMachines, putSpawnWhitelist } from '#lib/api/client.js';
   import { ApiError } from '#lib/api/http.js';
   import Button from '#lib/ui/Button.svelte';
   import Pill from '#lib/ui/Pill.svelte';
   import Select from '#lib/ui/Select.svelte';
   import {
-    NOT_IN_CATALOG, addEntry, describeEntries, getSpawnWhitelist, harnessOptions, mergeCatalog, modelOptions,
-    putSpawnWhitelist, removeEntry, sameEntries, type CatalogHarness, type WhitelistEntry, type WhitelistView
+    NOT_IN_CATALOG, addEntry, describeEntries, harnessOptions, mergeCatalog, modelOptions,
+    removeEntry, sameEntries, type CatalogHarness, type WhitelistEntry, type WhitelistView
   } from './spawnWhitelist.js';
 
   let view = $state<WhitelistView | null>(null);
@@ -47,7 +47,7 @@
   async function send(entries: WhitelistEntry[] | null) {
     if (busy) return;
     busy = true; error = '';
-    try { accept((await putSpawnWhitelist(entries, crypto.randomUUID())).data); }
+    try { accept((await putSpawnWhitelist({ entries }, crypto.randomUUID())).data); }
     catch (err) { error = err instanceof ApiError ? err.message : 'Не удалось сохранить список. Повторите при восстановлении связи'; }
     finally { busy = false; }
   }

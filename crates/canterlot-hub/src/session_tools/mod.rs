@@ -11,8 +11,10 @@ pub mod origin;
 pub mod read;
 pub mod send;
 pub mod settle;
+pub mod spawn;
 pub mod subs;
 pub mod summary;
+pub mod whitelist;
 
 use std::sync::Arc;
 
@@ -21,7 +23,7 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use self::settle::SettleConfig;
-use crate::{config::SessionToolsConfig, dispatcher::Dispatcher};
+use crate::{config::SessionToolsConfig, dispatcher::Dispatcher, session::Registry};
 
 /// Имена хаба для инструментов; на стороне модели к ним добавляются префиксы harness.
 pub const TOOLS: &[&str] = &[
@@ -184,6 +186,7 @@ pub struct ToolContext {
     pub config: Arc<SessionToolsConfig>,
     pub settle: SettleConfig,
     pub dispatcher: Option<Dispatcher>,
+    pub registry: Registry,
 }
 
 /// Вызывающий: всё выведено из живого исполнения, не из аргументов.
@@ -207,6 +210,7 @@ pub async fn call(
         "sessions.list" => read::list(context, caller, arguments).await,
         "sessions.inspect" => read::inspect(context, caller, arguments).await,
         "sessions.send" => send::send(context, caller, arguments).await,
+        "sessions.spawn" => spawn::spawn(context, caller, arguments).await,
         "sessions.subscribe" => send::subscribe(context, caller, arguments).await,
         "sessions.unsubscribe" => send::unsubscribe(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),

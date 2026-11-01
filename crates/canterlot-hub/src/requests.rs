@@ -223,12 +223,13 @@ pub async fn save_decision_in_tx(
     idempotency_key: &str,
 ) -> Result<DecisionResult, RequestDomainError> {
     // 1. Порядок блокировок хаба, шаг 7: блокировка строки conversations FOR NO KEY UPDATE
-    let machine_id: Uuid =
-        sqlx::query_scalar("select machine_id from conversations where id = $1 for no key update")
-            .bind(conversation_id)
-            .fetch_optional(&mut *tx)
-            .await?
-            .ok_or(RequestDomainError::ConversationNotFound(conversation_id))?;
+    let (machine_id, owner_id): (Uuid, Uuid) = sqlx::query_as(
+        "select machine_id, owner_id from conversations where id = $1 for no key update",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&mut *tx)
+    .await?
+    .ok_or(RequestDomainError::ConversationNotFound(conversation_id))?;
 
     // 2. Порядок блокировок хаба, шаг 10.5: блокировка строки requests FOR UPDATE по id
     let row: RequestRow = sqlx::query_as(
@@ -307,41 +308,49 @@ pub async fn save_decision_in_tx(
         .fetch_one(&mut *tx)
         .await?;
 
-        let command_id = Uuid::now_v7();
-        let command_payload = json!({
-            "request_id": row.id.to_string(),
-            "native_request_id": row.native_request_id,
-            "decision_id": winner_decision_id.to_string(),
-            "generation": row.generation,
-            "kind": row.kind.as_str(),
-            "decision_payload": decision_json,
-        });
+        // Одобрение запуска выполняет хаб: на машину решение не уходит.
+        let command_id = if row.kind == RequestKind::SpawnApproval {
+            crate::session_tools::spawn::queue_decision_in_tx(tx, owner_id, conversation_id, row.id)
+                .await?
+        } else {
+            let command_id = Uuid::now_v7();
+            let command_payload = json!({
+                "request_id": row.id.to_string(),
+                "native_request_id": row.native_request_id,
+                "decision_id": winner_decision_id.to_string(),
+                "generation": row.generation,
+                "kind": row.kind.as_str(),
+                "decision_payload": decision_json,
+            });
 
-        sqlx::query(
-            r#"
-            insert into commands (
-                id, machine_id, conversation_id, execution_id,
-                execution_generation, kind, payload, delivery_state
-            ) values (
-                $1, $2, $3, $4,
-                $5, 'deliver_decision', $6, 'pending'
+            sqlx::query(
+                r#"
+                insert into commands (
+                    id, machine_id, conversation_id, execution_id,
+                    execution_generation, kind, payload, delivery_state
+                ) values (
+                    $1, $2, $3, $4,
+                    $5, 'deliver_decision', $6, 'pending'
+                )
+                "#,
             )
-            "#,
-        )
-        .bind(command_id)
-        .bind(machine_id)
-        .bind(row.conversation_id)
-        .bind(row.execution_id)
-        .bind(row.generation)
-        .bind(&command_payload)
-        .execute(&mut *tx)
-        .await?;
-
-        // Уведомление outbox о появлении исходящей команды
-        sqlx::query("select pg_notify('canterlot_outbox', $1)")
-            .bind(machine_id.to_string())
+            .bind(command_id)
+            .bind(machine_id)
+            .bind(row.conversation_id)
+            .bind(row.execution_id)
+            .bind(row.generation)
+            .bind(&command_payload)
             .execute(&mut *tx)
             .await?;
+
+            // Уведомление outbox о появлении исходящей команды
+            sqlx::query("select pg_notify('canterlot_outbox', $1)")
+                .bind(machine_id.to_string())
+                .execute(&mut *tx)
+                .await?;
+
+            command_id
+        };
 
         // Шаг 12 порядка блокировок: публикация события request_decided
         crate::events::append(
@@ -525,15 +534,17 @@ pub(crate) async fn close_for_ended_execution_in_tx(
     reason: &str,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    let rows: Vec<(Uuid, String, Option<Uuid>)> = sqlx::query_as(
-        "select id, state, winner_decision_id from requests
+    // Сохранённое решение о запуске выполнит задание: живой родитель ему не нужен (D21).
+    let rows: Vec<(Uuid, String, Option<Uuid>, RequestKind, serde_json::Value)> = sqlx::query_as(
+        "select id, state, winner_decision_id, kind, request_payload from requests
          where execution_id = $1 and state in ('open', 'decision_saved', 'decision_transmitting')
+           and not (kind = 'spawn_approval' and state = 'decision_saved')
          order by id for update",
     )
     .bind(execution_id)
     .fetch_all(&mut *conn)
     .await?;
-    for (id, state, winner) in rows {
+    for (id, state, winner, kind, payload) in rows {
         // Команда на машине могла дойти до агента, а факты сопровождения идут отдельным
         // журналом и могут опоздать; решения дальше хаба не ушло только у `pending`.
         let on_machine: bool = sqlx::query_scalar(
@@ -584,6 +595,15 @@ pub(crate) async fn close_for_ended_execution_in_tx(
             },
         )
         .await?;
+        if kind == RequestKind::SpawnApproval {
+            crate::session_tools::spawn::queue_lapsed_note_in_tx(
+                conn,
+                conversation_id,
+                id,
+                &payload,
+            )
+            .await?;
+        }
     }
     Ok(())
 }

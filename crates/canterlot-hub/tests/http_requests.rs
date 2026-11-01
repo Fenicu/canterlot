@@ -161,6 +161,36 @@ async fn post_decision_commits_permission_and_returns_200(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn spawn_approval_decision_goes_to_a_job_not_to_the_machine(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let request = f
+        .request("spawn_approval", json!({"harness":"codex"}))
+        .await;
+    assert_error(
+        &f.post(request, "wrong", question(json!("Да, точно"))).await,
+        422,
+        "decision_invalid",
+    );
+    let response = f.post(request, "key", permission()).await;
+    assert_eq!(response.status, 200);
+    assert_schema(&response, "200");
+    let replay = f.post(request, "key", permission()).await;
+    assert_eq!(replay.body, response.body);
+    let (commands, _) = f.counts().await;
+    assert_eq!(commands, 0);
+    let jobs: i64 = sqlx::query_scalar(
+        "select count(*) from scheduled_jobs where kind='session_task' and conversation_id=$1
+           and payload->>'action'='spawn' and payload->>'request_id'=$2",
+    )
+    .bind(f.conversation)
+    .bind(request.to_string())
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(jobs, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn post_decision_commits_question_answers_and_validates_options(pool: PgPool) {
     let f = Fixture::new(pool).await;
     let id = f.request("question", contract()).await;

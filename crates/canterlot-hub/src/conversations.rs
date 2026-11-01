@@ -6,7 +6,7 @@ use crate::{
     idempotency,
     model::{HoldReason, HoldView},
     presets::{self, AppliedPreset, PresetRef},
-    session::{CAPABILITY_INSTRUCTIONS_V1, Registry},
+    session::{CAPABILITY_INSTRUCTIONS_V1, CAPABILITY_SESSION_TOOLS_V1, Registry},
 };
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -37,6 +37,22 @@ pub struct NewConversation {
     pub group_ids: Vec<Uuid>,
     pub crunch: CrunchSetting,
     pub start: bool,
+    // Сессии владельца эти поля не несут: их хеш идемпотентности не меняется.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent: Option<ParentLink>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree_source: Option<WorktreeSource>,
+}
+/// Кто запустил сессию: родитель и глубина самой новой сессии.
+#[derive(Clone, Copy, Serialize)]
+pub struct ParentLink {
+    pub id: Uuid,
+    pub spawn_depth: i32,
+}
+/// Сессия работает в своей рабочей копии: `workdir` тогда значит исходный репозиторий.
+#[derive(Clone, Serialize)]
+pub struct WorktreeSource {
+    pub base: String,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct Created {
@@ -729,7 +745,7 @@ fn valid_text(s: &str, max: usize) -> bool {
 /// Путь входит в ключ `machine_workdirs`, а строка btree ограничена примерно 2700 байтами.
 pub use canterlot_proto::limits::MAX_WORKDIR_BYTES;
 
-fn workdir_allowed(workdir: &str, roots: &Value) -> bool {
+pub(crate) fn workdir_allowed(workdir: &str, roots: &Value) -> bool {
     use std::path::{Component, Path};
     let path = Path::new(workdir);
     workdir.len() <= MAX_WORKDIR_BYTES
@@ -1037,7 +1053,23 @@ pub struct LiveExecutionView {
     pub created_at: DateTime<Utc>,
 }
 
-async fn create_in_tx(
+/// Ветка берёт хвост идентификатора: начало UUIDv7 одинаково у сессий, запущенных подряд.
+fn worktree_row(id: Uuid, root: &str, source: &str, base: &str) -> (String, Value) {
+    let hex = id.simple().to_string();
+    let path = format!("{}/{id}", root.trim_end_matches('/'));
+    let row = json!({
+        "source_workdir": source,
+        "path": path,
+        "branch": format!("canterlot/{}", &hex[hex.len() - 8..]),
+        "base": base,
+        "state": "active",
+        "detail": null,
+        "branch_kept": null,
+    });
+    (path, row)
+}
+
+pub(crate) async fn create_in_tx(
     conn: &mut PgConnection,
     req: NewConversation,
     limits: LimitsConfig,
@@ -1125,6 +1157,14 @@ async fn create_in_tx(
     if !workdir_allowed(&req.workdir, &m.try_get("allowed_roots")?) {
         return Err(CreateError::WorkdirNotAllowed);
     }
+    let worktree_root: Option<String> = m.try_get("worktree_root")?;
+    let worktree_root = match &req.worktree_source {
+        Some(_) if !registry.has_capability(req.machine_id, CAPABILITY_SESSION_TOOLS_V1) => {
+            return Err(CreateError::CapabilityMissing);
+        }
+        Some(_) => Some(worktree_root.ok_or(CreateError::CapabilityMissing)?),
+        None => None,
+    };
     if !groups_valid(conn, req.owner_id, &req.group_ids).await? {
         return Err(CreateError::GroupNotFound);
     }
@@ -1144,6 +1184,14 @@ async fn create_in_tx(
         holds.extend(crate::crunch::initial_holds_in_tx(conn, provider).await?);
     }
     let id = Uuid::now_v7();
+    let isolated = req
+        .worktree_source
+        .as_ref()
+        .zip(worktree_root.as_deref())
+        .map(|(source, root)| worktree_row(id, root, &req.workdir, &source.base));
+    let workdir = isolated
+        .as_ref()
+        .map_or(req.workdir.as_str(), |(path, _)| path);
     let title = req.title.as_deref().unwrap_or("");
     let user = !title.trim().is_empty();
     let resume = if req.crunch.enabled {
@@ -1156,9 +1204,13 @@ async fn create_in_tx(
     } else {
         req.crunch.resume_text.as_deref()
     };
-    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)")
-            .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(&req.workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume).execute(&mut *conn).await?;
-    remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;
+    sqlx::query("insert into conversations(id,owner_id,machine_id,harness,workdir,title,title_source,color,model,effort,permission_mode,instruction_profile,instruction_preset_revision,crunch_enabled,crunch_resume_text,parent_conversation_id,spawn_depth,worktree) values($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)")
+            .bind(id).bind(req.owner_id).bind(req.machine_id).bind(&req.harness).bind(workdir).bind(if user{title}else{"Новая сессия"}).bind(if user{"user"}else{"auto"}).bind(&req.color).bind(&req.model).bind(&req.effort).bind(permission).bind(reference.as_str()).bind(revision).bind(req.crunch.enabled).bind(resume)
+            .bind(req.parent.map(|parent| parent.id)).bind(req.parent.map_or(0, |parent| parent.spawn_depth)).bind(isolated.as_ref().map(|(_, row)| row)).execute(&mut *conn).await?;
+    // Путь рабочей копии одноразовый: на экране новой сессии ему делать нечего.
+    if isolated.is_none() {
+        remember_workdir(&mut *conn, req.owner_id, req.machine_id, &req.workdir).await?;
+    }
     sqlx::query("insert into queue_state(conversation_id,hold_reasons) values($1,$2)")
         .bind(id)
         .bind(sqlx::types::Json(&holds))

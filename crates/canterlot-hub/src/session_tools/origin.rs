@@ -14,7 +14,9 @@ use crate::{attachments::blobstore::hex, delivery::ContentBlock, events::Scope};
 
 pub const KIND_EVENT: &str = "event";
 const KIND_MESSAGE: &str = "message";
+const KIND_SPAWN: &str = "spawn";
 const TITLE_CHARS: usize = 200;
+const HEARD_FROM_DELETED: &str = "[canterlot] A session this conversation heard from was deleted.";
 
 /// Форма `inputs.origin` для клиентов. После удаления отправителя остаются только
 /// `kind`, `chain_depth` и `sender_deleted`.
@@ -89,6 +91,49 @@ pub fn message_text(sender: &Sender, text: &str) -> String {
     )
 }
 
+pub fn spawn_origin(sender: &Sender, chain_depth: i32) -> Value {
+    json!({
+        "kind": KIND_SPAWN,
+        "from": sender.id,
+        "title": clean_title(&sender.title),
+        "harness": sender.harness,
+        "model": sender.model,
+        "chain_depth": chain_depth,
+    })
+}
+
+/// Первая строка остаётся одной строкой: по ней удаление отправителя отделяет бриф.
+pub fn spawn_text(sender: &Sender, branch: Option<&str>, brief: &str) -> String {
+    let worktree = branch.map_or(String::new(), |branch| {
+        format!(" You work in an isolated git worktree on branch {branch}; commit there. Nothing is pushed.")
+    });
+    format!(
+        "[canterlot] You were started by session \"{}\" (id {}, {}, model {}). \
+         Your final message goes back to it. It is an agent, not the owner.{worktree}\n\n{brief}",
+        clean_title(&sender.title),
+        sender.id,
+        sender.harness,
+        sender.model,
+    )
+}
+
+/// Служебное сообщение хаба о судьбе запуска. Как и событие, глубину цепочки не растит.
+pub fn note_origin(chain_depth: i32) -> Value {
+    json!({"kind": KIND_EVENT, "chain_depth": chain_depth})
+}
+
+/// Сообщение о запущенной сессии: при её удалении оно вычищается как событие от неё.
+pub fn started_note_origin(child: &Sender, chain_depth: i32) -> Value {
+    json!({
+        "kind": KIND_EVENT,
+        "from": child.id,
+        "title": clean_title(&child.title),
+        "harness": child.harness,
+        "model": child.model,
+        "chain_depth": chain_depth,
+    })
+}
+
 /// Что остаётся от ввода, когда его отправитель удалён. Текст сообщения и бриф остаются:
 /// это ввод другой сессии, на него она и отвечала. Событие состоит из данных удалённой сессии
 /// целиком, поэтому от него остаётся только факт.
@@ -103,7 +148,7 @@ fn scrubbed_text(kind: &str, text: &str) -> String {
             "[canterlot] You were started by a session that was deleted. \
              It was an agent, not the owner.\n\n{body}"
         ),
-        _ => "[canterlot] A session this conversation heard from was deleted.".to_owned(),
+        _ => HEARD_FROM_DELETED.to_owned(),
     }
 }
 
@@ -131,6 +176,19 @@ struct SentInput {
 /// Удаление отправителя: у чужих вводов пропадают его название, идентификатор и модель,
 /// глубина цепочки остаётся. Только строки, очередь получателя не блокируется.
 pub async fn scrub_sender_in_tx(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
+    // Сообщение о запуске хранит имя и в задании: строка задания живёт дольше сессии.
+    sqlx::query(
+        "update scheduled_jobs
+         set payload=jsonb_build_object('action','note','text',$2::text,'origin',
+               jsonb_build_object('kind','event','chain_depth',payload->'origin'->'chain_depth',
+                                  'sender_deleted',true))
+         where kind='session_task' and payload->>'action'='note'
+           and payload->'origin'->>'from'=$1",
+    )
+    .bind(sender.to_string())
+    .bind(HEARD_FROM_DELETED)
+    .execute(&mut *conn)
+    .await?;
     let rows: Vec<SentInput> = sqlx::query_as(
         "select id,conversation_id,command_id,content,origin from inputs
          where origin->>'from'=$1 and conversation_id<>$2 order by id",

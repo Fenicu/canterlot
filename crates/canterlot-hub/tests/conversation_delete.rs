@@ -495,6 +495,7 @@ async fn sent_to_others(f: &Fixture, sender: Uuid, receiver: Uuid, title: &str) 
             idle_quiet: std::time::Duration::from_secs(5),
         },
         dispatcher: None,
+        registry: canterlot_hub::session::Registry::new(Default::default()),
     };
     let caller = Caller {
         owner_id: f.owner,

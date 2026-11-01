@@ -237,6 +237,16 @@ pub async fn start_in_tx(
     .bind(generation)
     .execute(&mut *conn)
     .await?;
+    let mut payload = json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
+        "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
+        "native_conversation_id":native});
+    if let Some(worktree) = row.try_get::<Option<serde_json::Value>, _>("worktree")? {
+        payload["worktree"] = json!({
+            "source_workdir": worktree["source_workdir"],
+            "branch": worktree["branch"],
+            "base": worktree["base"],
+        });
+    }
     sqlx::query(
         "insert into commands (id, machine_id, conversation_id, execution_id,
                                execution_generation, kind, payload, delivery_state)
@@ -247,9 +257,7 @@ pub async fn start_in_tx(
     .bind(conversation_id)
     .bind(started.execution_id)
     .bind(generation)
-    .bind(json!({"harness": row.try_get::<String,_>("harness")?, "workdir": row.try_get::<String,_>("workdir")?,
-        "model":model,"effort":effort,"permission_mode":permission_mode,"instructions":instructions,
-        "native_conversation_id":native}))
+    .bind(payload)
     .execute(&mut *conn)
     .await?;
     sqlx::query("select pg_notify('canterlot_outbox', $1::text)")

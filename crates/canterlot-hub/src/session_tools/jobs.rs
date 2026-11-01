@@ -11,7 +11,8 @@ use crate::{
     crunch::JobOutcome,
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
-    session_tools::summary,
+    session::Registry,
+    session_tools::{spawn, summary},
 };
 
 #[derive(Deserialize)]
@@ -26,6 +27,8 @@ struct EventJob {
 #[derive(Deserialize)]
 struct NoteJob {
     text: String,
+    #[serde(default)]
+    origin: Option<Value>,
 }
 
 pub async fn run_in_tx(
@@ -33,6 +36,7 @@ pub async fn run_in_tx(
     job: &ClaimedJob,
     now: DateTime<Utc>,
     correlation_id: Uuid,
+    registry: Option<&Registry>,
 ) -> Result<JobOutcome, SubmitError> {
     let Some(subscriber) = job.conversation_id else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
@@ -58,8 +62,19 @@ pub async fn run_in_tx(
             let Ok(note) = serde_json::from_value::<NoteJob>(job.payload.clone()) else {
                 return Ok(JobOutcome::Cancelled("invalid_payload"));
             };
-            deliver(conn, job, subscriber, note.text, None, now, correlation_id).await
+            deliver(
+                conn,
+                job,
+                subscriber,
+                note.text,
+                note.origin,
+                now,
+                correlation_id,
+            )
+            .await
         }
+        Some("spawn") => spawn::run_job(conn, job, subscriber, registry, now, correlation_id).await,
+        Some("spawn_close") => spawn::close_job(conn, job, subscriber, correlation_id).await,
         Some(_) => Ok(JobOutcome::Cancelled("unsupported")),
         None => Ok(JobOutcome::Cancelled("invalid_payload")),
     }

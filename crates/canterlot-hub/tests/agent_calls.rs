@@ -524,10 +524,7 @@ async fn agent_call_logs_contain_no_arguments(pool: PgPool) {
 async fn session_tool_stubs_answer_unknown_tool_after_the_liveness_check(pool: PgPool) {
     let fx = Fx::new(pool).await;
     for tool in canterlot_hub::session_tools::TOOLS {
-        if matches!(
-            *tool,
-            "sessions.spawn" | "sessions.wait" | "sessions.accept"
-        ) {
+        if matches!(*tool, "sessions.wait" | "sessions.accept") {
             let response = fx.agent(tool, json!({}), &Uuid::now_v7()).await;
             assert_eq!(response.error_code, "unknown_tool", "{tool}");
             assert!(response.result_json.is_empty(), "{tool}");

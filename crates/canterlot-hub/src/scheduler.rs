@@ -821,8 +821,14 @@ impl Scheduler {
                     .map_err(|e| sqlx::Error::Encode(Box::new(e)))
             }),
             JobKind::SessionTask => {
-                match crate::session_tools::jobs::run_in_tx(&mut tx, &claimed, now, correlation)
-                    .await
+                match crate::session_tools::jobs::run_in_tx(
+                    &mut tx,
+                    &claimed,
+                    now,
+                    correlation,
+                    self.registry.as_ref(),
+                )
+                .await
                 {
                     Ok(outcome) => Ok(outcome),
                     Err(SubmitError::Db(error)) => Err(error),

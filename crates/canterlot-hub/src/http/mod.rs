@@ -40,6 +40,7 @@ pub mod media;
 pub mod openapi;
 pub mod presets;
 pub mod scheduled;
+pub mod session_tools;
 pub mod snapshot;
 pub mod ws;
 
@@ -139,6 +140,7 @@ pub fn api_routes() -> OpenApiRouter<AppState> {
         .merge(crunch::routes())
         .merge(groups::routes())
         .merge(presets::routes())
+        .merge(session_tools::routes())
         .merge(machines::routes())
         .merge(limits::routes())
         .merge(snapshot::routes())

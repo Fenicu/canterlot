@@ -43,7 +43,7 @@ struct TargetArgs {
     session_id: Uuid,
 }
 
-fn submit_error(error: SubmitError) -> ToolError {
+pub(super) fn submit_error(error: SubmitError) -> ToolError {
     match error {
         SubmitError::QueueFull { .. } => ToolError::new(ToolErrorCode::QueueFull),
         SubmitError::ConversationClosed => ToolError::new(ToolErrorCode::ConversationClosed),
@@ -61,7 +61,7 @@ fn submit_error(error: SubmitError) -> ToolError {
 
 /// Отправки одной сессии идут по очереди: иначе параллельные вызовы вместе прошли бы
 /// и проверку частоты, и поиск такого же текста.
-async fn lock_sender(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
+pub(super) async fn lock_sender(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("select pg_advisory_xact_lock(hashtextextended('canterlot:send:'||$1::text,0))")
         .bind(sender)
         .execute(conn)
@@ -69,7 +69,7 @@ async fn lock_sender(conn: &mut PgConnection, sender: Uuid) -> Result<(), sqlx::
     Ok(())
 }
 
-async fn lock_queue(conn: &mut PgConnection, target: Uuid) -> Result<(), sqlx::Error> {
+pub(super) async fn lock_queue(conn: &mut PgConnection, target: Uuid) -> Result<(), sqlx::Error> {
     sqlx::query("select conversation_id from queue_state where conversation_id=$1 for update")
         .bind(target)
         .execute(conn)

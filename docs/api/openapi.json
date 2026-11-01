@@ -4245,6 +4245,120 @@
         }
       }
     },
+    "/api/v1/spawn-whitelist": {
+      "get": {
+        "tags": [
+          "session_tools"
+        ],
+        "operationId": "get__api_v1_spawn_whitelist",
+        "responses": {
+          "200": {
+            "description": "Белый список делегирования",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitelistView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "session_tools"
+        ],
+        "operationId": "put__api_v1_spawn_whitelist",
+        "parameters": [
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/WhitelistBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Список сохранён",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhitelistView"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/ws": {
       "get": {
         "tags": [
@@ -8926,6 +9040,66 @@
           "weekly_delta_permille": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "WhitelistBody": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/WhitelistEntry"
+            },
+            "description": "`null` возвращает встроенный список; поле обязательно, чтобы пустое тело его не сбрасывало."
+          }
+        },
+        "additionalProperties": false
+      },
+      "WhitelistEntry": {
+        "type": "object",
+        "required": [
+          "harness",
+          "model"
+        ],
+        "properties": {
+          "harness": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "WhitelistView": {
+        "type": "object",
+        "required": [
+          "entries",
+          "is_default",
+          "default_entries"
+        ],
+        "properties": {
+          "default_entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhitelistEntry"
+            }
+          },
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WhitelistEntry"
+            }
+          },
+          "is_default": {
+            "type": "boolean"
           }
         }
       },

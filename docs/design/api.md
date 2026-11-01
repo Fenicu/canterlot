@@ -210,6 +210,8 @@
 | `POST /api/v1/presets` | 201, новый пресет с `title`, необязательными `description` и `text` |
 | `PATCH /api/v1/presets/{id}` | Название, описание и/или текст; обязателен `base_revision` |
 | `DELETE /api/v1/presets/{id}` | 204, мягкое удаление; сессии держат свою копию |
+| `GET /api/v1/spawn-whitelist` | Белый список делегирования: `entries`, `is_default`, `default_entries` |
+| `PUT /api/v1/spawn-whitelist` | Замена списка; `entries: null` возвращает встроенный. До 64 записей без повторов, модель с каталогом не сверяется |
 | `GET /api/v1/machines` | Каталоги, ОС, домашний каталог `home_dir` (`null` у воркера без этого поля), доступность, метрики, сессии, предупреждения |
 | `GET /api/v1/machines/{id}` | Та же структура одной машины |
 | `GET /api/v1/machines/{id}/workdirs/recent` | `workdirs`, последние 3 каталога этой машины, свежие первыми |
@@ -479,6 +481,7 @@ Pump читает журнал только при доступной ёмкос
 | 24 | Удаление остановленной сессии с подтверждением, синхронно между устройствами (ТЗ §14.1) | `DELETE /api/v1/conversations/{id}` | `conversation_deleted` | пилот |
 | 25 | Туду-лист агента: живая панель с пунктами, состоянием и прогрессом в чате и в ленте субагента (§12.2) | `todos` в снимке разговора | `todo_updated` | 12.2 |
 | 26 | Фоновая работа: число задач в строке состояния, бейдж «Фоном», состояние субагента до настоящего результата | `background` в `GET /api/v1/conversations/{id}/snapshot`, `GET /api/v1/conversations/{id}/delegation` | `background_work_changed` | 6.1 |
+| 27 | Белый список делегирования: какие пары харнесса и модели агент запускает без вопроса (§12) | `GET /api/v1/spawn-whitelist`, `PUT /api/v1/spawn-whitelist` | – | межсессионные инструменты, задачи 8, 12 |
 
 `resync_required`, `lagged` и `close` - служебные кадры WSS (`ServerOp`), а не виды событий. `queue_resumed` публикуется при продолжении очереди без оставшихся пауз, вместе с `queue_state_changed`; полезная нагрузка совпадает с `queue_paused` и содержит пустой `pause_reasons`.
 
