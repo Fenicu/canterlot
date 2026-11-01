@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 fn timers() -> HubTimers {
     HubTimers {
-        command_stored_receipt: Duration::from_millis(250),
+        command_stored_receipt: Duration::from_secs(30),
         dispatch_sweep: Duration::from_millis(25),
         ..HubTimers::default()
     }
@@ -579,7 +579,14 @@ fn to_proto_checks_utf8_metadata_and_control_envelope_limits() {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn missing_receipt_resends_once_then_restarts_session(pool: PgPool) {
-    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_millis(250),
+            ..timers()
+        },
+    )
+    .await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;
     let submitted = input(&pool, &hub, conversation).await;
@@ -616,6 +623,9 @@ async fn missing_receipt_resends_once_then_restarts_session(pool: PgPool) {
         state(&pool, submitted.command_id).await,
         ("pending".into(), "dispatched".into(), false, false)
     );
+    // Короткий срок квитанции нужен только до рестарта сеанса: подтверждение записи проверяем на обычном.
+    stop(hub).await;
+    let hub = spawn_test_hub(pool.clone(), timers()).await;
     let mut reconnected = Worker::connect_with_journal(&hub, &machine, worker.journal).await;
     let replay = reconnected.command().await;
     assert_eq!(replay, first);
@@ -856,7 +866,14 @@ async fn diagnostics_cover_sessions_ingest_resend_and_restart_without_secrets(po
             .finish(),
     )
     .unwrap();
-    let hub = spawn_test_hub(pool.clone(), timers()).await;
+    let hub = spawn_test_hub(
+        pool.clone(),
+        HubTimers {
+            command_stored_receipt: Duration::from_millis(250),
+            ..timers()
+        },
+    )
+    .await;
     let (machine, conversation) = setup(&pool, &hub).await;
     let mut worker = Worker::connect(&hub, &machine).await;
     let submitted = input(&pool, &hub, conversation).await;
