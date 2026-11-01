@@ -165,6 +165,41 @@ describe("lane feed", () => {
     expect(rows.flatMap((row) => row.entries).some((entry) => entry.key.includes("live"))).toBe(true);
   });
 
+  test("an_open_lane_is_live_while_the_conversation_feed_is_detached_from_the_tail", async () => {
+    const chat = chatOf(hubLane(3).api);
+    const feed = new LaneFeed(chat, ROOT);
+    await feed.start();
+    chat.timeline.tailDetached = true;
+    const inLane = "live".padEnd(36, "0");
+    const nested = "deep".padEnd(36, "0");
+    const foreign = "other".padEnd(36, "0");
+    chat.applier.applyEvents([
+      { event: started(inLane, 900, ROOT), overlap: false },
+      { event: started(nested, 901, inLane), overlap: false },
+      { event: started(foreign, 902, "unrelated".padEnd(36, "0")), overlap: false },
+    ]);
+    expect(chat.blocks.has(inLane)).toBe(true);
+    expect(chat.blocks.has(nested)).toBe(true);
+    expect(chat.blocks.has(foreign)).toBe(false);
+    const keys = feed.entries.map((entry) => entry.key);
+    expect(keys).toContain(`block:${inLane}`);
+    expect(keys).toContain(`block:${nested}`);
+    expect(keys).not.toContain(`block:${foreign}`);
+    expect(chat.timeline.entries.map((entry) => entry.key)).not.toContain(`block:${inLane}`);
+    expect(buildRows(feed.entries, { laneRoot: ROOT }).flatMap((row) => row.entries).some((entry) => entry.key.includes("live"))).toBe(true);
+    const delta = {
+      ...started(inLane, 904, ROOT),
+      kind: "block_delta",
+      payload: { block_id: inLane, base_rev: 0, rev: 1, append: "токен" },
+    } as unknown as HubEvent;
+    chat.applier.applyEvents([{ event: delta, overlap: false }]);
+    expect(chat.blocks.get(inLane)?.rev).toBe(1);
+    feed.stop();
+    expect(chat.laneLive).toHaveLength(0);
+    chat.applier.applyEvents([{ event: started("late".padEnd(36, "0"), 903, ROOT), overlap: false }]);
+    expect(chat.blocks.has("late".padEnd(36, "0"))).toBe(false);
+  });
+
   test("a_live_revision_newer_than_the_page_is_kept", async () => {
     const chat = chatOf(async () => ({ root: root(), items: [item("x1".padEnd(36, "0"), 11, { rev: 1, content: "old" })] }));
     chat.applier.applyEvents([{ event: started("x1".padEnd(36, "0"), 1, ROOT), overlap: false }]);

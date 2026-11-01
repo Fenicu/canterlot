@@ -31,6 +31,7 @@
 	$effect(() => {
 		const current = feed;
 		untrack(() => void current.start());
+		return () => current.stop();
 	});
 	const links = $derived(blockLinks(feed.entries, chat.backgroundFacts));
 	const working = $derived(chat.activity?.state === 'working' || chat.activity?.state === 'waiting_for_user');

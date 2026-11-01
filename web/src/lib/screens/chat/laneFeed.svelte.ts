@@ -1,11 +1,12 @@
 import type { ChatStore } from '#lib/stores/chat.svelte.js';
+import { SvelteSet } from 'svelte/reactivity';
 import { rawCell } from '#lib/stores/cell.svelte.js';
 import { cmpSeq, type TimelineEntry, type TimelineSource } from '#lib/stores/timeline.js';
 
 /** Записи ленты разговора и подгруженной ветки по возрастанию номера, без повторов. */
 export function mergeLaneEntries(live: readonly TimelineEntry[], fetched: readonly TimelineEntry[]): TimelineEntry[] {
 	if (fetched.length === 0) return live as TimelineEntry[];
-	const seen = new Set<string>();
+	const seen = new SvelteSet<string>();
 	const out: TimelineEntry[] = [];
 	for (const entry of [...live, ...fetched]) {
 		if (seen.has(entry.key)) continue;
@@ -26,9 +27,10 @@ export class LaneFeed implements TimelineSource {
 	hasOlder = $state(false);
 	load = $state<LaneLoad>('idle');
 	readonly #fetched = rawCell<TimelineEntry[]>([]);
-	readonly entries = $derived.by(() => mergeLaneEntries(this.chat.timeline.entries, this.#fetched.get()));
+	readonly entries = $derived.by(() => mergeLaneEntries(this.chat.timeline.entries, [...this.chat.laneLive, ...this.#fetched.get()]));
 	#before: string | null = null;
 	#busy = false;
+	#unwatch: (() => void) | null = null;
 
 	constructor(
 		readonly chat: ChatStore,
@@ -41,7 +43,13 @@ export class LaneFeed implements TimelineSource {
 	}
 
 	async start(): Promise<void> {
+		this.#unwatch ??= this.chat.watchLane(this.rootId);
 		await this.#page(true);
+	}
+
+	stop(): void {
+		this.#unwatch?.();
+		this.#unwatch = null;
 	}
 
 	async loadOlder(): Promise<void> {

@@ -31,6 +31,7 @@ import {
   type InputView,
 } from "./inputs";
 import { LOCAL_SEQ, TimelineModel, cmpSeq, type TimelineEntry } from "./timeline";
+import { rawCell } from "./cell.svelte.js";
 import { RequestsModel, isDocked } from "./requests.svelte";
 import { BackgroundModel, type BackgroundTask } from "./background.svelte";
 import { TodosModel, type TodoList } from "./todos.svelte";
@@ -287,6 +288,8 @@ export class ChatStore {
   } | null = null;
   #hold = false;
   #held: HubEvent[] = [];
+  #lanes = new SvelteMap<string, number>();
+  #laneLive = rawCell<TimelineEntry[]>([]);
   #readSeq = 0n;
   #readAt = -10_000;
   #noteTimers = new SvelteMap<string, () => void>();
@@ -384,6 +387,7 @@ export class ChatStore {
     this.background.clear();
     this.diagnostics.length = 0;
     this.#held = [];
+    this.#laneLive.set([]);
     this.detail = null;
     this.execution = null;
     this.activity = null;
@@ -581,6 +585,11 @@ export class ChatStore {
       return;
     }
     if (this.#hold || this.timeline.tailDetached) {
+      // Открытая лента субагента живёт независимо от прокрутки ленты разговора.
+      if (!this.#hold && this.#inOpenLane(event)) {
+        this.#dispatch(event);
+        return;
+      }
       this.#held.push(event);
       if (
         this.timeline.tailDetached &&
@@ -591,6 +600,47 @@ export class ChatStore {
       return;
     }
     this.#dispatch(event);
+  }
+
+  /** Лента субагента открыта: её блоки применяются сразу, пока лента разговора оторвана от хвоста. */
+  watchLane(rootId: string): () => void {
+    this.#lanes.set(rootId, (this.#lanes.get(rootId) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const left = (this.#lanes.get(rootId) ?? 1) - 1;
+      if (left > 0) this.#lanes.set(rootId, left);
+      else this.#lanes.delete(rootId);
+      if (this.#lanes.size === 0) this.#laneLive.set([]);
+    };
+  }
+
+  /** Записи блоков открытых лент, пришедших живыми, пока лента разговора оторвана от хвоста. */
+  get laneLive(): TimelineEntry[] {
+    return this.#laneLive.get();
+  }
+
+  #inOpenLane(event: HubEvent): boolean {
+    if (this.#lanes.size === 0) return false;
+    if (event.kind === "block_started")
+      return this.#underOpenLane(event.payload.parent_block_id);
+    if (
+      event.kind === "block_delta" ||
+      event.kind === "block_final" ||
+      event.kind === "block_incomplete"
+    )
+      return this.#underOpenLane(event.payload.block_id);
+    return false;
+  }
+
+  #underOpenLane(start: string | null): boolean {
+    let id = start;
+    for (let depth = 0; id && depth < 64; depth += 1) {
+      if (this.#lanes.has(id)) return true;
+      id = this.blocks.get(id)?.parentId ?? null;
+    }
+    return false;
   }
 
   #flushHeld(): void {
@@ -840,13 +890,20 @@ export class ChatStore {
     }
     if (event.kind === "block_started") {
       const block = this.blocks.get(event.payload.block_id);
-      if (block)
-        this.timeline.upsert({
+      if (block) {
+        const entry: TimelineEntry = {
           kind: "block",
           key: `block:${block.id}`,
           seq: block.createdSeq,
           block,
-        });
+        };
+        this.timeline.upsert(entry);
+        if (
+          this.timeline.tailDetached &&
+          this.#underOpenLane(event.payload.parent_block_id)
+        )
+          this.#laneLive.set([...this.#laneLive.get(), entry]);
+      }
     }
   }
 
