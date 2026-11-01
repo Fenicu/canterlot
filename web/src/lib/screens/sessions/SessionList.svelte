@@ -65,6 +65,11 @@
     return clock.serverNow();
   });
 
+  async function reloadApp() {
+    await runtime?.drafts.flush().catch(() => {});
+    window.location.reload();
+  }
+
   onMount(() => {
     const install = installation();
     const changed = () => { canInstall = install.canInstall; };
@@ -243,6 +248,7 @@
           <MenuItem icon="sliders" href={resolve('/settings')} onclick={() => { menu = false; }}>Настройки</MenuItem>
           <MenuItem icon="folder" onclick={() => { groupsOpen = true; menu = false; }}>Группы</MenuItem>
           <MenuItem icon="archive" onclick={() => { tab = { kind: 'archive' }; menu = false; }}>Архив</MenuItem>
+          <MenuItem icon="retry" onclick={() => { menu = false; void reloadApp(); }}>Обновить страницу</MenuItem>
           {#if canInstall}<MenuItem icon="download" onclick={() => { menu = false; void installation().prompt(); }}>Установить</MenuItem>{/if}
         </Menu>
       </div>

@@ -17,6 +17,8 @@
 	import { runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
+	import { runningCount } from '#lib/stores/delegation.js';
+	import { liveNodes } from './delegationNodes';
 
 	interface DetailLike {
 		title?: string;
@@ -38,7 +40,8 @@
 		now = Date.now(),
 		onOpenSheet,
 		onOpenSettings,
-		onOpenDiagnostics
+		onOpenDiagnostics,
+		onOpenDelegation
 	}: {
 		chat: ChatStore;
 		providers?: ProviderLimits[];
@@ -47,10 +50,12 @@
 		onOpenSheet?: () => void;
 		onOpenSettings?: () => void;
 		onOpenDiagnostics?: () => void;
+		onOpenDelegation?: () => void;
 	} = $props();
 
 	let menuOpen = $state(false);
 	const delegated = $derived(chat.timeline.entries.some((entry) => entry.kind === 'block' && entry.block.toolName === 'Agent'));
+	const running = $derived(!pane.desktop && delegated ? runningCount(liveNodes(chat)) : 0);
 	let confirmingForce = $state(false);
 	let actionError = $state<string | null>(null);
 
@@ -160,6 +165,18 @@
 		<div class="header-actions">
 			{#if pane.desktop && delegated}
 				<button type="button" class="pane-action" aria-pressed={pane.view === 'delegation'} onclick={() => pane.toggle('delegation')}>Делегирование</button>
+			{/if}
+			{#if !pane.desktop && delegated && onOpenDelegation}
+				<button
+					type="button"
+					class="icon-button delegation-btn"
+					class:busy={running > 0}
+					aria-label={running > 0 ? `Делегирование, работает ${running}` : 'Делегирование'}
+					onclick={onOpenDelegation}
+				>
+					<Icon name="branch" />
+					{#if running > 0}<span class="running-count">{running}</span>{/if}
+				</button>
 			{/if}
 			<button
 				bind:this={menuButton}
@@ -331,6 +348,19 @@
 		width: var(--target);
 		height: var(--target);
 		border-radius: var(--radius-round);
+	}
+	.delegation-btn {
+		width: auto;
+		min-width: var(--target);
+		gap: var(--s1);
+		padding-inline: var(--s2);
+	}
+	.delegation-btn.busy {
+		color: var(--accent-link);
+	}
+	.running-count {
+		font-size: var(--fs-sm);
+		font-variant-numeric: tabular-nums;
 	}
 	.pane-action {
 		min-height: var(--target);
