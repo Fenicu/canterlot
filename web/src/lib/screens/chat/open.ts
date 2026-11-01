@@ -1,6 +1,7 @@
 import {
   conversationBlock,
   conversationHistory,
+  conversationLane,
   conversationSnapshot,
   eventsRange,
   markRead,
@@ -12,6 +13,7 @@ import { sha256Hex, type BlockPage } from "#lib/stores/blocks.js";
 import {
   ChatStore,
   type HistoryPage,
+  type LanePage,
   type SnapshotData,
 } from "#lib/stores/chat.svelte.js";
 import type { RangeResult } from "#lib/sync/scope.js";
@@ -178,6 +180,10 @@ async function createChatSession(id: string): Promise<ChatStore> {
       async history(conversationId, query) {
         const response = await conversationHistory(conversationId, query);
         return response.data as HistoryPage;
+      },
+      async lane(conversationId, blockId, query) {
+        const response = await conversationLane(conversationId, blockId, query);
+        return response.data as LanePage;
       },
       async events(scope, after, limit) {
         const response = await eventsRange({ scope, after, limit });

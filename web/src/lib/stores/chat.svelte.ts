@@ -101,6 +101,13 @@ export interface HistoryPage {
   next_after?: string | null;
 }
 
+/** Страница ленты одного субагента: корень и потомки по возрастанию номера, без корня. */
+export interface LanePage {
+  root: Omit<HistoryBlock, "kind">;
+  items: Omit<HistoryBlock, "kind">[];
+  next_before?: string | null;
+}
+
 export interface ChatApi {
   conversationSnapshot(
     id: string,
@@ -109,6 +116,12 @@ export interface ChatApi {
     id: string,
     query?: { before?: string; after?: string; limit?: number },
   ): Promise<HistoryPage>;
+  /** Страница ленты субагента; без `before` отдаёт самых новых потомков. */
+  lane?(
+    id: string,
+    blockId: string,
+    query?: { before?: string; limit?: number },
+  ): Promise<LanePage>;
   events(scope: string, after: string, limit: number): Promise<RangeResult>;
   markRead(id: string, seq: string): Promise<void>;
 }
@@ -385,6 +398,34 @@ export class ChatStore {
     });
     this.#ingest(page.items, "older");
     this.timeline.hasOlder = Boolean(page.next_before);
+  }
+
+  /**
+   * Одна страница ленты субагента. Блоки попадают в общую карту, как при чтении истории,
+   * но лента разговора и её окно не меняются; записи возвращаются для ленты субагента.
+   */
+  async loadLane(
+    rootId: string,
+    before?: string,
+  ): Promise<{ entries: TimelineEntry[]; nextBefore: string | null }> {
+    const fetchLane = this.deps.api.lane;
+    if (!fetchLane) throw new Error("lane_unavailable");
+    const page = await fetchLane.call(this.deps.api, this.id, rootId, { before });
+    const entries = [page.root, ...page.items].map((item) => {
+      const known = this.blocks.get(item.id);
+      // Живое событие могло обогнать ответ: более новую ревизию не затирает снимок.
+      const block =
+        known && known.rev >= item.rev && known.state !== "stale"
+          ? known
+          : this.#blockFromHistory({ ...item, kind: "block" }, false);
+      return {
+        kind: "block" as const,
+        key: `block:${block.id}`,
+        seq: block.createdSeq || item.created_seq,
+        block,
+      };
+    });
+    return { entries, nextBefore: page.next_before ?? null };
   }
 
   async loadNewer(): Promise<void> {

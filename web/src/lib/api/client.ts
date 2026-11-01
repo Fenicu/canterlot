@@ -433,6 +433,25 @@ export function delegation(
   );
 }
 
+export function conversationLane(
+  conversationId: string,
+  blockId: string,
+  query?: Query,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_conversations__id__lanes__block_id_"]>>
+> {
+  return http(
+    "GET",
+    withQuery(
+      `/api/v1/conversations/${id(conversationId)}/lanes/${id(blockId)}`,
+      query,
+    ),
+    undefined,
+    opts,
+  );
+}
+
 export function eventsRange(
   query?: Query,
   opts?: RequestOptions,

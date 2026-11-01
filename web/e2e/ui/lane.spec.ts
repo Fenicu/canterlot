@@ -334,3 +334,55 @@ test('phone_has_no_delegation_entry_without_subagents', async ({ page, isMobile 
 	await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
 	await expect(page.getByRole('button', { name: /^Делегирование/ })).toHaveCount(0);
 });
+
+test('lane_of_an_old_subagent_outside_the_loaded_window_shows_its_steps', async ({ page }) => {
+	const hub = new FakeHub();
+	const api = new FakeHubApi(hub);
+	const id = seedConversation(api, { title: 'Старый субагент', model: 'opus-5.5' });
+	const base = {
+		kind: 'block' as const,
+		content: '',
+		content_bytes: 0,
+		content_truncated: false,
+		created_at: '2026-11-01T09:00:00.000Z',
+		rev: 1,
+		state: 'final',
+		line_count: 1,
+		input_command_id: null
+	};
+	const call: HistoryBlock = { ...base, id: 'old-agent', block_kind: 'tool_call', created_seq: '1', agent: 'orchestrator', model: 'opus-5.5', tool_name: 'Agent', summary: 'Старая разведка', parent_block_id: null };
+	const lane: HistoryBlock[] = Array.from({ length: 6 }, (_, index) => ({
+		...base,
+		id: `old-step-${index}`,
+		block_kind: 'tool_call' as const,
+		created_seq: String(2 + index),
+		agent: 'general-purpose',
+		model: 'sonnet-5.5',
+		tool_name: 'Bash',
+		summary: `старый шаг ${index}`,
+		parent_block_id: 'old-agent'
+	}));
+	const filler: HistoryBlock[] = Array.from({ length: 150 }, (_, index) => ({
+		...base,
+		id: `later-${index}`,
+		block_kind: 'text' as const,
+		content: `позже ${index}`,
+		created_seq: String(100 + index),
+		agent: 'orchestrator',
+		model: 'opus-5.5',
+		tool_name: null,
+		summary: null,
+		parent_block_id: null
+	}));
+	api.histories.set(id, [call, ...lane, ...filler]);
+	for (const block of [call, ...lane, ...filler]) api.blocks.set(block.id, { text: block.content, rev: block.rev, state: block.state });
+	api.bindConversation(id);
+	await installChatRoutes(page, hub, api);
+
+	await page.goto(`/c/${id}/lane/old-agent`);
+	await expect(page.locator('.lane-screen[data-ready]')).toBeVisible();
+	await expect(page.locator('.tool .summary').filter({ hasText: 'старый шаг 5' })).toBeVisible();
+	await expect(page.locator('.header-title')).toHaveText('Старая разведка');
+	await expect(page.locator('.subtitle')).toContainText('general-purpose');
+	await expect(page.locator('.live-line')).toContainText('Готово');
+});

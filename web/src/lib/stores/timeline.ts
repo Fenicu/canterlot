@@ -8,6 +8,13 @@ export type TimelineEntry =
 	| { kind: 'block'; key: string; seq: string; block: BlockModel }
 	| { kind: 'request'; key: string; seq: string; request: RequestItem };
 
+/** Откуда лента берёт записи и как подгружает старые: у разговора это его окно, у субагента своя ветка. */
+export interface TimelineSource {
+	readonly entries: TimelineEntry[];
+	readonly hasOlder: boolean;
+	loadOlder(): Promise<void>;
+}
+
 /** Порядковый номер сообщения, которого хаб ещё не принял в ленту: оно стоит в самом конце. */
 export const LOCAL_SEQ = '9223372036854775807';
 

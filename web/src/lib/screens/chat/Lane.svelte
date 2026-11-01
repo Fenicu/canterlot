@@ -1,9 +1,11 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import { untrack } from 'svelte';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import { blockLinks } from '#lib/timeline/rows.js';
 	import Timeline from '#lib/timeline/Timeline.svelte';
 	import { laneModel } from './lane';
+	import { LaneFeed } from './laneFeed.svelte.js';
 	import TodoPanel from './TodoPanel.svelte';
 	import { theme } from '#lib/theme.js';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -25,7 +27,12 @@
 	const blocks = $derived([...chat.blocks.values()]);
 	const machineName = $derived((chat.detail?.machine as { name?: string })?.name || 'workstation');
 
-	const links = $derived(blockLinks(chat.timeline.entries, chat.backgroundFacts));
+	const feed = $derived(new LaneFeed(chat, rootBlockId));
+	$effect(() => {
+		const current = feed;
+		untrack(() => void current.start());
+	});
+	const links = $derived(blockLinks(feed.entries, chat.backgroundFacts));
 	const working = $derived(chat.activity?.state === 'working' || chat.activity?.state === 'waiting_for_user');
 	const model = $derived(
 		laneModel(blocks, rootBlockId, {
@@ -34,7 +41,8 @@
 			harness: chat.detail?.harness as { title?: string; provider?: string } | undefined,
 			result: links.result(rootBlockId),
 			background: links.background(rootBlockId),
-			working
+			working,
+			load: feed.load
 		})
 	);
 </script>
@@ -83,17 +91,21 @@
 	{/if}
 
 	<div class="lane-timeline-container">
-		<Timeline
-			chat={chat}
-			onInfo={onInfo}
-			now={now}
-			laneRoot={rootBlockId}
-		/>
+		{#key rootBlockId}
+			<Timeline
+				chat={chat}
+				onInfo={onInfo}
+				now={now}
+				laneRoot={rootBlockId}
+				{feed}
+			/>
+		{/key}
 	</div>
 
 	<TodoPanel {chat} lane={rootBlockId} />
 
 	<footer class="lane-footer">
+		{#if feed.load === 'failed'}<button type="button" class="return-link" onclick={() => feed.start()}>Повторить загрузку</button>{/if}
 		{#if model.running}<p class="pending-line">Результат вернётся в основную сессию</p>{/if}
 		{#if !embedded}
 			<a class="return-link" href={resolve(`c/${chat.id}`)}>К основной сессии</a>

@@ -23,6 +23,8 @@ export function laneModel(
     result?: BlockModel | null;
     background?: BackgroundFact | null;
     working?: boolean;
+    /** Ветку субагента ещё читают у хаба или её не удалось прочитать. */
+    load?: "idle" | "loading" | "ready" | "failed";
   },
 ): LaneModelResult {
   const root = blocks.find((b) => b.id === rootBlockId);
@@ -39,7 +41,8 @@ export function laneModel(
     .join(" · ");
   const breadcrumb = [harnessLabel(opts?.harness), agentName];
 
-  let status = "Готово";
+  // Корня нет: что с субагентом, неизвестно, и «Готово» тут было бы враньём.
+  let status = opts?.load === "failed" ? "Не удалось загрузить" : root ? "Готово" : "Загружаю…";
   let running = false;
   const background = opts?.background ?? null;
   const result = isLaunchResult(opts?.result ?? null) ? null : (opts?.result ?? null);

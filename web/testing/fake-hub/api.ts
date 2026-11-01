@@ -1,5 +1,5 @@
 import { utf8Length, utf8Slice, type BlockPage } from '../../src/lib/stores/blocks';
-import type { HistoryItem, HistoryPage, SnapshotData } from '../../src/lib/stores/chat.svelte';
+import type { HistoryBlock, HistoryItem, HistoryPage, LanePage, SnapshotData } from '../../src/lib/stores/chat.svelte';
 import type { DelegationNode } from '../../src/lib/stores/delegation';
 import type { Counts, ListRow, ListSnapshot } from '../../src/lib/stores/list.svelte';
 import type { ProviderLimits } from '../../src/lib/stores/limits';
@@ -430,6 +430,37 @@ export class FakeHubApi {
 	async machinesSnapshot(): Promise<{ cursor: string; data: { items: MachineRecord[] } }> {
 		const snap = this.hub.snapshot('machines');
 		return { cursor: snap.cursor, data: (snap.data as { items: MachineRecord[] } | null) ?? { items: [...this.machines.values()] } };
+	}
+
+	/** Как хаб: потомки корня любой глубины страницами от нового к старому, корень отдельно. */
+	async lane(id: string, blockId: string, query: { before?: string; limit?: number } = {}): Promise<LanePage> {
+		const blocks = (this.histories.get(id) ?? []).filter((item): item is HistoryBlock => item.kind === 'block');
+		const root = blocks.find((block) => block.id === blockId);
+		if (!root) throw new Error('not_found');
+		const keep = new Set<string>([blockId]);
+		for (let grew = true; grew; ) {
+			grew = false;
+			for (const block of blocks) {
+				if (block.parent_block_id && keep.has(block.parent_block_id) && !keep.has(block.id)) {
+					keep.add(block.id);
+					grew = true;
+				}
+			}
+		}
+		const below = blocks
+			.filter((block) => block.id !== blockId && keep.has(block.id) && (!query.before || cmp(block.created_seq, query.before) < 0))
+			.sort((a, b) => cmp(a.created_seq, b.created_seq));
+		const page = below.slice(-(query.limit ?? 100));
+		const strip = (block: HistoryBlock): Omit<HistoryBlock, 'kind'> => {
+			const rest: Partial<HistoryBlock> = { ...block };
+			delete rest.kind;
+			return rest as Omit<HistoryBlock, 'kind'>;
+		};
+		return {
+			root: strip(root),
+			items: page.map(strip),
+			next_before: below.length > page.length ? (page[0]?.created_seq ?? null) : null
+		};
 	}
 
 	async delegation(conversationId: string): Promise<DelegationNode[]> {
