@@ -2153,6 +2153,22 @@ async fn nul_in_one_session_leaves_the_machine_stream_running(pool: PgPool) {
 }
 
 // Запись, которую база не примет и при повторе, останавливает своё исполнение, а не машину.
+#[test]
+fn refused_records_are_the_error_strings_of_the_hub() {
+    use canterlot_hub::ingest::IngestError;
+    let hub = [
+        IngestError::UnknownRecord,
+        IngestError::InvalidRecord,
+        IngestError::RejectedValue,
+        IngestError::ForeignJournal,
+        IngestError::ForeignExecution,
+        IngestError::JournalKindMismatch,
+        IngestError::Execution,
+    ]
+    .map(|error| error.to_string());
+    assert_eq!(hub, canterlot_worker::session::REFUSED_RECORDS);
+}
+
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn refused_record_stops_its_execution_and_leaves_the_machine_stream_running(pool: PgPool) {
     let _gate = e2e_gate::acquire().await;

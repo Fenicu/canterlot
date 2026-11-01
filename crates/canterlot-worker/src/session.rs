@@ -107,17 +107,18 @@ impl JournalDiagnostics {
 }
 
 /// Отказ определяется записью журнала: повтор упрётся в неё же до обновления хаба или воркера.
+pub const REFUSED_RECORDS: [&str; 7] = [
+    "unknown_record",
+    "invalid_record",
+    "rejected_value",
+    "foreign_journal",
+    "foreign_execution",
+    "journal_kind_mismatch",
+    "execution",
+];
+
 fn refused_record(message: &str) -> bool {
-    matches!(
-        message,
-        "unknown_record"
-            | "invalid_record"
-            | "rejected_value"
-            | "foreign_journal"
-            | "foreign_execution"
-            | "journal_kind_mismatch"
-            | "execution"
-    )
+    REFUSED_RECORDS.contains(&message)
 }
 
 pub fn try_send_metrics(tx: &mpsc::Sender<ControlUp>, metrics: MachineMetrics) -> bool {
