@@ -477,6 +477,7 @@ impl Translator {
             "deprecationNotice" => vec![self.optional("codex_deprecation")],
             "account/updated"
             | "thread/compacted"
+            | "thread/goal/cleared"
             | "turn/moderationMetadata"
             | "remoteControl/status/changed"
             | "thread/readState/changed"

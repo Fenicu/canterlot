@@ -1728,3 +1728,10 @@ fn another_thread_without_a_parent_raises_a_diagnostic() {
         )]
     );
 }
+
+#[test]
+fn goal_cleared_after_resume_is_known_and_silent() {
+    let mut translator = Translator::new("01a196b0-d5f1-7af1-8e3f-d8749c706b15", "gpt-6-luna");
+    let out = feed_frames(&mut translator, &codex::replay("goal_cleared_live"));
+    assert!(events_of(&out).is_empty(), "{out:?}");
+}
