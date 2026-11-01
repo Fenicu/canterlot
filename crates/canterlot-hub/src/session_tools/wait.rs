@@ -12,8 +12,7 @@ use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::{
-    Caller, ToolContext, ToolError, ToolErrorCode, access, parse_arguments, settle::Settled, subs,
-    summary,
+    Caller, ToolContext, ToolError, ToolErrorCode, access, parse_arguments, subs, summary,
 };
 
 const DEFAULT_TIMEOUT: u64 = 120;
@@ -34,7 +33,7 @@ struct WaitArgs {
 /// Что показал опрос.
 enum Poll {
     /// Цель осела; отпечаток тот же, что посчитает проектор.
-    Settled(Settled, String),
+    Settled(subs::Current),
     /// Цель ещё работает; в поле её последнее состояние.
     Pending(String),
     Deleted,
@@ -54,8 +53,8 @@ pub async fn wait(
     let deadline = Instant::now() + Duration::from_secs(seconds as u64);
     loop {
         match poll(context, caller.owner_id, args.session_id).await? {
-            Poll::Settled(state, fingerprint) => {
-                return settled(context, caller, args.session_id, state, &fingerprint).await;
+            Poll::Settled(current) => {
+                return settled(context, caller, args.session_id, &current).await;
             }
             Poll::Deleted => {
                 return Ok(json!({
@@ -113,7 +112,7 @@ async fn poll(context: &ToolContext, owner_id: Uuid, target: Uuid) -> Result<Pol
     }
     Ok(
         match subs::current_in_tx(&mut conn, target, Utc::now(), &context.settle).await? {
-            Some((state, fingerprint)) => Poll::Settled(state, fingerprint),
+            Some(current) => Poll::Settled(current),
             None => Poll::Pending(activity_state(&mut conn, target).await?),
         },
     )
@@ -135,9 +134,9 @@ async fn settled(
     context: &ToolContext,
     caller: &Caller,
     target: Uuid,
-    state: Settled,
-    fingerprint: &str,
+    current: &subs::Current,
 ) -> Result<Value, ToolError> {
+    let state = current.state;
     let mut conn = context.pool.acquire().await?;
     let armed_at: Option<DateTime<Utc>> = sqlx::query_scalar(
         "select armed_at from session_subscriptions where subscriber_id=$1 and target_id=$2",
@@ -158,8 +157,8 @@ async fn settled(
     )
     .bind(caller.conversation_id)
     .bind(target)
-    .bind(fingerprint)
-    .bind(state.closes_subscription())
+    .bind(&current.fingerprint)
+    .bind(current.closes)
     .bind(state.as_str())
     .execute(&mut *conn)
     .await?

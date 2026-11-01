@@ -34,9 +34,10 @@ impl Settled {
         }
     }
 
-    /// Подписка закрывается: продолжение возможно только после нового ввода.
-    pub fn closes_subscription(self) -> bool {
-        matches!(self, Self::Idle | Self::Failed | Self::Stopped)
+    /// Подписка закрывается: продолжение возможно только после нового ввода. Ввод, уже стоящий
+    /// в очереди, и есть продолжение: он выполнится, когда владелец вернёт сессию.
+    pub fn closes_subscription(self, queued: u32) -> bool {
+        queued == 0 && matches!(self, Self::Idle | Self::Failed | Self::Stopped)
     }
 }
 
@@ -98,7 +99,11 @@ pub fn settled(
             if background > 0 && background_alive {
                 return None;
             }
-            let quiet_from = f.last_turn_at.map_or(f.since, |at| at.max(f.since));
+            // Ход пробуждения начинается сразу за концом фона: от него тоже отсчитывается тишина.
+            let quiet_from = [f.last_turn_at, f.last_event_at]
+                .into_iter()
+                .flatten()
+                .fold(f.since, DateTime::max);
             // Время из будущего считается окном тишины: событие не уходит раньше срока.
             let quiet = (f.now - quiet_from)
                 .to_std()

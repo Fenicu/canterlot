@@ -9,6 +9,8 @@ use canterlot_hub::{
     conversations::{self, SubmitMessage},
     deletion,
     delivery::ContentBlock,
+    executions,
+    model::ExecutionState,
     session_tools::{
         self, Caller, ToolContext, ToolError, ToolErrorCode as Code, settle::SettleConfig, subs,
     },
@@ -226,6 +228,39 @@ async fn wait_suppresses_event_when_it_wins(pool: PgPool) {
         0,
         "the evaluator finds nothing to say"
     );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn wait_on_a_stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let execution = executions::start(&f.pool, f.owner, f.target, Uuid::now_v7())
+        .await
+        .unwrap();
+    for (state, outcome) in [
+        (ExecutionState::Starting, None),
+        (ExecutionState::Running, None),
+        (ExecutionState::Stopped, Some("machine_rebooted")),
+    ] {
+        executions::set_state(
+            &f.pool,
+            execution.execution_id,
+            state,
+            outcome,
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+    }
+    f.busy_target().await;
+    f.refresh(Utc::now()).await;
+    f.subscribe().await;
+    let result = f
+        .wait(json!({"session_id": f.target, "timeout_seconds": 30}))
+        .await
+        .unwrap();
+    assert_eq!(result["state"], "stopped");
+    assert_eq!(result["event_suppressed"], true);
+    assert!(f.subscription().await["closed_at"].is_null());
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
