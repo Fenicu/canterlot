@@ -539,6 +539,36 @@ async fn summary_variants_for_each_state(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_session_without_a_process_does_not_promise_it_will_answer(pool: PgPool) {
+    let f = fixture(&pool).await;
+    for (state, activity, evidence) in [
+        (
+            "stopped",
+            S::Stopped,
+            E::Stopped {
+                outcome: "user_stop".into(),
+            },
+        ),
+        (
+            "failed",
+            S::Failed,
+            E::Failed {
+                reason: "crashed".into(),
+            },
+        ),
+    ] {
+        set_activity(&pool, f.target, activity, evidence).await;
+        let text = text_for(&pool, &f, state, None).await;
+        assert!(!text.contains("session_send to"), "{text}");
+        assert!(
+            text.contains("only when the owner resumes it: session_send just queues a message"),
+            "{text}"
+        );
+        assert!(text.contains("session_accept to clean up"), "{text}");
+    }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn lost_session_says_it_may_come_back(pool: PgPool) {
     let f = fixture(&pool).await;
     set_activity(
@@ -553,6 +583,12 @@ async fn lost_session_says_it_may_come_back(pool: PgPool) {
     let text = text_for(&pool, &f, "failed", None).await;
     assert!(text.contains("Reason: owner_lost."), "{text}");
     assert!(text.contains("you stay subscribed"), "{text}");
+    assert!(
+        text.ends_with(
+            "Next: wait for the next [canterlot] message, or session_accept to give up on it."
+        ),
+        "{text}"
+    );
 
     set_activity(
         &pool,

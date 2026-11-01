@@ -487,16 +487,23 @@ fn detail_section(detail: &Detail) -> String {
     }
 }
 
-fn footer(state: &str) -> Option<&'static str> {
+fn footer(state: &str, detail: &Detail) -> Option<&'static str> {
+    if matches!(detail, Detail::Failed { reason } if reason == OWNER_LOST) {
+        return Some(
+            "Next: wait for the next [canterlot] message, or session_accept to give up on it.",
+        );
+    }
     match state {
         "idle" => Some(
             "Next: read the result, then call session_accept to clean up, or session_send to continue.",
         ),
         "stalled" => Some("Next: session_inspect to look closer, or session_send to nudge it."),
         "failed" => Some(
-            "Next: session_inspect for details, session_send to retry, or session_accept to clean up.",
+            "Next: session_inspect for details, or session_accept to clean up. It runs again only when the owner resumes it: session_send just queues a message until then.",
         ),
-        "stopped" => Some("Next: session_send to continue, or session_accept to clean up."),
+        "stopped" => Some(
+            "Next: session_accept to clean up. It runs again only when the owner resumes it: session_send just queues a message until then.",
+        ),
         _ => None,
     }
 }
@@ -519,7 +526,8 @@ pub fn render(summary: &SessionSummary) -> String {
     if let Some((path, branch)) = &summary.worktree {
         let _ = writeln!(head, "Worktree: {path}, branch {branch}.");
     }
-    let tail = footer(&summary.state).map_or_else(String::new, |text| format!("\n{text}"));
+    let tail = footer(&summary.state, &summary.detail)
+        .map_or_else(String::new, |text| format!("\n{text}"));
     let label = match summary.state.as_str() {
         "idle" | "failed" | "stopped" => "Final answer",
         _ => "Last message",

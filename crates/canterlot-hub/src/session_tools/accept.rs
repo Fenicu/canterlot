@@ -501,7 +501,7 @@ fn subscription_closed_text(child: &Child) -> String {
 
 fn dirty_text(child: &Child) -> String {
     format!(
-        "[canterlot] Session {} is stopped, but its worktree has uncommitted changes or commits on no branch, so nothing was removed and the session is not archived. Call session_accept again with force:true to discard them, or session_send to ask it to commit first.",
+        "[canterlot] Session {} is stopped, but its worktree has uncommitted changes or commits on no branch, so nothing was removed and the session is not archived. Call session_accept again with force:true to discard them. To keep them, the owner has to resume the session: a session_send only waits until then.",
         child.label()
     )
 }
