@@ -663,3 +663,15 @@ test('reconnect_during_list_resync_keeps_rows_stable', async ({ page }) => {
   hub.chaos.forceResync('cursor_ahead');
   await expect(page.getByRole('link', { name: /Восстановление потока/ })).toHaveText(before ?? '');
 });
+
+test('more_menu_reloads_the_page', async ({ page }) => {
+  await boot(page);
+  await page.evaluate(() => { (window as unknown as { marker: number }).marker = 1; });
+  await page.getByRole('button', { name: 'Ещё', exact: true }).click();
+  await Promise.all([
+    page.waitForEvent('load'),
+    page.getByRole('menuitem', { name: 'Обновить страницу' }).click()
+  ]);
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  expect(await page.evaluate(() => (window as unknown as { marker?: number }).marker)).toBeUndefined();
+});
