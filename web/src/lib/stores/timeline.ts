@@ -32,10 +32,18 @@ export function cmpSeq(a: string, b: string): number {
 
 export class TimelineModel {
 	readonly maxLoaded = 3000;
-	hasOlder = false;
 	tailDetached = false;
 	newerCount = 0;
 	#entries = rawCell<TimelineEntry[]>([]);
+	#hasOlder = rawCell(false);
+
+	// Лента кэширует признак в $derived: без сигнала она навсегда запоминала значение до первой страницы.
+	get hasOlder(): boolean {
+		return this.#hasOlder.get();
+	}
+	set hasOlder(value: boolean) {
+		this.#hasOlder.set(value);
+	}
 
 	get entries(): TimelineEntry[] {
 		return this.#entries.get();
