@@ -395,6 +395,10 @@ test('background_command_is_a_plain_row_with_a_badge_and_runs_until_its_task_end
   api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'failed')]);
   await expect(row.locator('[data-state="error"]')).toBeVisible();
   await expect(row.getByText('Фоном')).toBeVisible();
+
+  api.pushBackground(id, [backgroundTask('b1', call.id, 'bash', 'stopped')]);
+  await expect(row.getByText('Прервано')).toBeVisible();
+  await expect(row.locator('[data-state="error"]')).toHaveCount(0);
 });
 
 test('user_bubble_marks_follow_input_state', async ({ page }) => {

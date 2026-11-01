@@ -46,7 +46,7 @@
   const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(toolError(block, result) || background?.state === 'failed');
   const launched = $derived(!background && !error && toolBackground(result));
-  const status = $derived(launched ? 'В фоне' : toolPillText({ ...timing, error, now }));
+  const status = $derived(launched ? 'В фоне' : background?.state === 'stopped' ? 'Прервано' : toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
