@@ -62,7 +62,7 @@ pub async fn subscribe_explicit_in_tx(
     config: &SettleConfig,
 ) -> Result<Option<Settled>, sqlx::Error> {
     let current = current_in_tx(conn, target_id, now, config).await?;
-    let fingerprint = current.as_ref().map(|(_, value)| value.as_str());
+    let fingerprint = current.as_ref().map(|value| value.fingerprint.as_str());
     upsert(
         conn,
         owner_id,
@@ -72,7 +72,7 @@ pub async fn subscribe_explicit_in_tx(
         fingerprint,
     )
     .await?;
-    Ok(current.map(|(state, _)| state))
+    Ok(current.map(|value| value.state))
 }
 
 /// Отписка забирает и событие, которое уже ждёт в заданиях: подписчик больше о нём не просил.
@@ -170,13 +170,20 @@ pub struct ClosedSubscriber {
     pub chain_depth: i32,
 }
 
+/// Осевшее состояние цели на момент чтения.
+pub struct Current {
+    pub state: Settled,
+    pub fingerprint: String,
+    pub closes: bool,
+}
+
 /// Осевшее состояние по проекции: отпечаток должен совпасть с тем, что посчитает проектор.
 pub async fn current_in_tx(
     conn: &mut PgConnection,
     target_id: Uuid,
     now: DateTime<Utc>,
     config: &SettleConfig,
-) -> Result<Option<(Settled, String)>, sqlx::Error> {
+) -> Result<Option<Current>, sqlx::Error> {
     let derived: Option<(Json<ActivityState>, Json<Evidence>, DateTime<Utc>)> = sqlx::query_as(
         "select to_jsonb(activity_state),activity_evidence,activity_since
          from conversation_derived where conversation_id=$1",
@@ -196,11 +203,10 @@ pub async fn current_in_tx(
     };
     let activity = Activity { state, evidence };
     Ok(
-        settle::settled(&activity, &inputs.queue, &facts, config).map(|settled| {
-            (
-                settled,
-                settle::fingerprint(settled, since, inputs.last_turn_at),
-            )
+        settle::settled(&activity, &inputs.queue, &facts, config).map(|state| Current {
+            state,
+            fingerprint: settle::fingerprint(state, since, inputs.last_turn_at),
+            closes: state.closes_subscription(inputs.queue.queued),
         }),
     )
 }
@@ -272,7 +278,7 @@ pub async fn evaluate_in_tx(
     .bind(&fingerprint)
     .fetch_all(&mut *conn)
     .await?;
-    let closes = state.closes_subscription();
+    let closes = state.closes_subscription(queue.queued);
     for (id, owner_id, subscriber_id, chain_depth, armed_at) in &open {
         sqlx::query(
             "update session_subscriptions set last_fingerprint=$2,

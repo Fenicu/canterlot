@@ -592,6 +592,53 @@ async fn stopped_target_fires(pool: PgPool) {
     );
 }
 
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stopped_target_with_a_queued_input_keeps_the_subscription(pool: PgPool) {
+    let p = pair(&pool).await;
+    let execution = start(&pool, p.owner, p.target).await;
+    subscribe(&pool, &p).await;
+    executions::set_state(
+        &pool,
+        execution.execution_id,
+        ExecutionState::Stopped,
+        Some("machine_rebooted"),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    submit_input(
+        &pool,
+        SubmitInput {
+            owner_id: p.owner,
+            conversation_id: p.target,
+            idempotency_key: "waits-for-resume".into(),
+            content: vec![ContentBlock::Text {
+                text: "after resume".into(),
+            }],
+            received_at: Utc::now(),
+            correlation_id: Uuid::now_v7(),
+            origin: None,
+        },
+    )
+    .await
+    .unwrap();
+    refresh_at(&pool, p.target, Utc::now()).await;
+    let fired = jobs(&pool, p.subscriber).await;
+    assert_eq!(fired.len(), 1, "the sender still hears about the stop");
+    assert_eq!(fired[0]["state"], "stopped");
+    let stored = subscription(&pool, p.subscriber, p.target).await;
+    assert!(
+        stored["closed_at"].is_null(),
+        "the queued input runs after a resume, and its result has to reach the sender"
+    );
+    refresh_at(&pool, p.target, Utc::now()).await;
+    assert_eq!(
+        jobs(&pool, p.subscriber).await.len(),
+        1,
+        "one report per stop"
+    );
+}
+
 async fn delete(pool: &PgPool, p: &Pair, id: Uuid, key: &str) -> Result<(), deletion::DeleteError> {
     let directory = tempfile::tempdir().unwrap();
     let (_, blobs) = testkit::test_blob_store(directory.path());

@@ -34,9 +34,10 @@ impl Settled {
         }
     }
 
-    /// Подписка закрывается: продолжение возможно только после нового ввода.
-    pub fn closes_subscription(self) -> bool {
-        matches!(self, Self::Idle | Self::Failed | Self::Stopped)
+    /// Подписка закрывается: продолжение возможно только после нового ввода. Ввод, уже стоящий
+    /// в очереди, и есть продолжение: он выполнится, когда владелец вернёт сессию.
+    pub fn closes_subscription(self, queued: u32) -> bool {
+        queued == 0 && matches!(self, Self::Idle | Self::Failed | Self::Stopped)
     }
 }
 
