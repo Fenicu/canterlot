@@ -1235,10 +1235,12 @@ async fn deferred_restart_keeps_the_session_and_its_subscription(pool: PgPool) {
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
     let parent = b.session("synthetic", &work).await;
+    let gate = work.join("restart-gate");
     let brief = script(json!([
         background("running"),
         {"delta": "Запустила фон"},
         {"after_turn": [
+            {"wait_file": gate},
             background("completed"),
             {"restart_due": true, "restart": true}
         ]}
@@ -1250,7 +1252,9 @@ async fn deferred_restart_keeps_the_session_and_its_subscription(pool: PgPool) {
         )
         .await;
     until("first CLI started", async || b.p.cli(child).await.is_some()).await;
+    // Без затвора перезапуск мог успеть до этого чтения, и «первым» оказался бы уже новый CLI.
     let first = b.p.cli(child).await.unwrap();
+    fs::write(&gate, "").unwrap();
     until("deferred restart applied", async || {
         b.p.cli(child).await.is_some_and(|cli| cli != first)
     })
