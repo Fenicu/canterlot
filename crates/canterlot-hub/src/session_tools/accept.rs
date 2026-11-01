@@ -486,7 +486,7 @@ fn accepted_text(child: &Child, removed: Option<bool>) -> String {
             child.branch()
         ),
         Some(false) => format!(
-            "[canterlot] Session {label} was accepted: it is stopped, archived, and its worktree is removed. Its branch {} had no commits of its own and was deleted.",
+            "[canterlot] Session {label} was accepted: it is stopped, archived, and its worktree is removed. Its branch {} held nothing that exists nowhere else and was deleted; commits the session left on other branches stay there.",
             child.branch()
         ),
     }
@@ -501,7 +501,7 @@ fn subscription_closed_text(child: &Child) -> String {
 
 fn dirty_text(child: &Child) -> String {
     format!(
-        "[canterlot] Session {} is stopped, but its worktree has uncommitted changes, so nothing was removed and the session is not archived. Call session_accept again with force:true to discard them, or session_send to ask it to commit first.",
+        "[canterlot] Session {} is stopped, but its worktree has uncommitted changes or commits on no branch, so nothing was removed and the session is not archived. Call session_accept again with force:true to discard them, or session_send to ask it to commit first.",
         child.label()
     )
 }

@@ -276,21 +276,16 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
             return Removed::failed("not_a_worktree");
         }
         if !request.force {
-            let status = git_text(
-                &target,
-                args!["status", "--porcelain", "--untracked-files=all"],
-            )
-            .await;
-            match status {
+            match holds_unsaved_work(&target).await {
                 None => return Removed::failed("git_failed"),
-                Some(text) if !text.is_empty() => {
+                Some(true) => {
                     return Removed {
                         outcome: "dirty",
                         detail: "dirty",
                         branch_kept: false,
                     };
                 }
-                Some(_) => {}
+                Some(false) => {}
             }
         }
         let removed = if request.force {
@@ -307,6 +302,26 @@ async fn remove_inner(root: &Path, source: &Path, request: &RemoveWorktree) -> R
         detail: "",
         branch_kept: settle_branch(source, &request.branch).await,
     }
+}
+
+/// С каталогом копии пропало бы то, что есть только в нём: незакоммиченные правки и коммиты, до
+/// которых не дойти ни от одной ссылки, например на отсоединённом HEAD. `--all` здесь не годится:
+/// он включает HEAD самой копии и потому всегда даёт ноль.
+async fn holds_unsaved_work(target: &Path) -> Option<bool> {
+    let status = git_text(
+        target,
+        args!["status", "--porcelain", "--untracked-files=all"],
+    )
+    .await?;
+    if !status.is_empty() {
+        return Some(true);
+    }
+    let unreachable = git_text(
+        target,
+        args!["rev-list", "--count", "HEAD", "--not", "--glob=*"],
+    )
+    .await?;
+    Some(unreachable != "0")
 }
 
 /// `true`, если ветка осталась: в ней есть коммиты без другой ссылки, либо удалить не вышло.

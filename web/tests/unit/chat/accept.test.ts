@@ -13,14 +13,14 @@ describe('chat/accept', () => {
     expect(view.dirty).toBe(true);
     expect(view.force).toBe(true);
     expect(view.confirmLabel).toBe('Убрать всё равно');
-    expect(view.body).toContain('В рабочей копии есть незакоммиченные правки');
+    expect(view.body).toContain('В рабочей копии есть незакоммиченные правки или коммиты вне веток');
 
     const target = document.createElement('div');
     document.body.appendChild(target);
     const onforce = vi.fn();
     mount(WorktreeNotice, { target, props: { onforce } });
     flushSync();
-    expect(target.textContent).toContain('В рабочей копии есть незакоммиченные правки');
+    expect(target.textContent).toContain('В рабочей копии есть незакоммиченные правки или коммиты вне веток');
     target.querySelector('button')!.click();
     expect(onforce).toHaveBeenCalled();
   });

@@ -107,7 +107,7 @@ test('accept_flow', async ({ page }) => {
   expect(api.acceptCalls[0]!.key).toBeTruthy();
 
   const notice = page.locator('[data-worktree-dirty]');
-  await expect(notice.getByText('В рабочей копии есть незакоммиченные правки')).toBeVisible();
+  await expect(notice.getByText('В рабочей копии есть незакоммиченные правки или коммиты вне веток')).toBeVisible();
   await noOverflow(page);
   await notice.getByRole('button', { name: 'Убрать всё равно' }).click();
   await page.getByRole('dialog').getByRole('button', { name: 'Убрать всё равно' }).click();

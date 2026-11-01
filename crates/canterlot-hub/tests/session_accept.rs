@@ -902,6 +902,7 @@ async fn dirty_keeps_work_and_tells_parent(pool: PgPool) {
     let note = fx.last_note().await;
     assert!(note.contains("force:true"), "{note}");
     assert!(note.contains("uncommitted"), "{note}");
+    assert!(note.contains("commits on no branch"), "{note}");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

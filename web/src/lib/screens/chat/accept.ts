@@ -9,7 +9,7 @@ export interface AcceptDetail {
 
 export const ACCEPT_LABEL = 'Принять результат и убрать';
 export const FORCE_LABEL = 'Убрать всё равно';
-export const DIRTY_NOTE = 'В рабочей копии есть незакоммиченные правки';
+export const DIRTY_NOTE = 'В рабочей копии есть незакоммиченные правки или коммиты вне веток';
 const CONFIRM_WITH_COPY = 'Сессия остановится, рабочая копия будет удалена. Ветка с коммитами останется.';
 const CONFIRM_NO_COPY = 'Сессия остановится.';
 

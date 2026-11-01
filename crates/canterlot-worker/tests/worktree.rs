@@ -329,6 +329,80 @@ async fn remove_refuses_dirty_without_force() {
 }
 
 #[tokio::test]
+async fn remove_refuses_commits_that_only_a_detached_head_reaches() {
+    let fixture = Fixture::new();
+    let target = fixture.target("r-detached");
+    let spec = fixture.spec("canterlot/0190abe5");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    git(&target, &["checkout", "-q", "--detach"]);
+    fs::write(target.join("work.txt"), "work\n").unwrap();
+    git(&target, &["add", "-A"]);
+    git(&target, &["commit", "-q", "-m", "on no branch"]);
+    let commit = git(&target, &["rev-parse", "HEAD"]);
+
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, false),
+    )
+    .await;
+    assert_eq!((done.outcome, done.detail), ("dirty", "dirty"));
+    assert!(target.exists(), "the only way to reach the commit stays");
+    assert!(git_ok(&fixture.source, &["cat-file", "-e", &commit]));
+
+    let forced = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, true),
+    )
+    .await;
+    assert_eq!(forced.outcome, "removed", "force is the explicit discard");
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn remove_takes_a_detached_head_with_nothing_of_its_own() {
+    let fixture = Fixture::new();
+    let target = fixture.target("r-detached-clean");
+    let spec = fixture.spec("canterlot/0190abe6");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    git(&target, &["checkout", "-q", "--detach"]);
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, false),
+    )
+    .await;
+    assert_eq!(done.outcome, "removed");
+    assert!(!target.exists());
+}
+
+#[tokio::test]
+async fn remove_leaves_commits_on_the_childs_own_branch_alone() {
+    let fixture = Fixture::new();
+    let target = fixture.target("r-own-branch");
+    let spec = fixture.spec("canterlot/0190abe7");
+    prepare(&target, &fixture.source, &spec).await.unwrap();
+    git(&target, &["checkout", "-q", "-b", "feature"]);
+    fs::write(target.join("work.txt"), "work\n").unwrap();
+    git(&target, &["add", "-A"]);
+    git(&target, &["commit", "-q", "-m", "on its own branch"]);
+
+    let done = remove(
+        &fixture.root,
+        &fixture.source,
+        &fixture.removal(&target, &spec.branch, false),
+    )
+    .await;
+    assert_eq!(done.outcome, "removed");
+    assert!(!done.branch_kept);
+    assert_eq!(
+        git(&fixture.source, &["log", "-1", "--format=%s", "feature"]),
+        "on its own branch"
+    );
+}
+
+#[tokio::test]
 async fn remove_force_keeps_branch_with_commits() {
     let fixture = Fixture::new();
     let target = fixture.target("r2");
