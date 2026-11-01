@@ -64,6 +64,7 @@ const ALL_ERROR_CODES: ErrorCode[] = [
   "spawn_whitelist_invalid",
   "not_delegated",
   "worktree_removed",
+  "worktree_not_removed",
 ];
 
 const VALID_ACTIONS: ErrorAction[] = [
@@ -103,7 +104,7 @@ describe("api/errors", () => {
   });
 
   it("error_actions_cover_every_code_in_the_api_error_table", () => {
-    expect(ALL_ERROR_CODES.length).toBe(56);
+    expect(ALL_ERROR_CODES.length).toBe(57);
 
     for (const code of ALL_ERROR_CODES) {
       const err = new ApiError(

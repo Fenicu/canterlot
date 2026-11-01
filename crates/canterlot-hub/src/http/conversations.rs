@@ -815,7 +815,7 @@ async fn update(
     responses(
         (status=204,description="Сессия удалена; повтор с тем же ключом даёт тот же ответ"),
         (status=404,description="not_found или conversation_deleted",body=super::error::ErrorEnvelope),
-        (status=409,description="conversation_live: исполнение не остановлено",body=super::error::ErrorEnvelope)
+        (status=409,description="conversation_live: исполнение не остановлено; worktree_not_removed: рабочая копия ещё на машине",body=super::error::ErrorEnvelope)
     )
 )]
 async fn remove(

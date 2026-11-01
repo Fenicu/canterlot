@@ -23,6 +23,8 @@ pub enum DeleteError {
     Deleted,
     #[error("execution is live")]
     Live,
+    #[error("worktree is not removed")]
+    WorktreeNotRemoved,
     #[error("referenced from another conversation")]
     Referenced,
     #[error("idempotency conflict")]
@@ -186,6 +188,9 @@ async fn delete_in_tx(
     if executions::live(conn, id).await?.is_some() {
         return Err(DeleteError::Live);
     }
+    if holds_worktree(conn, id).await? {
+        return Err(DeleteError::WorktreeNotRemoved);
+    }
     let (generation, execution_ids): (i64, Vec<Uuid>) = sqlx::query_as(
         "select coalesce(max(generation),0), coalesce(array_agg(id),'{}') from executions
          where conversation_id=$1",
@@ -210,6 +215,20 @@ async fn delete_in_tx(
     purge_events(conn, owner_id, id, &execution_ids).await?;
     announce(conn, owner_id, id, correlation_id).await?;
     Ok(json!({"deleted": true}))
+}
+
+/// Только строка разговора знает путь и ветку копии, а машине об удалении никто не скажет:
+/// без неё каталог и ветка остались бы навсегда. Убирает их приём результата. Сбой уборки и
+/// недоступная машина удаление не держат: иначе сессию нельзя было бы удалить вообще.
+async fn holds_worktree(conn: &mut PgConnection, id: Uuid) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar(
+        "select exists(select 1 from conversations c join machines m on m.id=c.machine_id
+                       where c.id=$1 and c.worktree->>'state' in ('active','dirty','removing')
+                         and m.availability<>'unavailable')",
+    )
+    .bind(id)
+    .fetch_one(conn)
+    .await
 }
 
 /// Без каскадов от разговора: каждая строка выбрана по нему, а незнакомая ссылка снаружи

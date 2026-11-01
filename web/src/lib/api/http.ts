@@ -164,6 +164,7 @@ const CODES = new Set<ErrorCode>([
   "spawn_whitelist_invalid",
   "not_delegated",
   "worktree_removed",
+  "worktree_not_removed",
 ]);
 
 const CONTENT_PATCH = /^\/api\/v1\/attachments\/[^/]+\/content$/;

@@ -786,6 +786,92 @@ async fn owner_can_accept_over_http(pool: PgPool) {
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_accepts_a_child_whose_parent_is_gone(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    // Так оставляет deletion.rs: потомок без родителя, но всё ещё делегированный.
+    sqlx::query("update conversations set parent_conversation_id=null where id=$1")
+        .bind(fx.child)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let answer = post(&fx, fx.child, "orphan", json!({})).await;
+    assert_eq!(
+        answer.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&answer.body)
+    );
+    assert_eq!(answer.json::<Value>(), json!({"state": "removing"}));
+    fx.tick().await;
+    let (command, _) = fx.removal_command().await;
+    fx.report(command, "removed", false, "").await;
+    assert_eq!(fx.worktree().await["state"], "removed");
+    assert!(fx.archived().await);
+}
+
+async fn delete(fx: &Fx, id: Uuid, key: &str) -> TestResponse {
+    fx.client
+        .send(
+            Method::DELETE,
+            &format!("/api/v1/conversations/{id}"),
+            Some(key),
+            None,
+        )
+        .await
+}
+
+async fn set_worktree_state(fx: &Fx, state: &str) {
+    sqlx::query("update conversations set worktree=worktree||jsonb_build_object('state',$2::text) where id=$1")
+        .bind(fx.child)
+        .bind(state)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn deleting_a_session_keeps_waiting_for_its_worktree(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    for state in ["active", "dirty", "removing"] {
+        set_worktree_state(&fx, state).await;
+        let refused = delete(&fx, fx.child, &format!("delete-{state}")).await;
+        assert_eq!(refused.status, 409, "{state}");
+        assert_eq!(
+            refused.json::<Value>()["error"]["code"],
+            "worktree_not_removed",
+            "{state}"
+        );
+    }
+    assert_eq!(fx.worktree().await["state"], "removing");
+
+    set_worktree_state(&fx, "removed").await;
+    let done = delete(&fx, fx.child, "delete-removed").await;
+    assert_eq!(done.status, 204, "{}", String::from_utf8_lossy(&done.body));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_does_not_wait_for_a_removal_that_failed(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    set_worktree_state(&fx, "failed").await;
+    assert_eq!(delete(&fx, fx.child, "failed").await.status, 204);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn delete_does_not_wait_for_a_machine_that_is_gone(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    sqlx::query("update machines set availability='unavailable' where id=$1")
+        .bind(fx.machine)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    assert_eq!(delete(&fx, fx.child, "gone").await.status, 204);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn dirty_keeps_work_and_tells_parent(pool: PgPool) {
     let fx = Fx::new(pool).await;
     fx.stopped_child().await;

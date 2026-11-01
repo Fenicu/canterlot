@@ -1211,7 +1211,7 @@ export interface components {
             scope: components["schemas"]["ErrorScope"];
         };
         /** @enum {string} */
-        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "not_delegated" | "worktree_removed";
+        ErrorCode: "unauthenticated" | "forbidden_user" | "origin_rejected" | "invalid_request" | "invalid_offset" | "not_found" | "method_not_allowed" | "idempotency_conflict" | "decision_conflict" | "request_not_open" | "decision_invalid" | "resource_limit" | "not_implemented" | "too_many_requests" | "db_unavailable" | "internal" | "queue_full" | "conversation_closed" | "execution_already_live" | "invalid_state" | "not_pending" | "schedule_time_out_of_range" | "too_many_scheduled" | "machine_not_found" | "machine_unavailable" | "capability_missing" | "limits_mismatch" | "harness_unknown" | "model_unknown" | "effort_not_allowed" | "permission_mode_unknown" | "settings_midsession_unsupported" | "profile_unknown" | "workdir_not_allowed" | "group_not_found" | "group_name_taken" | "archive_active" | "conversation_deleted" | "conversation_live" | "attachment_not_ready" | "attachment_not_uploadable" | "attachment_unsupported" | "attachment_unavailable" | "offset_mismatch" | "upload_in_progress" | "checksum_mismatch" | "attachment_conflict" | "preset_not_found" | "preset_builtin" | "preset_revision_conflict" | "preset_title_taken" | "preset_limit_reached" | "preset_invalid" | "spawn_whitelist_invalid" | "not_delegated" | "worktree_removed" | "worktree_not_removed";
         /** @description Детали ответа владельцу; содержимое решения не должно попадать в журналы ошибок. */
         ErrorDetails: {
             /**
@@ -2558,7 +2558,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorEnvelope"];
                 };
             };
-            /** @description conversation_live: исполнение не остановлено */
+            /** @description conversation_live: исполнение не остановлено; worktree_not_removed: рабочая копия ещё на машине */
             409: {
                 headers: {
                     /** @description Часы хаба: целые миллисекунды Unix */

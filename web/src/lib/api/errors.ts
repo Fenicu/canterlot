@@ -254,6 +254,10 @@ const ERROR_TABLE: Record<ErrorCode, ErrorDescriptor> = {
     action: "none",
     message: "Рабочая копия уже убрана",
   },
+  worktree_not_removed: {
+    action: "none",
+    message: "Сначала примите результат: рабочая копия ещё на машине",
+  },
 };
 
 export interface DescribedError {

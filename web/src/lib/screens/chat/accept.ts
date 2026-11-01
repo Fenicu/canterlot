@@ -1,6 +1,8 @@
-// Приём результата делегированной сессии: что показывать по `parent_id` и состоянию рабочей копии.
+// Приём результата делегированной сессии: что показывать по `spawn_depth` и состоянию рабочей копии.
 export interface AcceptDetail {
   parent_id?: string | null;
+  // Родителя могут удалить, а сессия остаётся делегированной: признак дают только глубина и хаб.
+  spawn_depth?: number;
   archived?: boolean;
   worktree?: { branch?: string; state?: string; path?: string } | null;
 }
@@ -29,7 +31,7 @@ export function acceptView(detail: AcceptDetail | null | undefined): AcceptView 
   const hasCopy = Boolean(detail?.worktree) && state !== 'removed';
   const confirm = hasCopy ? CONFIRM_WITH_COPY : CONFIRM_NO_COPY;
   return {
-    available: Boolean(detail?.parent_id) && !detail?.archived && state !== 'removed' && !removing,
+    available: (detail?.spawn_depth ?? 0) > 0 && !detail?.archived && state !== 'removed' && !removing,
     dirty,
     removing,
     body: dirty ? `${DIRTY_NOTE}. ${confirm}` : confirm,

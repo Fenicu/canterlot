@@ -137,6 +137,7 @@ error_codes! {
     SpawnWhitelistInvalid => "spawn_whitelist_invalid", 422, Browser, Never, "Некорректный белый список";
     NotDelegated => "not_delegated", 409, Browser, Never, "Сессия не запущена агентом";
     WorktreeRemoved => "worktree_removed", 409, Delivery, Never, "Рабочая копия уже убрана";
+    WorktreeNotRemoved => "worktree_not_removed", 409, Browser, AfterCondition, "Сначала примите результат: рабочая копия ещё на машине";
 }
 
 impl From<crate::conversations::SettingsError> for ApiError {
@@ -401,6 +402,7 @@ impl From<crate::deletion::DeleteError> for ApiError {
             DeleteError::NotFound => ApiError::new(ErrorCode::NotFound),
             DeleteError::Deleted => ApiError::new(ErrorCode::ConversationDeleted),
             DeleteError::Live => ApiError::new(ErrorCode::ConversationLive),
+            DeleteError::WorktreeNotRemoved => ApiError::new(ErrorCode::WorktreeNotRemoved),
             DeleteError::Referenced => ApiError::new(ErrorCode::InvalidState),
             DeleteError::IdempotencyConflict => ApiError::new(ErrorCode::IdempotencyConflict),
             DeleteError::Db(error) => error.into(),

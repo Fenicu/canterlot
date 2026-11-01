@@ -264,10 +264,15 @@ pub async fn accept_for_owner(
         move |conn| {
             Box::pin(async move {
                 conversations::lock_owner(conn, owner_id).await?;
-                let parent = parent_of(conn, owner_id, id)
-                    .await?
-                    .ok_or(AcceptError::NotFound)?;
-                if parent.is_none() {
+                // Глубина, а не родитель: потомок удалённого родителя остаётся делегированным.
+                let depth: Option<i32> = sqlx::query_scalar(
+                    "select spawn_depth from conversations where id=$1 and owner_id=$2",
+                )
+                .bind(id)
+                .bind(owner_id)
+                .fetch_optional(&mut *conn)
+                .await?;
+                if depth.ok_or(AcceptError::NotFound)? == 0 {
                     return Err(AcceptError::NotDelegated);
                 }
                 Ok::<_, AcceptError>(begin_in_tx(conn, owner_id, id, force, correlation_id).await?)

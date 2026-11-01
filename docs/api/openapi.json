@@ -837,7 +837,7 @@
             }
           },
           "409": {
-            "description": "conversation_live: исполнение не остановлено",
+            "description": "conversation_live: исполнение не остановлено; worktree_not_removed: рабочая копия ещё на машине",
             "headers": {
               "X-Server-Time-Ms": {
                 "schema": {
@@ -6181,7 +6181,8 @@
           "preset_invalid",
           "spawn_whitelist_invalid",
           "not_delegated",
-          "worktree_removed"
+          "worktree_removed",
+          "worktree_not_removed"
         ]
       },
       "ErrorDetails": {

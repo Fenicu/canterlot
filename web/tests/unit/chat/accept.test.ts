@@ -9,7 +9,7 @@ afterEach(() => {
 
 describe('chat/accept', () => {
   it('accept_shows_dirty_state', () => {
-    const view = acceptView({ parent_id: 'p', worktree: { branch: 'canterlot/ab', state: 'dirty', path: '/w/x' } });
+    const view = acceptView({ spawn_depth: 1, worktree: { branch: 'canterlot/ab', state: 'dirty', path: '/w/x' } });
     expect(view.dirty).toBe(true);
     expect(view.force).toBe(true);
     expect(view.confirmLabel).toBe('Убрать всё равно');
@@ -26,7 +26,7 @@ describe('chat/accept', () => {
   });
 
   it('a_clean_copy_asks_before_removing_and_does_not_force', () => {
-    const view = acceptView({ parent_id: 'p', worktree: { branch: 'b', state: 'active', path: '/w' } });
+    const view = acceptView({ spawn_depth: 1, worktree: { branch: 'b', state: 'active', path: '/w' } });
     expect(view.available).toBe(true);
     expect(view.dirty).toBe(false);
     expect(view.force).toBe(false);
@@ -37,9 +37,15 @@ describe('chat/accept', () => {
   it('only_a_delegated_unaccepted_session_offers_the_action', () => {
     expect(acceptView({ worktree: null }).available).toBe(false);
     expect(acceptView(null).available).toBe(false);
-    expect(acceptView({ parent_id: 'p', archived: true }).available).toBe(false);
-    expect(acceptView({ parent_id: 'p', worktree: { state: 'removed' } }).available).toBe(false);
-    expect(acceptView({ parent_id: 'p', worktree: { state: 'removing' } }).available).toBe(false);
-    expect(acceptView({ parent_id: 'p', worktree: null }).available).toBe(true);
+    expect(acceptView({ spawn_depth: 0 }).available).toBe(false);
+    expect(acceptView({ spawn_depth: 1, archived: true }).available).toBe(false);
+    expect(acceptView({ spawn_depth: 1, worktree: { state: 'removed' } }).available).toBe(false);
+    expect(acceptView({ spawn_depth: 1, worktree: { state: 'removing' } }).available).toBe(false);
+    expect(acceptView({ spawn_depth: 1, worktree: null }).available).toBe(true);
+  });
+
+  it('a_child_outlives_its_parent_and_can_still_be_accepted', () => {
+    const view = acceptView({ parent_id: null, spawn_depth: 2, worktree: { state: 'active' } });
+    expect(view.available).toBe(true);
   });
 });
