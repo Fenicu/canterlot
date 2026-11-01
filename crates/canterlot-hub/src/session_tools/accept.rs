@@ -231,6 +231,7 @@ pub async fn accept(
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;
     check_parent(parent, me.id).map_err(tool_error)?;
+    access::check_accept(&me, &target, args.force)?;
     let state = begin_in_tx(
         &mut tx,
         caller.owner_id,

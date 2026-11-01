@@ -138,6 +138,15 @@ pub fn check_read_only(sender: &Session, target: &Session) -> Result<(), ToolErr
     Ok(())
 }
 
+/// Приём останавливает цель и потому подчиняется тому же правилу, что и запись. `force` ещё и
+/// выбрасывает незакоммиченную работу, а она могла появиться до того, как цель сузили.
+pub fn check_accept(sender: &Session, target: &Session, force: bool) -> Result<(), ToolError> {
+    if force && sender.sends_read_only() {
+        return Err(ToolError::new(ToolErrorCode::ReadOnlySession));
+    }
+    check_read_only(sender, target)
+}
+
 /// Глубина хода, из которого пришёл вызов. Ввод в слоте учитывается и без квитанции о приёме:
 /// вызов инструмента может обогнать её. Без отметки о происхождении ввод владельца: ноль.
 pub async fn current_depth(

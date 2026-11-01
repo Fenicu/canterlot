@@ -592,6 +592,70 @@ async fn only_parent_can_accept(pool: PgPool) {
     );
 }
 
+async fn set_mode(fx: &Fx, id: Uuid, mode: &str) {
+    sqlx::query("update conversations set permission_mode=$2 where id=$1")
+        .bind(id)
+        .bind(mode)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn read_only_parent_cannot_stop_a_writing_child_or_discard_its_work(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    set_mode(&fx, fx.parent, "read_only").await;
+
+    for force in [false, true] {
+        assert_eq!(
+            code(fx.accept_as(fx.parent_caller(), fx.child, force).await),
+            Code::ReadOnlySession
+        );
+    }
+    assert_eq!(fx.pending_cleanups().await, 0);
+    assert_eq!(fx.worktree().await["state"], "active");
+
+    sqlx::query(
+        "update conversations set permission_mode='bypass',
+           pending_settings=jsonb_build_object('permission_mode','read_only') where id=$1",
+    )
+    .bind(fx.parent)
+    .execute(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        code(fx.accept_as(fx.parent_caller(), fx.child, true).await),
+        Code::ReadOnlySession,
+        "a narrowing that has not taken effect yet counts"
+    );
+    assert_eq!(fx.pending_cleanups().await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn read_only_parent_may_accept_a_read_only_child_but_never_force(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    set_mode(&fx, fx.parent, "read_only").await;
+    set_mode(&fx, fx.child, "read_only").await;
+
+    assert_eq!(
+        code(fx.accept_as(fx.parent_caller(), fx.child, true).await),
+        Code::ReadOnlySession,
+        "the child may hold work from before it was narrowed"
+    );
+    assert_eq!(fx.pending_cleanups().await, 0);
+
+    let answer = fx.accept(false).await;
+    assert_eq!(answer["status"], "removing", "{answer}");
+    fx.tick().await;
+    let (_, payload) = fx.removal_command().await;
+    assert_eq!(
+        payload["force"], false,
+        "the worker still refuses a dirty copy"
+    );
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn accept_tells_other_subscribers_instead_of_dropping_them(pool: PgPool) {
     let fx = Fx::new(pool).await;
