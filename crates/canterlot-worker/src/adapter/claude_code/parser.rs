@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use uuid::Uuid;
 
 use super::super::frame_names::object_field_names;
-use super::super::labels::{command_label, path_tail};
+use super::super::labels::{command_label, cut_end, path_tail};
 use super::super::{
     AdapterEvent, BackgroundKind, BackgroundState, BackgroundTask, BlockKind, ModelUsage, Phase,
     TodoItem, TodoStatus,
@@ -1443,13 +1443,12 @@ fn call_text(input: &serde_json::Value) -> String {
 
 fn tool_summary(tool_name: &str, input: &serde_json::Value) -> String {
     let argument = tool_argument(tool_name, input);
-    let mut summary = if argument.is_empty() {
+    let summary = if argument.is_empty() {
         tool_name.to_owned()
     } else {
         format!("{tool_name}: {argument}")
     };
-    summary.truncate(summary.floor_char_boundary(TOOL_CALL_SUMMARY_LIMIT));
-    summary
+    cut_end(&summary, TOOL_CALL_SUMMARY_LIMIT)
 }
 
 fn task_kind(task: &serde_json::Value) -> BackgroundKind {

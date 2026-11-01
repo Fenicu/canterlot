@@ -247,7 +247,12 @@ impl fmt::Debug for Translator {
 }
 
 fn cut120(text: &str) -> String {
-    text.chars().take(120).collect()
+    if text.chars().nth(120).is_none() {
+        return text.to_owned();
+    }
+    let mut label: String = text.chars().take(119).collect();
+    label.push('…');
+    label
 }
 
 fn file_name(path: &str) -> &str {

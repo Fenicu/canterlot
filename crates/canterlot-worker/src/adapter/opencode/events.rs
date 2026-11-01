@@ -7,7 +7,7 @@ use super::{
     requests::GLOBAL_SESSION,
 };
 use crate::adapter::frame_names::object_field_names;
-use crate::adapter::labels::{command_label, path_tail};
+use crate::adapter::labels::{command_label, cut_end, path_tail};
 use canterlot_proto::limits::BLOCK_FINAL_INLINE_MAX_BYTES;
 use serde_json::{Value, json};
 use std::{
@@ -332,13 +332,12 @@ fn tool_summary(name: &str, input: &Value) -> String {
             .unwrap_or_default()
             .to_owned()
     };
-    let mut summary = if argument.is_empty() {
+    let summary = if argument.is_empty() {
         name.to_owned()
     } else {
         format!("{name}: {argument}")
     };
-    summary.truncate(summary.floor_char_boundary(SUMMARY_BYTES));
-    summary
+    cut_end(&summary, SUMMARY_BYTES)
 }
 
 // Текст вызова: команда как есть, остальное сырым входом.

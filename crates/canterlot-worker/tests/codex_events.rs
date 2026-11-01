@@ -1239,3 +1239,28 @@ fn unknown_notification_names_are_bounded() {
     }
     assert_eq!(reported, 64);
 }
+
+#[test]
+fn long_command_label_is_marked_as_cut() {
+    let label = |command: String| {
+        let mut translator = Translator::new("thread", "gpt-6-luna");
+        translator.begin_turn("turn", command_id());
+        let out = translator.feed(
+            "item/started",
+            &json!({"threadId": "thread", "turnId": "turn", "item": {
+                "id": "c1", "type": "commandExecution", "command": command, "status": "inProgress"}}),
+        );
+        events_of(&out)
+            .iter()
+            .find_map(|event| match event {
+                AdapterEvent::BlockStarted {
+                    summary: Some(summary),
+                    ..
+                } => Some(summary.clone()),
+                _ => None,
+            })
+            .expect("the call has a summary")
+    };
+    assert_eq!(label("a".repeat(120)), "a".repeat(120));
+    assert_eq!(label("a".repeat(121)), format!("{}…", "a".repeat(119)));
+}

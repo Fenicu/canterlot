@@ -638,7 +638,7 @@ fn long_cyrillic_command_is_cut_on_a_character_boundary() {
         "input": {"command": command}}}));
     let tools = tools_of(out);
     assert!(tools[0].summary.len() <= 256);
-    assert!(tools[0].summary.ends_with('э'));
+    assert!(tools[0].summary.ends_with("э…"), "a cut label is marked");
 }
 
 #[test]

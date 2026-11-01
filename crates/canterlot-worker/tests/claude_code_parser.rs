@@ -615,7 +615,19 @@ fn tool_summary_cuts_cyrillic_on_a_char_boundary() {
     // «Bash: a» занимает 7 байт, поэтому байт 120 приходится на середину буквы.
     let command = format!("a{}", "я".repeat(100));
     let summary = final_summary(&command);
-    assert_eq!(summary, format!("Bash: a{}", "я".repeat(56)));
+    assert_eq!(summary, format!("Bash: a{}…", "я".repeat(55)));
+}
+
+#[test]
+fn tool_summary_marks_only_a_real_cut() {
+    assert_eq!(
+        final_summary(&"a".repeat(114)),
+        format!("Bash: {}", "a".repeat(114))
+    );
+    assert_eq!(
+        final_summary(&"a".repeat(115)),
+        format!("Bash: {}…", "a".repeat(111))
+    );
 }
 
 #[test]
