@@ -11,6 +11,7 @@ import {
 } from "#lib/ops/journal.js";
 import {
   defaultModelId,
+  keptHarness,
   NewSessionModel,
   soleEffort,
   prefillWorkdir,
@@ -121,6 +122,14 @@ describe("sessions/new", () => {
     expect(defaultModelId(models, "opus")).toBe("opus");
     expect(defaultModelId(models, "gpt-5")).toBe("opus[1m]");
     expect(defaultModelId([], "opus")).toBe("");
+  });
+
+  it("new_session_keeps_the_chosen_agent_while_it_is_listed_and_drops_it_once_gone", () => {
+    const agents = [{ id: "claude" }, { id: "codex" }];
+    expect(keptHarness(agents, "codex")).toBe("codex");
+    expect(keptHarness([...agents], "codex")).toBe("codex");
+    expect(keptHarness([{ id: "claude" }], "codex")).toBe("");
+    expect(keptHarness([], "")).toBe("");
   });
 
   it("new_session_submits_a_chosen_suggestion_without_the_trailing_slash", async () => {

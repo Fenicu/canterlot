@@ -15,7 +15,7 @@
   import Textarea from '#lib/ui/Textarea.svelte';
   import Toggle from '#lib/ui/Toggle.svelte';
   import { onMount, untrack } from 'svelte';
-  import { defaultModelId, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
+  import { defaultModelId, keptHarness, machineProblem, NewSessionModel, prefillWorkdir, soleEffort, soleMachine } from './newSessionModel';
   import WorkdirField from './WorkdirField.svelte';
   import { sortPresets, type PresetSummaryLike } from '../presets/presetsModel.js';
 
@@ -142,6 +142,13 @@
       path = prefillWorkdir(path, prefilled, next);
     });
     prefilled = next;
+  });
+
+  $effect(() => {
+    const list = harnesses;
+    untrack(() => {
+      harness = keptHarness(list, harness);
+    });
   });
 
   $effect(() => {

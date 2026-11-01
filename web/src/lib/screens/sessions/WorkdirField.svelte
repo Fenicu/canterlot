@@ -26,6 +26,22 @@
     return () => suggester.clear();
   });
 
+  // Список в потоке раскладки: убрать его между нажатием и отпусканием значит сдвинуть кнопку из-под пальца, и клик пропадёт.
+  let pressed = false;
+  let closeAfterPress = false;
+
+  function release() {
+    pressed = false;
+    if (!closeAfterPress) return;
+    closeAfterPress = false;
+    setTimeout(() => suggester.clear(), 0);
+  }
+
+  function blur() {
+    if (pressed) closeAfterPress = true;
+    else suggester.clear();
+  }
+
   function pick(item: string) {
     value = `${item}/`;
     suggester.input(machineId, value, 0);
@@ -51,6 +67,8 @@
   }
 </script>
 
+<svelte:window onpointerdowncapture={() => (pressed = true)} onpointerup={release} onpointercancel={release} />
+
 <div>
   <Field label="Рабочая папка">
     {#snippet children({ id })}<input
@@ -66,7 +84,7 @@
       spellcheck={false}
       oninput={() => suggester.input(machineId, value)}
       onkeydown={keydown}
-      onblur={() => suggester.clear()}
+      onblur={blur}
     />{/snippet}
   </Field>
   {#if items.length > 0}

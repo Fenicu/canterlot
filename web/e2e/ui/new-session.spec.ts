@@ -19,7 +19,7 @@ async function boot(page: Page, options: { solo?: boolean; home?: string | null;
   await installChatRoutes(page, hub, api, '00000000-0000-4000-8000-0000000000d1');
   await page.goto('/sessions');
   await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
-  return { api, machine };
+  return { api, hub, machine };
 }
 
 const pathField = (page: Page) => page.getByRole('textbox', { name: 'Рабочая папка' });
@@ -52,31 +52,27 @@ test('new_session_sheet_follows_mockup_07_and_creates_a_started_session', async 
   expect(bodies[0]?.key).not.toBe('');
 });
 
-// QUARANTINE: радиокнопка агента не меняет состояние, когда форма перерисовывается под нагрузкой (.superpowers/carry/flaky-tests.md)
-test.describe('quarantine new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', () => {
-  test.describe.configure({ retries: 2 });
-  test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', async ({ page }) => {
-    await boot(page);
-    const bodies: { permission_mode?: string }[] = [];
-    page.on('request', (request) => {
-      if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
-        bodies.push({ ...(request.postDataJSON() as { permission_mode?: string }) });
-      }
-    });
-    await page.goto('/new');
-    await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
-    await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
-    await page.getByRole('radio', { name: 'Claude Code' }).check();
-    await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
-    await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
-    const mode = page.getByRole('combobox', { name: 'Режим разрешений' });
-    await expect(mode).toHaveValue('bypass');
-    const options = (await mode.locator('option').allTextContents()).map((text) => text.trim());
-    expect(options).toEqual(['Как в настройках CLI', 'Спрашивать', 'Без подтверждений', 'Только чтение']);
-    await page.getByRole('button', { name: 'Создать' }).click();
-    await expect(page).toHaveURL(/\/c\//);
-    expect(bodies[0]?.permission_mode).toBe('bypass');
+test('new_session_defaults_to_bypass_and_lets_the_owner_pick_a_labelled_mode', async ({ page }) => {
+  await boot(page);
+  const bodies: { permission_mode?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') {
+      bodies.push({ ...(request.postDataJSON() as { permission_mode?: string }) });
+    }
   });
+  await page.goto('/new');
+  await page.getByRole('combobox', { name: 'Машина' }).selectOption({ label: 'workstation' });
+  await page.getByRole('textbox', { name: 'Рабочая папка' }).fill('/srv/canterlot');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  const mode = page.getByRole('combobox', { name: 'Режим разрешений' });
+  await expect(mode).toHaveValue('bypass');
+  const options = (await mode.locator('option').allTextContents()).map((text) => text.trim());
+  expect(options).toEqual(['Как в настройках CLI', 'Спрашивать', 'Без подтверждений', 'Только чтение']);
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]?.permission_mode).toBe('bypass');
 });
 
 test('new_session_offers_recent_workdirs_and_submits_a_typed_path', async ({ page }) => {
@@ -144,33 +140,29 @@ test('new_session_stays_empty_for_a_worker_without_a_home', async ({ page }) => 
   await expect(pathField(page)).toHaveValue('');
 });
 
-// QUARANTINE: радиокнопка агента не меняет состояние, когда форма перерисовывается под нагрузкой (.superpowers/carry/flaky-tests.md)
-test.describe('quarantine new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', () => {
-  test.describe.configure({ retries: 2 });
-  test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({ page }) => {
-    await boot(page, {
-      solo: true,
-      models: [
-        { id: 'opus[1m]', title: 'Opus 1M', efforts: ['medium'] },
-        { id: 'fable[1m]', title: 'Fable 1M', efforts: ['medium'] },
-        { id: 'opus', title: 'Opus', efforts: ['medium'] },
-        { id: 'haiku', title: 'Haiku', efforts: ['medium'] }
-      ]
-    });
-    await page.goto('/new');
-    await page.getByRole('radio', { name: 'Claude Code' }).check();
-    const field = page.getByRole('combobox', { name: 'Модель' });
-    await expect(field).toHaveValue('opus[1m]');
-    await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
-    await field.selectOption('haiku');
-    await expect(field).toHaveValue('haiku');
-    await field.selectOption('opus[1m]');
-    await pathField(page).fill('/srv/canterlot');
-    await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
-    await page.getByRole('button', { name: 'Создать' }).click();
-    await expect(page).toHaveURL(/\/c\//);
-    await expect(page.getByText(/Claude Code · Opus 1M · workstation/).first()).toBeVisible();
+test('new_session_defaults_to_the_1m_variant_with_plain_ones_after_it', async ({ page }) => {
+  await boot(page, {
+    solo: true,
+    models: [
+      { id: 'opus[1m]', title: 'Opus 1M', efforts: ['medium'] },
+      { id: 'fable[1m]', title: 'Fable 1M', efforts: ['medium'] },
+      { id: 'opus', title: 'Opus', efforts: ['medium'] },
+      { id: 'haiku', title: 'Haiku', efforts: ['medium'] }
+    ]
   });
+  await page.goto('/new');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  const field = page.getByRole('combobox', { name: 'Модель' });
+  await expect(field).toHaveValue('opus[1m]');
+  await expect(field.locator('option')).toContainText(['Выберите модель', 'Opus 1M', 'Fable 1M', 'Opus', 'Haiku']);
+  await field.selectOption('haiku');
+  await expect(field).toHaveValue('haiku');
+  await field.selectOption('opus[1m]');
+  await pathField(page).fill('/srv/canterlot');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  await expect(page.getByText(/Claude Code · Opus 1M · workstation/).first()).toBeVisible();
 });
 
 test('new_session_suggests_existing_folders_by_keyboard_and_continues_into_the_choice', async ({ page }) => {
@@ -200,6 +192,55 @@ test('new_session_suggestion_is_chosen_by_pointer_and_the_field_keeps_focus', as
   else await hint(page, '/srv/notes').click();
   await expect(pathField(page)).toHaveValue('/srv/notes/');
   await expect(pathField(page)).toBeFocused();
+});
+
+test('new_session_choices_by_pointer_are_not_lost_while_the_folder_list_is_open', async ({ page }) => {
+  await boot(page, { solo: true });
+  await openWithMachine(page);
+  const list = page.getByRole('listbox', { name: 'Подсказки папок' });
+  await pathField(page).fill('/srv/c');
+  await expect(list).toBeVisible();
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await expect(page.getByRole('radio', { name: 'Claude Code' })).toBeChecked();
+  await expect(list).toBeHidden();
+  await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await pathField(page).fill('/srv/canterlot');
+  await expect(list).toBeVisible();
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+});
+
+test('new_session_choices_survive_a_machine_list_refresh', async ({ page }) => {
+  const { hub, machine } = await boot(page, { solo: true });
+  const bodies: { harness?: string; model?: string; effort?: string; permission_mode?: string }[] = [];
+  page.on('request', (request) => {
+    if (request.method() === 'POST' && new URL(request.url()).pathname === '/api/v1/conversations') bodies.push({ ...(request.postDataJSON() as object) });
+  });
+  await openWithMachine(page);
+  await pathField(page).fill('/srv/canterlot');
+  await page.getByRole('radio', { name: 'Claude Code' }).check();
+  await page.getByRole('combobox', { name: 'Модель' }).selectOption('opus');
+  await page.getByRole('combobox', { name: 'Усилие' }).selectOption('medium');
+  await page.getByRole('combobox', { name: 'Режим разрешений' }).selectOption('ask');
+  const radio = page.getByRole('radio', { name: 'Claude Code' });
+  const handle = await radio.elementHandle();
+  const metrics = { machine_time_ms: Date.now(), cpu_cores: 8, cpu_permille: 500, mem_total_bytes: 1000, mem_available_bytes: 500, load1_centi: 100, load5_centi: 100, load15_centi: 100, disks: [], executions: [] };
+  for (let tick = 0; tick < 3; tick += 1) {
+    hub.append('machines', { kind: 'machine_metrics', payload: { machine_id: machine, ...metrics, cpu_permille: 500 + tick } });
+    hub.append('machines', { kind: 'machine_availability_changed', payload: { machine_id: machine, availability: 'available' } });
+    hub.flush();
+  }
+  await expect(page.getByRole('combobox', { name: 'Машина' })).toHaveValue(machine);
+  await expect(radio).toBeChecked();
+  await expect(page.getByRole('combobox', { name: 'Модель' })).toHaveValue('opus');
+  await expect(page.getByRole('combobox', { name: 'Усилие' })).toHaveValue('medium');
+  await expect(page.getByRole('combobox', { name: 'Режим разрешений' })).toHaveValue('ask');
+  await expect(pathField(page)).toHaveValue('/srv/canterlot');
+  expect(await handle!.evaluate((node) => node.isConnected)).toBe(true);
+  await page.getByRole('button', { name: 'Создать' }).click();
+  await expect(page).toHaveURL(/\/c\//);
+  expect(bodies[0]).toMatchObject({ harness: 'claude', model: 'opus', effort: 'medium', permission_mode: 'ask' });
 });
 
 test('new_session_shows_no_list_and_no_error_when_the_machine_does_not_answer', async ({ page }) => {

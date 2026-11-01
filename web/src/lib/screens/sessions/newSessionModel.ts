@@ -66,6 +66,14 @@ export function prefillWorkdir(
   return current === "" || current === prefilled ? home : current;
 }
 
+/** Пропавшего у машины агента форма не держит: выбор сбрасывается явно, а не остаётся невидимым. */
+export function keptHarness(
+  harnesses: { id: string }[],
+  current: string,
+): string {
+  return harnesses.some((item) => item.id === current) ? current : "";
+}
+
 /** Каталог перечисляет модели от выбора по умолчанию, как и у Codex. */
 export function defaultModelId(
   models: { id: string }[],
