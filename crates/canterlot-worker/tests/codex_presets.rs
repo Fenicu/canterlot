@@ -434,11 +434,7 @@ async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
         permission_mode: "ask".into(),
         instructions: clean_spec(),
     };
-    let error = adapter
-        .start(&spec, &group)
-        .await
-        .err()
-        .expect("no rollout");
+    let error = adapter.start(&spec, &group).await.expect_err("no rollout");
     assert!(
         matches!(error, AdapterError::StartFailed("resume_failed")),
         "{error:?}"

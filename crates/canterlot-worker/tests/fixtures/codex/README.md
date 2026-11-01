@@ -22,6 +22,8 @@
   повторяет форму `ev/tools.jsonl:27`. Покрывает: главный `spawnAgent` с
   `receiverThreadIds`, регистрацию ребёнка по `parentThreadId`, детские ходы
   (не завершают главный), расход ребёнка под его агентом и моделью.
+  Live smoke 0.164 эту форму не подтвердил: `thread/started` потомка нет,
+  `receiverThreadIds` на старте пуст, настоящие кадры в `subagent_live_*.jsonl`.
 - `reasoning.jsonl` — сконструировано, подтвердить в live smoke. Источники формы:
   элемент `reasoning` и методы `item/reasoning/summaryPartAdded`,
   `summaryTextDelta` из схемы (`generate-ts`, типы `Reasoning*`). Покрывает:
