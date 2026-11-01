@@ -315,10 +315,9 @@ impl Env {
     async fn cj(&self) -> Vec<Body> {
         self.thread()
             .call(|store| {
+                let store = store.as_ref().unwrap();
                 Ok(store
-                    .as_ref()
-                    .unwrap()
-                    .cj_records_from(1, usize::MAX)?
+                    .cj_records_from(store.cj_cursor()?.first_stored_seq, usize::MAX)?
                     .into_iter()
                     .filter_map(|record| record.body.and_then(|body| body.body))
                     .collect())
@@ -752,6 +751,293 @@ async fn spec_of_older_release_is_reattached() {
     assert!(env.manager().observations()[0].supervisor_attached);
     env.hub_session();
     env.stop().await;
+}
+
+fn owner_reclaimed(cj: &[Body], id: Uuid) -> usize {
+    cj.iter()
+        .filter(|b| {
+            matches!(b, Body::ExecutionState(f)
+                if f.outcome == canterlot_proto::OWNER_RECLAIMED && f.execution_id == id.to_string())
+        })
+        .count()
+}
+
+impl Env {
+    fn exec_dir(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("store/executions")
+            .join(self.execution.to_string())
+    }
+
+    async fn ack_cj(&self) {
+        let seq = self
+            .thread()
+            .call(|store| {
+                let store = store.as_mut().unwrap();
+                let seq = store.cj_cursor()?.last_seq;
+                store.on_cj_ack(seq)?;
+                Ok(seq)
+            })
+            .await
+            .unwrap();
+        self.manager().on_cj_ack(seq);
+    }
+
+    /// Повторяет сбой обновления: спека не читается, хаб подтвердил `owner_lost`.
+    async fn lose_owner_to_a_bad_spec(&mut self) -> String {
+        let spec = self.exec_dir().join("spec.toml");
+        let text = fs::read_to_string(&spec).unwrap();
+        self.close_manager().await;
+        fs::write(&spec, "[broken").unwrap();
+        self.reopen();
+        assert!(self.manager().startup_verify().await.unwrap().is_empty());
+        assert_eq!(owner_lost(&self.cj().await, self.execution), 1);
+        text
+    }
+
+    async fn restart_with_spec(&mut self, spec: &str) -> Vec<Uuid> {
+        self.close_manager().await;
+        fs::write(self.exec_dir().join("spec.toml"), spec).unwrap();
+        age_spec(&self.exec_dir());
+        self.reopen();
+        self.manager().startup_verify().await.unwrap()
+    }
+}
+
+#[tokio::test]
+async fn reported_owner_lost_is_reclaimed_from_the_same_supervisor() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let before = env.ownership(env.execution).await.unwrap();
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    assert_eq!(
+        env.ownership(env.execution).await.unwrap().released_reason,
+        "owner_lost_reported"
+    );
+    assert!(env.manager().observations().is_empty());
+    let answer = Uuid::now_v7();
+    env.send(deliver_command(
+        answer,
+        1,
+        env.execution,
+        1,
+        env.conversation,
+        &script(r#"{"delta":"after loss"}"#),
+    ))
+    .await;
+    assert_eq!(
+        env.stored_commands().await,
+        1,
+        "input for a lost execution waits in the inbox"
+    );
+
+    assert_eq!(env.restart_with_spec(&spec).await, vec![env.execution]);
+    let cj = env.cj().await;
+    assert_eq!(owner_reclaimed(&cj, env.execution), 1);
+    assert_eq!(owner_lost(&cj, env.execution), 0, "not reported again");
+    let after = env.ownership(env.execution).await.unwrap();
+    assert!(after.released_reason.is_empty());
+    assert!(after.reclaimed_cj_seq > 0);
+    assert_eq!(
+        (after.supervisor_pid, after.supervisor_start_ticks),
+        (before.supervisor_pid, before.supervisor_start_ticks)
+    );
+    let observations = env.manager().observations();
+    assert_eq!(observations.len(), 1);
+    assert_eq!(observations[0].state, "running");
+    assert!(observations[0].supervisor_attached);
+    assert_eq!(env.manager().journal_cursors().len(), 1);
+    env.hub_session();
+    env.wait("input after reclaim", |b| finished(b, answer))
+        .await;
+    assert_eq!(
+        cli_children(before.supervisor_pid).len(),
+        1,
+        "no second CLI"
+    );
+    assert_eq!(supervisors_of(env.root.path()), vec![before.supervisor_pid]);
+
+    // Подтверждённый ранее `owner_lost` ещё лежит в CJ: он не должен снова снять владение.
+    env.ack_cj().await;
+    assert!(
+        env.ownership(env.execution)
+            .await
+            .unwrap()
+            .released_reason
+            .is_empty()
+    );
+    env.close_manager().await;
+    env.reopen();
+    assert!(
+        env.ownership(env.execution)
+            .await
+            .unwrap()
+            .released_reason
+            .is_empty()
+    );
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        vec![env.execution]
+    );
+    assert_eq!(
+        owner_reclaimed(&env.cj().await, env.execution),
+        0,
+        "nothing to prove after a normal restart"
+    );
+    env.hub_session();
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn unacknowledged_owner_lost_is_reclaimed_and_stays_observed() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    assert_eq!(env.manager().observations()[0].state, "owner_lost");
+    assert_eq!(env.restart_with_spec(&spec).await, vec![env.execution]);
+    assert_eq!(env.manager().observations()[0].state, "running");
+    env.ack_cj().await;
+    let observations = env.manager().observations();
+    assert_eq!(
+        observations.len(),
+        1,
+        "the reclaimed execution is not retired"
+    );
+    assert_eq!(observations[0].state, "running");
+    assert!(
+        env.ownership(env.execution)
+            .await
+            .unwrap()
+            .released_reason
+            .is_empty()
+    );
+    env.hub_session();
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn crash_between_reclaim_fact_and_ownership_repeats_the_proof() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    let (id, generation) = (env.execution, 1);
+    env.thread()
+        .call(move |store| {
+            store
+                .as_mut()
+                .unwrap()
+                .append_cj_fact(Body::ExecutionState(
+                    canterlot_proto::worker::v1::ExecutionState {
+                        execution_id: id.to_string(),
+                        generation,
+                        state: "running".into(),
+                        outcome: canterlot_proto::OWNER_RECLAIMED.into(),
+                        native_conversation_id: String::new(),
+                    },
+                ))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    assert_eq!(env.restart_with_spec(&spec).await, vec![env.execution]);
+    assert_eq!(owner_reclaimed(&env.cj().await, env.execution), 2);
+    env.hub_session();
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn second_loss_after_a_reclaim_is_reported_again() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    assert_eq!(env.restart_with_spec(&spec).await, vec![env.execution]);
+    env.ack_cj().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    let id = env.execution;
+    env.wait_cj("second loss", |cj| owner_lost(cj, id) == 1)
+        .await;
+    env.ack_cj().await;
+    assert_eq!(
+        env.ownership(env.execution).await.unwrap().released_reason,
+        "owner_lost_reported"
+    );
+    assert!(env.manager().observations().is_empty());
+}
+
+#[tokio::test]
+async fn reclaim_needs_the_same_supervisor_boot_secret_and_generation() {
+    let tamper: [fn(&mut Ownership); 5] = [
+        |record| record.boot_id = Uuid::now_v7().to_string(),
+        |record| record.supervisor_start_ticks += 1,
+        |record| record.supervisor_pid = std::process::id(),
+        |record| record.secret_sha256[0] ^= 0xff,
+        |record| record.generation += 1,
+    ];
+    for change in tamper {
+        let mut env = Env::new().await;
+        env.config.supervisor.attach_wait = Duration::from_millis(250);
+        env.hub_session();
+        env.start(1).await;
+        env.wait_running().await;
+        let spec = env.lose_owner_to_a_bad_spec().await;
+        env.ack_cj().await;
+        let mut record = env.ownership(env.execution).await.unwrap();
+        change(&mut record);
+        env.thread()
+            .call(move |store| {
+                store.as_mut().unwrap().ownership_mut()?.append(record)?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(env.restart_with_spec(&spec).await.is_empty());
+        let cj = env.cj().await;
+        assert_eq!(owner_reclaimed(&cj, env.execution), 0);
+        assert_eq!(owner_lost(&cj, env.execution), 0, "not reported again");
+        assert!(env.manager().observations().is_empty());
+        assert!(env.manager().journal_cursors().is_empty());
+        assert_eq!(
+            env.ownership(env.execution).await.unwrap().released_reason,
+            "owner_lost_reported"
+        );
+    }
+}
+
+#[tokio::test]
+async fn dead_supervisor_is_never_reclaimed() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    let spec = env.lose_owner_to_a_bad_spec().await;
+    env.ack_cj().await;
+    assert!(env.guard.signal(
+        (record.supervisor_pid, record.supervisor_start_ticks),
+        rustix::process::Signal::KILL
+    ));
+    while alive(record.supervisor_pid) {
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert!(env.restart_with_spec(&spec).await.is_empty());
+    assert_eq!(owner_reclaimed(&env.cj().await, env.execution), 0);
+    assert!(env.manager().observations().is_empty());
 }
 
 #[derive(Clone, Default)]

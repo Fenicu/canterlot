@@ -38,10 +38,12 @@ use crate::{
     adapter,
     attachments::{AttachmentStore, FetchError, RetryPolicy},
     media::{self, PutError},
+    session::WorkerError,
     supervisor::ipc::{read_message, write_message},
 };
 
 const ORPHANED: &str = "owner_lost";
+const REPORTED: &str = "owner_lost_reported";
 const RECONNECT_EVERY: Duration = Duration::from_millis(200);
 
 #[allow(clippy::large_enum_variant)]
@@ -114,6 +116,10 @@ struct Link {
 
 pub(super) fn is_orphaned(record: &Ownership) -> bool {
     record.released_reason == ORPHANED && record.phase != OwnershipPhase::Released as i32
+}
+
+pub(super) fn is_reported(record: &Ownership) -> bool {
+    record.released_reason == REPORTED
 }
 
 fn sha256(bytes: &[u8]) -> Vec<u8> {
@@ -223,7 +229,7 @@ pub(super) async fn report_owner_lost(
         )
         .await?;
     ownership_update(shared, id, |record| {
-        if record.released_reason != "owner_lost_reported" {
+        if !is_reported(record) {
             record.released_reason = ORPHANED.into();
         }
     })
@@ -233,6 +239,39 @@ pub(super) async fn report_owner_lost(
         info.attached = false;
     });
     Ok(())
+}
+
+/// `verify` снова доказал то же живое сопровождение: хаб получает факт раньше записей `SJ`,
+/// потому что `CJ` доигрывается до сверки. Сбой между записями только повторит доказательство.
+pub(super) async fn reclaim_owner(
+    shared: &Shared,
+    id: Uuid,
+    generation: u64,
+) -> Result<u64, ExecError> {
+    let (seq, record) = shared
+        .store
+        .call(move |store| {
+            let store = open(store)?;
+            let seq = store.append_cj_fact(Body::ExecutionState(ExecutionState {
+                execution_id: id.to_string(),
+                generation,
+                state: "running".into(),
+                outcome: canterlot_proto::OWNER_RECLAIMED.into(),
+                native_conversation_id: String::new(),
+            }))?;
+            let mut record = store
+                .ownership()
+                .get(id)
+                .cloned()
+                .ok_or(WorkerError::Execution)?;
+            record.released_reason.clear();
+            record.reclaimed_cj_seq = seq;
+            store.ownership_mut()?.append(record.clone())?;
+            Ok((seq, record))
+        })
+        .await?;
+    shared.remember_ownership(&record);
+    Ok(seq)
 }
 
 pub(super) async fn verify(

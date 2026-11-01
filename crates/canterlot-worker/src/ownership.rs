@@ -123,6 +123,15 @@ impl OwnershipStore {
             .collect()
     }
 
+    /// Записи, по которым процесс ещё может быть жив, в том числе потерянные.
+    pub(crate) fn unreleased(&self) -> Vec<Ownership> {
+        self.latest
+            .values()
+            .filter(|record| record.phase != OwnershipPhase::Released as i32)
+            .cloned()
+            .collect()
+    }
+
     pub(crate) fn released(&self) -> Vec<Ownership> {
         self.latest
             .values()

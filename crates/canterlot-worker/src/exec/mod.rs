@@ -556,16 +556,9 @@ impl ExecutionManager {
         let records = self
             .shared
             .store
-            .call(|store| {
-                Ok(open(store)?
-                    .ownership()
-                    .live()
-                    .into_iter()
-                    .cloned()
-                    .collect::<Vec<_>>())
-            })
+            .call(|store| Ok(open(store)?.ownership().unreleased()))
             .await?;
-        let states = self
+        let mut states: Vec<(u64, canterlot_proto::worker::v1::ExecutionState)> = self
             .shared
             .store
             .call(|store| {
@@ -589,11 +582,19 @@ impl ExecutionManager {
             })
             .await?;
         let mut attached = Vec::new();
+        let mut reclaimed = HashMap::new();
         for record in records {
-            self.shared.remember_ownership(&record);
             let Ok(id) = Uuid::parse_str(&record.execution_id) else {
                 continue;
             };
+            let reported = manager::is_reported(&record);
+            let lost = reported || manager::is_orphaned(&record);
+            let verified = manager::verify(&self.shared, &record).await;
+            if let (true, Err(error)) = (reported, &verified) {
+                tracing::info!(execution_id = %id, reason = %error, "lost ownership not reclaimed");
+                continue;
+            }
+            self.shared.remember_ownership(&record);
             let conversation_id = Uuid::parse_str(&record.conversation_id).unwrap_or_default();
             self.shared.infos.lock().expect("infos lock").insert(
                 id,
@@ -610,14 +611,14 @@ impl ExecutionManager {
                     cj_terminal_seq: None,
                 },
             );
-            if manager::is_orphaned(&record) {
-                self.shared.with_info(id, |info| {
-                    info.state = "owner_lost".into();
-                });
-                continue;
-            }
-            match manager::verify(&self.shared, &record).await {
+            match verified {
                 Ok(linked) => {
+                    if lost {
+                        let seq =
+                            manager::reclaim_owner(&self.shared, id, record.generation).await?;
+                        reclaimed.insert(id, seq);
+                        tracing::info!(execution_id = %id, kind = "owner_reclaimed", "lost ownership reclaimed");
+                    }
                     let running = record.cli_pid != 0;
                     self.shared.with_info(id, |info| {
                         info.attached = true;
@@ -631,12 +632,25 @@ impl ExecutionManager {
                     self.spawn_actor(id, Start::Reattach(Box::new((linked, record))));
                     attached.push(id);
                 }
+                Err(error) if lost => {
+                    tracing::info!(execution_id = %id, reason = %error, "lost ownership not reclaimed");
+                    self.shared.with_info(id, |info| {
+                        info.state = "owner_lost".into();
+                    });
+                }
                 Err(error) => {
                     tracing::warn!(execution_id = %id, reason = %error, "ownership not verified");
                     manager::report_owner_lost(&self.shared, id, record.generation).await?;
                 }
             }
         }
+        // Факт `owner_lost` раньше доказательства уже не описывает исполнение.
+        states.retain(|(seq, state)| {
+            Uuid::parse_str(&state.execution_id)
+                .ok()
+                .and_then(|id| reclaimed.get(&id))
+                .is_none_or(|reclaimed| seq > reclaimed)
+        });
         let commands = self
             .shared
             .store

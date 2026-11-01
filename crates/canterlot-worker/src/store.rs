@@ -279,7 +279,7 @@ impl WorkerStore {
                     Some(record_body::Body::ExecutionState(fact)) => {
                         self.remember_cancelled_start(&fact)?;
                         if fact.state == "owner_lost" && record.seq <= self.cj.acked_seq() {
-                            self.retire_owner_lost(&fact.execution_id)?;
+                            self.retire_owner_lost(&fact.execution_id, record.seq)?;
                         }
                     }
                     Some(record_body::Body::CommandStored(fact)) => facts.push((
@@ -765,9 +765,10 @@ impl WorkerStore {
         Ok(())
     }
 
-    fn retire_owner_lost(&mut self, execution: &str) -> Result<(), StoreError> {
+    fn retire_owner_lost(&mut self, execution: &str, seq: u64) -> Result<(), StoreError> {
         if let Some(mut record) = self.ownership.get(Uuid::parse_str(execution)?).cloned()
             && record.released_reason != "owner_lost_reported"
+            && seq > record.reclaimed_cj_seq
         {
             record.released_reason = "owner_lost_reported".into();
             self.ownership.append(record)?;
@@ -887,7 +888,7 @@ impl WorkerStore {
                         record.body.and_then(|body| body.body)
                         && fact.state == "owner_lost"
                     {
-                        self.retire_owner_lost(&fact.execution_id)?;
+                        self.retire_owner_lost(&fact.execution_id, record.seq)?;
                     }
                 }
             }

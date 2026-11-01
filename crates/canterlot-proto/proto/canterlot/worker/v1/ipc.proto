@@ -162,6 +162,8 @@ message Ownership {
   uint32 ipc_protocol_version = 13;
   OwnershipPhase phase = 14;
   string released_reason = 15;
+  // Номер факта owner_reclaimed в CJ: более ранние факты owner_lost уже не действуют.
+  uint64 reclaimed_cj_seq = 16;
 }
 
 message LocalFile {
