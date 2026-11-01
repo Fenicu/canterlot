@@ -606,20 +606,23 @@ async fn review_fix_oversized_event_has_http_reference_and_resume_advances(pool:
 }
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn catch_up_over_a_slow_link_completes_without_lagged(pool: PgPool) {
-    let h = Hub::new(pool, |_| {}).await;
-    backlog(&h, 2000).await;
+    const EVENTS: i64 = 600;
+    // Читатель медленнее хаба на каждом кадре, а срок зависания короткий: учёт ожидания медленного
+    // читателя как зависания оборвал бы догон за секунды, а не за 15 с.
+    let h = Hub::new(pool, |c| c.ws.stall_timeout = Duration::from_secs(2)).await;
+    backlog(&h, EVENTS).await;
     let mut w = h.socket().await;
     h.subscribe(&mut w, "s", Some(0)).await;
     let mut cursor = 0;
     let mut bytes = 0;
-    while cursor < 2000 {
+    while cursor < EVENTS {
         let v = w.next(WAIT).await.unwrap();
         accept(&v, &mut cursor);
         let text = v["event"]["payload"]["append"].as_str().unwrap();
         bytes += text.len();
-        tokio::time::sleep(Duration::from_secs_f64(text.len() as f64 / 262144.0)).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    assert_eq!(bytes, 2000 * 16384);
+    assert_eq!(bytes, EVENTS as usize * 16384);
     assert!(w.next(Duration::from_millis(50)).await.is_none());
     w.close().await;
     h.stop().await;
