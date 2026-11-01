@@ -775,6 +775,7 @@ impl Scheduler {
             .to_owned();
         let correlation = Uuid::now_v7();
         let mut left = Vec::new();
+        let mut reserve_left = false;
         let outcome = match kind {
             JobKind::Wake => {
                 crunch::handle_wake_in_tx(&mut tx, &claimed, &self.limits, now, correlation).await
@@ -782,6 +783,14 @@ impl Scheduler {
             JobKind::LimitCheck => {
                 crunch::handle_limit_check_in_tx(&mut tx, &claimed, &self.limits, now, correlation)
                     .await
+                    .inspect(|outcome| {
+                        if let JobOutcome::Done(result) = outcome
+                            && let Some(ids) = result.get("left")
+                        {
+                            left = serde_json::from_value(ids.clone()).unwrap_or_default();
+                            reserve_left = true;
+                        }
+                    })
             }
             JobKind::LimitRule => crunch::apply_weekly_rule_in_tx(
                 &mut tx,
@@ -821,7 +830,9 @@ impl Scheduler {
                             self.dispatcher.trigger(id);
                         }
                     }
-                    JobKind::LimitRule => {
+                    JobKind::LimitRule | JobKind::LimitCheck
+                        if kind == JobKind::LimitRule || reserve_left =>
+                    {
                         for id in left {
                             self.dispatcher.trigger(id);
                         }

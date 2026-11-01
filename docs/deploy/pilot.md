@@ -248,32 +248,33 @@ unknown_reset_retry = "30m"                         # crates/canterlot-hub/src/c
 reserve_exit_hysteresis_permille = 20               # crates/canterlot-hub/src/config.rs:335
 warn_pcts = [80, 90, 95]                            # crates/canterlot-hub/src/config.rs:336
 stale_after = "35m"                                 # crates/canterlot-hub/src/config.rs:338
+unverified_wake_after = "20m"                       # crates/canterlot-hub/src/config.rs:341
 
 [limits.poll_floor]                                 # crates/canterlot-hub/src/config.rs:334
-claude = "30m"                                      # crates/canterlot-hub/src/config.rs:384
-codex = "5m"                                        # crates/canterlot-hub/src/config.rs:385
+claude = "30m"                                      # crates/canterlot-hub/src/config.rs:387
+codex = "5m"                                        # crates/canterlot-hub/src/config.rs:388
 
-[activity]                                          # crates/canterlot-hub/src/config.rs:396
-stalled_generating = "5m"                           # crates/canterlot-hub/src/config.rs:398
-stalled_tool = "30m"                                # crates/canterlot-hub/src/config.rs:400
-tick = "15s"                                        # crates/canterlot-hub/src/config.rs:402
-debounce = "250ms"                                  # crates/canterlot-hub/src/config.rs:404
+[activity]                                          # crates/canterlot-hub/src/config.rs:400
+stalled_generating = "5m"                           # crates/canterlot-hub/src/config.rs:402
+stalled_tool = "30m"                                # crates/canterlot-hub/src/config.rs:404
+tick = "15s"                                        # crates/canterlot-hub/src/config.rs:406
+debounce = "250ms"                                  # crates/canterlot-hub/src/config.rs:408
 
-[scheduler]                                         # crates/canterlot-hub/src/config.rs:420
-max_pending_per_conversation = 50                   # crates/canterlot-hub/src/config.rs:421
-retry_queue_full = "60s"                            # crates/canterlot-hub/src/config.rs:423
-max_attempts = 20                                   # crates/canterlot-hub/src/config.rs:424
-idle_poll = "1s"                                    # crates/canterlot-hub/src/config.rs:426
+[scheduler]                                         # crates/canterlot-hub/src/config.rs:424
+max_pending_per_conversation = 50                   # crates/canterlot-hub/src/config.rs:425
+retry_queue_full = "60s"                            # crates/canterlot-hub/src/config.rs:427
+max_attempts = 20                                   # crates/canterlot-hub/src/config.rs:428
+idle_poll = "1s"                                    # crates/canterlot-hub/src/config.rs:430
 
-[attachments]                                       # crates/canterlot-hub/src/config.rs:442
-blob_dir = "/var/lib/canterlot/attachments"         # crates/canterlot-hub/src/config.rs:443
-max_concurrent_uploads = 4                          # crates/canterlot-hub/src/config.rs:444
-gc_grace = "24h"                                    # crates/canterlot-hub/src/config.rs:446
-gc_interval = "1h"                                  # crates/canterlot-hub/src/config.rs:448
+[attachments]                                       # crates/canterlot-hub/src/config.rs:446
+blob_dir = "/var/lib/canterlot/attachments"         # crates/canterlot-hub/src/config.rs:447
+max_concurrent_uploads = 4                          # crates/canterlot-hub/src/config.rs:448
+gc_grace = "24h"                                    # crates/canterlot-hub/src/config.rs:450
+gc_interval = "1h"                                  # crates/canterlot-hub/src/config.rs:452
 
-[machines]                                          # crates/canterlot-hub/src/config.rs:464
-disk_warn_pct = 85                                  # crates/canterlot-hub/src/config.rs:465
-metrics_stale_after = "90s"                         # crates/canterlot-hub/src/config.rs:467
+[machines]                                          # crates/canterlot-hub/src/config.rs:468
+disk_warn_pct = 85                                  # crates/canterlot-hub/src/config.rs:469
+metrics_stale_after = "90s"                         # crates/canterlot-hub/src/config.rs:471
 ```
 
 ### 2.5. Секрет прокси и перенос на сервер Caddy

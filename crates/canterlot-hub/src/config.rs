@@ -336,6 +336,9 @@ pub struct LimitsConfig {
     pub warn_pcts: Vec<u16>,
     #[serde(with = "humantime_serde")]
     pub stale_after: Duration,
+    /// Удержание снимается по часам, если столько после срока не пришло ни одного нового показания.
+    #[serde(with = "humantime_serde")]
+    pub unverified_wake_after: Duration,
 }
 
 impl fmt::Debug for LimitsConfig {
@@ -387,6 +390,7 @@ impl Default for LimitsConfig {
             reserve_exit_hysteresis_permille: 20,
             warn_pcts: vec![80, 90, 95],
             stale_after: Duration::from_secs(2100),
+            unverified_wake_after: Duration::from_secs(1200),
         }
     }
 }

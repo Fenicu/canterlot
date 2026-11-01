@@ -187,6 +187,7 @@ unknown_reset_retry = "30m"
 reserve_exit_hysteresis_permille = 20
 warn_pcts = [80, 90, 95]
 stale_after = "35m"
+unverified_wake_after = "20m"
 
 [limits.poll_floor]
 claude = "30m"

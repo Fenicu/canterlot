@@ -532,12 +532,22 @@ struct WakePayload {
     verified: bool,
 }
 
-async fn reset_verified(
+/// Что говорят показания о сбросе окна после срока `wake_at`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResetCheck {
+    Verified,
+    /// Показание снято после срока, но сброса не показывает: опрос работает, окно не сбросилось.
+    NotReset,
+    /// После срока показаний нет: сбой опроса не должен держать сессию вечно.
+    NoReading,
+}
+
+async fn check_reset(
     conn: &mut PgConnection,
     provider: &str,
     window: Window,
     wake_at: DateTime<Utc>,
-) -> Result<bool, sqlx::Error> {
+) -> Result<ResetCheck, sqlx::Error> {
     // Окна больше нет у провайдера: ограничивать им нечему, сброс подтверждён отчётом после срока.
     if window == Window::FiveHour {
         let absent: Option<DateTime<Utc>> =
@@ -547,7 +557,7 @@ async fn reset_verified(
                 .await?
                 .flatten();
         if absent.is_some_and(|at| at >= wake_at) {
-            return Ok(true);
+            return Ok(ResetCheck::Verified);
         }
     }
     let row: Option<Reading> = sqlx::query_as(match window {
@@ -558,10 +568,13 @@ async fn reset_verified(
     // а без времени сброса - наблюдение не раньше ожидаемого.
     Ok(match row {
         Some((Some(used), resets, Some(observed))) if used < 1000 => match resets {
-            Some(resets) => resets > wake_at,
-            None => observed >= wake_at,
+            Some(resets) if resets > wake_at => ResetCheck::Verified,
+            None if observed >= wake_at => ResetCheck::Verified,
+            _ if observed >= wake_at => ResetCheck::NotReset,
+            _ => ResetCheck::NoReading,
         },
-        _ => false,
+        Some((_, _, Some(observed))) if observed >= wake_at => ResetCheck::NotReset,
+        _ => ResetCheck::NoReading,
     })
 }
 
@@ -590,6 +603,7 @@ pub async fn handle_wake_in_tx(
     }
     // Порядок блокировок: задание, строка провайдера, очередь, разговор.
     limits::share_provider(conn, provider).await?;
+    let mut by_clock = false;
     if !payload.verified {
         let holds: Option<Json<Vec<HoldReason>>> =
             sqlx::query_scalar("select hold_reasons from queue_state where conversation_id=$1")
@@ -616,11 +630,23 @@ pub async fn handle_wake_in_tx(
                 poll: false,
             });
         }
-        if !reset_verified(conn, provider, window, wake_at).await? {
-            return Ok(JobOutcome::Retry {
-                at: now + delta(verify_delay(config, job.attempts))?,
-                poll: true,
-            });
+        match check_reset(conn, provider, window, wake_at).await? {
+            ResetCheck::Verified => {}
+            ResetCheck::NoReading if now >= wake_at + delta(config.unverified_wake_after)? => {
+                by_clock = true;
+                tracing::warn!(
+                    kind = "crunch_wake_unverified",
+                    provider,
+                    window = window.as_str(),
+                    "crunch hold released by the clock without a fresh reading"
+                );
+            }
+            ResetCheck::NotReset | ResetCheck::NoReading => {
+                return Ok(JobOutcome::Retry {
+                    at: now + delta(verify_delay(config, job.attempts))?,
+                    poll: true,
+                });
+            }
         }
     }
     let mut queue: LockedQueue =
@@ -732,7 +758,7 @@ pub async fn handle_wake_in_tx(
         .execute(&mut *conn)
         .await?;
     }
-    let result = json!({"input_id":input_id,"skipped":skipped,"resume_pending":resume_pending});
+    let result = json!({"input_id":input_id,"skipped":skipped,"resume_pending":resume_pending,"by_clock":by_clock});
     append(
         conn,
         id,
@@ -751,7 +777,7 @@ pub async fn handle_limit_check_in_tx(
     job: &ClaimedJob,
     config: &LimitsConfig,
     now: DateTime<Utc>,
-    _correlation_id: Uuid,
+    correlation_id: Uuid,
 ) -> Result<JobOutcome, sqlx::Error> {
     let Some(provider) = job
         .payload
@@ -761,14 +787,41 @@ pub async fn handle_limit_check_in_tx(
     else {
         return Ok(JobOutcome::Cancelled("invalid_payload"));
     };
-    limits::share_provider(conn, provider).await?;
-    let active: bool =
-        sqlx::query_scalar("select weekly_reserve_active from provider_limits where provider=$1")
-            .bind(provider)
-            .fetch_one(&mut *conn)
-            .await?;
+    limits::lock_provider(conn, provider).await?;
+    let (active, entered, observed): (bool, Time, Time) = sqlx::query_as(
+        "select weekly_reserve_active,weekly_reserve_resets_at,weekly_observed_at from provider_limits where provider=$1",
+    )
+    .bind(provider)
+    .fetch_one(&mut *conn)
+    .await?;
     if !active {
         return Ok(JobOutcome::Done(json!({"reserve_active":false})));
+    }
+    // Резерв дождался сброса недели, а показаний после него нет: сессии не ждут починки опроса.
+    if let Some(entered) = entered
+        && now >= entered + delta(config.unverified_wake_after)?
+        && observed.is_none_or(|at| at < entered)
+    {
+        let mut effect = WeeklyEffect::default();
+        let harnesses = harness::harnesses_of(provider);
+        leave(
+            conn,
+            job.owner_id,
+            provider,
+            &harnesses,
+            now,
+            correlation_id,
+            &mut effect,
+        )
+        .await?;
+        tracing::warn!(
+            kind = "crunch_reserve_left_unverified",
+            provider,
+            "weekly reserve left by the clock without a fresh reading"
+        );
+        return serde_json::to_value(&effect)
+            .map(JobOutcome::Done)
+            .map_err(|e| sqlx::Error::Encode(Box::new(e)));
     }
     let attempt = usize::try_from(job.attempts).unwrap_or(0);
     let wait = config

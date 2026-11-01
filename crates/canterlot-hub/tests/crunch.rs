@@ -41,6 +41,13 @@ fn start() -> DateTime<Utc> {
 fn secs(n: i64) -> TimeDelta {
     TimeDelta::seconds(n)
 }
+// Проверки подтверждения показанием: пробуждение по часам им не мешает.
+fn patient_config() -> LimitsConfig {
+    LimitsConfig {
+        unverified_wake_after: Duration::from_secs(30 * 86_400),
+        ..Default::default()
+    }
+}
 fn timers() -> HubTimers {
     HubTimers {
         degraded_after: Duration::from_secs(3600),
@@ -742,7 +749,7 @@ async fn poll_offsets(env: &mut Env, from: DateTime<Utc>, until: DateTime<Utc>) 
 async fn poll_cadence_falls_back_to_the_provider_floor_after_the_backoff(pool: PgPool) {
     let config = LimitsConfig {
         poll_min_interval: Duration::from_secs(30),
-        ..Default::default()
+        ..patient_config()
     };
     let mut env = Env::with_config(&pool, config).await;
     let id = env.conversation(true, true).await;
@@ -868,7 +875,7 @@ async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation(pool: PgPool) {
-    let mut env = Env::new(&pool).await;
+    let mut env = Env::with_config(&pool, patient_config()).await;
     let known = env.conversation(true, true).await;
     let unknown = env.conversation(true, true).await;
     let now = start();
@@ -913,6 +920,117 @@ async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation(pool
     assert!(!has_quota(&holds(&pool, unknown).await));
     assert_eq!(wake_texts(&pool, unknown).await.len(), 1);
     assert!(has_quota(&holds(&pool, known).await));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn hold_wakes_by_the_clock_when_no_reading_arrives_after_the_reset(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let known = env.conversation(true, true).await;
+    let unknown = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::minutes(30);
+    env.limit_reached(known, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.limit_reached(unknown, "claude", Window::Weekly, None, now)
+        .await;
+    let soon = env.tick(reset + TimeDelta::minutes(19)).await;
+    assert_eq!(
+        (soon.fired, soon.retried),
+        (0, 2),
+        "the poll still has a chance"
+    );
+    assert!(has_quota(&holds(&pool, known).await));
+    let report = env.tick(reset + TimeDelta::minutes(21)).await;
+    assert_eq!((report.fired, report.retried), (2, 0));
+    for id in [known, unknown] {
+        assert!(!has_quota(&holds(&pool, id).await));
+        assert_eq!(wake_texts(&pool, id).await.len(), 1);
+    }
+    assert_eq!(
+        jobs(&pool, "wake").await[0].result.as_ref().unwrap()["by_clock"],
+        true
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn fresh_reading_of_a_full_window_keeps_the_hold_past_the_clock(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        1000,
+        Some(reset),
+        reset + TimeDelta::minutes(1),
+    )
+    .await;
+    let report = env.tick(reset + TimeDelta::hours(2)).await;
+    assert_eq!((report.fired, report.retried), (0, 1));
+    assert!(has_quota(&holds(&pool, id).await));
+    assert_eq!(inputs(&pool, id).await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn weekly_reserve_ends_by_the_clock_when_no_reading_arrives_after_the_reset(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let idle = env.conversation(true, false).await;
+    set_resume_pending(&pool, &[id]).await;
+    let now = start();
+    let weekly_reset = now + TimeDelta::days(2);
+    env.observe("claude", Window::Weekly, 960, Some(weekly_reset), now)
+        .await;
+    env.tick(now).await;
+    assert!(reserve(&pool, "claude").await.0);
+    let soon = env.tick(weekly_reset + TimeDelta::minutes(19)).await;
+    assert_eq!(soon.retried, 1, "the poll still has a chance");
+    assert!(reserve(&pool, "claude").await.0);
+    env.tick(weekly_reset + TimeDelta::minutes(21)).await;
+    assert!(!reserve(&pool, "claude").await.0);
+    for session in [id, idle] {
+        assert!(
+            holds(&pool, session)
+                .await
+                .iter()
+                .all(|h| !matches!(h, HoldReason::WeeklyReserve { .. }))
+        );
+    }
+    let woken = env.triggered();
+    assert!(woken.contains(&id) && woken.contains(&idle), "{woken:?}");
+    assert_eq!(jobs(&pool, "limit_check").await[0].state, "fired");
+    env.tick(weekly_reset + TimeDelta::minutes(21)).await;
+    assert_eq!(wake_texts(&pool, id).await.len(), 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn fresh_reading_above_the_threshold_keeps_the_reserve_past_the_clock(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, false).await;
+    let now = start();
+    let weekly_reset = now + TimeDelta::days(2);
+    env.observe("claude", Window::Weekly, 960, Some(weekly_reset), now)
+        .await;
+    env.tick(now).await;
+    env.observe(
+        "claude",
+        Window::Weekly,
+        970,
+        Some(weekly_reset),
+        weekly_reset + TimeDelta::minutes(1),
+    )
+    .await;
+    env.tick(weekly_reset + TimeDelta::hours(2)).await;
+    assert!(reserve(&pool, "claude").await.0);
+    assert!(
+        holds(&pool, id)
+            .await
+            .iter()
+            .any(|h| matches!(h, HoldReason::WeeklyReserve { .. }))
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -967,7 +1085,7 @@ async fn verified_reset(env: &Env, reset: DateTime<Utc>) {
 
 #[sqlx::test(migrations = "./migrations")]
 async fn rereview_nineteen_polls_and_backend_loss_still_wake_after_reset(pool: PgPool) {
-    let mut env = Env::new(&pool).await;
+    let mut env = Env::with_config(&pool, patient_config()).await;
     let id = env.conversation(true, true).await;
     let now = start();
     let reset = now + secs(3600);
