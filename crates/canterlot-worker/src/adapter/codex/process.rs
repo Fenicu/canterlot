@@ -105,6 +105,16 @@ pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsStri
     Ok(args)
 }
 
+/// Без приложений аккаунта и плагинов: оба приносят MCP-серверы владельца (D24).
+pub fn isolation_args() -> [OsString; 4] {
+    [
+        "--disable".into(),
+        "apps".into(),
+        "--disable".into(),
+        "plugins".into(),
+    ]
+}
+
 // Чужие ключи биллинга и просочившееся окружение родителя отрезаем.
 // Владелец хранит всё своё окружение; остальным подменяем CODEX_HOME и убираем CODEX_SQLITE_HOME.
 pub fn build_env(
@@ -112,6 +122,8 @@ pub fn build_env(
     mode: InstructionMode,
     home: Option<&CodexHome>,
 ) -> Vec<(OsString, OsString)> {
+    // Изолированный дом нужен и режиму «Как у владельца»: у делегированной сессии дом владельца не берётся.
+    let own_home = mode != InstructionMode::Owner || home.is_some();
     let mut out = Vec::new();
     for (k, v) in parent {
         let ks = k.to_string_lossy();
@@ -127,14 +139,12 @@ pub fn build_env(
         }
         // Не-владелец не наследует дома: путь ставит canterlot, SQLite владельца
         // отключается (иначе зависание account/read).
-        if mode != InstructionMode::Owner && (ks == "CODEX_HOME" || ks == "CODEX_SQLITE_HOME") {
+        if own_home && (ks == "CODEX_HOME" || ks == "CODEX_SQLITE_HOME") {
             continue;
         }
         out.push((k, v));
     }
-    if mode != InstructionMode::Owner
-        && let Some(home) = home
-    {
+    if own_home && let Some(home) = home {
         out.push((
             OsString::from("CODEX_HOME"),
             home.path.as_os_str().to_os_string(),
@@ -164,7 +174,10 @@ impl AppServerProcess {
         mode: InstructionMode,
         home: Option<&CodexHome>,
     ) -> Result<Self, LaunchError> {
-        let args = build_args(spec, mode)?;
+        let mut args = build_args(spec, mode)?;
+        if home.is_some_and(|home| home.kind.is_isolated()) {
+            args.extend(isolation_args());
+        }
         let envs = build_env(std::env::vars_os(), mode, home);
         // Повтор при ETXTBSY: тесты пишут двойника прямо перед запуском.
         // Синхронный сон только в редкой ветви повтора, обычный путь без задержек.

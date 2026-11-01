@@ -8,6 +8,8 @@ use super::{
     checked,
 };
 
+// Команды растут с аддитивными полями; ожидание живёт на стеке один шаг.
+#[allow(clippy::large_enum_variant)]
 enum Next {
     Ack(Option<Result<Option<JournalRangeAck>, Status>>),
     Inbound(Result<Option<ControlUp>, Status>),

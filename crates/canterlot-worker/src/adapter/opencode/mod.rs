@@ -462,6 +462,8 @@ pub struct OpenCodeAdapter {
     ready_wait: Duration,
     relay_executable: Option<PathBuf>,
     start_attempted: bool,
+    /// Делегированная сессия: ни серверов владельца, ни репозиторной конфигурации.
+    isolate_mcp: bool,
     proc: Option<ServerProcess>,
     http: Option<Http>,
     stream: Option<EventStream>,
@@ -552,6 +554,7 @@ impl OpenCodeAdapter {
             image_models: HashMap::new(),
             instructions: owner_instructions(),
             applied: owner_instructions(),
+            isolate_mcp: false,
             spec: None,
             overflowed: false,
             stuck: failure::StuckWatch::default(),
@@ -723,6 +726,9 @@ impl OpenCodeAdapter {
         let limit = Instant::now() + self.ready_wait;
         let state = loop {
             let state = match self.http()?.get("/api/mcp", REQUEST_WAIT).await {
+                Ok(list) if self.isolate_mcp && mcp::has_foreign_server(&list) => {
+                    return Err(AdapterError::StartFailed("mcp_isolation_failed"));
+                }
                 Ok(list) => mcp::state_of(&list),
                 Err(HttpError::Lost) => {
                     return Err(AdapterError::StartFailed("server_unreachable"));
@@ -790,7 +796,7 @@ impl OpenCodeAdapter {
             })?;
         let owner = instructions::owner_dir(self.cfg.owner_config.as_deref(), &env);
         env.extend(
-            instructions::prepare(&self.exec_dir, owner, instructions)
+            instructions::prepare(&self.exec_dir, owner, instructions, self.isolate_mcp)
                 .await
                 .map_err(|_| AdapterError::StartFailed("instructions_failed"))?,
         );
@@ -840,6 +846,7 @@ impl OpenCodeAdapter {
     ) -> Result<Started, AdapterError> {
         self.mode = PermissionMode::parse(&spec.permission_mode)
             .ok_or(AdapterError::StartFailed("unknown_permission_mode"))?;
+        self.isolate_mcp = spec.isolate_mcp;
         let layout = DataLayout::for_execution(&self.cfg, &self.exec_dir);
         let env = prepared_env(&self.cfg, &layout, self.exec_dir.join("tmp"))
             .await
@@ -2001,6 +2008,10 @@ impl OpenCodeAdapter {
 
 #[async_trait::async_trait]
 impl Adapter for OpenCodeAdapter {
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,

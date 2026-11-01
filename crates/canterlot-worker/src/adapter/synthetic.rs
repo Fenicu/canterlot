@@ -525,6 +525,10 @@ impl SyntheticAdapter {
 
 #[async_trait::async_trait]
 impl Adapter for SyntheticAdapter {
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,

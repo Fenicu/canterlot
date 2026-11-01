@@ -34,6 +34,21 @@ pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 6] {
     ]
 }
 
+/// Действующий конфиг делегированной сессии (`config/read`): серверов нет, кроме canterlot, а
+/// приложения аккаунта и плагины выключены. Сверка до `thread/start`, ничего не запуская.
+pub fn isolated_config(response: &Value) -> bool {
+    let config = &response["config"];
+    let servers_ok = match config.get("mcp_servers") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(servers)) => servers.iter().all(|(name, server)| {
+            name == SERVER_NAME || server.get("enabled").and_then(Value::as_bool) == Some(false)
+        }),
+        Some(_) => false,
+    };
+    let off = |feature: &str| config["features"][feature].as_bool() == Some(false);
+    servers_ok && off("apps") && off("plugins")
+}
+
 /// Уведомление `mcpServer/startupStatus/updated`: сбой canterlot → необязательная диагностика.
 pub fn startup_status_event(method: &str, params: &Value) -> Option<AdapterEvent> {
     if method != "mcpServer/startupStatus/updated" {
@@ -55,4 +70,55 @@ pub fn startup_status_event(method: &str, params: &Value) -> Option<AdapterEvent
 
 pub fn handle_rpc(msg: &Value) -> canterlot_mcp::mcp::McpAction {
     canterlot_mcp::mcp::handle_rpc_with_provider(msg, ToolSet::LimitsOnly, "codex")
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn config(servers: Value, apps: Value, plugins: Value) -> Value {
+        json!({"config": {"mcp_servers": servers, "features": {"apps": apps, "plugins": plugins}}})
+    }
+
+    #[test]
+    fn only_canterlot_with_apps_and_plugins_off_passes() {
+        let canterlot = json!({"canterlot": {"command": "x", "enabled": true}});
+        assert!(isolated_config(&config(
+            canterlot.clone(),
+            json!(false),
+            json!(false)
+        )));
+        assert!(isolated_config(&config(
+            json!({}),
+            json!(false),
+            json!(false)
+        )));
+        assert!(!isolated_config(&config(
+            canterlot.clone(),
+            json!(true),
+            json!(false)
+        )));
+        assert!(!isolated_config(&config(
+            canterlot.clone(),
+            json!(false),
+            json!(true)
+        )));
+        // Нет сведений - не доказано: закрыто.
+        assert!(!isolated_config(&config(
+            canterlot,
+            Value::Null,
+            json!(false)
+        )));
+        assert!(!isolated_config(&json!({"config": {"mcp_servers": {}}})));
+        assert!(!isolated_config(&json!({})));
+    }
+
+    #[test]
+    fn any_other_enabled_server_fails_the_start() {
+        let other = json!({"canterlot": {"enabled": true}, "nanokvm": {"command": "x"}});
+        assert!(!isolated_config(&config(other, json!(false), json!(false))));
+        let off = json!({"canterlot": {"enabled": true}, "nanokvm": {"enabled": false}});
+        assert!(isolated_config(&config(off, json!(false), json!(false))));
+    }
 }

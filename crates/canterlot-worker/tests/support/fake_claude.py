@@ -1,10 +1,11 @@
 #!/usr/bin/python3
-import json, sys, pathlib, signal, select, time, subprocess
+import json, os, sys, pathlib, signal, select, time, subprocess
 d=pathlib.Path(__file__).parent
 if '--version' in sys.argv:
     v=(d/'version').read_text() if (d/'version').exists() else '2.1.311'
     print(v); sys.exit(1 if v=='failed' else 0)
 (d/'args.json').write_text(json.dumps(sys.argv[1:]))
+(d/'connectors.json').write_text(json.dumps(os.environ.get('ENABLE_CLAUDEAI_MCP_SERVERS')))
 sid=sys.argv[sys.argv.index('--resume')+1] if '--resume' in sys.argv else sys.argv[sys.argv.index('--session-id')+1]
 def emit(v):
     if isinstance(v,str): print(v,flush=True); return

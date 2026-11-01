@@ -135,6 +135,8 @@ pub struct CodexAdapter {
     workdir: PathBuf,
     instructions: InstructionSpec,
     codex_home: Option<CodexHome>,
+    /// Делегированная сессия: дом без конфига MCP владельца, без приложений и плагинов.
+    isolate_mcp: bool,
     last_noted: Option<u16>,
     turn_items: HashSet<String>,
     started_items: HashMap<String, Value>,
@@ -218,6 +220,7 @@ impl CodexAdapter {
                 title: String::new(),
             },
             codex_home: None,
+            isolate_mcp: false,
             last_noted: None,
             turn_items: HashSet::new(),
             started_items: HashMap::new(),
@@ -886,6 +889,9 @@ impl CodexAdapter {
             .await
             .ok_or(AdapterError::StartFailed("app_server_failed"))?
             .map_err(|_| AdapterError::StartFailed("app_server_failed"))?;
+        if self.isolate_mcp && !mcp::isolated_config(&config) {
+            return Err(AdapterError::StartFailed("mcp_isolation_failed"));
+        }
         self.owner.reread(&config);
         Ok(())
     }
@@ -1074,10 +1080,10 @@ impl CodexAdapter {
             .and_then(|mode| PermissionMode::parse(mode).ok())
             .unwrap_or(self.mode);
         let effort = change.effort.clone().or_else(|| self.effort.clone());
-        let new_home = if next.mode == InstructionMode::Owner {
-            None
+        let new_home = if self.wants_home(next.mode) {
+            Some(self.prepare_home(next.mode)?)
         } else {
-            Some(self.prepare_home()?)
+            None
         };
         let note = match next.mode {
             InstructionMode::Preset => thread::ChangeNote::To {
@@ -1166,10 +1172,10 @@ impl CodexAdapter {
     /// перезапуска. Успех — отказ входа, провал — остановка исполнения.
     async fn respawn_previous(&mut self, group: &dyn Containment) -> Result<(), &'static str> {
         let previous = self.instructions.clone();
-        let previous_home = if previous.mode == InstructionMode::Owner {
+        let previous_home = if !self.wants_home(previous.mode) {
             None
         } else {
-            match self.prepare_home() {
+            match self.prepare_home(previous.mode) {
                 Ok(home) => Some(home),
                 // Сервера уже нет: без этого события сессия выглядела бы живой.
                 Err(_) => {
@@ -1238,14 +1244,22 @@ impl CodexAdapter {
         }
     }
 
+    /// Свой дом нужен всем режимам, кроме «Как у владельца»; делегированной сессии нужен и ему.
+    fn wants_home(&self, mode: InstructionMode) -> bool {
+        mode != InstructionMode::Owner || self.isolate_mcp
+    }
+
     /// Дом canterlot для запуска (релинк при каждом запуске и перезапуске).
-    fn prepare_home(&mut self) -> Result<CodexHome, &'static str> {
+    fn prepare_home(&mut self, mode: InstructionMode) -> Result<CodexHome, &'static str> {
         let home_error = |error| match error {
             HomeError::Unusable => "codex_home_unusable",
             HomeError::Io(_) => "codex_home_failed",
         };
-        let home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
+        let mut home = CodexHome::resolve(&self.cfg, &self.exec_dir, &owner_env(&self.cfg))
             .map_err(home_error)?;
+        if self.isolate_mcp {
+            home = home.isolated(mode == InstructionMode::Owner);
+        }
         let report = home
             .prepare(mcp::SERVER_INSTRUCTIONS, self.cfg.home_policy)
             .map_err(home_error)?;
@@ -1643,6 +1657,10 @@ async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
 
 #[async_trait::async_trait]
 impl Adapter for CodexAdapter {
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,
@@ -1688,9 +1706,14 @@ impl Adapter for CodexAdapter {
             .unwrap_or(std::env::current_exe()?);
         // Дом canterlot для всех пресетов, кроме «Как у владельца» (план 2c,
         // задача 7): готов до запуска, иначе первый сервер видит ~/.codex.
-        self.codex_home = match spec.instructions.mode {
-            InstructionMode::Owner => None,
-            _ => Some(self.prepare_home().map_err(AdapterError::StartFailed)?),
+        self.isolate_mcp = spec.isolate_mcp;
+        self.codex_home = if self.wants_home(spec.instructions.mode) {
+            Some(
+                self.prepare_home(spec.instructions.mode)
+                    .map_err(AdapterError::StartFailed)?,
+            )
+        } else {
+            None
         };
         let launch = LaunchSpec {
             executable: &self.cfg.executable,

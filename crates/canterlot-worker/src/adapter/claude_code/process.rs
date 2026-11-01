@@ -235,6 +235,8 @@ pub struct LaunchSpec<'a> {
     pub effort: &'a str,
     pub permission_mode: &'a str,
     pub instructions: &'a InstructionSpec,
+    /// Делегированная сессия: только MCP-сервер canterlot из `mcp.json`.
+    pub isolate_mcp: bool,
 }
 
 pub fn map_permission_mode(m: &str) -> Result<Option<&'static str>, LaunchError> {
@@ -275,6 +277,10 @@ pub fn build_args(
         "--effort".into(),
         spec.effort.into(),
     ];
+    // Серверы пользователя, проекта и плагинов не грузятся: остаётся только `mcp.json`.
+    if spec.isolate_mcp {
+        args.push("--strict-mcp-config".into());
+    }
     // Домашний каталог — из окружения воркера; файлы не читаются, только пути.
     let home = std::env::var("HOME").unwrap_or_default();
     let excludes = owner_instruction_excludes(spec.workdir, Path::new(&home));
@@ -326,6 +332,12 @@ pub fn build_env(parent: impl Iterator<Item = (OsString, OsString)>) -> Vec<(OsS
     out
 }
 
+/// Коннекторы аккаунта claude.ai тоже MCP-серверы владельца: переменная их выключает.
+pub fn apply_mcp_isolation(envs: &mut Vec<(OsString, OsString)>) {
+    envs.retain(|(key, _)| key != "ENABLE_CLAUDEAI_MCP_SERVERS");
+    envs.push(("ENABLE_CLAUDEAI_MCP_SERVERS".into(), "false".into()));
+}
+
 pub fn write_exec_files(
     spec: &LaunchSpec,
     _cfg: &ClaudeCodeConfig,
@@ -370,7 +382,10 @@ impl CliProcess {
         group: &dyn Containment,
     ) -> Result<Self, LaunchError> {
         let args = build_args(spec, cfg)?;
-        let envs = build_env(std::env::vars_os());
+        let mut envs = build_env(std::env::vars_os());
+        if spec.isolate_mcp {
+            apply_mcp_isolation(&mut envs);
+        }
         // Команда собирается заново на каждую попытку: повтор нужен только
         // для ETXTBSY при запуске свежезаписанного двойника в тестах.
         let mut child = spawn_with_retry_io(|| {

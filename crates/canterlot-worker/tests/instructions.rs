@@ -544,6 +544,7 @@ mod manager_tests {
                 instructions,
                 capabilities: vec!["pilot_v1".into()],
                 worktree: None,
+                isolate_mcp: false,
             }),
         )
     }

@@ -67,8 +67,11 @@ impl Live {
         let wrapper = fake_exec::write_executable(
             &root.path().join("opencode"),
             format!(
-                "#!/bin/sh\nexport HOME='{}' XDG_CONFIG_HOME='{}' OPENCODE_DISABLE_MODELS_FETCH=1\nexec '{}' \"$@\"\n",
+                "#!/bin/sh\nexport HOME='{}' OPENCODE_DISABLE_MODELS_FETCH=1\n\
+                 case \"$XDG_CONFIG_HOME\" in '{}'/*) ;; *) export XDG_CONFIG_HOME='{}' ;; esac\n\
+                 exec '{}' \"$@\"\n",
                 home.display(),
+                root.path().display(),
                 config_home.display(),
                 real_binary(),
             ),
@@ -112,6 +115,7 @@ impl Live {
                 revision: 0,
                 title: String::new(),
             },
+            isolate_mcp: false,
         }
     }
 
@@ -2215,4 +2219,48 @@ async fn real_resume_out_of_read_only_reminds_the_model() {
         "{texts:?}"
     );
     session.close().await;
+}
+
+// D24: сервер с именем nanokvm в конфигурации владельца и в репозитории. Настоящий opencode
+// запускает его при старте сессии владельца и не запускает при делегированной.
+#[tokio::test]
+#[ignore = "L2: настоящий opencode, см. заголовок файла"]
+async fn delegated_session_never_starts_owner_or_project_servers() {
+    for (isolate, mode) in [
+        (false, InstructionMode::Owner),
+        (true, InstructionMode::Owner),
+        (true, InstructionMode::Clean),
+    ] {
+        let live = Live::new("{}");
+        let server = |name: &str| {
+            json!({"type": "local", "environment": {}, "command": [
+                "sh", "-c", format!("touch '{}/marker-{name}'; sleep 60", live.root.path().display()),
+            ]})
+        };
+        fs::write(
+            live.root.path().join("config/opencode/opencode.json"),
+            json!({"mcp": {"servers": {"nanokvm": server("nanokvm")}}}).to_string(),
+        )
+        .unwrap();
+        fs::write(
+            live.workdir.join("opencode.json"),
+            json!({"mcp": {"servers": {"projkvm": server("projkvm")}}}).to_string(),
+        )
+        .unwrap();
+        let group = TreeContainment::new().unwrap();
+        let mut adapter = live.adapter();
+        let mut spec = live.spec("", "bypass");
+        spec.isolate_mcp = isolate;
+        spec.instructions.mode = mode;
+        tokio::time::timeout(WAIT, adapter.start(&spec, &group))
+            .await
+            .expect("start must finish")
+            .expect("start");
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let started = |name: &str| live.root.path().join(format!("marker-{name}")).exists();
+        assert_eq!(started("nanokvm"), !isolate, "isolate={isolate} {mode:?}");
+        assert_eq!(started("projkvm"), !isolate, "isolate={isolate} {mode:?}");
+        adapter.close(CloseMode::Graceful, &group).await.unwrap();
+        live.wait_gone().await;
+    }
 }

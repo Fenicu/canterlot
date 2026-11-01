@@ -6,7 +6,7 @@
 use canterlot_worker::adapter::{
     Adapter, AdapterContext, AdapterError, AdapterEvent, InstructionMode, InstructionSpec,
     SettingsChange, StartSpec, Transmission, TransmitOutcome,
-    codex::home::{CodexHome, TempDirPolicy},
+    codex::home::{CodexHome, HomeKind, TempDirPolicy},
 };
 use canterlot_worker::config::CodexConfig;
 use canterlot_worker::containment::TreeContainment;
@@ -220,6 +220,7 @@ impl PresetHarness {
             effort: "low".into(),
             permission_mode: permission.into(),
             instructions,
+            isolate_mcp: false,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -464,6 +465,7 @@ async fn clean_preset_keeps_project_agents_md_and_drops_global() {
     let home = CodexHome {
         path: h.dir.path().join("codex-home"),
         owner_home: h.dir.path().join("owner-home"),
+        kind: HomeKind::Shared,
     };
     // Глобальный AGENTS.md владельца не ссылается; блок canterlot на месте.
     assert!(!home.path.join("AGENTS.md").is_symlink());

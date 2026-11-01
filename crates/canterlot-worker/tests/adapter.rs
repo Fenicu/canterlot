@@ -109,6 +109,7 @@ async fn adapter_child() {
             revision: 0,
             title: String::new(),
         },
+        isolate_mcp: false,
     };
     let make = |profile: &str| {
         SyntheticAdapter::new(profile)

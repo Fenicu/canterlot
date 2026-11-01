@@ -1089,6 +1089,7 @@ impl Actor {
                 compact_v1: start.capabilities.iter().any(|c| c == "compact_v1"),
                 background_v1: start.capabilities.iter().any(|c| c == "background_v1"),
                 session_tools_v1: start.capabilities.iter().any(|c| c == "session_tools_v1"),
+                isolate_mcp: start.isolate_mcp,
             }))
             .await;
         Ok(())

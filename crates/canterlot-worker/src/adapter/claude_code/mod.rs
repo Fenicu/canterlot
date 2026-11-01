@@ -67,6 +67,7 @@ pub struct ClaudeCodeAdapter {
     eof: bool,
     exited: bool,
     start_attempted: bool,
+    isolate_mcp: bool,
     relay_executable: Option<PathBuf>,
     /// Смена, для которой нужен перезапуск CLI, ждёт конца фоновой работы: перезапуск убил бы её.
     deferred: Option<SettingsChange>,
@@ -112,6 +113,7 @@ impl ClaudeCodeAdapter {
             eof: false,
             exited: false,
             start_attempted: false,
+            isolate_mcp: false,
             relay_executable: None,
             deferred: None,
             deferred_due: false,
@@ -626,6 +628,7 @@ impl ClaudeCodeAdapter {
             effort: &effort,
             permission_mode: &permission_mode,
             instructions: &next,
+            isolate_mcp: self.isolate_mcp,
         };
         let spawned = self.spawn_for_restart(&launch, group).await;
         let Some(cli) = spawned else {
@@ -680,6 +683,7 @@ impl ClaudeCodeAdapter {
             effort: &effort,
             permission_mode: &permission_mode,
             instructions: &previous,
+            isolate_mcp: self.isolate_mcp,
         };
         match self.spawn_for_restart(&launch, group).await {
             Some(cli) => {
@@ -1063,6 +1067,10 @@ async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Opt
 
 #[async_trait::async_trait]
 impl Adapter for ClaudeCodeAdapter {
+    fn isolates_mcp(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,
@@ -1115,7 +1123,9 @@ impl Adapter for ClaudeCodeAdapter {
             effort: &spec.effort,
             permission_mode: &spec.permission_mode,
             instructions: &spec.instructions,
+            isolate_mcp: spec.isolate_mcp,
         };
+        self.isolate_mcp = spec.isolate_mcp;
         self.workdir = spec.workdir.clone();
         self.instructions = spec.instructions.clone();
         // The exec manager stages a named Task-1 profile before starting the supervisor.

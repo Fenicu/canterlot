@@ -261,6 +261,7 @@ fn clean_preset_args_exclude_owner_files_and_auto_memory() {
         effort: "e",
         permission_mode: "owner",
         instructions: &instructions,
+        isolate_mcp: false,
     };
     let args = build_args(&spec, &ClaudeCodeConfig::default()).unwrap();
     let s: Vec<String> = args
@@ -454,6 +455,7 @@ impl RestartHarness {
             effort: "low".into(),
             permission_mode: "ask".into(),
             instructions: owner_spec(),
+            isolate_mcp: false,
         };
         let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
             .await
@@ -1159,6 +1161,7 @@ for line in sys.stdin:
         effort: "low".into(),
         permission_mode: "ask".into(),
         instructions: owner_spec(),
+        isolate_mcp: false,
     };
     let started = tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await
@@ -1244,6 +1247,7 @@ sys.stdout.flush()
         effort: "low".into(),
         permission_mode: "ask".into(),
         instructions: owner_spec(),
+        isolate_mcp: false,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await
@@ -1311,6 +1315,7 @@ for line in sys.stdin:
         effort: "low".into(),
         permission_mode: "ask".into(),
         instructions: owner_spec(),
+        isolate_mcp: false,
     };
     tokio::time::timeout(WAIT, adapter.start(&spec, &group))
         .await

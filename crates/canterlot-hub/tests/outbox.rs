@@ -1335,3 +1335,39 @@ async fn worktree_commands_need_the_capability() {
         Err(OutboxError::InvalidCommand)
     ));
 }
+
+#[tokio::test]
+async fn delegated_start_carries_the_isolation_flag_only_with_the_capability() {
+    use canterlot_hub::outbox::{OutboxError, to_proto_for_session};
+    let machine = Uuid::now_v7();
+    let registry = canterlot_hub::session::Registry::new(Default::default());
+    let row = |payload: Value| canterlot_hub::outbox::CommandRow {
+        machine_id: machine,
+        ..command_row("start_execution", payload)
+    };
+    let delegated = json!({"harness": "claude_code", "workdir": "/tmp/w", "isolate_mcp": true});
+    {
+        let _old = registry.connect_for_tests(machine, &["pilot_v1".to_owned()]);
+        assert!(matches!(
+            to_proto_for_session(&row(delegated.clone()), &registry),
+            Err(OutboxError::CapabilityMissing)
+        ));
+    }
+    let _new = registry.connect_for_tests(
+        machine,
+        &["pilot_v1".to_owned(), "session_tools_v1".to_owned()],
+    );
+    let start_of = |payload: Value| {
+        let command = to_proto_for_session(&row(payload), &registry).unwrap();
+        let Some(command::Kind::StartExecution(start)) = command.kind else {
+            panic!("start expected");
+        };
+        start
+    };
+    assert!(start_of(delegated).isolate_mcp);
+    assert!(!start_of(json!({"harness": "claude_code", "workdir": "/tmp/w"})).isolate_mcp);
+    assert!(
+        !start_of(json!({"harness": "claude_code", "workdir": "/tmp/w", "isolate_mcp": false}))
+            .isolate_mcp
+    );
+}
