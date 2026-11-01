@@ -11,6 +11,7 @@ use crate::{
     crunch::JobOutcome,
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
+    session_tools::summary,
 };
 
 #[derive(Deserialize)]
@@ -18,6 +19,8 @@ struct EventJob {
     target_id: Uuid,
     state: String,
     chain_depth: i32,
+    #[serde(default)]
+    armed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Deserialize)]
@@ -68,22 +71,14 @@ async fn event_message(
     owner_id: Uuid,
     event: &EventJob,
 ) -> Result<(String, Value), sqlx::Error> {
-    let target: Option<(String, String, String)> =
-        sqlx::query_as("select title,harness,model from conversations where id=$1 and owner_id=$2")
-            .bind(event.target_id)
-            .bind(owner_id)
-            .fetch_optional(&mut *conn)
-            .await?;
     let id = event.target_id;
     let depth = event.chain_depth;
-    Ok(match target {
-        Some((title, harness, model)) => (
-            format!(
-                "[canterlot] Session \"{title}\" (id {id}, {harness}, model {model}) is now {}.",
-                event.state
-            ),
-            json!({"kind":"event","from":id,"title":title,"harness":harness,"model":model,"chain_depth":depth}),
-        ),
+    let summary = summary::build(conn, owner_id, id, &event.state, event.armed_at).await?;
+    Ok(match summary {
+        Some(summary) => {
+            let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth});
+            (summary::render(&summary), origin)
+        }
         None => (
             format!("[canterlot] Session {id} was deleted."),
             json!({"kind":"event","from":id,"chain_depth":depth}),

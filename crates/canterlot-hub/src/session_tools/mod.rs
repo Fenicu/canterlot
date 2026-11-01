@@ -8,6 +8,7 @@
 pub mod jobs;
 pub mod settle;
 pub mod subs;
+pub mod summary;
 
 use serde_json::Value;
 use sqlx::PgPool;
