@@ -188,7 +188,7 @@ pub(super) async fn cleanup_released(shared: &Shared) -> Result<(), ExecError> {
         if dir.exists() {
             let spec = fs::read_to_string(dir.join("spec.toml"))
                 .ok()
-                .and_then(|text| toml::from_str::<crate::supervisor::SupervisorSpec>(&text).ok());
+                .and_then(|text| toml::from_str::<crate::supervisor::PersistedSpec>(&text).ok());
             if let Some(spec) = spec {
                 let socket = spec.ipc_socket.unwrap_or_else(|| dir.join("ipc.sock"));
                 if socket == Path::new(&record.ipc_socket) {
@@ -258,9 +258,12 @@ pub(super) async fn verify(
         return Err(ExecError::Verify("supervisor_process"));
     }
     let secret = fs::read(dir.join("secret"))?;
-    let spec: crate::supervisor::SupervisorSpec =
+    let spec: crate::supervisor::PersistedSpec =
         toml::from_str(&fs::read_to_string(dir.join("spec.toml"))?)
             .map_err(|_| ExecError::Verify("spec"))?;
+    if spec.execution_id != id || spec.generation != record.generation {
+        return Err(ExecError::Verify("spec"));
+    }
     if Path::new(&record.ipc_socket) != spec.ipc_socket.unwrap_or_else(|| dir.join("ipc.sock")) {
         return Err(ExecError::Verify("ipc_socket"));
     }

@@ -721,6 +721,39 @@ async fn control_restart_reattaches_live_supervisor() {
     env.stop().await;
 }
 
+const SPEC_B644882: &str = include_str!("fixtures/spec/b644882ac458.toml");
+
+// Подставляет в спеку живого исполнения таблицы, которые записал старый релиз.
+fn age_spec(exec_dir: &Path) {
+    let path = exec_dir.join("spec.toml");
+    let mut spec: toml::Table = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let frozen: toml::Table = toml::from_str(SPEC_B644882).unwrap();
+    for table in ["claude_code", "codex", "opencode", "timers"] {
+        spec.insert(table.into(), frozen[table].clone());
+    }
+    fs::write(path, toml::to_string(&spec).unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn spec_of_older_release_is_reattached() {
+    let mut env = Env::new().await;
+    env.hub_session();
+    env.start(1).await;
+    env.wait_running().await;
+    let record = env.ownership(env.execution).await.unwrap();
+    env.close_manager().await;
+    age_spec(Path::new(&record.exec_dir));
+    env.reopen();
+    assert_eq!(
+        env.manager().startup_verify().await.unwrap(),
+        vec![env.execution]
+    );
+    assert_eq!(owner_lost(&env.cj().await, env.execution), 0);
+    assert!(env.manager().observations()[0].supervisor_attached);
+    env.hub_session();
+    env.stop().await;
+}
+
 #[derive(Clone, Default)]
 struct LogBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
 

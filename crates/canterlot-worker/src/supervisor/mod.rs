@@ -56,6 +56,17 @@ pub struct SupervisorSpec {
     pub opencode: Option<crate::config::OpenCodeConfig>,
 }
 
+/// Спека на диске глазами управляющей службы: она может быть записана другим релизом,
+/// поэтому читаются только поля проверки, а незнакомые ключи пропускаются. `SupervisorSpec`
+/// читает лишь сопровождение, запущенное тем же релизом, что её записал.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PersistedSpec {
+    pub execution_id: Uuid,
+    pub generation: u64,
+    #[serde(default)]
+    pub ipc_socket: Option<PathBuf>,
+}
+
 fn load(exec_dir: &Path) -> Result<(SupervisorSpec, Vec<u8>), SupervisorError> {
     let text = fs::read_to_string(exec_dir.join("spec.toml"))?;
     let spec: SupervisorSpec = toml::from_str(&text).map_err(|_| SupervisorError::Spec)?;
