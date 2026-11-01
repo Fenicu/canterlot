@@ -36,7 +36,7 @@ enum PendingKind {
     Question { normalized: Value, original: Value },
 }
 
-/// Ожидающий вызов пресетов: ответ уходит в соединение вызова, поздний итог
+/// Ожидающий вызов агентского инструмента: ответ уходит в соединение вызова, поздний итог
 /// хаба после отмены или разрыва молча отбрасывается.
 struct AgentCall {
     call_id: uuid::Uuid,
@@ -86,7 +86,7 @@ pub enum BrokerEvent {
     LimitsQuery {
         call: LimitsCall,
     },
-    /// Вызов инструмента пресетов: уходит в хаб как `AdapterEvent::AgentCall`.
+    /// Вызов агентского инструмента (пресеты, сессии): уходит в хаб как `AdapterEvent::AgentCall`.
     AgentTool {
         rpc_id: Value,
         call_id: uuid::Uuid,
@@ -161,7 +161,7 @@ fn same_user(stream: &UnixStream) -> bool {
 pub struct Broker {
     events: mpsc::UnboundedReceiver<BrokerEvent>,
     pending: Pending,
-    /// Ожидающие вызовы пресетов по соединению и строке rpc id.
+    /// Ожидающие вызовы агентских инструментов по соединению и строке rpc id.
     agent_pending: AgentPending,
     gate: Arc<SyncMutex<Gate>>,
     task: JoinHandle<()>,
@@ -346,7 +346,7 @@ impl Broker {
         let _ = write_line(&call.writer, &reply).await;
     }
 
-    /// Итог вызова пресетов от хаба: текст плюс подсказка или `isError` с кодом.
+    /// Итог вызова агентского инструмента от хаба: текст плюс подсказка или `isError` с кодом.
     /// Неизвестный (отменённый или чужой) вызов молча отбрасывается.
     pub async fn answer_agent_tool(
         &mut self,
@@ -397,7 +397,7 @@ impl Broker {
             );
             let _ = write_line(&call.writer, &reply).await;
         }
-        // Ожидающие вызовы пресетов отбрасываются: поздний итог хаба проигнорируют.
+        // Ожидающие вызовы агентских инструментов отбрасываются: поздний итог хаба проигнорируют.
         self.agent_pending.lock().await.clear();
         self.task.abort();
     }
@@ -557,7 +557,7 @@ async fn serve_conn(
                 });
             }
             mcp::McpAction::Cancelled { request_id } => {
-                // Отмена вызова пресетов: тихо отбрасываем, поздний итог проигнорируют.
+                // Отмена агентского вызова: тихо отбрасываем, поздний итог проигнорируют.
                 if agent_pending
                     .lock()
                     .await
@@ -601,7 +601,7 @@ async fn serve_conn(
     for request_id in open {
         let _ = events.send(BrokerEvent::Cancelled { request_id });
     }
-    // Вызовы пресетов разорванного соединения тихо отбрасываются.
+    // Агентские вызовы разорванного соединения тихо отбрасываются.
     agent_pending
         .lock()
         .await
