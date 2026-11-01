@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { edgeFade } from '#lib/render/edgeFade.js';
   import { highlightWithin } from '#lib/render/highlight.js';
   import Html from '#lib/render/Html.svelte';
   import { createMarkdown } from '#lib/render/markdown.js';
@@ -37,7 +38,7 @@
   }
 </script>
 
-<div class="text prose" data-block={block.id} use:highlightFinal={streaming ? null : block.text}>
+<div class="text prose" data-block={block.id} use:highlightFinal={streaming ? null : block.text} use:edgeFade>
   {#each rendered.chunks as chunk (chunk.id)}
     <Html html={chunk.html} />
   {/each}

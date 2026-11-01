@@ -26,9 +26,19 @@ export function formatDuration(ms: number): string {
   return remainingMins > 0 ? `${hours} ч ${remainingMins} мин` : `${hours} ч`;
 }
 
+/** Шапка называет модель сессии, лист хода должен называть ту же, пока семейство совпадает. */
+function mainModelLabel(model: string, sessionModel?: string | null): string {
+  const label = modelLabel(model);
+  if (!sessionModel) return label;
+  const session = modelLabel(sessionModel);
+  const family = (value: string) => value.split(" ")[0]?.toLowerCase();
+  return family(session) === family(label) ? session : label;
+}
+
 export function summarizeRun(
   info: RunInfo,
   harness?: { title?: string; provider?: string } | null,
+  sessionModel?: string | null,
 ): InfoModel {
   const pending = !info.finished_at || info.duration_ms == null;
 
@@ -73,7 +83,7 @@ export function summarizeRun(
       parts.push({
         title: "Основной ответ",
         sub: isMainAgent(p.agent ?? "") ? harnessLabel(harness) : p.agent,
-        model: modelLabel(p.model),
+        model: mainModelLabel(p.model, sessionModel),
       });
     } else {
       parts.push({

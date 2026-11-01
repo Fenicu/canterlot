@@ -3,7 +3,7 @@
   import type { BackgroundFact } from '#lib/stores/background.svelte.js';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { stripAnsi } from '#lib/render/ansi.js';
-  import { callCaption, firstLine, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
+  import { callCaption, firstLine, toolBackground, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
@@ -45,14 +45,15 @@
   const timing = $derived(toolTiming(block, result, working, background));
   const running = $derived(timing.running || block.state === 'stale');
   const error = $derived(toolError(block, result) || background?.state === 'failed');
-  const status = $derived(toolPillText({ ...timing, error, now }));
+  const launched = $derived(!background && !error && toolBackground(result));
+  const status = $derived(launched ? 'В фоне' : toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
 </script>
 
 <div class="tool">
-  <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : 'done'} {open} ontoggle={onToggle}>
+  <StepHead name={title.name || 'Шаг'} {detail} dir={label.dir} {status} state={error ? 'error' : running ? 'running' : launched ? 'background' : 'done'} {open} ontoggle={onToggle}>
     {#snippet badge()}
       {#if background}<span class="policy-badge">Фоном</span>{/if}
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}

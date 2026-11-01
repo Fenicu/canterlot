@@ -22,7 +22,11 @@
 	let loading = $state(true);
 	let error = $state<string | null>(null);
 
-	const summary = $derived(info ? summarizeRun(info, chat.detail?.harness as { title?: string; provider?: string } | undefined) : null);
+	const sessionModel = $derived(
+		((chat.settings as { effective?: { model?: string } } | null)?.effective?.model ||
+			(chat.detail as { model?: string } | null)?.model) ?? null
+	);
+	const summary = $derived(info ? summarizeRun(info, chat.detail?.harness as { title?: string; provider?: string } | undefined, sessionModel) : null);
 
 	// Collect blocks for export that belong to this run
 	const runBlocks = $derived.by(() => {
@@ -128,7 +132,7 @@
 					{#each summary.tokens as token (token.label)}
 						<div class="key-value">
 							<span>{token.label}</span>
-							<strong class="mono">
+							<strong>
 								{#if token.sub !== null}
 									{formatTokens(token.main)} + {formatTokens(token.sub)}
 								{:else}
@@ -159,7 +163,7 @@
 			{#if summary.limit}
 				<div class="key-value">
 					<span>Потрачено лимита</span>
-					<strong class="accent">{summary.limit.text}</strong>
+					<strong>{summary.limit.text}</strong>
 				</div>
 				{#if summary.limit.note}
 					<p class="meta">{summary.limit.note}</p>
@@ -233,15 +237,11 @@
 		align-items: baseline;
 		font-size: var(--fs-body);
 	}
-	.mono {
-		font-family: var(--font-mono);
-		font-size: var(--fs-meta);
+	.key-value strong {
+		font-variant-numeric: tabular-nums;
 	}
 	.rule {
 		height: var(--s4);
-	}
-	.accent {
-		color: var(--accent);
 	}
 	.error-msg {
 		color: var(--danger);

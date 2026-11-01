@@ -81,16 +81,19 @@
   <div class="body">{@render children()}</div>
 </dialog>
 <style>
-  dialog { position: fixed; inset: auto 0 0; width: min(100%, var(--reading-max)); max-width: 100%; max-height: var(--sheet-max); margin: auto auto 0; padding: var(--s4) var(--s8) calc(var(--s8) + env(safe-area-inset-bottom)); border: 0; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; background: var(--surface); color: var(--text); overflow-y: auto; }
+  dialog { position: fixed; inset: auto 0 0; width: min(100%, var(--reading-max)); max-width: 100%; max-height: var(--sheet-max); margin: auto auto 0; padding: var(--s4) var(--s8) var(--s0); border: 0; border-radius: var(--radius-sheet) var(--radius-sheet) 0 0; background: var(--surface); color: var(--text); overflow: hidden; }
+  dialog[open] { display: flex; flex-direction: column; }
   dialog::backdrop { background: var(--scrim-soft); }
   dialog[open] { animation: sheet-enter var(--duration-expand) var(--ease-sheet); }
   .handle { width: var(--handle-width); height: var(--handle-height); border-radius: var(--radius-pill); background: var(--control-line); margin: var(--s4) auto; }
-  header { display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
+  header { flex: none; display: flex; align-items: center; justify-content: space-between; gap: var(--s4); }
   .titles { min-width: 0; }
   p { margin: var(--s1) var(--s0) var(--s0); color: var(--muted); font-size: var(--fs-sm); overflow-wrap: anywhere; }
-  .body { padding-block: var(--s6) var(--s0); }
-  :global([data-layout='desktop']) dialog { inset: 0; height: fit-content; margin: auto; padding: var(--s6) var(--s10) var(--s10); border-radius: var(--radius-sheet); }
+  .body { flex: 1 1 auto; min-height: 0; padding-block: var(--s6) calc(var(--s8) + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; mask-image: linear-gradient(to bottom, var(--transparent), var(--text) var(--s6)); }
+  :global([data-layout='desktop']) dialog { inset: 0; height: fit-content; margin: auto; padding: var(--s6) var(--s10) var(--s0); border-radius: var(--radius-sheet); }
   :global([data-layout='desktop']) .handle { display: none; }
+  .body:has(> :global([data-sheet-flush])) { padding-bottom: var(--s0); }
+  :global([data-layout='desktop']) .body { padding-bottom: var(--s10); }
   :global([data-layout='desktop']) dialog[open] { animation-name: sheet-rise; }
   @keyframes sheet-enter { from { transform: translateY(100%); } to { transform: none; } }
   @keyframes sheet-rise { from { opacity: 0; transform: translateY(var(--shift-enter)); } to { opacity: 1; transform: none; } }

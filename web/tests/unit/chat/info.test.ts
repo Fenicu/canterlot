@@ -146,4 +146,37 @@ describe("summarizeRun", () => {
     expect(model.tokens.find((row) => row.label === "Вход")).toMatchObject({ main: 12000, sub: 8000 });
     expect(model.tokens.find((row) => row.label === "Выход")).toMatchObject({ main: 3400, sub: 900 });
   });
+
+  test("a_weekly_share_below_one_tenth_is_named_not_rounded_to_zero", () => {
+    const info = {
+      run_id: "00000000-0000-4000-8000-000000000021",
+      input_id: "00000000-0000-4000-8000-000000000022",
+      started_at: "2026-10-26T22:12:00.000Z",
+      finished_at: "2026-10-26T22:12:03.000Z",
+      duration_ms: 3000,
+      limit: { provider: "claude", weekly_delta_permille: 0, exact: true },
+      parts: [],
+      usage: [],
+    } as unknown as RunInfo;
+    expect(summarizeRun(info).limit?.text).toBe("меньше 0,1% недели");
+  });
+
+  test("main_part_carries_the_session_model_label_of_the_same_family", () => {
+    const info = {
+      run_id: "00000000-0000-4000-8000-000000000031",
+      input_id: "00000000-0000-4000-8000-000000000032",
+      started_at: "2026-10-26T22:12:00.000Z",
+      finished_at: "2026-10-26T22:12:03.000Z",
+      duration_ms: 3000,
+      parts: [
+        { block_id: "a", kind: "text", agent: "main", model: "claude-opus-5-5" },
+        { block_id: "b", kind: "text", agent: "Explore", model: "claude-opus-5-5" },
+        { block_id: "c", kind: "text", agent: "Other", model: "claude-haiku-4-5" },
+      ],
+      usage: [],
+    } as unknown as RunInfo;
+    const parts = summarizeRun(info, null, "opus[1m]").parts;
+    expect(parts.map((part) => part.model)).toEqual(["Opus 1M", "Opus 5.5", "Haiku 4.5"]);
+    expect(summarizeRun(info).parts[0]?.model).toBe("Opus 5.5");
+  });
 });

@@ -115,6 +115,13 @@ export function toolPillText(opts: Parameters<typeof toolStatusText>[0]): string
   return quick ? "" : toolStatusText(opts);
 }
 
+const BACKGROUND_START = /^Command running in background with ID: /;
+
+/** Результат такого запуска приходит сразу: время строки говорит о запуске, а не о работе команды. */
+export function toolBackground(result: Pick<BlockModel, "text"> | null): boolean {
+  return result !== null && BACKGROUND_START.test(result.text);
+}
+
 /** Начало и конец работы инструмента. Вызов у Claude Code финален сразу, время даёт результат. */
 export function toolTiming(
   call: BlockModel,
