@@ -899,6 +899,10 @@ impl Translator {
                     text: text.to_owned(),
                     summary: None,
                 }));
+                // Вопрос без запроса к серверу: тред начат с инкрементальными инструментами.
+                if item.get("delivery").and_then(Value::as_str) == Some("async") {
+                    out.push(self.optional("codex_async_question"));
+                }
             }
             "commandExecution" => {
                 let status = item

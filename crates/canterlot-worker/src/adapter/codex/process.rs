@@ -81,7 +81,8 @@ pub fn mcp_args_value(exec_dir: &Path) -> String {
     ])
 }
 
-// Только добавление нашего MCP и флага вопросов; чужая конфигурация не трогается.
+// Только добавление нашего MCP и флагов инструментов; чужая конфигурация не трогается.
+// Без `incremental_tools` смена модели не теряет блокирующий request_user_input.
 // He-владелец добавляет `--disable memories` (память Codex, не проектные документы).
 pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsString>, LaunchError> {
     if !spec.workdir.is_dir() {
@@ -93,6 +94,8 @@ pub fn build_args(spec: &LaunchSpec, mode: InstructionMode) -> Result<Vec<OsStri
         "stdio://".into(),
         "--enable".into(),
         "default_mode_request_user_input".into(),
+        "--disable".into(),
+        "incremental_tools".into(),
     ];
     args.extend(super::mcp::launch_overrides(spec.relay_exe, spec.exec_dir));
     if mode != InstructionMode::Owner {

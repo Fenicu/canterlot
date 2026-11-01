@@ -1264,3 +1264,46 @@ fn long_command_label_is_marked_as_cut() {
     assert_eq!(label("a".repeat(120)), "a".repeat(120));
     assert_eq!(label("a".repeat(121)), format!("{}…", "a".repeat(119)));
 }
+
+fn diagnostics(events: &[&AdapterEvent]) -> Vec<(String, String)> {
+    events
+        .iter()
+        .filter_map(|event| match event {
+            AdapterEvent::Diagnostic {
+                kind, event_type, ..
+            } => Some(((*kind).to_owned(), event_type.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn async_question_stays_a_text_block_and_raises_a_diagnostic() {
+    // Настоящий кадр: request_user_input_async, карточки нет, ничего не ждёт.
+    let thread = "01a196a8-4b17-7e32-ab40-54c2d402cc39";
+    let turn = "01a196ac-6014-7a50-a2ef-042266c1e3f5";
+    let mut translator = Translator::new(thread, "gpt-6-luna");
+    translator.begin_turn(turn, command_id());
+    let item = "call_4f42fda4cbc7403abdc4a4a5153d5586";
+    translator.feed(
+        "item/started",
+        &json!({"threadId": thread, "turnId": turn, "item": {
+            "id": item, "type": "agentMessage", "text": ""}}),
+    );
+    let out = feed_frames(&mut translator, &codex::replay("async_question_live"));
+    let events = events_of(&out);
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::BlockFinal { text, .. } if text.starts_with("Color")
+        )),
+        "{out:?}"
+    );
+    assert_eq!(
+        diagnostics(&events),
+        [(
+            "codex_async_question".to_owned(),
+            "codex_async_question".to_owned()
+        )]
+    );
+}

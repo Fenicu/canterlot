@@ -94,3 +94,22 @@
   `config/read` и `account/read` и методы без записи. Форма `config/read` — по
   схеме `ConfigReadResponse` (`config`, `origins`, `layers`), значения — по
   записи `ev/start_stream.jsonl:12`; `account/read` — по `ev/diagnostics.jsonl:23`.
+
+## Живые кадры (codex-cli 0.164.0, 01.11, одноразовый CODEX_HOME)
+
+Кадры настоящие. Пути заменены на `/work` и `/codex-home`, шумовые уведомления
+(`turn/moderationMetadata`, лимиты, `remoteControl`, `readState`) убраны.
+
+- `async_question_live.jsonl` - `agentMessage` с `delivery:"async"` и `questions`:
+  вопрос через `request_user_input_async`, запроса к серверу нет.
+- `subagent_live_v2.jsonl` - ход `gpt-6-luna` (`multi_agent_version` v2): порождение
+  приходит элементом `subAgentActivity`, `thread/started` потомка нет, первый кадр
+  потомка (`thread/status/changed`) обгоняет элемент, потомок выполняет команду.
+- `subagent_live_v1.jsonl` - ход `gpt-5.6-luna` (v1): `collabAgentToolCall` с
+  `tool:"spawnAgent"`; `model` пуст и `receiverThreadIds` пуст на старте, оба
+  заполняются к завершению; кадры потомка идут до этого завершения.
+- `subagent_live_outlives_turn.jsonl` - главный ход прерван, потомок работает
+  дальше и заканчивает после `turn/completed` главного.
+- `goal_cleared_live.jsonl` - `thread/goal/cleared` сразу после `thread/resume`.
+- `thread_resume_no_rollout_live.json` - ошибка `thread/resume`, когда рулона нет в
+  доме сервера. Та же ошибка приходит и с параметром `path` на рулон другого дома.

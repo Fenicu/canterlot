@@ -134,6 +134,8 @@ fn launch_args_add_only_feature_flag_and_canterlot_mcp() {
             "stdio://".to_string(),
             "--enable".to_string(),
             "default_mode_request_user_input".to_string(),
+            "--disable".to_string(),
+            "incremental_tools".to_string(),
             "-c".to_string(),
             "mcp_servers.canterlot.command=\"/usr/bin/canterlot-worker\"".to_string(),
             "-c".to_string(),
@@ -147,7 +149,7 @@ fn launch_args_add_only_feature_flag_and_canterlot_mcp() {
         "approval_policy",
         "sandbox_mode",
         "model",
-        "--disable",
+        "memories",
         "project_doc_max_bytes",
         "history.persistence",
     ] {
