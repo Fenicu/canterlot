@@ -11,8 +11,11 @@ pub use canterlot_mcp::{
 
 pub const SERVER_NAME: &str = canterlot_mcp::SERVER_NAME;
 
-/// Четыре аргумента `-c mcp_servers.canterlot.*` для `codex app-server`.
-pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 4] {
+const TOOL_TIMEOUT_SEC: u32 = 330;
+
+/// Шесть аргументов `-c mcp_servers.canterlot.*` для `codex app-server`.
+/// Таймаут вызова 330 с покрывает `session_wait` (до 300 с) с запасом.
+pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 6] {
     [
         "-c".into(),
         format!(
@@ -26,6 +29,8 @@ pub fn launch_overrides(relay_exe: &Path, exec_dir: &Path) -> [OsString; 4] {
             super::process::mcp_args_value(exec_dir)
         )
         .into(),
+        "-c".into(),
+        format!("mcp_servers.canterlot.tool_timeout_sec={TOOL_TIMEOUT_SEC}").into(),
     ]
 }
 

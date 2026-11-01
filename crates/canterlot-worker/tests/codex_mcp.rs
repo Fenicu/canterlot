@@ -21,7 +21,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = list.as_reply().expect("tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 4);
+    assert_eq!(tools.len(), 12);
     assert_eq!(tools[0]["name"], "canterlot_limits");
     assert_eq!(tools[0]["annotations"]["readOnlyHint"], true);
     let names: Vec<&str> = tools
@@ -40,7 +40,7 @@ fn limits_only_tool_set_lists_only_canterlot_limits() {
     let tools = claude.as_reply().expect("claude tools/list")["result"]["tools"]
         .as_array()
         .expect("tools");
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 13);
     let names: Vec<&str> = tools
         .iter()
         .map(|t| t["name"].as_str().expect("name"))
@@ -65,6 +65,9 @@ fn launch_overrides_point_relay_at_exec_socket() {
     let sock = exec_dir.join("mcp.sock").to_string_lossy().into_owned();
     assert!(parts[3].contains("mcp-relay"));
     assert!(parts[3].contains(&sock));
+    assert_eq!(parts.len(), 6);
+    assert_eq!(parts[4], "-c");
+    assert_eq!(parts[5], "mcp_servers.canterlot.tool_timeout_sec=330");
 }
 
 #[test]

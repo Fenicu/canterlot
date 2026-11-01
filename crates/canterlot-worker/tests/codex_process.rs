@@ -138,6 +138,8 @@ fn launch_args_add_only_feature_flag_and_canterlot_mcp() {
             "mcp_servers.canterlot.command=\"/usr/bin/canterlot-worker\"".to_string(),
             "-c".to_string(),
             format!("mcp_servers.canterlot.args=[\"mcp-relay\", \"--socket\", \"{sock}\"]"),
+            "-c".to_string(),
+            "mcp_servers.canterlot.tool_timeout_sec=330".to_string(),
         ]
     );
     let joined = s.join(" ");
@@ -191,10 +193,14 @@ fn mcp_override_values_are_valid_toml_for_awkward_paths() {
                 );
                 seen += 1;
             }
+            "mcp_servers.canterlot.tool_timeout_sec" => {
+                assert_eq!(doc["k"].as_integer(), Some(330));
+                seen += 1;
+            }
             other => panic!("unexpected -c key {other}"),
         }
     }
-    assert_eq!(seen, 2);
+    assert_eq!(seen, 3);
 }
 
 #[test]
