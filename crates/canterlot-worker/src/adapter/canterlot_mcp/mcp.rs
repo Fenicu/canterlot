@@ -127,7 +127,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "List the owner's coding sessions you may see, with harness, model, workdir, activity state with evidence, queued inputs, parent and worktree; `is_self` marks this session. Use it to find a session id. Do not call it in a loop to wait for a result: the result arrives in your queue."
         }
         "session_inspect" => {
-            "Show one session in detail: activity with evidence, its last messages, running processes, the last run summary, worktree and open requests. Use it to read a result in full or to find out why a session is quiet. Do not call it to poll for progress: you are subscribed and get a [canterlot] message when the session finishes, asks or stalls."
+            "Show one session in detail: activity with evidence, its last messages, running processes, the last run summary, worktree and open requests. Messages are cut at 4 KiB. To read a long result in full, pass `block_id` (a message `id`) and `offset`: the answer holds one page of that block, and `next_offset` is the offset of the next page until it is null. Also use it to find out why a session is quiet. Do not call it to poll for progress: you are subscribed and get a [canterlot] message when the session finishes, asks or stalls."
         }
         "session_send" => {
             "Queue a text message for another session; it reads it as a message from an agent, not from the owner. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
@@ -168,6 +168,8 @@ fn session_input_schema(mcp_name: &str) -> Value {
             "properties": {
                 "session_id": id,
                 "messages": {"type": "integer", "minimum": 0, "maximum": 20, "default": 5},
+                "block_id": {"type": "string", "description": "Read this block instead of the session overview; not together with `messages`."},
+                "offset": {"type": "integer", "minimum": 0, "default": 0, "description": "Byte offset in the block: 0, or a value from `next_offset` or a truncated summary."},
             },
             "required": ["session_id"],
             "additionalProperties": false,

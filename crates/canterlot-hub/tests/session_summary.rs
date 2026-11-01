@@ -297,11 +297,13 @@ async fn summary_truncates_on_char_boundary(pool: PgPool) {
     .await;
     // Три байта на символ: 8192 не делится на три, граница уходит на 8190.
     let answer = "€".repeat(4000);
-    add_text(&pool, &f, 1, Some(command), None, &answer).await;
+    let block = add_text(&pool, &f, 1, Some(command), None, &answer).await;
 
     let text = text_for(&pool, &f, "idle", Some(now - TimeDelta::minutes(1))).await;
-    let header = "Final answer (truncated to 8190 bytes of 12000, session_inspect has more):\n";
-    let start = text.find(header).expect("truncation header") + header.len();
+    let header = format!(
+        "Final answer (truncated to 8190 bytes of 12000; session_inspect with block_id {block} and offset 8190 reads on):\n"
+    );
+    let start = text.find(&header).expect("truncation header") + header.len();
     let body = text[start..].split("\n\nNext:").next().unwrap();
     assert_eq!(body.len(), 8190);
     assert!(body.chars().all(|c| c == '€'));

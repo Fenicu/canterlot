@@ -11,7 +11,7 @@ use super::{Caller, ToolContext, ToolError, ToolErrorCode, access, parse_argumen
 use crate::{
     activity::{ActivityState, extract_request_summary},
     conversations::{self, AgentListQuery, ListItem},
-    history::{self, HistoryCursor, InputContentBlock, TimelineItem},
+    history::{self, HistoryCursor, HistoryError, InputContentBlock, TimelineItem},
     requests::RequestKind,
 };
 
@@ -23,6 +23,8 @@ const MAX_MESSAGES: i64 = 20;
 const PAGE_FACTOR: i64 = 3;
 const MESSAGE_BYTES: usize = 4096;
 const TOTAL_BYTES: usize = 64 * 1024;
+/// Одна страница блока: длинный результат читается по `next_offset`.
+const BLOCK_PAGE_BYTES: i64 = 32 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +40,8 @@ struct ListArgs {
 struct InspectArgs {
     session_id: Uuid,
     messages: Option<i64>,
+    block_id: Option<Uuid>,
+    offset: Option<i64>,
 }
 
 fn bounded(value: Option<i64>, default: i64, min: i64, max: i64) -> Result<i64, ToolError> {
@@ -108,12 +112,19 @@ fn clipped(text: &str, total_bytes: i64, truncated_before: bool) -> Value {
     })
 }
 
+/// Продолжение усечённого блока; у ввода его нет, он хранится не в блоках.
+fn next_offset(row: &Value) -> Option<usize> {
+    let truncated = row["truncated"].as_bool().unwrap_or(false);
+    truncated.then(|| row["text"].as_str().map_or(0, str::len))
+}
+
 fn message(item: &TimelineItem) -> Option<Value> {
     match item {
         TimelineItem::Request(_) => None,
         TimelineItem::Block(block) if block.kind == "reasoning" => None,
         TimelineItem::Block(block) => {
             let mut row = clipped(&block.content, block.content_bytes, block.content_truncated);
+            row["next_offset"] = json!(next_offset(&row));
             row["id"] = json!(block.id);
             row["kind"] = json!("block");
             row["block_kind"] = json!(block.kind);
@@ -262,6 +273,42 @@ async fn open_requests(conn: &mut PgConnection, id: Uuid) -> Result<Vec<Value>, 
         .collect())
 }
 
+/// Страница одного блока цели. Рассуждения остаются закрыты и здесь: для модели такой блок
+/// неотличим от несуществующего.
+async fn block_page(
+    conn: &mut PgConnection,
+    owner_id: Uuid,
+    target: Uuid,
+    block_id: Uuid,
+    offset: i64,
+) -> Result<Value, ToolError> {
+    let invalid = || ToolError::new(ToolErrorCode::InvalidArguments);
+    let kind: Option<String> = sqlx::query_scalar(
+        "select kind from blocks where block_id=$1 and conversation_id=$2 and kind<>'reasoning'",
+    )
+    .bind(block_id)
+    .bind(target)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let kind = kind.ok_or_else(invalid)?;
+    let page = history::block_content(conn, owner_id, target, block_id, offset, BLOCK_PAGE_BYTES)
+        .await
+        .map_err(|error| match error {
+            HistoryError::Db(error) => error.into(),
+            HistoryError::InvalidOffset | HistoryError::InvalidLimit => invalid(),
+        })?
+        .ok_or_else(invalid)?;
+    Ok(json!({
+        "id": block_id,
+        "block_kind": kind,
+        "text": page.content,
+        "offset": page.offset,
+        "next_offset": page.next_offset,
+        "total_bytes": page.total_bytes,
+        "state": page.state,
+    }))
+}
+
 pub async fn inspect(
     context: &ToolContext,
     caller: &Caller,
@@ -269,6 +316,12 @@ pub async fn inspect(
 ) -> Result<Value, ToolError> {
     let args: InspectArgs = parse_arguments(arguments)?;
     let count = bounded(args.messages, DEFAULT_MESSAGES, 0, MAX_MESSAGES)?;
+    if match args.block_id {
+        Some(_) => args.messages.is_some(),
+        None => args.offset.is_some(),
+    } {
+        return Err(ToolError::new(ToolErrorCode::InvalidArguments));
+    }
     let mut tx = context.pool.begin().await?;
     let session = access::caller_in_tx(&mut tx, caller.owner_id, caller.conversation_id).await?;
     let target = access::target_in_tx(
@@ -279,6 +332,12 @@ pub async fn inspect(
         args.session_id,
     )
     .await?;
+    if let Some(block_id) = args.block_id {
+        let offset = args.offset.unwrap_or(0);
+        let block = block_page(&mut tx, caller.owner_id, target.id, block_id, offset).await?;
+        tx.commit().await?;
+        return Ok(json!({"session_id": target.id, "block": block}));
+    }
     let item = conversations::list_item(&mut tx, caller.owner_id, target.id)
         .await?
         .ok_or_else(|| ToolError::new(ToolErrorCode::SessionNotFound))?;

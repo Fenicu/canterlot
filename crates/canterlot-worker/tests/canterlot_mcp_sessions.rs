@@ -98,6 +98,16 @@ fn session_tools_listed_for_all_three_providers() {
                 required.0
             );
         }
+        let inspect = tools
+            .iter()
+            .find(|tool| tool["name"] == "session_inspect")
+            .unwrap();
+        for field in ["block_id", "offset"] {
+            assert!(
+                inspect["inputSchema"]["properties"].get(field).is_some(),
+                "{provider}: {field}"
+            );
+        }
     }
 }
 

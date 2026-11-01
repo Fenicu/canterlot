@@ -394,11 +394,13 @@ async fn inspect_truncates_and_redacts(pool: PgPool) {
     assert_eq!(tail["id"], json!(last), "the newest stays");
     assert_eq!(tail["text"], "короткий хвост");
     assert_eq!(tail["truncated"], false);
+    assert_eq!(tail["next_offset"], Value::Null);
     let long = &messages[0];
     assert_eq!(long["truncated"], true);
     assert_eq!(long["total_bytes"], 20_000);
     let cut = long["text"].as_str().unwrap();
     assert!(cut.len() <= 4096 && cut.ends_with('ю'), "{}", cut.len());
+    assert_eq!(long["next_offset"], cut.len(), "where the next read starts");
 
     assert_eq!(answer["activity"]["state"], "working");
     assert_eq!(answer["activity"]["evidence"]["kind"], "working");
@@ -426,6 +428,110 @@ async fn inspect_truncates_and_redacts(pool: PgPool) {
             Code::InvalidArguments
         );
     }
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_long_block_is_paged_to_its_end(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let target = f.conversation("цель", None, 0).await;
+    executions::start(&f.pool, f.owner, target, Uuid::now_v7())
+        .await
+        .unwrap();
+    let full = "ю".repeat(50_000);
+    let id = block(&f, target, "text", &full).await;
+
+    let mut text = String::new();
+    let mut offset = 0;
+    let mut pages = 0;
+    loop {
+        let answer = f
+            .call(
+                f.root,
+                "sessions.inspect",
+                json!({"session_id": target, "block_id": id, "offset": offset}),
+            )
+            .await
+            .unwrap();
+        let page = &answer["block"];
+        assert_eq!(page["id"], json!(id));
+        assert_eq!(page["block_kind"], "text");
+        assert_eq!(page["offset"], offset);
+        assert_eq!(page["total_bytes"], 100_000);
+        assert_eq!(answer.get("messages"), None, "only the requested page");
+        let chunk = page["text"].as_str().unwrap();
+        assert!(
+            !chunk.is_empty() && chunk.len() <= 32 * 1024,
+            "{}",
+            chunk.len()
+        );
+        text.push_str(chunk);
+        pages += 1;
+        match page["next_offset"].as_i64() {
+            Some(next) => offset = next,
+            None => break,
+        }
+    }
+    assert_eq!(text, full);
+    assert_eq!(pages, 4);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn block_page_stays_within_what_inspect_shows(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let family = family(&f).await;
+    for id in [family.child, family.stranger] {
+        executions::start(&f.pool, f.owner, id, Uuid::now_v7())
+            .await
+            .unwrap();
+    }
+    let reasoning = block(&f, family.child, "reasoning", "скрытые рассуждения").await;
+    let text = block(&f, family.child, "text", "ютекст").await;
+    let foreign = block(&f, family.stranger, "text", "чужой текст").await;
+
+    let refused = [
+        json!({"session_id": family.child, "block_id": reasoning}),
+        json!({"session_id": family.child, "block_id": foreign}),
+        json!({"session_id": family.child, "block_id": Uuid::now_v7()}),
+        json!({"session_id": family.child, "block_id": text, "offset": 1}),
+        json!({"session_id": family.child, "block_id": text, "offset": 1000}),
+        json!({"session_id": family.child, "block_id": text, "offset": -1}),
+        json!({"session_id": family.child, "block_id": text, "messages": 1}),
+        json!({"session_id": family.child, "offset": 0}),
+    ];
+    for args in refused {
+        assert_eq!(
+            f.call(f.root, "sessions.inspect", args.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::InvalidArguments,
+            "{args}"
+        );
+    }
+    let hidden = f
+        .call(
+            family.child,
+            "sessions.inspect",
+            json!({"session_id": family.stranger, "block_id": foreign}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(
+        hidden.code,
+        Code::SessionNotFound,
+        "family rule still holds"
+    );
+    let whole = f
+        .call(
+            f.root,
+            "sessions.inspect",
+            json!({"session_id": family.child, "block_id": text}),
+        )
+        .await
+        .unwrap();
+    assert_eq!(whole["block"]["text"], "ютекст");
+    assert_eq!(whole["block"]["offset"], 0);
+    assert_eq!(whole["block"]["next_offset"], Value::Null);
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

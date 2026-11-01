@@ -62,6 +62,7 @@ struct Git {
 }
 
 struct Answer {
+    block_id: Uuid,
     head: String,
     total_bytes: usize,
 }
@@ -217,8 +218,8 @@ pub async fn build(
     .fetch_one(&mut *conn)
     .await?;
     let git: Vec<Option<Value>> = runs.iter().map(|run| run.2.clone()).collect();
-    let answer: Option<(String, i64)> = sqlx::query_as(
-        "select left(content,$4::int),octet_length(content)::bigint from blocks
+    let answer: Option<(Uuid, String, i64)> = sqlx::query_as(
+        "select block_id,left(content,$4::int),octet_length(content)::bigint from blocks
          where conversation_id=$1 and kind='text' and parent_block_id is null
            and btrim(content) <> ''
            and (input_command_id = any($2) or ($3::timestamptz is not null and created_at >= $3))
@@ -255,7 +256,8 @@ pub async fn build(
         git: aggregate_git(&git),
         worktree,
         detail,
-        answer: answer.map(|(head, total)| Answer {
+        answer: answer.map(|(block_id, head, total)| Answer {
+            block_id,
             head,
             total_bytes: total.max(0) as usize,
         }),
@@ -525,15 +527,16 @@ pub fn render(summary: &SessionSummary) -> String {
         None => {}
         Some(answer) => {
             // Заголовок ответа и разделитель перед подвалом входят в общий предел.
-            let reserved = out.len() + tail.len() + label.len() + 96;
+            let reserved = out.len() + tail.len() + label.len() + 160;
             let budget = ANSWER_LIMIT.min(TEXT_LIMIT.saturating_sub(reserved));
             let kept = truncate_at_boundary(&answer.head, budget);
             if answer.total_bytes > kept.len() {
                 let _ = writeln!(
                     out,
-                    "{label} (truncated to {} bytes of {}, session_inspect has more):",
-                    kept.len(),
-                    answer.total_bytes
+                    "{label} (truncated to {kept_bytes} bytes of {}; session_inspect with block_id {} and offset {kept_bytes} reads on):",
+                    answer.total_bytes,
+                    answer.block_id,
+                    kept_bytes = kept.len(),
                 );
                 out.push_str(kept);
             } else {
