@@ -32,7 +32,7 @@ use tokio::{
     net::{UnixStream, unix::OwnedWriteHalf},
     process::Child,
     sync::mpsc,
-    time::timeout,
+    time::{Instant, timeout},
 };
 use uuid::Uuid;
 
@@ -649,6 +649,43 @@ async fn intent_is_durable_before_first_byte_and_never_repeated() {
             && log.is_empty(),
         "the CLI must not have received a single input byte"
     );
+}
+
+#[tokio::test]
+async fn transmission_started_ships_before_the_cli_proves_acceptance() {
+    let _gate = e2e_gate::acquire().await;
+    let mut harness = Harness::start(&[]).await;
+    harness.attach_and_ship(0).await;
+    harness.start_cli("synthetic").await;
+    let id = Uuid::now_v7();
+    harness
+        .deliver(id, 1, &script(r#"{"delay_ms":1500},{"delta":"a"}"#))
+        .await;
+    // CLI молчит 1,5 с до accepted: хаб обязан узнать о начале передачи, не дожидаясь доказательства.
+    let wait = Duration::from_millis(800);
+    let started = Instant::now();
+    while started.elapsed() < wait {
+        harness.pump(Duration::from_millis(20)).await;
+        if harness
+            .records
+            .values()
+            .any(|b| matches!(b, Body::TransmissionStarted(f) if f.command_id == id.to_string()))
+        {
+            break;
+        }
+    }
+    let bodies: Vec<_> = harness.records.values().cloned().collect();
+    assert!(
+        bodies
+            .iter()
+            .any(|b| matches!(b, Body::TransmissionStarted(f) if f.command_id == id.to_string())),
+        "TransmissionStarted must be shipped while the CLI is still silent"
+    );
+    assert!(!bodies.iter().any(|b| matches!(b, Body::InputAccepted(_))));
+    harness
+        .wait_records("run finished", |b| run_finished(b, id))
+        .await;
+    harness.shutdown().await;
 }
 
 #[tokio::test]

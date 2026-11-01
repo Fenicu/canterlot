@@ -1578,6 +1578,8 @@ impl Supervisor {
                     dispatch_attempt: key.1,
                     machine_time_ms: now_ms(),
                 }))?;
+            // Передача может ждать доказательства от CLI секундами: хаб узнаёт о ней сразу.
+            self.pump_shipping();
             self.faults.abort_at("before_first_byte");
             self.ready = false;
             self.aborting_turn = false;
