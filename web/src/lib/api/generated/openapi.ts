@@ -336,6 +336,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/resolve-owner-lost": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__resolve_owner_lost"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/resume": {
         parameters: {
             query?: never;
@@ -1759,6 +1775,17 @@ export interface components {
             /** Format: uuid */
             winner_decision_id?: string | null;
         };
+        ResolveOwnerLostOutcome: {
+            requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        } | {
+            already_requested: {
+                /** Format: uuid */
+                command_id: string;
+            };
+        } | "not_owner_lost";
         ResumeBody: {
             continue_queue?: boolean;
         };
@@ -1910,7 +1937,7 @@ export interface components {
                 /** Format: uuid */
                 command_id: string;
             };
-        } | "nothing_to_stop";
+        } | "nothing_to_stop" | "owner_lost";
         StopOutcome: {
             requested: {
                 /** Format: uuid */
@@ -3169,6 +3196,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__resolve_owner_lost: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Решение по потерянному исполнению передано машине */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResolveOwnerLostOutcome"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

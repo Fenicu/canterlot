@@ -630,15 +630,33 @@ describe("chat/pauseCards", () => {
     }
   });
 
-  it("an_execution_still_in_owner_lost_offers_nothing_the_hub_would_refuse", () => {
+  it("an_execution_still_in_owner_lost_offers_only_the_owners_decision", () => {
     const cards = pauseHoldCards(
       { pause_reasons: [{ reason: "owner_lost" }], hold_reasons: [], queued: 0 },
       { ...base, executionOwnerLost: true },
     );
-    expect(cards[0]!.actions).toEqual([]);
-    expect(cards[0]!.body).toEqual([
-      "Продолжить можно, когда машина вернётся на связь и сверит состояние.",
+    expect(cards[0]!.actions).toEqual([
+      { id: "resolve_owner_lost", label: "Завершить исполнение" },
     ]);
+    expect(cards[0]!.body).toEqual([
+      "Если процессы исполнения завершились, сессия закроется сама. Если что-то ещё работает, машина ждёт вашего решения.",
+    ]);
+  });
+
+  it("an_emergency_exit_names_what_may_be_incomplete", () => {
+    const fatal: QueueView = {
+      pause_reasons: [{ reason: "fatal_error" }],
+      hold_reasons: [],
+      queued: 0,
+    };
+    const died = pauseHoldCards(fatal, { ...base, failureReason: "supervisor_died" });
+    expect(died[0]!.body).toEqual([
+      "Причина: процесс сопровождения завершился",
+      "Последний вывод мог не сохраниться. При возобновлении контекст берётся из истории агента.",
+    ]);
+    const resolved = pauseHoldCards(fatal, { ...base, failureReason: "admin_resolved" });
+    expect(resolved[0]!.body[1]).toContain("могла продолжить работу");
+    expect(resolved[0]!.actions[0]!.id).toBe("run");
   });
 
   it("retry_as_new_names_the_input_it_repeats", () => {
