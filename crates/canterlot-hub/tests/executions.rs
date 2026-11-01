@@ -269,7 +269,6 @@ async fn illegal_transition_rejected(pool: PgPool) -> TestResult {
     let before = queue(&pool, seed.conversation_id).await?;
     for (to, outcome) in [
         (ExecutionState::Stopped, Some("normal_exit")),
-        (ExecutionState::Stopped, Some("machine_rebooted")),
         (ExecutionState::Failed, Some("crashed")),
         (ExecutionState::Running, None),
     ] {

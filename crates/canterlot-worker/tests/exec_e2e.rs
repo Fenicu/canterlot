@@ -598,7 +598,9 @@ impl Fixture {
         match result {
             StopExecutionOutcome::Requested { command_id, .. }
             | StopExecutionOutcome::AlreadyRequested { command_id } => command_id,
-            StopExecutionOutcome::NothingToStop => panic!("execution unexpectedly absent"),
+            StopExecutionOutcome::NothingToStop | StopExecutionOutcome::OwnerLost => {
+                panic!("execution unexpectedly absent")
+            }
         }
     }
 
@@ -838,7 +840,7 @@ impl Fixture {
         if self.state().await == "running" {
             self.stop_execution(true).await;
         }
-        if self.state().await != "owner_lost" {
+        if !matches!(self.state().await.as_str(), "owner_lost" | "failed") {
             self.wait_state("stopped").await;
             until("journal closed", async || sqlx::query_scalar::<_, bool>("select coalesce(bool_or(closed), false) from journal_cursors where execution_id = $1")
                 .bind(self.execution).fetch_one(&self.pool).await.unwrap()).await;
@@ -1377,7 +1379,7 @@ async fn transport_errors_never_stop_an_execution(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPool) {
+async fn killed_supervisor_is_never_respawned_and_exits_when_the_group_empties(pool: PgPool) {
     let _gate = e2e_gate::acquire().await;
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
@@ -1387,7 +1389,7 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
     fixture.wait_deltas(1).await;
     fixture.assert_cursor(false).await;
     assert!(fixture.guard.signal(identities.0, Signal::KILL));
-    fixture.wait_state("owner_lost").await;
+    fixture.wait_state("failed").await;
     assert!(fixture.paused("owner_lost").await);
     assert!(!same_process(identities.0));
     for _ in 0..15 {
@@ -1401,9 +1403,140 @@ async fn killed_supervisor_is_reported_owner_lost_and_never_respawned(pool: PgPo
     }
     assert_eq!(fixture.history.lock().unwrap().len(), 2);
     assert_eq!(fixture.input_state(input.input_id).await, "accepted");
-    assert_eq!(fixture.slot().await, "running");
-    assert_eq!(fixture.cli_receipts(input.command_id), [1]);
+    assert_eq!(fixture.slot().await, "free");
     fixture.assert_contiguous().await;
+    fixture.finish().await;
+}
+
+impl Fixture {
+    async fn outcome(&self) -> Option<String> {
+        sqlx::query_scalar("select outcome from executions where id = $1")
+            .bind(self.execution)
+            .fetch_one(&self.pool)
+            .await
+            .unwrap()
+    }
+
+    async fn resume(&mut self) {
+        let resumed = executions::start_with_key(
+            &self.pool,
+            self.owner,
+            self.conversation,
+            &Uuid::now_v7().to_string(),
+            (true, true),
+            Uuid::now_v7(),
+            #[cfg(feature = "fault-injection")]
+            &Default::default(),
+        )
+        .await
+        .unwrap();
+        self.execution = resumed.execution_id;
+        self.wait_state("running").await;
+        self.hub().dispatcher.trigger(self.conversation);
+    }
+
+    async fn assert_answers(&self) {
+        let input = self
+            .submit(json!({"synthetic":[{"delta":"after"}]}).to_string())
+            .await;
+        until("the resumed session accepts input", async || {
+            self.input_state(input.input_id).await == "accepted"
+        })
+        .await;
+    }
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn killed_supervisor_with_nothing_left_fails_and_the_session_resumes(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture
+        .submit(json!({"synthetic":[{"delta":"x"},{"hang":true}]}).to_string())
+        .await;
+    fixture.wait_deltas(1).await;
+    assert!(fixture.guard.signal(identities.1, Signal::KILL));
+    assert!(fixture.guard.signal(identities.0, Signal::KILL));
+    fixture.wait_state("failed").await;
+    assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
+    assert!(fixture.paused("fatal_error").await);
+    assert_eq!(fixture.event_count("execution_fact_rejected").await, 0);
+    let open: i64 = sqlx::query_scalar(
+        "select count(*) from blocks where execution_id = $1 and state = 'streaming'",
+    )
+    .bind(fixture.execution)
+    .fetch_one(&fixture.pool)
+    .await
+    .unwrap();
+    assert_eq!(open, 0, "nothing keeps streaming after the exit");
+    until("execution directory removed", async || {
+        !fixture.exec_dir().exists()
+    })
+    .await;
+    let dead = fixture.exec_dir();
+    fixture.resume().await;
+    assert_ne!(dead, fixture.exec_dir());
+    assert!(!fixture.paused("owner_lost").await);
+    assert!(!fixture.paused("fatal_error").await);
+    fixture.assert_answers().await;
+    fixture.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn orphan_process_waits_for_the_owner_and_stop_leads_to_the_resolve(pool: PgPool) {
+    let _gate = e2e_gate::acquire().await;
+    let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
+    let identities = fixture.identities();
+    fixture
+        .submit(
+            json!({"synthetic":[{"detach_child":true},{"delta":"x"},{"hang":true}]}).to_string(),
+        )
+        .await;
+    fixture.wait_deltas(1).await;
+    let orphan = fixture
+        .guard
+        .members()
+        .into_iter()
+        .find(|(pid, _)| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|line| line.windows(14).any(|part| part == b"__detach_sleep"))
+        })
+        .expect("detached descendant");
+    assert!(fixture.guard.signal(identities.0, Signal::KILL));
+    fixture.wait_state("owner_lost").await;
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        fixture.state().await,
+        "owner_lost",
+        "the group is not empty"
+    );
+    assert!(same_process(orphan), "nobody kills it uninvited");
+    assert_eq!(
+        control::request_stop_execution(
+            &fixture.pool,
+            fixture.owner,
+            fixture.conversation,
+            true,
+            &Uuid::now_v7().to_string(),
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap(),
+        StopExecutionOutcome::OwnerLost
+    );
+    control::request_resolve_owner_lost(
+        &fixture.pool,
+        fixture.owner,
+        fixture.conversation,
+        &Uuid::now_v7().to_string(),
+    )
+    .await
+    .unwrap();
+    fixture.wait_state("failed").await;
+    assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
+    assert!(!same_process(orphan), "the rest of the group is gone");
+    fixture.resume().await;
+    fixture.assert_answers().await;
     fixture.finish().await;
 }
 
@@ -1578,10 +1711,11 @@ async fn wave_w_d1a_dead_supervisor_then_control_restart(pool: PgPool) {
     fixture.wait_deltas(1).await;
     fixture.assert_cursor(false).await;
     assert!(fixture.guard.signal(identities.0, Signal::KILL));
-    fixture.wait_state("owner_lost").await;
+    until("lost", async || fixture.paused("owner_lost").await).await;
     fixture.stop_worker().await;
     fixture.start_worker().await;
-    assert_eq!(fixture.state().await, "owner_lost");
+    fixture.wait_state("failed").await;
+    assert_eq!(fixture.outcome().await.as_deref(), Some("supervisor_died"));
     fixture.finish().await;
 }
 
@@ -1599,7 +1733,8 @@ async fn wave_w_d1b_supervisor_dies_while_control_down(pool: PgPool) {
     assert!(fixture.guard.signal(identities.0, Signal::KILL));
     until("supervisor died", async || !same_process(identities.0)).await;
     fixture.start_worker().await;
-    fixture.wait_state("owner_lost").await;
+    fixture.wait_state("failed").await;
+    assert!(fixture.paused("owner_lost").await);
     fixture.finish().await;
 }
 
@@ -1668,23 +1803,17 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
     fixture.stop_worker().await;
     fixture.faults().drop_next_acks(0);
     fixture.start_worker().await;
-    sleep(Duration::from_millis(500)).await;
+    fixture.wait_state("failed").await;
+    until("the undetermined input", async || {
+        fixture.input_state(input.input_id).await == "acceptance_unconfirmed"
+    })
+    .await;
     fixture.stop_worker().await;
     let store = WorkerStore::open(&fixture.config.data_dir).unwrap();
-    assert!(
-        !store
-            .command_state(&input.command_id.to_string())
-            .unwrap()
-            .unwrap()
-            .terminal
-    );
     assert!(!store.cj_records_from(store.cj_cursor().unwrap().first_stored_seq, usize::MAX).unwrap().iter().any(|r|
         matches!(r.body.as_ref().and_then(|b| b.body.as_ref()), Some(Body::DispatchDeferred(f)) if f.command_id == input.command_id.to_string())));
     drop(store);
     fixture.start_worker().await;
-    sleep(Duration::from_millis(500)).await;
-    let state = fixture.input_state(input.input_id).await;
-    assert!(unresolved.contains(&state.as_str()), "{state}");
     assert_eq!(
         transmissions(&fixture.sj().2, input.command_id),
         [1],

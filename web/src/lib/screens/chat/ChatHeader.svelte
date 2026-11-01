@@ -13,8 +13,8 @@
 	import MenuItem from '#lib/ui/MenuItem.svelte';
 	import { colorVar } from '#lib/screens/sessions/colors.js';
 	import { theme } from '#lib/theme.js';
-	import { stopSession, resumeSession, continueSessionQueue } from './controls';
-	import { runLabel } from './pauseCards';
+	import { stopSession, resumeSession, continueSessionQueue, resolveOwnerLost } from './controls';
+	import { RESOLVE_WARNING, runLabel } from './pauseCards';
 	import LimitsStrip from '#lib/screens/sessions/LimitsStrip.svelte';
 	import type { LimitThresholds, ProviderLimits } from '#lib/stores/limits.js';
 	import { runningCount } from '#lib/stores/delegation.js';
@@ -99,11 +99,26 @@
 	async function handleStop(force = false) {
 		actionError = null;
 		try {
-			await stopSession(chat.id, { force });
+			const { data } = await stopSession(chat.id, { force });
+			confirmingForce = false;
+			if (data === 'owner_lost') {
+				actionError = 'Связь с исполнением потеряна: остановить его можно только действием «Завершить исполнение»';
+				return;
+			}
+			menuOpen = false;
+		} catch (err: unknown) {
+			actionError = errorText(err, 'Не удалось остановить сессию');
+		}
+	}
+
+	async function handleResolve() {
+		actionError = null;
+		try {
+			await resolveOwnerLost(chat.id);
 			menuOpen = false;
 			confirmingForce = false;
 		} catch (err: unknown) {
-			actionError = errorText(err, 'Не удалось остановить сессию');
+			actionError = errorText(err, 'Не удалось завершить исполнение');
 		}
 	}
 
@@ -271,7 +286,23 @@
 							</div>
 						</div>
 					{/if}
-				{:else if !ownerLost}
+				{:else if ownerLost}
+					{#if !confirmingForce}
+						<MenuItem icon="warning" danger onclick={() => { confirmingForce = true; }}>Завершить исполнение</MenuItem>
+					{:else}
+						<div class="confirm-box" role="dialog" aria-label="Подтверждение завершения">
+							<p>{RESOLVE_WARNING}</p>
+							<div class="confirm-actions">
+								<button type="button" class="btn-confirm-danger" onclick={() => void handleResolve()}>
+									Завершить
+								</button>
+								<button type="button" class="btn-cancel" onclick={() => { confirmingForce = false; }}>
+									Отмена
+								</button>
+							</div>
+						</div>
+					{/if}
+				{:else}
 					<MenuItem onclick={() => void handleRun()}>{runLabel(chat.turnRecorded)}</MenuItem>
 				{/if}
 

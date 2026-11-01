@@ -566,6 +566,23 @@ export function stop(
   );
 }
 
+export function resolveOwnerLost(
+  conversationId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["post__api_v1_conversations__id__resolve_owner_lost"]>
+  >
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/resolve-owner-lost`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function compact(
   conversationId: string,
   key: string,

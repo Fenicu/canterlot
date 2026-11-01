@@ -26,6 +26,7 @@ pub fn routes() -> OpenApiRouter<AppState> {
         .routes(routes!(compact))
         .routes(routes!(stop))
         .routes(routes!(continue_queue))
+        .routes(routes!(resolve_owner_lost))
         .routes(routes!(cancel_input))
         .routes(routes!(settings))
         .routes(routes!(submit))
@@ -230,6 +231,18 @@ async fn stop(
     )
     .await?;
     s.dispatcher.trigger(id);
+    Ok(Json(result))
+}
+
+#[utoipa::path(post,path="/api/v1/conversations/{id}/resolve-owner-lost",tag="conversations",params(("id"=Uuid,Path),("Idempotency-Key"=String,Header)),responses((status=200,description="Решение по потерянному исполнению передано машине",body=crate::delivery::control::ResolveOwnerLostOutcome)))]
+async fn resolve_owner_lost(
+    State(s): State<AppState>,
+    o: Owner,
+    ApiPath(id): ApiPath<Uuid>,
+    IdempotencyKey(key): IdempotencyKey,
+) -> Result<Json<crate::delivery::control::ResolveOwnerLostOutcome>, ApiError> {
+    let result =
+        crate::delivery::control::request_resolve_owner_lost(&s.pool, o.owner_id, id, &key).await?;
     Ok(Json(result))
 }
 

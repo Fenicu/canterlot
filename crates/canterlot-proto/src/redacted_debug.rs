@@ -44,6 +44,9 @@ impl fmt::Debug for command::Kind {
             Self::StartExecution(input) => f.debug_tuple("StartExecution").field(input).finish(),
             Self::DeliverDecision(input) => f.debug_tuple("DeliverDecision").field(input).finish(),
             Self::StopExecution(input) => f.debug_tuple("StopExecution").field(input).finish(),
+            Self::ResolveOwnerLost(input) => {
+                f.debug_tuple("ResolveOwnerLost").field(input).finish()
+            }
         }
     }
 }

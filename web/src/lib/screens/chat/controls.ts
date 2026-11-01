@@ -32,6 +32,13 @@ export async function continueSessionQueue(
   return client.continueQueue(conversationId, key);
 }
 
+export async function resolveOwnerLost(
+  conversationId: string,
+  key = crypto.randomUUID(),
+) {
+  return client.resolveOwnerLost(conversationId, key);
+}
+
 export async function compactSessionContext(
   conversationId: string,
   key = crypto.randomUUID(),

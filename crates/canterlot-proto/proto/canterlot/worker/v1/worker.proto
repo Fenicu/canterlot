@@ -170,8 +170,13 @@ message Command {
     CompactSession compact_session = 17;
     // Только при согласованной возможности session_tools_v1.
     RemoveWorktree remove_worktree = 18;
+    // Только при согласованной возможности owner_exit_v1.
+    ResolveOwnerLost resolve_owner_lost = 19;
   }
 }
+
+// Решение владельца: завершить остаток группы потерянного исполнения.
+message ResolveOwnerLost {}
 
 message DeliverInput {
   string input_id = 1;

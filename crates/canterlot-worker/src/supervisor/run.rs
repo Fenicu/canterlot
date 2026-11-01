@@ -61,6 +61,8 @@ use crate::{
 const MAX_PENDING_MEDIA: usize = 32;
 /// Период уборки зомби усыновлённых процессов: они занимают лимит процессов владельца.
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
+/// Период снимка участников: он находит потомков, потерявших метку группы.
+const GROUP_RECORD_PERIOD: Duration = Duration::from_secs(5);
 
 struct MediaJob {
     media_id: Uuid,
@@ -287,7 +289,9 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         Ok(_) | Err(rustix::io::Errno::PERM) => {}
         Err(error) => return Err(std::io::Error::from(error).into()),
     }
-    let containment: Arc<dyn Containment> = Arc::new(TreeContainment::new()?);
+    let containment: Arc<dyn Containment> =
+        Arc::new(TreeContainment::marked(spec.execution_id.to_string())?);
+    crate::containment::write_group_file(&exec_dir, &[])?;
     let sj = Sj::create(&exec_dir)?;
     let recovered = sj.last_seq() > 0;
     let lifecycle = sj
@@ -413,6 +417,22 @@ async fn reap_orphans(containment: Arc<dyn Containment>) {
     }
 }
 
+async fn record_group(containment: Arc<dyn Containment>, exec_dir: PathBuf) {
+    let mut tick =
+        tokio::time::interval_at(Instant::now() + GROUP_RECORD_PERIOD, GROUP_RECORD_PERIOD);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tick.tick().await;
+        let (containment, dir) = (containment.clone(), exec_dir.clone());
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Ok(members) = containment.observed() {
+                let _ = crate::containment::write_group_file(&dir, &members);
+            }
+        })
+        .await;
+    }
+}
+
 async fn adapter_event(adapter: &mut Option<Box<dyn Adapter>>, gone: bool) -> AdapterEvent {
     match adapter {
         Some(adapter) if !gone => adapter.next_event().await,
@@ -498,11 +518,16 @@ impl Supervisor {
             }
         });
         let reaper = tokio::spawn(reap_orphans(self.containment.clone()));
+        let recorder = tokio::spawn(record_group(
+            self.containment.clone(),
+            self.exec_dir.clone(),
+        ));
         let (control_tx, mut control_rx) = mpsc::unbounded_channel::<Control>();
         loop {
             if let Some(code) = self.after_event().await? {
                 accept_task.abort();
                 reaper.abort();
+                recorder.abort();
                 return Ok(code);
             }
             let wake = self.next_wake();

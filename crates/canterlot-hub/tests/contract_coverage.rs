@@ -588,6 +588,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         ),
         case(
             Method::POST,
+            "/api/v1/conversations/{id}/resolve-owner-lost",
+            format!("/api/v1/conversations/{id}/resolve-owner-lost"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
             "/api/v1/conversations/{id}/executions",
             format!("/api/v1/conversations/{id}/executions"),
             None,

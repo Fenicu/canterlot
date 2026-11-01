@@ -23,6 +23,7 @@ pub const CAPABILITY_TODO_V1: &str = "todo_v1";
 pub const CAPABILITY_COMPACT_V1: &str = "compact_v1";
 pub const CAPABILITY_BACKGROUND_V1: &str = "background_v1";
 pub const CAPABILITY_SESSION_TOOLS_V1: &str = "session_tools_v1";
+pub const CAPABILITY_OWNER_EXIT_V1: &str = "owner_exit_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";

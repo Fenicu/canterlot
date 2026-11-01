@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs, io,
+    path::Path,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -10,6 +11,13 @@ use std::{
 
 use rustix::process::{self, Pid, Signal, WaitOptions};
 use tokio::process::Command;
+
+/// Метка группы в окружении CLI: её наследуют потомки, ушедшие в свои сессии, и она
+/// переживает смерть сопровождения, в отличие от дерева родителей.
+pub const GROUP_MARKER_ENV: &str = "CANTERLOT_EXECUTION_GROUP";
+/// Последний снимок участников в каталоге исполнения; его наличие означает, что сопровождение
+/// ставит метку. Старый релиз файла не пишет, и пустоту его группы доказать нельзя.
+pub const GROUP_FILE: &str = "group.json";
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct Member {
@@ -40,6 +48,11 @@ pub trait Containment: Send + Sync {
     fn kind(&self) -> &'static str;
     fn prepare_command(&self, command: &mut Command);
     fn members(&self) -> Result<Vec<Member>, ContainmentError>;
+    /// Живые участники без побочных действий: `members` закрепляет CLI и забирает зомби,
+    /// поэтому фоновый опрос идёт сюда.
+    fn observed(&self) -> Result<Vec<Member>, ContainmentError> {
+        Ok(Vec::new())
+    }
     fn populated(&self) -> Result<bool, ContainmentError>;
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError>;
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
@@ -56,13 +69,15 @@ pub struct TreeContainment {
     supervisor: Member,
     cli: Mutex<Option<Member>>,
     prepared: AtomicBool,
+    marker: Option<String>,
 }
 
-struct Stat {
-    member: Member,
-    parent: u32,
+pub(crate) struct Stat {
+    pub member: Member,
+    pub parent: u32,
     group: u32,
-    zombie: bool,
+    pub session: u32,
+    pub zombie: bool,
 }
 
 /// Текст `stat` процесса. Имя в нём ядро режет по байтам, поэтому это не обязательно UTF-8.
@@ -100,6 +115,7 @@ fn parse_stat(pid: u32, text: &str) -> Result<Stat, ContainmentError> {
         },
         parent: u32::try_from(number(1)?).map_err(|_| ContainmentError::InvalidStat)?,
         group: u32::try_from(number(2)?).map_err(|_| ContainmentError::InvalidStat)?,
+        session: u32::try_from(number(3)?).map_err(|_| ContainmentError::InvalidStat)?,
         zombie: matches!(fields.first(), Some(&"Z") | Some(&"X")),
     })
 }
@@ -108,18 +124,71 @@ pub fn start_ticks(pid: u32) -> Result<u64, ContainmentError> {
     Ok(stat(pid)?.member.start_ticks)
 }
 
+/// Все процессы машины; исчезнувшие по ходу чтения пропускаются.
+pub(crate) fn process_table() -> Result<HashMap<u32, Stat>, ContainmentError> {
+    let mut all = HashMap::new();
+    for entry in fs::read_dir("/proc")? {
+        let entry = entry?;
+        let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
+            continue;
+        };
+        match stat(pid) {
+            Ok(info) => {
+                all.insert(pid, info);
+            }
+            Err(error) if disappeared(&error) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(all)
+}
+
+/// Снимок заменяется целиком: смерть сопровождения посреди записи оставит прошлый.
+pub fn write_group_file(exec_dir: &Path, members: &[Member]) -> io::Result<()> {
+    let pairs: Vec<(u32, u64)> = members.iter().map(|m| (m.pid, m.start_ticks)).collect();
+    let temporary = exec_dir.join(format!("{GROUP_FILE}.tmp"));
+    fs::write(&temporary, serde_json::to_vec(&pairs)?)?;
+    fs::rename(temporary, exec_dir.join(GROUP_FILE))
+}
+
+/// `None`, если сопровождение файла не писало.
+pub(crate) fn read_group_file(exec_dir: &Path) -> io::Result<Option<Vec<Member>>> {
+    let bytes = match fs::read(exec_dir.join(GROUP_FILE)) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let pairs: Vec<(u32, u64)> = serde_json::from_slice(&bytes)?;
+    Ok(Some(
+        pairs
+            .into_iter()
+            .map(|(pid, start_ticks)| Member { pid, start_ticks })
+            .collect(),
+    ))
+}
+
 fn disappeared(error: &ContainmentError) -> bool {
     matches!(error, ContainmentError::Io(e) if e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(rustix::io::Errno::SRCH.raw_os_error()))
 }
 
 impl TreeContainment {
     pub fn new() -> Result<Self, ContainmentError> {
+        Self::build(None)
+    }
+
+    /// Группа с меткой исполнения: её участники опознаются и после смерти сопровождения.
+    pub fn marked(marker: String) -> Result<Self, ContainmentError> {
+        Self::build(Some(marker))
+    }
+
+    fn build(marker: Option<String>) -> Result<Self, ContainmentError> {
         process::set_child_subreaper(Pid::from_raw(1))?;
         tracing::info!(containment = "tree", "process containment initialized");
         Ok(Self {
             supervisor: stat(std::process::id())?.member,
             cli: Mutex::new(None),
             prepared: AtomicBool::new(false),
+            marker,
         })
     }
 
@@ -127,21 +196,7 @@ impl TreeContainment {
         if stat(self.supervisor.pid)?.member != self.supervisor {
             return Err(ContainmentError::SupervisorChanged);
         }
-        let mut all = HashMap::new();
-        for entry in fs::read_dir("/proc")? {
-            let entry = entry?;
-            let Some(pid) = entry.file_name().to_str().and_then(|s| s.parse().ok()) else {
-                continue;
-            };
-            match stat(pid) {
-                Ok(info) => {
-                    all.insert(pid, info);
-                }
-                Err(error) if disappeared(&error) => {}
-                Err(error) => return Err(error),
-            }
-        }
-        Ok(all)
+        process_table()
     }
 
     /// Забрать статус зомби-ребёнка, если это всё ещё тот же процесс.
@@ -220,6 +275,9 @@ impl Containment for TreeContainment {
         }
         self.prepared.store(true, Ordering::Relaxed);
         command.process_group(0);
+        if let Some(marker) = &self.marker {
+            command.env(GROUP_MARKER_ENV, marker);
+        }
     }
 
     fn members(&self) -> Result<Vec<Member>, ContainmentError> {
@@ -245,6 +303,15 @@ impl Containment for TreeContainment {
         }
         members.sort_by_key(|m| m.pid);
         Ok(members)
+    }
+
+    fn observed(&self) -> Result<Vec<Member>, ContainmentError> {
+        let all = self.snapshot()?;
+        Ok(all
+            .values()
+            .filter(|info| !info.zombie && self.belongs(info, &all))
+            .map(|info| info.member.clone())
+            .collect())
     }
 
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError> {

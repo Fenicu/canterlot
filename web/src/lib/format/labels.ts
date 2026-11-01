@@ -197,6 +197,7 @@ const BLOCK_ENDS: Record<string, string> = {
   interrupted: "Прервано",
   stopped: "Исполнение остановлено",
   process_exited: "Процесс агента завершился",
+  machine_rebooted: "Машина перезагружена",
 };
 
 export function blockEndLabel(value: Value): string {

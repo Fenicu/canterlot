@@ -21,7 +21,8 @@ export type CardAction = {
     | "spend_reserve"
     | "edit_resume_text"
     | "retry_as_new"
-    | "compact_context";
+    | "compact_context"
+    | "resolve_owner_lost";
   label: string;
   /** Ввод, который повторяет `retry_as_new`. */
   inputId?: string;
@@ -48,6 +49,18 @@ const ACTION_LABELS: Record<Exclude<CardAction["id"], "run">, string> = {
   edit_resume_text: "Изменить текст продолжения",
   retry_as_new: "Отправить повторно как новое",
   compact_context: "Сжать контекст",
+  resolve_owner_lost: "Завершить исполнение",
+};
+
+export const RESOLVE_WARNING =
+  "Оставшиеся процессы исполнения получат сигнал завершения, незавершённая работа в них пропадёт. Если сопровождение на самом деле живо, сессия вернётся без потерь. Если подтвердить завершение не выйдет, исполнение всё равно закроется, а часть процессов может продолжить работу.";
+
+/** Что осталось неизвестным после аварийного выхода: владелец видит это рядом с причиной. */
+const EXIT_NOTES: Record<string, string> = {
+  supervisor_died:
+    "Последний вывод мог не сохраниться. При возобновлении контекст берётся из истории агента.",
+  admin_resolved:
+    "Часть процессов могла продолжить работу. Проверьте рабочую папку, прежде чем возобновлять.",
 };
 
 const STUCK_NOTE = "Причина отказа неизвестна. Сжатие контекста может его снять и тратит токены.";
@@ -92,7 +105,12 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "danger",
           title: "Очередь остановлена из-за ошибки агента",
           body: ctx.failureReason
-            ? [`Причина: ${failureLabel(ctx.failureReason)}`]
+            ? [
+                `Причина: ${failureLabel(ctx.failureReason)}`,
+                ...(EXIT_NOTES[ctx.failureReason]
+                  ? [EXIT_NOTES[ctx.failureReason]!]
+                  : []),
+              ]
             : [],
           actions: forward,
         });
@@ -147,9 +165,18 @@ export function pauseHoldCards(q: QueueView, ctx: PauseCardsContext): Card[] {
           tone: "danger",
           title: "Связь с исполнением потеряна",
           body: ctx.executionOwnerLost
-            ? ["Продолжить можно, когда машина вернётся на связь и сверит состояние."]
+            ? [
+                "Если процессы исполнения завершились, сессия закроется сама. Если что-то ещё работает, машина ждёт вашего решения.",
+              ]
             : [],
-          actions: forward,
+          actions: ctx.executionOwnerLost
+            ? [
+                {
+                  id: "resolve_owner_lost",
+                  label: ACTION_LABELS.resolve_owner_lost,
+                },
+              ]
+            : forward,
         });
         break;
       }

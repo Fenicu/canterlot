@@ -1441,8 +1441,24 @@ async fn apply_body(
                         .await?;
                     }
                     if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
-                        sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = case when kind = 'stop_execution' then jsonb_build_object('outcome', $3::text) else jsonb_build_object('status', 'superseded') end, last_status = case when kind = 'interrupt' then 'superseded' else last_status end where execution_id = $1 and machine_id = $2 and kind in ('stop_execution', 'interrupt') and delivery_state <> 'completed'")
-                            .bind(execution_id).bind(machine_id).bind(stored_outcome).execute(&mut *conn).await?;
+                        sqlx::query("update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()), result = case when kind in ('stop_execution', 'resolve_owner_lost') then jsonb_build_object('outcome', $3::text) else jsonb_build_object('status', 'superseded') end, last_status = case when kind = 'interrupt' then 'superseded' else last_status end where execution_id = $1 and machine_id = $2 and kind in ('stop_execution', 'interrupt', 'resolve_owner_lost') and delivery_state <> 'completed'")
+                            .bind(execution_id).bind(machine_id).bind(&stored_outcome).execute(&mut *conn).await?;
+                        if let Some(outcome) = stored_outcome.as_deref().filter(|outcome| {
+                            matches!(
+                                *outcome,
+                                "supervisor_died" | "admin_resolved" | "machine_rebooted"
+                            )
+                        }) {
+                            close_dead_journal(
+                                conn,
+                                machine_id,
+                                execution_id,
+                                fact.generation,
+                                outcome,
+                                correlation_id,
+                            )
+                            .await?;
+                        }
                     }
                 }
             }
@@ -2583,7 +2599,57 @@ async fn apply_owner_reclaimed(
         correlation_id,
     )
     .await?;
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
+                result = jsonb_build_object('outcome', $3::text)
+         where execution_id = $1 and machine_id = $2 and kind = 'resolve_owner_lost'
+           and delivery_state <> 'completed'",
+    )
+    .bind(execution_id)
+    .bind(machine_id)
+    .bind(canterlot_proto::OWNER_RECLAIMED)
+    .execute(&mut *conn)
+    .await?;
     Ok(false)
+}
+
+/// Сопровождение журнал уже не закроет: всё, что от него осталось, воркер отдал раньше итога,
+/// поэтому незавершённым блокам ждать больше нечего.
+async fn close_dead_journal(
+    conn: &mut PgConnection,
+    machine_id: Uuid,
+    execution_id: Uuid,
+    generation: u64,
+    outcome: &str,
+    correlation_id: Uuid,
+) -> Result<(), IngestError> {
+    let Some(run) = owned_execution(conn, machine_id, execution_id, None).await? else {
+        return Ok(());
+    };
+    let fact = canterlot_proto::worker::v1::JournalClosed {
+        execution_id: execution_id.to_string(),
+        generation,
+        reason: outcome.into(),
+    };
+    blocks::close_journal(conn, &run, &fact, correlation_id).await?;
+    let closed = sqlx::query_scalar::<_, Uuid>(
+        "update journal_cursors set closed = true
+         where execution_id = $1 and kind = 'sj' and not closed returning journal_id",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for journal_id in closed {
+        execution_event(
+            conn,
+            &run,
+            "journal_closed",
+            json!({"reason": outcome, "generation": generation, "journal_id": journal_id}),
+            correlation_id,
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Исполнение решения из CJ: запрос машины с тем же решением-победителем.

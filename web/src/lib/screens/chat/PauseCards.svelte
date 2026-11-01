@@ -1,9 +1,10 @@
 <script lang="ts">
 	import { executionLive, type ChatStore } from '#lib/stores/chat.svelte.js';
-	import { pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
+	import { RESOLVE_WARNING, pauseHoldCards, type CardAction, type QueueView } from './pauseCards';
 	import {
 		compactSessionContext,
 		continueSessionQueue,
+		resolveOwnerLost,
 		resumeSession,
 		spendSessionReserve,
 		updateCrunch
@@ -47,6 +48,7 @@
 	let actionError = $state<string | null>(null);
 	let acting = $state(false);
 	let ask = $state<string | null>(null);
+	let askResolve = $state(false);
 	let decided = $state<((ok: boolean) => void) | null>(null);
 
 	function confirm(message: string): Promise<boolean> {
@@ -91,6 +93,13 @@
 				case 'compact_context':
 					await compactSessionContext(chat.id);
 					break;
+				case 'resolve_owner_lost': {
+					askResolve = true;
+					const ok = await confirm(RESOLVE_WARNING);
+					askResolve = false;
+					if (ok) await resolveOwnerLost(chat.id);
+					break;
+				}
 				case 'run':
 					await resumeSession(chat.id, { continue_queue: chat.queue.pause_reasons.length > 0 });
 					break;
@@ -131,7 +140,14 @@
 </script>
 
 {#if ask}
-	<ConfirmDialog title="Повторная отправка" body={ask} confirmLabel="Отправить" onconfirm={() => answer(true)} onclose={() => answer(false)} />
+	<ConfirmDialog
+		title={askResolve ? 'Завершить исполнение?' : 'Повторная отправка'}
+		body={ask}
+		confirmLabel={askResolve ? 'Завершить' : 'Отправить'}
+		danger={askResolve}
+		onconfirm={() => answer(true)}
+		onclose={() => answer(false)}
+	/>
 {/if}
 
 {#if cards.length > 0}

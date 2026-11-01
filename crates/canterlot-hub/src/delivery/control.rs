@@ -33,9 +33,24 @@ pub enum StopOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StopExecutionOutcome {
-    Requested { command_id: Uuid, force: bool },
-    AlreadyRequested { command_id: Uuid },
+    Requested {
+        command_id: Uuid,
+        force: bool,
+    },
+    AlreadyRequested {
+        command_id: Uuid,
+    },
     NothingToStop,
+    /// Сопровождения нет: выход только через `resolve-owner-lost`, команда остановки не придёт.
+    OwnerLost,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveOwnerLostOutcome {
+    Requested { command_id: Uuid },
+    AlreadyRequested { command_id: Uuid },
+    NotOwnerLost,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
@@ -495,6 +510,11 @@ async fn stop_locked_in_tx(
     force: bool,
     correlation_id: Uuid,
 ) -> Result<StopExecutionOutcome, ControlError> {
+    if let Some((_, _, ExecutionState::OwnerLost)) =
+        executions::live(&mut *conn, conversation_id).await?
+    {
+        return Ok(StopExecutionOutcome::OwnerLost);
+    }
     mark_owner_stop(&mut *conn, conversation_id, true).await?;
     crate::crunch::clear_resume_in_tx(&mut *conn, conversation_id, None, correlation_id).await?;
     if !queue.pause_reasons.0.contains(&PauseReason::UserStop) {
@@ -520,6 +540,85 @@ async fn stop_locked_in_tx(
     )
     .await?;
     Ok(outcome)
+}
+
+/// Решение владельца по потерянному исполнению. Воркер сначала проверяет, не живо ли
+/// сопровождение, и только потом завершает остаток группы.
+pub async fn request_resolve_owner_lost(
+    pool: &PgPool,
+    owner_id: Uuid,
+    conversation_id: Uuid,
+    idempotency_key: &str,
+) -> Result<ResolveOwnerLostOutcome, ControlError> {
+    idempotency::validate_key(idempotency_key)
+        .map_err(|reason| ControlError::InvalidRequest { reason })?;
+    const OPERATION: &str = "resolve_owner_lost";
+    let hash = idempotency::request_hash(OPERATION, &json!({"conversation_id": conversation_id}));
+    let idempotency_key = idempotency_key.to_owned();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            lock_conversation(&mut *conn, owner_id, conversation_id).await?;
+            if let Some(outcome) =
+                lookup(&mut *conn, owner_id, &idempotency_key, OPERATION, &hash).await?
+            {
+                return Ok(outcome);
+            }
+            let outcome = match executions::live(&mut *conn, conversation_id).await? {
+                Some((execution_id, generation, ExecutionState::OwnerLost)) => {
+                    enqueue_resolve(&mut *conn, conversation_id, execution_id, generation).await?
+                }
+                _ => ResolveOwnerLostOutcome::NotOwnerLost,
+            };
+            record(
+                &mut *conn,
+                owner_id,
+                &idempotency_key,
+                OPERATION,
+                &hash,
+                conversation_id,
+                &outcome,
+            )
+            .await?;
+            Ok(outcome)
+        })
+    })
+    .await
+}
+
+async fn enqueue_resolve(
+    conn: &mut PgConnection,
+    conversation_id: Uuid,
+    execution_id: Uuid,
+    generation: i64,
+) -> Result<ResolveOwnerLostOutcome, sqlx::Error> {
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "select id from commands where conversation_id = $1 and kind = 'resolve_owner_lost'
+             and execution_id = $2 and execution_generation = $3 and delivery_state <> 'completed'
+         order by created_at, id limit 1",
+    )
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .fetch_optional(&mut *conn)
+    .await?;
+    if let Some(command_id) = existing {
+        return Ok(ResolveOwnerLostOutcome::AlreadyRequested { command_id });
+    }
+    let command_id = Uuid::now_v7();
+    let machine_id: Uuid = sqlx::query_scalar(
+        "insert into commands (id, machine_id, conversation_id, execution_id,
+                               execution_generation, kind, payload, delivery_state)
+         select $1, machine_id, id, $3, $4, 'resolve_owner_lost', '{}', 'pending'
+         from conversations where id = $2 returning machine_id",
+    )
+    .bind(command_id)
+    .bind(conversation_id)
+    .bind(execution_id)
+    .bind(generation)
+    .fetch_one(&mut *conn)
+    .await?;
+    notify_outbox(&mut *conn, machine_id).await?;
+    Ok(ResolveOwnerLostOutcome::Requested { command_id })
 }
 
 pub(crate) async fn withdraw_dispatch(
