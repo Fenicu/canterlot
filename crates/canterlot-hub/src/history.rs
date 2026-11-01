@@ -448,14 +448,14 @@ pub struct LanePage {
     pub items: Vec<BlockView>,
     pub next_before: Option<String>,
 }
-const LANE_KEYS_SQL: &str = "with recursive lane(block_id) as (
- select block_id from blocks where conversation_id=$1 and parent_block_id=$2
+const LANE_KEYS_SQL: &str = "with recursive lane(block_id, created_seq) as (
+ select block_id, created_seq from blocks where conversation_id=$1 and parent_block_id=$2
  union
- select b.block_id from blocks b join lane l on b.parent_block_id=l.block_id where b.conversation_id=$1
+ select b.block_id, b.created_seq from blocks b join lane l on b.parent_block_id=l.block_id where b.conversation_id=$1
 )
-select b.block_id,b.created_seq from blocks b join lane l on l.block_id=b.block_id
- where b.block_id<>$2 and b.conversation_id=$1 and (not $3 or b.created_seq<$4)
- order by b.created_seq desc limit $5";
+select block_id, created_seq from lane
+ where block_id<>$2 and (not $3 or created_seq<$4)
+ order by created_seq desc limit $5";
 /// Один субагент целиком, страницами от нового к старому: лента разговора держит только хвост,
 /// а старые ветки в ней не лежат.
 pub async fn lane(
