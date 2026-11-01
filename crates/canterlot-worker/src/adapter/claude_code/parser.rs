@@ -1223,14 +1223,21 @@ impl Parser {
         }));
     }
 
-    /// `result` пробуждающего хода не заканчивает записанную команду. Сообщение, записанное
+    /// `result` пробуждающего хода не заканчивает записанную команду. Такой ход узнаётся по
+    /// `origin` или по `user_message_uuids` без этой команды. Сообщение, записанное
     /// раньше его конца, CLI держит у себя, и его собственный `result` идёт следом: тогда
     /// кадр ничего не завершает, а расход достаётся этому `result` как разница счётчиков.
     fn result_command(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) -> Option<Uuid> {
-        let waking = value
-            .pointer("/origin/kind")
-            .and_then(serde_json::Value::as_str)
-            == Some("task-notification");
+        let foreign = matches!(
+            Self::answer_frame(value),
+            Some(Parsed::AnswerFrame { user_message_uuids })
+                if !self.input_command.is_some_and(|id| user_message_uuids.contains(&id))
+        );
+        let waking = foreign
+            || value
+                .pointer("/origin/kind")
+                .and_then(serde_json::Value::as_str)
+                == Some("task-notification");
         self.cli_turn = false;
         if !waking && (self.command_open || self.wake.is_none()) {
             self.command_open = false;

@@ -29,6 +29,19 @@ fn feed_all(parser: &mut Parser, lines: &[String]) -> Vec<Parsed> {
     out
 }
 
+// Запись нескольких ходов: `result` каждого называет своё сообщение, оно и есть команда хода.
+fn feed_turns(parser: &mut Parser, lines: &[String]) -> Vec<Parsed> {
+    let mut out = Vec::new();
+    for line in lines {
+        let frame: Value = serde_json::from_str(line).unwrap();
+        if let Some(id) = frame["user_message_uuids"][0].as_str() {
+            parser.set_input_command(id.parse().unwrap());
+        }
+        out.extend(parser.feed(line));
+    }
+    out
+}
+
 fn deltas(parsed: &[Parsed]) -> Vec<&Parsed> {
     parsed
         .iter()
@@ -219,7 +232,7 @@ fn usage_is_per_turn_although_model_usage_is_cumulative() {
     let replay = fixtures::replay_evidence("multi_input");
     let mut parser = Parser::new();
     parser.set_input_command(command_id());
-    let parsed = feed_all(&mut parser, &replay.out);
+    let parsed = feed_turns(&mut parser, &replay.out);
     let mut per_turn = Vec::new();
     for p in &parsed {
         if let Parsed::Event(AdapterEvent::RunFinished { usage, .. }) = p {
@@ -241,7 +254,7 @@ fn context_tokens_and_window_come_from_the_turn() {
     let replay = fixtures::replay_evidence("multi_input");
     let mut parser = Parser::new();
     parser.set_input_command(command_id());
-    let parsed = feed_all(&mut parser, &replay.out);
+    let parsed = feed_turns(&mut parser, &replay.out);
     let first = parsed
         .iter()
         .find_map(|p| match p {
@@ -1251,6 +1264,26 @@ fn wake_turn_result_with_origin_task_notification_has_no_command() {
             ..
         })
     )));
+}
+
+#[test]
+fn result_naming_another_message_does_not_finish_the_open_command() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let result = |uuid: Uuid| {
+        json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "user_message_uuids": [uuid],
+            "modelUsage": {},
+        })
+        .to_string()
+    };
+    let foreign = parser.feed(&result(Uuid::now_v7()));
+    assert!(finished(&foreign).is_empty(), "the command is still open");
+    let own = parser.feed(&result(command_id()));
+    assert_eq!(finished(&own), [command_id()]);
 }
 
 #[test]
