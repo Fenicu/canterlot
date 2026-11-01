@@ -1330,7 +1330,7 @@ impl Worker {
                 observations=async{limits_operation.as_mut().unwrap().await}, if limits_operation.is_some()=>{
                     limits_operation=None;
                     // Хаб держит один необработанный отчёт: пустой вытеснил бы настоящий.
-                    if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations}))});}
+                    if !observations.is_empty() {limits_outbound=Some(ControlUp{msg:Some(control_up::Msg::LimitsReport(LimitsReport{observations,absent:Default::default()}))});}
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});

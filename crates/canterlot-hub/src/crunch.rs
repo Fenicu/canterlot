@@ -538,6 +538,18 @@ async fn reset_verified(
     window: Window,
     wake_at: DateTime<Utc>,
 ) -> Result<bool, sqlx::Error> {
+    // Окна больше нет у провайдера: ограничивать им нечему, сброс подтверждён отчётом после срока.
+    if window == Window::FiveHour {
+        let absent: Option<DateTime<Utc>> =
+            sqlx::query_scalar("select five_hour_absent_at from provider_limits where provider=$1")
+                .bind(provider)
+                .fetch_optional(&mut *conn)
+                .await?
+                .flatten();
+        if absent.is_some_and(|at| at >= wake_at) {
+            return Ok(true);
+        }
+    }
     let row: Option<Reading> = sqlx::query_as(match window {
         Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1",
         Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",

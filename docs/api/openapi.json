@@ -7626,7 +7626,8 @@
         "type": "object",
         "required": [
           "provider",
-          "weekly_reserve_active"
+          "weekly_reserve_active",
+          "five_hour_absent"
         ],
         "properties": {
           "five_hour": {
@@ -7638,6 +7639,10 @@
                 "type": "null"
               }
             ]
+          },
+          "five_hour_absent": {
+            "type": "boolean",
+            "description": "У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается."
           },
           "provider": {
             "type": "string"

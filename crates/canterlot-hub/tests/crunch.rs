@@ -831,6 +831,41 @@ async fn wake_after_verified_reset_releases_hold_and_queues_resume_text_once(poo
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_five_hour_hold_wakes_when_the_provider_no_longer_has_that_window(pool: PgPool) {
+    let mut env = Env::new(&pool).await;
+    let id = env.conversation(true, true).await;
+    let now = start();
+    let reset = now + TimeDelta::hours(1);
+    env.observe(
+        "claude",
+        Window::FiveHour,
+        990,
+        Some(reset),
+        now - TimeDelta::minutes(1),
+    )
+    .await;
+    env.limit_reached(id, "claude", Window::FiveHour, Some(reset), now)
+        .await;
+    let mut tx = pool.begin().await.unwrap();
+    limits::record_absence_in_tx(
+        &mut tx,
+        env.owner,
+        "claude",
+        Window::FiveHour,
+        reset + secs(60),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    tx.commit().await.unwrap();
+    env.triggered();
+    let report = env.tick(reset + secs(120)).await;
+    assert_eq!(report.fired, 1);
+    assert!(!has_quota(&holds(&pool, id).await));
+    assert!(env.take_polls().is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn five_hour_wake_is_not_verified_by_a_replayed_pre_limit_observation(pool: PgPool) {
     let mut env = Env::new(&pool).await;
     let known = env.conversation(true, true).await;

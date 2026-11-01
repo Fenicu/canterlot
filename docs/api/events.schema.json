@@ -3490,9 +3490,16 @@
               ]
             },
             "used_permille": {
-              "type": "integer",
-              "minimum": 0,
-              "maximum": 1000
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 1000
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "resets_at": {
               "anyOf": [

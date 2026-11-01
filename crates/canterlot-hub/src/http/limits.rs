@@ -40,6 +40,8 @@ pub struct ProviderView {
     pub weekly_reserve_active: bool,
     /// Сброс недели, в окне которой включился резерв.
     pub weekly_reserve_resets_at: Option<String>,
+    /// У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается.
+    pub five_hour_absent: bool,
 }
 impl From<limits::ProviderLimits> for ProviderView {
     fn from(p: limits::ProviderLimits) -> Self {
@@ -49,6 +51,7 @@ impl From<limits::ProviderLimits> for ProviderView {
             five_hour: p.five_hour.map(window),
             weekly_reserve_active: p.weekly_reserve_active,
             weekly_reserve_resets_at: p.weekly_reserve_resets_at.map(time),
+            five_hour_absent: p.five_hour_absent,
         }
     }
 }

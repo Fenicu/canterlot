@@ -720,6 +720,7 @@ async fn observation_time_is_machine_time_converted_with_the_session_offset(
         c.tx.send(ControlUp {
             msg: Some(control_up::Msg::LimitsReport(LimitsReport {
                 observations: vec![observation(if skew < 0 { 960 } else { 970 }, machine_ms)],
+                ..Default::default()
             })),
         })
         .await?;
@@ -838,6 +839,7 @@ async fn limits_report_from_poll_is_stored_with_poll_source(pool: PgPool) -> Tes
     c.tx.send(ControlUp {
         msg: Some(control_up::Msg::LimitsReport(LimitsReport {
             observations: vec![observation(920, Utc::now().timestamp_millis())],
+            ..Default::default()
         })),
     })
     .await?;
@@ -1138,6 +1140,51 @@ async fn limits_snapshot_is_sent_on_session_start(pool: PgPool) -> TestResult {
     };
     assert_eq!(snapshot.current[0].used_permille, 960);
     assert_eq!(snapshot.provider, "claude");
+    hub.shutdown.send(()).unwrap();
+    hub.join.await??;
+    Ok(())
+}
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn reported_absence_of_the_five_hour_window_reaches_the_state_and_the_worker_snapshot(
+    pool: PgPool,
+) -> TestResult {
+    let s = wire_seed(&pool).await;
+    let earlier = Utc::now() - Duration::minutes(30);
+    record(&pool, &s, &obs(&s, 530, earlier)).await;
+    let mut five = obs(&s, 440, earlier);
+    five.window = Window::FiveHour;
+    record(&pool, &s, &five).await;
+    let hub = testkit::spawn_test_hub(pool.clone(), HubTimers::default()).await;
+    let now_ms = Utc::now().timestamp_millis() as u64;
+    let mut c = connect(&hub, &s, Uuid::now_v7(), true, now_ms).await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::LimitsReport(LimitsReport {
+            observations: Vec::new(),
+            absent: vec![canterlot_proto::worker::v1::LimitAbsence {
+                provider: "claude".into(),
+                window: LimitWindow::FiveHour as i32,
+                observed_machine_ms: now_ms + 1000,
+            }],
+        })),
+    })
+    .await?;
+    wait_until(
+        &pool,
+        "select count(*) from provider_limits where five_hour_absent_at is not null",
+    )
+    .await;
+    c.tx.send(ControlUp {
+        msg: Some(control_up::Msg::MachineReport(report())),
+    })
+    .await?;
+    let down = tokio::time::timeout(WAIT, c.stream.message())
+        .await??
+        .unwrap();
+    let Some(control_down::Msg::LimitsSnapshot(snapshot)) = down.msg else {
+        panic!("snapshot")
+    };
+    assert_eq!(snapshot.current.len(), 1, "only the weekly window is sent on");
+    assert_eq!(snapshot.current[0].window, LimitWindow::Weekly as i32);
     hub.shutdown.send(()).unwrap();
     hub.join.await??;
     Ok(())

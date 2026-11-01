@@ -499,8 +499,16 @@ message LimitObservation {
   uint64 observed_machine_ms = 5;
 }
 
+// Окно, которого у провайдера нет: полное успешное чтение не содержит его при других окнах.
+message LimitAbsence {
+  string provider = 1;
+  LimitWindow window = 2;
+  uint64 observed_machine_ms = 3;
+}
+
 message LimitsReport {
   repeated LimitObservation observations = 1;
+  repeated LimitAbsence absent = 2;
 }
 
 message PollLimits {
