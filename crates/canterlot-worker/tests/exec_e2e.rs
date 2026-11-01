@@ -1136,12 +1136,12 @@ async fn stop_execution_reaches_stopped_only_after_group_empty(pool: PgPool) {
 async fn large_answer_backlog_does_not_starve_control_session(pool: PgPool) {
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
-    // Пауза 80 мс на пакет до 256 записей плюс ~4,5 мс на запись держат приём хаба около
-    // 220 записей в секунду: 4000 дельт локально опережают курсор хаба больше чем на 1024.
-    const DELTAS: usize = 4000;
+    // Пауза 500 мс на пакет до 256 записей плюс ~4,5 мс на запись держат приём хаба около
+    // 150 записей в секунду: 1800 дельт локально опережают курсор хаба больше чем на 1024.
+    const DELTAS: usize = 1800;
     fixture
         .faults()
-        .set_sj_batch_pause(Duration::from_millis(80));
+        .set_sj_batch_pause(Duration::from_millis(500));
     let steps: Vec<_> = (0..DELTAS)
         .map(|_| json!({"delta":"x"}))
         .chain([json!({"hang":true})])
@@ -1888,20 +1888,23 @@ async fn wave_w_d5_dead_sj_intent_is_never_deferred_by_cj(pool: PgPool) {
 async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
     let fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
+    // Пакет до 256 записей и секундная пауза на пакет: за 2 с ожидания хаб принимает не больше
+    // двух пакетов, то есть меньше 800 записей.
+    const DELTAS: usize = 800;
     fixture
         .faults()
-        .set_sj_batch_pause(Duration::from_millis(200));
-    let mut steps: Vec<Value> = (0..3000).map(|_| json!({"delta":"x"})).collect();
+        .set_sj_batch_pause(Duration::from_millis(1000));
+    let mut steps: Vec<Value> = (0..DELTAS).map(|_| json!({"delta":"x"})).collect();
     steps.push(json!({"hang":true}));
     fixture.submit(json!({"synthetic":steps}).to_string()).await;
-    until("3000 local deltas", async || {
+    until("local deltas", async || {
         fixture
             .sj()
             .2
             .iter()
             .filter(|b| matches!(b, Body::BlockDelta(_)))
             .count()
-            == 3000
+            == DELTAS
     })
     .await;
     let stop = fixture.stop_execution(true).await;
@@ -1928,39 +1931,78 @@ async fn wave_w_d6_stop_behind_slow_sj_backlog(pool: PgPool) {
     fixture.finish().await;
 }
 
-#[test]
-fn wave2_n3_runtime_wipe_and_replacement() {
-    for case in ["canterlot", "runtime", "replacement"] {
-        let runtime = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "wave2_n3_runtime_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("CANTERLOT_WAVE2_RUNTIME_CASE", case)
-            .env("XDG_RUNTIME_DIR", runtime.path().join("runtime"))
-            .output()
-            .unwrap();
+/// Сценарии с переменной XDG_RUNTIME_DIR идут дочерними процессами и параллельно; у каждого своё имя
+/// теста, потому что sqlx называет тестовую базу по пути теста и сносит одноимённую.
+fn run_runtime_children(children: &[(&str, &str, &str, PathBuf)], label: &str) {
+    let running: Vec<_> = children
+        .iter()
+        .map(|(test, variable, case, runtime)| {
+            let child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", test, "--ignored", "--nocapture"])
+                .env(variable, case)
+                .env("XDG_RUNTIME_DIR", runtime)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .unwrap();
+            (case, child)
+        })
+        .collect();
+    for (case, child) in running {
+        let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
-            "{case}: {}\n{}",
+            "{label} {case}: {}\n{}",
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{label} {case}: the child test did not run"
         );
     }
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-#[ignore]
-async fn wave2_n3_runtime_child(pool: PgPool) {
+#[test]
+fn wave2_n3_runtime_wipe_and_replacement() {
+    let root = tempfile::tempdir().unwrap();
+    let children: Vec<_> = [
+        ("wave2_n3_runtime_child_canterlot", "canterlot"),
+        ("wave2_n3_runtime_child_runtime", "runtime"),
+        ("wave2_n3_runtime_child_replacement", "replacement"),
+    ]
+    .into_iter()
+    .map(|(test, case)| {
+        (
+            test,
+            "CANTERLOT_WAVE2_RUNTIME_CASE",
+            case,
+            root.path().join(case).join("runtime"),
+        )
+    })
+    .collect();
+    run_runtime_children(&children, "");
+}
+
+macro_rules! wave2_runtime_children {
+    ($($name:ident => $case:literal),*) => {$(
+        #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+        #[ignore]
+        async fn $name(pool: PgPool) {
+            wave2_n3_runtime_child(pool, $case).await;
+        }
+    )*};
+}
+wave2_runtime_children!(
+    wave2_n3_runtime_child_canterlot => "canterlot",
+    wave2_n3_runtime_child_runtime => "runtime",
+    wave2_n3_runtime_child_replacement => "replacement"
+);
+
+async fn wave2_n3_runtime_child(pool: PgPool, case: &str) {
     use canterlot_proto::worker::ipc::{self, control_to_supervisor::Msg};
     use canterlot_worker::supervisor::ipc::{read_message, write_message};
     use std::os::unix::fs::MetadataExt;
-    let Ok(case) = std::env::var("CANTERLOT_WAVE2_RUNTIME_CASE") else {
-        return;
-    };
     let mut fixture = Fixture::new(&pool, "synthetic", &[]).await;
     let identities = fixture.identities();
     let runtime = PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap());
@@ -2125,39 +2167,38 @@ async fn wave2_n1_draining_delivery_releases_slot(pool: PgPool) {
 
 #[test]
 fn wave_w_d2_runtime_socket_paths() {
-    for case in ["short", "long"] {
-        let runtime = tempfile::tempdir().unwrap();
-        let path = if case == "long" {
-            runtime.path().join("r".repeat(100))
-        } else {
-            runtime.path().to_path_buf()
-        };
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "wave_w_runtime_child",
-                "--ignored",
-                "--nocapture",
-            ])
-            .env("CANTERLOT_W_RUNTIME_CASE", case)
-            .env("XDG_RUNTIME_DIR", path)
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "runtime {case}: {}\n{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
+    let root = tempfile::tempdir().unwrap();
+    let children = [
+        (
+            "wave_w_runtime_child_short",
+            "short",
+            root.path().join("short"),
+        ),
+        (
+            "wave_w_runtime_child_long",
+            "long",
+            root.path().join("long").join("r".repeat(100)),
+        ),
+    ]
+    .map(|(test, case, runtime)| (test, "CANTERLOT_W_RUNTIME_CASE", case, runtime));
+    run_runtime_children(&children, "runtime");
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-#[ignore]
-async fn wave_w_runtime_child(pool: PgPool) {
-    let Ok(case) = std::env::var("CANTERLOT_W_RUNTIME_CASE") else {
-        return;
-    };
+macro_rules! wave_w_runtime_children {
+    ($($name:ident => $case:literal),*) => {$(
+        #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+        #[ignore]
+        async fn $name(pool: PgPool) {
+            wave_w_runtime_child(pool, $case).await;
+        }
+    )*};
+}
+wave_w_runtime_children!(
+    wave_w_runtime_child_short => "short",
+    wave_w_runtime_child_long => "long"
+);
+
+async fn wave_w_runtime_child(pool: PgPool, case: &str) {
     let mut fixture = Fixture::new_with(&pool, "synthetic", &[], true, false).await;
     let started = executions::start(&pool, fixture.owner, fixture.conversation, Uuid::now_v7())
         .await

@@ -70,20 +70,24 @@ async fn hub_restart_during_fetch_resumes_after_reconnect_without_rejecting(pool
     let faults = hub.faults.clone();
     hub.shutdown.send(()).unwrap();
     timeout(WAIT, hub.join).await.unwrap().unwrap().unwrap();
-    sleep(Duration::from_secs(30)).await;
+    let failed = async |f: &Fixture| {
+        f.cj()
+            .await
+            .into_iter()
+            .filter_map(|b| {
+                if let Body::AttachmentFailed(v) = b {
+                    Some(v)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    };
+    until(async || !failed(&f).await.is_empty()).await;
+    // Простой хаба после отказа: ввод не отвергается и вложение не терзается повторами.
+    sleep(Duration::from_secs(3)).await;
     assert_eq!(f.input_state(input.input_id).await, "on_machine");
-    let failures: Vec<_> = f
-        .cj()
-        .await
-        .into_iter()
-        .filter_map(|b| {
-            if let Body::AttachmentFailed(v) = b {
-                Some(v)
-            } else {
-                None
-            }
-        })
-        .collect();
+    let failures = failed(&f).await;
     assert_eq!(failures.len(), 1);
     assert!(failures[0].retryable);
     assert_eq!(failures[0].reason, "hub_unreachable");

@@ -897,96 +897,108 @@ async fn approval_card_holds_nothing_and_a_refusal_starts_nothing(pool: PgPool) 
     b.finish().await;
 }
 
-#[sqlx::test(migrations = "../canterlot-hub/migrations")]
-async fn all_three_harness_names_reach_the_same_tools(pool: PgPool) {
+async fn harness_reaches_the_tools(pool: PgPool, harness: &str) {
     let mut b = Bench::new(&pool).await;
     let work = b.p.work.clone();
-    for harness in HARNESSES {
-        let parent = b.session(harness, &work).await;
-        let listed = b
-            .tool(parent, "sessions.list", json!({}))
-            .await
-            .expect(harness);
-        assert!(
-            listed["sessions"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|s| s["id"] == parent.to_string() && s["is_self"] == true),
-            "{harness}"
-        );
-        let brief = script(json!([{"delta": "Первый итог"}]));
-        let (child, spawned) = b
-            .spawn_child(
-                parent,
-                json!({"harness": harness, "model": "synthetic-small", "brief": brief}),
-            )
-            .await;
-        assert_eq!(spawned["permission_mode"], "owner", "{harness}");
-        b.report_with(parent, "Первый итог").await;
+    let parent = b.session(harness, &work).await;
+    let listed = b
+        .tool(parent, "sessions.list", json!({}))
+        .await
+        .expect(harness);
+    assert!(
+        listed["sessions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|s| s["id"] == parent.to_string() && s["is_self"] == true),
+        "{harness}"
+    );
+    let brief = script(json!([{"delta": "Первый итог"}]));
+    let (child, spawned) = b
+        .spawn_child(
+            parent,
+            json!({"harness": harness, "model": "synthetic-small", "brief": brief}),
+        )
+        .await;
+    assert_eq!(spawned["permission_mode"], "owner", "{harness}");
+    b.report_with(parent, "Первый итог").await;
 
-        let inspected = b
-            .tool(parent, "sessions.inspect", json!({"session_id": child}))
-            .await
-            .expect(harness);
-        assert_eq!(inspected["activity"]["state"], "idle", "{harness}");
-        let subscribed = b
-            .tool(parent, "sessions.subscribe", json!({"session_id": child}))
-            .await
-            .expect(harness);
-        assert_eq!(subscribed["subscribed"], true);
-        assert_eq!(subscribed["current_state"], "idle");
-        let unsubscribed = b
-            .tool(parent, "sessions.unsubscribe", json!({"session_id": child}))
-            .await
-            .expect(harness);
-        assert_eq!(unsubscribed["subscribed"], false);
-        let sent = b
-            .tool(
-                parent,
-                "sessions.send",
-                json!({"session_id": child, "text": "Продолжай"}),
-            )
-            .await
-            .expect(harness);
-        assert_eq!(sent["subscribed"], true);
-        let waited = b
-            .tool(
-                parent,
-                "sessions.wait",
-                json!({"session_id": child, "timeout_seconds": 20}),
-            )
-            .await
-            .expect(harness);
-        assert_eq!(waited["state"], "idle", "{harness}");
-        assert_eq!(waited["timed_out"], false);
-        b.quiet(&[parent, child]).await;
-        let expected = if waited["event_suppressed"] == true {
-            1
-        } else {
-            2
-        };
-        assert_eq!(b.reports(parent).await.len(), expected, "{harness}");
-        let accepted = b
-            .tool(parent, "sessions.accept", json!({"session_id": child}))
-            .await
-            .expect(harness);
-        assert_eq!(accepted["status"], "stopping", "{harness}");
-        b.stopped(child).await;
-        b.event_with(parent, "was accepted").await;
+    let inspected = b
+        .tool(parent, "sessions.inspect", json!({"session_id": child}))
+        .await
+        .expect(harness);
+    assert_eq!(inspected["activity"]["state"], "idle", "{harness}");
+    let subscribed = b
+        .tool(parent, "sessions.subscribe", json!({"session_id": child}))
+        .await
+        .expect(harness);
+    assert_eq!(subscribed["subscribed"], true);
+    assert_eq!(subscribed["current_state"], "idle");
+    let unsubscribed = b
+        .tool(parent, "sessions.unsubscribe", json!({"session_id": child}))
+        .await
+        .expect(harness);
+    assert_eq!(unsubscribed["subscribed"], false);
+    let sent = b
+        .tool(
+            parent,
+            "sessions.send",
+            json!({"session_id": child, "text": "Продолжай"}),
+        )
+        .await
+        .expect(harness);
+    assert_eq!(sent["subscribed"], true);
+    let waited = b
+        .tool(
+            parent,
+            "sessions.wait",
+            json!({"session_id": child, "timeout_seconds": 20}),
+        )
+        .await
+        .expect(harness);
+    assert_eq!(waited["state"], "idle", "{harness}");
+    assert_eq!(waited["timed_out"], false);
+    b.quiet(&[parent, child]).await;
+    let expected = if waited["event_suppressed"] == true {
+        1
+    } else {
+        2
+    };
+    assert_eq!(b.reports(parent).await.len(), expected, "{harness}");
+    let accepted = b
+        .tool(parent, "sessions.accept", json!({"session_id": child}))
+        .await
+        .expect(harness);
+    assert_eq!(accepted["status"], "stopping", "{harness}");
+    b.stopped(child).await;
+    b.event_with(parent, "was accepted").await;
 
-        // Режим владельца не переходит через границу харнесса.
-        let other = HARNESSES[(HARNESSES.iter().position(|h| *h == harness).unwrap() + 1) % 3];
-        let (crossed, answer) = b
-            .spawn_child(
-                parent,
-                json!({"harness": other, "model": "synthetic-small", "brief": "Другой харнесс"}),
-            )
-            .await;
-        assert_eq!(answer["permission_mode"], "ask", "{harness} to {other}");
-        b.quiet(&[parent, crossed]).await;
-    }
+    // Режим владельца не переходит через границу харнесса.
+    let other = HARNESSES[(HARNESSES.iter().position(|h| *h == harness).unwrap() + 1) % 3];
+    let (crossed, answer) = b
+        .spawn_child(
+            parent,
+            json!({"harness": other, "model": "synthetic-small", "brief": "Другой харнесс"}),
+        )
+        .await;
+    assert_eq!(answer["permission_mode"], "ask", "{harness} to {other}");
+    b.quiet(&[parent, crossed]).await;
     b.finish().await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn synthetic_harness_name_reaches_the_tools(pool: PgPool) {
+    harness_reaches_the_tools(pool, "synthetic").await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn exit_on_interrupt_harness_name_reaches_the_tools(pool: PgPool) {
+    harness_reaches_the_tools(pool, "synthetic-exit-on-interrupt").await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn codex_harness_name_reaches_the_tools(pool: PgPool) {
+    harness_reaches_the_tools(pool, "synthetic-codex").await;
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
