@@ -23,7 +23,7 @@
 | Состояние | `outcome` |
 | --- | --- |
 | `stopped` | `user_stop`, `normal_exit`, `machine_rebooted` (§9.4 «прерванным»), `start_cancelled`, `force_stopped` |
-| `failed` | `start_rejected`, `start_failed`, `cli_incompatible`, `auth_required`, `crashed`, `protocol_incompatible`, `storage_failure`, `supervisor_died`, `admin_resolved`, `context_exhausted` |
+| `failed` | `start_rejected`, `worktree_not_git`, `worktree_base_unknown`, `worktree_failed`, `start_failed`, `cli_incompatible`, `auth_required`, `crashed`, `protocol_incompatible`, `storage_failure`, `supervisor_died`, `admin_resolved`, `context_exhausted` |
 
 ```mermaid
 stateDiagram-v2
@@ -58,7 +58,7 @@ stateDiagram-v2
 | Из | Событие | Условие | Действие | В |
 | --- | --- | --- | --- | --- |
 | нет | `start_committed` | явный старт нового разговора, resume или `resume_and_continue`; нет нетерминального исполнения разговора (E-1); разговор не удалён; машина разговора не ожидает сверки после restore (§18.1 п. 5) | `PG-tx`: исполнение с поколением `max + 1`, команда `start_execution` (агент, каталог, настройки, `native_conversation_id` для resume), удержание `execution_starting`, событие | `created` |
-| `created` | `start_rejected` | воркер однозначно отказал до запуска: каталог вне разрешённых корней, CLI не найден или несовместим, нужен локальный вход, журнал не в `normal`, поколение не новее известного | `CJ`: квитанция; `PG-tx`: `failed(reason)`; автоповтора нет | `failed` |
+| `created` | `start_rejected` | воркер однозначно отказал до запуска: каталог вне разрешённых корней, CLI не найден или несовместим, нужен локальный вход, журнал не в `normal`, поколение не новее известного; для изолированной рабочей копии (`session_tools_v1`) причины `worktree_not_git`, `worktree_base_unknown`, `worktree_failed` становятся исходом как есть | `CJ`: квитанция; `PG-tx`: `failed(reason)`; автоповтора нет | `failed` |
 | `created` | `workdir_wait` | каталог занят конфликтующим исполнением (§4) | `CJ`: место в локальной очереди владения; хабу удержание `workdir_busy(conflict)` | `created` |
 | `created` | `start_cancelled` | владелец отменил старт до запуска сопровождения (линеаризация в `CJ`) | `CJ`, `PG-tx` | `stopped` |
 | `created` | `supervisor_spawned` | владение каталогом получено; запись принадлежности записана в локальном журнале `ownership` до запуска CLI (§5) | сопровождение создаёт `SJ`, записывает `journal_opened` и `execution_state{starting}`, создаёт группу ресурсов, запускает CLI | `starting` |

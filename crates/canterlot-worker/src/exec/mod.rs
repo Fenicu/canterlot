@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io,
     path::PathBuf,
     sync::{
@@ -188,6 +188,8 @@ pub(crate) struct Shared {
     pub probes: Mutex<HashMap<Uuid, crate::machine::metrics::ExecutionProbe>>,
     pub actors: Mutex<HashMap<Uuid, mpsc::UnboundedSender<Msg>>>,
     pub tasks: Mutex<Vec<JoinHandle<()>>>,
+    /// Уборки рабочих копий в работе: повтор той же команды не запускает вторую.
+    pub worktree_jobs: Mutex<HashSet<String>>,
     pub runtime_dir: Option<PathBuf>,
     pub data_dir: OnceCell<PathBuf>,
     pub boot_id: OnceCell<String>,
@@ -369,6 +371,7 @@ impl ExecutionManager {
                 probes: Mutex::default(),
                 actors: Mutex::default(),
                 tasks: Mutex::default(),
+                worktree_jobs: Mutex::default(),
                 runtime_dir: std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from),
                 data_dir: OnceCell::new(),
                 boot_id: OnceCell::new(),
@@ -657,6 +660,10 @@ impl ExecutionManager {
             .call(|store| Ok(open(store)?.stored_commands()?))
             .await?;
         for command in commands {
+            if matches!(command.kind, Some(Kind::RemoveWorktree(_))) {
+                self.route(command).await?;
+                continue;
+            }
             let Ok(id) = Uuid::parse_str(&command.execution_id) else {
                 continue;
             };
@@ -708,6 +715,11 @@ impl ExecutionManager {
             let start = start.clone();
             return self.start(command, start).await;
         }
+        if let Kind::RemoveWorktree(request) = kind {
+            let request = request.clone();
+            self.remove_worktree(command, request);
+            return Ok(());
+        }
         let Ok(id) = Uuid::parse_str(&command.execution_id) else {
             return manager::reject_invalid(&self.shared, &command).await;
         };
@@ -757,8 +769,8 @@ impl ExecutionManager {
                 )
                 .await;
         }
-        let workdir = match manager::validate(shared, &command, &start, conversation_id).await? {
-            Ok(workdir) => workdir,
+        let validated = match manager::validate(shared, &command, &start, conversation_id).await? {
+            Ok(validated) => validated,
             Err(reason) => return manager::reject(shared, &command, reason).await,
         };
         {
@@ -784,11 +796,48 @@ impl ExecutionManager {
             Start::Spawn(Box::new(manager::SpawnRequest {
                 command,
                 start,
-                workdir,
+                workdir: validated.workdir,
+                source: validated.source,
                 conversation_id,
             })),
         );
         Ok(())
+    }
+
+    /// Вне актора исполнения: у уборки его нет. Остановка менеджера обрывает её, команда
+    /// остаётся непогашенной и доигрывается при следующем старте.
+    fn remove_worktree(
+        &self,
+        command: Command,
+        request: canterlot_proto::worker::v1::RemoveWorktree,
+    ) {
+        let key = command.command_id.clone();
+        if !self
+            .shared
+            .worktree_jobs
+            .lock()
+            .expect("worktree jobs lock")
+            .insert(key.clone())
+        {
+            return;
+        }
+        let shared = self.shared.clone();
+        let mut shutdown = shared.shutdown.clone();
+        let task = tokio::spawn(async move {
+            let done = tokio::select! {
+                result = manager::remove_worktree(&shared, &command, &request) => Some(result),
+                _ = shutdown.wait_for(|stop| *stop) => None,
+            };
+            if let Some(Err(error)) = done {
+                tracing::warn!(error_kind = ?std::mem::discriminant(&error), "worktree removal failed");
+            }
+            shared
+                .worktree_jobs
+                .lock()
+                .expect("worktree jobs lock")
+                .remove(&key);
+        });
+        self.shared.tasks.lock().expect("tasks lock").push(task);
     }
 
     fn spawn_actor(&self, id: Uuid, start: Start) {

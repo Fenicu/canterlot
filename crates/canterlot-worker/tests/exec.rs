@@ -2122,3 +2122,239 @@ async fn decision_envelope_generation_is_checked_before_ipc() {
     env.stop().await;
     env.close_manager().await;
 }
+
+fn git_in(dir: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(["-c", "user.name=t", "-c", "user.email=t@example.test"])
+        .args(args)
+        .current_dir(dir)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "git {args:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+impl Env {
+    fn git_source(&self) -> PathBuf {
+        let source = fs::canonicalize(&self.work).unwrap().join("repo");
+        fs::create_dir_all(&source).unwrap();
+        git_in(&source, &["init", "-q", "-b", "main"]);
+        fs::write(source.join("a.txt"), "alpha\n").unwrap();
+        git_in(&source, &["add", "-A"]);
+        git_in(&source, &["commit", "-q", "-m", "first"]);
+        source
+    }
+
+    fn worktree_dir(&self) -> PathBuf {
+        self.root
+            .path()
+            .join("store/worktrees")
+            .join(self.conversation.to_string())
+    }
+
+    fn worktree_start(&self, generation: u64, source: &Path, workdir: &Path) -> Command {
+        let mut command = start_command(
+            self.execution,
+            generation,
+            self.conversation,
+            "synthetic",
+            workdir,
+        );
+        if let Some(Kind::StartExecution(start)) = &mut command.kind {
+            start.worktree = Some(canterlot_proto::worker::v1::WorktreeSpec {
+                source_workdir: source.to_string_lossy().into_owned(),
+                branch: "canterlot/0190abcd".into(),
+                base: "HEAD".into(),
+            });
+        }
+        command
+    }
+
+    fn remove_command(&self, path: &Path, force: bool) -> Command {
+        Command {
+            command_id: Uuid::now_v7().to_string(),
+            dispatch_attempt: 1,
+            execution_id: String::new(),
+            execution_generation: 0,
+            kind: Some(Kind::RemoveWorktree(
+                canterlot_proto::worker::v1::RemoveWorktree {
+                    source_workdir: self.work.join("repo").to_string_lossy().into_owned(),
+                    path: path.to_string_lossy().into_owned(),
+                    branch: "canterlot/0190abcd".into(),
+                    force,
+                },
+            )),
+        }
+    }
+}
+
+fn removed_outcomes(cj: &[Body]) -> Vec<(String, String, bool)> {
+    cj.iter()
+        .filter_map(|b| match b {
+            Body::WorktreeRemoved(f) => Some((f.outcome.clone(), f.detail.clone(), f.branch_kept)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn start_with_worktree_runs_cli_there() {
+    let mut env = Env::new().await;
+    let source = env.git_source();
+    let target = env.worktree_dir();
+    env.hub_session();
+    env.send(env.worktree_start(1, &source, &target)).await;
+    env.wait_running().await;
+    assert_eq!(fs::read_to_string(target.join("a.txt")).unwrap(), "alpha\n");
+    assert_eq!(
+        git_in(&target, &["symbolic-ref", "--short", "HEAD"]),
+        "canterlot/0190abcd"
+    );
+    let record = env.ownership(env.execution).await.unwrap();
+    let cwd = fs::read_link(format!("/proc/{}/cwd", record.cli_pid)).unwrap();
+    assert_eq!(cwd, fs::canonicalize(&target).unwrap());
+    assert!(
+        fs::read_dir(&source)
+            .unwrap()
+            .flatten()
+            .all(|e| e.file_name() == ".git" || e.file_name() == "a.txt"),
+        "the source tree gets nothing"
+    );
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn resumed_start_reuses_the_existing_worktree() {
+    let mut env = Env::new().await;
+    let source = env.git_source();
+    let target = env.worktree_dir();
+    env.hub_session();
+    env.send(env.worktree_start(1, &source, &target)).await;
+    env.wait_running().await;
+    fs::write(target.join("wip.txt"), "wip\n").unwrap();
+    env.stop().await;
+    env.execution = Uuid::now_v7();
+    env.send(env.worktree_start(2, &source, &target)).await;
+    env.wait_running().await;
+    assert_eq!(fs::read_to_string(target.join("wip.txt")).unwrap(), "wip\n");
+    env.stop().await;
+}
+
+#[tokio::test]
+async fn start_with_a_bad_worktree_is_rejected_before_any_supervisor() {
+    let env = Env::new().await;
+    let source = env.git_source();
+    let target = env.worktree_dir();
+    let plain = env.work.join("plain");
+    fs::create_dir(&plain).unwrap();
+    let mut unknown_base = env.worktree_start(1, &source, &target);
+    if let Some(Kind::StartExecution(start)) = &mut unknown_base.kind {
+        start.worktree.as_mut().unwrap().base = "no-such-ref".into();
+    }
+    env.send(unknown_base).await;
+    let other = |generation, source: &Path, workdir: &Path| {
+        let mut command = env.worktree_start(generation, source, workdir);
+        command.execution_id = Uuid::now_v7().to_string();
+        command
+    };
+    env.send(other(
+        2,
+        &plain,
+        &env.root.path().join("store/worktrees").join("n1"),
+    ))
+    .await;
+    env.send(other(
+        3,
+        Path::new("/etc"),
+        &env.root.path().join("store/worktrees").join("n2"),
+    ))
+    .await;
+    env.send(other(4, &source, &env.work.join("elsewhere")))
+        .await;
+    env.send(other(
+        5,
+        &source,
+        &env.root.path().join("store/worktrees/../n3"),
+    ))
+    .await;
+    let cj = env
+        .wait_cj("five rejections", |cj| rejected_reasons(cj).len() >= 5)
+        .await;
+    let mut reasons = rejected_reasons(&cj);
+    reasons.sort();
+    assert_eq!(
+        reasons,
+        [
+            "workdir_not_allowed",
+            "workdir_not_allowed",
+            "workdir_not_allowed",
+            "worktree_base_unknown",
+            "worktree_not_git",
+        ]
+    );
+    assert!(!target.exists(), "a failed preparation leaves no copy");
+    assert!(
+        git_in(&source, &["branch", "--list", "canterlot/*"]).is_empty(),
+        "no branch is left behind"
+    );
+    assert_eq!(
+        fs::read_dir(env.root.path().join("store/executions"))
+            .map(|d| d.count())
+            .unwrap_or(0),
+        0,
+        "a rejected start never creates an execution directory"
+    );
+}
+
+#[tokio::test]
+async fn remove_worktree_answers_through_cj_and_survives_a_restart() {
+    let mut env = Env::new().await;
+    let source = env.git_source();
+    let target = env.worktree_dir();
+    env.hub_session();
+    env.send(env.worktree_start(1, &source, &target)).await;
+    env.wait_running().await;
+    env.stop().await;
+    fs::write(target.join("wip.txt"), "wip\n").unwrap();
+    let dirty = env.remove_command(&target, false);
+    env.send(dirty.clone()).await;
+    let cj = env
+        .wait_cj("dirty answer", |cj| !removed_outcomes(cj).is_empty())
+        .await;
+    assert_eq!(
+        removed_outcomes(&cj),
+        [("dirty".into(), "dirty".into(), false)]
+    );
+    assert!(env.terminal(&dirty).await);
+    let outside = env.remove_command(&env.work, true);
+    env.send(outside.clone()).await;
+    let cj = env
+        .wait_cj("refusal", |cj| removed_outcomes(cj).len() >= 2)
+        .await;
+    assert_eq!(
+        removed_outcomes(&cj)[1],
+        ("failed".into(), "path_outside_root".into(), false)
+    );
+    assert!(env.terminal(&outside).await);
+    assert!(target.exists());
+    // Команда принята, но управляющая служба упала до исполнения: после старта она доигрывается.
+    let forced = env.remove_command(&target, true);
+    let copy = forced.clone();
+    env.thread()
+        .call(move |store| Ok(store.as_mut().unwrap().accept_command(&copy)?))
+        .await
+        .unwrap();
+    env.close_manager().await;
+    env.reopen();
+    env.manager().startup_verify().await.unwrap();
+    let cj = env
+        .wait_cj("replayed removal", |cj| removed_outcomes(cj).len() >= 3)
+        .await;
+    assert_eq!(
+        removed_outcomes(&cj)[2],
+        ("removed".into(), String::new(), false)
+    );
+    assert!(env.terminal(&forced).await);
+    assert!(!target.exists());
+}

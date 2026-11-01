@@ -1588,7 +1588,7 @@ async fn reject_start(
             conn,
             execution_id,
             ExecutionState::Failed,
-            Some("start_rejected"),
+            Some(executions::start_rejected_outcome(reason)),
             correlation_id,
         )
         .await?;

@@ -533,6 +533,21 @@ pub async fn turn_in_progress(
     .await
 }
 
+/// Исходы запуска, когда воркер не смог подготовить рабочую копию.
+pub const WORKTREE_OUTCOMES: [&str; 3] = [
+    "worktree_not_git",
+    "worktree_base_unknown",
+    "worktree_failed",
+];
+
+/// Причина отказа воркера как исход исполнения: причины рабочей копии родитель видит как есть.
+pub fn start_rejected_outcome(reason: &str) -> &'static str {
+    WORKTREE_OUTCOMES
+        .into_iter()
+        .find(|known| *known == reason)
+        .unwrap_or("start_rejected")
+}
+
 fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&str>) -> bool {
     use ExecutionState::*;
     matches!(
@@ -540,6 +555,11 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
         (Created, Created | Starting | OwnerLost, None)
             | (Created, Stopped, Some("start_cancelled"))
             | (Created, Failed, Some("start_rejected"))
+            | (
+                Created,
+                Failed,
+                Some("worktree_not_git" | "worktree_base_unknown" | "worktree_failed")
+            )
             | (Starting, Running | Stopping | OwnerLost, None)
             | (Running, Stopping | OwnerLost, None)
             | (Stopping, OwnerLost, None)
@@ -563,6 +583,9 @@ fn legal_transition(from: ExecutionState, to: ExecutionState, outcome: Option<&s
                 Failed,
                 Some(
                     "start_rejected"
+                        | "worktree_not_git"
+                        | "worktree_base_unknown"
+                        | "worktree_failed"
                         | "start_failed"
                         | "cli_incompatible"
                         | "auth_required"

@@ -8,6 +8,7 @@ import {
   effortLabel,
   executionOutcomeLabel,
   executionStateLabel,
+  failureLabel,
   permissionHint,
   permissionLabel,
   modelImagesNote,
@@ -84,6 +85,17 @@ describe("format/labels", () => {
       expect(executionOutcomeLabel(outcome)).not.toBe(
         executionOutcomeLabel("something_new"),
       );
+    }
+  });
+
+  it("worktree_failures_have_their_own_russian_reason", () => {
+    for (const reason of [
+      "worktree_not_git",
+      "worktree_base_unknown",
+      "worktree_failed",
+    ]) {
+      expect(failureLabel(reason)).not.toMatch(RAW);
+      expect(failureLabel(reason)).not.toBe(failureLabel("something_new"));
     }
   });
 
