@@ -1,7 +1,9 @@
 //! Собственный CODEX_HOME canterlot: символические ссылки на записи дома
 //! владельца без файлов инструкций, SQLite, блокировок и каталогов демонов,
 //! плюс общий AGENTS.md canterlot. Файлы владельца никогда не открываются:
-//! читаются только имена записей, создаются только ссылки.
+//! читаются только имена записей, создаются только ссылки. Исключение: каталог
+//! `sessions`, рулоны тредов обязаны быть видны из обоих домов, иначе смена
+//! режима инструкций не возобновит тред.
 
 use crate::config::CodexConfig;
 use std::ffi::OsString;
@@ -43,6 +45,7 @@ pub enum TempDirPolicy {
 const AGENTS_MD: &str = "AGENTS.md";
 const LOCK_FILE: &str = ".canterlot-home.lock";
 const LINK_TMP_PREFIX: &str = ".canterlot-link-";
+const SESSIONS: &str = "sessions";
 
 /// Дом canterlot: путь и дом владельца, чьи записи ссылаются.
 #[derive(Clone, Debug)]
@@ -65,6 +68,29 @@ pub struct LinkReport {
 pub enum HomeError {
     Unusable,
     Io(std::io::Error),
+}
+
+/// Перенести настоящий каталог рулонов в каталог владельца без перезаписи.
+/// `false` — что-то осталось на месте: совпало имя или другая файловая система.
+fn move_rollouts(from: &Path, to: &Path) -> std::io::Result<bool> {
+    let mut emptied = true;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            std::fs::create_dir_all(&target)?;
+            emptied &= move_rollouts(&source, &target)?;
+        } else if target.symlink_metadata().is_err() {
+            emptied &= std::fs::rename(&source, &target).is_ok();
+        } else {
+            emptied = false;
+        }
+    }
+    if emptied {
+        std::fs::remove_dir(from)?;
+    }
+    Ok(emptied)
 }
 
 fn excluded(name: &std::ffi::OsStr) -> bool {
@@ -234,6 +260,17 @@ impl CodexHome {
         })?;
         let _unlock = UnlockOnDrop(lock);
         let mut report = LinkReport::default();
+        // Каталог рулонов есть до первого запуска, иначе Codex создаст настоящий.
+        let owner_sessions = self.owner_home.join(SESSIONS);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&owner_sessions)
+            .map_err(HomeError::Io)?;
+        let own_sessions = self.path.join(SESSIONS);
+        if std::fs::symlink_metadata(&own_sessions).is_ok_and(|meta| meta.is_dir()) {
+            move_rollouts(&own_sessions, &owner_sessions).map_err(HomeError::Io)?;
+        }
         // Только имена записей; содержимое файлов владельца не читается.
         let mut entries: Vec<OsString> = Vec::new();
         match std::fs::read_dir(&self.owner_home) {

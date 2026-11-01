@@ -474,7 +474,7 @@ fn permission_modes_map_to_thread_and_turn_policy() {
             policy
         );
         assert_eq!(params.get("sandbox").and_then(|v| v.as_str()), sandbox);
-        let resume = thread_resume_params("tid", mode, None, workdir, "BLOCK", None);
+        let resume = thread_resume_params("tid", mode, None, workdir, "BLOCK");
         assert_eq!(
             resume.get("approvalPolicy").and_then(|v| v.as_str()),
             policy
@@ -629,7 +629,6 @@ fn resume_params_exclude_turns() {
         Some("gpt-6-luna"),
         workdir,
         "BLOCK",
-        None,
     );
     // Форма записи ev/resume.jsonl:49 плюс developerInstructions.
     let recorded = &data("resume.jsonl", 49)["params"];

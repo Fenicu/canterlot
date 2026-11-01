@@ -181,7 +181,8 @@ fn real_entries_are_never_replaced() {
     std::fs::create_dir_all(&canterlot).unwrap();
     // Настоящий файл и каталог Codex: не трогать, отметить конфликт.
     std::fs::write(canterlot.join("config.toml"), "codex own").unwrap();
-    std::fs::create_dir_all(canterlot.join("sessions")).unwrap();
+    std::fs::create_dir_all(canterlot.join("cache")).unwrap();
+    std::fs::create_dir_all(owner.join("cache")).unwrap();
     let home = resolve(&canterlot, &owner);
     let report = home.prepare(BLOCK, TempDirPolicy::Allow).unwrap();
     assert_eq!(
@@ -198,8 +199,95 @@ fn real_entries_are_never_replaced() {
         "{report:?}"
     );
     assert!(
+        report.conflicts.contains(&"cache".to_string()),
+        "{report:?}"
+    );
+}
+
+fn is_link(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .unwrap()
+        .file_type()
+        .is_symlink()
+}
+
+#[test]
+fn sessions_are_linked_even_when_the_owner_has_none_yet() {
+    let (_td, owner) = owner_home();
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let report = resolve(&canterlot, &owner)
+        .prepare(BLOCK, TempDirPolicy::Allow)
+        .unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert!(is_link(&canterlot.join("sessions")));
+    assert!(
+        owner.join("sessions").is_dir(),
+        "created before first launch"
+    );
+}
+
+#[test]
+fn sessions_are_linked_when_the_owner_home_does_not_exist() {
+    let (td, _) = owner_home();
+    let owner = td.path().join("never-used");
+    let canterlot = td.path().join("canterlot");
+    resolve(&canterlot, &owner)
+        .prepare(BLOCK, TempDirPolicy::Allow)
+        .unwrap();
+    assert!(is_link(&canterlot.join("sessions")));
+}
+
+#[test]
+fn real_sessions_directory_moves_to_the_owner_and_becomes_a_link() {
+    // Codex успел создать настоящий каталог: дом владельца был пуст при первом запуске.
+    let (_td, owner) = owner_home();
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    let day = canterlot.join("sessions/2026/11/01");
+    std::fs::create_dir_all(&day).unwrap();
+    std::fs::write(day.join("rollout-a.jsonl"), "created under canterlot").unwrap();
+    std::fs::create_dir_all(owner.join("sessions/2026/11/01")).unwrap();
+    std::fs::write(owner.join("sessions/2026/11/01/rollout-b.jsonl"), "owner").unwrap();
+
+    let report = resolve(&canterlot, &owner)
+        .prepare(BLOCK, TempDirPolicy::Allow)
+        .unwrap();
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    assert!(is_link(&canterlot.join("sessions")));
+    for name in ["rollout-a.jsonl", "rollout-b.jsonl"] {
+        assert!(
+            canterlot.join("sessions/2026/11/01").join(name).is_file(),
+            "{name} visible from the canterlot home"
+        );
+        assert!(
+            owner.join("sessions/2026/11/01").join(name).is_file(),
+            "{name} visible from the owner home"
+        );
+    }
+}
+
+#[test]
+fn real_sessions_directory_with_a_name_clash_stays_a_conflict() {
+    let (_td, owner) = owner_home();
+    let canterlot = owner.parent().unwrap().join("canterlot");
+    std::fs::create_dir_all(canterlot.join("sessions")).unwrap();
+    std::fs::write(canterlot.join("sessions/rollout-a.jsonl"), "ours").unwrap();
+    std::fs::create_dir_all(owner.join("sessions")).unwrap();
+    std::fs::write(owner.join("sessions/rollout-a.jsonl"), "theirs").unwrap();
+
+    let report = resolve(&canterlot, &owner)
+        .prepare(BLOCK, TempDirPolicy::Allow)
+        .unwrap();
+    assert!(
         report.conflicts.contains(&"sessions".to_string()),
         "{report:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(canterlot.join("sessions/rollout-a.jsonl")).unwrap(),
+        "ours"
+    );
+    assert_eq!(
+        std::fs::read_to_string(owner.join("sessions/rollout-a.jsonl")).unwrap(),
+        "theirs"
     );
 }
 

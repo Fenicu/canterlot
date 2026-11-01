@@ -4,8 +4,8 @@
 #![forbid(unsafe_code)]
 
 use canterlot_worker::adapter::{
-    Adapter, AdapterContext, AdapterEvent, InstructionMode, InstructionSpec, SettingsChange,
-    StartSpec, Transmission, TransmitOutcome,
+    Adapter, AdapterContext, AdapterError, AdapterEvent, InstructionMode, InstructionSpec,
+    SettingsChange, StartSpec, Transmission, TransmitOutcome,
     codex::home::{CodexHome, TempDirPolicy},
 };
 use canterlot_worker::config::CodexConfig;
@@ -397,36 +397,65 @@ async fn clean_and_preset_start_spawns_the_first_app_server_under_canterlot_home
     }
 }
 
-// Кандидаты на ошибку thread/resume для треда без рулона в текущем доме: тексты —
-// строки бинарника codex-cli 0.164.0 (`strings`), код -32600 предположен.
-// Настоящий ответ снимает пункт 5 live smoke.
-const MISSING_THREAD_ERRORS: [&str; 3] = [
-    r#"{"code": -32600, "message": "no rollout found for thread id thread-1"}"#,
-    r#"{"code": -32600, "message": "no rollout found for conversation id thread-1"}"#,
-    r#"{"code": -32600, "message": "thread not found: thread-1"}"#,
-];
+// Настоящий ответ codex-cli 0.164: параметр path на рулон другого дома его не меняет.
+const NO_ROLLOUT: &str = include_str!("fixtures/codex/thread_resume_no_rollout_live.json");
 
 #[tokio::test]
-async fn clean_start_resume_falls_back_to_owner_rollout_path() {
-    for error in MISSING_THREAD_ERRORS {
-        // Тред создан под домом владельца: в доме canterlot его нет.
-        let h = PresetHarness::start_with(clean_spec(), Some("thread-1"), |dir| {
-            std::fs::write(dir.join("resume-error.json"), error).unwrap();
-            let sessions = dir.join("owner-home").join("sessions").join("2026");
-            std::fs::create_dir_all(&sessions).unwrap();
-            std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
-        })
-        .await;
-        let resumes = h.method_params("thread/resume");
-        assert_eq!(resumes.len(), 2, "{error}: retry with path: {resumes:?}");
-        assert!(
-            resumes[1]["path"]
-                .as_str()
-                .is_some_and(|p| p.ends_with("rollout-2026-thread-1.jsonl")),
-            "{error}: {}",
-            resumes[1]
-        );
-    }
+async fn resume_of_a_missing_rollout_fails_once_without_a_path() {
+    let dir = TempDir::new().unwrap();
+    std::fs::write(dir.path().join("resume-error.json"), NO_ROLLOUT).unwrap();
+    let exe = dir.path().join("fake-codex");
+    fake_exec::write_executable(&exe, PRESET_FAKE, 0o700);
+    let owner = dir.path().join("owner-home");
+    std::fs::create_dir_all(&owner).unwrap();
+    let context = AdapterContext {
+        transmit_deadline: WAIT,
+        exec_dir: dir.path().join("exec"),
+        claude_code: None,
+        codex: Some(CodexConfig {
+            executable: exe,
+            home_dir: Some(dir.path().join("codex-home")),
+            owner_home: Some(owner),
+            home_policy: TempDirPolicy::Allow,
+            ..Default::default()
+        }),
+        opencode: None,
+    };
+    let mut adapter = canterlot_worker::adapter::registry_with("codex", &context).unwrap();
+    let group = TreeContainment::new().unwrap();
+    let spec = StartSpec {
+        execution_id: Uuid::now_v7(),
+        generation: 1,
+        workdir: dir.path().into(),
+        native_conversation_id: Some("thread-1".into()),
+        profile: String::new(),
+        model: "gpt-6-luna".into(),
+        effort: String::new(),
+        permission_mode: "ask".into(),
+        instructions: clean_spec(),
+    };
+    let error = adapter
+        .start(&spec, &group)
+        .await
+        .err()
+        .expect("no rollout");
+    assert!(
+        matches!(error, AdapterError::StartFailed("resume_failed")),
+        "{error:?}"
+    );
+    let log = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("stdin-"))
+        .map(|entry| std::fs::read_to_string(entry.path()).unwrap())
+        .collect::<String>();
+    let resumes: Vec<Value> = log
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+        .filter(|message| message["method"] == "thread/resume")
+        .collect();
+    assert_eq!(resumes.len(), 1, "{resumes:?}");
+    assert!(resumes[0]["params"].get("path").is_none(), "{resumes:?}");
 }
 
 #[tokio::test]
@@ -615,35 +644,24 @@ async fn failed_fallback_restart_reports_process_exited() {
 }
 
 #[tokio::test]
-async fn cross_home_resume_falls_back_to_rollout_path() {
+async fn missing_rollout_rejects_the_change_and_keeps_the_session_working() {
     let mut h = PresetHarness::new().await;
     let out = h.transmit(None).await;
     assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
     h.until_finished().await;
 
-    // Тред известен только по rollout в доме владельца.
-    std::fs::write(
-        h.dir.path().join("resume-error.json"),
-        MISSING_THREAD_ERRORS[0],
-    )
-    .unwrap();
-    let sessions = h.dir.path().join("owner-home").join("sessions").join("sub");
-    std::fs::create_dir_all(&sessions).unwrap();
-    std::fs::write(sessions.join("rollout-2026-thread-1.jsonl"), "{}\n").unwrap();
-
+    // Рулона нет: смена не состоялась, а сессия работает дальше на прежнем сервере.
+    std::fs::write(h.dir.path().join("resume-error.json"), NO_ROLLOUT).unwrap();
     let out = h.transmit(Some(change(clean_spec()))).await;
+    assert!(
+        matches!(&out, TransmitOutcome::Rejected(reason) if reason == "instructions_change_failed"),
+        "{out:?}"
+    );
+    let resumes = h.method_params("thread/resume");
+    assert!(resumes.iter().all(|params| params.get("path").is_none()));
+    let out = h.transmit(None).await;
     assert!(matches!(out, TransmitOutcome::Accepted(_)), "{out:?}");
     h.until_finished().await;
-    let resumes = h.method_params("thread/resume");
-    assert_eq!(resumes.len(), 2, "retry with path: {resumes:?}");
-    assert!(
-        resumes[1]
-            .get("path")
-            .and_then(Value::as_str)
-            .is_some_and(|p| p.contains("rollout-2026-thread-1.jsonl")),
-        "second resume uses rollout path: {}",
-        resumes[1]
-    );
 }
 
 #[tokio::test]

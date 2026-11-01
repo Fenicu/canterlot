@@ -5,7 +5,7 @@ use super::process::LaunchError;
 use crate::adapter::{InstructionMode, InstructionSpec};
 use serde_json::Value;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PermissionMode {
@@ -216,41 +216,6 @@ pub fn compose_developer_instructions(
     body
 }
 
-/// Рулон треда в доме владельца: sessions/**/rollout-*-<thread_id>.jsonl.
-/// Рулон треда в доме владельца: sessions/**/rollout-*-<thread_id>.jsonl.
-pub fn find_rollout(owner_home: &Path, thread_id: &str) -> Option<PathBuf> {
-    fn walk(dir: &Path, suffix: &str, depth: usize, out: &mut Vec<PathBuf>) {
-        if depth == 0 {
-            return;
-        }
-        let Ok(listing) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let mut entries: Vec<_> = listing.filter_map(|entry| entry.ok()).collect();
-        entries.sort_by_key(|entry| entry.file_name());
-        for entry in entries {
-            let path = entry.path();
-            if path.is_dir() && !path.is_symlink() {
-                walk(&path, suffix, depth - 1, out);
-            } else if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.starts_with("rollout-") && name.ends_with(suffix))
-            {
-                out.push(path);
-            }
-        }
-    }
-    let mut found = Vec::new();
-    walk(
-        &owner_home.join("sessions"),
-        &format!("-{thread_id}.jsonl"),
-        4,
-        &mut found,
-    );
-    found.into_iter().next()
-}
-
 fn thread_policy(mode: PermissionMode) -> (Option<&'static str>, Option<&'static str>) {
     match mode {
         // Везде yolo, кроме чтения: песочница только в read_only.
@@ -306,18 +271,10 @@ pub fn thread_resume_params(
     model: Option<&str>,
     workdir: &Path,
     developer_instructions: &str,
-    path: Option<&Path>,
 ) -> Value {
     let mut params = base_params(mode, model, workdir, developer_instructions);
     params.insert("threadId".to_owned(), thread_id.into());
     params.insert("excludeTurns".to_owned(), true.into());
-    // Путь рулона — только запасной вариант (UNSTABLE в схеме).
-    if let Some(path) = path {
-        params.insert(
-            "path".to_owned(),
-            path.to_string_lossy().into_owned().into(),
-        );
-    }
     Value::Object(params)
 }
 

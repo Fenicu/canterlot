@@ -37,7 +37,7 @@ use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::{Path, PathBuf},
+    path::PathBuf,
     time::Duration,
 };
 use tokio::time::{Instant, timeout, timeout_at};
@@ -186,7 +186,6 @@ struct ResumeLaunch<'a> {
     model: Option<&'a str>,
     dev: &'a str,
     home: Option<&'a CodexHome>,
-    owner_home: Option<&'a Path>,
 }
 
 impl CodexAdapter {
@@ -928,17 +927,14 @@ impl CodexAdapter {
         );
         let model = (!spec.model.is_empty()).then(|| spec.model.clone());
         let effective = if let Some(native) = spec.native_conversation_id.as_deref() {
-            // Тред, созданный под другим домом, ищется по рулону в доме владельца.
-            let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
             let launch = ResumeLaunch {
                 mode: self.mode,
                 launch_mode: spec.instructions.mode,
                 model: model.as_deref(),
                 dev: &instructions,
                 home: None,
-                owner_home: owner_home.as_deref(),
             };
-            self.resume_with_fallback(native, launch).await?
+            self.resume_thread(native, launch).await?
         } else {
             let result = self
                 .rpc_round(
@@ -1034,58 +1030,27 @@ impl CodexAdapter {
         Some(proc)
     }
 
-    /// thread/resume с новыми инструкциями; тред не найден в доме — одна попытка
-    /// с путём рулона из дома владельца.
-    async fn resume_with_fallback(
+    /// thread/resume с новыми инструкциями. Рулоны всех домов лежат в одном
+    /// `sessions` (см. `CodexHome::prepare`): параметр `path` в 0.164 не помогает.
+    async fn resume_thread(
         &mut self,
         thread_id: &str,
         launch: ResumeLaunch<'_>,
     ) -> Result<thread::Effective, AdapterError> {
-        let thread_id = thread_id.to_owned();
         let workdir = self.workdir.clone();
         let params = thread::thread_resume_params(
-            &thread_id,
+            thread_id,
             launch.mode,
             launch.model,
             &workdir,
             launch.dev,
-            None,
         );
         let result = self
             .rpc_round("thread/resume", params, HANDSHAKE_STEP)
             .await
-            .ok_or(AdapterError::StartFailed("app_server_failed"))?;
-        match result {
-            Ok(value) => thread::parse_thread_result(&value)
-                .map_err(|_| AdapterError::StartFailed("resume_failed")),
-            Err(error) if is_missing_thread(&error) => {
-                if let Some(path) = launch
-                    .owner_home
-                    .and_then(|home| thread::find_rollout(home, &thread_id))
-                {
-                    let params = thread::thread_resume_params(
-                        &thread_id,
-                        launch.mode,
-                        launch.model,
-                        &workdir,
-                        launch.dev,
-                        Some(&path),
-                    );
-                    let result = self
-                        .rpc_round("thread/resume", params, HANDSHAKE_STEP)
-                        .await
-                        .ok_or(AdapterError::StartFailed("app_server_failed"))?;
-                    match result {
-                        Ok(value) => thread::parse_thread_result(&value)
-                            .map_err(|_| AdapterError::StartFailed("resume_failed")),
-                        Err(_) => Err(AdapterError::StartFailed("resume_failed")),
-                    }
-                } else {
-                    Err(AdapterError::StartFailed("resume_failed"))
-                }
-            }
-            Err(_) => Err(AdapterError::StartFailed("resume_failed")),
-        }
+            .ok_or(AdapterError::StartFailed("app_server_failed"))?
+            .map_err(|_| AdapterError::StartFailed("resume_failed"))?;
+        thread::parse_thread_result(&result).map_err(|_| AdapterError::StartFailed("resume_failed"))
     }
 
     /// Перезапустить app-server между ходами с новыми инструкциями.
@@ -1114,7 +1079,6 @@ impl CodexAdapter {
         } else {
             Some(self.prepare_home()?)
         };
-        let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
         let note = match next.mode {
             InstructionMode::Preset => thread::ChangeNote::To {
                 title: next.title.as_str(),
@@ -1136,7 +1100,6 @@ impl CodexAdapter {
             model: model.as_deref(),
             dev: &dev,
             home: new_home.as_ref(),
-            owner_home: owner_home.as_deref(),
         };
         match self.spawn_and_resume(launch, group).await {
             Ok(effective) => {
@@ -1193,7 +1156,7 @@ impl CodexAdapter {
         self.proc = Some(proc);
         self.handshake_base().await?;
         let thread_id = self.thread_id();
-        self.resume_with_fallback(&thread_id, launch).await
+        self.resume_thread(&thread_id, launch).await
     }
 
     /// Запасной запуск со старыми инструкциями и домом после неудачного
@@ -1226,14 +1189,12 @@ impl CodexAdapter {
             mcp::SERVER_INSTRUCTIONS,
             thread::ChangeNote::None,
         );
-        let owner_home = CodexHome::owner_home(&self.cfg, &owner_env(&self.cfg));
         let launch = ResumeLaunch {
             mode,
             launch_mode: previous.mode,
             model: model.as_deref(),
             dev: &dev,
             home: previous_home.as_ref(),
-            owner_home: owner_home.as_deref(),
         };
         match self.spawn_and_resume(launch, group).await {
             Ok(effective) => {
@@ -1287,7 +1248,12 @@ impl CodexAdapter {
             .map_err(home_error)?;
         // Настоящий файл вместо ссылки перестал следовать за настройками владельца.
         if !report.conflicts.is_empty() {
-            self.diagnostic("codex_home_conflict", false);
+            self.events.push_back(AdapterEvent::Diagnostic {
+                kind: "codex_home_conflict",
+                event_type: "codex_home_conflict".into(),
+                required: false,
+                field_names: report.conflicts,
+            });
         }
         Ok(home)
     }
@@ -1670,18 +1636,6 @@ async fn drain_to_eof(proc: &mut AppServerProcess, adapter: &mut CodexAdapter) {
             _ => return,
         }
     }
-}
-
-// В схеме 0.164 нет кода или data отсутствующего треда, поэтому узнаём его по
-// тексту. Варианты — строки бинарника codex-cli 0.164.0; живая ошибка
-// thread/resume ещё не снята (пункт 5 live smoke).
-const MISSING_THREAD_MARKERS: [&str; 2] = ["no rollout found", "not found"];
-
-fn is_missing_thread(error: &RpcError) -> bool {
-    let message = error.message.to_lowercase();
-    MISSING_THREAD_MARKERS
-        .iter()
-        .any(|marker| message.contains(marker))
 }
 
 #[async_trait::async_trait]
