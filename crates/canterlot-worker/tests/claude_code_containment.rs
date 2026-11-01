@@ -40,6 +40,7 @@ sleep 60
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

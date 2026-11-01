@@ -517,6 +517,51 @@ async fn restart_resumes_with_the_same_native_id() {
     second.close().await;
 }
 
+async fn recorded(f: &Fake, name: &str) -> Value {
+    tokio::time::timeout(WAIT, async {
+        loop {
+            // Двойник пишет файл не атомарно: недописанный JSON читается заново.
+            if let Ok(bytes) = std::fs::read(f.dir.path().join(name))
+                && let Ok(value) = serde_json::from_slice(&bytes)
+            {
+                break value;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap()
+}
+
+#[tokio::test]
+async fn delegated_session_starts_the_cli_with_a_strict_mcp_config() {
+    let mut owner = Fake::new(vec![]);
+    owner.start().await;
+    let args = recorded(&owner, "args.json").await;
+    assert!(
+        !args
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--strict-mcp-config")
+    );
+    assert_eq!(recorded(&owner, "connectors.json").await, Value::Null);
+    owner.close().await;
+
+    let mut delegated = Fake::new(vec![]);
+    delegated.spec.isolate_mcp = true;
+    delegated.start().await;
+    let args = recorded(&delegated, "args.json").await;
+    assert!(
+        args.as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a == "--strict-mcp-config")
+    );
+    assert_eq!(recorded(&delegated, "connectors.json").await, "false");
+    delegated.close().await;
+}
+
 #[tokio::test]
 async fn cli_start_failures_have_stable_reasons() {
     let _permit = CLI_GATE.lock().await;

@@ -75,6 +75,7 @@ fn owner_preset_args_keep_owner_configuration() {
         effort: "medium",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -110,6 +111,7 @@ fn one_million_variant_reaches_the_cli_unchanged_on_resume() {
         effort: "medium",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -148,6 +150,7 @@ fn no_preset_passes_bare_setting_sources_or_strict_mcp() {
             effort: "e",
             permission_mode: "owner",
             instructions,
+            isolate_mcp: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -181,6 +184,7 @@ fn custom_preset_writes_instructions_file_0600_and_appends_it() {
         effort: "e",
         permission_mode: "owner",
         instructions: &preset,
+        isolate_mcp: false,
     };
     let args = build_args(&spec, &cfg()).unwrap();
     let s: Vec<String> = args
@@ -233,6 +237,7 @@ fn permission_modes_map_to_cli_values() {
             effort: "e",
             permission_mode: input,
             instructions: &owner,
+            isolate_mcp: false,
         };
         let args = build_args(&spec, &cfg()).unwrap();
         let s: Vec<String> = args
@@ -262,6 +267,7 @@ fn permission_modes_map_to_cli_values() {
         effort: "e",
         permission_mode: "nope",
         instructions: &owner,
+        isolate_mcp: false,
     };
     assert!(build_args(&spec, &cfg()).is_err());
 }
@@ -336,6 +342,7 @@ fn mcp_json_points_relay_at_exec_socket() {
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     fs::create_dir_all(&exec_dir).unwrap();
     write_exec_files(&spec, &cfg(), Path::new("/usr/bin/canterlot-worker")).unwrap();
@@ -382,6 +389,7 @@ printf '%s\n' '{"type":"x"}'
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -464,6 +472,7 @@ head -c 102400 /dev/zero | tr '\0' b 1>&2
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -504,6 +513,7 @@ while :; do sleep 0.1; done
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let mut proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await
@@ -559,6 +569,7 @@ sleep 1
         effort: "e",
         permission_mode: "owner",
         instructions: &owner,
+        isolate_mcp: false,
     };
     let proc = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

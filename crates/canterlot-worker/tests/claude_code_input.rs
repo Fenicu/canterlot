@@ -201,6 +201,7 @@ impl Fake {
             effort: "low",
             permission_mode: "ask",
             instructions: &owner_instructions(),
+            isolate_mcp: false,
         };
         let cli = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
             .await
@@ -1056,6 +1057,7 @@ async fn stdout_reading_survives_cancelled_waits() {
         effort: "e",
         permission_mode: "owner",
         instructions: &owner_instructions(),
+        isolate_mcp: false,
     };
     let mut cli = CliProcess::spawn(&spec, &ClaudeCodeConfig::default(), &group)
         .await

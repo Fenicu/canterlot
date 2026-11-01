@@ -261,6 +261,7 @@ fn clean_preset_args_exclude_owner_files_and_auto_memory() {
         effort: "e",
         permission_mode: "owner",
         instructions: &instructions,
+        isolate_mcp: false,
     };
     let args = build_args(&spec, &ClaudeCodeConfig::default()).unwrap();
     let s: Vec<String> = args
