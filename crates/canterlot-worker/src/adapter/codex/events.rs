@@ -257,6 +257,8 @@ pub struct Translator {
     late_usage_noted: bool,
     /// Последнее закрытое сжатие: повторный финиш того же элемента — дубль, а не эпизод.
     last_compaction_item: Option<String>,
+    /// Сжатие главного потока началось и ещё не закрыто своим `item/completed`.
+    open_compaction: bool,
 }
 
 impl fmt::Debug for Translator {
@@ -311,6 +313,7 @@ impl Translator {
             unattributed_methods: HashSet::new(),
             late_usage_noted: false,
             last_compaction_item: None,
+            open_compaction: false,
         }
     }
 
@@ -662,11 +665,12 @@ impl Translator {
             .as_ref()
             .is_some_and(|(id, _)| *id == turn_id);
         if !active {
-            return vec![if self.active_turn.is_none() {
-                Translated::UntrackedTurnEnded
-            } else {
-                Translated::Ignored
-            }];
+            if self.active_turn.is_some() {
+                return vec![Translated::Ignored];
+            }
+            let mut out = self.close_open_compaction();
+            out.push(Translated::UntrackedTurnEnded);
+            return out;
         }
         // Поздние завершения старого хода не должны переоткрывать блоки.
         let active_command = self.active_turn.as_ref().map(|(_, id)| *id);
@@ -680,11 +684,12 @@ impl Translator {
         let context_exhausted = error
             .as_ref()
             .is_some_and(|e| e.kind == "contextWindowExceeded");
-        let mut out = vec![Translated::TurnCompleted {
+        let mut out = self.close_open_compaction();
+        out.push(Translated::TurnCompleted {
             turn_id,
             status,
             error,
-        }];
+        });
         if context_exhausted {
             out.push(Translated::Event(AdapterEvent::ContextExhausted));
         }
@@ -704,6 +709,7 @@ impl Translator {
             // Ручное сжатие стартует между ходами: активного хода и открытого
             // элемента нет, допуск ему не нужен.
             if item_type == "contextCompaction" {
+                self.open_compaction = true;
                 return self.context_maintenance();
             }
             let known_turn = self
@@ -803,8 +809,9 @@ impl Translator {
             );
             return vec![Translated::Ignored];
         }
+        // Сжатие потомка главный контекст не трогает: эпизод открывает только главный поток.
         if item_type == "contextCompaction" {
-            return self.context_maintenance();
+            return vec![Translated::Ignored];
         }
         if item_type == "subAgentActivity" {
             return self.on_sub_agent_item(item, agent, &model, parent, command_id);
@@ -1039,6 +1046,21 @@ impl Translator {
         })
     }
 
+    /// Ход кончился, а сжатие так и не завершилось: эпизод закрывается отказом, иначе он
+    /// висел бы открытым и запрещал «Отправить сейчас».
+    fn close_open_compaction(&mut self) -> Vec<Translated> {
+        if !std::mem::take(&mut self.open_compaction) {
+            return Vec::new();
+        }
+        self.phase = Phase::Generating;
+        vec![Translated::Event(AdapterEvent::CompactionFinished {
+            manual: false,
+            ok: false,
+            pre_tokens: 0,
+            post_tokens: 0,
+        })]
+    }
+
     fn context_maintenance(&mut self) -> Vec<Translated> {
         self.phase = Phase::ContextMaintenance;
         // Кадры дают только факт сжатия без токенов и триггера: кнопка для Codex
@@ -1067,6 +1089,7 @@ impl Translator {
                 return vec![Translated::Ignored];
             }
             self.last_compaction_item = Some(item_id.to_owned());
+            self.open_compaction = false;
             self.phase = Phase::Generating;
             // После сжатия расход начинается заново: старые проценты не должны пережить границу.
             self.last_context_tokens = 0;

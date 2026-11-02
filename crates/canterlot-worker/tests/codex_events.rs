@@ -1850,3 +1850,75 @@ fn repeated_compaction_completion_is_dropped_once_closed() {
         "duplicate completion must be dropped: {second:?}"
     );
 }
+
+#[test]
+fn child_thread_compaction_start_opens_no_episode() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    translator.feed("thread/started", &child_started());
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-child-1", "turnId": "turn-child-1",
+            "item": {"id": "cc-child", "type": "contextCompaction"}}),
+    );
+    assert!(
+        events_of(&out).is_empty(),
+        "child compaction must not open a main episode: {out:?}"
+    );
+}
+
+fn compaction_started_only() -> Vec<Frame> {
+    // Из записанной фикстуры только старт: кадр завершения так и не пришёл.
+    codex::replay("compaction").into_iter().take(1).collect()
+}
+
+fn finished_compactions(out: &[Translated]) -> Vec<bool> {
+    events_of(out)
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::CompactionFinished { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn main_turn_end_closes_a_compaction_without_its_completion() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let started = feed_frames(&mut translator, &compaction_started_only());
+    assert!(
+        events_of(&started)
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CompactionStarted { .. }))
+    );
+    let out = translator.feed(
+        "turn/completed",
+        &json!({"threadId": "thread-main",
+            "turn": {"id": "turn-main", "status": "interrupted", "items": []}}),
+    );
+    assert_eq!(finished_compactions(&out), vec![false], "{out:?}");
+    let again = translator.feed(
+        "turn/completed",
+        &json!({"threadId": "thread-main",
+            "turn": {"id": "turn-main", "status": "interrupted", "items": []}}),
+    );
+    assert!(finished_compactions(&again).is_empty());
+}
+
+#[test]
+fn untracked_turn_end_closes_a_manual_compaction_without_its_completion() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    feed_frames(&mut translator, &compaction_started_only());
+    let out = translator.feed(
+        "turn/completed",
+        &json!({"threadId": "thread-main",
+            "turn": {"id": "turn-main", "status": "failed", "items": [],
+                "error": {"message": "boom"}}}),
+    );
+    assert_eq!(finished_compactions(&out), vec![false], "{out:?}");
+    assert!(
+        out.iter()
+            .any(|t| matches!(t, Translated::UntrackedTurnEnded))
+    );
+}
