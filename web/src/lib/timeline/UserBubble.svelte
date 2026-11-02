@@ -96,6 +96,7 @@
   let editing = $state(false);
   let editText = $state('');
   let editKept = $state<string[]>([]);
+  let editRevision = $state(1);
   let editBusy = $state(false);
   let editError = $state<string | null>(null);
   let editClosedNote = $state<string | null>(null);
@@ -103,6 +104,7 @@
   function startEdit() {
     editText = input.text;
     editKept = input.attachments.map((file) => file.attachment_id);
+    editRevision = input.revision;
     editError = null;
     editClosedNote = null;
     editing = true;
@@ -117,11 +119,18 @@
     editBusy = true;
     editError = null;
     try {
-      const outcome = await editInput(input, chat.id, editText, editKept, input.revision);
+      const outcome = await editInput(input, chat.id, editText, editKept, editRevision);
       if (outcome === 'saved' || outcome === 'noop') {
         editing = false;
       } else {
         editError = editInputCaption(outcome.reason);
+        if (outcome.reason === 'revision_conflict') {
+          // Показываем текст, который уже сохранила другая сессия, и продолжаем
+          // правку с её ревизией: иначе повтор снова упрётся в конфликт.
+          editText = input.text;
+          editKept = input.attachments.map((file) => file.attachment_id);
+          editRevision = input.revision;
+        }
         if (outcome.reason === 'input_not_queued') {
           editClosedNote = editError;
           editing = false;

@@ -132,6 +132,7 @@
   let editing = $state<Record<string, boolean>>({});
   let editTexts = $state<Record<string, string>>({});
   let editKept = $state<Record<string, string[]>>({});
+  let editRevisions = $state<Record<string, number>>({});
   let editBusy = $state<Record<string, boolean>>({});
   let editErrors = $state<Record<string, string | null>>({});
   let editClosed = $state<Record<string, string | null>>({});
@@ -139,6 +140,7 @@
   function startEdit(input: InputView) {
     editTexts = { ...editTexts, [input.key]: input.text };
     editKept = { ...editKept, [input.key]: input.attachments.map((file) => file.attachment_id) };
+    editRevisions = { ...editRevisions, [input.key]: input.revision };
     editErrors = { ...editErrors, [input.key]: null };
     editClosed = { ...editClosed, [input.key]: null };
     editing = { ...editing, [input.key]: true };
@@ -161,12 +163,21 @@
         chat.id,
         editTexts[input.key] ?? input.text,
         editKept[input.key] ?? input.attachments.map((file) => file.attachment_id),
-        input.revision,
+        editRevisions[input.key] ?? input.revision,
       );
       if (outcome === 'saved' || outcome === 'noop') {
         editing = { ...editing, [input.key]: false };
       } else {
         editErrors = { ...editErrors, [input.key]: editInputCaption(outcome.reason) };
+        if (outcome.reason === 'revision_conflict') {
+          // Показываем текст другой сессии и продолжаем с её ревизией.
+          editTexts = { ...editTexts, [input.key]: input.text };
+          editKept = {
+            ...editKept,
+            [input.key]: input.attachments.map((file) => file.attachment_id)
+          };
+          editRevisions = { ...editRevisions, [input.key]: input.revision };
+        }
         if (outcome.reason === 'input_not_queued') {
           editClosed = { ...editClosed, [input.key]: editErrors[input.key] ?? null };
           editing = { ...editing, [input.key]: false };
