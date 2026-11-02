@@ -65,6 +65,19 @@ const MAX_PENDING_MEDIA: usize = 32;
 const ORPHAN_REAP_PERIOD: Duration = Duration::from_secs(30);
 /// Период снимка участников: он находит потомков, потерявших метку группы.
 const GROUP_RECORD_PERIOD: Duration = Duration::from_secs(5);
+/// Подготовка файла и постановка в очередь: загрузки ещё нет, срок короткий.
+const SHARE_PREPARE_TIMEOUT: Duration = Duration::from_secs(20);
+/// Передача файла: базовый срок и время на размер, крупный файл не обрывается.
+const SHARE_TRANSFER_BASE: Duration = Duration::from_secs(60);
+const SHARE_TRANSFER_PER_MIB: Duration = Duration::from_secs(2);
+const SHARE_TRANSFER_MAX: Duration = Duration::from_secs(15 * 60);
+
+fn share_transfer_timeout(size: u64) -> Duration {
+    let mib = u32::try_from(size / (1024 * 1024)).unwrap_or(u32::MAX);
+    SHARE_TRANSFER_BASE
+        .saturating_add(SHARE_TRANSFER_PER_MIB.saturating_mul(mib))
+        .min(SHARE_TRANSFER_MAX)
+}
 
 struct MediaJob {
     media_id: Uuid,
@@ -954,6 +967,12 @@ impl Supervisor {
                 let pending = self.shares.ready.remove(position).expect("found share");
                 if self.shares.inflight == Some(pending.prepared.id) {
                     self.shares.inflight = None;
+                    // Загрузка на управляющей службе больше не нужна: её задача снимается.
+                    self.send(up::Msg::ShareCancel(
+                        canterlot_proto::worker::ipc::ShareCancel {
+                            share_id: pending.prepared.id.to_string(),
+                        },
+                    ));
                 }
                 let _ =
                     std::fs::remove_file(media::media_path(&self.exec_dir, pending.prepared.id));
@@ -1398,9 +1417,10 @@ impl Supervisor {
             title: args.title.unwrap_or_default(),
             note: args.note.unwrap_or_default(),
         };
-        // Ожидание ответа управляющей службы ограничено: иначе агент ждал бы вечно.
+        // Подготовка и постановка в очередь ограничены коротко; передача получит
+        // свой срок от размера, когда файл действительно пойдёт на хаб.
         self.agent_calls
-            .insert(call_id, Instant::now() + crate::exec::AGENT_CALL_TIMEOUT);
+            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
         if self.share_jobs.send(job).is_ok() {
             self.shares.preparing += 1;
         }
@@ -1458,9 +1478,10 @@ impl Supervisor {
         let Some(next) = self.shares.ready.front() else {
             return;
         };
+        let (share_id, call_id, size) = (next.prepared.id, next.call_id, next.prepared.size);
         let request = canterlot_proto::worker::ipc::ShareUpload {
-            share_id: next.prepared.id.to_string(),
-            call_id: next.call_id.to_string(),
+            share_id: share_id.to_string(),
+            call_id: call_id.to_string(),
             block_id: next.block_id.to_string(),
             name: next.prepared.name.clone(),
             title: next.prepared.title.clone(),
@@ -1471,7 +1492,11 @@ impl Supervisor {
             width: next.prepared.width.unwrap_or_default(),
             height: next.prepared.height.unwrap_or_default(),
         };
-        self.shares.inflight = Some(next.prepared.id);
+        self.shares.inflight = Some(share_id);
+        // Передача крупного файла получает срок от его размера, а не короткий срок подготовки.
+        if let Some(deadline) = self.agent_calls.get_mut(&call_id) {
+            *deadline = Instant::now() + share_transfer_timeout(size);
+        }
         self.send(up::Msg::ShareUpload(request));
     }
 
@@ -3864,6 +3889,64 @@ mod tests {
         assert_eq!(upload.block_id, block_id.to_string());
     }
 
+    #[test]
+    fn share_transfer_deadline_scales_with_size_and_caps() {
+        assert_eq!(share_transfer_timeout(0), Duration::from_secs(60));
+        assert_eq!(
+            share_transfer_timeout(10 * 1024 * 1024),
+            Duration::from_secs(80)
+        );
+        assert_eq!(
+            share_transfer_timeout(u64::MAX),
+            Duration::from_secs(15 * 60)
+        );
+    }
+
+    #[tokio::test]
+    async fn large_share_upload_gets_a_scaled_deadline_and_success_is_honoured() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        let (share_id, call_id, mut pending) = queued_share();
+        pending.prepared.size = 300 * 1024 * 1024;
+        supervisor.shares.ready.push_back(pending);
+        supervisor
+            .agent_calls
+            .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
+        let (tx, mut rx) = mpsc::channel(64);
+        supervisor.conns.insert(0, Conn { tx, attached: true });
+        supervisor.attached = Some(0);
+        supervisor.pump_share();
+        assert!(
+            supervisor.agent_calls[&call_id] > Instant::now() + SHARE_TRANSFER_BASE,
+            "the transfer deadline scales with the file size"
+        );
+        match rx.recv().await.expect("share upload").msg {
+            Some(up::Msg::ShareUpload(request)) => {
+                assert_eq!(request.share_id, share_id.to_string());
+            }
+            other => panic!("expected ShareUpload, got {other:?}"),
+        }
+        // Успех до истечения срока всегда принимается.
+        supervisor
+            .on_share_result(canterlot_proto::worker::ipc::ShareResult {
+                share_id: share_id.to_string(),
+                stored: true,
+                reason: String::new(),
+            })
+            .await
+            .unwrap();
+        assert!(supervisor.shares.ready.is_empty());
+        assert!(!supervisor.agent_calls.contains_key(&call_id));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .agent_call_errors
+                .iter()
+                .any(|(id, code)| *id == call_id && code == "ok"),
+            "the agent is told the file was shared"
+        );
+    }
+
     #[tokio::test]
     async fn expired_share_upload_fails_the_call_and_deletes_the_copy() {
         let (_dir, mut supervisor, state) = test_supervisor();
@@ -3873,6 +3956,9 @@ mod tests {
         supervisor
             .agent_calls
             .insert(call_id, Instant::now() - Duration::from_secs(1));
+        let (tx, mut rx) = mpsc::channel(8);
+        supervisor.conns.insert(0, Conn { tx, attached: true });
+        supervisor.attached = Some(0);
         let copy = media::media_path(&supervisor.exec_dir, share_id);
         std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
         std::fs::write(&copy, b"shared").unwrap();
@@ -3895,6 +3981,12 @@ mod tests {
                 .any(|(id, code)| *id == call_id && code == "hub_timeout"),
             "the agent gets a bounded error, not silence"
         );
+        match rx.recv().await.expect("share cancellation").msg {
+            Some(up::Msg::ShareCancel(cancel)) => {
+                assert_eq!(cancel.share_id, share_id.to_string());
+            }
+            other => panic!("expected ShareCancel, got {other:?}"),
+        }
     }
 
     #[tokio::test]

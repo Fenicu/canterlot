@@ -347,6 +347,13 @@ async fn lookup_done(lookup: &mut Option<Lookup>) -> bool {
     }
 }
 
+async fn steers_done(lookups: &mut JoinSet<(Uuid, bool)>) -> Option<(Uuid, bool)> {
+    if lookups.is_empty() {
+        return std::future::pending().await;
+    }
+    lookups.join_next().await.and_then(Result::ok)
+}
+
 /// Подписка и чтение проекций в отдельной задаче: `next_event` могут бросить в любой момент.
 struct Resync {
     task: tokio::task::JoinHandle<Option<Resynced>>,
@@ -472,8 +479,11 @@ pub struct OpenCodeAdapter {
     translator: Option<Translator>,
     delivery: Delivery,
     lookup: Option<Lookup>,
-    /// Сверка влитого ввода после `Undetermined`: чужой ход не трогает.
-    steer_lookup: Option<Lookup>,
+    /// Сверки влитых вводов после `Undetermined`: у каждой команды своя задача,
+    /// чужой ход они не трогают.
+    steer_lookups: JoinSet<(Uuid, bool)>,
+    /// Вливания без доказательства: их может подтвердить очередь сервера.
+    steer_pending: HashSet<Uuid>,
     shells: Option<ShellList>,
     resync: Option<Resync>,
     held: HeldTools,
@@ -538,7 +548,8 @@ impl OpenCodeAdapter {
             translator: None,
             delivery: Delivery::default(),
             lookup: None,
-            steer_lookup: None,
+            steer_lookups: JoinSet::new(),
+            steer_pending: HashSet::new(),
             shells: None,
             resync: None,
             held: HeldTools::default(),
@@ -1362,6 +1373,19 @@ impl OpenCodeAdapter {
                 {
                     self.prove_late(command);
                 }
+                // Вливания живут отдельно от обычного ввода: очередь сервера
+                // подтверждает любое из них по идентификатору сообщения.
+                let steered = self
+                    .steer_pending
+                    .iter()
+                    .copied()
+                    .find(|command| input::message_id(*command) == id);
+                if let Some(command) = steered {
+                    self.steer_pending.remove(&command);
+                    self.events.push_back(AdapterEvent::InputAccepted {
+                        command_id: command,
+                    });
+                }
             }
             Translated::RunStarted => {
                 self.delivery.stale_terminal = false;
@@ -1478,6 +1502,7 @@ impl OpenCodeAdapter {
         let inputs: Vec<(Uuid, bool)> = [self.delivery.active, self.delivery.unconfirmed]
             .into_iter()
             .flatten()
+            .chain(self.steer_pending.iter().copied())
             .map(|command| {
                 let id = input::message_id(command);
                 (command, reconcile::delivered(&snapshot.messages, &id))
@@ -1629,30 +1654,32 @@ impl OpenCodeAdapter {
     }
 
     /// Сверка влитого ввода: ход чужой, доставку обычного ввода не трогает.
+    /// Своя задача у каждой команды: новая вливка не отменяет прежнюю сверку.
     fn start_steer_lookup(&mut self, command: Uuid) {
         let Some(http) = self.http.clone() else {
             return;
         };
-        let task = tokio::spawn(input::reconcile(
-            http,
-            self.session.clone(),
-            input::message_id(command),
-        ));
-        self.steer_lookup = Some(Lookup { command, task });
+        self.steer_pending.insert(command);
+        let session = self.session.clone();
+        self.steer_lookups.spawn(async move {
+            let found = input::reconcile(http, session, input::message_id(command)).await;
+            (command, found)
+        });
     }
 
     /// Позднее доказательство влитого ввода: только событие для команды вливания.
-    fn on_steer_lookup(&mut self, found: bool) {
-        let Some(lookup) = self.steer_lookup.take() else {
+    fn on_steer_lookup(&mut self, done: Option<(Uuid, bool)>) {
+        let Some((command, found)) = done else {
             return;
         };
-        if found {
+        if found && self.steer_pending.remove(&command) {
             self.events.push_back(AdapterEvent::InputAccepted {
-                command_id: lookup.command,
+                command_id: command,
             });
         }
         // Иначе вливание остаётся неподтверждённым: исход уже отдан как
-        // `Undetermined`, чужой ход и его конец не трогаем.
+        // `Undetermined`, чужой ход и его конец не трогаем. Очередь сервера
+        // может подтвердить его позже по идентификатору сообщения.
     }
 
     fn known_model(&self, model: &str, effort: &str) -> bool {
@@ -2009,7 +2036,7 @@ impl OpenCodeAdapter {
             }
         };
         let lookup = &mut self.lookup;
-        let steer_lookup = &mut self.steer_lookup;
+        let steer_lookups = &mut self.steer_lookups;
         let shells = &mut self.shells;
         let resync = &mut self.resync;
         let kill_at = self.kill_at;
@@ -2024,7 +2051,7 @@ impl OpenCodeAdapter {
             item = item => self.on_stream(item),
             event = broker.next() => self.on_broker(event),
             found = lookup_done(lookup) => self.on_lookup(found),
-            found = lookup_done(steer_lookup) => self.on_steer_lookup(found),
+            found = steers_done(steer_lookups) => self.on_steer_lookup(found),
             list = shells_done(shells) => self.on_shells(list),
             done = resync_done(resync) => self.on_resynced(done),
             () = escalate => {

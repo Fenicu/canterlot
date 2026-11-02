@@ -484,6 +484,73 @@ pub async fn claim_for_send(
     .await
 }
 
+/// Снимает захват команды, которая точно не попала в транспорт. Замок тот же,
+/// что у выдачи и правки: отмена не увидит команду захваченной.
+async fn release_claim(pool: &PgPool, row: &CommandRow) {
+    let id = row.id;
+    let attempt = row.dispatch_attempt;
+    let conversation_id = row.conversation_id;
+    let lock_queue = matches!(row.kind.as_str(), "deliver_input" | "steer_input");
+    let result: Result<(), sqlx::Error> = crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if lock_queue && let Some(conversation_id) = conversation_id {
+                sqlx::query(
+                    "select conversation_id from queue_state where conversation_id = $1 for update",
+                )
+                .bind(conversation_id)
+                .execute(&mut *conn)
+                .await?;
+            }
+            sqlx::query(
+                "update commands set dispatch_claimed_at = null
+                 where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'",
+            )
+            .bind(id)
+            .bind(attempt)
+            .execute(&mut *conn)
+            .await?;
+            Ok(())
+        })
+    })
+    .await;
+    if result.is_err() {
+        eprintln!("outbox_database_error");
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandOff {
+    Sent,
+    Full,
+    Closed,
+}
+
+/// Отдаёт захваченную команду транспорту. При отказе канала (и если эта
+/// попытка ещё не уходила) захват снимается: команда не ушла и её можно отменить.
+pub async fn hand_off(
+    pool: &PgPool,
+    row: &CommandRow,
+    command: Command,
+    sender: &mpsc::Sender<ControlDown>,
+    release: bool,
+) -> HandOff {
+    match sender.try_send(envelope(command)) {
+        Ok(()) => HandOff::Sent,
+        Err(mpsc::error::TrySendError::Closed(_)) => {
+            if release {
+                release_claim(pool, row).await;
+            }
+            HandOff::Closed
+        }
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            if release {
+                release_claim(pool, row).await;
+            }
+            HandOff::Full
+        }
+    }
+}
+
 pub async fn run(
     pool: PgPool,
     registry: Registry,
@@ -698,9 +765,16 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                     continue;
                 }
             };
+            let fresh = !sent.contains_key(&row.id);
             let command = match to_proto_for_connection(&row, &registry, connection) {
                 Ok(command) => command,
-                Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => continue,
+                Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => {
+                    // Команда не попала в транспорт: захват не должен держать отмену.
+                    if fresh {
+                        release_claim(&pool, &row).await;
+                    }
+                    continue;
+                }
                 Err(error) => {
                     let reason = match error {
                         OutboxError::ResourceLimit => "resource_limit",
@@ -717,8 +791,8 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                     continue;
                 }
             };
-            match sender.try_send(envelope(command)) {
-                Ok(()) => {
+            match hand_off(&pool, &row, command, &sender, fresh).await {
+                HandOff::Sent => {
                     let resent = sent.contains_key(&row.id);
                     if resent {
                         tracing::info!(kind = "outbox_resend", command_id = %row.id, machine_id = %machine, "command resent");
@@ -732,8 +806,8 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
                         },
                     );
                 }
-                Err(mpsc::error::TrySendError::Closed(_)) => break,
-                Err(mpsc::error::TrySendError::Full(_)) => {
+                HandOff::Closed => break,
+                HandOff::Full => {
                     if let Some(item) = sent.get_mut(&row.id) {
                         item.deadline = Instant::now() + timers.dispatch_sweep;
                     }

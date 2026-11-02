@@ -1547,3 +1547,66 @@ async fn replays_wait_for_queue_lock(pool: PgPool) -> TestResult {
     assert_eq!(snapshot(&pool, seed.conversation_id).await, before);
     Ok(())
 }
+
+#[sqlx::test(migrations = "./migrations")]
+async fn closed_outbox_channel_releases_a_steer_so_cancel_succeeds(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    running(&pool, &seed).await;
+    let first = input(&pool, &seed).await;
+    let second = input(&pool, &seed).await;
+    dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first.command_id).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second.input_id).await?
+    else {
+        panic!("send now must create a steer");
+    };
+    let row: canterlot_hub::outbox::CommandRow = sqlx::query_as(
+        "select id, machine_id, conversation_id, execution_id, execution_generation,
+                kind, payload, dispatch_attempt
+         from commands where id = $1",
+    )
+    .bind(steer_command_id)
+    .fetch_one(&pool)
+    .await?;
+    let claimed = canterlot_hub::outbox::claim_for_send(&pool, &row)
+        .await?
+        .expect("steer is still pending");
+    let command = canterlot_hub::outbox::to_proto(&claimed)?;
+    // Канал уже закрыт: команда точно не попала в транспорт.
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    drop(rx);
+    assert!(matches!(
+        canterlot_hub::outbox::hand_off(&pool, &claimed, command, &tx, true).await,
+        canterlot_hub::outbox::HandOff::Closed
+    ));
+    assert_eq!(
+        cancel_input(
+            &pool,
+            seed.owner_id,
+            second.input_id,
+            "cancel-closed",
+            Uuid::now_v7()
+        )
+        .await?,
+        CancelOutcome::Cancelled
+    );
+    let (delivery, result): (String, Option<Value>) =
+        sqlx::query_as("select delivery_state, result from commands where id = $1")
+            .bind(steer_command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(delivery, "completed");
+    assert_eq!(result.unwrap()["cancelled"], json!(true));
+    assert!(
+        canterlot_hub::outbox::claim_for_send(&pool, &row)
+            .await?
+            .is_none(),
+        "cancelled steer is never sent"
+    );
+    Ok(())
+}
