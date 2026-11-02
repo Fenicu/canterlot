@@ -29,7 +29,7 @@ pub struct CompactionView {
 }
 
 fn invalid(what: &str) -> sqlx::Error {
-    sqlx::Error::InvalidArgument(format!("invalid compaction fact: {what}").into())
+    sqlx::Error::InvalidArgument(format!("invalid compaction fact: {what}"))
 }
 
 fn time(value: DateTime<Utc>) -> String {

@@ -308,10 +308,10 @@ impl ClaudeCodeAdapter {
                     AdapterEvent::BackgroundWork { .. } => {
                         self.background_changed = Some(Instant::now());
                     }
-                    AdapterEvent::CompactionFinished { ok, .. } => {
-                        if self.compact_pending.take().is_some() {
-                            self.events.push_back(AdapterEvent::Compacted { ok: *ok });
-                        }
+                    AdapterEvent::CompactionFinished { ok, .. }
+                        if self.compact_pending.take().is_some() =>
+                    {
+                        self.events.push_back(AdapterEvent::Compacted { ok: *ok });
                     }
                     _ => {}
                 }
