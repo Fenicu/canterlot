@@ -157,7 +157,7 @@ stateDiagram-v2
 | `fatal_error` | фатальная ошибка | исполнение `failed` либо фатальная ошибка адаптера | `continue_queue` | нет |
 | `process_exited` | завершение процесса | исполнение терминально не по запросу пользователя, в т.ч. перезагрузка машины (`machine_rebooted`) | `continue_queue` | нет |
 | `limit_reached(provider, window, resets_at)` | исчерпание лимита вне «кранча»; поля необязательны для старых записей | факт адаптера `limit_reached` | `continue_queue` | нет |
-| `unconfirmed_delivery(input_id)` | неподтверждённый приём | ввод перешёл в `acceptance_unconfirmed` | автоматически при `acceptance_proven` этого ввода; иначе `continue_queue` без повтора ввода | нет |
+| `unconfirmed_delivery(input_id)` | неподтверждённый приём | ввод перешёл в `acceptance_unconfirmed` | автоматически при `acceptance_proven` этого ввода или при `retry_as_new` по нему; иначе `continue_queue` без повтора ввода | нет |
 | `owner_lost` | потерян владелец процесса | исполнение перешло в `owner_lost` | автоматически при `ownership_reclaimed` ([execution.md](execution.md) §1, E-4); иначе `continue_queue`, в том числе составной из `resume_and_continue` | исполнение вышло из `owner_lost` (§9.5 завершён или владение доказано). Выход в `failed` или `stopped` паузу не снимает: рядом появляется `fatal_error` или `process_exited`, и обе причины уходят одним `continue_queue` |
 | `restore_pending` | выполнен restore БД | старт хаба в режиме restore (§18.1 п. 2) | `continue_queue` | машина разговора сверена в новом поколении, команды разговора классифицированы (§18.1 п. 4–5) |
 
