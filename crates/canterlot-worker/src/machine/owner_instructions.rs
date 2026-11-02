@@ -456,22 +456,15 @@ pub fn read_one(
         }
         let projects_base = canonical_base(&roots.claude_config_dir.join("projects"));
         let Ok(dir_canon) = std::fs::canonicalize(&dir) else {
+            let leaf = if kind == KIND_MEMORY_INDEX {
+                "MEMORY.md"
+            } else {
+                name
+            };
             return OwnerInstructionsFile {
                 request_id: request_id.into(),
                 kind: kind.into(),
-                path: dir
-                    .join(if kind == KIND_MEMORY_INDEX {
-                        "MEMORY.md"
-                    } else {
-                        name
-                    })
-                    .to_string_lossy()
-                    .into_owned(),
-                files: if kind == KIND_MEMORY_INDEX {
-                    Vec::new()
-                } else {
-                    Vec::new()
-                },
+                path: dir.join(leaf).to_string_lossy().into_owned(),
                 ..Default::default()
             };
         };
