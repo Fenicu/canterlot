@@ -7,8 +7,8 @@
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, StartSpec, SteerOutcome,
-        Transmission, TransmitOutcome,
+        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, Phase, StartSpec,
+        SteerOutcome, Transmission, TransmitOutcome,
         codex::{CodexCatalog, input::model_entries},
     },
     config::CodexConfig,
@@ -3213,4 +3213,79 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
         "adapter must call the app-server method"
     );
     fake.close().await;
+}
+
+/// Ручное сжатие ходом: `turn/started`, затем кадры элемента и конец хода.
+fn compaction_turn(item: bool, status: &str) -> Vec<String> {
+    let mut lines = handshake("thread-main");
+    lines.push(w_in(10, "thread/compact/start", json!({})));
+    lines.push(w_out(json!({"id": 10, "result": {}})));
+    lines.push(w_out(json!({"method": "turn/started",
+        "params": {"threadId": "thread-main", "turn": {"id": "turn-cc", "status": "inProgress", "items": []}}})));
+    if item {
+        lines.push(w_out(json!({"method": "item/started",
+            "params": {"threadId": "thread-main", "turnId": "turn-cc",
+                "item": {"id": "cc-1", "type": "contextCompaction"}}})));
+        lines.push(w_out(json!({"method": "item/completed",
+            "params": {"completedAtMs": 2, "threadId": "thread-main", "turnId": "turn-cc",
+                "item": {"id": "cc-1", "type": "contextCompaction"}}})));
+    }
+    lines.push(w_out(json!({"method": "turn/completed",
+        "params": {"threadId": "thread-main",
+            "turn": {"id": "turn-cc", "status": status, "items": []}}})));
+    lines
+}
+
+async fn compaction_events(lines: Vec<String>) -> Vec<AdapterEvent> {
+    use canterlot_worker::adapter::CompactOutcome;
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.compact(Uuid::now_v7()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CompactOutcome::Accepted));
+    let mut events = Vec::new();
+    loop {
+        let event = tokio::time::timeout(Duration::from_secs(5), fake.adapter.next_event())
+            .await
+            .expect("the compaction ends in time");
+        let done = matches!(event, AdapterEvent::Compacted { .. });
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    fake.close().await;
+    events
+}
+
+#[tokio::test]
+async fn compaction_turn_releases_the_command_at_its_end() {
+    let events = compaction_events(compaction_turn(true, "completed")).await;
+    let idle = events
+        .iter()
+        .position(|e| {
+            matches!(
+                e,
+                AdapterEvent::Phase {
+                    phase: Phase::AwaitingInput,
+                    ..
+                }
+            )
+        })
+        .expect("the compaction turn ends");
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Compacted { ok: true }))
+            && idle + 1 < events.len(),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn compaction_turn_without_its_item_is_a_failure() {
+    let events = compaction_events(compaction_turn(false, "failed")).await;
+    assert!(
+        matches!(events.last(), Some(AdapterEvent::Compacted { ok: false })),
+        "{events:?}"
+    );
 }
