@@ -1,8 +1,14 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { resolve } from '$app/paths';
 	import { delegation } from '#lib/api/client.js';
 	import { modelLabel } from '#lib/format/labels.js';
+	import type { Runtime } from '#lib/app/runtime.js';
+	import { getRuntime } from '#lib/app/runtime.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
+	import { browserRuntime } from './open.js';
+	import { activityLine, type Activity } from '#lib/screens/sessions/activityText.js';
+	import type { ListRow } from '#lib/stores/list.svelte.js';
 	import { groupDelegation, latestTurnStart, mergeNodes, subagentVerb, type DelegationNode } from '#lib/stores/delegation.js';
 	import { isMainAgent, toolTitle } from '#lib/timeline/present.js';
 	import Icon from '#lib/ui/Icon.svelte';
@@ -24,14 +30,43 @@
 
 	let serverNodes = $state<DelegationNode[]>([]);
 	let expanded = $state(false);
+	let sessionsExpanded = $state(false);
 	const listId = $props.id();
+
+	let runtime = $state<Runtime | null>(null);
+	try {
+		runtime = getRuntime();
+	} catch {
+		runtime = null;
+	}
 
 	const nodes = $derived(mergeNodes(serverNodes, liveNodes(chat)));
 	const groups = $derived(groupDelegation(nodes, latestTurnStart(chat.blocks.values())));
 	const sessionTitle = $derived((chat.detail?.title as string) || 'Сессия');
 	const olderLabel = $derived(`Завершённые · ${groups.older.length}${groups.interrupted > 0 ? `, прервано ${groups.interrupted}` : ''}`);
 
+	// Делегированные сессии живут в общем списке и обновляются его событиями.
+	const sessions = $derived(
+		runtime ? [...runtime.list.items.values()].filter((row) => row.parent_id === chat.id) : []
+	);
+	const sessionDone = (row: ListRow): boolean =>
+		row.activity.state === 'stopped' || row.activity.state === 'failed';
+	const shownSessions = $derived(
+		sessions.filter((row) => !sessionDone(row)).sort((a, b) => a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id))
+	);
+	const olderSessions = $derived(
+		sessions
+			.filter(sessionDone)
+			.sort((a, b) => (b.last_activity_at ?? b.created_at).localeCompare(a.last_activity_at ?? a.created_at))
+	);
+	const sessionsLabel = $derived(`Завершённые · ${olderSessions.length}`);
+
 	onMount(async () => {
+		try {
+			runtime ??= await browserRuntime();
+		} catch {
+			// список недоступен: остаются узлы живой ленты
+		}
 		try {
 			const res = await delegation(chat.id);
 			if (res.data && Array.isArray(res.data)) serverNodes = res.data as DelegationNode[];
@@ -55,6 +90,11 @@
 		if (text === 'Готово') return 'muted';
 		if (text === 'Прервано' || text === 'Ошибка') return 'danger';
 		return 'accent';
+	}
+
+	function sessionLine(row: ListRow): { text: string; tone: string } {
+		const line = activityLine(row.activity as Activity, { now: Date.now() });
+		return { text: line.text, tone: line.tone === 'default' ? 'muted' : line.tone };
 	}
 </script>
 
@@ -80,6 +120,18 @@
 	{/if}
 {/snippet}
 
+{#snippet sessionRow(row: ListRow)}
+	<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
+	<a class="tree-node" href={resolve(`/c/${row.id}` as '/')}>
+		<span class="branch">└</span>
+		<span class="grow node-info">
+			<span class="session-name">{row.title}</span>
+			<span class="subagent-model">· {modelLabel(row.model)}</span>
+		</span>
+		<span class={sessionLine(row).tone}>{sessionLine(row).text}</span>
+	</a>
+{/snippet}
+
 <div class="tree">
 	<div class="tree-root">{sessionTitle}</div>
 
@@ -100,6 +152,26 @@
 			</div>
 		{/if}
 	{/if}
+
+	{#if sessions.length > 0}
+		<div class="tree-root sessions-title">Сессии</div>
+		{#each shownSessions as row (row.id)}
+			{@render sessionRow(row)}
+		{/each}
+		{#if olderSessions.length > 0}
+			<button type="button" class="tree-node older-toggle" aria-expanded={sessionsExpanded} onclick={() => (sessionsExpanded = !sessionsExpanded)}>
+				<span class="grow">{sessionsLabel}</span>
+				<span class="chevron"><Icon name="chevron" /></span>
+			</button>
+			{#if sessionsExpanded}
+				<div class="older">
+					{#each olderSessions as row (row.id)}
+						{@render sessionRow(row)}
+					{/each}
+				</div>
+			{/if}
+		{/if}
+	{/if}
 </div>
 
 <style>
@@ -115,6 +187,9 @@
 		padding: var(--s1) var(--s3);
 		font-size: var(--fs-meta);
 		font-weight: var(--weight-medium);
+	}
+	.sessions-title {
+		margin-top: var(--s2);
 	}
 	.tree-node {
 		display: flex;

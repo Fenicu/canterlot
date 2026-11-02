@@ -31,6 +31,8 @@ export interface ListRow {
   pinned: boolean;
   archived: boolean;
   groups: string[];
+  parent_id: string | null;
+  spawn_depth: number;
   machine: { id: string; name: string };
   harness: { id: string; title: string; provider: string };
   workdir: string;
@@ -77,6 +79,8 @@ const ATTRIBUTES = [
   "pinned",
   "archived",
   "groups",
+  "parent_id",
+  "spawn_depth",
   "machine",
   "harness",
   "workdir",
@@ -277,6 +281,8 @@ function rowFromCreated(payload: {
   pinned: boolean;
   archived: boolean;
   groups: string[];
+  parent_id?: string | null;
+  spawn_depth?: number;
   machine: { id: string; name: string };
   harness: { id: string; title: string; provider: string };
   workdir: string;
@@ -290,7 +296,12 @@ function rowFromCreated(payload: {
   crunch: { enabled: boolean };
   last_activity_at: string | null;
 }): ListRow {
-  return { ...payload, activity: payload.activity };
+  return {
+    parent_id: null,
+    spawn_depth: 0,
+    ...payload,
+    activity: payload.activity,
+  };
 }
 
 function rowFromUpdated(payload: {
@@ -305,8 +316,12 @@ function rowFromUpdated(payload: {
   harness: ListRow["harness"];
   workdir: string;
   created_at: string;
+  parent_id?: string | null;
+  spawn_depth?: number;
 }): ListRow {
   return {
+    parent_id: null,
+    spawn_depth: 0,
     ...payload,
     model: "",
     effort: "",

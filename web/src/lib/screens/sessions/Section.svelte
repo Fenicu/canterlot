@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ListRow } from '#lib/stores/list.svelte.js';
+  import type { TreeNode } from './grouping';
   import Icon from '#lib/ui/Icon.svelte';
   import SessionRow from './SessionRow.svelte';
 
@@ -13,20 +13,47 @@
     current = '',
     heading = true,
     ontoggle,
+    ontoggleKids,
     onopen
   }: {
     id: string;
     title: string;
     count: number;
-    items: ListRow[];
+    items: TreeNode[];
     collapsed: boolean;
     now: number;
     current?: string;
     heading?: boolean;
     ontoggle: (id: string) => void;
+    ontoggleKids: (id: string) => void;
     onopen: (id: string) => void;
   } = $props();
 </script>
+
+{#snippet branch(node: TreeNode)}
+  {#if node.children.length > 0}
+    {@const label = node.open
+      ? `Свернуть делегированные: ${node.children.length}`
+      : `Развернуть делегированные: ${node.children.length}`}
+    <button
+      type="button"
+      class="kids depth-{Math.min(node.depth + 1, 2)}"
+      aria-expanded={node.open}
+      aria-label={label}
+      onclick={() => ontoggleKids(node.item.id)}
+    >
+      <span class="stem" aria-hidden="true">└</span>
+      <span class="kids-title">Делегированные · {node.children.length}{#if node.running > 0}<span> · работает {node.running}</span>{/if}</span>
+      <span class="chevron" class:open={node.open}><Icon name="chevron" /></span>
+    </button>
+    {#if node.open}
+      {#each node.children as child (child.item.id)}
+        <SessionRow item={child.item} {now} depth={child.depth} current={child.item.id === current} {onopen} />
+        {@render branch(child)}
+      {/each}
+    {/if}
+  {/if}
+{/snippet}
 
 <section>
   {#if heading}
@@ -39,8 +66,9 @@
     </h2>
   {/if}
   {#if !heading || !collapsed}
-    {#each items as item (item.id)}
-      <SessionRow {item} {now} current={item.id === current} {onopen} />
+    {#each items as node (node.item.id)}
+      <SessionRow item={node.item} {now} depth={node.depth} current={node.item.id === current} {onopen} />
+      {@render branch(node)}
     {/each}
   {/if}
 </section>
@@ -64,4 +92,13 @@
   .chevron.open { transform: rotate(90deg); }
   .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .count { flex: none; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .kids {
+    min-height: var(--target);
+    color: var(--muted);
+    font-size: var(--fs-meta);
+  }
+  .kids.depth-1 { padding-left: calc(var(--gutter) + var(--s9)); }
+  .kids.depth-2 { padding-left: calc(var(--gutter) + var(--s10) + var(--s4)); }
+  .stem { color: var(--accent-link); font-family: var(--font-mono); }
+  .kids-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 </style>

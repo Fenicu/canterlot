@@ -24,6 +24,7 @@
 	import { acceptSession } from './controls';
 	import { errorText } from '#lib/api/errors.js';
 	import SessionSheet from '#lib/screens/sessions/SessionSheet.svelte';
+	import { childLive } from '#lib/screens/sessions/grouping.js';
 	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ProviderLimits, LimitThresholds } from '#lib/stores/limits.js';
 	import type { MachineRecord } from '#lib/stores/machines.svelte.js';
@@ -81,6 +82,10 @@
 	let showDelegation = $state(false);
 	let showSheet = $state(false);
 	const listRow = $derived(runtime?.list.items.get(chat.id) ?? null);
+	const childSessions = $derived(
+		runtime ? [...runtime.list.items.values()].filter((row) => row.parent_id === chat.id) : []
+	);
+	const childRunning = $derived(childSessions.filter(childLive).length);
 	const parentTitle = $derived.by(() => {
 		const parentId = (chat.detail as AcceptDetail | null)?.parent_id;
 		return parentId ? (runtime?.list.items.get(parentId)?.title ?? null) : null;
@@ -146,6 +151,8 @@
 			showAccept = true;
 		}}
 		{parentTitle}
+		childRunning={childRunning}
+		hasChildren={childSessions.length > 0}
 	/>
 
 	<Timeline

@@ -2380,6 +2380,8 @@ function sampleRow(id: string): ListRow {
     pinned: false,
     archived: false,
     groups: [],
+    parent_id: null,
+    spawn_depth: 0,
     machine: { id: "m", name: "dev" },
     harness: { id: "claude", title: "Claude", provider: "anthropic" },
     workdir: "/work",

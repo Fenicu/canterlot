@@ -18,6 +18,8 @@ export function seedConversation(api: FakeHubApi, patch: Partial<ListRow> = {}):
 		pinned: false,
 		archived: false,
 		groups: [],
+		parent_id: null,
+		spawn_depth: 0,
 		machine: { id: api.id(), name: 'dev' },
 		harness: { id: 'claude', title: 'Claude', provider: 'anthropic' },
 		workdir: '/work',
