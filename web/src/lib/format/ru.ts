@@ -85,6 +85,16 @@ export const fmt = {
 	tokens(n: number): string {
 		return grouped(n);
 	},
+	/** Коротко для строк ленты: «980 тыс.», «1 млн», «640». */
+	tokensShort(n: number): string {
+		const short = (value: number, unit: string): string => {
+			const text = Number.isInteger(value) ? String(value) : value.toFixed(1).replace('.', ',');
+			return `${text} ${unit}`;
+		};
+		if (n >= 1_000_000) return short(Math.round(n / 100_000) / 10, 'млн');
+		if (n >= 1_000) return short(Math.round(n / 100) / 10, 'тыс.');
+		return grouped(n);
+	},
 	bytes(n: number): string {
 		const units = ['Б', 'КиБ', 'МиБ', 'ГиБ'];
 		let value = n;

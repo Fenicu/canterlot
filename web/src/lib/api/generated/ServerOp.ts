@@ -53,7 +53,10 @@ export type ServerOp =
         | PhaseChanged
         | Oversized
         | QueueResumed
-        | InstructionPresetChanged;
+        | InstructionPresetChanged
+        | CompactionStarted
+        | CompactionFinished
+        | ContextChanged;
     }
   | {
       op: "resync_required";
@@ -1159,4 +1162,56 @@ export interface PresetOrigin {
   conversation_id: Uuid | null;
   conversation_title: string | null;
   at?: Time | null;
+}
+export interface CompactionStarted {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "compaction_started";
+  payload: {
+    id: Uuid;
+    trigger: string;
+  };
+}
+export interface CompactionFinished {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "compaction_finished";
+  payload: {
+    id: Uuid;
+    trigger: string;
+    ok: boolean;
+  };
+}
+export interface ContextChanged {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "context_changed";
+  payload: {
+    tokens: number | null;
+    window_tokens: number | null;
+  };
 }

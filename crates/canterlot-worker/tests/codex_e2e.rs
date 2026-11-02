@@ -3046,3 +3046,50 @@ async fn live_smoke() {
     .expect("live close works");
     eprintln!("SMOKE: done");
 }
+
+#[tokio::test]
+async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
+    use canterlot_worker::adapter::CompactOutcome;
+    let mut lines = handshake("thread-main");
+    lines.push(w_in(10, "thread/compact/start", json!({})));
+    lines.push(w_out(json!({"id": 10, "result": {}})));
+    lines.push(w_out(json!({"method": "item/started",
+        "params": {"threadId": "thread-main", "turnId": "turn-main",
+            "item": {"id": "cc-1", "type": "contextCompaction"}}})));
+    lines.push(w_out(json!({"method": "item/completed",
+        "params": {"completedAtMs": 2, "threadId": "thread-main", "turnId": "turn-main",
+            "item": {"id": "cc-1", "type": "contextCompaction"}}})));
+    let mut fake = Fake::new(lines);
+    fake.start().await;
+    let outcome = tokio::time::timeout(WAIT, fake.adapter.compact(Uuid::now_v7()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CompactOutcome::Accepted));
+    let mut finished = None;
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(2), fake.adapter.next_event()).await {
+            Ok(AdapterEvent::CompactionFinished {
+                manual,
+                ok,
+                pre_tokens,
+                post_tokens,
+            }) => {
+                finished = Some((manual, ok, pre_tokens, post_tokens));
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        finished,
+        Some((true, true, 0, 0)),
+        "manual episode must finish"
+    );
+    assert!(
+        fake.stdin_methods()
+            .contains(&"thread/compact/start".to_owned()),
+        "adapter must call the app-server method"
+    );
+    fake.close().await;
+}

@@ -33,6 +33,9 @@ use std::{
 use tokio::time::{Instant, timeout, timeout_at};
 use uuid::Uuid;
 
+/// Сколько кнопочное сжатие ждёт `compact_boundary`, прежде чем признать отказ.
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
+
 pub struct ClaudeCodeAdapter {
     cfg: ClaudeCodeConfig,
     exec_dir: PathBuf,
@@ -74,6 +77,8 @@ pub struct ClaudeCodeAdapter {
     /// `DeferredRestartDue` уже отдан; сбрасывается новым кадром CLI.
     deferred_due: bool,
     background_changed: Option<Instant>,
+    /// Кнопка «Сжать контекст» отправила `/compact` и ждёт `compact_boundary`.
+    compact_pending: Option<(Uuid, Instant)>,
 }
 
 impl ClaudeCodeAdapter {
@@ -118,6 +123,7 @@ impl ClaudeCodeAdapter {
             deferred: None,
             deferred_due: false,
             background_changed: None,
+            compact_pending: None,
         }
     }
 
@@ -301,6 +307,11 @@ impl ClaudeCodeAdapter {
                     }
                     AdapterEvent::BackgroundWork { .. } => {
                         self.background_changed = Some(Instant::now());
+                    }
+                    AdapterEvent::CompactionFinished { ok, .. }
+                        if self.compact_pending.take().is_some() =>
+                    {
+                        self.events.push_back(AdapterEvent::Compacted { ok: *ok });
                     }
                     _ => {}
                 }
@@ -1065,6 +1076,27 @@ async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Opt
     }
 }
 
+impl ClaudeCodeAdapter {
+    /// Просроченное сжатие — отказ: граница так и не пришла, висеть вечно нельзя.
+    fn compact_timed_out(&mut self) -> bool {
+        if self
+            .compact_pending
+            .is_some_and(|(_, until)| Instant::now() >= until)
+        {
+            self.compact_pending = None;
+            self.events.push_back(AdapterEvent::Compacted { ok: false });
+            self.events.push_back(AdapterEvent::CompactionFinished {
+                manual: true,
+                ok: false,
+                pre_tokens: 0,
+                post_tokens: 0,
+            });
+            return true;
+        }
+        false
+    }
+}
+
 #[async_trait::async_trait]
 impl Adapter for ClaudeCodeAdapter {
     fn isolates_mcp(&self) -> bool {
@@ -1231,6 +1263,43 @@ impl Adapter for ClaudeCodeAdapter {
         }
     }
 
+    /// Сжатие по кнопке: `/compact` уходит вводом через stream-json между ходами,
+    /// итог приходит границей `compact_boundary` и доводится `Compacted`.
+    async fn compact(&mut self, command: Uuid) -> CompactOutcome {
+        if self.compact_pending.is_some() {
+            return CompactOutcome::NotApplicable;
+        }
+        let turn_busy = self
+            .queue
+            .as_ref()
+            .is_some_and(|queue| queue.active().is_some())
+            || self.parser.wake_turn_open();
+        if turn_busy {
+            return CompactOutcome::NotApplicable;
+        }
+        let Some(cli) = self.cli.as_mut() else {
+            return CompactOutcome::Failed;
+        };
+        if self.exited || self.eof || !self.cli_ready {
+            return CompactOutcome::Failed;
+        }
+        let line = serde_json::json!({
+            "type": "user",
+            "uuid": command.to_string(),
+            "message": {"role": "user", "content": "/compact"},
+            "parent_tool_use_id": serde_json::Value::Null,
+        });
+        if !matches!(
+            timeout(self.deadline, cli.write_line(&line)).await,
+            Ok(Ok(()))
+        ) {
+            return CompactOutcome::Failed;
+        }
+        self.parser.mark_compact_manual();
+        self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
+        CompactOutcome::Accepted
+    }
+
     async fn interrupt(&mut self) -> InterruptOutcome {
         if self.exited || self.eof {
             return InterruptOutcome::NotApplicable;
@@ -1269,6 +1338,7 @@ impl Adapter for ClaudeCodeAdapter {
     }
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
+            self.compact_timed_out();
             if let Some(event) = self.events.pop_front() {
                 return event;
             }

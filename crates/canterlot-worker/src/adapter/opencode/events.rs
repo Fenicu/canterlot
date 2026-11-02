@@ -24,6 +24,8 @@ pub const RETRY_SUMMARY: &str = "retry";
 const UNNAMED_CHILD: &str = "subagent";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
+/// Шаг живого расхода контекста между записями `ContextProgress`.
+const CONTEXT_PROGRESS_STEP: u64 = 10_000;
 const SUMMARY_BYTES: usize = 240;
 const BLOCK_NAMESPACE: Uuid = Uuid::from_u128(0x7c1e_52a0_9d3b_4f6e_8a21_3b5d_c04e_91f7);
 
@@ -265,6 +267,8 @@ pub struct Translator {
     /// Ключ — пара (модель, агент).
     usage: BTreeMap<(String, String), Tally>,
     context_tokens: u64,
+    /// Живой расход, уже отданный `ContextProgress`.
+    progress_sent: u64,
     windows: HashMap<String, u64>,
     unknown: HashSet<String>,
 }
@@ -433,6 +437,7 @@ impl Translator {
             tools: HashMap::new(),
             usage: BTreeMap::new(),
             context_tokens: 0,
+            progress_sent: 0,
             windows,
             unknown: HashSet::new(),
         }
@@ -585,6 +590,8 @@ impl Translator {
 
     pub fn finish_run(&mut self, command: Uuid) -> AdapterEvent {
         self.command = None;
+        // Живой учёт следующего хода начинается заново: итог ушёл в `RunFinished`.
+        self.progress_sent = 0;
         // Фоновый потомок работает дальше: его блоки и инструменты ещё закончатся.
         self.steps.retain(|_, step| step.child);
         self.open.retain(|_, block| block.child);
@@ -667,7 +674,14 @@ impl Translator {
                 }]
             }
             "session.retry.scheduled" => Self::on_retry(data),
-            "session.compaction.started" => vec![Self::phase(Phase::ContextMaintenance, None)],
+            "session.compaction.started" => {
+                // Кнопка для OpenCode шлёт `POST .../compact` с `reason: manual`.
+                let manual = string_field(data, "reason") == "manual";
+                vec![
+                    Self::phase(Phase::ContextMaintenance, None),
+                    Translated::Event(AdapterEvent::CompactionStarted { manual }),
+                ]
+            }
             "session.compaction.ended" | "session.compaction.failed" => {
                 self.on_compaction_ended(kind, data)
             }
@@ -734,12 +748,20 @@ impl Translator {
         }
         let failed = (kind == "session.compaction.failed")
             .then(|| RunFailure::from_error(data.get("error")));
+        let manual = string_field(data, "reason") == "manual";
+        // После сжатия расход начинается заново: старые проценты не должны пережить границу.
+        self.context_tokens = 0;
+        self.progress_sent = 0;
         vec![
             Self::phase(Phase::Generating, None),
-            Translated::CompactionEnded {
-                failed,
-                manual: string_field(data, "reason") == "manual",
-            },
+            Translated::Event(AdapterEvent::CompactionFinished {
+                manual,
+                ok: failed.is_none(),
+                // Кадры дают расход самого вызова сжатия, а не размер до него: цифры нет.
+                pre_tokens: 0,
+                post_tokens: 0,
+            }),
+            Translated::CompactionEnded { failed, manual },
         ]
     }
 
@@ -876,6 +898,18 @@ impl Translator {
             let count =
                 |pointer: &str| tokens.pointer(pointer).and_then(Value::as_u64).unwrap_or(0);
             self.context_tokens = count("/input") + count("/cache/read") + count("/cache/write");
+            // Живой расход в ходу: реже журнала, иначе болтливый ход зальёт хаб.
+            if self.context_tokens >= self.progress_sent + CONTEXT_PROGRESS_STEP {
+                self.progress_sent = self.context_tokens;
+                return vec![Translated::Event(AdapterEvent::ContextProgress {
+                    context_tokens: self.context_tokens,
+                    context_window_tokens: self
+                        .windows
+                        .get(&self.model)
+                        .copied()
+                        .unwrap_or_default(),
+                })];
+            }
         }
         Vec::new()
     }

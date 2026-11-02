@@ -4,6 +4,7 @@
   import { loadConfig } from '#lib/api/config.js';
   import { clock } from '#lib/clock.js';
   import AttachmentTray from '#lib/composer/AttachmentTray.svelte';
+  import ContextIndicator from '#lib/composer/ContextIndicator.svelte';
   import InterruptButton from '#lib/composer/InterruptButton.svelte';
   import SendLater from '#lib/composer/SendLater.svelte';
   import { bindDraft } from '#lib/composer/draftBinding.js';
@@ -221,6 +222,7 @@
       onkeydown={onKey}
     ></textarea>
     <span class="attach"><IconButton icon="attach" label="Прикрепить файл" onclick={() => file?.click()} /></span>
+    <ContextIndicator {chat} />
     <span class="extras"><InterruptButton show={showInterrupt} label={model.interruptLabel} onclick={() => model.interrupt()} /></span>
     {#if !touch}
       <button
@@ -270,8 +272,8 @@
   .composer { display: flex; flex-direction: column; gap: var(--s2); padding: var(--s3) var(--gutter) max(var(--s4), env(safe-area-inset-bottom)); min-width: 0; position: relative; }
   .capsule {
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto auto;
-    grid-template-areas: 'input input input input' 'attach extras clock send';
+    grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+    grid-template-areas: 'input input input input input' 'attach context extras clock send';
     align-items: center;
     gap: var(--s2);
     min-width: 0;
@@ -280,7 +282,7 @@
     background: var(--surface);
   }
   .capsule:has(:global(.tray)) {
-    grid-template-areas: 'tray tray tray tray' 'input input input input' 'attach extras clock send';
+    grid-template-areas: 'tray tray tray tray tray' 'input input input input input' 'attach context extras clock send';
   }
   .capsule:has(textarea:focus-visible) { outline: var(--focus-width) solid var(--accent); outline-offset: var(--s1); }
   textarea {

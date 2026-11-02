@@ -18,13 +18,14 @@ use canterlot_proto::{
         v1::{
             AdapterDiagnostic, BackgroundTask as ProtoBackgroundTask, BackgroundTaskKind,
             BackgroundTaskState, BackgroundWorkChanged, BlockDelta, BlockFinal, BlockIncomplete,
-            BlockMedia, BlockStarted, CompactionState, CompactionStatus, DecisionApplied,
-            DecisionNotApplied, DecisionTransmissionStarted, DecisionUnconfirmed, DeliverDecision,
-            InputAcceptanceUnconfirmed, InputAccepted, InputCancelLost, InputCancelWon,
-            InputDispatchDeferred, InputRejected, InputTransmissionStarted, InputWithdrawn,
-            InterruptState, InterruptStatus, JournalClosed, JournalOpened, PhaseChanged,
-            RequestClosed, RequestOpened, RunFinished, SessionStuck, TodoItem as ProtoTodoItem,
-            TodoStatus as ProtoTodoStatus, TodoUpdated, content_block, record_body::Body,
+            BlockMedia, BlockStarted, CompactionEvent, CompactionState, CompactionStatus,
+            ContextProgress, DecisionApplied, DecisionNotApplied, DecisionTransmissionStarted,
+            DecisionUnconfirmed, DeliverDecision, InputAcceptanceUnconfirmed, InputAccepted,
+            InputCancelLost, InputCancelWon, InputDispatchDeferred, InputRejected,
+            InputTransmissionStarted, InputWithdrawn, InterruptState, InterruptStatus,
+            JournalClosed, JournalOpened, PhaseChanged, RequestClosed, RequestOpened, RunFinished,
+            SessionStuck, TodoItem as ProtoTodoItem, TodoStatus as ProtoTodoStatus, TodoUpdated,
+            content_block, record_body::Body,
         },
     },
 };
@@ -184,6 +185,9 @@ struct Supervisor {
     known_compactions: HashSet<(String, u32)>,
     /// Сжатие принято адаптером, итог придёт событием.
     pending_compaction: Option<(String, u32)>,
+    /// Открытый эпизод сжатия для durable ленты: `id` делят старт и финиш, повторный
+    /// старт эпизода не дублирует, повторный финиш после закрытия ignored.
+    compaction_episode: Option<(Uuid, bool)>,
     interrupted: bool,
     aborting_turn: bool,
     /// Вызовы инструментов агента в ожидании ответа хаба: срок ответа.
@@ -348,6 +352,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         pending_interrupts: Vec::new(),
         known_compactions: HashSet::new(),
         pending_compaction: None,
+        compaction_episode: None,
         interrupted: false,
         aborting_turn: false,
         agent_calls: HashMap::new(),
@@ -1928,6 +1933,17 @@ impl Supervisor {
                     self.compaction_record(&id, attempt, state)?;
                 }
             }
+            AdapterEvent::CompactionStarted { manual } => self.on_compaction_started(manual)?,
+            AdapterEvent::CompactionFinished {
+                manual,
+                ok,
+                pre_tokens,
+                post_tokens,
+            } => self.on_compaction_finished(manual, ok, pre_tokens, post_tokens)?,
+            AdapterEvent::ContextProgress {
+                context_tokens,
+                context_window_tokens,
+            } => self.on_context_progress(context_tokens, context_window_tokens)?,
             AdapterEvent::ContextExhausted => {
                 self.begin_stop(StopCause::ContextExhausted, false)?;
             }
@@ -2178,6 +2194,101 @@ impl Supervisor {
         self.record(Body::SessionStuck(SessionStuck {
             execution_id: self.spec.execution_id.to_string(),
             generation: self.spec.generation,
+        }))?;
+        Ok(())
+    }
+
+    /// Начало эпизода сжатия для durable ленты. Повторный старт того же эпизода
+    /// (CLI дублирует статус) запись не дублирует; без возможности хаба эпизод
+    /// отбрасывается, как `SessionStuck`.
+    fn on_compaction_started(&mut self, manual: bool) -> Result<(), SupervisorError> {
+        if !self.compact_v1 {
+            self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                execution_id: self.spec.execution_id.to_string(),
+                kind: "capability_missing".into(),
+                event_type: "compaction_event_dropped".into(),
+                ..Default::default()
+            }))?;
+            return Ok(());
+        }
+        if self.compaction_episode.is_some() {
+            return Ok(());
+        }
+        let id = Uuid::now_v7();
+        self.compaction_episode = Some((id, manual));
+        self.record(Body::CompactionEvent(CompactionEvent {
+            id: id.to_string(),
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            started: true,
+            manual,
+            ok: false,
+            pre_tokens: 0,
+        }))?;
+        Ok(())
+    }
+
+    /// Конец эпизода сжатия. Финиш без старта (переподключение в середине) открывает
+    /// и закрывает эпизод сразу, чтобы тихая строка всё равно пережила перезагрузку.
+    /// Удачное сжатие обнуляет живой контекст: индикатор ждёт новый размер, а не
+    /// показывает досжаточные проценты.
+    fn on_compaction_finished(
+        &mut self,
+        manual: bool,
+        ok: bool,
+        pre_tokens: u64,
+        post_tokens: u64,
+    ) -> Result<(), SupervisorError> {
+        if !self.compact_v1 {
+            self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
+                execution_id: self.spec.execution_id.to_string(),
+                kind: "capability_missing".into(),
+                event_type: "compaction_event_dropped".into(),
+                ..Default::default()
+            }))?;
+            return Ok(());
+        }
+        let (id, _) = match self.compaction_episode.take() {
+            Some(episode) => episode,
+            None => (Uuid::now_v7(), manual),
+        };
+        self.record(Body::CompactionEvent(CompactionEvent {
+            id: id.to_string(),
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            started: false,
+            manual,
+            ok,
+            pre_tokens,
+        }))?;
+        if ok {
+            // Новый размер известен сразу: индикатор показывает его, а не прячется.
+            // Без него расход гасится, окно при этом не трогаем.
+            self.record(Body::ContextProgress(ContextProgress {
+                execution_id: self.spec.execution_id.to_string(),
+                generation: self.spec.generation,
+                context_tokens: post_tokens,
+                context_window_tokens: 0,
+            }))?;
+        }
+        Ok(())
+    }
+
+    /// Живой расход контекста в ходу. Без возможности хаба молча отбрасывается:
+    /// поток частый, диагностика на каждое обновление залила бы журнал.
+    fn on_context_progress(
+        &mut self,
+        context_tokens: u64,
+        context_window_tokens: u64,
+    ) -> Result<(), SupervisorError> {
+        if !self.compact_v1 {
+            return Ok(());
+        }
+        self.record(Body::ContextProgress(ContextProgress {
+            execution_id: self.spec.execution_id.to_string(),
+            generation: self.spec.generation,
+            context_tokens,
+            context_window_tokens,
         }))?;
         Ok(())
     }

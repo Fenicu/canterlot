@@ -96,7 +96,18 @@ export type HistoryRequest = components["schemas"]["RequestItemView"] & {
   kind: "request";
 };
 
-export type HistoryItem = HistoryBlock | HistoryInput | HistoryRequest;
+export interface HistoryCompaction {
+  kind: "compaction";
+  id: string;
+  trigger: string;
+  pre_tokens?: number | null;
+  ok?: boolean | null;
+  created_seq: string;
+  created_at: string;
+  finished_at?: string | null;
+}
+
+export type HistoryItem = HistoryBlock | HistoryInput | HistoryRequest | HistoryCompaction;
 
 export interface HistoryPage {
   items: HistoryItem[];
@@ -145,6 +156,7 @@ export type ScheduledMessage = components["schemas"]["ScheduledMessage"];
 
 export interface SnapshotData {
   detail?: Record<string, unknown> | null;
+  context?: { tokens: number; window_tokens?: number | null } | null;
   queue?: Partial<QueueSnapshot>;
   history?: HistoryPage;
   scheduled?: ScheduledMessage[];
@@ -248,6 +260,8 @@ export class ChatStore {
     this.background.facts(this.execution === null || executionLive(this.execution)),
   );
   activity = $state<Record<string, unknown> | null>(null);
+  /** Последний известный расход контекста; `null` — данных нет, индикатор скрыт. */
+  context = $state<{ tokens: number; window: number | null } | null>(null);
   settings = $state<{
     effective: unknown;
     pending: unknown;
@@ -393,6 +407,7 @@ export class ChatStore {
     this.detail = null;
     this.execution = null;
     this.activity = null;
+    this.context = null;
     this.scheduled = [];
     this.settings = { effective: null, pending: null, rev: 0 };
     this.crunch = { enabled: false, resume_pending: false };
@@ -682,6 +697,27 @@ export class ChatStore {
         return;
       case "phase_changed":
         if (event.kind === "phase_changed") this.phase = { ...event.payload };
+        return;
+      case "context_changed":
+        if (event.kind === "context_changed") {
+          const tokens = event.payload.tokens;
+          this.context =
+            typeof tokens === "number"
+              ? {
+                  tokens,
+                  window:
+                    typeof event.payload.window_tokens === "number"
+                      ? event.payload.window_tokens
+                      : null,
+                }
+              : null;
+        }
+        return;
+      case "compaction_finished":
+        // Тихая строка уже в истории: подтягиваем хвост, переживает перезагрузку.
+        void this.reloadTail();
+        return;
+      case "compaction_started":
         return;
       case "queue_state_changed":
         if (event.kind === "queue_state_changed") {
@@ -1077,6 +1113,10 @@ export class ChatStore {
     if (data.open_requests) this.requests.ingestSnapshot(data.open_requests);
     if (data.todos) this.todos.ingestSnapshot(data.todos);
     if (data.background) this.background.ingestSnapshot(data.background);
+    if (data.context !== undefined)
+      this.context = data.context
+        ? { tokens: data.context.tokens, window: data.context.window_tokens ?? null }
+        : null;
     if (data.history)
       this.timeline.hasOlder = Boolean(data.history.next_before);
     const items = data.history?.items ?? [];
@@ -1137,6 +1177,20 @@ export class ChatStore {
           key: `block:${block.id}`,
           seq: block.createdSeq,
           block,
+        });
+      } else if (item.kind === "compaction") {
+        entries.push({
+          kind: "compaction",
+          key: `compaction:${item.id}`,
+          seq: item.created_seq,
+          compaction: {
+            id: item.id,
+            trigger: item.trigger,
+            preTokens: item.pre_tokens ?? null,
+            ok: item.ok ?? null,
+            createdAt: Date.parse(item.created_at),
+            finishedAt: item.finished_at ? Date.parse(item.finished_at) : null,
+          },
         });
       } else {
         const input = this.#inputFromHistory(item);
@@ -1268,10 +1322,15 @@ function seqOf(item: HistoryItem): string {
   return item.created_seq;
 }
 
+function compactionTerminal(entry: Extract<TimelineEntry, { kind: "compaction" }>): boolean {
+  return entry.compaction.ok !== null;
+}
+
 function terminalEntry(entry: TimelineEntry): boolean {
   if (entry.kind === "block")
     return entry.block.state === "final" || entry.block.state === "incomplete";
   if (entry.kind === "request") return !isDocked(entry.request);
+  if (entry.kind === "compaction") return compactionTerminal(entry);
   return (
     entry.input.state === "accepted" ||
     entry.input.state === "rejected" ||

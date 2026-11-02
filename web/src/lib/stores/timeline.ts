@@ -3,10 +3,20 @@ import type { InputView } from './inputs';
 import type { RequestItem } from './requests.svelte';
 import { rawCell } from './cell.svelte';
 
+export interface CompactionModel {
+	id: string;
+	trigger: string;
+	preTokens: number | null;
+	ok: boolean | null;
+	createdAt: number;
+	finishedAt: number | null;
+}
+
 export type TimelineEntry =
 	| { kind: 'input'; key: string; seq: string; input: InputView }
 	| { kind: 'block'; key: string; seq: string; block: BlockModel }
-	| { kind: 'request'; key: string; seq: string; request: RequestItem };
+	| { kind: 'request'; key: string; seq: string; request: RequestItem }
+	| { kind: 'compaction'; key: string; seq: string; compaction: CompactionModel };
 
 /** Откуда лента берёт записи и как подгружает старые: у разговора это его окно, у субагента своя ветка. */
 export interface TimelineSource {
@@ -132,6 +142,7 @@ function sameEntry(a: TimelineEntry, b: TimelineEntry): boolean {
 	if (a.seq !== b.seq) return false;
 	if (a.kind === 'block') return b.kind === 'block' && a.block === b.block;
 	if (a.kind === 'request') return b.kind === 'request' && a.request === b.request;
+	if (a.kind === 'compaction') return b.kind === 'compaction' && a.compaction === b.compaction;
 	return b.kind === 'input' && a.input === b.input;
 }
 

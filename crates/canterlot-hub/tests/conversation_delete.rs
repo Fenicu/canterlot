@@ -50,7 +50,8 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         Uuid::now_v7(),
         Uuid::now_v7(),
     );
-    let (cancel, input, retry, block, child, request, job, media) = (
+    let (cancel, input, retry, block, child, request, job, media, compaction) = (
+        Uuid::now_v7(),
         Uuid::now_v7(),
         Uuid::now_v7(),
         Uuid::now_v7(),
@@ -186,6 +187,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
     .await;
     exec(
         pool,
+        "insert into compactions(id,conversation_id,execution_id,trigger,pre_tokens,ok,created_seq,finished_at)
+         values($1,$2,$3,'auto',1,true,1,now())",
+        &[compaction, conversation, execution],
+    )
+    .await;
+    exec(
+        pool,
         "insert into scheduled_jobs(id,kind,owner_id,conversation_id,run_at,payload)
          values($1,'message',$2,$3,now()+interval '1 day','{}')",
         &[job, owner, conversation],
@@ -313,6 +321,7 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         request,
         job,
         media,
+        compaction,
         linked,
         scheduled,
     ]

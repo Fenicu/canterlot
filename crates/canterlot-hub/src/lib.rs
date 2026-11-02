@@ -9,6 +9,7 @@ pub mod background;
 pub mod background_tasks;
 pub mod blocks;
 pub mod bus;
+pub mod compactions;
 pub mod config;
 pub mod conversations;
 pub mod crunch;

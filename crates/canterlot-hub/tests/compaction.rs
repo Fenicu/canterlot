@@ -222,14 +222,17 @@ async fn failed_compaction_keeps_the_pause_and_may_be_asked_again(pool: PgPool) 
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
-async fn compaction_needs_a_stuck_session(pool: PgPool) {
+async fn compaction_works_without_a_stuck_session(pool: PgPool) {
     let run = Run::start(&pool).await;
-    assert!(matches!(
-        run.compact(&pool, KEY).await,
-        Err(ControlError::InvalidRequest {
-            reason: "session_not_stuck"
-        })
-    ));
+    let command = id_of(run.compact(&pool, KEY).await.unwrap());
+    // Вне паузы очередь не трогаем: причин как не было, так и нет.
+    assert_eq!(run.pauses(&pool).await, vec![]);
+    let kind: String = sqlx::query_scalar("select kind from commands where id = $1")
+        .bind(command)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(kind, "compact_session");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -325,4 +328,256 @@ async fn command_goes_only_to_a_session_that_agreed_to_it(pool: PgPool) {
         command.kind,
         Some(command::Kind::CompactSession(_))
     ));
+}
+
+fn compaction_event(
+    id: Uuid,
+    execution: Uuid,
+    generation: u64,
+    started: bool,
+    manual: bool,
+    ok: bool,
+    pre_tokens: u64,
+) -> Body {
+    Body::CompactionEvent(canterlot_proto::worker::v1::CompactionEvent {
+        id: id.to_string(),
+        execution_id: execution.to_string(),
+        generation,
+        started,
+        manual,
+        ok,
+        pre_tokens,
+    })
+}
+
+async fn event_kinds(pool: &PgPool, conversation: Uuid) -> Vec<String> {
+    sqlx::query_scalar("select kind from events where scope = $1 order by scope_seq")
+        .bind(format!("conversation:{conversation}"))
+        .fetch_all(pool)
+        .await
+        .unwrap()
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn compaction_episode_is_a_durable_timeline_row(pool: PgPool) {
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    let start = compaction_event(
+        id,
+        run.execution.execution_id,
+        run.execution.generation as u64,
+        true,
+        false,
+        false,
+        0,
+    );
+    run.send(&pool, start).await;
+    // Повторный старт эпизода запись не дублирует.
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            true,
+            false,
+            false,
+            0,
+        ),
+    )
+    .await;
+    let row: (String, Option<bool>, Option<i64>) =
+        sqlx::query_as("select trigger, ok, pre_tokens from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("auto".to_owned(), None, None));
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            false,
+            false,
+            true,
+            980_000,
+        ),
+    )
+    .await;
+    let row: (String, Option<bool>, Option<i64>) =
+        sqlx::query_as("select trigger, ok, pre_tokens from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("auto".to_owned(), Some(true), Some(980_000)));
+    // Повторный финиш дубли не пишет.
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            false,
+            false,
+            true,
+            980_000,
+        ),
+    )
+    .await;
+    let kinds = event_kinds(&pool, run.seed.conversation_id).await;
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "compaction_started").count(),
+        1,
+        "{kinds:?}"
+    );
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "compaction_finished").count(),
+        1,
+        "{kinds:?}"
+    );
+    let page = canterlot_hub::history::page(
+        &mut pool.acquire().await.unwrap(),
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        canterlot_hub::history::HistoryCursor::Tail,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        page.items.iter().any(|item| matches!(
+            item,
+            canterlot_hub::history::TimelineItem::Compaction(view)
+                if view.id == id && view.trigger == "auto" && view.ok == Some(true)
+        )),
+        "finished compaction must be in the timeline"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn compaction_finish_without_start_opens_and_closes_at_once(pool: PgPool) {
+    let mut run = Run::start(&pool).await;
+    let id = Uuid::now_v7();
+    run.send(
+        &pool,
+        compaction_event(
+            id,
+            run.execution.execution_id,
+            run.execution.generation as u64,
+            false,
+            true,
+            false,
+            0,
+        ),
+    )
+    .await;
+    let row: (String, Option<bool>) =
+        sqlx::query_as("select trigger, ok from compactions where id = $1")
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, ("manual".to_owned(), Some(false)));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn context_progress_keeps_only_the_latest(pool: PgPool) {
+    use canterlot_proto::worker::v1::ContextProgress;
+    let mut run = Run::start(&pool).await;
+    let execution = run.execution.execution_id;
+    let generation = run.execution.generation as u64;
+    let progress = |tokens: u64, window: u64| {
+        Body::ContextProgress(ContextProgress {
+            execution_id: execution.to_string(),
+            generation,
+            context_tokens: tokens,
+            context_window_tokens: window,
+        })
+    };
+    run.send(&pool, progress(640_000, 1_000_000)).await;
+    run.send(&pool, progress(650_000, 1_000_000)).await;
+    let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "select context_tokens, context_window_tokens from executions where id = $1",
+    )
+    .bind(run.execution.execution_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(650_000), Some(1_000_000)));
+    let kinds = event_kinds(&pool, run.seed.conversation_id).await;
+    assert_eq!(
+        kinds.iter().filter(|k| *k == "context_changed").count(),
+        2,
+        "{kinds:?}"
+    );
+    let snapshot = canterlot_hub::snapshot::conversation(
+        &pool,
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let context = snapshot.data.context.expect("snapshot carries context");
+    assert_eq!(
+        (context.tokens, context.window_tokens),
+        (650_000, Some(1_000_000))
+    );
+    // Новый размер после сжатия встаёт сразу, окно при этом не теряется.
+    run.send(&pool, progress(15_694, 0)).await;
+    let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "select context_tokens, context_window_tokens from executions where id = $1",
+    )
+    .bind(run.execution.execution_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(15_694), Some(1_000_000)));
+    // Нули без размера гасят токены: индикатор ждёт новые данные.
+    run.send(&pool, progress(0, 0)).await;
+    let snapshot = canterlot_hub::snapshot::conversation(
+        &pool,
+        run.seed.owner_id,
+        run.seed.conversation_id,
+        50,
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(
+        snapshot.data.context.is_none(),
+        "cleared context hides the indicator"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn turn_end_context_is_authoritative_for_the_indicator(pool: PgPool) {
+    use canterlot_proto::worker::v1::RunFinished;
+    let mut run = Run::start(&pool).await;
+    run.send(
+        &pool,
+        Body::RunFinished(RunFinished {
+            execution_id: run.execution.execution_id.to_string(),
+            input_command_id: Uuid::now_v7().to_string(),
+            context_tokens: 640_000,
+            context_window_tokens: 1_000_000,
+            ..Default::default()
+        }),
+    )
+    .await;
+    let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "select context_tokens, context_window_tokens from executions where id = $1",
+    )
+    .bind(run.execution.execution_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(row, (Some(640_000), Some(1_000_000)));
+    let kinds = event_kinds(&pool, run.seed.conversation_id).await;
+    assert!(kinds.contains(&"context_changed".to_owned()), "{kinds:?}");
 }

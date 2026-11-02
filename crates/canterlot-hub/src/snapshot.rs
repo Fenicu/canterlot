@@ -41,6 +41,8 @@ pub struct ConversationSnapshot {
     /// Списки задач агента по дорожкам, основной агент первым.
     pub todos: Vec<crate::todos::TodoListView>,
     pub background: Vec<crate::background_tasks::BackgroundTaskView>,
+    /// Последний известный расход контекста; `None` — данных нет, индикатор скрыт.
+    pub context: Option<crate::compactions::ContextSnapshot>,
 }
 
 pub type ConversationSnapshotView = ConversationSnapshot;
@@ -218,6 +220,7 @@ pub async fn conversation_with_registry(
         .collect();
     let todos = crate::todos::list(&mut *conn, id).await?;
     let background = crate::background_tasks::list(&mut *conn, id).await?;
+    let context = crate::compactions::latest_context(&mut *conn, id).await?;
     let data = ConversationSnapshot {
         detail,
         queue: QueueView {
@@ -231,6 +234,7 @@ pub async fn conversation_with_registry(
         open_requests,
         todos,
         background,
+        context,
     };
     Ok(Some(Snapshot {
         scope: events::wire_scope(&scope),

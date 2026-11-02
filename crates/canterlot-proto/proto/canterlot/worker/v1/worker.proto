@@ -291,6 +291,10 @@ message RecordBody {
     BackgroundWorkChanged background_work_changed = 37;
     // Только при согласованной возможности session_tools_v1.
     WorktreeRemoved worktree_removed = 38;
+    // Только при согласованной возможности compact_v1: durable timeline of
+    // context compactions (auto and manual) and live context fill.
+    CompactionEvent compaction_event = 39;
+    ContextProgress context_progress = 40;
   }
 }
 
@@ -768,6 +772,28 @@ message CompactionStatus {
   string command_id = 1;
   uint32 dispatch_attempt = 2;
   CompactionState state = 3;
+}
+
+// Durable timeline record of one context compaction episode. Start and finish
+// share `id`: finish without a recorded start (reconnect) opens and closes at
+// once. `pre_tokens` is 0 when the CLI did not report it.
+message CompactionEvent {
+  string id = 1;
+  string execution_id = 2;
+  uint64 generation = 3;
+  bool started = 4;
+  bool manual = 5;
+  bool ok = 6;
+  uint64 pre_tokens = 7;
+}
+
+// Live context fill during a turn, rate limited by the adapter. Hub keeps only
+// the latest per execution; the turn-end RunFinished stays authoritative.
+message ContextProgress {
+  string execution_id = 1;
+  uint64 generation = 2;
+  uint64 context_tokens = 3;
+  uint64 context_window_tokens = 4;
 }
 
 message TodoItem {

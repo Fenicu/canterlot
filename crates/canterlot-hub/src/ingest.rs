@@ -902,6 +902,8 @@ fn touches_activity(body: &Body) -> bool {
             | Body::TodoUpdated(_)
             | Body::BackgroundWorkChanged(_)
             | Body::SessionStuck(_)
+            | Body::CompactionEvent(_)
+            | Body::ContextProgress(_)
             | Body::CompactionStatus(_)
     )
 }
@@ -1030,6 +1032,11 @@ impl Ingest {
                         )
                         .await
                         .map_err(pilot_error)?;
+                        // Итог хода — авторитетный расход для индикатора контекста.
+                        return crate::compactions::note_turn_context(conn, &run, f, correlation)
+                            .await
+                            .map(|_| (ignored, None, false))
+                            .map_err(pilot_error);
                     }
                 }
                 _ => {}
@@ -1586,6 +1593,8 @@ async fn apply_body(
         | Body::JournalOpened(_)
         | Body::TodoUpdated(_)
         | Body::BackgroundWorkChanged(_)
+        | Body::CompactionEvent(_)
+        | Body::ContextProgress(_)
         | Body::SessionStuck(_) => return Err(IngestError::InvalidRecord),
         Body::WorktreeRemoved(fact) => {
             use crate::session_tools::accept::{Removal, apply_removal_in_tx};
@@ -2435,6 +2444,8 @@ async fn apply_journal_body(
             | Body::DecisionUnconfirmed(_)
             | Body::TodoUpdated(_)
             | Body::BackgroundWorkChanged(_)
+            | Body::CompactionEvent(_)
+            | Body::ContextProgress(_)
             | Body::SessionStuck(_)
     ) {
         return Ok(None);
@@ -2515,6 +2526,18 @@ async fn apply_journal_body(
         }
         crate::delivery::control::on_session_stuck_in_tx(conn, &run, correlation_id).await?;
         return Ok(Some(false));
+    }
+    if let Body::CompactionEvent(fact) = body {
+        return crate::compactions::apply_event(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(pilot_error);
+    }
+    if let Body::ContextProgress(fact) = body {
+        return crate::compactions::apply_progress(conn, &run, fact, correlation_id)
+            .await
+            .map(Some)
+            .map_err(pilot_error);
     }
     match body {
         Body::RequestOpened(fact) => {

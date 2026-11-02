@@ -204,6 +204,15 @@ export class FakeHubApi {
 			todos.set(list.lane_block_id ?? null, list);
 		}
 		const held = this.details.get(id)?.queue as Partial<Record<keyof QueueSnapshot, unknown>> | undefined;
+		let context: SnapshotData['context'];
+		for (const ev of this.hub.log(`conversation:${id}`)) {
+			if (ev.kind !== 'context_changed') continue;
+			const p = ev.payload as { tokens: unknown; window_tokens: unknown };
+			context =
+				typeof p.tokens === 'number'
+					? { tokens: p.tokens, window_tokens: typeof p.window_tokens === 'number' ? p.window_tokens : null }
+					: null;
+		}
 
 		return {
 			detail: this.details.get(id) ?? { id, title: 'Сессия' },
@@ -217,7 +226,8 @@ export class FakeHubApi {
 			scheduled: [],
 			open_requests,
 			todos: [...todos.values()].sort((a, b) => Number(a.lane_block_id !== null) - Number(b.lane_block_id !== null)),
-			background: [...background.values()]
+			background: [...background.values()],
+			context
 		};
 	}
 
@@ -231,6 +241,63 @@ export class FakeHubApi {
 			conversation_id: id,
 			payload: { lane_block_id: lane, revision: known + 1, items, omitted }
 		});
+	}
+
+	/** Как `context_changed` хаба: последнее значение — расход индикатора. */
+	pushContext(id: string, tokens: number | null, window: number | null): HubEvent {
+		return this.hub.append(`conversation:${id}`, {
+			kind: 'context_changed',
+			conversation_id: id,
+			payload: { tokens, window_tokens: window }
+		});
+	}
+
+	/** Как эпизод сжатия хаба: идущая строка сразу, тихая строка финишем. */
+	pushCompaction(
+		id: string,
+		opts: { trigger?: string; ok?: boolean | null; pre_tokens?: number | null } = {}
+	): HubEvent {
+		const items = this.histories.get(id) ?? [];
+		let max = 0n;
+		for (const item of items) {
+			if (item.kind === 'input') continue;
+			try {
+				const seq = BigInt(item.created_seq);
+				if (seq > max) max = seq;
+			} catch {}
+		}
+		const seq = String(max + 1n);
+		const at = new Date().toISOString();
+		const row = {
+			kind: 'compaction',
+			id: this.id(),
+			trigger: opts.trigger ?? 'auto',
+			pre_tokens: opts.pre_tokens ?? null,
+			ok: null,
+			created_seq: seq,
+			created_at: at,
+			finished_at: null
+		} as const;
+		items.push({ ...row });
+		this.histories.set(id, items);
+		const started = this.hub.append(`conversation:${id}`, {
+			kind: 'compaction_started',
+			conversation_id: id,
+			payload: { id: row.id, trigger: row.trigger }
+		});
+		if (opts.ok !== undefined && opts.ok !== null) {
+			const finished = items.find((item) => item.id === row.id);
+			if (finished && finished.kind === 'compaction') {
+				finished.ok = opts.ok;
+				finished.finished_at = at;
+			}
+			return this.hub.append(`conversation:${id}`, {
+				kind: 'compaction_finished',
+				conversation_id: id,
+				payload: { id: row.id, trigger: row.trigger, ok: opts.ok }
+			});
+		}
+		return started;
 	}
 
 	/** Как `background_work_changed` хаба: только изменившиеся задачи. */
