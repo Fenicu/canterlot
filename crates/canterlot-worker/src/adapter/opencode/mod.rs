@@ -472,6 +472,8 @@ pub struct OpenCodeAdapter {
     translator: Option<Translator>,
     delivery: Delivery,
     lookup: Option<Lookup>,
+    /// Сверка влитого ввода после `Undetermined`: чужой ход не трогает.
+    steer_lookup: Option<Lookup>,
     shells: Option<ShellList>,
     resync: Option<Resync>,
     held: HeldTools,
@@ -536,6 +538,7 @@ impl OpenCodeAdapter {
             translator: None,
             delivery: Delivery::default(),
             lookup: None,
+            steer_lookup: None,
             shells: None,
             resync: None,
             held: HeldTools::default(),
@@ -1625,6 +1628,33 @@ impl OpenCodeAdapter {
         self.lookup = Some(Lookup { command, task });
     }
 
+    /// Сверка влитого ввода: ход чужой, доставку обычного ввода не трогает.
+    fn start_steer_lookup(&mut self, command: Uuid) {
+        let Some(http) = self.http.clone() else {
+            return;
+        };
+        let task = tokio::spawn(input::reconcile(
+            http,
+            self.session.clone(),
+            input::message_id(command),
+        ));
+        self.steer_lookup = Some(Lookup { command, task });
+    }
+
+    /// Позднее доказательство влитого ввода: только событие для команды вливания.
+    fn on_steer_lookup(&mut self, found: bool) {
+        let Some(lookup) = self.steer_lookup.take() else {
+            return;
+        };
+        if found {
+            self.events.push_back(AdapterEvent::InputAccepted {
+                command_id: lookup.command,
+            });
+        }
+        // Иначе вливание остаётся неподтверждённым: исход уже отдан как
+        // `Undetermined`, чужой ход и его конец не трогаем.
+    }
+
     fn known_model(&self, model: &str, effort: &str) -> bool {
         self.variants.get(model).is_some_and(|variants| {
             effort.is_empty()
@@ -1979,6 +2009,7 @@ impl OpenCodeAdapter {
             }
         };
         let lookup = &mut self.lookup;
+        let steer_lookup = &mut self.steer_lookup;
         let shells = &mut self.shells;
         let resync = &mut self.resync;
         let kill_at = self.kill_at;
@@ -1993,6 +2024,7 @@ impl OpenCodeAdapter {
             item = item => self.on_stream(item),
             event = broker.next() => self.on_broker(event),
             found = lookup_done(lookup) => self.on_lookup(found),
+            found = lookup_done(steer_lookup) => self.on_steer_lookup(found),
             list = shells_done(shells) => self.on_shells(list),
             done = resync_done(resync) => self.on_resynced(done),
             () = escalate => {
@@ -2176,7 +2208,7 @@ impl Adapter for OpenCodeAdapter {
                 SteerOutcome::Rejected(tag)
             }
             _ => {
-                self.start_lookup(command);
+                self.start_steer_lookup(command);
                 SteerOutcome::Undetermined
             }
         }
