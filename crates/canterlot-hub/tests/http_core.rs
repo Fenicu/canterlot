@@ -526,14 +526,25 @@ async fn background_services_stop_on_shutdown_and_release_their_locks(pool: PgPo
         .await
         .expect("background stops")
         .expect("no service panicked");
-    let held: i64 = sqlx::query_scalar(
-        "select count(*) from pg_locks where locktype = 'advisory'
-         and database = (select oid from pg_database where datname = current_database())",
-    )
-    .fetch_one(&pool)
+    // Закрытие соединения асинхронно убирает запись из `pg_locks`: ждём условие,
+    // а не мгновение. Инвариант тот же — ни один замок не переживает остановку.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let held: i64 = sqlx::query_scalar(
+                "select count(*) from pg_locks where locktype = 'advisory'
+                 and database = (select oid from pg_database where datname = current_database())",
+            )
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            if held == 0 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
     .await
-    .unwrap();
-    assert_eq!(held, 0);
+    .expect("no singleton lock outlives the shutdown");
 }
 
 // ---------------------------------------------------------------- вход

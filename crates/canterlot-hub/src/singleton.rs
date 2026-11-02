@@ -109,9 +109,20 @@ pub(crate) async fn supervise<F, Fut>(
     let options = pool.connect_options();
     let mut backoff = Duration::from_millis(250);
     loop {
+        // Захват и остановка гоняют: завершившийся одновременно с ней захват
+        // нельзя бросать — замок отпустит только закрытие соединения.
+        let mut acquire = Box::pin(tokio::time::timeout(
+            Duration::from_secs(10),
+            Singleton::acquire(&options, service),
+        ));
         let acquired = tokio::select! {biased;
-            _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>return,
-            result=tokio::time::timeout(Duration::from_secs(10),Singleton::acquire(&options,service))=>result,
+            _=crate::dispatcher::wait_for_shutdown(&mut shutdown)=>{
+                match futures_util::FutureExt::now_or_never(&mut acquire) {
+                    Some(done) => done,
+                    None => return,
+                }
+            }
+            done=&mut acquire=>done,
         };
         match acquired {
             Ok(Ok(Some(mut singleton))) => {

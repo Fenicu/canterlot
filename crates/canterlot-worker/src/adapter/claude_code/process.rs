@@ -408,12 +408,16 @@ impl CliProcess {
         let child_pid = child
             .id()
             .ok_or(LaunchError::SpawnFailed(std::io::Error::other("no pid")))?;
+        // Ребёнок известен без опроса дерева: опрос мог застать быстро вышедший
+        // CLI уже зомби и исключить его из участников.
         let member = group
-            .members()
-            .map_err(|e| LaunchError::Io(std::io::Error::other(e.to_string())))?
-            .into_iter()
-            .find(|m| m.pid == child_pid)
-            .ok_or(LaunchError::CliNotFoundInContainment)?;
+            .direct_member(child_pid)
+            .map_err(|error| match error {
+                crate::containment::ContainmentError::InvalidStat => {
+                    LaunchError::CliNotFoundInContainment
+                }
+                error => LaunchError::Io(std::io::Error::other(error.to_string())),
+            })?;
         group.register_cli(&member);
         let pid = member.pid;
         let start_ticks = member.start_ticks;

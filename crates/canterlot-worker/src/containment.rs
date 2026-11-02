@@ -56,6 +56,15 @@ pub trait Containment: Send + Sync {
     fn populated(&self) -> Result<bool, ContainmentError>;
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError>;
     async fn terminate(&self, grace: Duration) -> Result<Termination, ContainmentError>;
+    /// Прямой ребёнок как участник без опроса всего дерева: быстро вышедший CLI
+    /// опрос застаёт уже зомби и исключает из участников, а чужая уборка статуса
+    /// отнимает выход у `Child`. По умолчанию — поиск в опросе (старое поведение).
+    fn direct_member(&self, pid: u32) -> Result<Member, ContainmentError> {
+        self.members()?
+            .into_iter()
+            .find(|m| m.pid == pid)
+            .ok_or(ContainmentError::InvalidStat)
+    }
     /// Запомнить прямой CLI: его статус выхода читает `Child`, чужая уборка его отняла бы.
     fn register_cli(&self, _member: &Member) {}
     /// Убрать зомби усыновлённых процессов, не трогая детей самого супервизора.
@@ -312,6 +321,19 @@ impl Containment for TreeContainment {
             .filter(|info| !info.zombie && self.belongs(info, &all))
             .map(|info| info.member.clone())
             .collect())
+    }
+
+    /// Участник по pid прямого ребёнка без опроса дерева: зомби тоже подходит,
+    /// его статус читает владеющий `Child`. Не наш или не лидер группы — `InvalidStat`.
+    fn direct_member(&self, pid: u32) -> Result<Member, ContainmentError> {
+        if stat(self.supervisor.pid)?.member != self.supervisor {
+            return Err(ContainmentError::SupervisorChanged);
+        }
+        let info = stat(pid)?;
+        if info.parent != self.supervisor.pid || info.group != pid {
+            return Err(ContainmentError::InvalidStat);
+        }
+        Ok(info.member)
     }
 
     fn signal_member(&self, member: &Member, signal: Signal) -> Result<bool, ContainmentError> {
