@@ -23,6 +23,13 @@ export function chartModel(series: Series[], days: string[], zone: string) {
   });
 }
 export { providerLabel as providerName } from '#lib/format/labels.js';
+
+/** Подзаголовок страницы перечисляет ровно те провайдеры, чьи карточки видны. */
+export function limitsSubtitle(providers: { provider: string }[]): string {
+  const names = [...new Set(providers.map((item) => providerLabel(item.provider)))];
+  if (names.length <= 1) return names[0] ?? '';
+  return `${names.slice(0, -1).join(', ')} и ${names.at(-1)}`;
+}
 export function usageRows(usage: Usage[], day: string, sessions: ReadonlyMap<string, { title: string }>) {
   return usage.filter(row => row.day === day).sort((a, b) => b.weekly_delta_permille - a.weekly_delta_permille).map(row => ({
     id: `${row.provider}:${row.conversation_id}:${row.agent}:${row.model}`,

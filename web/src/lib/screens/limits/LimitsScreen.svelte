@@ -11,7 +11,7 @@
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import UsageChart from './UsageChart.svelte';
   import UsageTable from './UsageTable.svelte';
-  import { providerName, sevenDays, usageRows, historyRange } from './model.js';
+  import { limitsSubtitle, providerName, sevenDays, usageRows, historyRange } from './model.js';
   import '../secondary.css';
   let runtime = $state<Runtime | null>(null);
   let series = $state<components['schemas']['ProviderSeries'][]>([]);
@@ -20,6 +20,7 @@
   let now = $state(clock.serverNow());
   let thresholds = $state({ stale_after_secs: 2100, warn_pcts: [80, 95], weekly_reserve_pct: 95 });
   const rows = $derived(usageRows(usage, days.at(-1) ?? '', runtime?.list.items ?? new Map()));
+  const subtitle = $derived(limitsSubtitle(runtime?.list.limits ?? []));
   async function load() {
     loading = true; error = '';
     try {
@@ -35,7 +36,7 @@
   onMount(() => { void load(); const timer = setInterval(() => now = clock.serverNow(), 1000); return () => clearInterval(timer); });
 </script>
 <main id="main" tabindex="-1" data-secondary-ready={!loading ? '' : undefined}>
-  <SecondaryHeader title="Лимиты" subtitle="Claude Code и Codex" />
+  <SecondaryHeader title="Лимиты" subtitle={subtitle} />
   <div class="secondary-body"><div class="secondary-content">
     <h2>История лимитов</h2>
     {#if loading}<p>Загружаю историю лимитов…</p>{:else if error}<p class="error">{error}</p><button type="button" onclick={load}>Повторить</button>
@@ -46,7 +47,15 @@
       {#if !series.some(p => p.five_hour.length || p.weekly.length)}<p>Снимков лимитов за эти дни ещё нет</p>{/if}
       <div class="current">{#each runtime?.list.limits ?? [] as provider (provider.provider)}
         {@const view = limitView(provider, now, thresholds)}
-        <section data-tone={view.tone}><p class="note">{providerName(provider.provider)} сейчас · осталось</p>{#if view.five.absent}<strong>{view.week.text} / нед</strong>{:else}<strong>{view.five.text} / 5ч</strong><p>{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}{#if view.week.reset}<small>{view.week.reset}</small>{/if}{#if view.stale}<p class="note">данные устарели</p>{/if}</section>
+        {@const primary = view.five.absent ? view.week : view.five}
+        {@const windowLabel = view.five.absent ? 'нед' : '5ч'}
+        <section data-tone={view.tone}>
+          <p class="note">{providerName(provider.provider)} сейчас · осталось</p>
+          <strong class="value">{primary.text}&#32;/ <span class="window">{windowLabel}</span></strong>
+          {#if !view.five.absent}<p class="other">{view.week.known ? `${view.week.text} недели` : 'Нет данных недели'}</p>{/if}
+          {#if view.week.reset}<small>{view.week.reset}</small>{/if}
+          {#if view.stale}<p class="note">данные устарели</p>{/if}
+        </section>
       {/each}</div>
       <UsageTable {rows} />
     {/if}
@@ -54,9 +63,10 @@
 </main>
 <style>
   .current { display: flex; flex-wrap: wrap; gap: var(--s8); margin-block: var(--s8); }
-  .current section { flex: 1; padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
-  strong { font-size: var(--fs-heading); }
-  small { color: var(--muted); }
+  .current section { flex: 1 1 calc(var(--gauge-width) * 2); min-width: 0; padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
+  .value { display: block; white-space: nowrap; font-size: var(--fs-heading); }
+  .window { font-size: var(--fs-body); font-weight: var(--weight-normal); }
+  small { display: block; margin-top: var(--s2); color: var(--muted); }
   [data-tone='warning'] > p:not(.note), [data-tone='reserve'] > p:not(.note) { color: var(--warning); }
   [data-tone='danger'] > p:not(.note) { color: var(--danger); }
 </style>
