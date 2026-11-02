@@ -1202,12 +1202,21 @@ impl Worker {
                 && owner_outbound.is_none()
                 && let Some(request) = owner_next.take()
             {
-                let codex_owner = self.config.codex.as_ref().and_then(|c| c.owner_home.clone());
-                let opencode_owner = self.config.opencode.as_ref().and_then(|c| c.owner_config.clone());
+                let codex_owner = self
+                    .config
+                    .codex
+                    .as_ref()
+                    .and_then(|c| c.owner_home.clone());
+                let opencode_owner = self
+                    .config
+                    .opencode
+                    .as_ref()
+                    .and_then(|c| c.owner_config.clone());
                 owner_operation = Some(Box::pin(async move {
                     let request_id = request.request_id.clone();
                     tokio::task::spawn_blocking(move || {
-                        let home = std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+                        let home =
+                            std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
                         let env: Vec<(std::ffi::OsString, std::ffi::OsString)> =
                             ["HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR"]
                                 .into_iter()
@@ -1222,8 +1231,7 @@ impl Worker {
                             opencode_owner.as_deref(),
                         );
                         if request.kind == crate::machine::owner_instructions::KIND_OVERVIEW {
-                            let mut view =
-                                crate::machine::owner_instructions::overview(&roots);
+                            let mut view = crate::machine::owner_instructions::overview(&roots);
                             view.request_id = request.request_id.clone();
                             ControlUp {
                                 msg: Some(control_up::Msg::OwnerOverview(view)),

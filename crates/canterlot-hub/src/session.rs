@@ -67,10 +67,19 @@ struct SessionEntry {
 }
 
 type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
-type OwnerOverviewWaiters =
-    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsOverview>>>>;
-type OwnerFileWaiters =
-    Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsFile>>>>;
+type OwnerOverviewWaiters = Arc<
+    Mutex<
+        HashMap<
+            (Uuid, Uuid),
+            oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsOverview>,
+        >,
+    >,
+>;
+type OwnerFileWaiters = Arc<
+    Mutex<
+        HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsFile>>,
+    >,
+>;
 
 #[derive(Clone)]
 pub struct Registry {
@@ -380,10 +389,7 @@ impl Registry {
         }
     }
 
-    fn owner_sender(
-        &self,
-        machine_id: Uuid,
-    ) -> Result<mpsc::Sender<ControlDown>, OwnerReadError> {
+    fn owner_sender(&self, machine_id: Uuid) -> Result<mpsc::Sender<ControlDown>, OwnerReadError> {
         if self.session_info(machine_id).is_none() {
             return Err(OwnerReadError::Unavailable);
         }
@@ -451,10 +457,7 @@ impl Registry {
         let key = (machine_id, request_id);
         let (answer, answered) = oneshot::channel();
         {
-            let mut waiters = self
-                .owner_files
-                .lock()
-                .expect("owner file waiters lock");
+            let mut waiters = self.owner_files.lock().expect("owner file waiters lock");
             let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
             if busy >= MAX_OWNER_READS_PER_MACHINE {
                 return Err(OwnerReadError::Unavailable);

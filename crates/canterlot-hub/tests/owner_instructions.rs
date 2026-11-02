@@ -41,13 +41,7 @@ impl Fixture {
         }
     }
 
-    async fn request(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Value>,
-        status: u16,
-    ) -> Value {
+    async fn request(&self, method: Method, path: &str, body: Option<Value>, status: u16) -> Value {
         let r = self
             .client
             .send(method, path, Some(&Uuid::now_v7().to_string()), body)
@@ -113,15 +107,14 @@ async fn owner_overview_proxies_a_fake_worker(pool: PgPool) {
         }
     });
     let (mut session, request) = worker.await.unwrap();
-    f.registry.finish_owner_overview(f.machine, overview_reply(&request.request_id));
+    f.registry
+        .finish_owner_overview(f.machine, overview_reply(&request.request_id));
     let reply = task.await.unwrap();
     assert_eq!(reply.files.len(), 1);
     assert_eq!(reply.projects.len(), 1);
     // Чужой ответ игнорируется.
-    f.registry.finish_owner_overview(
-        Uuid::now_v7(),
-        overview_reply(&request.request_id),
-    );
+    f.registry
+        .finish_owner_overview(Uuid::now_v7(), overview_reply(&request.request_id));
     let _ = session.commands.try_recv();
 }
 
@@ -134,21 +127,20 @@ async fn owner_endpoints_need_a_capable_live_worker(pool: PgPool) {
         f.machine
     );
     // Нет сеанса: машина недоступна.
-    let r = f
-        .request(Method::GET, &overview, None, 409)
-        .await;
+    let r = f.request(Method::GET, &overview, None, 409).await;
     assert_eq!(r["error"]["code"], "machine_unavailable");
     let r = f.request(Method::GET, &file, None, 409).await;
     assert_eq!(r["error"]["code"], "machine_unavailable");
     // Старый воркер без возможности: требуется обновление.
     let mut old = testkit::fake_session(&f.registry, f.machine, &["pilot_v1"], true);
-    let r = f
-        .request(Method::GET, &overview, None, 409)
-        .await;
+    let r = f.request(Method::GET, &overview, None, 409).await;
     assert_eq!(r["error"]["code"], "capability_missing");
     let r = f.request(Method::GET, &file, None, 409).await;
     assert_eq!(r["error"]["code"], "capability_missing");
-    assert!(old.commands.try_recv().is_err(), "старому воркеру ничего не шлётся");
+    assert!(
+        old.commands.try_recv().is_err(),
+        "старому воркеру ничего не шлётся"
+    );
     drop(old);
     // Живой воркер с возможностью отвечает через управляющий канал.
     let mut session = testkit::fake_session(
@@ -225,20 +217,27 @@ async fn owner_file_serves_content_and_validates_kinds(pool: PgPool) {
             panic!("{down:?}");
         };
         assert_eq!(
-            (request.kind.as_str(), request.project.as_str(), request.name.as_str()),
+            (
+                request.kind.as_str(),
+                request.project.as_str(),
+                request.name.as_str()
+            ),
             ("memory_file", "proj1", "a.md")
         );
-        registry.finish_owner_file(machine, OwnerInstructionsFile {
-            request_id: request.request_id.clone(),
-            kind: request.kind.clone(),
-            path: "/home/owner/.claude/projects/proj1/memory/a.md".into(),
-            present: true,
-            size: 3,
-            mtime_ms: 1_700_000_000_000,
-            truncated: false,
-            content: "# a".into(),
-            ..Default::default()
-        });
+        registry.finish_owner_file(
+            machine,
+            OwnerInstructionsFile {
+                request_id: request.request_id.clone(),
+                kind: request.kind.clone(),
+                path: "/home/owner/.claude/projects/proj1/memory/a.md".into(),
+                present: true,
+                size: 3,
+                mtime_ms: 1_700_000_000_000,
+                truncated: false,
+                content: "# a".into(),
+                ..Default::default()
+            },
+        );
     });
     let body = f
         .request(

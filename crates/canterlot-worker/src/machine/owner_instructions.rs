@@ -44,12 +44,7 @@ pub const KIND_MEMORY_INDEX: &str = "memory_index";
 pub const KIND_MEMORY_FILE: &str = "memory_file";
 
 /// Имена файлов, которые никогда не отдаются, даже при совпадении каталога.
-const DENIED_NAMES: &[&str] = &[
-    ".credentials.json",
-    "credentials.json",
-    "auth.json",
-    ".env",
-];
+const DENIED_NAMES: &[&str] = &[".credentials.json", "credentials.json", "auth.json", ".env"];
 
 /// Корни, из которых строятся разрешённые пути.
 #[derive(Clone, Debug)]
@@ -92,14 +87,17 @@ impl OwnerRoots {
             .map(PathBuf::from)
             .filter(|dir| dir.is_absolute())
             .unwrap_or_else(|| home.join(".claude"));
-        let codex_home = codex_owner_home.map(Path::to_path_buf).unwrap_or_else(|| {
-            get("CODEX_HOME").unwrap_or_else(|| home.join(".codex"))
-        });
-        let opencode_config_dir = opencode_owner_config.map(Path::to_path_buf).unwrap_or_else(|| {
-            get("XDG_CONFIG_HOME")
-                .map(|dir| Path::new(&dir).join("opencode"))
-                .unwrap_or_else(|| home.join(".config/opencode"))
-        });
+        let codex_home = codex_owner_home
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| get("CODEX_HOME").unwrap_or_else(|| home.join(".codex")));
+        let opencode_config_dir =
+            opencode_owner_config
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| {
+                    get("XDG_CONFIG_HOME")
+                        .map(|dir| Path::new(&dir).join("opencode"))
+                        .unwrap_or_else(|| home.join(".config/opencode"))
+                });
         Self {
             home: home.to_path_buf(),
             claude_config_dir,
@@ -121,9 +119,9 @@ fn denied_name(name: &str) -> bool {
 fn valid_project(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
-        && id.bytes().all(|b| {
-            b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'='
-        })
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-' || b == b'=')
         && id != "."
         && id != ".."
 }
@@ -461,13 +459,14 @@ pub fn read_one(
             return OwnerInstructionsFile {
                 request_id: request_id.into(),
                 kind: kind.into(),
-                path: dir.join(if kind == KIND_MEMORY_INDEX {
-                    "MEMORY.md"
-                } else {
-                    name
-                })
-                .to_string_lossy()
-                .into_owned(),
+                path: dir
+                    .join(if kind == KIND_MEMORY_INDEX {
+                        "MEMORY.md"
+                    } else {
+                        name
+                    })
+                    .to_string_lossy()
+                    .into_owned(),
                 files: if kind == KIND_MEMORY_INDEX {
                     Vec::new()
                 } else {
@@ -571,8 +570,7 @@ mod tests {
         std::fs::write(r.codex_home.join("AGENTS.md"), "# codex").unwrap();
         std::fs::write(r.opencode_config_dir.join("AGENTS.md"), "# opencode").unwrap();
         std::fs::write(
-            r.claude_config_dir
-                .join("projects/proj1/memory/MEMORY.md"),
+            r.claude_config_dir.join("projects/proj1/memory/MEMORY.md"),
             "- topic in a.md",
         )
         .unwrap();
@@ -660,8 +658,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = setup(dir.path());
         let memory = r.claude_config_dir.join("projects/proj1/memory");
-        symlink(r.claude_config_dir.join(".credentials.json"), memory.join("evil.md"))
-            .unwrap();
+        symlink(
+            r.claude_config_dir.join(".credentials.json"),
+            memory.join("evil.md"),
+        )
+        .unwrap();
         symlink("/etc/hostname", memory.join("outer.md")).unwrap();
         let evil = read_one(KIND_MEMORY_FILE, "proj1", "evil.md", &r, "req");
         assert!(!evil.present);
@@ -670,7 +671,10 @@ mod tests {
         assert!(!outer.present);
         let index = read_one(KIND_MEMORY_INDEX, "proj1", "", &r, "req");
         assert!(
-            index.files.iter().all(|f| f.name != "evil.md" && f.name != "outer.md"),
+            index
+                .files
+                .iter()
+                .all(|f| f.name != "evil.md" && f.name != "outer.md"),
             "ссылки наружу не попадают даже в список"
         );
         let view = overview(&r);

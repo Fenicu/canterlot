@@ -392,9 +392,7 @@ fn map_owner_error(error: crate::session::OwnerReadError) -> ApiError {
         crate::session::OwnerReadError::CapabilityMissing => {
             ApiError::new(ErrorCode::CapabilityMissing)
         }
-        crate::session::OwnerReadError::Unavailable => {
-            ApiError::new(ErrorCode::MachineUnavailable)
-        }
+        crate::session::OwnerReadError::Unavailable => ApiError::new(ErrorCode::MachineUnavailable),
     }
 }
 
