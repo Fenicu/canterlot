@@ -597,6 +597,11 @@ impl InputQueue {
     pub fn interrupt_acknowledged(&self) -> bool {
         self.interrupt == Interrupt::Acknowledged
     }
+
+    /// Ход завершён обычным итогом: прерывать нечего, ожидание закончено.
+    pub fn turn_over(&self) -> bool {
+        self.active.is_none() && self.adopted.is_none()
+    }
 }
 
 /// Конец хода после SIGINT: прерван вызов инструмента (`aborted_tools`)
@@ -906,6 +911,10 @@ impl InputDriver {
             if self.queue.interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
             }
+            // Обычный итог после квитанции тоже закрывает ход: ждать нечего.
+            if self.queue.turn_over() {
+                return InterruptOutcome::Undetermined;
+            }
             if self.eof {
                 return InterruptOutcome::Undetermined;
             }
@@ -928,7 +937,7 @@ impl InputDriver {
             if tokio::time::timeout_at(bound, self.pump(cli))
                 .await
                 .is_err()
-                && sigint_sent
+                && Instant::now() >= limit
             {
                 return InterruptOutcome::Undetermined;
             }

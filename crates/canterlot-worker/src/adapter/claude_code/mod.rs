@@ -1445,6 +1445,10 @@ impl Adapter for ClaudeCodeAdapter {
             if self.queue.as_ref().unwrap().interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
             }
+            // Обычный итог после квитанции тоже закрывает ход: ждать нечего.
+            if self.queue.as_ref().unwrap().turn_over() {
+                return InterruptOutcome::Undetermined;
+            }
             if self.eof {
                 return InterruptOutcome::Undetermined;
             }
@@ -1471,7 +1475,7 @@ impl Adapter for ClaudeCodeAdapter {
                 .filter(|_| !sigint_sent)
                 .map(|bound| bound.min(until))
                 .unwrap_or(until);
-            if timeout_at(bound, self.pump()).await.is_err() && sigint_sent {
+            if timeout_at(bound, self.pump()).await.is_err() && Instant::now() >= until {
                 return InterruptOutcome::Undetermined;
             }
         }
