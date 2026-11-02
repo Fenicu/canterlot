@@ -28,6 +28,7 @@ mod fake_exec;
 
 const CLAUDE_WEEKLY_ONLY: &str = include_str!("fixtures/codexbar/claude_weekly_only.json");
 const CODEX: &str = include_str!("fixtures/codexbar/codex.json");
+const OPENCODEGO: &str = include_str!("fixtures/codexbar/opencodego.json");
 const NOW_MS: u64 = 1_793_483_400_000; // 2026-10-31T21:50:00Z
 const WEEK_RESET_MS: u64 = 1_793_667_600_000; // 2026-11-03T01:00:00Z
 const FIVE: i32 = LimitWindow::FiveHour as i32;
@@ -206,7 +207,7 @@ async fn poll_runs_codexbar_with_the_provider_and_json_format() {
     let clock = TestClock::new();
     let source = source(printing(dir.path(), CLAUDE_WEEKLY_ONLY), &clock, None);
 
-    assert!(source.poll("opencode").await.is_empty());
+    assert!(source.poll("antigravity").await.is_empty());
     assert!(
         calls(dir.path()).is_empty(),
         "foreign provider never starts the program"
@@ -485,6 +486,83 @@ async fn poll_report_carries_the_absence_and_a_failed_run_carries_none() {
     let failing = executable(dir.path(), "exit 3\n");
     let failed = self::source(failing, &clock, None)
         .poll_report("claude", false)
+        .await;
+    assert!(failed.observations.is_empty() && failed.absent.is_empty());
+}
+
+#[test]
+fn opencode_reading_uses_window_lengths_and_skips_the_monthly_window() {
+    let reading = reading_from_output("opencode", OPENCODEGO.as_bytes(), NOW_MS).unwrap();
+    assert_eq!(
+        rows(&reading.observations),
+        vec![
+            (FIVE, 125, 1_793_501_361_000),
+            (WEEK, 340, 1_794_182_399_000)
+        ]
+    );
+    assert!(reading.absent.is_empty(), "five hour window is present");
+    assert!(
+        reading
+            .observations
+            .iter()
+            .all(|o| o.provider == "opencode"),
+        "hub provider, not the codexbar name"
+    );
+    assert!(
+        reading
+            .observations
+            .iter()
+            .all(|o| o.observed_machine_ms == 1_793_483_361_000),
+        "reading time comes from updatedAt"
+    );
+}
+
+#[test]
+fn opencode_weekly_only_reading_marks_only_its_own_five_hour_window_absent() {
+    let body = r#"[{"provider":"opencodego","usage":{
+        "primary":{"usedPercent":34,"windowMinutes":10080,"resetsAt":"2026-11-08T23:59:59Z"},
+        "updatedAt":"2026-10-31T21:49:21Z"}}]"#;
+    let reading = reading_from_output("opencode", body.as_bytes(), NOW_MS).unwrap();
+    assert_eq!(
+        rows(&reading.observations),
+        vec![(WEEK, 340, 1_794_182_399_000)]
+    );
+    assert_eq!(reading.absent.len(), 1);
+    assert_eq!(reading.absent[0].provider, "opencode");
+    assert_eq!(reading.absent[0].window, FIVE);
+}
+
+#[test]
+fn opencode_reading_without_a_usable_percent_marks_nothing_absent() {
+    let body = r#"[{"provider":"opencodego","usage":{
+        "primary":{"usedPercent":null,"windowMinutes":300},
+        "secondary":{"usedPercent":null,"windowMinutes":10080},
+        "tertiary":{"usedPercent":9.3,"windowMinutes":43200},
+        "updatedAt":"2026-10-31T21:49:21Z"}}]"#;
+    let reading = reading_from_output("opencode", body.as_bytes(), NOW_MS).unwrap();
+    assert!(reading.observations.is_empty());
+    assert!(reading.absent.is_empty());
+}
+
+#[tokio::test]
+async fn opencode_poll_calls_codexbar_with_the_go_provider_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let clock = TestClock::new();
+    let source = source(printing(dir.path(), OPENCODEGO), &clock, None);
+
+    let fetched = source.poll_report("opencode", false).await;
+    assert_eq!(fetched.observations.len(), 2);
+    assert!(fetched.absent.is_empty());
+    let args = calls(dir.path());
+    assert!(
+        args.iter()
+            .any(|call| call == "usage --provider opencodego --format json --no-color"),
+        "unexpected calls: {args:?}"
+    );
+
+    let failing = executable(dir.path(), "exit 3\n");
+    let failed = self::source(failing, &clock, None)
+        .poll_report("opencode", false)
         .await;
     assert!(failed.observations.is_empty() && failed.absent.is_empty());
 }

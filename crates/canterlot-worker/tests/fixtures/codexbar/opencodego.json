@@ -1,0 +1,33 @@
+[
+  {
+    "usage": {
+      "updatedAt": "2026-10-31T21:49:21Z",
+      "dataConfidence": "estimated",
+      "primary": {
+        "resetsAt": "2026-11-01T02:49:21Z",
+        "windowMinutes": 300,
+        "resetDescription": "5-hour",
+        "usedPercent": 12.5
+      },
+      "secondary": {
+        "resetsAt": "2026-11-08T23:59:59Z",
+        "windowMinutes": 10080,
+        "resetDescription": "Weekly",
+        "usedPercent": 34
+      },
+      "tertiary": {
+        "resetsAt": "2026-11-29T07:35:50Z",
+        "windowMinutes": 43200,
+        "resetDescription": "Monthly",
+        "usedPercent": 9.3
+      }
+    },
+    "rateWindowLabels": {
+      "primary": "5-hour",
+      "secondary": "Weekly",
+      "tertiary": "Monthly"
+    },
+    "source": "local",
+    "provider": "opencodego"
+  }
+]

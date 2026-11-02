@@ -260,3 +260,36 @@ test('chat_header_and_limits_tab_hide_the_missing_five_hour_window', async ({ pa
   await expect(page.locator('main .current section').filter({ hasText: 'Codex сейчас' })).toContainText('/ 5ч');
   await shot(page, 'limits-tab-one-meter');
 });
+
+test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async ({ page }) => {
+  await boot(page, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    api.limits.push({
+      provider: 'opencode',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed }
+    });
+  });
+  const strip = page.locator('.limits').first();
+  await expect(strip.locator('.row')).toHaveCount(3);
+  const opencode = strip.locator('.row').nth(2);
+  await expect(opencode).toContainText('OpenCode');
+  const geometry = await strip.evaluate((root) => {
+    const rows = [...root.querySelectorAll(':scope .row')];
+    const boxes = rows.map((row) => {
+      const name = row.querySelector(':scope .name')!.getBoundingClientRect();
+      const meters = row.querySelector(':scope .meters')!.getBoundingClientRect();
+      return { nameRight: name.right, metersLeft: meters.left };
+    });
+    const gaps = boxes.map((box) => box.metersLeft - box.nameRight);
+    const starts = boxes.map((box) => box.metersLeft);
+    return { gaps, starts };
+  });
+  for (const gap of geometry.gaps) expect(gap).toBeGreaterThanOrEqual(0);
+  for (const start of geometry.starts) expect(Math.abs(start - geometry.starts[0]!)).toBeLessThanOrEqual(1);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-opencode');
+});

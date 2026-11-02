@@ -70,7 +70,7 @@ impl FileLimitsSource {
 impl LimitsSource for FileLimitsSource {
     async fn poll(&self, provider: &str) -> Vec<LimitObservation> {
         use canterlot_proto::worker::v1::LimitWindow;
-        if !matches!(provider, "claude" | "codex") {
+        if !matches!(provider, "claude" | "codex" | "opencode") {
             return Vec::new();
         }
         let path = self

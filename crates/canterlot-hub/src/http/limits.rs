@@ -165,7 +165,7 @@ async fn refresh(
 ) -> Result<(StatusCode, Json<RefreshView>), ApiError> {
     use crate::crunch::{PollRequest, request_poll_outcome};
     let providers: Vec<String> = sqlx::query_scalar(
-        "select distinct provider from machine_harnesses where provider in ('claude','codex') order by provider",
+        "select distinct provider from machine_harnesses where provider in ('claude','codex','opencode') order by provider",
     )
     .fetch_all(&s.pool)
     .await?;
