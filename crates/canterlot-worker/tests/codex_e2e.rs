@@ -3081,9 +3081,14 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
             Err(_) => break,
         }
     }
-    assert_eq!(finished, Some((true, true, 0, 0)), "manual episode must finish");
+    assert_eq!(
+        finished,
+        Some((true, true, 0, 0)),
+        "manual episode must finish"
+    );
     assert!(
-        fake.stdin_methods().contains(&"thread/compact/start".to_owned()),
+        fake.stdin_methods()
+            .contains(&"thread/compact/start".to_owned()),
         "adapter must call the app-server method"
     );
     fake.close().await;

@@ -761,10 +761,7 @@ impl Translator {
                 pre_tokens: 0,
                 post_tokens: 0,
             }),
-            Translated::CompactionEnded {
-                failed,
-                manual,
-            },
+            Translated::CompactionEnded { failed, manual },
         ]
     }
 
@@ -906,7 +903,11 @@ impl Translator {
                 self.progress_sent = self.context_tokens;
                 return vec![Translated::Event(AdapterEvent::ContextProgress {
                     context_tokens: self.context_tokens,
-                    context_window_tokens: self.windows.get(&self.model).copied().unwrap_or_default(),
+                    context_window_tokens: self
+                        .windows
+                        .get(&self.model)
+                        .copied()
+                        .unwrap_or_default(),
                 })];
             }
         }

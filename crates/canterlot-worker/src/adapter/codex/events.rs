@@ -100,7 +100,8 @@ fn parse_turn_error(error: &Value) -> TurnErrorInfo {
 /// Шаг живого расхода контекста между записями `ContextProgress`.
 const CONTEXT_PROGRESS_STEP: u64 = 10_000;
 
-pub enum Translated {    Event(AdapterEvent),
+pub enum Translated {
+    Event(AdapterEvent),
     UserMessage {
         thread_id: String,
         turn_id: String,

@@ -142,10 +142,7 @@ pub async fn apply_event(
             .await?;
     } else {
         let pre_tokens: Option<i64> = if fact.pre_tokens > 0 {
-            Some(
-                i64::try_from(fact.pre_tokens)
-                    .map_err(|_| invalid("pre tokens"))?,
-            )
+            Some(i64::try_from(fact.pre_tokens).map_err(|_| invalid("pre tokens"))?)
         } else {
             None
         };

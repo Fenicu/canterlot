@@ -1033,12 +1033,10 @@ impl Ingest {
                         .await
                         .map_err(pilot_error)?;
                         // Итог хода — авторитетный расход для индикатора контекста.
-                        return crate::compactions::note_turn_context(
-                            conn, &run, f, correlation
-                        )
-                        .await
-                        .map(|_| (ignored, None, false))
-                        .map_err(pilot_error);
+                        return crate::compactions::note_turn_context(conn, &run, f, correlation)
+                            .await
+                            .map(|_| (ignored, None, false))
+                            .map_err(pilot_error);
                     }
                 }
                 _ => {}

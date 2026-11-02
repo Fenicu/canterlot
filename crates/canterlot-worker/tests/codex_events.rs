@@ -1745,10 +1745,9 @@ fn compaction_frames_open_and_close_a_timeline_episode() {
     let events = events_of(&out);
     // Кадры дают факт без токенов и триггера: эпизод автоматический, цифры нет.
     assert!(
-        events.iter().any(|e| matches!(
-            e,
-            AdapterEvent::CompactionStarted { manual: false }
-        )),
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CompactionStarted { manual: false })),
         "{events:?}"
     );
     assert!(

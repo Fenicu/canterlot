@@ -1488,10 +1488,8 @@ fn compaction_frames_open_and_close_a_timeline_episode() {
     let out = adapter_events(feed_all(&mut translator, &tail));
     // Записанное автоматическое сжатие: эпизод авто, цифры CLI не даёт.
     assert!(
-        out.iter().any(|e| matches!(
-            e,
-            AdapterEvent::CompactionStarted { manual: false }
-        )),
+        out.iter()
+            .any(|e| matches!(e, AdapterEvent::CompactionStarted { manual: false })),
         "{out:?}"
     );
     assert!(

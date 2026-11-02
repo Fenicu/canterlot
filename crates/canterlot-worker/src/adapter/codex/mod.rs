@@ -26,10 +26,9 @@ use crate::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         CompactOutcome, DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec,
-        InterruptOutcome,
-        ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support, Transmission,
-        TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent, held_tool::HeldTools,
-        reaped,
+        InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started, Support,
+        Transmission, TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
+        held_tool::HeldTools, reaped,
     },
     config::CodexConfig,
     containment::Containment,

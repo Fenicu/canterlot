@@ -605,7 +605,9 @@ impl Parser {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0)
         };
-        let total = get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens");
+        let total = get("input_tokens")
+            + get("cache_read_input_tokens")
+            + get("cache_creation_input_tokens");
         self.last_usage = Some(MessageUsage {
             input: get("input_tokens"),
             cache_read: get("cache_read_input_tokens"),
@@ -731,12 +733,11 @@ impl Parser {
                 }
             }
             Some("compact_boundary") => {
-                let meta = value.get("compact_metadata").unwrap_or(&serde_json::Value::Null);
+                let meta = value
+                    .get("compact_metadata")
+                    .unwrap_or(&serde_json::Value::Null);
                 let manual = self.compact_manual
-                    || meta
-                        .get("trigger")
-                        .and_then(serde_json::Value::as_str)
-                        == Some("manual");
+                    || meta.get("trigger").and_then(serde_json::Value::as_str) == Some("manual");
                 let pre_tokens = meta
                     .get("pre_tokens")
                     .and_then(serde_json::Value::as_u64)

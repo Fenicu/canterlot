@@ -1269,7 +1269,10 @@ impl Adapter for ClaudeCodeAdapter {
         if self.compact_pending.is_some() {
             return CompactOutcome::NotApplicable;
         }
-        let turn_busy = self.queue.as_ref().is_some_and(|queue| queue.active().is_some())
+        let turn_busy = self
+            .queue
+            .as_ref()
+            .is_some_and(|queue| queue.active().is_some())
             || self.parser.wake_turn_open();
         if turn_busy {
             return CompactOutcome::NotApplicable;
