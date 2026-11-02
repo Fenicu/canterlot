@@ -182,7 +182,7 @@ describe("timeline/QueueActions sendNow", () => {
     input.id = "inp-uuid-1";
     input.state = "queued";
 
-    let posted: Array<[string, string, string]> = [];
+    const posted: Array<[string, string, string]> = [];
     const res = await sendNow(input, "conv-1", {
       clientSendNow: async (conv, id, key) => {
         posted.push([conv, id, key]);
@@ -191,12 +191,12 @@ describe("timeline/QueueActions sendNow", () => {
     });
     expect(res).toBe("requested");
     expect(posted).toHaveLength(1);
-    expect(posted[0][0]).toBe("conv-1");
-    expect(posted[0][1]).toBe("inp-uuid-1");
+    expect(posted[0]![0]).toBe("conv-1");
+    expect(posted[0]![1]).toBe("inp-uuid-1");
 
     const refused = await sendNow(input, "conv-1", {
       clientSendNow: async () => {
-        throw new ApiError(400, "invalid_request", "Некорректный запрос", "Browser", "Never", "c", {
+        throw new ApiError(400, "invalid_request", "Некорректный запрос", "browser", "never", "c", {
           reason: "request_open",
         });
       },
