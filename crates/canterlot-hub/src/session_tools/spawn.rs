@@ -91,6 +91,9 @@ pub struct SpawnSpec {
     attachment_ids: Vec<Uuid>,
     /// Глубина хода родителя: с неё подписка и бриф считают цепочку.
     chain_depth: i32,
+    /// Режим у CLI потомка сильнее, чем у родителя: запуск только через карточку.
+    #[serde(default)]
+    wider_than_parent: bool,
 }
 
 impl fmt::Debug for SpawnSpec {
@@ -114,6 +117,18 @@ fn rank(mode: &str) -> Option<u8> {
     }
 }
 
+/// Сила режима у конкретного CLI: что агент делает без вопроса владельцу.
+/// У Codex `ask` идёт без песочницы, и команды он почти никогда не спрашивает
+/// (`approvalPolicy: on-request` при `dangerFullAccess`), поэтому он равен `bypass`.
+/// `owner` неизвестен заранее: сравнивается как `ask`.
+fn power(harness: &str, mode: &str) -> u8 {
+    match (harness, rank(mode)) {
+        ("codex", Some(1)) => WIDEST_RANK,
+        (_, Some(rank)) => rank,
+        (_, None) => 1,
+    }
+}
+
 /// Более узкий из действующего и ожидающего (D11). `owner` с рангами не сравним:
 /// ограниченный режим считается уже него, `bypass` ничего не сужает.
 fn parent_mode<'a>(effective: &'a str, pending: Option<&'a str>) -> &'a str {
@@ -134,19 +149,48 @@ fn parent_mode<'a>(effective: &'a str, pending: Option<&'a str>) -> &'a str {
     }
 }
 
+struct ChildMode {
+    mode: String,
+    /// Режим по названию не шире родителя, но у CLI потомка сильнее: нужна карточка.
+    wider_than_parent: bool,
+}
+
+/// Режим потомка: по названию не шире родителя, по силе у его CLI не сильнее без карточки.
 /// `owner` значит разное у разных CLI, поэтому через границу харнесса он становится `ask`.
+/// Без явного режима берётся самый широкий из не сильнее родителя: Codex от родителя
+/// в `ask` или `owner` получает `read_only`.
 fn resolve_mode(
+    parent_harness: &str,
     parent: &str,
-    same_harness: bool,
+    child_harness: &str,
     requested: Option<&str>,
-) -> Result<String, ToolError> {
+) -> Result<ChildMode, ToolError> {
+    let same_harness = parent_harness == child_harness;
     let ceiling = if parent == OWNER_MODE && !same_harness {
         "ask"
     } else {
         parent
     };
+    let limit = power(parent_harness, parent);
     let Some(requested) = requested else {
-        return Ok(ceiling.to_owned());
+        if ceiling == OWNER_MODE {
+            return Ok(ChildMode {
+                mode: OWNER_MODE.to_owned(),
+                wider_than_parent: false,
+            });
+        }
+        let ceiling_rank = rank(ceiling).unwrap_or(0);
+        let mode = ["bypass", "ask", "read_only"]
+            .into_iter()
+            .find(|mode| {
+                rank(mode).is_some_and(|rank| rank <= ceiling_rank)
+                    && power(child_harness, mode) <= limit
+            })
+            .unwrap_or("read_only");
+        return Ok(ChildMode {
+            mode: mode.to_owned(),
+            wider_than_parent: false,
+        });
     };
     let fits = requested == ceiling
         || match (rank(requested), rank(ceiling)) {
@@ -157,7 +201,12 @@ fn resolve_mode(
     if !fits {
         return Err(ToolError::new(ToolErrorCode::PermissionModeTooWide));
     }
-    Ok(requested.to_owned())
+    let wider_than_parent =
+        !(same_harness && requested == parent) && power(child_harness, requested) > limit;
+    Ok(ChildMode {
+        mode: requested.to_owned(),
+        wider_than_parent,
+    })
 }
 
 fn invalid() -> ToolError {
@@ -387,9 +436,13 @@ async fn validate(
     let model = catalog.resolve_model(args.model.as_deref())?;
     let effort = resolve_effort(model, args.effort.as_deref())?;
     let model = model["id"].as_str().unwrap_or_default().to_owned();
-    let mode = resolve_mode(
+    let ChildMode {
+        mode,
+        wider_than_parent,
+    } = resolve_mode(
+        &parent.harness,
         parent_mode(&parent.permission_mode, parent.pending_mode.as_deref()),
-        parent.harness == args.harness,
+        &args.harness,
         args.permission_mode.as_deref(),
     )?;
     if !catalog.has_mode(&mode) {
@@ -417,6 +470,7 @@ async fn validate(
             subscribe: args.subscribe,
             attachment_ids: args.attachment_ids,
             chain_depth,
+            wider_than_parent,
         },
         catalog,
     ))
@@ -664,7 +718,9 @@ pub async fn spawn(
     let (spec, catalog) = validate(&mut tx, context, caller, &parent, args, depth).await?;
     let list = whitelist::view(&mut tx, caller.owner_id).await?;
     let first_model = catalog.first_model().unwrap_or_default();
-    if !whitelist::allows(&list.entries, &spec.harness, &spec.model, first_model) {
+    if spec.wider_than_parent
+        || !whitelist::allows(&list.entries, &spec.harness, &spec.model, first_model)
+    {
         let request = open_card(&mut tx, caller, &spec).await?;
         tx.commit().await?;
         return Ok(pending_answer(request));
@@ -813,14 +869,19 @@ fn started(request: Uuid, spec: &SpawnSpec, child: &Started) -> Resolution {
 /// Разрешение проходит те же правила, кроме списка: за время ожидания родитель мог сузиться,
 /// а каталог измениться. Отказ откатывает только эту попытку: закрыть запрос ещё нужно.
 async fn allow(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Started, ToolError> {
-    resolve_mode(
+    let mode = resolve_mode(
+        &launch.parent.harness,
         parent_mode(
             &launch.parent.permission_mode,
             launch.parent.pending_mode.as_deref(),
         ),
-        launch.parent.harness == launch.spec.harness,
+        &launch.spec.harness,
         Some(&launch.spec.permission_mode),
     )?;
+    // Владелец одобрял карточку без пометки: стать сильнее родителя запуск не может.
+    if mode.wider_than_parent && !launch.spec.wider_than_parent {
+        return Err(ToolError::new(ToolErrorCode::PermissionModeTooWide));
+    }
     let mut attempt = conn.begin().await?;
     match start_child(&mut attempt, launch).await {
         Ok(child) => {

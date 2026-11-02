@@ -1478,3 +1478,64 @@ async fn foreign_attachment_is_refused_for_spawn(pool: PgPool) {
     assert_eq!(error.code, Code::AttachmentNotAvailable);
     assert!(f.child().await.is_none());
 }
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn codex_ask_from_an_ask_parent_needs_the_owner(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.set_modes(f.parent, "ask", json!({})).await;
+    let before = f.sessions().await;
+    let request = f
+        .pending(json!({"harness":"codex","brief":"b","permission_mode":"ask"}))
+        .await;
+    assert_eq!(f.sessions().await, before, "whitelisted, but no child yet");
+    let payload: Value = sqlx::query_scalar("select request_payload from requests where id=$1")
+        .bind(request)
+        .fetch_one(&f.pool)
+        .await
+        .unwrap();
+    assert_eq!(payload["permission_mode"], "ask");
+    assert_eq!(payload["wider_than_parent"], true, "{payload}");
+
+    f.decide(request, PermissionBehavior::Allow).await;
+    f.tick().await;
+    let child = f.child().await.expect("the owner allowed it");
+    assert_eq!(f.mode(child).await, "ask");
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn codex_child_without_a_mode_gets_the_strictest_equivalent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    for parent in ["ask", "owner"] {
+        f.set_modes(f.parent, parent, json!({})).await;
+        let (child, answer) = f.started(json!({"harness":"codex","brief":"b"})).await;
+        assert_eq!(answer["permission_mode"], "read_only", "{parent}");
+        assert_eq!(f.mode(child).await, "read_only", "{parent}");
+    }
+    f.set_modes(f.parent, "bypass", json!({})).await;
+    let (_, answer) = f.started(json!({"harness":"codex","brief":"b"})).await;
+    assert_eq!(answer["permission_mode"], "bypass");
+    let (_, answer) = f
+        .started(json!({"harness":"codex","brief":"b","permission_mode":"ask"}))
+        .await;
+    assert_eq!(
+        answer["permission_mode"], "ask",
+        "a bypass parent needs no card"
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn approved_wider_child_is_rechecked_against_a_narrowed_parent(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    f.set_modes(f.parent, "ask", json!({})).await;
+    let request = f
+        .pending(json!({"harness":"codex","brief":"b","permission_mode":"ask"}))
+        .await;
+    f.set_modes(f.parent, "read_only", json!({})).await;
+    f.decide(request, PermissionBehavior::Allow).await;
+    f.tick().await;
+    assert!(f.child().await.is_none());
+    assert_eq!(
+        f.closed_reason(request).await.as_deref(),
+        Some("permission_mode_too_wide")
+    );
+}

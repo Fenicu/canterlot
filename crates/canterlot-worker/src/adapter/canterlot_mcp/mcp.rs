@@ -161,7 +161,7 @@ fn session_tool_description(mcp_name: &str) -> &'static str {
             "Queue a text message for another session; it reads it as a message from an agent, not from the owner. By default you are subscribed to its completion. Do not use it to ask the owner anything (use your own question flow) and do not send the same text twice. After sending, end your turn instead of polling."
         }
         "session_spawn" => {
-            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir. The child never gets wider permissions than yours. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
+            "Start a new session with a brief, optionally in an isolated git worktree of the parent's workdir. The child never gets wider permissions than yours without the owner: a mode that is stronger in the child's CLI than yours (Codex `ask` runs commands without asking) answers pending_approval, and an omitted mode falls back to the widest one that is not stronger. Harnesses or models outside the owner's list answer pending_approval and the owner decides in the app. Do not use it for small steps you can do yourself, and do not call it in a loop. After spawning, end your turn: the summary arrives in your queue."
         }
         "session_subscribe" => {
             "Ask for a [canterlot] message when another session finishes, asks or stalls. Sending to or spawning a session already subscribes you. Do not call it for a session you just sent to or spawned."

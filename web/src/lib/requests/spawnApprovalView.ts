@@ -26,6 +26,10 @@ export function spawnApprovalView(payload: unknown): SpawnApprovalView {
     { label: 'Харнесс', value: HARNESS_TITLES[harness] ?? harness },
     { label: 'Модель', value: model ? modelLabel(model) : '' },
     { label: 'Режим', value: text(top.permission_mode) ? permissionLabel(text(top.permission_mode)) : '' },
+    {
+      label: 'Права',
+      value: top.wider_than_parent === true ? 'шире, чем у родителя: у этого CLI режим выполняет команды без вопроса' : ''
+    },
     { label: 'Каталог', value: text(top.workdir) },
     { label: 'Отдельная рабочая копия', value: top.isolated === true ? (base ? `да, от ${base}` : 'да') : 'нет' }
   ];
