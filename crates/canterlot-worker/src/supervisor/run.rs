@@ -3896,7 +3896,10 @@ mod tests {
             share_transfer_timeout(10 * 1024 * 1024),
             Duration::from_secs(80)
         );
-        assert_eq!(share_transfer_timeout(u64::MAX), Duration::from_secs(15 * 60));
+        assert_eq!(
+            share_transfer_timeout(u64::MAX),
+            Duration::from_secs(15 * 60)
+        );
     }
 
     #[tokio::test]
@@ -3909,13 +3912,7 @@ mod tests {
             .agent_calls
             .insert(call_id, Instant::now() + SHARE_PREPARE_TIMEOUT);
         let (tx, mut rx) = mpsc::channel(64);
-        supervisor.conns.insert(
-            0,
-            Conn {
-                tx,
-                attached: true,
-            },
-        );
+        supervisor.conns.insert(0, Conn { tx, attached: true });
         supervisor.attached = Some(0);
         supervisor.pump_share();
         assert!(
@@ -3960,13 +3957,7 @@ mod tests {
             .agent_calls
             .insert(call_id, Instant::now() - Duration::from_secs(1));
         let (tx, mut rx) = mpsc::channel(8);
-        supervisor.conns.insert(
-            0,
-            Conn {
-                tx,
-                attached: true,
-            },
-        );
+        supervisor.conns.insert(0, Conn { tx, attached: true });
         supervisor.attached = Some(0);
         let copy = media::media_path(&supervisor.exec_dir, share_id);
         std::fs::create_dir_all(copy.parent().unwrap()).unwrap();

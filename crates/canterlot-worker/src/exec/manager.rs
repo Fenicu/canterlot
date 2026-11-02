@@ -2867,12 +2867,7 @@ mod tests {
         let mut actor = Actor::new(manager.shared.clone(), id, 1, rx);
         actor.exec_dir = Some(root.path().to_owned());
         let (self_tx, mut self_rx) = mpsc::unbounded_channel();
-        manager
-            .shared
-            .actors
-            .lock()
-            .unwrap()
-            .insert(id, self_tx);
+        manager.shared.actors.lock().unwrap().insert(id, self_tx);
         let share_id = Uuid::now_v7();
         actor
             .on_up(up::Msg::ShareUpload(
