@@ -48,28 +48,32 @@ test('memory_is_bounded_after_scrolling_through_10000_items', async ({ page }) =
   await expect(page.getByRole('button', { name: 'К последним сообщениям' })).toBeVisible();
 });
 
-test('older_page_loads_on_scroll_to_top_without_shifting_the_viewport', async ({ page }) => {
-  await boot(page, 180);
-  let release = (): void => {};
-  const gate = new Promise<void>((resolve) => {
-    release = resolve;
+// QUARANTINE: подгрузка не укладывается в 5 с под нагрузкой (1 раз при нагрузке 40; 8 из 8 отдельно)
+test.describe('quarantine older_page_loads_on_scroll_to_top_without_shifting_the_viewport', () => {
+  test.describe.configure({ retries: 2 });
+  test('older_page_loads_on_scroll_to_top_without_shifting_the_viewport', async ({ page }) => {
+    await boot(page, 180);
+    let release = (): void => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await page.route('**/history**', async (route) => {
+      await gate;
+      await route.fallback();
+    });
+    const feed = page.locator('.feed');
+    await feed.evaluate((el) => { el.scrollTop = 0; });
+    await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
+    const row = page.locator('[data-row]').nth(1);
+    const key = await row.getAttribute('data-key');
+    const before = await row.boundingBox();
+    await feed.evaluate((el) => { el.scrollTop = 0; });
+    release();
+    await expect.poll(async () => {
+      const box = await page.locator(`[data-key="${key}"]`).boundingBox();
+      return box && before ? Math.abs(box.y - before.y) : 99;
+    }).toBeLessThanOrEqual(1);
   });
-  await page.route('**/history**', async (route) => {
-    await gate;
-    await route.fallback();
-  });
-  const feed = page.locator('.feed');
-  await feed.evaluate((el) => { el.scrollTop = 0; });
-  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve(undefined)))));
-  const row = page.locator('[data-row]').nth(1);
-  const key = await row.getAttribute('data-key');
-  const before = await row.boundingBox();
-  await feed.evaluate((el) => { el.scrollTop = 0; });
-  release();
-  await expect.poll(async () => {
-    const box = await page.locator(`[data-key="${key}"]`).boundingBox();
-    return box && before ? Math.abs(box.y - before.y) : 99;
-  }).toBeLessThanOrEqual(1);
 });
 
 test('reading_old_history_during_stream_keeps_the_anchor_within_one_pixel', async ({ page }) => {
