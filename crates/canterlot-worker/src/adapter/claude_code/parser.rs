@@ -164,6 +164,8 @@ pub enum Parsed {
         request_id: String,
         success: bool,
     },
+    /// Служебный итог `/compact` потреблён без открытого хода: команда сжатия закрыта.
+    CompactResultConsumed,
     Ignored,
 }
 
@@ -226,6 +228,7 @@ impl std::fmt::Debug for Parsed {
                 .field("request_id", request_id)
                 .field("success", success)
                 .finish(),
+            Self::CompactResultConsumed => f.write_str("CompactResultConsumed"),
             Self::Ignored => f.write_str("Ignored"),
         }
     }
@@ -263,6 +266,8 @@ pub struct Parser {
     /// Граница сжатия прошла: ближайший `result` без открытого хода — итог служебного
     /// `/compact`, а не ход прошлой команды.
     compact_swallow_result: bool,
+    /// Кадр последней границы сжатия: CLI дублирует границу, повторный эпизод не открывает.
+    last_compact_boundary: Option<String>,
     /// Живой расход контекста, уже отданный `ContextProgress`: реже журнала, не чаще каждых
     /// `CONTEXT_PROGRESS_STEP` токенов, иначе болтливый ход зальёт журнал и хаб.
     progress_sent: u64,
@@ -305,6 +310,7 @@ impl Parser {
             compact_manual: false,
             compact_active: false,
             compact_swallow_result: false,
+            last_compact_boundary: None,
             progress_sent: 0,
             unknown: HashSet::new(),
             command_open: false,
@@ -733,6 +739,16 @@ impl Parser {
                 }
             }
             Some("compact_boundary") => {
+                let uuid = value
+                    .get("uuid")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                // Повторный кадр той же границы эпизод не дублирует.
+                if !uuid.is_empty() && self.last_compact_boundary.as_deref() == Some(uuid) {
+                    out.push(Parsed::Ignored);
+                    return;
+                }
+                self.last_compact_boundary = Some(uuid.to_owned());
                 let meta = value
                     .get("compact_metadata")
                     .unwrap_or(&serde_json::Value::Null);
@@ -1362,6 +1378,8 @@ impl Parser {
                 tool_name: None,
                 summary: None,
             }));
+            // Служебный итог потреблён: команда сжатия закрывается им, а не границей.
+            out.push(Parsed::CompactResultConsumed);
             self.report_background(out);
             return;
         }

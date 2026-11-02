@@ -1789,3 +1789,64 @@ fn token_usage_updates_emit_rate_limited_progress() {
     // Порог 10 000: срабатывает на 10 000 и 25 000; окно из кадра прикладывается.
     assert_eq!(progresses, vec![(10_000, 200_000), (25_000, 200_000)]);
 }
+
+#[test]
+fn child_thread_compaction_does_not_touch_main_context() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    translator.feed("thread/started", &child_started());
+    let out = translator.feed(
+        "item/completed",
+        &json!({"threadId": "thread-child-1", "turnId": "turn-child-1",
+            "completedAtMs": 3,
+            "item": {"id": "cc-child", "type": "contextCompaction"}}),
+    );
+    assert!(
+        events_of(&out).is_empty(),
+        "child compaction must not finish the main episode: {out:?}"
+    );
+}
+
+#[test]
+fn manual_compaction_start_between_turns_opens_running_state() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    // Хода нет: кнопка нажата между ходами, допуск без активного хода.
+    let out = translator.feed(
+        "item/started",
+        &json!({"threadId": "thread-main", "turnId": "turn-main",
+            "item": {"id": "cc-1", "type": "contextCompaction"}}),
+    );
+    let events = events_of(&out);
+    assert!(
+        events
+            .iter()
+            .any(|e| is_phase(e, &Phase::ContextMaintenance)),
+        "manual start must show running state: {out:?}"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CompactionStarted { .. })),
+        "manual start must open the episode: {out:?}"
+    );
+}
+
+#[test]
+fn repeated_compaction_completion_is_dropped_once_closed() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    // Переподключение в середине: старта не было, финиш открывает и закрывает сразу.
+    let params = json!({"threadId": "thread-main", "turnId": "turn-main",
+        "completedAtMs": 2, "item": {"id": "cc-1", "type": "contextCompaction"}});
+    let first = translator.feed("item/completed", &params);
+    assert!(
+        events_of(&first)
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::CompactionFinished { .. })),
+        "finish without a start still closes at once: {first:?}"
+    );
+    let second = translator.feed("item/completed", &params);
+    assert!(
+        events_of(&second).is_empty(),
+        "duplicate completion must be dropped: {second:?}"
+    );
+}

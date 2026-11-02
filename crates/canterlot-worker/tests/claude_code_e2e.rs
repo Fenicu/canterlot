@@ -2342,3 +2342,86 @@ async fn compact_sends_slash_compact_and_reports_the_manual_boundary() {
     );
     f.close().await;
 }
+
+#[tokio::test]
+async fn compacted_waits_for_service_result_after_boundary() {
+    use canterlot_worker::adapter::CompactOutcome;
+    // Порядок кадров — из tests/fixtures/claude_code/compaction.jsonl: граница
+    // ручного сжатия, затем служебный итог без uuids владельца.
+    let mut f = Fake::new(vec![
+        answer_turn(),
+        vec![
+            json!({"type":"system","subtype":"status","status":"compacting"}),
+            json!({"type":"system","subtype":"compact_boundary",
+                "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+            json!({"type":"result","subtype":"success","is_error":false,"modelUsage":{}}),
+        ],
+        answer_turn(),
+    ]);
+    f.start().await;
+    let id = Uuid::now_v7();
+    f.send(&tx(id)).await;
+    let _ = f.finish().await;
+    let outcome = tokio::time::timeout(WAIT, f.adapter.compact(Uuid::now_v7()))
+        .await
+        .unwrap();
+    assert!(matches!(outcome, CompactOutcome::Accepted), "{outcome:?}");
+    // Граница прошла, служебный итог ещё нет: команда сжатия открыта.
+    let mut finished = false;
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(2), f.adapter.next_event()).await {
+            Ok(AdapterEvent::Compacted { .. }) => {
+                panic!("Compacted must wait for the service result, not the boundary");
+            }
+            Ok(AdapterEvent::CompactionFinished { manual, ok, .. }) => {
+                assert!((manual, ok) == (true, true));
+                finished = true;
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert!(finished, "boundary must finish the episode");
+    // Служебный итог потреблён: команда сжатия завершена.
+    let mut compacted = None;
+    for _ in 0..50 {
+        match tokio::time::timeout(Duration::from_secs(2), f.adapter.next_event()).await {
+            Ok(AdapterEvent::Compacted { ok }) => {
+                compacted = Some(ok);
+                break;
+            }
+            Ok(_) => continue,
+            Err(_) => break,
+        }
+    }
+    assert_eq!(
+        compacted,
+        Some(true),
+        "command flow completes after the result"
+    );
+    // Придержанный ввод уходит по порядку, один раз, с доказательством доставки.
+    let owner = Uuid::now_v7();
+    f.send(&tx(owner)).await;
+    let events = f.finish().await;
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::RunFinished { .. })),
+        "held input must finish its turn: {events:?}"
+    );
+    let written: Vec<Value> = std::fs::read_to_string(f.dir.path().join("stdin.log"))
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(
+        written
+            .iter()
+            .filter(|message| message["uuid"] == owner.to_string())
+            .count(),
+        1,
+        "held input is delivered exactly once: {written:?}"
+    );
+    f.close().await;
+}

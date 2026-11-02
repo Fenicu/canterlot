@@ -255,6 +255,8 @@ pub struct Translator {
     replay: VecDeque<(String, Value)>,
     unattributed_methods: HashSet<String>,
     late_usage_noted: bool,
+    /// Последнее закрытое сжатие: повторный финиш того же элемента — дубль, а не эпизод.
+    last_compaction_item: Option<String>,
 }
 
 impl fmt::Debug for Translator {
@@ -308,6 +310,7 @@ impl Translator {
             replay: VecDeque::new(),
             unattributed_methods: HashSet::new(),
             late_usage_noted: false,
+            last_compaction_item: None,
         }
     }
 
@@ -698,6 +701,11 @@ impl Translator {
             .and_then(Value::as_str)
             .unwrap_or_default();
         if thread_id == self.main_thread_id {
+            // Ручное сжатие стартует между ходами: активного хода и открытого
+            // элемента нет, допуск ему не нужен.
+            if item_type == "contextCompaction" {
+                return self.context_maintenance();
+            }
             let known_turn = self
                 .active_turn
                 .as_ref()
@@ -1050,6 +1058,15 @@ impl Translator {
         let item_id = item.get("id").and_then(Value::as_str).unwrap_or_default();
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         if item_type == "contextCompaction" {
+            // Сжатие потомка главный контекст не трогает.
+            if !self.is_main(params) {
+                return vec![Translated::Ignored];
+            }
+            // Повторный финиш того же элемента — дубль доставки, а не новый эпизод.
+            if self.last_compaction_item.as_deref() == Some(item_id) {
+                return vec![Translated::Ignored];
+            }
+            self.last_compaction_item = Some(item_id.to_owned());
             self.phase = Phase::Generating;
             // После сжатия расход начинается заново: старые проценты не должны пережить границу.
             self.last_context_tokens = 0;

@@ -110,6 +110,8 @@ pub async fn discover(cfg: &CodexConfig) -> Result<CodexCatalog, DiscoverError> 
 
 const HANDSHAKE_STEP: Duration = Duration::from_secs(20);
 const CRUNCH_PROBE: Duration = Duration::from_secs(15);
+/// Сколько кнопочное сжатие ждёт пару `contextCompaction`, прежде чем признать отказ.
+const COMPACT_TIMEOUT: Duration = Duration::from_secs(300);
 
 type RpcResult = Result<Value, RpcError>;
 
@@ -151,6 +153,8 @@ pub struct CodexAdapter {
     pending_turn: Option<PendingTurn>,
     /// Кнопка «Сжать контекст» запустила `thread/compact/start`: ближайший эпизод ручной.
     compact_manual: bool,
+    /// Команда сжатия ждёт итога парой `contextCompaction`: им она и закрывается.
+    compact_pending: Option<(Uuid, Instant)>,
     eof: bool,
     exited: bool,
     start_attempted: bool,
@@ -234,6 +238,7 @@ impl CodexAdapter {
             unconfirmed: HashSet::new(),
             pending_turn: None,
             compact_manual: false,
+            compact_pending: None,
             eof: false,
             exited: false,
             start_attempted: false,
@@ -579,7 +584,8 @@ impl CodexAdapter {
     // отложенного блока ждут вместе с ним.
     fn on_block_event(&mut self, event: AdapterEvent) {
         // Кнопочное сжатие Codex идёт методом `thread/compact/start`: кадры триггера не
-        // несут, ручным эпизод помечает флаг запроса.
+        // несут, ручным эпизод помечает флаг запроса. Итог закрывает и команду хаба.
+        let mut complete_compact: Option<bool> = None;
         let event = match event {
             AdapterEvent::CompactionStarted { manual: false } if self.compact_manual => {
                 AdapterEvent::CompactionStarted { manual: true }
@@ -591,6 +597,9 @@ impl CodexAdapter {
                 post_tokens,
             } if self.compact_manual => {
                 self.compact_manual = false;
+                if self.compact_pending.take().is_some() {
+                    complete_compact = Some(ok);
+                }
                 AdapterEvent::CompactionFinished {
                     manual: true,
                     ok,
@@ -598,8 +607,11 @@ impl CodexAdapter {
                     post_tokens,
                 }
             }
-            AdapterEvent::CompactionFinished { .. } => {
+            AdapterEvent::CompactionFinished { ok, .. } => {
                 self.compact_manual = false;
+                if self.compact_pending.take().is_some() {
+                    complete_compact = Some(ok);
+                }
                 event
             }
             _ => event,
@@ -616,6 +628,9 @@ impl CodexAdapter {
         }
         if let Some(event) = self.hold.capture(event) {
             self.events.push_back(event);
+        }
+        if let Some(ok) = complete_compact {
+            self.events.push_back(AdapterEvent::Compacted { ok });
         }
     }
 
@@ -1308,6 +1323,25 @@ impl CodexAdapter {
         self.outbox.active().is_some() || self.pending_turn.is_some()
     }
 
+    /// Просроченное сжатие — отказ: пара `contextCompaction` так и не пришла,
+    /// висеть вечно нельзя, иначе команда хаба останется открытой навсегда.
+    fn compact_timed_out(&mut self) {
+        if self
+            .compact_pending
+            .is_some_and(|(_, until)| Instant::now() >= until)
+        {
+            self.compact_pending = None;
+            self.compact_manual = false;
+            self.events.push_back(AdapterEvent::Compacted { ok: false });
+            self.events.push_back(AdapterEvent::CompactionFinished {
+                manual: true,
+                ok: false,
+                pre_tokens: 0,
+                post_tokens: 0,
+            });
+        }
+    }
+
     fn begin_turn(&mut self, turn_id: &str, command_id: Uuid) {
         if let Some(translator) = self.translator.as_mut() {
             translator.begin_turn(turn_id, command_id);
@@ -1690,6 +1724,12 @@ impl Adapter for CodexAdapter {
         true
     }
 
+    /// Пара `contextCompaction` приходит тем же каналом между ходами: итог чужого
+    /// хода приписался бы вводу владельца без hold.
+    fn holds_input_during_compaction(&self) -> bool {
+        true
+    }
+
     fn capabilities(&self) -> Capabilities {
         Capabilities {
             streaming: Support::Supported,
@@ -1878,8 +1918,8 @@ impl Adapter for CodexAdapter {
 
     /// Сжатие по кнопке методом app-server `thread/compact/start` между ходами.
     /// Итог приходит парой `contextCompaction`, ручным эпизод помечает флаг.
-    async fn compact(&mut self, _command: Uuid) -> CompactOutcome {
-        if self.turn_running() || self.compact_manual {
+    async fn compact(&mut self, command: Uuid) -> CompactOutcome {
+        if self.turn_running() || self.compact_manual || self.compact_pending.is_some() {
             return CompactOutcome::NotApplicable;
         }
         if self.eof || self.exited {
@@ -1903,6 +1943,7 @@ impl Adapter for CodexAdapter {
             return CompactOutcome::Failed;
         }
         self.compact_manual = true;
+        self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
         CompactOutcome::Accepted
     }
 
@@ -1962,6 +2003,7 @@ impl Adapter for CodexAdapter {
 
     async fn next_event(&mut self) -> AdapterEvent {
         loop {
+            self.compact_timed_out();
             self.flush_writes().await;
             self.settle_late_turn();
             if let Some(event) = self.events.pop_front() {

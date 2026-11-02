@@ -79,6 +79,8 @@ pub struct ClaudeCodeAdapter {
     background_changed: Option<Instant>,
     /// Кнопка «Сжать контекст» отправила `/compact` и ждёт `compact_boundary`.
     compact_pending: Option<(Uuid, Instant)>,
+    /// Граница сжатия прошла, служебный итог ещё нет: команда закрывается им, а не границей.
+    compact_result_due: bool,
 }
 
 impl ClaudeCodeAdapter {
@@ -124,6 +126,7 @@ impl ClaudeCodeAdapter {
             deferred_due: false,
             background_changed: None,
             compact_pending: None,
+            compact_result_due: false,
         }
     }
 
@@ -309,13 +312,27 @@ impl ClaudeCodeAdapter {
                         self.background_changed = Some(Instant::now());
                     }
                     AdapterEvent::CompactionFinished { ok, .. }
-                        if self.compact_pending.take().is_some() =>
+                        if self.compact_pending.is_some() =>
                     {
-                        self.events.push_back(AdapterEvent::Compacted { ok: *ok });
+                        // Граница прошла, служебный итог впереди: команду закрывает
+                        // он, иначе ввод владельца влезет между ними и итог
+                        // припишется чужому ходу. Отказ закрывает сразу: он и есть итог.
+                        if *ok {
+                            self.compact_result_due = true;
+                        } else if self.compact_pending.take().is_some() {
+                            self.compact_result_due = false;
+                            self.events.push_back(AdapterEvent::Compacted { ok: *ok });
+                        }
                     }
                     _ => {}
                 }
                 self.events.push_back(event);
+            }
+            Parsed::CompactResultConsumed => {
+                if self.compact_pending.take().is_some() {
+                    self.compact_result_due = false;
+                    self.events.push_back(AdapterEvent::Compacted { ok: true });
+                }
             }
             Parsed::ToolCallComplete {
                 block_id,
@@ -1078,19 +1095,23 @@ async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Opt
 
 impl ClaudeCodeAdapter {
     /// Просроченное сжатие — отказ: граница так и не пришла, висеть вечно нельзя.
+    /// Граница без итога тоже отпускает очередь: эпизод уже закрыт, дублировать нечего.
     fn compact_timed_out(&mut self) -> bool {
         if self
             .compact_pending
             .is_some_and(|(_, until)| Instant::now() >= until)
         {
             self.compact_pending = None;
+            let boundary_seen = std::mem::take(&mut self.compact_result_due);
             self.events.push_back(AdapterEvent::Compacted { ok: false });
-            self.events.push_back(AdapterEvent::CompactionFinished {
-                manual: true,
-                ok: false,
-                pre_tokens: 0,
-                post_tokens: 0,
-            });
+            if !boundary_seen {
+                self.events.push_back(AdapterEvent::CompactionFinished {
+                    manual: true,
+                    ok: false,
+                    pre_tokens: 0,
+                    post_tokens: 0,
+                });
+            }
             return true;
         }
         false
@@ -1100,6 +1121,12 @@ impl ClaudeCodeAdapter {
 #[async_trait::async_trait]
 impl Adapter for ClaudeCodeAdapter {
     fn isolates_mcp(&self) -> bool {
+        true
+    }
+
+    /// Служебный `/compact` идёт вводом stream-json между ходами: итог чужого
+    /// хода приписался бы вводу владельца без hold.
+    fn holds_input_during_compaction(&self) -> bool {
         true
     }
 
@@ -1297,6 +1324,7 @@ impl Adapter for ClaudeCodeAdapter {
         }
         self.parser.mark_compact_manual();
         self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
+        self.compact_result_due = false;
         CompactOutcome::Accepted
     }
 
