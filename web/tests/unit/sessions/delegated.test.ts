@@ -97,6 +97,43 @@ describe("sessions/delegated-tree", () => {
     expect(sections[0]?.items[0]?.depth).toBe(0);
   });
 
+  it("child_rides_with_parent_into_group_and_pinned_tabs", () => {
+    const items = [
+      row({ id: "parent", title: "Оркестратор", groups: ["canterlot"], pinned: true }),
+      row({
+        id: "child",
+        title: "Миграция",
+        parent_id: "parent",
+        spawn_depth: 1,
+        activity: { state: "working", evidence: { phase: "generating" } },
+      }),
+    ];
+    const group = buildSections(items, groups, { kind: "group", id: "canterlot" }, new Set())[0];
+    expect(group?.count).toBe(1);
+    expect(group?.items.map((node) => node.item.id)).toEqual(["parent"]);
+    expect(group?.items[0]?.children.map((node) => node.item.id)).toEqual(["child"]);
+    const pinned = buildSections(items, groups, { kind: "pinned" }, new Set())[0];
+    expect(pinned?.items.map((node) => node.item.id)).toEqual(["parent"]);
+    expect(pinned?.items[0]?.children.map((node) => node.item.id)).toEqual(["child"]);
+  });
+
+  it("pinned_child_of_unpinned_parent_stays_a_plain_row", () => {
+    const items = [
+      row({ id: "parent", title: "Оркестратор" }),
+      row({
+        id: "child",
+        title: "Миграция",
+        parent_id: "parent",
+        spawn_depth: 1,
+        pinned: true,
+      }),
+    ];
+    const pinned = buildSections(items, groups, { kind: "pinned" }, new Set())[0];
+    expect(pinned?.items.map((node) => node.item.id)).toEqual(["child"]);
+    expect(pinned?.items[0]?.depth).toBe(0);
+    expect(pinned?.items[0]?.children).toEqual([]);
+  });
+
   it("depth_stops_growing_at_two", () => {
     const items = [
       row({ id: "a", title: "Корень" }),

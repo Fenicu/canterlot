@@ -67,24 +67,23 @@ export function buildSections(
   );
   const active = items.filter((item) => !item.archived);
   if (tab.kind === "archive") {
+    const archived = items.filter((item) => item.archived);
     return [
       section(
         "archive",
         "Архив",
-        nest(items.filter((item) => item.archived), kids),
+        nest(archived, new Set(archived.map((item) => item.id)), kids),
         collapsed,
       ),
     ];
   }
   if (tab.kind === "pinned") {
+    const pinned = active.filter((item) => item.pinned);
     return [
       section(
         "pinned",
         "Закреплённые",
-        nest(
-          active.filter((item) => item.pinned),
-          kids,
-        ),
+        nest(active, new Set(pinned.map((item) => item.id)), kids),
         collapsed,
       ),
     ];
@@ -92,9 +91,16 @@ export function buildSections(
   if (tab.kind === "group") {
     const group = ordered.find((item) => item.id === tab.id);
     const members = active.filter((item) => item.groups.includes(tab.id));
-    return [section(tab.id, group?.name ?? "Группа", nest(members, kids), collapsed)];
+    return [
+      section(
+        tab.id,
+        group?.name ?? "Группа",
+        nest(active, new Set(members.map((item) => item.id)), kids),
+        collapsed,
+      ),
+    ];
   }
-  const roots = nest(active, kids);
+  const roots = nest(active, null, kids);
   const used = new Set<string>();
   const sections: Section[] = [];
   const pinned = roots.filter((node) => node.item.pinned);
@@ -117,13 +123,18 @@ export function buildSections(
 }
 
 /**
- * Дети встают под родителя из того же набора: ребёнок без видимого родителя
- * остаётся обычной строкой. Счёт и группы считают только верхний уровень.
+ * Дети встают под родителя из того же набора и едут с ним по вкладкам:
+ * ребёнок без видимого родителя остаётся обычной строкой, а чужой
+ * вкладке невидим вовсе. Счёт и группы считают только верхний уровень.
  */
-function nest(visible: ListRow[], kids: KidsChoice): TreeNode[] {
-  const byId = new Map(visible.map((item) => [item.id, item]));
+function nest(
+  pool: ListRow[],
+  topIds: Set<string> | null,
+  kids: KidsChoice,
+): TreeNode[] {
+  const tops = topIds ?? new Set(pool.map((item) => item.id));
   const nodes = new Map<string, TreeNode>();
-  for (const item of visible) {
+  for (const item of pool) {
     nodes.set(item.id, {
       item,
       depth: 0,
@@ -133,19 +144,24 @@ function nest(visible: ListRow[], kids: KidsChoice): TreeNode[] {
     });
   }
   const roots: TreeNode[] = [];
-  const order = [...visible].sort(
+  const order = [...pool].sort(
     (a, b) =>
       a.created_at.localeCompare(b.created_at) || a.id.localeCompare(b.id),
   );
   for (const item of order) {
     const node = nodes.get(item.id)!;
-    const parent = item.parent_id ? nodes.get(item.parent_id) ?? null : null;
+    const parent = item.parent_id ? (nodes.get(item.parent_id) ?? null) : null;
     // Петля ссылок не должна прятать строки: её участники остаются наверху.
-    if (!parent || parent === node || reaches(parent, node.item.id, nodes)) {
-      roots.push(node);
+    if (
+      parent &&
+      parent !== node &&
+      tops.has(parent.item.id) &&
+      !reaches(parent, node.item.id, nodes)
+    ) {
+      parent.children.push(node);
       continue;
     }
-    parent.children.push(node);
+    if (tops.has(item.id)) roots.push(node);
   }
   for (const node of nodes.values()) {
     node.children.sort(
@@ -154,13 +170,14 @@ function nest(visible: ListRow[], kids: KidsChoice): TreeNode[] {
         a.item.id.localeCompare(b.item.id),
     );
   }
+  const rootSet = new Set(roots);
   const depthOf = (node: TreeNode, seen: Set<string>): number => {
-    const parent =
-      node.item.parent_id && byId.has(node.item.parent_id)
-        ? nodes.get(node.item.parent_id) ?? null
-        : null;
-    if (!parent || parent === node || seen.has(node.item.id)) return 0;
+    if (rootSet.has(node) || seen.has(node.item.id)) return 0;
     seen.add(node.item.id);
+    const parent = node.item.parent_id
+      ? (nodes.get(node.item.parent_id) ?? null)
+      : null;
+    if (!parent || parent === node) return 0;
     return Math.min(depthOf(parent, seen) + 1, 2);
   };
   for (const node of nodes.values()) node.depth = depthOf(node, new Set());
@@ -185,9 +202,9 @@ function nest(visible: ListRow[], kids: KidsChoice): TreeNode[] {
         : node.running > 0 || node.children.length === 0;
   }
   const top: TreeNode[] = [];
-  for (const item of visible) {
+  for (const item of pool) {
     const node = nodes.get(item.id)!;
-    if (node.depth === 0) top.push(node);
+    if (rootSet.has(node)) top.push(node);
   }
   return top;
 }
