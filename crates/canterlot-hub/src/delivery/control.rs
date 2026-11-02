@@ -116,6 +116,36 @@ pub async fn cancel_input(
         .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
     let outcome = match state {
         InputState::Queued => {
+            // «Отправить сейчас» мог уже создать вливание: отмена ввода должна
+            // погасить его в той же транзакции, иначе отменённый текст всё равно
+            // уедет в идущий ход. Ушедшее на машину вливание отменяем только
+            // отказом: вслепую помечать его завершённым нельзя.
+            let steers: Vec<(Uuid, String)> = sqlx::query_as(
+                "select id, delivery_state from commands
+                 where kind = 'steer_input' and target_command_id = $1
+                   and delivery_state <> 'completed'
+                 order by created_at, id",
+            )
+            .bind(command_id)
+            .fetch_all(&mut *conn)
+            .await?;
+            if steers.iter().any(|(_, state)| state != "pending") {
+                return Err(ControlError::InvalidRequest {
+                    reason: "steer_in_flight",
+                });
+            }
+            if !steers.is_empty() {
+                let ids: Vec<Uuid> = steers.into_iter().map(|(id, _)| id).collect();
+                sqlx::query(
+                    "update commands set delivery_state = 'completed',
+                            completed_at = coalesce(completed_at, now()),
+                            result = jsonb_build_object('cancelled', true)
+                     where id = any($1)",
+                )
+                .bind(&ids)
+                .execute(&mut *conn)
+                .await?;
+            }
             sqlx::query(
                 "update inputs set state = 'cancelled', cancel_requested = false where id = $1",
             )

@@ -3,8 +3,8 @@ use std::{sync::Arc, time::Duration};
 use canterlot_hub::{
     delivery::{
         control::{
-            CancelOutcome, ContinueOutcome, ControlError, StopOutcome, cancel_input,
-            continue_queue, request_stop,
+            CancelOutcome, ContinueOutcome, ControlError, SendNowOutcome, StopOutcome,
+            cancel_input, continue_queue, request_send_now, request_stop,
         },
         dispatch::{BlockReason, DispatchOutcome, GateInputs, dispatch_next},
         receipts::{ApplyOutcome, InputReceipt, apply_input_receipt, apply_run_finished},
@@ -72,6 +72,44 @@ async fn apply(pool: &PgPool, command_id: Uuid, receipt: InputReceipt) -> ApplyO
     apply_input_receipt(pool, command_id, 1, receipt, Uuid::now_v7())
         .await
         .unwrap()
+}
+
+async fn send_now(
+    pool: &PgPool,
+    seed: &Seed,
+    input_id: Uuid,
+) -> Result<SendNowOutcome, ControlError> {
+    request_send_now(
+        pool,
+        seed.owner_id,
+        seed.conversation_id,
+        input_id,
+        &Uuid::now_v7().to_string(),
+        Uuid::now_v7(),
+        &["send_now_v1".to_owned()],
+    )
+    .await
+}
+
+async fn accept_turn(pool: &PgPool, command_id: Uuid) {
+    for receipt in [
+        InputReceipt::Stored,
+        InputReceipt::TransmissionStarted,
+        InputReceipt::Accepted,
+    ] {
+        apply(pool, command_id, receipt).await;
+    }
+}
+
+async fn steer(pool: &PgPool, input_command_id: Uuid) -> (Uuid, String, Value, Option<Value>) {
+    sqlx::query_as(
+        "select id, delivery_state, payload, result from commands
+         where kind = 'steer_input' and target_command_id = $1",
+    )
+    .bind(input_command_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
 }
 
 async fn slot(pool: &PgPool, conversation_id: Uuid) -> RunSlot {
@@ -186,6 +224,89 @@ async fn cancel_queued_input(pool: PgPool) -> TestResult {
         command_count(&pool, seed.conversation_id, "cancel_input").await,
         0
     );
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancel_queued_input_cancels_pending_steer(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    running(&pool, &seed).await;
+    let first = input(&pool, &seed).await;
+    let second = input(&pool, &seed).await;
+    dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first.command_id).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second.input_id).await?
+    else {
+        panic!("send now must create a steer");
+    };
+    assert_eq!(steer(&pool, second.command_id).await.1, "pending");
+
+    assert_eq!(
+        cancel_input(
+            &pool,
+            seed.owner_id,
+            second.input_id,
+            "cancel-steered",
+            Uuid::now_v7()
+        )
+        .await?,
+        CancelOutcome::Cancelled
+    );
+    assert_eq!(state(&pool, second.input_id).await, InputState::Cancelled);
+    let (id, delivery, _, result) = steer(&pool, second.command_id).await;
+    assert_eq!(id, steer_command_id);
+    assert_eq!(delivery, "completed");
+    assert_eq!(result.unwrap()["cancelled"], json!(true));
+    // Отменённый ввод не уходит ни влитым, ни следующим ходом.
+    assert!(!matches!(
+        dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Dispatched { .. }
+    ));
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn cancel_refuses_steer_already_handed_to_machine(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(seed.conversation_id)
+        .execute(&pool)
+        .await?;
+    running(&pool, &seed).await;
+    let first = input(&pool, &seed).await;
+    let second = input(&pool, &seed).await;
+    dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first.command_id).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second.input_id).await?
+    else {
+        panic!("send now must create a steer");
+    };
+    sqlx::query("update commands set delivery_state = 'stored_on_machine' where id = $1")
+        .bind(steer_command_id)
+        .execute(&pool)
+        .await?;
+
+    assert!(matches!(
+        cancel_input(
+            &pool,
+            seed.owner_id,
+            second.input_id,
+            "cancel-steered",
+            Uuid::now_v7()
+        )
+        .await,
+        Err(ControlError::InvalidRequest {
+            reason: "steer_in_flight"
+        })
+    ));
+    assert_eq!(state(&pool, second.input_id).await, InputState::Queued);
+    assert_eq!(steer(&pool, second.command_id).await.1, "stored_on_machine");
     Ok(())
 }
 
