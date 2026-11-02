@@ -1800,6 +1800,7 @@ export interface components {
             five_hour?: components["schemas"]["WindowView"] | null;
             /** @description У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается. */
             five_hour_absent: boolean;
+            monthly?: components["schemas"]["WindowView"] | null;
             provider: string;
             weekly?: components["schemas"]["WindowView"] | null;
             weekly_reserve_active: boolean;

@@ -66,7 +66,7 @@
   onDestroy(() => clearTimeout(timer));
 </script>
 
-{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week')}
+{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'month')}
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
     <span class="tag">{tag}</span>
     <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
@@ -86,8 +86,9 @@
               {#if row.empty}
                 <span class="none">нет данных</span>
               {:else}
-                {#if !row.five.absent}{@render meter('5ч', row.label, row.five, 'five')}{/if}
+                {#if !row.five.absent}{@render meter('5ч', row.label, row.five, 'five')}{:else}<span class="slot" aria-hidden="true"></span>{/if}
                 {@render meter('нед', row.label, row.week, 'week')}
+                {#if row.month}{@render meter('мес', row.label, row.month, 'month')}{/if}
                 {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
               {/if}
             </span>
@@ -127,24 +128,28 @@
   }
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
-  .rows { display: grid; grid-template-columns: auto max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; }
-  .row { display: contents; }
-  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .rows { display: flex; flex: 1; flex-direction: column; gap: var(--s2); min-width: 0; }
+  .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; }
+  .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meters { display: contents; }
-  .meter { display: inline-flex; align-items: center; gap: var(--s2); white-space: nowrap; --gauge-width: calc(var(--s4) * 4); }
-  .meter[data-window='five'] { grid-column: 2; }
+  .meter { display: inline-flex; align-items: center; gap: var(--s2); width: calc(var(--s4) * 11); white-space: nowrap; --gauge-width: calc(var(--s4) * 2); }
+  .meter[data-window='five'], .slot { grid-column: 2; }
+  .slot { width: calc(var(--s4) * 11); }
   .meter[data-window='week'] { grid-column: 3; }
+  .meter[data-window='month'] { grid-column: 2 / -1; grid-row: 2; justify-self: start; }
   .limits[open] .rows { display: flex; flex-direction: column; gap: var(--s2); }
   .limits[open] .row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--s2) var(--s4); }
   .limits[open] .meters { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
+  .limits[open] .meter { width: auto; }
+  .limits[open] .slot { display: none; }
   .tag { color: var(--muted); font-size: var(--fs-xs); min-width: calc(var(--s4) * 3); }
   .bar { display: inline-flex; }
   .pct { font-weight: var(--weight-semibold); font-variant-numeric: tabular-nums; min-width: calc(var(--s4) * 3.5); }
   .pct[data-tone='warning'], .reserve { color: var(--warning); }
   .pct[data-tone='danger'] { color: var(--danger); }
   .meter[data-stale] .pct, .meter[data-known='false'] .pct { color: var(--muted); font-weight: var(--weight-normal); }
-  .none, .reserve { grid-column: 2 / -1; justify-self: start; }
-  .none { color: var(--muted); }
+  .none { grid-column: 2 / -1; justify-self: start; color: var(--muted); }
+  .reserve { grid-column: 2 / -1; grid-row: 3; justify-self: start; }
   .reset { display: none; color: var(--muted); }
   .limits[open] .reset { display: inline; }
   .chevron { flex: none; color: var(--secondary); transition: transform var(--duration-fast) var(--ease); }

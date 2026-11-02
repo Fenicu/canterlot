@@ -162,6 +162,22 @@ describe("sessions/limits", () => {
     expect(limitStrip([only], NOW, cfg).rows[0]).toMatchObject({ empty: true });
   });
 
+  it("monthly_window_is_kept_apart_and_old_rows_stay_without_it", () => {
+    const withMonth = {
+      ...provider("opencode", 125, 340),
+      monthly: {
+        used_permille: 93,
+        resets_at: at(31, 4, 0),
+        observed_at: new Date(NOW - 60_000).toISOString(),
+      },
+    };
+    const strip = limitStrip([provider("claude", 340, 960), withMonth], NOW, cfg);
+    const [claude, opencode] = strip.rows;
+    expect(claude?.month).toBeNull();
+    expect(opencode?.month).toMatchObject({ text: "91%", fill: 90.7 });
+    expect(opencode?.month?.reset).toBe("сброс сб 04:00");
+  });
+
   it("opencode_sorts_after_codex_and_keeps_its_label", () => {
     const strip = limitStrip(
       [provider("opencode", 125, 340), provider("codex", 0, 150), provider("claude", 340, 960)],

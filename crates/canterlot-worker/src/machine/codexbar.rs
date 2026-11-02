@@ -19,6 +19,7 @@ const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 10080;
+const MONTH_MINUTES: u64 = 43200;
 /// Провайдер хаба и имя в выводе `codexbar usage --provider`.
 const OPENCODE_HUB: &str = "opencode";
 const OPENCODE_CLI: &str = "opencodego";
@@ -58,7 +59,6 @@ fn cli_provider(provider: &str) -> &str {
 
 /// Окна по `windowMinutes`: `primary` у CodexBar не обязательно пятичасовое
 /// (у Claude без пятичасового окна он повторяет недельное), поэтому имена слотов не используются.
-/// Месячное окно (43200) хаб не хранит: оно пропускается вместе с остальными неизвестными.
 pub fn observations_from_output(
     provider: &str,
     stdout: &[u8],
@@ -104,6 +104,7 @@ pub fn reading_from_output(
                 LimitWindow::FiveHour
             }
             Some(WEEK_MINUTES) => LimitWindow::Weekly,
+            Some(MONTH_MINUTES) => LimitWindow::Monthly,
             _ => continue,
         };
         if observations.iter().any(|o| o.window == window as i32) {

@@ -8502,6 +8502,16 @@
             "type": "boolean",
             "description": "У провайдера нет пятичасового окна (например, план без этого лимита): счётчик скрывается."
           },
+          "monthly": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/WindowView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "provider": {
             "type": "string"
           },

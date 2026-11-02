@@ -10,6 +10,7 @@ export interface ProviderLimits {
   provider: string;
   five_hour?: LimitWindow | null;
   weekly?: LimitWindow | null;
+  monthly?: LimitWindow | null;
   weekly_reserve_active: boolean;
   weekly_reserve_resets_at?: string | null;
   /** У провайдера нет пятичасового окна (план без этого лимита): счётчик не показывается. */
@@ -51,6 +52,8 @@ export interface MeterView {
 export interface LimitView {
   five: MeterView;
   week: MeterView;
+  /** Месячное окно есть не у всех провайдеров и может отсутствовать в старых данных. */
+  month: MeterView | null;
   tone: "default" | "warning" | "danger" | "reserve";
   stale: boolean;
 }
@@ -136,9 +139,10 @@ export function limitView(
     ? { ...NOT_SEEN, absent: true, text: "" }
     : windowText(provider.five_hour, now, options);
   const week = windowText(provider.weekly, now, options);
+  const month = provider.monthly ? windowText(provider.monthly, now, options) : null;
   let tone: LimitView["tone"] = "default";
   if (provider.weekly_reserve_active) tone = "reserve";
-  else if (five.tone === "danger" || week.tone === "danger") tone = "danger";
-  else if (five.tone === "warning" || week.tone === "warning") tone = "warning";
-  return { five, week, tone, stale: five.stale || week.stale };
+  else if (five.tone === "danger" || week.tone === "danger" || month?.tone === "danger") tone = "danger";
+  else if (five.tone === "warning" || week.tone === "warning" || month?.tone === "warning") tone = "warning";
+  return { five, week, month, tone, stale: five.stale || week.stale || Boolean(month?.stale) };
 }

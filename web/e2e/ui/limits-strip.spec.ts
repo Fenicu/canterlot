@@ -282,13 +282,18 @@ test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async (
       provider: 'opencode',
       weekly_reserve_active: false,
       five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
-      weekly: { used_permille: 340, resets_at: reset, observed_at: observed }
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed },
+      monthly: { used_permille: 93, resets_at: new Date(Date.now() + 30 * 86_400_000).toISOString(), observed_at: observed }
     });
   });
   const strip = page.locator('.limits').first();
   await expect(strip.locator('.row')).toHaveCount(3);
   const opencode = strip.locator('.row').nth(2);
   await expect(opencode).toContainText('OpenCode');
+  await expect(opencode.locator('.meter')).toHaveCount(3);
+  await expect(opencode.locator('.meter').nth(2)).toContainText('мес');
+  await expect(opencode.locator('.meter').nth(2)).toContainText('91%');
+  await expect(opencode.locator('.meter').nth(2).locator('.reset')).toBeHidden();
   const geometry = await strip.evaluate((root) => {
     const rows = [...root.querySelectorAll(':scope .row')];
     const boxes = rows.map((row) => {
@@ -305,4 +310,33 @@ test('opencode_name_fits_beside_the_meters_and_all_meters_stay_aligned', async (
   const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-opencode');
+  await strip.locator('summary').click();
+  await expect(opencode.locator('.reset')).toHaveCount(3);
+  await expect(opencode.locator('.meter').nth(2).locator('.reset')).toHaveText(/^сброс/);
+});
+
+test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
+  await boot(page, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const codex = api.limits.find((item) => item.provider === 'codex')!;
+    codex.monthly = { used_permille: 300, resets_at: reset, observed_at: observed };
+    api.limits.push({
+      provider: 'opencode',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed },
+      monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
+    });
+  });
+  const strip = page.locator('.limits').first();
+  const months = strip.locator('.meter[data-window="month"]');
+  await expect(months).toHaveCount(2);
+  const boxes = await months.evaluateAll((nodes) => nodes.map((node) => node.getBoundingClientRect().x));
+  expect(Math.abs(boxes[0]! - boxes[1]!)).toBeLessThanOrEqual(1);
+  await expect(months.nth(0)).toContainText('мес');
+  await expect(months.nth(1)).toContainText('мес');
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-monthly');
 });

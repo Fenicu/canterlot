@@ -558,6 +558,7 @@ enum LimitWindow {
   LIMIT_WINDOW_UNSPECIFIED = 0;
   LIMIT_WINDOW_FIVE_HOUR = 1;
   LIMIT_WINDOW_WEEKLY = 2;
+  LIMIT_WINDOW_MONTHLY = 3;
 }
 
 message LimitObservation {

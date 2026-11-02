@@ -142,6 +142,24 @@ async fn absence_of_a_window_that_was_never_seen_is_still_recorded(pool: PgPool)
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn monthly_readings_are_stored_and_emitted(pool: PgPool) -> TestResult {
+    let s = testkit::seed(&pool).await;
+    observe(&pool, &s, Window::Monthly, 93, at(-30)).await;
+    let state = claude(&pool).await;
+    assert_eq!(state.monthly.unwrap().used_permille, 93);
+    let payload = last_change(&pool).await;
+    assert_eq!(payload["window"], "monthly");
+    assert_eq!(payload["used_permille"], 93);
+    let history: i64 = sqlx::query_scalar(
+        "select count(*) from limit_snapshots where provider='claude' and window_kind='monthly'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(history, 1);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn only_the_five_hour_window_can_be_absent(pool: PgPool) -> TestResult {
     let s = testkit::seed(&pool).await;
     let mut tx = pool.begin().await?;

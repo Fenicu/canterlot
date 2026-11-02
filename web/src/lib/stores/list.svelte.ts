@@ -256,6 +256,8 @@ export class ListStore {
       if (payload.window === "five_hour") {
         provider.five_hour = window;
         provider.five_hour_absent = window === null;
+      } else if (payload.window === "monthly") {
+        provider.monthly = window;
       } else if (window) provider.weekly = window;
       provider.weekly_reserve_active = payload.weekly_reserve_active;
       provider.weekly_reserve_resets_at = payload.weekly_reserve_resets_at;

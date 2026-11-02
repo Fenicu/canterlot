@@ -45,13 +45,15 @@ test('subtitle_names_the_shown_providers_and_cards_keep_their_shape', async ({ p
       provider: 'opencode',
       weekly_reserve_active: false,
       five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
-      weekly: { used_permille: 340, resets_at: reset, observed_at: observed }
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed },
+      monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
     });
   });
   await expect(page.locator('header.topbar p')).toHaveText('Claude, Codex и OpenCode');
   const cards = page.locator('main .current section');
   await expect(cards).toHaveCount(3);
   await expect(cards.nth(0).locator('.value')).toHaveText('21% / нед');
+  await expect(cards.nth(2)).toContainText('мес · 91%');
   // Одинаковая структура: крупное значение с окном в одну строку, сброс — отдельной.
   for (let index = 0; index < 3; index += 1) {
     const card = cards.nth(index);

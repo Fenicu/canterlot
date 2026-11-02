@@ -12,6 +12,8 @@ export interface LimitRow {
   label: string;
   five: MeterView;
   week: MeterView;
+  /** Месячное окно есть не у всех провайдеров и может отсутствовать в старых данных. */
+  month: MeterView | null;
   /** Хаб не знает ни одного окна: строка сводится к «нет данных». */
   empty: boolean;
   /** Провайдер на недельном резерве: это дополнение к остаткам, а не замена им. */
@@ -56,7 +58,8 @@ export function limitStrip(
       label: label(provider.provider),
       five: view.five,
       week: view.week,
-      empty: !provider.five_hour && !provider.weekly,
+      month: view.month,
+      empty: !provider.five_hour && !provider.weekly && !provider.monthly,
       reserve: provider.weekly_reserve_active,
     })),
     tone,

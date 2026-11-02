@@ -563,6 +563,7 @@ async fn check_reset(
     let row: Option<Reading> = sqlx::query_as(match window {
         Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1",
         Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",
+        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at from provider_limits where provider=$1",
     }).bind(provider).fetch_optional(conn).await?;
     // Повтор доналимитного наблюдения не может подтвердить сброс: нужен более поздний сброс,
     // а без времени сброса - наблюдение не раньше ожидаемого.
@@ -595,6 +596,7 @@ pub async fn handle_wake_in_tx(
     let window = match payload.window.as_str() {
         "five_hour" => Window::FiveHour,
         "weekly" => Window::Weekly,
+        "monthly" => Window::Monthly,
         _ => return Ok(JobOutcome::Cancelled("invalid_payload")),
     };
     let provider = payload.provider.as_str();

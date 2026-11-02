@@ -25,18 +25,21 @@ use uuid::Uuid;
 pub enum Window {
     FiveHour,
     Weekly,
+    Monthly,
 }
 impl Window {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FiveHour => "five_hour",
             Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
         }
     }
     pub fn from_proto(value: i32) -> Result<Self, sqlx::Error> {
         match LimitWindow::try_from(value) {
             Ok(LimitWindow::FiveHour) => Ok(Self::FiveHour),
             Ok(LimitWindow::Weekly) => Ok(Self::Weekly),
+            Ok(LimitWindow::Monthly) => Ok(Self::Monthly),
             _ => Err(sqlx::Error::InvalidArgument("invalid limit window".into())),
         }
     }
@@ -44,6 +47,7 @@ impl Window {
         match self {
             Self::FiveHour => LimitWindow::FiveHour as i32,
             Self::Weekly => LimitWindow::Weekly as i32,
+            Self::Monthly => LimitWindow::Monthly as i32,
         }
     }
 }
@@ -76,6 +80,7 @@ pub struct ProviderLimits {
     pub provider: String,
     pub weekly: Option<WindowState>,
     pub five_hour: Option<WindowState>,
+    pub monthly: Option<WindowState>,
     pub weekly_reserve_active: bool,
     pub weekly_reserve_resets_at: Option<DateTime<Utc>>,
     /// У провайдера нет пятичасового окна: клиенты прячут счётчик, история остаётся.
@@ -167,6 +172,7 @@ pub(crate) async fn record_in_tx(
     let current: Option<StoredReading> = sqlx::query_as(match o.window {
         Window::Weekly => "select weekly_used_permille,weekly_resets_at,weekly_observed_at from provider_limits where provider=$1",
         Window::FiveHour => "select five_hour_used_permille,five_hour_resets_at,five_hour_observed_at from provider_limits where provider=$1",
+        Window::Monthly => "select monthly_used_permille,monthly_resets_at,monthly_observed_at from provider_limits where provider=$1",
     }).bind(&o.provider).fetch_optional(&mut *conn).await?;
     let (used, reset, seen) = current.unwrap_or_default();
     let absent_at: Option<DateTime<Utc>> = if o.window == Window::FiveHour {
@@ -184,6 +190,7 @@ pub(crate) async fn record_in_tx(
         sqlx::query(match o.window {
             Window::Weekly => "update provider_limits set weekly_used_permille=$2,weekly_resets_at=$3,weekly_observed_at=$4,updated_at=$5 where provider=$1",
             Window::FiveHour => "update provider_limits set five_hour_used_permille=$2,five_hour_resets_at=$3,five_hour_observed_at=$4,five_hour_absent_at=null,updated_at=$5 where provider=$1",
+            Window::Monthly => "update provider_limits set monthly_used_permille=$2,monthly_resets_at=$3,monthly_observed_at=$4,updated_at=$5 where provider=$1",
         }).bind(&o.provider).bind(i32::from(o.used_permille)).bind(o.resets_at).bind(observed_at).bind(now).execute(&mut *conn).await?;
     }
     if newer && o.window == Window::Weekly {
@@ -264,6 +271,7 @@ pub(crate) async fn emit_changed(
         let state = match window {
             Window::Weekly => p.weekly,
             Window::FiveHour => p.five_hour,
+            Window::Monthly => p.monthly,
         };
         let wire = |at: DateTime<Utc>| at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
         let reserve = p.weekly_reserve_resets_at.map(wire);
@@ -430,6 +438,7 @@ pub async fn current(conn: &mut PgConnection) -> Result<Vec<ProviderLimits>, sql
                 provider: r.try_get("provider")?,
                 weekly: state("weekly")?,
                 five_hour: state("five_hour")?,
+                monthly: state("monthly")?,
                 weekly_reserve_active: r.try_get("weekly_reserve_active")?,
                 weekly_reserve_resets_at: r.try_get("weekly_reserve_resets_at")?,
                 five_hour_absent: r
@@ -460,6 +469,7 @@ fn snapshot_message(
         for (window, state) in [
             (Window::FiveHour, &p.five_hour),
             (Window::Weekly, &p.weekly),
+            (Window::Monthly, &p.monthly),
         ] {
             if let Some(s) = state {
                 let seen = s.observed_at - offset.unwrap_or_default();
