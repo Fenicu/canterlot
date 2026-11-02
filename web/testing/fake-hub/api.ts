@@ -66,6 +66,23 @@ export class FakeHubApi {
 	limits: ProviderLimits[] = [];
 	truncated = false;
 	presets = new Map<string, FakePreset>();
+	ownerOverview = {
+		files: [
+			{ kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z' },
+			{ kind: 'claude_home', harness: 'claude', path: '/home/owner/CLAUDE.md', present: false, size: 0, mtime: null },
+			{ kind: 'codex_global', harness: 'codex', path: '/home/owner/.codex/AGENTS.md', present: true, size: 18, mtime: '2026-10-28T12:00:00.000Z' },
+			{ kind: 'codex_override', harness: 'codex', path: '/home/owner/.codex/AGENTS.override.md', present: false, size: 0, mtime: null },
+			{ kind: 'opencode_global', harness: 'opencode', path: '/home/owner/.config/opencode/AGENTS.md', present: true, size: 20, mtime: '2026-10-28T12:00:00.000Z' }
+		],
+		memory_projects: [{ id: 'proj1', files: 2, has_index: true }]
+	};
+	ownerFiles = new Map<string, { kind: string; harness: string; path: string; present: boolean; size: number; mtime: string | null; truncated: boolean; content: string; files: { name: string; size: number; mtime: string | null }[] }>([
+		['claude_user', { kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z', truncated: false, content: '# Пользователь\n\nСтиль: кратко.', files: [] }],
+		['codex_global', { kind: 'codex_global', harness: 'codex', path: '/home/owner/.codex/AGENTS.md', present: true, size: 18, mtime: '2026-10-28T12:00:00.000Z', truncated: false, content: '# Codex\n\nТесты перед коммитом.', files: [] }],
+		['opencode_global', { kind: 'opencode_global', harness: 'opencode', path: '/home/owner/.config/opencode/AGENTS.md', present: true, size: 20, mtime: '2026-10-28T12:00:00.000Z', truncated: false, content: '# OpenCode\n\nПроверяй сборку.', files: [] }],
+		['memory_index:proj1', { kind: 'memory_index', harness: 'claude', path: '/home/owner/.claude/projects/proj1/memory/MEMORY.md', present: true, size: 16, mtime: '2026-10-28T12:00:00.000Z', truncated: false, content: '- тема в a.md', files: [{ name: 'MEMORY.md', size: 16, mtime: '2026-10-28T12:00:00.000Z' }, { name: 'a.md', size: 5, mtime: '2026-10-28T12:00:00.000Z' }] }],
+		['memory_file:proj1:a.md', { kind: 'memory_file', harness: 'claude', path: '/home/owner/.claude/projects/proj1/memory/a.md', present: true, size: 5, mtime: '2026-10-28T12:00:00.000Z', truncated: false, content: '# Тема', files: [] }]
+	]);
 	/** `null`: встроенный список по умолчанию, как у хаба. */
 	spawnWhitelist: { harness: string; model: string }[] | null = null;
 	readonly spawnWhitelistKeys: string[] = [];

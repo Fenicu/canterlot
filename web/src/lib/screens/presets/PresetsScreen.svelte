@@ -9,6 +9,7 @@
   import Pill from '#lib/ui/Pill.svelte';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import PresetEditor from './PresetEditor.svelte';
+  import OwnerSheet from './OwnerSheet.svelte';
   import { formatOrigin, isAgentMarked, sortPresets } from './presetsModel.js';
   import '../secondary.css';
 
@@ -18,8 +19,12 @@
   let editing = $state<{ id: string; revision: number | null } | null>(null);
   let deleting = $state<{ id: string; title: string; used_by: number } | null>(null);
   let deleteError = $state('');
+  let ownerOpen = $state(false);
 
   const presets = $derived(runtime ? sortPresets([...runtime.list.presets]) : []);
+  const ownerMachines = $derived(
+    runtime ? [...runtime.machines.items.values()].map((m) => ({ id: m.id, name: m.name })) : [],
+  );
 
   async function load(): Promise<void> {
     error = '';
@@ -60,7 +65,7 @@
       {#if deleteError}<p class="error" role="alert">{deleteError}</p>{/if}
       <ul>
         {#each presets as preset (preset.id)}
-          <li data-preset={preset.id}>
+          <li data-preset={preset.id} data-owner-card={preset.kind === 'owner' ? '' : undefined}>
             <div class="row">
               <strong>{preset.title}</strong>
               {#if preset.kind !== 'custom'}
@@ -70,6 +75,11 @@
               {/if}
             </div>
             {#if preset.description}<p class="note">{preset.description}</p>{/if}
+            {#if preset.kind === 'owner'}
+              <div class="actions">
+                <Button onclick={() => (ownerOpen = true)}>Посмотреть</Button>
+              </div>
+            {/if}
             {#if preset.kind === 'custom'}
               <p class="meta">версия {preset.revision}</p>
               <p class="meta">Используется в {preset.used_by} {fmt.plural(preset.used_by, ['сессии', 'сессиях', 'сессиях'])}</p>
@@ -107,6 +117,14 @@
     confirmLabel="Удалить инструкцию"
     onconfirm={() => void remove()}
     onclose={() => (deleting = null)}
+  />
+{/if}
+
+{#if ownerOpen && ownerMachines.length > 0}
+  <OwnerSheet
+    machines={ownerMachines}
+    initialMachine={ownerMachines[0]?.id ?? ''}
+    onclose={() => (ownerOpen = false)}
   />
 {/if}
 
