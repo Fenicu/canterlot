@@ -2467,3 +2467,89 @@ async fn compacted_waits_for_service_result_after_boundary() {
     );
     f.close().await;
 }
+
+fn init_with(servers: Value) -> Value {
+    json!({"type":"system","subtype":"init","session_id":"x","model":"claude-haiku-test","permissionMode":"default","mcp_servers":servers})
+}
+
+/// События до остановки CLI или до конца хода.
+async fn isolated_turn(isolate_mcp: bool, servers: Value) -> Vec<AdapterEvent> {
+    let id = Uuid::now_v7();
+    let mut f = Fake::new(vec![vec![
+        init_with(servers),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":[id],"modelUsage":{}}),
+    ]]);
+    f.spec.isolate_mcp = isolate_mcp;
+    f.start().await;
+    // Убитый CLI не успевает подтвердить ввод: исход передачи здесь не важен.
+    let _ = tokio::time::timeout(WAIT, f.adapter.transmit(&tx(id), &f.group))
+        .await
+        .unwrap();
+    let mut events = vec![];
+    loop {
+        let event = f.event().await;
+        let done = matches!(
+            event,
+            AdapterEvent::RunFinished { .. } | AdapterEvent::ProcessExited { .. }
+        );
+        events.push(event);
+        if done {
+            break;
+        }
+    }
+    f.close().await;
+    events
+}
+
+fn isolation_failed(events: &[AdapterEvent]) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            e,
+            AdapterEvent::Diagnostic {
+                kind: "mcp_isolation_failed",
+                required: true,
+                ..
+            }
+        )
+    })
+}
+
+#[tokio::test]
+async fn isolated_start_fails_when_init_lists_a_foreign_mcp_server() {
+    let events = isolated_turn(
+        true,
+        json!([
+            {"name":"canterlot","status":"connected"},
+            {"name":"nanokvm","status":"connected"},
+        ]),
+    )
+    .await;
+    assert!(isolation_failed(&events), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::ProcessExited { .. })),
+        "the CLI is stopped at once: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::RunFinished { .. })),
+        "the turn is not allowed to finish: {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn isolated_start_with_only_canterlot_and_owner_start_with_more_servers_run() {
+    let only_ours = isolated_turn(true, json!([{"name":"canterlot","status":"connected"}])).await;
+    assert!(!isolation_failed(&only_ours), "{only_ours:?}");
+    let owner = isolated_turn(
+        false,
+        json!([
+            {"name":"canterlot","status":"connected"},
+            {"name":"nanokvm","status":"connected"},
+        ]),
+    )
+    .await;
+    assert!(!isolation_failed(&owner), "{owner:?}");
+}

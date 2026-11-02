@@ -72,6 +72,8 @@ pub struct ClaudeCodeAdapter {
     exited: bool,
     start_attempted: bool,
     isolate_mcp: bool,
+    /// `system/init` делегата назвал чужой сервер MCP: CLI убит, кадры больше не разбираются.
+    isolation_broken: bool,
     relay_executable: Option<PathBuf>,
     /// Смена, для которой нужен перезапуск CLI, ждёт конца фоновой работы: перезапуск убил бы её.
     deferred: Option<SettingsChange>,
@@ -123,6 +125,7 @@ impl ClaudeCodeAdapter {
             exited: false,
             start_attempted: false,
             isolate_mcp: false,
+            isolation_broken: false,
             relay_executable: None,
             deferred: None,
             deferred_due: false,
@@ -149,6 +152,25 @@ impl ClaudeCodeAdapter {
             required,
             field_names: Vec::new(),
         });
+    }
+
+    /// Как у Codex и OpenCode: делегат с серверами MCP владельца не работает ни хода.
+    /// CLI убивается сразу, обязательная диагностика останавливает исполнение как `start_failed`.
+    fn refuse_foreign_mcp(&mut self, foreign: &[String]) {
+        tracing::warn!(
+            kind = "mcp_isolation_failed",
+            servers = foreign.len(),
+            "delegated Claude Code session sees foreign MCP servers"
+        );
+        self.isolation_broken = true;
+        if let Some(cli) = &self.cli {
+            signal_group(cli.pid, process::Signal::Kill);
+        }
+        self.error_block(format!(
+            "Запуск остановлен: делегированной сессии доступны чужие серверы MCP ({}), а должен быть только canterlot.",
+            foreign.join(", ")
+        ));
+        self.diagnostic("mcp_isolation_failed", true);
     }
 
     fn error_block(&mut self, text: String) {
@@ -186,10 +208,20 @@ impl ClaudeCodeAdapter {
         match line {
             StdoutLine::Eof => self.eof = true,
             StdoutLine::Oversized(_) => self.diagnostic("oversized_frame", false),
+            // CLI с чужими серверами MCP уже остановлен: его кадры не доходят до хода.
+            StdoutLine::Line(_) if self.isolation_broken => {}
             StdoutLine::Line(line) => {
                 self.deferred_due = false;
                 // MCP status is launch metadata; the parser's Init contract stays unchanged.
                 if let Ok(value) = serde_json::from_str::<Value>(&line) {
+                    if value["type"] == "system"
+                        && value["subtype"] == "init"
+                        && self.isolate_mcp
+                        && let Some(foreign) = foreign_mcp_servers(&value["mcp_servers"])
+                    {
+                        self.refuse_foreign_mcp(&foreign);
+                        return;
+                    }
                     if value["type"] == "system" && value["subtype"] == "init" {
                         let connected = value["mcp_servers"].as_array().is_some_and(|servers| {
                             servers
@@ -1026,6 +1058,23 @@ async fn exited_early(cli: &mut CliProcess) -> bool {
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     false
+}
+
+/// Имена серверов MCP из `system/init`, кроме canterlot; `None`, если чужих нет.
+/// Запись без имени тоже чужая: проверить её нельзя.
+fn foreign_mcp_servers(servers: &Value) -> Option<Vec<String>> {
+    let foreign: Vec<String> = servers
+        .as_array()?
+        .iter()
+        .filter(|server| server["name"] != "canterlot")
+        .map(|server| {
+            server["name"]
+                .as_str()
+                .map(|name| name.chars().filter(|c| !c.is_control()).take(64).collect())
+                .unwrap_or_else(|| "?".to_owned())
+        })
+        .collect();
+    (!foreign.is_empty()).then_some(foreign)
 }
 
 /// Сигнал группе процесса CLI (CLI запускается лидером своей группы).

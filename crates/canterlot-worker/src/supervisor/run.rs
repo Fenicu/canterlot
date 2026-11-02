@@ -3142,7 +3142,9 @@ fn required_diagnostic_cause(kind: &str) -> StopCause {
         "auth_required" => StopCause::AuthRequired,
         "cli_too_old" | "session_id_mismatch" => StopCause::CliIncompatible,
         // CLI не прислал init в срок запуска: протокол не нарушен, процесс не поднялся.
-        "mcp_unavailable" | "restart_failed" | "cli_init_missing" => StopCause::StartFailed,
+        "mcp_unavailable" | "mcp_isolation_failed" | "restart_failed" | "cli_init_missing" => {
+            StopCause::StartFailed
+        }
         _ => StopCause::ProtocolIncompatible,
     }
 }
@@ -3160,6 +3162,10 @@ mod tests {
         assert!(matches!(
             required_diagnostic_cause("unknown_required_event"),
             StopCause::ProtocolIncompatible
+        ));
+        assert!(matches!(
+            required_diagnostic_cause("mcp_isolation_failed"),
+            StopCause::StartFailed
         ));
     }
 
