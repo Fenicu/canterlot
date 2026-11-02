@@ -1064,6 +1064,7 @@ impl Translator {
                     manual: false,
                     ok: true,
                     pre_tokens: 0,
+                    post_tokens: 0,
                 }),
             ];
         }

@@ -1588,25 +1588,26 @@ fn compaction_boundary_opens_and_closes_one_episode() {
         .count();
     // Повторный статус того же сжатия эпизод не дублирует: стартов три, а не четыре.
     assert_eq!(starts, 3, "one start per episode, duplicates collapse");
-    let finishes: Vec<(&bool, &bool, &u64)> = events
+    let finishes: Vec<(&bool, &bool, &u64, &u64)> = events
         .iter()
         .filter_map(|e| match e {
             AdapterEvent::CompactionFinished {
                 manual,
                 ok,
                 pre_tokens,
-            } => Some((manual, ok, pre_tokens)),
+                post_tokens,
+            } => Some((manual, ok, pre_tokens, post_tokens)),
             _ => None,
         })
         .collect();
     assert_eq!(
         finishes,
         vec![
-            (&false, &true, &980_000),
-            (&true, &true, &0),
-            (&false, &false, &0),
+            (&false, &true, &980_000, &0),
+            (&true, &true, &30_111, &15_694),
+            (&false, &false, &0, &0),
         ],
-        "auto with tokens, manual without, then a failure"
+        "auto with tokens, live manual with both sizes, then a failure"
     );
     // Служебный /compact ходу прошлой команды не принадлежит: RunFinished нет.
     assert!(
@@ -1637,6 +1638,7 @@ fn compaction_manual_flag_comes_from_the_button() {
             manual: true,
             ok: true,
             pre_tokens: 0,
+            post_tokens: 0,
         })
     )));
 }

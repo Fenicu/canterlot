@@ -741,6 +741,10 @@ impl Parser {
                     .get("pre_tokens")
                     .and_then(serde_json::Value::as_u64)
                     .unwrap_or(0);
+                let post_tokens = meta
+                    .get("post_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
                 self.compact_active = false;
                 self.compact_manual = false;
                 self.compact_swallow_result = true;
@@ -752,6 +756,7 @@ impl Parser {
                     manual,
                     ok: true,
                     pre_tokens,
+                    post_tokens,
                 }));
             }
             Some("background_tasks_changed") => {
@@ -1343,6 +1348,7 @@ impl Parser {
                 manual,
                 ok: false,
                 pre_tokens: 0,
+                post_tokens: 0,
             }));
         }
         // Итог служебного `/compact` между ходами: ходу прошлой команды он не принадлежит,

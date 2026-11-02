@@ -1501,6 +1501,7 @@ fn compaction_frames_open_and_close_a_timeline_episode() {
                 manual: false,
                 ok: true,
                 pre_tokens: 0,
+                post_tokens: 0,
             }
         )),
         "{out:?}"
@@ -1524,6 +1525,7 @@ fn compaction_failure_closes_the_episode_as_failed() {
                 manual: false,
                 ok: false,
                 pre_tokens: 0,
+                post_tokens: 0,
             }
         )),
         "{out:?}"

@@ -3068,15 +3068,20 @@ async fn compact_starts_thread_compaction_and_marks_the_episode_manual() {
     let mut finished = None;
     for _ in 0..50 {
         match tokio::time::timeout(Duration::from_secs(2), fake.adapter.next_event()).await {
-            Ok(AdapterEvent::CompactionFinished { manual, ok, .. }) => {
-                finished = Some((manual, ok));
+            Ok(AdapterEvent::CompactionFinished {
+                manual,
+                ok,
+                pre_tokens,
+                post_tokens,
+            }) => {
+                finished = Some((manual, ok, pre_tokens, post_tokens));
                 break;
             }
             Ok(_) => continue,
             Err(_) => break,
         }
     }
-    assert_eq!(finished, Some((true, true)), "manual episode must finish");
+    assert_eq!(finished, Some((true, true, 0, 0)), "manual episode must finish");
     assert!(
         fake.stdin_methods().contains(&"thread/compact/start".to_owned()),
         "adapter must call the app-server method"

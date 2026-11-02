@@ -209,8 +209,8 @@ pub async fn apply_event(
     Ok(false)
 }
 
-/// Живой расход контекста: нули от воркера после сжатия гасят значение, а не
-/// показывают досжаточные проценты.
+/// Живой расход контекста: нулевой размер после сжатия гасит токены, окно при этом
+/// не трогаем (сжатие окно не меняет); нулевое окно в прогрессе оставляет прежнее.
 pub async fn apply_progress(
     conn: &mut PgConnection,
     run: &ExecutionRef,
@@ -267,14 +267,16 @@ async fn store_context(
     window: Option<i64>,
     correlation_id: Uuid,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(
-        "update executions set context_tokens = $2, context_window_tokens = $3, updated_at = now()
-         where id = $1",
+    let row: (Option<i64>, Option<i64>) = sqlx::query_as(
+        "update executions set context_tokens = $2,
+         context_window_tokens = coalesce($3, context_window_tokens),
+         updated_at = now() where id = $1
+         returning context_tokens, context_window_tokens",
     )
     .bind(run.execution_id)
     .bind(tokens)
     .bind(window)
-    .execute(&mut *conn)
+    .fetch_one(&mut *conn)
     .await?;
     events::append(
         conn,
@@ -285,7 +287,7 @@ async fn store_context(
             kind: "context_changed",
             conversation_id: Some(run.conversation_id),
             execution_id: Some(run.execution_id),
-            payload: serde_json::json!({"tokens": tokens, "window_tokens": window}),
+            payload: serde_json::json!({"tokens": row.0, "window_tokens": row.1}),
             correlation_id,
         },
     )

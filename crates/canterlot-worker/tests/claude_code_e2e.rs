@@ -2314,7 +2314,8 @@ async fn compact_sends_slash_compact_and_reports_the_manual_boundary() {
                 manual,
                 ok,
                 pre_tokens,
-            }) => finished = Some((manual, ok, pre_tokens)),
+                post_tokens,
+            }) => finished = Some((manual, ok, pre_tokens, post_tokens)),
             Ok(_) => continue,
             Err(_) => break,
         }
@@ -2323,7 +2324,11 @@ async fn compact_sends_slash_compact_and_reports_the_manual_boundary() {
         }
     }
     assert_eq!(compacted, Some(true), "command flow must complete");
-    assert_eq!(finished, Some((true, true, 41_000)), "manual episode with tokens");
+    assert_eq!(
+        finished,
+        Some((true, true, 41_000, 0)),
+        "manual episode with tokens"
+    );
     let written: Vec<Value> = std::fs::read_to_string(f.dir.path().join("stdin.log"))
         .unwrap()
         .lines()

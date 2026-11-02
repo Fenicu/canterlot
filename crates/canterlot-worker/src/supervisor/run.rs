@@ -1938,7 +1938,8 @@ impl Supervisor {
                 manual,
                 ok,
                 pre_tokens,
-            } => self.on_compaction_finished(manual, ok, pre_tokens)?,
+                post_tokens,
+            } => self.on_compaction_finished(manual, ok, pre_tokens, post_tokens)?,
             AdapterEvent::ContextProgress {
                 context_tokens,
                 context_window_tokens,
@@ -2236,6 +2237,7 @@ impl Supervisor {
         manual: bool,
         ok: bool,
         pre_tokens: u64,
+        post_tokens: u64,
     ) -> Result<(), SupervisorError> {
         if !self.compact_v1 {
             self.record(Body::AdapterDiagnostic(AdapterDiagnostic {
@@ -2260,10 +2262,12 @@ impl Supervisor {
             pre_tokens,
         }))?;
         if ok {
+            // Новый размер известен сразу: индикатор показывает его, а не прячется.
+            // Без него расход гасится, окно при этом не трогаем.
             self.record(Body::ContextProgress(ContextProgress {
                 execution_id: self.spec.execution_id.to_string(),
                 generation: self.spec.generation,
-                context_tokens: 0,
+                context_tokens: post_tokens,
                 context_window_tokens: 0,
             }))?;
         }

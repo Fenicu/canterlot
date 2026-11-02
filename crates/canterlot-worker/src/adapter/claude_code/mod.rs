@@ -1089,6 +1089,7 @@ impl ClaudeCodeAdapter {
                 manual: true,
                 ok: false,
                 pre_tokens: 0,
+                post_tokens: 0,
             });
             return true;
         }

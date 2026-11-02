@@ -1758,6 +1758,7 @@ fn compaction_frames_open_and_close_a_timeline_episode() {
                 manual: false,
                 ok: true,
                 pre_tokens: 0,
+                post_tokens: 0,
             }
         )),
         "{events:?}"

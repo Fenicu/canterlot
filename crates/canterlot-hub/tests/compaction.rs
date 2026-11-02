@@ -460,7 +460,16 @@ async fn context_progress_keeps_only_the_latest(pool: PgPool) {
     .unwrap();
     let context = snapshot.data.context.expect("snapshot carries context");
     assert_eq!((context.tokens, context.window_tokens), (650_000, Some(1_000_000)));
-    // Нули после сжатия гасят значение: индикатор ждёт новый размер.
+    // Новый размер после сжатия встаёт сразу, окно при этом не теряется.
+    run.send(&pool, progress(15_694, 0)).await;
+    let row: (Option<i64>, Option<i64>) =
+        sqlx::query_as("select context_tokens, context_window_tokens from executions where id = $1")
+            .bind(run.execution.execution_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(row, (Some(15_694), Some(1_000_000)));
+    // Нули без размера гасят токены: индикатор ждёт новые данные.
     run.send(&pool, progress(0, 0)).await;
     let snapshot = canterlot_hub::snapshot::conversation(
         &pool,

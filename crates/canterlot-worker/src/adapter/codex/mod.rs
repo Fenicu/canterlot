@@ -589,12 +589,14 @@ impl CodexAdapter {
                 manual: false,
                 ok,
                 pre_tokens,
+                post_tokens,
             } if self.compact_manual => {
                 self.compact_manual = false;
                 AdapterEvent::CompactionFinished {
                     manual: true,
                     ok,
                     pre_tokens,
+                    post_tokens,
                 }
             }
             AdapterEvent::CompactionFinished { .. } => {

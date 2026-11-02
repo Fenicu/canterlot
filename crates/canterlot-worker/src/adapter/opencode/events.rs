@@ -759,6 +759,7 @@ impl Translator {
                 ok: failed.is_none(),
                 // Кадры дают расход самого вызова сжатия, а не размер до него: цифры нет.
                 pre_tokens: 0,
+                post_tokens: 0,
             }),
             Translated::CompactionEnded {
                 failed,
