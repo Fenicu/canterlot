@@ -123,6 +123,7 @@ pub struct CodexAdapter {
     rpc: RpcClient,
     translator: Option<Translator>,
     requests: Requests,
+    limits_calls: HashMap<Uuid, String>,
     outbox: Outbox,
     limits: LimitTracker,
     broker: Option<Broker>,
@@ -206,6 +207,7 @@ impl CodexAdapter {
             rpc: RpcClient::new(),
             translator: None,
             requests: Requests::new(),
+            limits_calls: HashMap::new(),
             outbox: Outbox::new(),
             limits: LimitTracker::default(),
             broker: None,
@@ -790,7 +792,12 @@ impl CodexAdapter {
             });
             return;
         }
-        let BrokerEvent::LimitsQuery { call } = event else {
+        if let BrokerEvent::ShareFile { call_id, arguments } = event {
+            self.events
+                .push_back(AdapterEvent::ShareFile { call_id, arguments });
+            return;
+        }
+        let BrokerEvent::LimitsQuery { call_id } = event else {
             return;
         };
         let snapshot = self.limits.snapshot();
@@ -810,14 +817,16 @@ impl CodexAdapter {
             )
         })
         .collect();
-        self.broker.as_mut().unwrap().answer_limits(
-            call,
+        let text = crate::adapter::canterlot_mcp::mcp::limits_tool_text(
             &canterlot_proto::worker::v1::LimitsSnapshot {
                 provider: "codex".into(),
                 current,
                 ..Default::default()
             },
+            "codex",
         );
+        self.limits_calls.insert(call_id, text);
+        self.events.push_back(AdapterEvent::Limits { call_id });
     }
 
     // --- RPC поверх насоса ----------------------------------------------------
@@ -1911,6 +1920,7 @@ impl Adapter for CodexAdapter {
 
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
         // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
+        let result = crate::adapter::limits_fallback(&mut self.limits_calls, call_id, result);
         if let Some(broker) = self.broker.as_mut() {
             broker.answer_agent_tool(call_id, &result).await;
         }

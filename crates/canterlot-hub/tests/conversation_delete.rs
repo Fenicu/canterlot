@@ -148,6 +148,13 @@ async fn seed_everything(f: &Fixture, conversation: Uuid, machine: Uuid, group: 
         &[media, execution, conversation, block],
     )
     .await;
+    exec(
+        pool,
+        "insert into block_files(id,execution_id,conversation_id,block_id,attachment_id,name,mime,size_bytes,sha256,title,note)
+         values($1,$2,$3,$4,$5,'a.txt','text/plain',1,repeat('a',64),'','')",
+        &[Uuid::now_v7(), execution, conversation, block, linked],
+    )
+    .await;
     let path = f.blob_path(media);
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, b"x").unwrap();

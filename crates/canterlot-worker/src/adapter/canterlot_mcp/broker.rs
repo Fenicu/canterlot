@@ -84,7 +84,12 @@ pub enum BrokerEvent {
         request_id: String,
     },
     LimitsQuery {
-        call: LimitsCall,
+        call_id: uuid::Uuid,
+    },
+    /// `share_file`: путь читает супервизор, ответ вернётся через agent_call_result.
+    ShareFile {
+        call_id: uuid::Uuid,
+        arguments: Value,
     },
     /// Вызов агентского инструмента (пресеты, сессии): уходит в хаб как `AdapterEvent::AgentCall`.
     AgentTool {
@@ -455,13 +460,37 @@ async fn serve_conn(
                 rpc_id,
                 arguments,
             } => {
-                if kind == mcp::ToolKind::Limits {
-                    let _ = events.send(BrokerEvent::LimitsQuery {
-                        call: LimitsCall {
-                            rpc_id,
+                if kind == mcp::ToolKind::ShareFile {
+                    if !gate.lock().expect("mcp gate").current(conn) {
+                        let _ =
+                            write_line(&writer, &rpc_error(&rpc_id, "connection superseded")).await;
+                        continue;
+                    }
+                    let call_id = uuid::Uuid::now_v7();
+                    agent_pending.lock().await.insert(
+                        (conn, rpc_id.to_string()),
+                        AgentCall {
+                            call_id,
+                            rpc_id: rpc_id.clone(),
+                            tool: "share_file",
                             writer: writer.clone(),
                         },
-                    });
+                    );
+                    let _ = events.send(BrokerEvent::ShareFile { call_id, arguments });
+                    continue;
+                }
+                if kind == mcp::ToolKind::Limits {
+                    let call_id = uuid::Uuid::now_v7();
+                    agent_pending.lock().await.insert(
+                        (conn, rpc_id.to_string()),
+                        AgentCall {
+                            call_id,
+                            rpc_id: rpc_id.clone(),
+                            tool: "limits.report",
+                            writer: writer.clone(),
+                        },
+                    );
+                    let _ = events.send(BrokerEvent::LimitsQuery { call_id });
                     continue;
                 }
                 if let mcp::ToolKind::Agent { tool } = kind {

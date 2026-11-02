@@ -38,7 +38,7 @@ impl Fx {
     async fn with(pool: PgPool, config: SessionToolsConfig) -> Self {
         let seed = testkit::seed(&pool).await;
         let b = testkit::seed_conversation(&pool, seed.owner_id, seed.machine_id).await;
-        sqlx::query("update machines set availability='available' where id=$1")
+        sqlx::query("update machines set availability='available',capabilities=array['pilot_v1'],limits_ok=true where id=$1")
             .bind(seed.machine_id)
             .execute(&pool)
             .await
@@ -188,6 +188,24 @@ impl Fx {
         activity::refresh(&self.pool, conversation, now, &thresholds, Uuid::now_v7())
             .await
             .unwrap();
+    }
+
+    async fn attachment(&self, conversation: Uuid, name: &str, mime: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into attachments (id,owner_id,conversation_id,name,mime,size_bytes,sha256,state,ready_at)
+             values($1,$2,$3,$4,$5,4,$6,'ready',clock_timestamp())",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(conversation)
+        .bind(name)
+        .bind(mime)
+        .bind("0".repeat(64))
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
     }
 
     fn scheduler(&self) -> Scheduler {
@@ -967,4 +985,87 @@ async fn parallel_sends_cannot_outrun_the_limit_or_the_dedup(pool: PgPool) {
     let same = futures_util::future::join_all((0..8).map(|_| f.send(f.b, third, "одно"))).await;
     assert!(same.iter().all(Result::is_ok));
     assert_eq!(f.inputs(third).await, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn attachments_of_the_callers_conversation_are_forwarded(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let file = f.attachment(f.a, "report.pdf", "application/pdf").await;
+    let answer = f
+        .call(
+            f.a,
+            "sessions.send",
+            json!({"session_id": f.b, "text": "вот файл", "attachment_ids": [file]}),
+        )
+        .await
+        .unwrap();
+    let (content, _, _) = f.input(&answer["input_id"]).await;
+    let blocks = content.as_array().unwrap();
+    assert_eq!(blocks[1]["type"], "attachment");
+    assert_eq!(blocks[1]["attachment_id"], file.to_string());
+    assert_eq!(blocks[1]["name"], "report.pdf");
+    let linked: i64 = sqlx::query_scalar(
+        "select count(*) from input_attachments where attachment_id=$1
+           and input_id=(select id from inputs where conversation_id=$2 and origin is not null)",
+    )
+    .bind(file)
+    .bind(f.b)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(linked, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn foreign_attachment_is_refused(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let other = f.conversation().await;
+    let file = f.attachment(other, "secret.pdf", "application/pdf").await;
+    let error = f
+        .call(
+            f.a,
+            "sessions.send",
+            json!({"session_id": f.b, "text": "чужой файл", "attachment_ids": [file]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::AttachmentNotAvailable);
+    assert_eq!(f.inputs(f.b).await, 0);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn image_attachment_is_refused_when_the_target_cannot_take_images(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let file = f.attachment(f.a, "shot.png", "image/png").await;
+    let error = f
+        .call(
+            f.a,
+            "sessions.send",
+            json!({"session_id": f.b, "text": "картинка", "attachment_ids": [file]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::AttachmentNotAvailable);
+    assert!(error.message.contains("does not accept"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn an_old_worker_without_pilot_refuses_attachments_cleanly(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let file = f.attachment(f.a, "old.pdf", "application/pdf").await;
+    sqlx::query("update machines set capabilities=array[]::text[] where id=$1")
+        .bind(f.machine)
+        .execute(&f.pool)
+        .await
+        .unwrap();
+    let error = f
+        .call(
+            f.a,
+            "sessions.send",
+            json!({"session_id": f.b, "text": "файл", "attachment_ids": [file]}),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::CapabilityMissing);
+    assert_eq!(f.inputs(f.b).await, 0);
 }

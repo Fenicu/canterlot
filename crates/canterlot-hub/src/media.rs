@@ -6,8 +6,10 @@ use std::{fmt, io};
 
 use bytes::Bytes;
 use canterlot_proto::{
-    limits::{MAX_MEDIA_BYTES, MEDIA_MIMES},
-    worker::v1::{BlockMedia, MediaHeader},
+    limits::{
+        MAX_MEDIA_BYTES, MAX_SHARE_BYTES, MAX_SHARE_NOTE_BYTES, MAX_SHARE_TITLE_BYTES, MEDIA_MIMES,
+    },
+    worker::v1::{BlockFile, BlockMedia, MediaHeader},
 };
 use futures_util::stream::BoxStream;
 use serde::Serialize;
@@ -23,15 +25,26 @@ use crate::{
     events::{self, NewEvent, Scope},
 };
 
+/// Файл, который агент отдаёт владельцу: часть заголовка `PutMedia` с `share`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Share {
+    pub name: String,
+    pub title: String,
+    pub note: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
 /// Проверенный заголовок `PutMedia`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Header {
     pub id: Uuid,
     pub execution_id: Uuid,
     pub block_id: Uuid,
-    pub mime: &'static str,
+    pub mime: String,
     pub size: u64,
     pub sha256: String,
+    pub share: Option<Share>,
 }
 
 pub enum MediaError {
@@ -97,12 +110,44 @@ fn uuid(value: &str) -> Result<Uuid, MediaError> {
         .ok_or(MediaError::Invalid)
 }
 
+fn optional_dimension(value: u32) -> Option<u32> {
+    (value > 0).then_some(value)
+}
+
 pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
-    let mime = MEDIA_MIMES
-        .iter()
-        .copied()
-        .find(|mime| *mime == raw.mime)
-        .ok_or(MediaError::Invalid)?;
+    let share = if raw.share {
+        let name =
+            crate::attachments::normalize_name(&raw.name).map_err(|_| MediaError::Invalid)?;
+        if raw.size == 0 || raw.size > MAX_SHARE_BYTES {
+            return Err(MediaError::Invalid);
+        }
+        if raw.title.len() > MAX_SHARE_TITLE_BYTES
+            || raw.title.chars().any(char::is_control)
+            || raw.note.len() > MAX_SHARE_NOTE_BYTES
+        {
+            return Err(MediaError::Invalid);
+        }
+        Some(Share {
+            name,
+            title: raw.title.clone(),
+            note: raw.note.clone(),
+            width: optional_dimension(raw.width),
+            height: optional_dimension(raw.height),
+        })
+    } else {
+        None
+    };
+    let mime = match &share {
+        Some(_) => {
+            crate::attachments::normalize_mime(Some(&raw.mime)).map_err(|_| MediaError::Invalid)?
+        }
+        None => MEDIA_MIMES
+            .iter()
+            .copied()
+            .find(|mime| *mime == raw.mime)
+            .ok_or(MediaError::Invalid)?
+            .to_owned(),
+    };
     let sha256 = raw.sha256.as_str();
     if sha256.len() != 64
         || !sha256
@@ -111,7 +156,7 @@ pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
     {
         return Err(MediaError::Invalid);
     }
-    if raw.size == 0 || raw.size > MAX_MEDIA_BYTES {
+    if !raw.share && (raw.size == 0 || raw.size > MAX_MEDIA_BYTES) {
         return Err(MediaError::Invalid);
     }
     Ok(Header {
@@ -121,6 +166,7 @@ pub fn parse_header(raw: &MediaHeader) -> Result<Header, MediaError> {
         mime,
         size: raw.size,
         sha256: sha256.to_owned(),
+        share,
     })
 }
 
@@ -185,6 +231,106 @@ async fn read_head(store: &dyn BlobStore, id: Uuid) -> Result<Vec<u8>, MediaErro
 /// каталогов), сверяет сигнатуру и только затем фиксирует строку `block_media`. Сбой между
 /// публикацией и commit оставляет blob без строки; повтор с тем же ID и checksum проверяет
 /// опубликованный blob без копирования и фиксирует метаданные.
+#[derive(sqlx::FromRow)]
+struct StoredShare {
+    execution_id: Uuid,
+    block_id: Uuid,
+    mime: String,
+    size_bytes: i64,
+    sha256: String,
+    name: String,
+    title: String,
+    note: String,
+}
+
+impl StoredShare {
+    fn same(&self, header: &Header, share: &Share) -> bool {
+        self.execution_id == header.execution_id
+            && self.block_id == header.block_id
+            && self.mime == header.mime
+            && self.size_bytes == header.size as i64
+            && self.sha256 == header.sha256
+            && self.name == share.name
+            && self.title == share.title
+            && self.note == share.note
+    }
+}
+
+async fn stored_share(pool: &PgPool, id: Uuid) -> Result<Option<StoredShare>, sqlx::Error> {
+    sqlx::query_as(
+        "select execution_id, block_id, mime, size_bytes, sha256, name, title, note
+         from block_files where id=$1",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn insert_share(
+    pool: &PgPool,
+    conversation_id: Uuid,
+    header: &Header,
+    share: &Share,
+) -> Result<(), MediaError> {
+    let header = header.clone();
+    let share = share.clone();
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            let owner_id: Uuid = sqlx::query_scalar(
+                "select owner_id from conversations where id=$1",
+            )
+            .bind(conversation_id)
+            .fetch_one(&mut *conn)
+            .await?;
+            sqlx::query(
+                "insert into attachments (id, owner_id, conversation_id, name, mime, size_bytes, sha256, state, ready_at)
+                 values ($1, $2, $3, $4, $5, $6, $7, 'ready', clock_timestamp())
+                 on conflict (id) do nothing",
+            )
+            .bind(header.id)
+            .bind(owner_id)
+            .bind(conversation_id)
+            .bind(&share.name)
+            .bind(&header.mime)
+            .bind(header.size as i64)
+            .bind(&header.sha256)
+            .execute(&mut *conn)
+            .await?;
+            sqlx::query(
+                "insert into block_files (id, execution_id, conversation_id, block_id, attachment_id, name, mime, size_bytes, sha256, title, note, width, height)
+                 values ($1, $2, $3, $4, $1, $5, $6, $7, $8, $9, $10, $11, $12)
+                 on conflict (id) do nothing",
+            )
+            .bind(header.id)
+            .bind(header.execution_id)
+            .bind(conversation_id)
+            .bind(header.block_id)
+            .bind(&share.name)
+            .bind(&header.mime)
+            .bind(header.size as i64)
+            .bind(&header.sha256)
+            .bind(&share.title)
+            .bind(&share.note)
+            .bind(share.width.map(|v| v as i32))
+            .bind(share.height.map(|v| v as i32))
+            .execute(&mut *conn)
+            .await?;
+            let row: Option<StoredShare> = sqlx::query_as(
+                "select execution_id, block_id, mime, size_bytes, sha256, name, title, note
+                 from block_files where id=$1",
+            )
+            .bind(header.id)
+            .fetch_optional(&mut *conn)
+            .await?;
+            match row {
+                Some(row) if row.same(&header, &share) => Ok(()),
+                _ => Err(MediaError::Conflict),
+            }
+        })
+    })
+    .await
+}
+
 pub async fn put(
     pool: &PgPool,
     store: &dyn BlobStore,
@@ -201,15 +347,34 @@ pub async fn put(
     .fetch_optional(pool)
     .await?
     .ok_or(MediaError::NotFound)?;
-    let foreign: bool = sqlx::query_scalar("select exists(select 1 from attachments where id=$1)")
-        .bind(header.id)
-        .fetch_one(pool)
-        .await?;
-    if foreign {
-        return Err(MediaError::Conflict);
-    }
-    if let Some(result) = replay(stored(pool, header.id).await?, header) {
-        return result;
+    if let Some(share) = &header.share {
+        if let Some(stored) = stored_share(pool, header.id).await? {
+            return if stored.same(header, share) {
+                Ok(())
+            } else {
+                Err(MediaError::Conflict)
+            };
+        }
+        let foreign: bool =
+            sqlx::query_scalar("select exists(select 1 from attachments where id=$1)")
+                .bind(header.id)
+                .fetch_one(pool)
+                .await?;
+        if foreign {
+            return Err(MediaError::Conflict);
+        }
+    } else {
+        let foreign: bool =
+            sqlx::query_scalar("select exists(select 1 from attachments where id=$1)")
+                .bind(header.id)
+                .fetch_one(pool)
+                .await?;
+        if foreign {
+            return Err(MediaError::Conflict);
+        }
+        if let Some(result) = replay(stored(pool, header.id).await?, header) {
+            return result;
+        }
     }
     let Some(locked) = store.try_lock(header.id)? else {
         return Err(MediaError::Busy);
@@ -240,9 +405,15 @@ pub async fn put(
         }
         Err(error) => return Err(error.into()),
     }
-    if !signature_matches(header.mime, &read_head(store, id).await?) {
+    let share = header.share.clone();
+    let head = read_head(store, id).await?;
+    let image = header.mime.starts_with("image/");
+    if (header.share.is_none() || image) && !signature_matches(&header.mime, &head) {
         store.delete_blob(id).await?;
         return Err(MediaError::Invalid);
+    }
+    if let Some(share) = share {
+        return insert_share(pool, conversation_id, header, &share).await;
     }
     let header = header.clone();
     crate::db::in_tx(pool, move |conn| {
@@ -255,7 +426,7 @@ pub async fn put(
             .bind(header.execution_id)
             .bind(conversation_id)
             .bind(header.block_id)
-            .bind(header.mime)
+            .bind(header.mime.clone())
             .bind(header.size as i64)
             .bind(header.sha256.clone())
             .execute(&mut *conn)
@@ -369,6 +540,121 @@ pub async fn attach_in_tx(
     .bind(width)
     .bind(height)
     .execute(conn)
+    .await?;
+    Ok(false)
+}
+
+/// Файл, который агент отдал владельцу, в моделях чтения блока.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, ToSchema, sqlx::FromRow)]
+pub struct FileView {
+    pub attachment_id: Uuid,
+    pub name: String,
+    pub mime: String,
+    pub size: i64,
+    pub title: String,
+    pub note: String,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+}
+
+pub async fn files_for_block(
+    conn: &mut PgConnection,
+    block_id: Uuid,
+) -> Result<Vec<FileView>, sqlx::Error> {
+    sqlx::query_as(
+        "select attachment_id, name, mime, size_bytes size, title, note, width, height
+         from block_files where block_id=$1 and attached_at is not null order by attached_seq, id",
+    )
+    .bind(block_id)
+    .fetch_all(conn)
+    .await
+}
+
+/// Запись `BlockFile`: ссылка появляется только на опубликованную строку того же исполнения,
+/// блока, имени, типа, размера и checksum.
+pub async fn attach_file_in_tx(
+    conn: &mut PgConnection,
+    run: &ExecutionRef,
+    fact: &BlockFile,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    let parse = |value: &str| {
+        Uuid::parse_str(value)
+            .ok()
+            .filter(|id| !id.is_nil())
+            .ok_or_else(|| sqlx::Error::InvalidArgument("invalid file reference".into()))
+    };
+    let id = parse(&fact.attachment_id)?;
+    let block_id = parse(&fact.block_id)?;
+    let row: Option<(String, String, i64, String, String, String, bool)> = sqlx::query_as(
+        "select mime, name, size_bytes, sha256, title, note, attached_at is not null
+         from block_files where id=$1 and execution_id=$2 and conversation_id=$3
+           and block_id=$4 for update",
+    )
+    .bind(id)
+    .bind(run.execution_id)
+    .bind(run.conversation_id)
+    .bind(block_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((mime, name, size, sha256, title, note, attached)) = row else {
+        return Ok(true);
+    };
+    if attached
+        || mime != fact.mime
+        || name != fact.name
+        || size != fact.size as i64
+        || sha256 != fact.sha256
+        || title != fact.title
+        || note != fact.note
+    {
+        return Ok(true);
+    }
+    let block: bool = sqlx::query_scalar(
+        "select exists(select 1 from blocks where block_id=$1 and execution_id=$2)",
+    )
+    .bind(block_id)
+    .bind(run.execution_id)
+    .fetch_one(&mut *conn)
+    .await?;
+    if !block {
+        return Ok(true);
+    }
+    let dimension = |value: u32| i32::try_from(value).ok().filter(|v| *v > 0);
+    let (width, height) = (dimension(fact.width), dimension(fact.height));
+    let event = events::append(
+        conn,
+        NewEvent {
+            scope: Scope::Conversation {
+                id: run.conversation_id,
+            },
+            kind: "block_file_attached",
+            conversation_id: Some(run.conversation_id),
+            execution_id: Some(run.execution_id),
+            payload: json!({
+                "block_id": block_id,
+                "attachment_id": id,
+                "name": name,
+                "mime": mime,
+                "size": size,
+                "title": title,
+                "note": note,
+                "width": width,
+                "height": height,
+            }),
+            correlation_id,
+        },
+    )
+    .await?;
+    sqlx::query(
+        "update block_files set attached_at=$2, attached_seq=$3, width=coalesce($4,width), height=coalesce($5,height) where id=$1",
+    )
+    .bind(id)
+    .bind(event.committed_at)
+    .bind(event.scope_seq)
+    .bind(width)
+    .bind(height)
+    .execute(&mut *conn)
     .await?;
     Ok(false)
 }

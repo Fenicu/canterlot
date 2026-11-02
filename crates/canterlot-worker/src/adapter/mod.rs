@@ -536,6 +536,15 @@ pub enum AdapterEvent {
         tool: String,
         arguments: serde_json::Value,
     },
+    /// Файл для владельца: читает и загружает супервизор.
+    ShareFile {
+        call_id: Uuid,
+        arguments: serde_json::Value,
+    },
+    /// Лимиты всех провайдеров: ответ хаба, при отказе — местный снимок.
+    Limits {
+        call_id: Uuid,
+    },
     /// Полный список задач агента. `lane` — блок вызова субагента, у основного агента `None`.
     TodoUpdated {
         lane: Option<Uuid>,
@@ -662,6 +671,14 @@ impl fmt::Debug for AdapterEvent {
                 .field("call_id", call_id)
                 .field("tool", tool)
                 .finish_non_exhaustive(),
+            Self::ShareFile { call_id, .. } => f
+                .debug_struct("ShareFile")
+                .field("call_id", call_id)
+                .finish_non_exhaustive(),
+            Self::Limits { call_id } => f
+                .debug_struct("Limits")
+                .field("call_id", call_id)
+                .finish_non_exhaustive(),
             Self::BackgroundWork { tasks, wake_turn } => f
                 .debug_struct("BackgroundWork")
                 .field("tasks", &tasks.len())
@@ -693,6 +710,22 @@ impl fmt::Debug for AdapterEvent {
 pub enum AgentCallResult {
     Ok(serde_json::Value),
     Err { code: String, message: String },
+}
+
+/// Отказ хаба по `limits.report` заменяется местным снимком: старый хаб не знает
+/// многопровайдерный отчёт, а `canterlot_limits` должен отвечать и там.
+pub fn limits_fallback(
+    pending: &mut std::collections::HashMap<uuid::Uuid, String>,
+    call_id: uuid::Uuid,
+    result: AgentCallResult,
+) -> AgentCallResult {
+    let Some(text) = pending.remove(&call_id) else {
+        return result;
+    };
+    match result {
+        AgentCallResult::Ok(value) if value.get("text").is_some() => AgentCallResult::Ok(value),
+        _ => AgentCallResult::Ok(serde_json::json!({"text": text})),
+    }
 }
 
 impl fmt::Debug for AgentCallResult {

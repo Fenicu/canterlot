@@ -69,6 +69,17 @@ export interface PendingDelta {
   append: string;
 }
 
+export interface BlockFile {
+  attachment_id: string;
+  name: string;
+  mime: string;
+  size: number;
+  title: string;
+  note: string;
+  width?: number | null;
+  height?: number | null;
+}
+
 export interface BlockMedia {
   media_id: string;
   mime: string;
@@ -107,6 +118,7 @@ export class BlockModel {
   #reason = cell<string | null>(null);
   #truncated = cell(false);
   #media = cell<BlockMedia[]>([]);
+  #files = cell<BlockFile[]>([]);
 
   constructor(id: string, kind: BlockKind) {
     this.id = id;
@@ -149,6 +161,12 @@ export class BlockModel {
   }
   set media(value: BlockMedia[]) {
     this.#media.set(value);
+  }
+  get files(): BlockFile[] {
+    return this.#files.get();
+  }
+  set files(value: BlockFile[]) {
+    this.#files.set(value);
   }
 }
 

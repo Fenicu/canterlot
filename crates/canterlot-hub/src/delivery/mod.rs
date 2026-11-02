@@ -4,8 +4,8 @@ pub mod receipts;
 pub mod submit;
 
 pub use submit::{
-    ContentBlock, LimitKind, QUEUE_LIMIT, SubmitError, SubmitInput, SubmittedInput, submit_input,
-    submit_input_in_tx,
+    ContentBlock, LimitKind, QUEUE_LIMIT, SubmitError, SubmitInput, SubmittedInput,
+    submit_forwarded_message_input_in_tx, submit_input, submit_input_in_tx,
 };
 
 use sqlx::{PgConnection, types::Json};

@@ -65,7 +65,7 @@ impl Fx {
         let registry = Registry::new(Default::default());
         let session = testkit::fake_session(&registry, seed.machine_id, capabilities, true);
         sqlx::query(
-            "update machines set availability='available',capabilities=array['pilot_v1'],
+            "update machines set availability='available',capabilities=array['pilot_v1'],limits_ok=true,
                allowed_roots='[\"/tmp\"]',worktree_root='/data/worktrees' where id=$1",
         )
         .bind(seed.machine_id)
@@ -154,6 +154,24 @@ impl Fx {
 
     async fn spawn(&self, args: Value) -> Result<Value, ToolError> {
         session_tools::call(&self.context, &self.caller(), "sessions.spawn", args).await
+    }
+
+    async fn attachment(&self, name: &str, mime: &str) -> Uuid {
+        let id = Uuid::now_v7();
+        sqlx::query(
+            "insert into attachments (id,owner_id,conversation_id,name,mime,size_bytes,sha256,state,ready_at)
+             values($1,$2,$3,$4,$5,4,$6,'ready',clock_timestamp())",
+        )
+        .bind(id)
+        .bind(self.owner)
+        .bind(self.parent)
+        .bind(name)
+        .bind(mime)
+        .bind("0".repeat(64))
+        .execute(&self.pool)
+        .await
+        .unwrap();
+        id
     }
 
     async fn pending(&self, args: Value) -> Uuid {
@@ -1407,4 +1425,56 @@ async fn delegated_start_carries_the_isolation_flag_on_every_start(pool: PgPool)
     .await
     .unwrap();
     assert_eq!(flags, vec![Some(true), Some(true)]);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn brief_carries_the_callers_attachments(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let file = f.attachment("brief.pdf", "application/pdf").await;
+    let (child, _) = f
+        .started(json!({
+            "harness": "synthetic", "model": "small", "brief": "Прочитай файл",
+            "attachment_ids": [file],
+        }))
+        .await;
+    let content: Value = sqlx::query_scalar(
+        "select content from inputs where conversation_id=$1 and origin is not null",
+    )
+    .bind(child)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    let blocks = content.as_array().unwrap();
+    assert!(
+        blocks.iter().any(
+            |block| block["type"] == "attachment" && block["attachment_id"] == file.to_string()
+        )
+    );
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn foreign_attachment_is_refused_for_spawn(pool: PgPool) {
+    let f = Fx::new(pool).await;
+    let other = testkit::seed_conversation(&f.pool, f.owner, f.machine).await;
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into attachments (id,owner_id,conversation_id,name,mime,size_bytes,sha256,state,ready_at)
+         values($1,$2,$3,'secret.pdf','application/pdf',4,$4,'ready',clock_timestamp())",
+    )
+    .bind(id)
+    .bind(f.owner)
+    .bind(other)
+    .bind("0".repeat(64))
+    .execute(&f.pool)
+    .await
+    .unwrap();
+    let error = f
+        .spawn(json!({
+            "harness": "synthetic", "model": "small", "brief": "чужой файл",
+            "attachment_ids": [id],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::AttachmentNotAvailable);
+    assert!(f.child().await.is_none());
 }

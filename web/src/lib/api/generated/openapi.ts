@@ -1015,6 +1015,8 @@ export interface components {
             content_truncated: boolean;
             created_at: string;
             created_seq: string;
+            /** @description Файлы, которые агент отдал владельцу; появляются после `block_file_attached`. */
+            files: components["schemas"]["FileView"][];
             finished_at?: string | null;
             /** Format: uuid */
             id: string;
@@ -1333,6 +1335,21 @@ export interface components {
             /** @enum {string} */
             kind: "stopped";
             outcome: string;
+        };
+        /** @description Файл, который агент отдал владельцу, в моделях чтения блока. */
+        FileView: {
+            /** Format: uuid */
+            attachment_id: string;
+            /** Format: int32 */
+            height?: number | null;
+            mime: string;
+            name: string;
+            note: string;
+            /** Format: int64 */
+            size: number;
+            title: string;
+            /** Format: int32 */
+            width?: number | null;
         };
         Group: {
             created_at: string;

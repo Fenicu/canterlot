@@ -16,6 +16,7 @@ export type WireEvent =
   | BlockChecksumMismatch
   | BlockConflictingFinal
   | BlockMediaAttached
+  | BlockFileAttached
   | ConversationCreated
   | ConversationUpdated
   | ConversationDeleted
@@ -457,6 +458,30 @@ export interface BlockMediaAttached {
     media_id: Uuid;
     mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
     size: number;
+    width: number | null;
+    height: number | null;
+  };
+}
+export interface BlockFileAttached {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_file_attached";
+  payload: {
+    block_id: Uuid;
+    attachment_id: Uuid;
+    name: string;
+    mime: string;
+    size: number;
+    title: string;
+    note: string;
     width: number | null;
     height: number | null;
   };

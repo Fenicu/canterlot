@@ -5365,7 +5365,8 @@
           "content_bytes",
           "rev",
           "revision_gap",
-          "media"
+          "media",
+          "files"
         ],
         "properties": {
           "agent": {
@@ -5396,6 +5397,13 @@
           },
           "created_seq": {
             "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileView"
+            },
+            "description": "Файлы, которые агент отдал владельцу; появляются после `block_file_attached`."
           },
           "finished_at": {
             "type": [
@@ -6693,6 +6701,54 @@
             }
           }
         ]
+      },
+      "FileView": {
+        "type": "object",
+        "description": "Файл, который агент отдал владельцу, в моделях чтения блока.",
+        "required": [
+          "attachment_id",
+          "name",
+          "mime",
+          "size",
+          "title",
+          "note"
+        ],
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
       },
       "Group": {
         "type": "object",
