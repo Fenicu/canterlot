@@ -497,6 +497,10 @@ impl Worker {
                 ));
             routes.insert("codex".into(), codexbar(Some(probe)));
         }
+        if config.opencode.is_some() {
+            idle_ticker.register("opencode", limits_interval);
+            routes.insert("opencode".into(), codexbar(None));
+        }
         let limits_source: Arc<dyn crate::machine::limits::LimitsSource> = if routes.is_empty() {
             default_source
         } else {

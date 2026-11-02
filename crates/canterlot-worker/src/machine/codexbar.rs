@@ -19,6 +19,9 @@ const MAX_BACKOFF: Duration = Duration::from_secs(3600);
 const MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const FIVE_HOUR_MINUTES: u64 = 300;
 const WEEK_MINUTES: u64 = 10080;
+/// Провайдер хаба и имя в выводе `codexbar usage --provider`.
+const OPENCODE_HUB: &str = "opencode";
+const OPENCODE_CLI: &str = "opencodego";
 
 /// Причины пустого опроса. Ни один вариант не несёт вывод программы.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,8 +47,18 @@ impl fmt::Display for CodexBarError {
 
 impl std::error::Error for CodexBarError {}
 
+/// Имя для запуска `codexbar usage --provider`: у OpenCode оно отличается от провайдера хаба.
+fn cli_provider(provider: &str) -> &str {
+    if provider == OPENCODE_HUB {
+        OPENCODE_CLI
+    } else {
+        provider
+    }
+}
+
 /// Окна по `windowMinutes`: `primary` у CodexBar не обязательно пятичасовое
 /// (у Claude без пятичасового окна он повторяет недельное), поэтому имена слотов не используются.
+/// Месячное окно (43200) хаб не хранит: оно пропускается вместе с остальными неизвестными.
 pub fn observations_from_output(
     provider: &str,
     stdout: &[u8],
@@ -66,9 +79,11 @@ pub fn reading_from_output(
     let entry = value
         .as_array()
         .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item.get("provider").and_then(Value::as_str) == Some(provider))
+            items.iter().find(|item| {
+                item.get("provider").and_then(Value::as_str).is_some_and(|name| {
+                    name == provider || name == cli_provider(provider)
+                })
+            })
         })
         .ok_or(CodexBarError::Output)?;
     let usage = entry.get("usage").ok_or(CodexBarError::Output)?;
@@ -203,13 +218,14 @@ impl CodexBarLimitsSource {
     /// Один запуск без учёта интервала.
     pub async fn fetch(&self, provider: &str) -> Result<LimitsFetch, CodexBarError> {
         let executable = locate(self.configured.as_deref()).ok_or(CodexBarError::Missing)?;
+        let cli = cli_provider(provider).to_owned();
         let mut child = crate::adapter::spawn_with_retry_io(|| {
             let mut command = Command::new(&executable);
             command
                 .args([
                     "usage",
                     "--provider",
-                    provider,
+                    cli.as_str(),
                     "--format",
                     "json",
                     "--no-color",
@@ -264,7 +280,7 @@ impl CodexBarLimitsSource {
     }
 
     async fn poll_with(&self, provider: &str, request: Request) -> LimitsFetch {
-        if !matches!(provider, "claude" | "codex") {
+        if !matches!(provider, "claude" | "codex" | OPENCODE_HUB) {
             return LimitsFetch::default();
         }
         let now = (self.clock)();
