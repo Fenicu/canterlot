@@ -758,6 +758,7 @@ impl Supervisor {
         if self.attached == Some(id) {
             self.attached = None;
             self.media.inflight = None;
+            self.shares.inflight = None;
             self.sj.disable_ship();
         }
     }
@@ -829,6 +830,8 @@ impl Supervisor {
             // Новая управляющая служба получает незавершённую загрузку заново.
             self.media.inflight = None;
             self.pump_media();
+            self.shares.inflight = None;
+            self.pump_share();
             return Ok(());
         }
         if matches!(self.lifecycle, Lifecycle::Draining { .. }) {
@@ -941,6 +944,21 @@ impl Supervisor {
             .collect();
         for call_id in expired {
             self.agent_calls.remove(&call_id);
+            // Просроченная отправка файла: убрать из очереди и стереть копию.
+            if let Some(position) = self
+                .shares
+                .ready
+                .iter()
+                .position(|pending| pending.call_id == call_id)
+            {
+                let pending = self.shares.ready.remove(position).expect("found share");
+                if self.shares.inflight == Some(pending.prepared.id) {
+                    self.shares.inflight = None;
+                }
+                let _ =
+                    std::fs::remove_file(media::media_path(&self.exec_dir, pending.prepared.id));
+                self.pump_share();
+            }
             if let Some(adapter) = self.adapter.as_mut() {
                 tracing::info!(
                     kind = "agent_call",
@@ -1380,6 +1398,9 @@ impl Supervisor {
             title: args.title.unwrap_or_default(),
             note: args.note.unwrap_or_default(),
         };
+        // Ожидание ответа управляющей службы ограничено: иначе агент ждал бы вечно.
+        self.agent_calls
+            .insert(call_id, Instant::now() + crate::exec::AGENT_CALL_TIMEOUT);
         if self.share_jobs.send(job).is_ok() {
             self.shares.preparing += 1;
         }
@@ -1390,11 +1411,16 @@ impl Supervisor {
         self.shares.preparing = self.shares.preparing.saturating_sub(1);
         match result {
             Ok((job, prepared)) if !matches!(self.lifecycle, Lifecycle::Draining { .. }) => {
-                self.shares.ready.push_back(PendingShare {
-                    call_id: job.call_id,
-                    block_id: job.block_id,
-                    prepared,
-                });
+                if self.agent_calls.contains_key(&job.call_id) {
+                    self.shares.ready.push_back(PendingShare {
+                        call_id: job.call_id,
+                        block_id: job.block_id,
+                        prepared,
+                    });
+                } else {
+                    // Срок вызова вышел раньше подготовки: ответ уже ушёл, копия не нужна.
+                    let _ = std::fs::remove_file(media::media_path(&self.exec_dir, prepared.id));
+                }
             }
             Ok((job, prepared)) => {
                 let _ = std::fs::remove_file(media::media_path(&self.exec_dir, prepared.id));
@@ -3172,6 +3198,7 @@ mod tests {
     #[derive(Default)]
     struct StubState {
         transmit_calls: Vec<Uuid>,
+        agent_call_errors: Vec<(Uuid, String)>,
         ack_interrupt: bool,
         steer_accept: bool,
         steer_undetermined: bool,
@@ -3260,6 +3287,18 @@ mod tests {
 
         async fn next_event(&mut self) -> AdapterEvent {
             std::future::pending().await
+        }
+
+        async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+            let code = match &result {
+                AgentCallResult::Ok(_) => "ok".to_owned(),
+                AgentCallResult::Err { code, .. } => code.clone(),
+            };
+            self.state
+                .lock()
+                .unwrap()
+                .agent_call_errors
+                .push((call_id, code));
         }
 
         async fn close(
@@ -3730,6 +3769,132 @@ mod tests {
             body,
             Body::InputAccepted(accepted) if accepted.command_id == key.0.to_string()
         )));
+    }
+
+    fn queued_share() -> (Uuid, Uuid, PendingShare) {
+        let share_id = Uuid::now_v7();
+        let call_id = Uuid::now_v7();
+        let pending = PendingShare {
+            call_id,
+            block_id: Uuid::now_v7(),
+            prepared: PreparedShare {
+                id: share_id,
+                name: "doc.txt".into(),
+                title: String::new(),
+                note: String::new(),
+                mime: "text/plain".into(),
+                size: 6,
+                sha256: "e".repeat(64),
+                width: None,
+                height: None,
+            },
+        };
+        (share_id, call_id, pending)
+    }
+
+    #[tokio::test]
+    async fn reattach_restarts_share_upload_like_media() {
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        // Прерванная загрузка: очередь и полёт, как при обрыве связи посередине.
+        let (share_id, call_id, pending) = queued_share();
+        let block_id = pending.block_id;
+        supervisor.shares.ready.push_back(pending);
+        supervisor.shares.inflight = Some(share_id);
+        supervisor.media.inflight = Some(Uuid::now_v7());
+        let (old_tx, _old_rx) = mpsc::channel(64);
+        supervisor.conns.insert(
+            0,
+            Conn {
+                tx: old_tx,
+                attached: true,
+            },
+        );
+        supervisor.attached = Some(0);
+        supervisor.drop_connection(0);
+        assert!(
+            supervisor.shares.inflight.is_none(),
+            "interrupted share upload leaves flight"
+        );
+        assert!(supervisor.media.inflight.is_none());
+        assert_eq!(
+            supervisor.shares.ready.len(),
+            1,
+            "queued share survives disconnect"
+        );
+        // Новая служба: загрузка уходит заново тем же блоком.
+        let (tx, mut rx) = mpsc::channel(64);
+        supervisor.conns.insert(
+            1,
+            Conn {
+                tx,
+                attached: false,
+            },
+        );
+        let attach = canterlot_proto::worker::ipc::control_to_supervisor::Msg::Attach(
+            canterlot_proto::worker::ipc::Attach {
+                protocol_version: IPC_PROTOCOL_VERSION,
+                secret: Vec::new(),
+                execution_id: supervisor.spec.execution_id.to_string(),
+                generation: supervisor.spec.generation,
+            },
+        );
+        supervisor
+            .on_control(Control::Message(
+                1,
+                ControlToSupervisor { msg: Some(attach) },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(supervisor.shares.inflight, Some(share_id));
+        let mut upload = None;
+        for _ in 0..4 {
+            match rx.recv().await.expect("share upload resent").msg {
+                Some(up::Msg::ShareUpload(request)) => {
+                    upload = Some(request);
+                    break;
+                }
+                // Приложенный ответ о присоединении идёт первым.
+                Some(up::Msg::Attached(_)) => {}
+                other => panic!("expected ShareUpload, got {other:?}"),
+            }
+        }
+        let upload = upload.expect("share upload resent");
+        assert_eq!(upload.share_id, share_id.to_string());
+        assert_eq!(upload.call_id, call_id.to_string());
+        assert_eq!(upload.block_id, block_id.to_string());
+    }
+
+    #[tokio::test]
+    async fn expired_share_upload_fails_the_call_and_deletes_the_copy() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        let (share_id, call_id, pending) = queued_share();
+        supervisor.shares.ready.push_back(pending);
+        supervisor.shares.inflight = Some(share_id);
+        supervisor
+            .agent_calls
+            .insert(call_id, Instant::now() - Duration::from_secs(1));
+        let copy = media::media_path(&supervisor.exec_dir, share_id);
+        std::fs::create_dir_all(copy.parent().unwrap()).unwrap();
+        std::fs::write(&copy, b"shared").unwrap();
+        supervisor.expire_agent_calls().await;
+        assert!(
+            supervisor.shares.ready.is_empty(),
+            "expired share leaves the queue"
+        );
+        assert!(
+            supervisor.shares.inflight.is_none(),
+            "expired share leaves flight"
+        );
+        assert!(!copy.exists(), "expired share copy is deleted");
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .agent_call_errors
+                .iter()
+                .any(|(id, code)| *id == call_id && code == "hub_timeout"),
+            "the agent gets a bounded error, not silence"
+        );
     }
 
     #[tokio::test]
