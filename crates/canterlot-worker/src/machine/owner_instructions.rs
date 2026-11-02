@@ -3,8 +3,10 @@
 //! и имя файла, никогда путь. Пути строятся из фиксированного списка,
 //! проверяются канонизацией и не выходят за разрешённые каталоги.
 //! Глобальный файл и файл памяти ссылкой не бывают: ссылка вместо настоящего
-//! файла не читается и видна с причиной `symlink`, чтение идёт через дескриптор
-//! с `O_NOFOLLOW`, чтобы подмена между проверкой и чтением не увела в чужой файл.
+//! файла не читается и видна с причиной `symlink`. Путь открывается ровно один
+//! раз с `O_NOFOLLOW` и `O_NONBLOCK`, все проверки — только по дескриптору
+//! (`fstat`: обычный файл, одна жёсткая ссылка, владелец-процесс), читается
+//! только из него: подмена между проверкой и чтением невозможна.
 //!
 //! Подтверждённые пути CLI:
 //! - Claude Code: пользовательский `~/.claude/CLAUDE.md` (или `CLAUDE_CONFIG_DIR`,
@@ -36,6 +38,9 @@ pub const TRUNCATED_MARKER: &str = "\n…[truncated]";
 /// Сколько проектов памяти и файлов в проекте отдаёт обзор.
 pub const MAX_MEMORY_PROJECTS: usize = 200;
 pub const MAX_MEMORY_FILES: usize = 50;
+/// Сколько записей каталога просматривается: ограничиваются просмотренные,
+/// а не только принятые, иначе каталог мусора сканировался бы без конца.
+const MAX_SCANNED_ENTRIES: usize = 1000;
 
 /// Виды запроса: обзор и шесть глобальных файлов плюс два вида памяти.
 pub const KIND_OVERVIEW: &str = "overview";
@@ -148,9 +153,8 @@ fn valid_memory_name(name: &str) -> bool {
         && !denied_name(name)
 }
 
-fn mtime_ms(path: &Path) -> u64 {
-    std::fs::metadata(path)
-        .and_then(|meta| meta.modified())
+fn mtime_ms(meta: &std::fs::Metadata) -> u64 {
+    meta.modified()
         .ok()
         .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
         .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
@@ -182,13 +186,53 @@ fn is_loop(error: &std::io::Error) -> bool {
     error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
 }
 
-/// Открыть файл без перехода по ссылке: подмена между проверкой и чтением
-/// упрётся в ошибку, а не в чужое содержимое.
-fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+/// Открыть файл ровно один раз без перехода по ссылке и без блокировки
+/// на FIFO: подмена между проверкой и чтением упрётся в ошибку,
+/// а не в чужое содержимое.
+fn open_verified(path: &Path) -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)
+}
+
+/// Все проверки файла — только по дескриптору: обычный файл, единственная
+/// жёсткая ссылка и владелец-процесс. Жёсткая ссылка на чужой файл
+/// неотличима по пути, поэтому счётчик ссылок проверяется здесь.
+fn verified_meta(file: &std::fs::File) -> Option<std::fs::Metadata> {
+    use std::os::unix::fs::MetadataExt as _;
+    let meta = file.metadata().ok()?;
+    (meta.is_file() && meta.nlink() == 1 && meta.uid() == rustix::process::getuid().as_raw())
+        .then_some(meta)
+}
+
+/// Открыть ожидаемый путь и проверить дескриптор. Единственная проверка
+/// по пути — родительский каталог до открытия; дальше только дескриптор.
+fn open_checked(expected: &Path, base: &Path) -> Result<(std::fs::File, std::fs::Metadata), ReadOutcome> {
+    let (Some(parent), Some(name)) = (expected.parent(), expected.file_name()) else {
+        return Err(ReadOutcome::Absent);
+    };
+    let Some(name) = name.to_str() else {
+        return Err(ReadOutcome::Absent);
+    };
+    if denied_name(name) {
+        return Err(ReadOutcome::Absent);
+    }
+    let Ok(parent_canon) = std::fs::canonicalize(parent) else {
+        return Err(ReadOutcome::Absent);
+    };
+    if !inside(&parent_canon, base) {
+        return Err(ReadOutcome::Absent);
+    }
+    let file = match open_verified(expected) {
+        Ok(file) => file,
+        Err(error) if is_loop(&error) => return Err(ReadOutcome::Symlink),
+        Err(_) => return Err(ReadOutcome::Absent),
+    };
+    match verified_meta(&file) {
+        Some(handle) => Ok((file, handle)),
+        None => Err(ReadOutcome::Absent),
+    }
 }
 
 /// Прочитать обычный текстовый файл с лимитом и проверками. Ссылка —
@@ -196,46 +240,12 @@ fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
 /// глобальный файл или файл памяти ссылкой никогда не бывает.
 fn read_text(expected: &Path, base: &Path) -> ReadOutcome {
     use std::io::Read as _;
-    let meta = match std::fs::symlink_metadata(expected) {
-        Ok(meta) => meta,
-        Err(_) => return ReadOutcome::Absent,
-    };
-    if meta.file_type().is_symlink() {
-        return ReadOutcome::Symlink;
-    }
-    if !meta.is_file() {
-        return ReadOutcome::Absent;
-    }
-    let (Some(parent), Some(name)) = (expected.parent(), expected.file_name()) else {
-        return ReadOutcome::Absent;
-    };
-    // Канонический путь обязан совпасть с ожидаемым побайтово: ссылка
-    // в любом месте цепочки выше уже раскрыта канонизацией родителя.
-    let Ok(parent_canon) = std::fs::canonicalize(parent) else {
-        return ReadOutcome::Absent;
-    };
-    let Ok(canonical) = std::fs::canonicalize(expected) else {
-        return ReadOutcome::Absent;
-    };
-    if canonical != parent_canon.join(name) || !inside(&canonical, base) {
-        return ReadOutcome::Absent;
-    }
-    if let Some(name) = canonical.file_name().and_then(|n| n.to_str())
-        && denied_name(name)
-    {
-        return ReadOutcome::Absent;
-    }
-    let file = match open_nofollow(expected) {
-        Ok(file) => file,
-        Err(error) if is_loop(&error) => return ReadOutcome::Symlink,
-        Err(_) => return ReadOutcome::Absent,
-    };
-    let handle = match file.metadata() {
-        Ok(handle) if handle.is_file() => handle,
-        _ => return ReadOutcome::Absent,
+    let (file, handle) = match open_checked(expected, base) {
+        Ok(opened) => opened,
+        Err(outcome) => return outcome,
     };
     let size = handle.len();
-    let mtime = mtime_ms(expected);
+    let mtime = mtime_ms(&handle);
     // Читать не больше лимита с запасом в байт: признак усечения виден
     // без загрузки огромного файла в память целиком.
     let mut capped = Vec::new();
@@ -251,11 +261,19 @@ fn read_text(expected: &Path, base: &Path) -> ReadOutcome {
     }
     let truncated = capped.len() > MAX_OWNER_FILE_BYTES;
     capped.truncate(MAX_OWNER_FILE_BYTES);
-    // Срез только по границе символа, иначе markdown покажет половину знака.
-    while String::from_utf8(capped.clone()).is_err() && !capped.is_empty() {
-        capped.pop();
-    }
-    let mut text = String::from_utf8_lossy(&capped).into_owned();
+    let text = match std::str::from_utf8(&capped) {
+        Ok(text) => text.to_owned(),
+        // Недописанная последовательность ровно на срезе усечения: обрезать
+        // по границе и показать начало. Любая другая порча — не текст, отказ.
+        Err(error) if truncated && error.error_len().is_none() => {
+            match std::str::from_utf8(&capped[..error.valid_up_to()]) {
+                Ok(head) => head.to_owned(),
+                Err(_) => return ReadOutcome::Absent,
+            }
+        }
+        Err(_) => return ReadOutcome::Absent,
+    };
+    let mut text = text;
     if truncated {
         text.push_str(TRUNCATED_MARKER);
     }
@@ -319,25 +337,19 @@ fn meta_for(kind: &str, roots: &OwnerRoots) -> OwnerFileMeta {
     };
     // Ссылка вместо настоящего файла не показывается, но видна в обзоре
     // с причиной: молчаливое отсутствие скрыло бы подмену.
-    if std::fs::symlink_metadata(&expected).is_ok_and(|meta| meta.file_type().is_symlink()) {
-        return absent(REASON_SYMLINK);
-    }
     let base = global_base(kind, roots).unwrap_or_else(|| expected.clone());
     let base_canon = canonical_base(&base);
-    let canonical = std::fs::canonicalize(&expected).unwrap_or(expected);
-    if !inside(&canonical, &base_canon) {
-        return absent("");
-    }
-    match std::fs::metadata(&canonical) {
-        Ok(meta) if meta.is_file() => OwnerFileMeta {
+    match open_checked(&expected, &base_canon) {
+        Ok((_, handle)) => OwnerFileMeta {
             kind: kind.into(),
             path: display,
             present: true,
-            size: meta.len(),
-            mtime_ms: mtime_ms(&canonical),
+            size: handle.len(),
+            mtime_ms: mtime_ms(&handle),
             ..Default::default()
         },
-        _ => absent(""),
+        Err(ReadOutcome::Symlink) => absent(REASON_SYMLINK),
+        Err(_) => absent(""),
     }
 }
 
@@ -367,7 +379,7 @@ fn memory_projects(roots: &OwnerRoots) -> Vec<OwnerMemoryProject> {
     };
     let base_canon = canonical_base(&base);
     let mut out = Vec::new();
-    for entry in entries.flatten().take(MAX_MEMORY_PROJECTS * 2) {
+    for entry in entries.flatten().take(MAX_SCANNED_ENTRIES) {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !valid_project(&name) {
             continue;
@@ -403,21 +415,14 @@ fn memory_stats(dir: &Path) -> (u64, bool) {
     };
     let mut files = 0u64;
     let mut has_index = false;
-    for entry in entries.flatten().take(MAX_MEMORY_FILES + 1) {
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        // Настоящий файл памяти ссылкой не бывает: ссылки не считаются,
-        // даже если цель осталась внутри каталога.
-        if !kind.is_file() {
-            continue;
-        }
+    for entry in entries.flatten().take(MAX_SCANNED_ENTRIES) {
         let name = entry.file_name().to_string_lossy().into_owned();
         if !valid_memory_name(&name) {
             continue;
         }
-        let target = std::fs::canonicalize(entry.path()).unwrap_or_default();
-        if !inside(&target, dir) || !target.is_file() {
+        // Настоящий файл памяти ссылкой не бывает и чужим не бывает:
+        // проверка та же, что при чтении, по дескриптору.
+        if open_checked(&entry.path(), dir).is_err() {
             continue;
         }
         if name == "MEMORY.md" {
@@ -433,34 +438,21 @@ fn memory_listing(dir: &Path) -> Vec<OwnerMemoryFile> {
         return Vec::new();
     };
     let mut out = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries.flatten().take(MAX_SCANNED_ENTRIES) {
         if out.len() >= MAX_MEMORY_FILES {
             break;
-        }
-        let Ok(kind) = entry.file_type() else {
-            continue;
-        };
-        if !kind.is_file() {
-            continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if !valid_memory_name(&name) {
             continue;
         }
-        let target = std::fs::canonicalize(entry.path()).unwrap_or_default();
-        if !inside(&target, dir) {
-            continue;
-        }
-        let Ok(meta) = std::fs::metadata(&target) else {
+        let Ok((_, handle)) = open_checked(&entry.path(), dir) else {
             continue;
         };
-        if !meta.is_file() {
-            continue;
-        }
         out.push(OwnerMemoryFile {
             name,
-            size: meta.len(),
-            mtime_ms: mtime_ms(&target),
+            size: handle.len(),
+            mtime_ms: mtime_ms(&handle),
         });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -847,5 +839,151 @@ mod tests {
         let view = overview(&r);
         let proj = view.projects.iter().find(|p| p.id == "proj1").unwrap();
         assert_eq!(proj.files, 2);
+    }
+
+    #[test]
+    fn hard_link_to_credentials_is_refused_in_memory_and_at_global_spots() {
+        use std::fs::hard_link;
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        // Приманка с обычным именем: канонизация её не выдаст, имя разрешено.
+        let vault = dir.path().join("vault");
+        std::fs::create_dir_all(&vault).unwrap();
+        std::fs::write(vault.join("creds"), "secret-token").unwrap();
+        let memory = r.claude_config_dir.join("projects/proj1/memory");
+        hard_link(vault.join("creds"), memory.join("notes.md")).unwrap();
+        let linked = read_one(KIND_MEMORY_FILE, "proj1", "notes.md", &r, "req");
+        assert!(!linked.present, "жёсткая ссылка в памяти не читается");
+        assert!(linked.content.is_empty());
+        let index = read_one(KIND_MEMORY_INDEX, "proj1", "", &r, "req");
+        assert!(
+            index.files.iter().all(|f| f.name != "notes.md"),
+            "жёсткая ссылка не попадает даже в список"
+        );
+        let view = overview(&r);
+        let proj = view.projects.iter().find(|p| p.id == "proj1").unwrap();
+        assert_eq!(proj.files, 2);
+        // Та же приманка на месте глобального файла.
+        std::fs::remove_file(r.codex_home.join("AGENTS.md")).unwrap();
+        hard_link(vault.join("creds"), r.codex_home.join("AGENTS.md")).unwrap();
+        let global = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
+        assert!(!global.present, "жёсткая ссылка на месте AGENTS.md не читается");
+        assert!(global.content.is_empty());
+    }
+
+    #[test]
+    fn fifo_at_global_spot_does_not_hang_and_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        std::fs::remove_file(r.codex_home.join("AGENTS.md")).unwrap();
+        rustix::fs::mknodat(
+            rustix::fs::CWD,
+            &r.codex_home.join("AGENTS.md"),
+            rustix::fs::FileType::Fifo,
+            rustix::fs::Mode::from_raw_mode(0o600),
+            0,
+        )
+        .unwrap();
+        let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
+        assert!(!file.present);
+        assert!(file.content.is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_is_refused_fast() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        // Недействительный байт первым: наивная посимвольная подрезка
+        // клонировала бы буфер сотни тысяч раз.
+        let mut bad = vec![0xff];
+        bad.extend(std::iter::repeat(b'x').take(MAX_OWNER_FILE_BYTES - 1));
+        std::fs::write(r.codex_home.join("AGENTS.md"), &bad).unwrap();
+        let start = std::time::Instant::now();
+        let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(5),
+            "отказ быстрее посимвольной подрезки"
+        );
+        assert!(!file.present);
+        assert!(file.content.is_empty());
+    }
+
+    #[test]
+    fn multibyte_char_split_by_truncation_stays_valid() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        // Двухбайтовая «é» ровно на границе среза: первый байт последний в лимите.
+        let mut big = vec![b'x'; MAX_OWNER_FILE_BYTES - 1];
+        big.extend([0xc3, 0xa9]);
+        big.extend(std::iter::repeat(b'y').take(100));
+        std::fs::write(r.codex_home.join("AGENTS.md"), &big).unwrap();
+        let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
+        assert!(file.present);
+        assert!(file.truncated);
+        assert!(file.content.ends_with(TRUNCATED_MARKER));
+        let body = file.content.strip_suffix(TRUNCATED_MARKER).unwrap();
+        assert_eq!(body.len(), MAX_OWNER_FILE_BYTES - 1);
+        assert!(std::str::from_utf8(body.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn huge_file_is_read_bounded_and_truncated() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        let big = "z".repeat(4 * 1024 * 1024);
+        std::fs::write(r.codex_home.join("AGENTS.md"), &big).unwrap();
+        let file = read_one(KIND_CODEX_GLOBAL, "", "", &r, "req");
+        assert!(file.present);
+        assert!(file.truncated);
+        assert_eq!(file.size as usize, big.len());
+        assert!(file.content.ends_with(TRUNCATED_MARKER));
+        let body = file.content.strip_suffix(TRUNCATED_MARKER).unwrap();
+        assert_eq!(body.len(), MAX_OWNER_FILE_BYTES);
+    }
+
+    #[test]
+    fn directory_full_of_junk_is_scanned_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        let memory = r.claude_config_dir.join("projects/proj1/memory");
+        // Мусора меньше лимита просмотра: настоящие файлы находятся при любом порядке.
+        for n in 0..900 {
+            std::fs::write(memory.join(format!("junk{n}.txt")), "мусор").unwrap();
+        }
+        let view = overview(&r);
+        let proj = view.projects.iter().find(|p| p.id == "proj1").unwrap();
+        assert_eq!(proj.files, 2);
+        // Мусора больше лимита: просмотр заканчивается, а не сканирует без конца.
+        for n in 900..2400 {
+            std::fs::write(memory.join(format!("junk{n}.txt")), "мусор").unwrap();
+        }
+        let start = std::time::Instant::now();
+        let view = overview(&r);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "обзор не зависит от числа мусора"
+        );
+        if let Some(proj) = view.projects.iter().find(|p| p.id == "proj1") {
+            assert!(proj.files <= MAX_MEMORY_FILES as u64);
+        }
+    }
+
+    #[test]
+    fn directory_full_of_junk_projects_is_scanned_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        // Мусорных проектов меньше лимита просмотра: настоящий находится при любом порядке.
+        let projects = r.claude_config_dir.join("projects");
+        for n in 0..300 {
+            std::fs::create_dir_all(projects.join(format!("junk-proj-{n}"))).unwrap();
+        }
+        let start = std::time::Instant::now();
+        let view = overview(&r);
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "обзор не зависит от числа мусора"
+        );
+        assert!(view.projects.iter().any(|p| p.id == "proj1"));
+        assert!(view.projects.len() <= MAX_MEMORY_PROJECTS);
     }
 }
