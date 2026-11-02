@@ -4,6 +4,7 @@ import {
   ApiError,
   NetworkError,
   AuthRequired,
+  authProbeResult,
   session,
 } from "#lib/api/http.js";
 import { clock } from "#lib/clock.js";
@@ -430,6 +431,12 @@ describe("api/http", () => {
     );
     await http("GET", "/api/v1/me");
     expect(session.state).toBe("ok");
+  });
+
+  it("auth_probe_only_treats_auth_requirements_as_an_expired_session", () => {
+    expect(authProbeResult(new AuthRequired("redirect"))).toBe("expired");
+    expect(authProbeResult(new NetworkError("timeout"))).toBe("down");
+    expect(authProbeResult(new Error("boom"))).toBe("down");
   });
 
   it("read_times_out_at_15s_and_mutation_at_30s_and_abort_is_unknown", async () => {

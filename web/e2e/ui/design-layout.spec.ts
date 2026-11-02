@@ -457,15 +457,4 @@ test.describe('лимиты и баннеры', () => {
     await expect(page.getByText('В архиве пока пусто')).toBeVisible();
   });
 
-  test('offline_shows_one_banner_without_a_reload_action', async ({ page, context, isMobile }) => {
-    test.skip(!isMobile, 'офлайн проверяется в Chromium');
-    await list(page);
-    await page.evaluate(async () => { await navigator.serviceWorker.ready; });
-    await page.waitForFunction(() => !!navigator.serviceWorker.controller);
-    await context.setOffline(true);
-    await expect(page.locator('[data-offline]')).toBeVisible({ timeout: 10_000 });
-    await expect(page.locator('.banner')).toHaveCount(1);
-    await expect(page.locator('.banner').getByRole('button')).toHaveCount(0);
-    await context.setOffline(false);
-  });
 });

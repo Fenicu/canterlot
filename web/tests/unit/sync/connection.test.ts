@@ -96,6 +96,82 @@ test('connection_status_transitions_are_announced_once_each', async () => {
   h.hub.chaos.cut(); await h.clock.advanceAsync(1000);
   expect(h.announcements).toEqual(['Подключение', 'Соединение установлено', 'Восстановление соединения', 'Соединение установлено']); h.manager.dispose();
 });
+test('a_quick_return_to_visible_probes_the_socket_immediately', async () => {
+  const h = await connectionHarness(); append(h.hub, 1); h.hub.flush(); await h.clock.advanceAsync(16);
+  h.lifecycle.suspend(); h.hub.chaos.blackhole(true); await h.clock.advanceAsync(3000);
+  h.lifecycle.resume('visible', 3000); await h.clock.advanceAsync(1999);
+  expect(h.wire.opens).toBe(1); await h.clock.advanceAsync(100);
+  expect(h.wire.opens).toBe(2); h.manager.dispose();
+});
+test('an_attempt_stuck_before_open_is_abandoned_and_retried', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    open: vi.fn(), send: () => false,
+    close: vi.fn(() => { handlers?.close({ code: 1006, reason: '', opened: false }); })
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => 'ok', announce: vi.fn() });
+  await clock.advanceAsync(9_999); expect(transport.open).toHaveBeenCalledTimes(1);
+  await clock.advanceAsync(1000); expect(transport.open).toHaveBeenCalledTimes(2);
+  expect(manager.status.phase).toBe('reconnecting'); expect(clock.pending).toBeGreaterThan(0);
+  manager.dispose(); expect(clock.pending).toBe(0);
+});
+test('resume_that_replaces_a_stuck_attempt_does_not_count_as_an_auth_failure', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const probeAuth = vi.fn(async () => 'ok' as const);
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    open: vi.fn(), send: () => false,
+    close: vi.fn(() => { handlers?.close({ code: 1006, reason: '', opened: false }); })
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth, announce: vi.fn() });
+  for (let n = 0; n < 4; n++) { manager.probe('online'); await clock.advanceAsync(0); }
+  expect(probeAuth).not.toHaveBeenCalled(); expect(transport.open.mock.calls.length).toBeGreaterThan(4);
+  manager.dispose();
+});
+test('auth_required_rechecks_auth_on_resume_and_recovers_without_reload', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  let result: 'ok' | 'expired' | 'down' = 'expired'; let opens = false;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    send: () => true, open: vi.fn(() => { clock.schedule(() => { if (opens) handlers?.open(); else handlers?.close({ code: 1006, reason: '', opened: false }); }, 0); }),
+    close: vi.fn(() => { handlers?.close({ code: 1000, reason: '', opened: true }); })
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => result, announce: vi.fn() });
+  await clock.advanceAsync(1000); expect(manager.status.phase).toBe('auth_required');
+  const attempts = transport.open.mock.calls.length;
+  await clock.advanceAsync(120_000); expect(transport.open.mock.calls.length).toBe(attempts);
+  result = 'ok'; opens = true; lifecycle.resume('online', 0); await clock.advanceAsync(0);
+  expect(transport.open.mock.calls.length).toBe(attempts + 1); expect(manager.status.phase).toBe('live');
+  manager.dispose(); expect(clock.pending).toBe(0);
+});
+test('auth_required_rechecks_only_when_the_session_is_still_expired', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    send: () => true, open: vi.fn(() => { clock.schedule(() => handlers?.close({ code: 1006, reason: '', opened: false }), 0); }),
+    close: vi.fn(() => { handlers?.close({ code: 1000, reason: '', opened: true }); })
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => 'expired', announce: vi.fn() });
+  await clock.advanceAsync(1000); const attempts = transport.open.mock.calls.length;
+  expect(manager.status.phase).toBe('auth_required');
+  lifecycle.resume('visible', 6000); await clock.advanceAsync(1000);
+  expect(manager.status.phase).toBe('auth_required'); expect(transport.open.mock.calls.length).toBe(attempts);
+  manager.dispose();
+});
+test('reconnect_never_gives_up_and_keeps_retrying_after_many_failures', async () => {
+  const clock = new FakeClock(), lifecycle = new TestLifecycle(); let handlers: TransportHandlers | undefined;
+  const transport = {
+    on: (h: TransportHandlers) => { handlers = h; return () => { handlers = undefined; }; },
+    send: () => false, open: vi.fn(() => { clock.schedule(() => handlers?.close({ code: 1006, reason: '', opened: false }), 0); }),
+    close: vi.fn()
+  };
+  const manager = new ConnectionManager({ transport, lifecycle, now: clock.now, schedule: clock.schedule, rng: clock.rng, probeAuth: async () => 'down', announce: vi.fn() });
+  await clock.advanceAsync(10 * 60_000);
+  expect(transport.open.mock.calls.length).toBeGreaterThan(30); expect(clock.pending).toBeGreaterThan(0);
+  const before = transport.open.mock.calls.length; await clock.advanceAsync(30_000);
+  expect(transport.open.mock.calls.length).toBeGreaterThan(before); manager.dispose();
+});
 test('incompatible_version_stops_every_scope_and_prompts_an_update', async () => {
   const clock = new FakeClock(), lifecycle = new TestLifecycle(), sent: ClientOp[] = [], announce = vi.fn();
   let handlers: TransportHandlers | undefined;

@@ -10,21 +10,23 @@
     since,
     now,
     scope,
-    offline = '',
     update = 'idle',
+    updateMessage = '',
     failure = '',
     onupdate,
-    onrefresh
+    onrefresh,
+    onrelogin
   }: {
     phase: ConnectionPhase;
     since: number;
     now: number;
     scope: ScopeStatus;
-    offline?: string;
     update?: string;
+    updateMessage?: string;
     failure?: string;
     onupdate?: () => void;
     onrefresh: () => void;
+    onrelogin?: () => void;
   } = $props();
 
   type Tone = 'warning' | 'danger' | 'neutral' | 'success';
@@ -46,20 +48,22 @@
 
   // Баннер всегда один: при нескольких состояниях показывается самое важное.
   const view = $derived.by((): View | null => {
-    if (offline) return { kind: 'offline', text: offline, tone: 'warning' };
+    if (update === 'failed') return { kind: 'update', text: updateMessage || 'Не удалось обновить приложение', tone: 'danger', action: { label: 'Повторить', run: () => onupdate?.() } };
     if (update !== 'idle') {
       return update === 'applying'
         ? { kind: 'update', text: 'Доступна новая версия. Сохраняю и обновляю…', tone: 'neutral' }
         : { kind: 'update', text: 'Доступна новая версия', tone: 'neutral', action: { label: 'Обновить', run: () => onupdate?.() } };
     }
     if (phase === 'incompatible') return { kind: 'incompatible', text: 'Доступна новая версия приложения', tone: 'neutral' };
+    if (phase === 'auth_required') return { kind: 'auth', text: 'Сессия истекла. Войдите снова', tone: 'danger', action: { label: 'Войти', run: () => onrelogin?.() } };
     if (scope === 'degraded') return { kind: 'degraded', text: 'Не удаётся синхронизироваться. Повторяю попытки', tone: 'danger', action: { label: 'Обновить', run: onrefresh } };
+    if (phase === 'offline') return { kind: 'link', text: 'Нет связи с сервером. Переподключаюсь…', tone: 'warning' };
     if (phase === 'reconnecting' && now - since >= 3000) return { kind: 'link', text: 'Нет связи. Переподключаюсь…', tone: 'warning' };
     if (failure) return { kind: 'failure', text: failure, tone: 'danger' };
     if (phase === 'live' && now < until) return { kind: 'link', text: 'Связь восстановлена', tone: 'success' };
     return null;
   });
-  const message = $derived(view && view.kind !== 'offline' && view.kind !== 'update' ? view.text : '');
+  const message = $derived(view && view.kind !== 'update' ? view.text : '');
 
   $effect(() => {
     if (message) announce(message);
@@ -70,8 +74,7 @@
   <div
     class="banner"
     data-tone={view.tone}
-    data-banner={view.kind === 'offline' || view.kind === 'update' || view.kind === 'failure' ? undefined : view.kind}
-    data-offline={view.kind === 'offline' ? '' : undefined}
+    data-banner={view.kind === 'update' || view.kind === 'failure' ? undefined : view.kind}
     data-update={view.kind === 'update' ? '' : undefined}
   >
     <Icon name={view.tone === 'warning' || view.tone === 'danger' ? 'warning' : 'info'} />

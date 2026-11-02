@@ -4,14 +4,14 @@ import {
   snapshotConversations,
   snapshotMachines,
 } from "#lib/api/client.js";
-import { NetworkError, session } from "#lib/api/http.js";
+import { AuthRequired, NetworkError, authProbeResult, session } from "#lib/api/http.js";
 import { returnRefused } from "#lib/composer/returned.js";
 import { DraftStore } from "#lib/drafts/store.js";
 import { OpJournal } from "#lib/ops/journal.js";
 import { sendOp } from "#lib/ops/request.js";
 import { openDb, type Idb } from "#lib/storage/idb.js";
 import { bindOwner, onOwnerRetired } from "#lib/storage/owner.js";
-import { staleness } from "#lib/pwa/offline.js";
+import { staleness } from "#lib/pwa/sync-state.js";
 import { sweepShares } from "#lib/pwa/share.js";
 import { ListStore, type ListSnapshot } from "#lib/stores/list.svelte.js";
 import {
@@ -61,7 +61,9 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
       ownerId = who.data.owner_id;
       await bindOwner({ owner_id: ownerId });
     } catch (error) {
-      if (!(error instanceof NetworkError)) throw error;
+      // Истёкшая сессия не должна оставлять приложение без runtime: диалог входа
+      // откроется после старта, а сохранённый владелец даст показать локальные данные.
+      if (!(error instanceof NetworkError) && !(error instanceof AuthRequired)) throw error;
       const saved = await (
         await openDb("__system__")
       ).get<string>("kv", "current_owner");
@@ -108,8 +110,8 @@ export async function createRuntime(deps: RuntimeDeps): Promise<Runtime> {
             return "expired";
           }
           return "ok";
-        } catch {
-          return session.state === "expired" ? "expired" : "down";
+        } catch (error) {
+          return authProbeResult(error);
         }
       },
       now: deps.clock.now,

@@ -6,7 +6,7 @@ import { closeOpenJournals } from "#lib/ops/journal.js";
 import { httpHealth } from "#lib/api/gate.js";
 import { resetConfig } from "#lib/api/config.js";
 import { restoreComposerText } from "#lib/composer/restore.js";
-import { staleness } from "./offline";
+import { staleness } from "./sync-state";
 
 export async function purgeLocal(deps: {
   idb: Idb;
@@ -27,11 +27,7 @@ export async function purgeLocal(deps: {
   await purgeAllStores();
   clearOwnerPreferences(deps.ls);
   const keys = await deps.caches.keys();
-  await Promise.all(
-    keys
-      .filter((key) => !key.startsWith("canterlot-shell-"))
-      .map((key) => deps.caches.delete(key)),
-  );
+  await Promise.all(keys.map((key) => deps.caches.delete(key)));
   announceSignout();
 }
 
