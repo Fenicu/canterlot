@@ -273,6 +273,12 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
     await expect(card.getByText(value, { exact: true })).toBeVisible();
   }
   await expect(card.getByText('Итог')).toHaveCount(0);
+  const footer = card.locator('[data-role="event-footer"]');
+  await expect(footer).toBeVisible();
+  const titleBox = await card.locator('.title').boundingBox();
+  const footerBox = await footer.boundingBox();
+  expect(footerBox!.y).toBeGreaterThan(titleBox!.y);
+  await page.screenshot({ path: `test-results/event-footer-${test.info().project.name}.png` });
   await card.getByRole('button', { name: 'Показать ответ' }).click();
   await expect(card.getByText('Итог')).toBeVisible();
   await expect(card.getByText('прошли', { exact: false })).toBeVisible();
