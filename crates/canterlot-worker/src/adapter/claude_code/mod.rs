@@ -82,6 +82,7 @@ pub struct ClaudeCodeAdapter {
     compact_pending: Option<(Uuid, Instant)>,
     /// Граница сжатия прошла, служебный итог ещё нет: команда закрывается им, а не границей.
     compact_result_due: bool,
+    compact_timeout: Duration,
 }
 
 impl ClaudeCodeAdapter {
@@ -129,7 +130,13 @@ impl ClaudeCodeAdapter {
             background_changed: None,
             compact_pending: None,
             compact_result_due: false,
+            compact_timeout: COMPACT_TIMEOUT,
         }
+    }
+
+    pub fn with_compact_timeout(mut self, compact_timeout: Duration) -> Self {
+        self.compact_timeout = compact_timeout;
+        self
     }
 
     pub fn with_ready_deadline(mut self, ready_deadline: Duration) -> Self {
@@ -1140,8 +1147,9 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    /// Просроченное сжатие — отказ: граница так и не пришла, висеть вечно нельзя.
-    /// Граница без итога тоже отпускает очередь: эпизод уже закрыт, дублировать нечего.
+    /// Просроченное сжатие отпускает очередь, висеть вечно нельзя. Без границы это отказ;
+    /// с границей сжатие удалось, ждался только служебный итог. Открытый эпизод закроет
+    /// своя граница, если придёт: второй строки сжатия не будет.
     fn compact_timed_out(&mut self) -> bool {
         if self
             .compact_pending
@@ -1150,8 +1158,9 @@ impl ClaudeCodeAdapter {
             self.compact_pending = None;
             self.parser.forget_compact();
             let boundary_seen = std::mem::take(&mut self.compact_result_due);
-            self.events.push_back(AdapterEvent::Compacted { ok: false });
-            if !boundary_seen {
+            self.events
+                .push_back(AdapterEvent::Compacted { ok: boundary_seen });
+            if !boundary_seen && !self.parser.compaction_open() {
                 self.events.push_back(AdapterEvent::CompactionFinished {
                     manual: true,
                     ok: false,
@@ -1371,7 +1380,7 @@ impl Adapter for ClaudeCodeAdapter {
             return CompactOutcome::Failed;
         }
         self.parser.mark_compact_manual(command);
-        self.compact_pending = Some((command, Instant::now() + COMPACT_TIMEOUT));
+        self.compact_pending = Some((command, Instant::now() + self.compact_timeout));
         self.compact_result_due = false;
         CompactOutcome::Accepted
     }

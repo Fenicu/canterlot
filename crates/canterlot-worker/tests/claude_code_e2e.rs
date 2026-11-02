@@ -2607,3 +2607,87 @@ async fn steer_without_a_cli_after_a_failed_restart_is_deferred() {
     ));
     f.close().await;
 }
+
+/// События сжатия до тишины в `quiet`: срок команды здесь короче кадров CLI.
+async fn compaction_with_timeout(compact_turn: Vec<Value>) -> Vec<AdapterEvent> {
+    use canterlot_worker::adapter::{CompactOutcome, claude_code::ClaudeCodeAdapter};
+    let mut f = Fake::new(vec![answer_turn(), compact_turn]);
+    f.adapter = Box::new(
+        ClaudeCodeAdapter::new(
+            ClaudeCodeConfig {
+                executable: f.dir.path().join("fake-cli"),
+                ..Default::default()
+            },
+            f.dir.path().join("exec"),
+            WAIT,
+        )
+        .with_compact_timeout(Duration::from_millis(500)),
+    );
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    f.finish().await;
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.compact(Uuid::now_v7()))
+            .await
+            .unwrap(),
+        CompactOutcome::Accepted
+    ));
+    let mut events = Vec::new();
+    while let Ok(event) = tokio::time::timeout(Duration::from_secs(3), f.adapter.next_event()).await
+    {
+        events.push(event);
+    }
+    f.close().await;
+    events
+}
+
+fn compaction_outcomes(events: &[AdapterEvent]) -> (Vec<bool>, Vec<bool>) {
+    let finished = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::CompactionFinished { ok, .. } => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    let compacted = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::Compacted { ok } => Some(*ok),
+            _ => None,
+        })
+        .collect();
+    (finished, compacted)
+}
+
+#[tokio::test]
+async fn compaction_timeout_after_the_boundary_is_a_success() {
+    let events = compaction_with_timeout(vec![
+        json!({"type":"system","subtype":"status","status":"compacting"}),
+        json!({"type":"system","subtype":"compact_boundary",
+            "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+        json!("@wait"),
+    ])
+    .await;
+    assert_eq!(
+        compaction_outcomes(&events),
+        (vec![true], vec![true]),
+        "{events:?}"
+    );
+}
+
+#[tokio::test]
+async fn late_boundary_after_the_timeout_closes_the_one_episode() {
+    let events = compaction_with_timeout(vec![
+        json!({"type":"system","subtype":"status","status":"compacting"}),
+        json!("@sleep:1500"),
+        json!({"type":"system","subtype":"compact_boundary",
+            "compact_metadata":{"pre_tokens":41000,"trigger":"manual"}}),
+        json!("@wait"),
+    ])
+    .await;
+    assert_eq!(
+        compaction_outcomes(&events),
+        (vec![true], vec![false]),
+        "{events:?}"
+    );
+}

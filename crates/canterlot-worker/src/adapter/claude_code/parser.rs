@@ -389,6 +389,11 @@ impl Parser {
         self.compact_boundary_seen = false;
     }
 
+    /// Эпизод сжатия начат статусом и ещё не закрыт границей или отказом.
+    pub fn compaction_open(&self) -> bool {
+        self.compact_active
+    }
+
     /// Адаптер больше не ждёт `/compact`: его поздний итог идёт обычным путём.
     pub fn forget_compact(&mut self) {
         self.compact_manual = false;
