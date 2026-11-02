@@ -272,7 +272,7 @@ fn preset_tool_description(mcp_name: &str) -> &'static str {
             "List the instruction presets the owner keeps in canterlot (built-in «Без инструкций» = none of the owner's own instruction files, repository instructions still apply, «Как у владельца» = the owner's own configuration, saved presets with origin and revision) and which one this session uses and has pending; pass `id` to get that preset's text."
         }
         "canterlot_preset_save" => {
-            "Create a preset (no `id`) or replace a saved preset's title, description and text (`id` + `base_revision` from the list); built-ins cannot be changed; saving never changes running sessions; the preset is marked as made by an agent."
+            "Create a preset (no `id`) or replace the title, description and text of a preset this session created (`id` + `base_revision` from the list); built-ins and presets of the owner or other sessions cannot be changed, and a read_only session cannot save; saving never changes running sessions; the preset is marked as made by an agent."
         }
         "canterlot_preset_apply" => {
             "Apply a preset to this session only, from the next turn; canterlot restarts the agent between turns with the conversation history kept; in Claude Code the restart waits until the background tasks of this session finish, they are not stopped; call it once, not in a loop."

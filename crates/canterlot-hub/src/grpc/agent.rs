@@ -206,6 +206,24 @@ async fn applied_and_pending(
     Ok((applied, pending))
 }
 
+/// Режим и глубина сессии вызывающего агента для правил пресетов.
+struct CallerSession {
+    read_only: bool,
+}
+
+async fn caller_session(pool: &sqlx::PgPool, conversation: Uuid) -> Result<CallerSession, Status> {
+    let read_only: bool = sqlx::query_scalar(
+        "select permission_mode='read_only'
+                  or coalesce(pending_settings->>'permission_mode','')='read_only'
+         from conversations where id=$1",
+    )
+    .bind(conversation)
+    .fetch_one(pool)
+    .await
+    .map_err(|_| Status::internal("database"))?;
+    Ok(CallerSession { read_only })
+}
+
 async fn list(
     pool: &sqlx::PgPool,
     owner: Uuid,
@@ -258,6 +276,12 @@ async fn save(
         Ok(args) => args,
         Err(_) => return Ok(err("invalid_arguments", "Некорректный вызов".into())),
     };
+    if caller_session(pool, conversation).await?.read_only {
+        return Ok(err(
+            "read_only_session",
+            "Сессия в режиме только чтения не меняет пресеты".into(),
+        ));
+    }
     let key = format!("agent:{call_id}");
     let actor = crate::presets::Actor::Agent {
         conversation_id: conversation,
@@ -268,6 +292,28 @@ async fn save(
                 let Some(base_revision) = args.base_revision else {
                     return Ok(err("invalid_arguments", "Некорректный вызов".into()));
                 };
+                // Происхождение пресета не меняется правкой: проверка до транзакции не устаревает.
+                let created_here: Option<bool> = sqlx::query_scalar(
+                    "select origin='agent' and origin_conversation_id is not distinct from $3
+                     from instruction_presets
+                     where owner_id=$1 and id=$2 and deleted_at is null",
+                )
+                .bind(owner)
+                .bind(uuid)
+                .bind(conversation)
+                .fetch_optional(pool)
+                .await
+                .map_err(|_| Status::internal("database"))?;
+                match created_here {
+                    None => return Ok(err("preset_not_found", "Пресет не найден".into())),
+                    Some(false) => {
+                        return Ok(err(
+                            "preset_read_only",
+                            "Агент меняет только пресеты, созданные этой сессией".into(),
+                        ));
+                    }
+                    Some(true) => {}
+                }
                 let preset = match crate::presets::update(
                     pool,
                     owner,
