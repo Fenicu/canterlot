@@ -67,12 +67,28 @@ pub struct Prepared {
     pub height: Option<u32>,
 }
 
-fn denied_path(path: &Path) -> bool {
-    path.components().any(|part| part.as_os_str() == ".ssh")
-        || path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(denied_name)
+/// Секретные каталоги: путь под любым из них не отдаётся, даже через ссылки.
+fn denied_dir(part: &str) -> bool {
+    matches!(part, ".ssh" | ".gnupg" | ".claude" | ".codex")
+}
+
+/// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
+/// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.config/opencode`),
+/// секретные имена и любой `.env` не отдаются.
+fn denied_resolved(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect();
+    if parts.iter().any(|part| denied_dir(part)) {
+        return true;
+    }
+    if parts.windows(2).any(|pair| pair == [".config", "opencode"]) {
+        return true;
+    }
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(denied_name)
 }
 
 fn valid_title(title: &str) -> bool {
@@ -146,20 +162,36 @@ pub fn prepare(
         return Err(ShareError::Unreadable);
     }
     let name = name_of(path)?;
-    if denied_path(path) {
+    // Родитель раскрывается первым: ссылка в нём не должна прятать секретный каталог.
+    // Финал открывается строго с O_NOFOLLOW от дескриптора родителя.
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let resolved_parent = fs::canonicalize(parent).map_err(|_| ShareError::Unreadable)?;
+    if denied_resolved(&resolved_parent.join(&name)) {
         return Err(ShareError::Denied);
     }
-    let file = fs::OpenOptions::new()
-        .read(true)
-        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
-        .open(path)
-        .map_err(|error| {
-            if error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) {
-                ShareError::Symlink
-            } else {
-                ShareError::Unreadable
-            }
-        })?;
+    let parent_fd = rustix::fs::open(
+        &resolved_parent,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::DIRECTORY | rustix::fs::OFlags::CLOEXEC,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| ShareError::Unreadable)?;
+    let file = rustix::fs::openat(
+        &parent_fd,
+        name.as_str(),
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map(fs::File::from)
+    .map_err(|error| {
+        if error == rustix::io::Errno::LOOP {
+            ShareError::Symlink
+        } else {
+            ShareError::Unreadable
+        }
+    })?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;
     if meta.file_type().is_symlink() {
         return Err(ShareError::Symlink);
@@ -395,5 +427,69 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn refuses_key_under_symlinked_ssh_directory() {
+        // `export -> ~/.ssh`: лексически секрета нет, после раскрытия — есть.
+        let dir = dir();
+        let home = dir.path().join("home");
+        let ssh = home.join(".ssh");
+        fs::create_dir_all(&ssh).unwrap();
+        fs::write(ssh.join("id_ed25519"), b"secret").unwrap();
+        symlink(&ssh, dir.path().join("export")).unwrap();
+        assert_eq!(
+            prepare(
+                dir.path(),
+                Uuid::now_v7(),
+                &dir.path().join("export").join("id_ed25519"),
+                String::new(),
+                String::new()
+            )
+            .unwrap_err(),
+            ShareError::Denied
+        );
+    }
+
+    #[test]
+    fn refuses_key_through_chained_parent_symlinks() {
+        // Ссылка несколькими уровнями выше прячет секретный каталог целиком.
+        let dir = dir();
+        let outer = dir.path().join("outer");
+        let ssh = outer.join(".ssh");
+        fs::create_dir_all(&ssh).unwrap();
+        fs::write(ssh.join("id_ed25519"), b"secret").unwrap();
+        symlink(&outer, dir.path().join("a")).unwrap();
+        symlink(ssh.clone(), dir.path().join("a").join("b")).unwrap();
+        assert_eq!(
+            prepare(
+                dir.path(),
+                Uuid::now_v7(),
+                &dir.path().join("a").join("b").join("id_ed25519"),
+                String::new(),
+                String::new()
+            )
+            .unwrap_err(),
+            ShareError::Denied
+        );
+    }
+
+    #[test]
+    fn shares_file_through_benign_parent_symlink() {
+        let dir = dir();
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("note.txt"), b"hello").unwrap();
+        symlink(&real, dir.path().join("alias")).unwrap();
+        let prepared = prepare(
+            dir.path(),
+            Uuid::now_v7(),
+            &dir.path().join("alias").join("note.txt"),
+            String::new(),
+            String::new(),
+        )
+        .unwrap();
+        assert_eq!(prepared.name, "note.txt");
+        assert_eq!(prepared.size, 5);
     }
 }
