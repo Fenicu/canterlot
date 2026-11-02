@@ -101,6 +101,21 @@ for (const theme of ['dark', 'light'] as const) {
 
 		const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
 		expect(overflow).toBeLessThanOrEqual(0);
+
+		await page.emulateMedia({ reducedMotion: 'reduce' });
+		await page.reload();
+		await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+		hub.append(`conversation:${id}`, {
+			kind: 'phase_changed',
+			conversation_id: id,
+			payload: { phase: 'context_maintenance', tool_name: null, summary: null }
+		});
+		hub.flush();
+		await expect(feed.getByText('Сжимает контекст')).toBeVisible();
+		const still = page.locator('.compact[data-running="true"] .pulse');
+		await expect(still).toBeVisible();
+		expect(await still.evaluate((el) => getComputedStyle(el).animationName)).toBe('none');
+		await page.emulateMedia({ reducedMotion: 'no-preference' });
 	});
 
 	test(`compaction_indicator_disabled_states_${theme}`, async ({ page }) => {
