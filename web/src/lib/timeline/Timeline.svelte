@@ -14,6 +14,7 @@
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
   import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
+  import { turnIsLive } from '#lib/composer/sendRules.js';
   import { ScrollController } from '#lib/timeline/scrollController.js';
   import {
     HeightIndex,
@@ -88,6 +89,9 @@
   const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
+  // Строка «Ход прерван»: прерывание остановило ход, а не сессию. Видна, пока
+  // очередь на паузе `user_stop` и новый ход не идёт: продолжение и следующий
+  // ход её снимают. От остановленной сессии отличается живой исполняеммостью.
   const compactingPhase = $derived((chat.phase as { phase?: string } | null)?.phase === 'context_maintenance');
   const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
   const compacting = $derived(!feed && !laneRoot && compactingPhase && !compactingRow);
@@ -95,6 +99,15 @@
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;
     return entries.findLast((entry) => entry.kind === 'block')?.block.inputCommandId ?? null;
+  });
+
+  const interruptDone = $derived.by(() => {
+    if (feed || laneRoot) return false;
+    const status = (chat.interrupt as { status?: string } | null)?.status;
+    if (status !== 'acknowledged' && status !== 'completed') return false;
+    if (turnIsLive(chat.activity, chat.queue.run_slot)) return false;
+    const pauses = chat.queue.pause_reasons as { reason?: string }[];
+    return pauses.some((pause) => pause?.reason === 'user_stop');
   });
 
   // Оценка непромеренной строки назначается один раз: иначе каждый замер живой карточки сдвигал бы все строки выше экрана и сбивал прокрутку.
@@ -391,6 +404,11 @@
         <CompactionRow compaction={{ id: 'live', trigger: 'auto', preTokens: null, ok: null, createdAt: now, finishedAt: null }} />
       </div>
     {/if}
+    {#if interruptDone}
+      <div class="row" data-row data-kind="interrupt" data-key="interrupt-aborted">
+        <p class="aborted">Ход прерван</p>
+      </div>
+    {/if}
     {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
   </div>
   {#if !feed && chat.timeline.tailDetached}
@@ -408,5 +426,6 @@
   .row[data-kind='input'] { padding-top: var(--s8); }
   .row:first-of-type { padding-top: var(--s0); }
   .day { margin: 0; padding-block: var(--s4) var(--s0); color: var(--muted); font-size: var(--fs-sm); text-align: center; }
+  .aborted { margin: 0; padding-block: var(--s4) var(--s0); color: var(--warning); font-size: var(--fs-sm); text-align: center; }
   .jump { position: absolute; bottom: var(--s4); left: 50%; translate: -50%; min-height: var(--target); padding-inline: var(--s8); border-radius: var(--radius-pill); background: var(--accent); color: var(--accent-ink); font-size: var(--fs-meta); white-space: nowrap; }
 </style>

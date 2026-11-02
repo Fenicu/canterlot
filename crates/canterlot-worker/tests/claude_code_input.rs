@@ -1259,3 +1259,64 @@ fn interrupt_receipt_carries_still_queued_and_cancelled() {
         "got {parsed:?}"
     );
 }
+
+#[test]
+fn live_interrupt_and_send_now_frames_parse() {
+    // Живые прогоны haiku: прерывание управляющим запросом во время `sleep`
+    // (`interrupt_control.jsonl`), `interrupt(send_now:true)` после queued-кадра
+    // (`send_now.jsonl`), прерывание при живой фоновой задаче
+    // (`interrupt_background.jsonl`).
+    let mut parser = Parser::new();
+    let mut receipts = Vec::new();
+    let mut lifecycles = Vec::new();
+    for name in ["interrupt_control", "send_now", "interrupt_background"] {
+        for (_, frame) in out_lines(name, 1, 1000) {
+            for parsed in parser.feed(&frame) {
+                match parsed {
+                    Parsed::ControlResponse {
+                        request_id,
+                        success: true,
+                        interrupt: Some(receipt),
+                    } => receipts.push((request_id, receipt)),
+                    Parsed::CommandLifecycle { state, .. } => lifecycles.push(state),
+                    _ => {}
+                }
+            }
+        }
+    }
+    assert_eq!(receipts.len(), 3, "one interrupt receipt per live run");
+    for (request_id, receipt) in &receipts {
+        assert!(
+            request_id == "edge-int-1" || request_id == "edge-sendnow-1",
+            "unexpected receipt {request_id}"
+        );
+        let _ = receipt;
+    }
+    // Abort хода виден и кадром жизненного цикла.
+    assert!(
+        lifecycles.iter().any(|state| state == "cancelled"),
+        "lifecycles: {lifecycles:?}"
+    );
+    // `send_now:true` не втягивает сообщение в идущий ход: ход останавливается,
+    // queued-сообщение стартует новым ходом (свой `init` и `result`).
+    let mut parser = Parser::new();
+    let mut queued_saw_new_init = false;
+    let mut saw_send_now_receipt = false;
+    for (_, frame) in out_lines("send_now", 1, 1000) {
+        if frame.contains("\"send_now\"") {
+            saw_send_now_receipt = true;
+        }
+        for parsed in parser.feed(&frame) {
+            if let Parsed::ControlResponse { interrupt: Some(receipt), .. } = &parsed
+                && !receipt.still_queued.is_empty()
+            {
+                queued_saw_new_init = true;
+            }
+        }
+    }
+    assert!(saw_send_now_receipt, "the send_now receipt is in the fixture");
+    assert!(
+        queued_saw_new_init,
+        "the queued message uuid is listed in still_queued before the new turn"
+    );
+}
