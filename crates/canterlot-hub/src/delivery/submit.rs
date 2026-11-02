@@ -408,7 +408,7 @@ pub async fn submit_input(pool: &PgPool, req: SubmitInput) -> Result<SubmittedIn
     validate_content(&req, false)?;
     let hash = request_hash(&req, &[], None);
     let mut tx = pool.begin().await?;
-    match submit_attempt(&mut tx, &req, &hash, None, &[], false).await {
+    match submit_attempt(&mut tx, &req, &hash, None, &[], None, false).await {
         Ok(Attempt::Submitted(submitted)) => {
             tx.commit().await?;
             Ok(submitted)
@@ -435,7 +435,7 @@ pub async fn submit_input_in_tx(
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
     }
     let hash = request_hash(req, &[], None);
-    match submit_attempt(tx, req, &hash, None, &[], false).await? {
+    match submit_attempt(tx, req, &hash, None, &[], None, false).await? {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -446,6 +446,28 @@ pub(crate) async fn submit_message_input_in_tx(
     req: &SubmitInput,
     attachments: &[Uuid],
     retry_of: Option<Uuid>,
+) -> Result<SubmittedInput, SubmitError> {
+    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, None).await
+}
+
+/// Вложения другого разговора вызывающего: источник проверяется вместо целевого.
+pub async fn submit_forwarded_message_input_in_tx(
+    tx: &mut PgConnection,
+    req: &SubmitInput,
+    attachments: &[Uuid],
+    retry_of: Option<Uuid>,
+    source_conversation_id: Uuid,
+) -> Result<SubmittedInput, SubmitError> {
+    submit_message_input_scoped_in_tx(tx, req, attachments, retry_of, Some(source_conversation_id))
+        .await
+}
+
+async fn submit_message_input_scoped_in_tx(
+    tx: &mut PgConnection,
+    req: &SubmitInput,
+    attachments: &[Uuid],
+    retry_of: Option<Uuid>,
+    source_conversation_id: Option<Uuid>,
 ) -> Result<SubmittedInput, SubmitError> {
     if !tx.is_in_transaction() {
         return Err(sqlx::Error::InvalidArgument("an outer transaction is required".into()).into());
@@ -463,7 +485,17 @@ pub(crate) async fn submit_message_input_in_tx(
     }
     attachments::check_ids(attachments)?;
     validate_content(req, !attachments.is_empty())?;
-    match submit_attempt(tx, req, &hash, retry_of, attachments, true).await? {
+    match submit_attempt(
+        tx,
+        req,
+        &hash,
+        retry_of,
+        attachments,
+        source_conversation_id,
+        true,
+    )
+    .await?
+    {
         Attempt::Submitted(submitted) => Ok(submitted),
         Attempt::LostRace => Err(SubmitError::KeyRaceLost),
     }
@@ -475,6 +507,7 @@ async fn submit_attempt(
     hash: &[u8],
     retry_of: Option<Uuid>,
     attachment_ids: &[Uuid],
+    source_conversation_id: Option<Uuid>,
     auto_title: bool,
 ) -> Result<Attempt, SubmitError> {
     match idempotency::lookup(conn, req.owner_id, &req.idempotency_key, OPERATION, hash).await? {
@@ -593,16 +626,32 @@ async fn submit_attempt(
         content
     } else {
         let (catalog, machine) = attachments::gate_for(conn, req.conversation_id).await?;
-        let refs = attachments::link_in_tx(
-            conn,
-            req.owner_id,
-            req.conversation_id,
-            submitted.input_id,
-            attachment_ids,
-            &catalog,
-            &machine,
-        )
-        .await?;
+        let refs = match source_conversation_id {
+            Some(source) => {
+                attachments::link_forwarded_in_tx(
+                    conn,
+                    req.owner_id,
+                    source,
+                    submitted.input_id,
+                    attachment_ids,
+                    &catalog,
+                    &machine,
+                )
+                .await?
+            }
+            None => {
+                attachments::link_in_tx(
+                    conn,
+                    req.owner_id,
+                    req.conversation_id,
+                    submitted.input_id,
+                    attachment_ids,
+                    &catalog,
+                    &machine,
+                )
+                .await?
+            }
+        };
         let mut blocks = req.content.clone();
         for reference in &refs {
             blocks.push(ContentBlock::from_ref(reference)?);

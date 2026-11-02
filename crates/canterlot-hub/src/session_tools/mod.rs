@@ -7,9 +7,11 @@
 
 pub mod accept;
 pub mod access;
+pub mod control;
 pub mod jobs;
 pub mod origin;
 pub mod read;
+pub mod report;
 pub mod send;
 pub mod settle;
 pub mod spawn;
@@ -38,6 +40,9 @@ pub const TOOLS: &[&str] = &[
     "sessions.unsubscribe",
     "sessions.wait",
     "sessions.accept",
+    "sessions.interrupt",
+    "sessions.stop",
+    "limits.report",
 ];
 
 pub fn is_tool(name: &str) -> bool {
@@ -65,13 +70,14 @@ pub enum ToolErrorCode {
     ConversationClosed,
     NotParent,
     NotDelegated,
+    AttachmentNotAvailable,
     TextTooLarge,
     InvalidArguments,
     Internal,
 }
 
 impl ToolErrorCode {
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::UnknownTool,
         Self::SessionNotFound,
         Self::ReadOnlySession,
@@ -90,6 +96,7 @@ impl ToolErrorCode {
         Self::ConversationClosed,
         Self::NotParent,
         Self::NotDelegated,
+        Self::AttachmentNotAvailable,
         Self::TextTooLarge,
         Self::InvalidArguments,
         Self::Internal,
@@ -115,6 +122,7 @@ impl ToolErrorCode {
             Self::ConversationClosed => "conversation_closed",
             Self::NotParent => "not_parent",
             Self::NotDelegated => "not_delegated",
+            Self::AttachmentNotAvailable => "attachment_not_available",
             Self::TextTooLarge => "text_too_large",
             Self::InvalidArguments => "invalid_arguments",
             Self::Internal => "internal_error",
@@ -141,6 +149,7 @@ impl ToolErrorCode {
             Self::ConversationClosed => "The session is closed",
             Self::NotParent => "Only the session that started this one may do this",
             Self::NotDelegated => "The session was not started by an agent",
+            Self::AttachmentNotAvailable => "The attachment is not available in this conversation",
             Self::TextTooLarge => "The text is too large",
             Self::InvalidArguments => "Invalid arguments",
             Self::Internal => "The hub could not complete the call, try later",
@@ -220,6 +229,9 @@ pub async fn call(
         "sessions.unsubscribe" => send::unsubscribe(context, caller, arguments).await,
         "sessions.wait" => wait::wait(context, caller, arguments).await,
         "sessions.accept" => accept::accept(context, caller, arguments).await,
+        "sessions.interrupt" => control::interrupt(context, caller, arguments).await,
+        "sessions.stop" => control::stop(context, caller, arguments).await,
+        "limits.report" => report::report(context, caller, arguments).await,
         _ => Err(ToolError::new(ToolErrorCode::UnknownTool)),
     }
 }

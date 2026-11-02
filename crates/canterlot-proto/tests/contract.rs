@@ -1401,6 +1401,7 @@ fn media_messages_roundtrip_fit_limits_and_redact_bytes() {
             mime: "image/png".into(),
             size: MAX_MEDIA_BYTES,
             sha256: "a".repeat(64),
+            ..Default::default()
         })),
     };
     let data = MediaChunk {

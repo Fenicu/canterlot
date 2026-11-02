@@ -3,8 +3,11 @@
   import type { BackgroundFact } from '#lib/stores/background.svelte.js';
   import type { BlockMedia, BlockModel, BlockPage } from '#lib/stores/blocks.js';
   import { stripAnsi } from '#lib/render/ansi.js';
+  import { fmt } from '#lib/format/ru.js';
   import { callCaption, firstLine, toolBackground, toolError, toolLabel, toolPillText, toolTiming, toolTitle } from '#lib/timeline/present.js';
   import StepHead from '#lib/timeline/StepHead.svelte';
+  import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
+  import { attachmentUrl } from '#lib/timeline/attachments.js';
   import ToolOutput from '#lib/timeline/ToolOutput.svelte';
 
   let {
@@ -28,6 +31,7 @@
   } = $props();
   let viewing = $state<number | null>(null);
   let Viewer = $state<Component<{ shots: BlockMedia[]; start?: number; title: string; onclose: () => void }> | null>(null);
+  let FileViewer = $state<Component<{ shots: { media_id: string; src: string; mime: string; caption: string }[]; start?: number; title: string; heading: string; onclose: () => void }> | null>(null);
 
   async function view(index: number): Promise<void> {
     Viewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
@@ -49,6 +53,24 @@
   const status = $derived(launched ? 'В фоне' : background?.state === 'stopped' ? 'Прервано' : toolPillText({ ...timing, error, now }));
   const shots = $derived(block.media);
   const readyShots = $derived(shots.filter((shot) => shot.ready));
+  const files = $derived(block.files);
+  const fileShots = $derived(
+    files
+      .filter((file) => file.mime.startsWith('image/'))
+      .map((file) => ({
+        media_id: file.attachment_id,
+        src: attachmentUrl(file.attachment_id),
+        mime: file.mime,
+        caption: [file.title || file.name, file.size > 0 ? fmt.bytes(file.size) : ''].filter(Boolean).join(' · ')
+      }))
+  );
+  let fileViewing: number | null = $state(null);
+
+  async function viewFile(file: { attachment_id: string; mime: string }): Promise<void> {
+    if (!file.mime.startsWith('image/')) return;
+    FileViewer ??= (await import('#lib/timeline/MediaViewer.svelte')).default;
+    fileViewing = Math.max(0, fileShots.findIndex((shot) => shot.media_id === file.attachment_id));
+  }
   const isCliPolicy = $derived(block.approvedBy === 'cli_policy');
 </script>
 
@@ -59,6 +81,25 @@
       {#if isCliPolicy}<span class="policy-badge">Разрешено правилами CLI</span>{/if}
     {/snippet}
   </StepHead>
+  {#if files.length > 0}
+    <ul class="files">
+      {#each files as file (file.attachment_id)}
+        <li>
+          <AttachmentTile
+            file={{
+              attachment_id: file.attachment_id,
+              name: file.name,
+              mime: file.mime,
+              size: file.size,
+              sha256: '',
+              image: file.mime.startsWith('image/')
+            }}
+            onopen={() => void viewFile(file)}
+          />
+        </li>
+      {/each}
+    </ul>
+  {/if}
   {#if shots.length > 0}
     <div class="shots">
       {#each shots as shot (shot.media_id)}
@@ -88,6 +129,9 @@
 {#if viewing !== null && Viewer}
   <Viewer shots={readyShots} start={viewing} title={title.argument || title.name || 'инструмент'} onclose={() => { viewing = null; }} />
 {/if}
+{#if fileViewing !== null && FileViewer}
+  <FileViewer shots={fileShots} start={fileViewing} title={title.argument || title.name || 'файл'} heading="Файл" onclose={() => { fileViewing = null; }} />
+{/if}
 
 <style>
   .tool { display: flex; flex-direction: column; min-width: 0; border-radius: var(--radius-card); background: var(--raised); }
@@ -105,6 +149,8 @@
   .body > :global(:last-child) { margin-bottom: var(--s2); }
   @keyframes fold { from { grid-template-rows: 0fr; } to { grid-template-rows: 1fr; } }
   .shots { display: flex; flex-wrap: wrap; gap: var(--s2); padding: var(--s0) var(--s2) var(--s2); }
+  .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: var(--s0) var(--s2) var(--s2); list-style: none; }
+  .files li { display: flex; min-width: 0; max-width: 100%; }
   .shot { flex: 1 1 calc(50% - var(--s2)); min-width: 0; max-height: var(--preview-height); margin: 0; overflow: hidden; border-radius: var(--radius-sm); background: var(--chat-bg); }
   .shot[data-state='failed'] { background: var(--danger-soft); }
   .shot:not([data-state='ready']) { display: flex; align-items: center; justify-content: center; min-height: var(--target); padding: var(--s4); color: var(--secondary); font-size: var(--fs-sm); text-align: center; }

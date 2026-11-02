@@ -10,7 +10,11 @@ use uuid::Uuid;
 
 use super::{Caller, ToolContext, ToolError, ToolErrorCode, access, origin, parse_arguments, subs};
 use crate::{
-    delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
+    attachments::AttachmentError,
+    delivery::{
+        ContentBlock, SubmitError, SubmitInput, submit_forwarded_message_input_in_tx,
+        submit_input_in_tx,
+    },
     executions,
 };
 
@@ -35,6 +39,8 @@ struct SendArgs {
     text: String,
     #[serde(default = "subscribe_by_default")]
     subscribe: bool,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
 }
 
 #[derive(Deserialize)]
@@ -53,9 +59,15 @@ pub(super) fn submit_error(error: SubmitError) -> ToolError {
         SubmitError::InvalidContent { .. }
         | SubmitError::InvalidRequest { .. }
         | SubmitError::IdempotencyConflict => ToolError::new(ToolErrorCode::InvalidArguments),
-        SubmitError::KeyRaceLost | SubmitError::Attachment(_) => {
-            ToolError::new(ToolErrorCode::Internal)
+        SubmitError::Attachment(AttachmentError::CapabilityMissing) => {
+            ToolError::new(ToolErrorCode::CapabilityMissing)
         }
+        SubmitError::Attachment(AttachmentError::Unsupported) => ToolError::with_message(
+            ToolErrorCode::AttachmentNotAvailable,
+            "The target harness does not accept this attachment",
+        ),
+        SubmitError::Attachment(_) => ToolError::new(ToolErrorCode::AttachmentNotAvailable),
+        SubmitError::KeyRaceLost => ToolError::new(ToolErrorCode::Internal),
     }
 }
 
@@ -218,7 +230,9 @@ async fn send_in_tx(
     lock_queue(conn, target_id).await?;
     let now = Utc::now();
     let depth = access::current_depth(conn, sender.id).await?;
-    if let Some(input_id) = duplicate(conn, sender.id, target_id, &sha256, now).await? {
+    if args.attachment_ids.is_empty()
+        && let Some(input_id) = duplicate(conn, sender.id, target_id, &sha256, now).await?
+    {
         if args.subscribe {
             subs::subscribe_in_tx(conn, caller.owner_id, sender.id, target_id, depth).await?;
         }
@@ -230,21 +244,23 @@ async fn send_in_tx(
     access::check_depth(&context.config, depth + 1)?;
     access::check_rate(conn, &context.config, sender.id, target_id, now).await?;
     let from = sender.sender();
-    let submitted = submit_input_in_tx(
-        conn,
-        &SubmitInput {
-            owner_id: caller.owner_id,
-            conversation_id: target_id,
-            idempotency_key: key,
-            content: vec![ContentBlock::Text {
-                text: origin::message_text(&from, &args.text),
-            }],
-            received_at: now,
-            correlation_id: caller.call_id,
-            origin: Some(origin::message_origin(&from, depth + 1, &sha256)),
-        },
-    )
-    .await
+    let request = SubmitInput {
+        owner_id: caller.owner_id,
+        conversation_id: target_id,
+        idempotency_key: key,
+        content: vec![ContentBlock::Text {
+            text: origin::message_text(&from, &args.text),
+        }],
+        received_at: now,
+        correlation_id: caller.call_id,
+        origin: Some(origin::message_origin(&from, depth + 1, &sha256)),
+    };
+    let submitted = if args.attachment_ids.is_empty() {
+        submit_input_in_tx(conn, &request).await
+    } else {
+        submit_forwarded_message_input_in_tx(conn, &request, &args.attachment_ids, None, sender.id)
+            .await
+    }
     .map_err(submit_error)?;
     if args.subscribe {
         subs::subscribe_in_tx(conn, caller.owner_id, sender.id, target_id, depth).await?;

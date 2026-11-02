@@ -19,7 +19,7 @@ const PROVIDERS: [(ToolSet, &str); 3] = [
     (ToolSet::LimitsOnly, "opencode"),
 ];
 
-const SESSION_TOOLS: [(&str, &str); 8] = [
+const SESSION_TOOLS: [(&str, &str); 10] = [
     ("sessions_list", "sessions.list"),
     ("session_inspect", "sessions.inspect"),
     ("session_send", "sessions.send"),
@@ -28,6 +28,8 @@ const SESSION_TOOLS: [(&str, &str); 8] = [
     ("session_unsubscribe", "sessions.unsubscribe"),
     ("session_wait", "sessions.wait"),
     ("session_accept", "sessions.accept"),
+    ("session_interrupt", "sessions.interrupt"),
+    ("session_stop", "sessions.stop"),
 ];
 
 fn tools_of(tool_set: ToolSet, provider: &str) -> Vec<Value> {
@@ -76,9 +78,9 @@ fn session_tools_listed_for_all_three_providers() {
             );
         }
         let expected = if tool_set == ToolSet::ApproveAndLimits {
-            2 + 3 + 8
+            2 + 3 + 10 + 1
         } else {
-            1 + 3 + 8
+            1 + 3 + 10 + 1
         };
         assert_eq!(tools.len(), expected, "{provider}");
         for required in [
@@ -182,7 +184,7 @@ fn instructions_stay_short() {
         let lines = text.lines().count();
         assert!((10..=15).contains(&lines), "{provider}: {lines}\n{text}");
     }
-    assert_eq!(mcp::SERVER_INSTRUCTIONS.lines().count(), 13);
+    assert_eq!(mcp::SERVER_INSTRUCTIONS.lines().count(), 15);
 }
 
 #[test]
@@ -212,6 +214,8 @@ fn claude_instructions_keep_approve_and_codex_drops_it() {
             "session_spawn",
             "session_wait",
             "session_accept",
+            "session_interrupt",
+            "session_stop",
             "pending_approval",
             "not the owner",
         ] {
@@ -234,6 +238,8 @@ fn instructions_name_prefixed_tools_for_opencode() {
         "canterlot_session_spawn",
         "canterlot_session_wait",
         "canterlot_session_accept",
+        "canterlot_session_interrupt",
+        "canterlot_session_stop",
     ] {
         assert!(text.contains(name), "нет {name}: {text}");
     }
@@ -335,7 +341,7 @@ fn no_tool_touches_the_whitelist() {
             "{hub_name}"
         );
     }
-    assert_eq!(mcp::AGENT_TOOLS.len(), 11);
+    assert_eq!(mcp::AGENT_TOOLS.len(), 13);
 }
 
 #[tokio::test]
@@ -388,4 +394,87 @@ async fn session_call_reaches_the_hub_and_returns_text_with_hint() {
         .as_str()
         .expect("text");
     assert!(text.ends_with("\nQueued."), "{text}");
+}
+
+#[test]
+fn share_file_is_listed_for_all_providers_with_a_strict_schema() {
+    for (tool_set, provider) in PROVIDERS {
+        let tools = tools_of(tool_set, provider);
+        let tool = tools
+            .iter()
+            .find(|tool| tool["name"] == "share_file")
+            .unwrap_or_else(|| panic!("{provider}: нет share_file"));
+        let description = tool["description"].as_str().expect("description");
+        assert!(description.contains("owner"), "{description}");
+        assert!(description.contains("50 MiB"), "{description}");
+        assert!(description.contains("symlink"), "{description}");
+        let required = tool["inputSchema"]["required"].as_array().unwrap();
+        assert_eq!(required, &vec![json!("path")]);
+        assert_eq!(tool["inputSchema"]["additionalProperties"], json!(false));
+        let instructions = instructions_of(tool_set, provider);
+        let name = if provider == "opencode" {
+            "canterlot_share_file"
+        } else {
+            "share_file"
+        };
+        assert!(instructions.contains(name), "{provider}: {instructions}");
+    }
+}
+
+#[test]
+fn share_file_arguments_are_checked_before_the_tool_runs() {
+    assert!(mcp::valid_share_arguments(&json!({"path": "report.pdf"})));
+    assert!(mcp::valid_share_arguments(
+        &json!({"path": "a.png", "title": "Снимок", "note": "Смотри"})
+    ));
+    assert!(!mcp::valid_share_arguments(&json!({})));
+    assert!(!mcp::valid_share_arguments(&json!({"path": 1})));
+    assert!(!mcp::valid_share_arguments(
+        &json!({"path": "a", "extra": true})
+    ));
+    assert!(!mcp::valid_share_arguments(
+        &json!({"path": "a", "title": null})
+    ));
+}
+
+#[test]
+fn limits_report_falls_back_to_the_local_snapshot_on_an_old_hub() {
+    use canterlot_worker::adapter::limits_fallback;
+    let mut pending = std::collections::HashMap::new();
+    let id = uuid::Uuid::now_v7();
+    pending.insert(
+        id,
+        "Claude API budget: five-hour window 10% used.".to_owned(),
+    );
+    let local = limits_fallback(
+        &mut pending,
+        id,
+        AgentCallResult::Err {
+            code: "unknown_tool".into(),
+            message: "old hub".into(),
+        },
+    );
+    assert_eq!(
+        local_value(&local),
+        serde_json::json!({"text": "Claude API budget: five-hour window 10% used."})
+    );
+    let id = uuid::Uuid::now_v7();
+    pending.insert(id, "local".to_owned());
+    let report = limits_fallback(
+        &mut pending,
+        id,
+        AgentCallResult::Ok(serde_json::json!({"text": "all providers"})),
+    );
+    assert_eq!(
+        local_value(&report),
+        serde_json::json!({"text": "all providers"})
+    );
+    assert!(pending.is_empty());
+}
+
+fn local_value(result: &AgentCallResult) -> Value {
+    match result {
+        AgentCallResult::Ok(value) => value.clone(),
+        AgentCallResult::Err { .. } => panic!("expected ok"),
+    }
 }

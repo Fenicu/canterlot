@@ -119,7 +119,7 @@ impl OwnerRoots {
     }
 }
 
-fn denied_name(name: &str) -> bool {
+pub(crate) fn denied_name(name: &str) -> bool {
     DENIED_NAMES.contains(&name)
         || name.ends_with(".sqlite")
         || name.ends_with(".sqlite-wal")

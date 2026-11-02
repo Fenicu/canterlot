@@ -116,6 +116,7 @@ impl Media {
             mime: "image/png".into(),
             size: bytes.len() as u64,
             sha256: sha(bytes),
+            ..Default::default()
         }
     }
 
@@ -317,6 +318,88 @@ fn set_mtime(path: &std::path::Path, hours_ago: u64) {
     let file = std::fs::File::options().write(true).open(path).unwrap();
     file.set_modified(SystemTime::now() - Duration::from_secs(hours_ago * 3600))
         .unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn shared_file_becomes_an_attachment_and_a_block_file(pool: PgPool) {
+    let mut f = Media::new(pool).await;
+    let (mut client, stop, task) = server(f.hub.clone()).await;
+    let block = f.tool_block().await;
+    let bytes = b"%PDF-1.7\nshared report".as_slice();
+    let id = Uuid::now_v7();
+    let header = MediaHeader {
+        media_id: id.to_string(),
+        execution_id: f.execution.to_string(),
+        block_id: block.to_string(),
+        mime: "application/pdf".into(),
+        size: bytes.len() as u64,
+        sha256: sha(bytes),
+        name: "report.pdf".into(),
+        title: "Отчёт".into(),
+        note: "Смотри раздел 2".into(),
+        share: true,
+        ..Default::default()
+    };
+    let stored = put(&mut client, &f.token, header, bytes).await.unwrap();
+    assert_eq!(stored.media_id, id.to_string());
+    let attachment: (String, String, String, i64) =
+        sqlx::query_as("select state,name,mime,size_bytes from attachments where id=$1")
+            .bind(id)
+            .fetch_one(f.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        attachment,
+        (
+            "ready".into(),
+            "report.pdf".into(),
+            "application/pdf".into(),
+            bytes.len() as i64
+        )
+    );
+    let file: (String, String, String) =
+        sqlx::query_as("select name,title,note from block_files where id=$1")
+            .bind(id)
+            .fetch_one(f.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        file,
+        (
+            "report.pdf".into(),
+            "Отчёт".into(),
+            "Смотри раздел 2".into()
+        )
+    );
+    f.committed(vec![Body::BlockFile(BlockFile {
+        block_id: block.to_string(),
+        attachment_id: id.to_string(),
+        name: "report.pdf".into(),
+        mime: "application/pdf".into(),
+        size: bytes.len() as u64,
+        sha256: sha(bytes),
+        title: "Отчёт".into(),
+        note: "Смотри раздел 2".into(),
+        ..Default::default()
+    })])
+    .await;
+    let item = f.history_block(block).await;
+    assert_eq!(item["files"][0]["attachment_id"], id.to_string());
+    assert_eq!(item["files"][0]["name"], "report.pdf");
+    let download = f
+        .files
+        .client
+        .send(
+            Method::GET,
+            &format!("/api/v1/attachments/{id}/content"),
+            None,
+            None,
+        )
+        .await;
+    assert_eq!(download.status, 200);
+    assert_eq!(download.body, bytes);
+    stop.cancel();
+    task.await.unwrap();
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

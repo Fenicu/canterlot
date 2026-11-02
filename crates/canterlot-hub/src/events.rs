@@ -241,6 +241,7 @@ pub const CLIENT_KINDS: &[&str] = &[
     "block_checksum_mismatch",
     "block_conflicting_final",
     "block_media_attached",
+    "block_file_attached",
     "conversation_created",
     "conversation_updated",
     "conversation_deleted",

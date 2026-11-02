@@ -65,6 +65,10 @@ pub(crate) enum Msg {
         media_id: Uuid,
         result: Result<(), PutError>,
     },
+    ShareFinished {
+        share_id: Uuid,
+        result: Result<(), PutError>,
+    },
     AgentCallDone {
         call_id: Uuid,
         result: crate::adapter::AgentCallResult,
@@ -1612,6 +1616,25 @@ impl Actor {
                 .await;
                 Ok(())
             }
+            Msg::ShareFinished { share_id, result } => {
+                self.uploads.remove(&share_id);
+                if let Err(error) = result {
+                    tracing::warn!(kind = "share_upload_failed", execution_id = %self.id, share_id = %share_id, reason = error.reason(), "share upload failed");
+                }
+                self.send(down::Msg::ShareResult(
+                    canterlot_proto::worker::ipc::ShareResult {
+                        share_id: share_id.to_string(),
+                        stored: result.is_ok(),
+                        reason: result
+                            .err()
+                            .map(PutError::reason)
+                            .unwrap_or_default()
+                            .into(),
+                    },
+                ))
+                .await;
+                Ok(())
+            }
             Msg::FetchFinished { key, files } => {
                 if self.discard_closed_fetch(key).await? {
                     return Ok(());
@@ -1702,6 +1725,7 @@ impl Actor {
             up::Msg::DeliverAck(ack) => self.on_deliver_ack(ack).await?,
             up::Msg::SjBatch(batch) => self.on_batch(batch).await?,
             up::Msg::MediaUpload(request) => self.start_upload(request),
+            up::Msg::ShareUpload(request) => self.start_share(request),
             up::Msg::Exited(exited) => {
                 self.cancel_fetches().await?;
                 self.uploads.clear();
@@ -2168,6 +2192,7 @@ impl Actor {
             mime: request.mime,
             size: request.size,
             sha256: request.sha256,
+            ..Default::default()
         };
         let task = tokio::spawn(async move {
             let path = media::media_path(&exec_dir, media_id);
@@ -2175,6 +2200,47 @@ impl Actor {
             let _ = sender.send(Msg::MediaFinished { media_id, result });
         });
         self.uploads.insert(media_id, MediaTask(task));
+    }
+
+    fn start_share(&mut self, request: canterlot_proto::worker::ipc::ShareUpload) {
+        let (Ok(share_id), Some(exec_dir)) =
+            (Uuid::parse_str(&request.share_id), self.exec_dir.clone())
+        else {
+            return;
+        };
+        if self.uploads.contains_key(&share_id) {
+            return;
+        }
+        let sender = self
+            .shared
+            .actors
+            .lock()
+            .expect("actors lock")
+            .get(&self.id)
+            .expect("actor sender")
+            .clone();
+        let sink = self.shared.media_sink.subscribe();
+        let backoff_cap = self.shared.attachment_config.fetch_backoff_cap;
+        let header = MediaHeader {
+            media_id: request.share_id,
+            execution_id: self.id.to_string(),
+            block_id: String::new(),
+            mime: request.mime,
+            size: request.size,
+            sha256: request.sha256,
+            name: request.name,
+            title: request.title,
+            note: request.note,
+            share: true,
+            width: request.width,
+            height: request.height,
+        };
+        let task = tokio::spawn(async move {
+            let path = media::media_path(&exec_dir, share_id);
+            let result = media::upload(sink, &path, header, backoff_cap).await;
+            let _ = sender.send(Msg::ShareFinished { share_id, result });
+        });
+        self.uploads.insert(share_id, MediaTask(task));
     }
 
     fn start_fetch(&mut self, command: Command, references: Vec<AttachmentRef>) {

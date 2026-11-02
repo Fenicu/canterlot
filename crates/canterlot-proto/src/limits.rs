@@ -8,6 +8,10 @@ pub const MAX_ATTACHMENT_NAME_BYTES: usize = 255;
 pub const MAX_METRICS_EXECUTIONS: usize = 256;
 /// Картинка, на которую смотрел агент: крупнее показывается только путь и размер.
 pub const MAX_MEDIA_BYTES: u64 = 20_971_520;
+/// Файл, который агент отдаёт владельцу: не больше 50 МиБ.
+pub const MAX_SHARE_BYTES: u64 = 52_428_800;
+pub const MAX_SHARE_TITLE_BYTES: usize = 512;
+pub const MAX_SHARE_NOTE_BYTES: usize = 4096;
 pub const MEDIA_MIMES: &[&str] = &["image/png", "image/jpeg", "image/webp", "image/gif"];
 /// Текст пресета инструкций агента: данные уровня сообщения, в лимит меты не входит.
 pub const MAX_PRESET_TEXT_BYTES: usize = 65_536;
