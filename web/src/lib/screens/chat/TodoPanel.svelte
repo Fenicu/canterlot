@@ -2,11 +2,11 @@
 	import { slide } from 'svelte/transition';
 	import { fmt } from '#lib/format/ru.js';
 	import { durationMs } from '#lib/motion.js';
-	import { pane } from '#lib/shell/pane.svelte.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
 	import Icon from '#lib/ui/Icon.svelte';
 	import StageTrack from '#lib/ui/StageTrack.svelte';
 	import { TODO_STATUS_LABEL, todoView } from './todo';
+	import { readTodoOpen, writeTodoOpen } from './todoOpen';
 
 	let { chat, lane = null }: { chat: ChatStore; lane?: string | null } = $props();
 
@@ -21,8 +21,13 @@
 		return `Ещё ${count} ${fmt.plural(count, ['пункт', 'пункта', 'пунктов'])} не поместилось`;
 	}
 
-	let chosen = $state<boolean | null>(null);
-	const expanded = $derived(chosen ?? pane.desktop);
+	let chosen = $state<boolean | null>(readTodoOpen());
+	const expanded = $derived(chosen ?? false);
+
+	function toggle() {
+		chosen = !expanded;
+		writeTodoOpen(chosen);
+	}
 </script>
 
 {#if shown && view}
@@ -41,7 +46,7 @@
 					class="toggle"
 					aria-expanded={expanded}
 					aria-controls={listId}
-					onclick={() => (chosen = !expanded)}
+					onclick={toggle}
 				>
 					<span class="word" data-status={view.headlineStatus}>{TODO_STATUS_LABEL[view.headlineStatus]}</span>
 					<span class="now">{view.headline}</span>

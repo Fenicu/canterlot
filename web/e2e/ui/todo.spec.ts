@@ -71,9 +71,8 @@ test('list_shows_items_with_status_words_and_collapses', async ({ page }) => {
 	await page.goto(`/c/${id}`);
 	await expect(panel(page)).toBeVisible();
 
-	const desktop = (page.viewportSize()?.width ?? 0) >= 1024;
-	await expect(toggle(page)).toHaveAttribute('aria-expanded', desktop ? 'true' : 'false');
-	if (!desktop) await toggle(page).click();
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
+	await toggle(page).click();
 
 	const items = panel(page).locator('.item');
 	await expect(items).toHaveCount(3);
@@ -87,12 +86,29 @@ test('list_shows_items_with_status_words_and_collapses', async ({ page }) => {
 	await expect(items).toHaveCount(0);
 });
 
+test('panel_remembers_the_owner_choice_per_device', async ({ page }) => {
+	const { api, id } = await boot(page);
+	api.pushTodo(id, PLAN);
+	await page.goto(`/c/${id}`);
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
+	await toggle(page).click();
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
+	await page.reload();
+	await expect(panel(page)).toContainText('Написать падающий тест');
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'true');
+	await toggle(page).click();
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
+	await page.reload();
+	await expect(panel(page)).toContainText('Написать падающий тест');
+	await expect(toggle(page)).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('revision_updates_the_same_nodes_in_place', async ({ page }) => {
 	const { api, id } = await boot(page);
 	api.pushTodo(id, PLAN);
 	await page.goto(`/c/${id}`);
 	await expect(panel(page)).toBeVisible();
-	if ((page.viewportSize()?.width ?? 0) < 1024) await toggle(page).click();
+	if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
 	const second = panel(page).locator('.item').nth(1);
 	await expect(second).toContainText('в работе');
 	await second.evaluate((node) => ((node as unknown as { marker: string }).marker = 'same'));
@@ -126,7 +142,7 @@ test('finished_list_says_so_and_a_long_one_names_what_did_not_fit', async ({ pag
 
 	api.pushTodo(id, [{ text: 'Первый', status: 'in_progress' }], null, 4);
 	await expect(panel(page)).toContainText('0 из 5');
-	if ((page.viewportSize()?.width ?? 0) < 1024) await toggle(page).click();
+	if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
 	await expect(panel(page).locator('.omitted')).toHaveText(/Ещё 4 пункта не поместилось/);
 });
 
@@ -163,7 +179,7 @@ test('pulse_follows_real_work_and_reduced_motion_stills_it', async ({ page }) =>
 	api.pushTodo(id, PLAN);
 	await page.goto(`/c/${id}`);
 	await expect(panel(page)).toBeVisible();
-	if ((page.viewportSize()?.width ?? 0) < 1024) await toggle(page).click();
+	if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
 	const mark = panel(page).locator('.item[data-status="in_progress"] .mark');
 	await expect(mark).toBeVisible();
 	await expect(panel(page).locator('.st')).toHaveAttribute('data-state', 'active');
@@ -187,7 +203,7 @@ test('panel_keeps_to_the_visual_rules', async ({ page }) => {
 	api.pushTodo(id, [...PLAN, { text: long, status: 'pending' }, ...Array.from({ length: 30 }, (_, i) => ({ text: `Пункт ${i}`, status: 'pending' as const }))]);
 	await page.goto(`/c/${id}`);
 	await expect(panel(page)).toBeVisible();
-	if ((page.viewportSize()?.width ?? 0) < 1024) await toggle(page).click();
+	if ((await toggle(page).getAttribute('aria-expanded')) === 'false') await toggle(page).click();
 
 	const text = await panel(page).innerText();
 	expect(text).not.toMatch(/[✅✓✔✗✘☑\p{Extended_Pictographic}]/u);
