@@ -260,7 +260,7 @@ fn registry_builds_claude_code_adapter_from_context() {
     assert!(matches!(caps.resume, adapter::Support::Supported));
     assert!(matches!(caps.approvals, adapter::Support::Supported));
     assert!(matches!(caps.questions, adapter::Support::Supported));
-    assert!(!caps.interrupt_keeps_process);
+    assert!(caps.interrupt_keeps_process);
     assert!(adapter::known_harness("claude_code"));
     assert!(!adapter::known_harness("unknown"));
 }

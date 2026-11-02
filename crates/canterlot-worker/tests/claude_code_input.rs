@@ -11,7 +11,7 @@ use canterlot_worker::adapter::{
     claude_code::{
         input::{InputDriver, InputQueue, LaunchSettings, Next, user_message},
         parser::{Parsed, Parser},
-        process::{CliProcess, LaunchSpec, SessionArg, StdoutLine, exit_event},
+        process::{CliProcess, LaunchSpec, SessionArg, StdoutLine},
     },
 };
 use canterlot_worker::config::ClaudeCodeConfig;
@@ -153,7 +153,7 @@ emit() {
   while IFS= read -r frame <&3; do
     case "$frame" in
       @probe) if IFS= read -r -t 0.4 early; then echo EARLY >> "$dir/events.log"; held="$early"; fi ;;
-      @wait) IFS= read -r _ || exit 0 ;;
+      @wait) if IFS= read -r early; then printf '%s\n' "$early" >> "$dir/stdin.log"; else exit 0; fi ;;
       *) printf '%s\n' "$frame" ;;
     esac
   done 3< "$1"
@@ -169,8 +169,15 @@ while :; do
       rid="$(printf '%s' "$line" | sed -n 's/.*"request_id":"\([^"]*\)".*/\1/p')"
       reply="$(cat "$dir/control" 2>/dev/null || echo success)"
       case "$reply" in
-        success) printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$rid" ;;
+        success)
+          if printf '%s' "$line" | grep -q '"subtype":"interrupt"'; then
+            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{"still_queued":[]}}}\n' "$rid"
+            if [ -f "$dir/int.out" ]; then emit "$dir/int.out"; fi
+          else
+            printf '{"type":"control_response","response":{"subtype":"success","request_id":"%s","response":{}}}\n' "$rid"
+          fi ;;
         error) printf '{"type":"control_response","response":{"subtype":"error","request_id":"%s","error":"refused by fake"}}\n' "$rid" ;;
+        none) ;;
       esac ;;
     *)
       n=$((n+1))
@@ -859,6 +866,7 @@ fn switching_into_bypass_is_refused_without_bypass_launch() {
     ask.on_parsed(&Parsed::ControlResponse {
         request_id: control["request_id"].as_str().unwrap().into(),
         success: true,
+        interrupt: None,
     });
     let message = written(ask.next(None));
     assert_eq!(message["uuid"], command.to_string());
@@ -876,6 +884,7 @@ fn switching_into_bypass_is_refused_without_bypass_launch() {
     bypass.on_parsed(&Parsed::ControlResponse {
         request_id: control["request_id"].as_str().unwrap().into(),
         success: true,
+        interrupt: None,
     });
     written(bypass.next(None));
     bypass.on_parsed(&run_finished(back));
@@ -958,9 +967,11 @@ fn weekly_threshold_note_is_added_once_per_threshold() {
 
 // --- прерывание -------------------------------------------------------------------
 
-/// Прогон A из `interrupt.jsonl`: ввод на `sleep 20`, кадры до SIGINT
-/// (строки 5–38), после SIGINT строки 42–45 и выход с кодом 0.
-async fn interrupted_run() -> (Fake, InputDriver, InterruptOutcome) {
+/// Прогон из `interrupt.jsonl`: ввод на `sleep 20`, кадры до прерывания
+/// (строки 5–38), после — строки 42–45. Процесс жив: конец хода приходит
+/// кадром `result`, а не выходом CLI. При `fallback` квитанции нет (`control`
+/// = `none`, `@wait` держит кадр до сигнала) и остановка идёт через SIGINT.
+async fn interrupted_run(fallback: bool) -> (Fake, InputDriver, InterruptOutcome) {
     // Как в main: свой обработчик SIGINT снимает унаследованный SIG_IGN у потомка.
     let _interrupt =
         tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
@@ -969,22 +980,32 @@ async fn interrupted_run() -> (Fake, InputDriver, InterruptOutcome) {
             .into_iter()
             .map(|(_, frame)| frame)
             .collect();
-        turn.push("@wait".into());
+        if fallback {
+            turn.push("@wait".into());
+        }
         write_frames(dir, "turn_1.out", &turn);
         let after: Vec<String> = out_lines("interrupt", 42, 45)
             .into_iter()
             .map(|(_, frame)| frame)
             .collect();
         write_frames(dir, "int.out", &after);
+        if fallback {
+            std::fs::write(dir.join("control"), "none").unwrap();
+        }
     })
     .await;
-    let mut driver = InputDriver::new(InputQueue::new(launch("ask")), Parser::new());
+    let queue = if fallback {
+        InputQueue::new(launch("ask")).with_control_timeout(Duration::from_millis(300))
+    } else {
+        InputQueue::new(launch("ask"))
+    };
+    let mut driver = InputDriver::new(queue, Parser::new());
     let nothing = tokio::time::timeout(WAIT, driver.interrupt(&mut fake.cli, DEADLINE))
         .await
         .unwrap();
     assert!(
         matches!(nothing, InterruptOutcome::NotApplicable),
-        "no active turn, no signal"
+        "no active turn, no interrupt request"
     );
     let text = in_line("interrupt", 4)["message"]["content"]
         .as_str()
@@ -1023,16 +1044,26 @@ async fn interrupted_run() -> (Fake, InputDriver, InterruptOutcome) {
 }
 
 #[tokio::test]
-async fn interrupt_sends_sigint_and_acknowledges_on_aborted_tools_result() {
-    let (fake, mut driver, outcome) = interrupted_run().await;
+async fn interrupt_uses_control_request_and_acknowledges_on_aborted_tools_result() {
+    let (fake, mut driver, outcome) = interrupted_run(false).await;
     assert!(
         matches!(outcome, InterruptOutcome::Acknowledged),
         "got {outcome:?}"
     );
     let log = fake.stdin_log();
-    assert_eq!(log.len(), 1, "SIGINT only: no control_request on stdin");
+    assert_eq!(log.len(), 2, "user message plus one interrupt control_request");
     assert_eq!(log[0]["uuid"], SLEEP_INPUT);
+    assert_eq!(log[1]["type"], "control_request");
+    assert_eq!(log[1]["request"]["subtype"], "interrupt");
+    assert!(
+        driver.queue.interrupt_receipt().is_some(),
+        "the control_response receipt is captured before the turn result"
+    );
     let parsed = drain(&mut driver);
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::ControlResponse { success: true, .. }
+    )));
     assert!(parsed.iter().any(|p| matches!(
         p,
         Parsed::Event(AdapterEvent::RunFinished { input_command_id, .. }) if *input_command_id == id(SLEEP_INPUT)
@@ -1048,28 +1079,16 @@ async fn interrupt_sends_sigint_and_acknowledges_on_aborted_tools_result() {
 }
 
 #[tokio::test]
-async fn interrupt_exit_is_user_stop_not_a_crash() {
-    let (mut fake, mut driver, outcome) = interrupted_run().await;
+async fn interrupt_keeps_process_alive_for_next_turn() {
+    let (mut fake, mut driver, outcome) = interrupted_run(false).await;
     assert!(
         matches!(outcome, InterruptOutcome::Acknowledged),
         "got {outcome:?}"
     );
-    tokio::time::timeout(WAIT, async {
-        while !driver.eof() {
-            driver.pump(&mut fake.cli).await;
-        }
-    })
-    .await
-    .expect("the CLI did not close stdout after SIGINT");
-    let status = tokio::time::timeout(WAIT, fake.cli.wait())
-        .await
-        .unwrap()
-        .unwrap();
-    let exited = exit_event(status);
-    let AdapterEvent::ProcessExited { code, signal } = exited else {
-        panic!("expected ProcessExited, got {exited:?}");
-    };
-    assert_eq!((code, signal), (Some(0), None));
+    assert!(
+        !driver.eof(),
+        "the CLI process survives a control interrupt"
+    );
     assert!(
         !drain(&mut driver).iter().any(|p| matches!(
             p,
@@ -1077,14 +1096,50 @@ async fn interrupt_exit_is_user_stop_not_a_crash() {
         )),
         "the interrupted turn raises no required diagnostic"
     );
-    // Тот же разбор выхода, что у супервизора для synthetic-exit-on-interrupt.
-    use canterlot_worker::supervisor::exit_outcome;
-    assert_eq!(exit_outcome(code, signal, true), ("stopped", "user_stop"));
-    assert_eq!(
-        exit_outcome(code, signal, false),
-        ("stopped", "normal_exit")
+    // Следующий ввод уходит в тот же процесс без перезапуска.
+    let followup = Uuid::now_v7();
+    let second: Vec<String> = out_lines("multi_input", 32, 44)
+        .into_iter()
+        .map(|(_, frame)| frame.replace(BRAVO, &followup.to_string()))
+        .collect();
+    write_frames(fake.dir.path(), "turn_2.out", &second);
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(&mut fake.cli, &tx(followup, 1, "again"), None, DEADLINE),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(outcome, TransmitOutcome::Accepted(_)),
+        "the next input goes to the same process, got {outcome:?}"
     );
-    assert_eq!(exit_outcome(None, Some(2), true), ("failed", "crashed"));
+}
+
+#[tokio::test]
+async fn interrupt_falls_back_to_sigint_without_receipt() {
+    let (fake, mut driver, outcome) = interrupted_run(true).await;
+    assert!(
+        matches!(outcome, InterruptOutcome::Acknowledged),
+        "got {outcome:?}"
+    );
+    // Квитанции не было: кадры прерывания мог дать только ловушка SIGINT.
+    assert!(
+        driver.queue.interrupt_receipt().is_none(),
+        "no control_response, no receipt"
+    );
+    let log = fake.stdin_log();
+    assert_eq!(log.len(), 2, "user message plus one interrupt control_request");
+    assert_eq!(log[1]["type"], "control_request");
+    assert_eq!(log[1]["request"]["subtype"], "interrupt");
+    let parsed = drain(&mut driver);
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::TurnError { terminal_reason: Some(reason), .. } if reason == "aborted_tools"
+    )));
+    assert!(
+        driver.queue.active().is_none(),
+        "the interrupted turn is over"
+    );
 }
 
 // --- чтение потока и управляющие ответы -------------------------------------------
@@ -1130,15 +1185,77 @@ fn control_response_success_is_read_from_the_recorded_frame() {
     let mut parser = Parser::new();
     let (_, recorded) = out_lines("interrupt", 90, 90).remove(0);
     let parsed = parser.feed(&recorded);
-    assert!(matches!(
-        parsed.as_slice(),
-        [Parsed::ControlResponse { request_id, success: true }]
-            if request_id == "probe-interrupt-b9039f8e-e82f-4e39-8cbc-d18b74389337"
-    ));
+    let [Parsed::ControlResponse { request_id, success: true, interrupt: Some(receipt) }] =
+        parsed.as_slice()
+    else {
+        panic!("expected the recorded interrupt receipt, got {parsed:?}");
+    };
+    assert_eq!(request_id, "probe-interrupt-b9039f8e-e82f-4e39-8cbc-d18b74389337");
+    assert!(receipt.still_queued.is_empty());
+    assert_eq!(
+        receipt.cancelled,
+        vec![Uuid::parse_str("ffc00768-427e-4748-a759-78defa3488ce").unwrap()]
+    );
     let error = json!({"type": "control_response", "response": {"subtype": "error", "request_id": "r1", "error": "no"}});
     let parsed = parser.feed(&error.to_string());
     assert!(matches!(
         parsed.as_slice(),
-        [Parsed::ControlResponse { request_id, success: false }] if request_id == "r1"
+        [Parsed::ControlResponse { request_id, success: false, interrupt: None }] if request_id == "r1"
     ));
+}
+
+#[test]
+fn interrupt_receipt_carries_still_queued_and_cancelled() {
+    // Форма кадра — из живого прогона (control_request interrupt во время `sleep`).
+    let frame = json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": "probe-int-1",
+            "response": {"still_queued": ["22222222-2222-4222-8222-222222222222"], "cancelled": []},
+        },
+    });
+    let mut parser = Parser::new();
+    let parsed = parser.feed(&frame.to_string());
+    let [Parsed::ControlResponse { request_id, success: true, interrupt: Some(receipt) }] =
+        parsed.as_slice()
+    else {
+        panic!("expected an interrupt receipt, got {parsed:?}");
+    };
+    assert_eq!(request_id, "probe-int-1");
+    assert_eq!(
+        receipt.still_queued,
+        vec![Uuid::parse_str("22222222-2222-4222-8222-222222222222").unwrap()]
+    );
+    assert!(receipt.cancelled.is_empty());
+    // Пустой список — тоже квитанция: очередь была пуста.
+    let empty = json!({
+        "type": "control_response",
+        "response": {
+            "subtype": "success",
+            "request_id": "probe-int-2",
+            "response": {"still_queued": []},
+        },
+    });
+    let parsed = parser.feed(&empty.to_string());
+    assert!(
+        matches!(
+            parsed.as_slice(),
+            [Parsed::ControlResponse { interrupt: Some(receipt), .. }] if receipt.still_queued.is_empty()
+        ),
+        "got {parsed:?}"
+    );
+    // Ответ на смену модели квитанции не несёт.
+    let model = json!({
+        "type": "control_response",
+        "response": {"subtype": "success", "request_id": "r3", "response": {}},
+    });
+    let parsed = parser.feed(&model.to_string());
+    assert!(
+        matches!(
+            parsed.as_slice(),
+            [Parsed::ControlResponse { interrupt: None, .. }]
+        ),
+        "got {parsed:?}"
+    );
 }

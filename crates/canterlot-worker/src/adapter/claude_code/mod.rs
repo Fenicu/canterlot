@@ -1138,7 +1138,7 @@ impl Adapter for ClaudeCodeAdapter {
             approvals: Support::Supported,
             questions: Support::Supported,
             background_work: Support::Supported,
-            interrupt_keeps_process: false,
+            interrupt_keeps_process: true,
         }
     }
     async fn start(
@@ -1332,21 +1332,13 @@ impl Adapter for ClaudeCodeAdapter {
         if self.exited || self.eof {
             return InterruptOutcome::NotApplicable;
         }
-        let Some(queue) = self.queue.as_mut() else {
+        let Some(line) = self
+            .queue
+            .as_mut()
+            .and_then(|queue| queue.interrupt_request())
+        else {
             return InterruptOutcome::NotApplicable;
         };
-        if !queue.interrupt_sent() {
-            return InterruptOutcome::NotApplicable;
-        }
-        if self
-            .cli
-            .as_ref()
-            .unwrap()
-            .signal(process::Signal::Int)
-            .is_err()
-        {
-            return InterruptOutcome::Undetermined;
-        }
         for request_id in self.requests.keys() {
             self.events.push_back(AdapterEvent::RequestClosed {
                 request_id: request_id.clone(),
@@ -1354,12 +1346,57 @@ impl Adapter for ClaudeCodeAdapter {
             });
         }
         self.requests.clear();
+        // Управляющий запрос останавливает ход, процесс жив: следующий ввод
+        // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
+        if self
+            .cli
+            .as_mut()
+            .unwrap()
+            .write_line(&line)
+            .await
+            .is_err()
+        {
+            return InterruptOutcome::Undetermined;
+        }
+        let mut sigint_sent = false;
         let until = Instant::now() + self.deadline;
         loop {
             if self.queue.as_ref().unwrap().interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
             }
-            if self.eof || timeout_at(until, self.pump()).await.is_err() {
+            if self.eof {
+                return InterruptOutcome::Undetermined;
+            }
+            if !sigint_sent
+                && self
+                    .queue
+                    .as_ref()
+                    .unwrap()
+                    .interrupt_receipt_expired()
+            {
+                // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
+                if self
+                    .cli
+                    .as_ref()
+                    .unwrap()
+                    .signal(process::Signal::Int)
+                    .is_err()
+                {
+                    return InterruptOutcome::Undetermined;
+                }
+                sigint_sent = true;
+            }
+            // Без кадров stdout ожидание упирается в срок квитанции,
+            // иначе запасной SIGINT никогда бы не наступил.
+            let bound = self
+                .queue
+                .as_ref()
+                .unwrap()
+                .interrupt_receipt_bound()
+                .filter(|_| !sigint_sent)
+                .map(|bound| bound.min(until))
+                .unwrap_or(until);
+            if timeout_at(bound, self.pump()).await.is_err() && sigint_sent {
                 return InterruptOutcome::Undetermined;
             }
         }

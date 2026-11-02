@@ -1865,6 +1865,10 @@ impl Supervisor {
                 }))?;
                 if ours {
                     self.active_turn = None;
+                    // Прерванный ход закончился, процесс жив: сессия снова idle,
+                    // следующий ввод уйдёт в тот же CLI. Без сброса решения
+                    // следующего хода отклонялись бы как «во время прерывания».
+                    self.aborting_turn = false;
                 }
                 for ((command, _), input) in self.inputs.iter_mut() {
                     if *command == input_command_id && input.state == InputState::Transmitting {
@@ -2644,6 +2648,7 @@ mod tests {
     #[derive(Default)]
     struct StubState {
         transmit_calls: Vec<Uuid>,
+        ack_interrupt: bool,
     }
 
     struct StubAdapter {
@@ -2706,7 +2711,11 @@ mod tests {
         }
 
         async fn interrupt(&mut self) -> InterruptOutcome {
-            InterruptOutcome::NotApplicable
+            if self.state.lock().unwrap().ack_interrupt {
+                InterruptOutcome::Acknowledged
+            } else {
+                InterruptOutcome::NotApplicable
+            }
         }
 
         async fn next_event(&mut self) -> AdapterEvent {
@@ -2938,5 +2947,54 @@ mod tests {
         let key = queue_owner(&mut supervisor);
         supervisor.try_transmit().await.unwrap();
         assert_delivered_once_with_proof(&mut supervisor, &state, key);
+    }
+
+    #[tokio::test]
+    async fn acknowledged_interrupt_is_turn_aborted_not_session_stopped() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        let first = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert_eq!(supervisor.active_turn, Some(first.0));
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        assert!(supervisor.aborting_turn, "the turn is being aborted");
+        assert!(
+            matches!(supervisor.lifecycle, Lifecycle::Running),
+            "no stop while the process survives"
+        );
+        // Прерванный ход закончился кадром итога: сессия idle, остановка не начата.
+        supervisor
+            .on_adapter_event(AdapterEvent::RunFinished {
+                input_command_id: first.0,
+                usage: Vec::new(),
+                context_tokens: 0,
+                context_window_tokens: 0,
+            })
+            .await
+            .unwrap();
+        assert!(supervisor.active_turn.is_none());
+        assert!(!supervisor.aborting_turn, "the abort ended with its turn");
+        assert!(
+            matches!(supervisor.lifecycle, Lifecycle::Running),
+            "the execution stays running for the next input"
+        );
+        assert!(!supervisor.adapter_exited);
+        // CLI готов к следующему вводу той же фазой, что после обычного хода.
+        supervisor
+            .on_adapter_event(AdapterEvent::Phase {
+                phase: crate::adapter::Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            })
+            .await
+            .unwrap();
+        // Следующий ввод уходит в тот же процесс без перезапуска.
+        let second = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert_eq!(supervisor.active_turn, Some(second.0));
+        assert_eq!(
+            state.lock().unwrap().transmit_calls,
+            vec![first.0, second.0]
+        );
     }
 }

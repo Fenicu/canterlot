@@ -1,6 +1,7 @@
 //! Ввод Claude Code: строго один ход за раз, сообщения пользователя с вложениями,
 //! доказательство доставки кадром `command_lifecycle` (запасное — кадром ответа),
-//! смена модели и режима между ходами, прерывание только SIGINT (решение владельца OD-2).
+//! смена модели и режима между ходами, прерывание управляющим запросом
+//! `interrupt` с запасным SIGINT, если квитанции нет в срок.
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
@@ -11,7 +12,7 @@ use serde_json::{Value, json};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::parser::{Parsed, Parser};
+use super::parser::{InterruptReceipt, Parsed, Parser};
 use super::process::{CliProcess, Signal, StdoutLine};
 use crate::adapter::{
     AdapterEvent, InterruptOutcome, LocalFile, Proof, SettingsChange, Transmission,
@@ -78,6 +79,13 @@ struct PendingControl {
     deadline: Instant,
 }
 
+/// Запрос прерывания: квитанция приходит раньше итога прерванного хода.
+struct InterruptRequest {
+    request_id: String,
+    deadline: Instant,
+    receipt: Option<InterruptReceipt>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Interrupt {
     None,
@@ -97,6 +105,7 @@ pub struct InputQueue {
     /// Команда, на которую приписан пробуждающий ход: его тоже можно прервать.
     adopted: Option<Uuid>,
     control: Option<PendingControl>,
+    interrupt_request: Option<InterruptRequest>,
     rejected: Vec<(Uuid, &'static str)>,
     proven: HashMap<Uuid, &'static str>,
     weekly_noted: u16,
@@ -127,6 +136,7 @@ impl InputQueue {
             active: None,
             adopted: None,
             control: None,
+            interrupt_request: None,
             rejected: Vec::new(),
             proven: HashMap::new(),
             weekly_noted: 0,
@@ -412,12 +422,26 @@ impl InputQueue {
             Parsed::ControlResponse {
                 request_id,
                 success,
+                interrupt,
             } => {
                 if let Some(control) = self
                     .control
                     .take_if(|control| control.request_id == *request_id)
                 {
                     self.finish_control(control, *success);
+                } else if let Some(pending) = self
+                    .interrupt_request
+                    .as_mut()
+                    .filter(|pending| pending.request_id == *request_id)
+                {
+                    // Отказ прерывания квитанции не даст: итога ждём так же,
+                    // запасной SIGINT решит срок.
+                    if *success {
+                        pending.receipt =
+                            Some(interrupt.clone().unwrap_or_default());
+                    } else {
+                        self.interrupt_request = None;
+                    }
                 }
             }
             Parsed::Init {
@@ -442,6 +466,48 @@ impl InputQueue {
             _ => {}
         }
         None
+    }
+
+    /// Запрос прерывания строкой stdin: `None`, если хода нет и прерывать нечего.
+    /// Квитанция (`control_response`) приходит раньше итога прерванного хода;
+    /// её отсутствие в срок — повод для запасного SIGINT, а не для отказа.
+    pub fn interrupt_request(&mut self) -> Option<Value> {
+        if self.active.is_none() && self.adopted.is_none() {
+            return None;
+        }
+        let request_id = format!("canterlot-{}", Uuid::now_v7());
+        self.interrupt_request = Some(InterruptRequest {
+            request_id: request_id.clone(),
+            deadline: Instant::now() + self.control_timeout,
+            receipt: None,
+        });
+        self.interrupt = Interrupt::Sent;
+        Some(json!({
+            "type": "control_request",
+            "request_id": request_id,
+            "request": {"subtype": "interrupt"},
+        }))
+    }
+
+    /// Квитанция прерывания уже пришла: SIGINT не нужен, ждём итог хода.
+    pub fn interrupt_receipt(&self) -> Option<&InterruptReceipt> {
+        self.interrupt_request
+            .as_ref()
+            .and_then(|pending| pending.receipt.as_ref())
+    }
+
+    /// Срок ожидания квитанции, если её ещё нет: пробуждение для запасного SIGINT.
+    pub fn interrupt_receipt_bound(&self) -> Option<Instant> {
+        self.interrupt_request.as_ref().and_then(|pending| {
+            pending.receipt.is_none().then_some(pending.deadline)
+        })
+    }
+
+    /// Срок квитанции вышел, а её нет: пора в запасной SIGINT.
+    pub fn interrupt_receipt_expired(&self) -> bool {
+        self.interrupt_request.as_ref().is_some_and(|pending| {
+            pending.receipt.is_none() && Instant::now() >= pending.deadline
+        })
     }
 
     /// Отметить отправку SIGINT; `false`, если хода нет и прерывать нечего.
@@ -688,19 +754,22 @@ impl InputDriver {
         }
     }
 
-    /// SIGINT процессу CLI и ничего больше: подтверждение = `result` с `aborted_tools` или `aborted_streaming`,
-    /// после него CLI выходит с кодом 0 (исполнение заканчивается `stopped(user_stop)`).
+    /// Прерывание управляющим запросом `interrupt`: CLI останавливает ход,
+    /// процесс жив и принимает следующий ввод. Подтверждение — `result`
+    /// с `aborted_tools` или `aborted_streaming`, квитанция `control_response`
+    /// приходит раньше него. SIGINT — только запасной: квитанции нет в срок.
     pub async fn interrupt(
         &mut self,
         cli: &mut CliProcess,
         deadline: Duration,
     ) -> InterruptOutcome {
-        if !self.queue.interrupt_sent() {
+        let Some(line) = self.queue.interrupt_request() else {
             return InterruptOutcome::NotApplicable;
-        }
-        if cli.signal(Signal::Int).is_err() {
+        };
+        if cli.write_line(&line).await.is_err() {
             return InterruptOutcome::Undetermined;
         }
+        let mut sigint_sent = false;
         let limit = Instant::now() + deadline;
         loop {
             if self.queue.interrupt_acknowledged() {
@@ -709,9 +778,26 @@ impl InputDriver {
             if self.eof {
                 return InterruptOutcome::Undetermined;
             }
-            if tokio::time::timeout_at(limit, self.pump(cli))
+            if !sigint_sent && self.queue.interrupt_receipt_expired() {
+                // Запасной путь: квитанции нет, останавливаем ход сигналом.
+                // Дальше ждём то же подтверждение: итог хода един для обоих путей.
+                if cli.signal(Signal::Int).is_err() {
+                    return InterruptOutcome::Undetermined;
+                }
+                sigint_sent = true;
+            }
+            // Без кадров stdout ожидание упирается в срок квитанции,
+            // иначе запасной SIGINT никогда бы не наступил.
+            let bound = self
+                .queue
+                .interrupt_receipt_bound()
+                .filter(|_| !sigint_sent)
+                .map(|bound| bound.min(limit))
+                .unwrap_or(limit);
+            if tokio::time::timeout_at(bound, self.pump(cli))
                 .await
                 .is_err()
+                && sigint_sent
             {
                 return InterruptOutcome::Undetermined;
             }

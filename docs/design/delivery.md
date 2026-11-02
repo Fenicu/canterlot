@@ -312,7 +312,7 @@ stateDiagram-v2
 | `requested`, `on_machine` | `generation_mismatch` | поколение закрыто или не совпадает | квитанция `rejected_stale`; новое исполнение не затрагивается | `rejected_stale` |
 | `on_machine` | `nothing_to_interrupt` | адаптер не в ходе | квитанция; пауза остаётся | `not_applicable` |
 | `on_machine` | `interrupt_delivered` | | `SJ`: запись; адаптер получил прерывание | `sent_to_agent` |
-| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание: Codex ответом `{}` на `turn/interrupt`; Claude Code кадром `result` с `terminal_reason: aborted_tools` после SIGINT (решение владельца OD-2), см. отображение ниже | `SJ`, PG | `acknowledged` |
+| `sent_to_agent` | `agent_ack` | CLI подтверждает прерывание: Codex ответом `{}` на `turn/interrupt`; Claude Code кадром `result` с `terminal_reason: aborted_tools` (квитанция `control_response` приходит раньше него), см. отображение ниже | `SJ`, PG | `acknowledged` |
 | `sent_to_agent`, `acknowledged` | `run_ended_or_process_exited` | факт адаптера о конце хода либо подтверждённый выход процесса | `SJ`, PG: терминальное состояние хода; блоки хода `incomplete` или `final`; слот свободен | `completed` |
 | `requested`, `on_machine` | `execution_terminal_or_owner_lost` | | PG | `superseded` |
 | любое нетерминальное | 3 с без `acknowledged` или `completed` | таймер UI от `requested_at` | UI «подтверждение задерживается» | без изменения |
@@ -328,18 +328,18 @@ stateDiagram-v2
 - INT-6: прерывание идёт по каналу управления и не ждёт очереди событий (P-05, AT-H-03).
 - INT-7: `completed` («остановлено») означает конец хода, а не всех процессов инструментов. Если адаптер сообщает, что процессы инструментов пережили прерывание или их наличие неизвестно, UI показывает их как фоновую работу исполнения и предлагает их остановку: у Codex `thread/backgroundTerminals/clean`, у любого адаптера `stop_execution` или `force_stop`; владение каталогом не освобождается (execution.md §4, W-5).
 
-Отображение на CLI (факты этапа 0, решение владельца OD-2 и решения контролёра в [сводке этапа 0](../stage0/README.md) §6):
+Отображение на CLI (факты этапа 0 и решения контролёра в [сводке этапа 0](../stage0/README.md) §6):
 
-| Событие | Claude Code 2.1.310 | Codex 0.164.0 | OpenCode 2.1.4 |
+| Событие | Claude Code 2.1.316 | Codex 0.164.0 | OpenCode 2.1.4 |
 | --- | --- | --- | --- |
-| `interrupt_delivered` | SIGINT процессу CLI | `turn/interrupt {threadId, turnId}` | `POST .../interrupt` |
-| `agent_ack` | `result` с `subtype: error_during_execution`, `terminal_reason: aborted_tools`, 35 мс; он же конец хода | ответ `{}`, 15 мс | ответ `{interrupted: true}`, `false` значит `not_applicable` |
-| `run_ended_or_process_exited` | выход процесса CLI с кодом 0 | `turn/completed status: interrupted`, 15–16 мс, процесс жив | `session.execution.interrupted {reason: "user"}`, процесс жив |
-| процессы инструментов | дерево Bash убито | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер показывает её по `thread/backgroundTerminals/list` (INT-7) | основная команда снята, фоновые `shell` работают дальше и показываются блоком; `DELETE` разбудил бы модель |
+| `interrupt_delivered` | `control_request` `{"subtype": "interrupt"}` на stdin; SIGINT только запасной, если квитанции нет в срок | `turn/interrupt {threadId, turnId}` | `POST .../interrupt` |
+| `agent_ack` | `result` с `subtype: error_during_execution`, `terminal_reason: aborted_tools`; он же конец хода. Квитанция `control_response` (`{still_queued, cancelled?}`) приходит раньше него | ответ `{}`, 15 мс | ответ `{interrupted: true}`, `false` значит `not_applicable` |
+| `run_ended_or_process_exited` | `result error_during_execution` завершает ход, процесс жив; выход CLI только по запасному SIGINT | `turn/completed status: interrupted`, 15–16 мс, процесс жив | `session.execution.interrupted {reason: "user"}`, процесс жив |
+| процессы инструментов | дерево Bash останавливается прерыванием хода, процесс CLI жив | запущенная команда работает дальше; её элемент не получает `item/completed` до смерти процесса (поздний факт); адаптер показывает её по `thread/backgroundTerminals/list` (INT-7) | основная команда снята, фоновые `shell` работают дальше и показываются блоком; `DELETE` разбудил бы модель |
 | открытый запрос пользователя | MCP `notifications/cancelled` → `request_closed(interrupted)` | `serverRequest/resolved` без нашего ответа → `request_closed(interrupted)` | сервер снимает запрос сам: `request_closed(interrupted)`, остальным отказ с текстом |
-| исполнение после прерывания | `running` → `stopping` → `stopped(user_stop)` | остаётся `running` | остаётся `running` |
+| исполнение после прерывания | остаётся `running`; следующий ввод уходит в тот же процесс | остаётся `running` | остаётся `running` |
 
-**Решение владельца (OD-2)** для Claude Code: прерывание = документированный SIGINT, недокументированный `control_request` не используется. Выход процесса является ожидаемым итогом команды `interrupt`, а не `process_exited`: исполнение `stopped(user_stop)`, у очереди только пауза `user_stop`, которая и так требует явного продолжения (§7.3). Продолжение = явный resume, новое исполнение (около 1 с старта; эта задержка относится к resume, а не к прерыванию); `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
+Прерывание Claude Code управляющим запросом останавливает ход, а не сессию: актом `run_ended` ход закрывается как прерванный, `interrupt_keeps_process = true`, у очереди остаётся только пауза `user_stop`, которая и так требует явного продолжения (§7.3). Запасной SIGINT (квитанции нет в срок) завершается выходом процесса с кодом 0: исполнение `stopped(user_stop)`, продолжение = явный resume новым исполнением; `continue_queue` без него упирается в удержание `no_live_execution`, UI предлагает `resume_and_continue`.
 
 Codex (решение контролёра): точная политика для команд, выполнявшихся в прерванном ходе, определяется на этапе 2 с отдельным тестом; до этого действует INT-7.
 
