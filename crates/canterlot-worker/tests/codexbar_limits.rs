@@ -33,6 +33,7 @@ const NOW_MS: u64 = 1_793_483_400_000; // 2026-10-31T21:50:00Z
 const WEEK_RESET_MS: u64 = 1_793_667_600_000; // 2026-11-03T01:00:00Z
 const FIVE: i32 = LimitWindow::FiveHour as i32;
 const WEEK: i32 = LimitWindow::Weekly as i32;
+const MONTH: i32 = LimitWindow::Monthly as i32;
 
 fn rows(observations: &[LimitObservation]) -> Vec<(i32, u32, u64)> {
     let mut rows: Vec<_> = observations
@@ -491,13 +492,14 @@ async fn poll_report_carries_the_absence_and_a_failed_run_carries_none() {
 }
 
 #[test]
-fn opencode_reading_uses_window_lengths_and_skips_the_monthly_window() {
+fn opencode_reading_uses_window_lengths_and_keeps_the_monthly_window() {
     let reading = reading_from_output("opencode", OPENCODEGO.as_bytes(), NOW_MS).unwrap();
     assert_eq!(
         rows(&reading.observations),
         vec![
             (FIVE, 125, 1_793_501_361_000),
-            (WEEK, 340, 1_794_182_399_000)
+            (WEEK, 340, 1_794_182_399_000),
+            (MONTH, 93, 1_795_937_750_000)
         ]
     );
     assert!(reading.absent.is_empty(), "five hour window is present");
@@ -537,11 +539,27 @@ fn opencode_reading_without_a_usable_percent_marks_nothing_absent() {
     let body = r#"[{"provider":"opencodego","usage":{
         "primary":{"usedPercent":null,"windowMinutes":300},
         "secondary":{"usedPercent":null,"windowMinutes":10080},
-        "tertiary":{"usedPercent":9.3,"windowMinutes":43200},
+        "tertiary":{"usedPercent":null,"windowMinutes":43200},
         "updatedAt":"2026-10-31T21:49:21Z"}}]"#;
     let reading = reading_from_output("opencode", body.as_bytes(), NOW_MS).unwrap();
     assert!(reading.observations.is_empty());
     assert!(reading.absent.is_empty());
+}
+
+#[test]
+fn opencode_monthly_window_is_read_even_when_other_windows_are_missing() {
+    let body = r#"[{"provider":"opencodego","usage":{
+        "tertiary":{"usedPercent":9.3,"windowMinutes":43200,"resetsAt":"2026-11-29T07:35:50Z"},
+        "updatedAt":"2026-10-31T21:49:21Z"}}]"#;
+    let reading = reading_from_output("opencode", body.as_bytes(), NOW_MS).unwrap();
+    assert_eq!(
+        rows(&reading.observations),
+        vec![(MONTH, 93, 1_795_937_750_000)]
+    );
+    assert_eq!(
+        reading.absent.iter().map(|a| a.window).collect::<Vec<_>>(),
+        vec![FIVE]
+    );
 }
 
 #[tokio::test]
@@ -551,7 +569,7 @@ async fn opencode_poll_calls_codexbar_with_the_go_provider_name() {
     let source = source(printing(dir.path(), OPENCODEGO), &clock, None);
 
     let fetched = source.poll_report("opencode", false).await;
-    assert_eq!(fetched.observations.len(), 2);
+    assert_eq!(fetched.observations.len(), 3);
     assert!(fetched.absent.is_empty());
     let args = calls(dir.path());
     assert!(

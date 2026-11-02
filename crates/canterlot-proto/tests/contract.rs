@@ -929,6 +929,7 @@ fn pilot_records_roundtrip() {
         (0, "LIMIT_WINDOW_UNSPECIFIED"),
         (1, "LIMIT_WINDOW_FIVE_HOUR"),
         (2, "LIMIT_WINDOW_WEEKLY"),
+        (3, "LIMIT_WINDOW_MONTHLY"),
     ] {
         assert_eq!(LimitWindow::try_from(number).unwrap().as_str_name(), name);
     }

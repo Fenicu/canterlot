@@ -80,19 +80,75 @@ async function bootList(page: Page) {
 
 test('child_nests_under_parent_and_keeps_counts', async ({ page }) => {
   const { ids } = await bootList(page);
+  // Разделители в строке-сгибе не слипаются с числом работающих.
+  const fold = page.getByRole('button', { name: /делегированные: 2/ });
+  await expect(fold).toBeVisible();
+  await expect(fold).toContainText('Делегированные · 2 · работает 1');
   const child = page.locator(`[data-session="${ids.child}"]`);
   await expect(child).toBeVisible();
   await expect(child).toHaveClass(/depth-1/);
-  await expect(child.locator('.title')).toContainText('└');
+  // Ветку рисует строка-сгиб: в самой строке второго значка и склейки с названием нет.
+  await expect(child.locator('.title')).not.toContainText('└');
+  await expect(child.locator('.title')).toHaveText('Миграция схемы');
   // Ребёнок не занимает места в счёте группы и вкладок.
   await expect(page.getByRole('tab', { name: /canterlot 1/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /Все 4/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /делегированные: 2/ })).toBeVisible();
-  await expect(page.getByRole('button', { name: /делегированные: 2/ })).toContainText('работает 1');
   // Во вкладке группы ребёнок едет с родителем, а не своей строкой.
   await page.getByRole('tab', { name: /canterlot/ }).click();
   await expect(page.locator(`[data-session="${ids.child}"]`)).toHaveClass(/depth-1/);
   await expect(page.getByRole('tab', { name: /canterlot 1/ })).toBeVisible();
+});
+
+test('child_status_dot_uses_the_same_activity_colour_as_a_top_level_row', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const parent = seedConversation(api, { title: 'Оркестратор', activity: IDLE as never });
+  const child = seedConversation(api, {
+    title: 'Выкатка ba35992',
+    parent_id: parent,
+    spawn_depth: 1,
+    activity: WORKING as never
+  });
+  const top = seedConversation(api, { title: 'Обычная работа', activity: WORKING as never });
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  const childMark = page.locator(`[data-session="${child}"] .mark`);
+  const topMark = page.locator(`[data-session="${top}"] .mark`);
+  await expect(childMark).toHaveAttribute('data-token', '--accent');
+  expect(await childMark.getAttribute('data-token')).toBe(await topMark.getAttribute('data-token'));
+  // Спокойная строка без выбранного цвета остаётся нейтральной.
+  await expect(page.locator(`[data-session="${parent}"] .mark`)).toHaveAttribute('data-token', '--muted');
+});
+
+test('grandchild_keeps_indentation_without_a_second_tree_mark', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const root = seedConversation(api, { title: 'Оркестратор', activity: IDLE as never });
+  const child = seedConversation(api, {
+    title: 'Миграция схемы',
+    parent_id: root,
+    spawn_depth: 1,
+    activity: IDLE as never
+  });
+  const grandchild = seedConversation(api, {
+    title: 'Проверка',
+    parent_id: child,
+    spawn_depth: 2,
+    activity: WORKING as never
+  });
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto('/sessions');
+  await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 15_000 });
+  const childRow = page.locator(`[data-session="${child}"]`);
+  const grandchildRow = page.locator(`[data-session="${grandchild}"]`);
+  await expect(childRow).toHaveClass(/depth-1/);
+  await expect(grandchildRow).toHaveClass(/depth-2/);
+  await expect(grandchildRow.locator('.title')).toHaveText('Проверка');
+  await expect(grandchildRow.locator('.title')).not.toContainText('└');
+  const childBox = await childRow.boundingBox();
+  const grandchildBox = await grandchildRow.boundingBox();
+  expect(grandchildBox!.x).toBeGreaterThan(childBox!.x);
 });
 
 test('kids_toggle_collapses_and_remembers_choice', async ({ page }) => {

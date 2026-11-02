@@ -4,8 +4,9 @@ import { installChatRoutes, seedSecondaryScreens } from '../../testing/fake-hub/
 import { seedMockupSessions } from '../../testing/fixtures/mockup-sessions';
 import { expect } from './fixtures';
 
-export async function bootSecondary(page: Page, path = '/machines', logout: string | null = null) {
+export async function bootSecondary(page: Page, path = '/machines', logout: string | null = null, patch?: (api: FakeHubApi) => void) {
   const hub = new FakeHub(); const api = new FakeHubApi(hub); const ids = seedMockupSessions(api);
+  patch?.(api);
   await installChatRoutes(page, hub, api, ids.pinned);
   const fixture = await seedSecondaryScreens(page, api, ids, logout);
   await page.goto(path);

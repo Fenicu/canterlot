@@ -3593,7 +3593,8 @@
             "window": {
               "enum": [
                 "five_hour",
-                "weekly"
+                "weekly",
+                "monthly"
               ]
             },
             "used_permille": {

@@ -772,7 +772,7 @@ export interface LimitsChanged {
   kind: "limits_changed";
   payload: {
     provider: string;
-    window: "five_hour" | "weekly";
+    window: "five_hour" | "weekly" | "monthly";
     used_permille: number | null;
     resets_at: Time | null;
     observed_at: Time;
