@@ -4,6 +4,7 @@
 
 use std::fmt;
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -30,6 +31,156 @@ pub struct InputOrigin {
     pub chain_depth: i32,
     pub sha256: Option<String>,
     pub sender_deleted: Option<bool>,
+    /// Разобранные факты служебного события: клиент не читает английский текст.
+    pub event: Option<HubEvent>,
+}
+
+/// Коммит из итога сессии: короткий хеш и первая строка сообщения.
+#[derive(Serialize, utoipa::ToSchema, Clone, Debug)]
+pub struct HubCommit {
+    pub sha: String,
+    pub title: String,
+}
+
+/// Факты события хаба. Текст для модели остаётся прежним, а здесь лежит то, что
+/// владелец видит в ленте.
+#[derive(Serialize, utoipa::ToSchema, Clone, Debug, Default)]
+pub struct HubEvent {
+    /// `session_result`, `asked`, `stalled`, `failed`, `quota_paused`, `stopped`,
+    /// `accepted`, `approval` или `deleted`.
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turns: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_in: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_out: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commits: Option<Vec<HubCommit>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_files: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub answer_block_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub question: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_event_at: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_alive: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_busy: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub until: Option<DateTime<Utc>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub outcome: Option<String>,
+    /// `accepted`: `removed`, `none`, `dirty` или `failed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_kept: Option<bool>,
+    /// `approval`: `allowed`, `denied`, `failed` или `lapsed`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub decision: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub child_id: Option<Uuid>,
+    /// `accepted`: событие ушло другому подписчику, а не принявшему родителю.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub closed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+impl HubEvent {
+    pub fn accepted(
+        session_id: Uuid,
+        worktree: &str,
+        branch: Option<&str>,
+        branch_kept: Option<bool>,
+    ) -> Self {
+        Self {
+            kind: "accepted".to_owned(),
+            session_id: Some(session_id),
+            worktree: Some(worktree.to_owned()),
+            branch: branch.map(str::to_owned),
+            branch_kept,
+            ..Self::default()
+        }
+    }
+
+    pub fn accepted_with_detail(session_id: Uuid, worktree: &str, detail: Option<&str>) -> Self {
+        Self {
+            kind: "accepted".to_owned(),
+            session_id: Some(session_id),
+            worktree: Some(worktree.to_owned()),
+            detail: detail.map(str::to_owned),
+            ..Self::default()
+        }
+    }
+
+    pub fn accepted_closed(session_id: Uuid) -> Self {
+        Self {
+            kind: "accepted".to_owned(),
+            session_id: Some(session_id),
+            closed: Some(true),
+            ..Self::default()
+        }
+    }
+
+    pub fn approval(
+        decision: &str,
+        request_id: Uuid,
+        child_id: Option<Uuid>,
+        detail: Option<&str>,
+    ) -> Self {
+        Self {
+            kind: "approval".to_owned(),
+            decision: Some(decision.to_owned()),
+            request_id: Some(request_id),
+            child_id,
+            detail: detail.map(str::to_owned),
+            ..Self::default()
+        }
+    }
+
+    pub fn deleted(session_id: Uuid) -> Self {
+        Self {
+            kind: "deleted".to_owned(),
+            session_id: Some(session_id),
+            ..Self::default()
+        }
+    }
+}
+
+/// Кладёт факты рядом с отправителем, не трогая остальные поля origin.
+pub fn with_event(mut origin: Value, event: HubEvent) -> Value {
+    if let Some(object) = origin.as_object_mut()
+        && let Ok(value) = serde_json::to_value(event)
+    {
+        object.insert("event".to_owned(), value);
+    }
+    origin
 }
 
 /// Отправитель сообщения.

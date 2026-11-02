@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::{
     activity::{Evidence, OWNER_LOST, extract_request_summary},
     requests::RequestKind,
+    session_tools::origin::{HubCommit, HubEvent},
 };
 
 /// Предел итогового ответа в тексте события.
@@ -560,6 +561,73 @@ pub fn render(summary: &SessionSummary) -> String {
     out.push_str(&tail);
     out.truncate(out.trim_end().len());
     out
+}
+
+impl SessionSummary {
+    /// Факты для ленты владельца: текст события остаётся прежним.
+    pub fn hub_event(&self) -> HubEvent {
+        let kind = match self.state.as_str() {
+            "idle" => "session_result",
+            "waiting_for_user" => "asked",
+            "stalled" => "stalled",
+            "failed" => "failed",
+            "quota_paused" => "quota_paused",
+            "stopped" => "stopped",
+            _ => "session_result",
+        };
+        let mut event = HubEvent {
+            kind: kind.to_owned(),
+            state: Some(self.state.clone()),
+            session_id: Some(self.id),
+            turns: Some(self.turns as i64),
+            duration_ms: Some(self.duration_ms),
+            tokens_in: Some(self.tokens_in),
+            tokens_out: Some(self.tokens_out),
+            commits: self.git.as_ref().map(|git| {
+                git.commits
+                    .iter()
+                    .map(|commit| HubCommit {
+                        sha: short(&commit.sha),
+                        title: one_line(&commit.subject, SHORT_FIELD),
+                    })
+                    .collect()
+            }),
+            changed_files: self.git.as_ref().map(|git| git.files.len() as i64),
+            ..HubEvent::default()
+        };
+        if let Some(answer) = &self.answer {
+            event.answer = Some(answer.head.clone());
+            event.answer_bytes = Some(answer.total_bytes as i64);
+            event.answer_block_id = Some(answer.block_id);
+        }
+        match &self.detail {
+            Detail::Waiting { question } => event.question.clone_from(question),
+            Detail::Stalled {
+                phase,
+                last_event_at,
+                process_alive,
+                cpu_busy,
+            } => {
+                event.phase = Some(phase.clone());
+                event.last_event_at = Some(*last_event_at);
+                event.process_alive = *process_alive;
+                event.cpu_busy = *cpu_busy;
+            }
+            Detail::Failed { reason } => event.reason = Some(reason.clone()),
+            Detail::QuotaPaused {
+                provider,
+                window,
+                until,
+            } => {
+                event.provider.clone_from(provider);
+                event.window.clone_from(window);
+                event.until = *until;
+            }
+            Detail::Stopped { outcome } => event.outcome = Some(outcome.clone()),
+            Detail::None => {}
+        }
+        event
+    }
 }
 
 /// Текст события для подписчика; `None`, если цели уже нет.

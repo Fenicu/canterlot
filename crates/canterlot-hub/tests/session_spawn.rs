@@ -705,8 +705,13 @@ async fn allow_creates_session_and_notifies_parent(pool: PgPool) {
     assert_eq!(notes.len(), 1);
     assert!(notes[0].0.starts_with("[canterlot]"), "{}", notes[0].0);
     assert!(notes[0].0.contains(&child.to_string()));
-    assert_eq!(notes[0].1.as_ref().unwrap()["kind"], "event");
-    assert_eq!(notes[0].1.as_ref().unwrap()["from"], child.to_string());
+    let origin = notes[0].1.as_ref().unwrap();
+    assert_eq!(origin["kind"], "event");
+    assert_eq!(origin["from"], child.to_string());
+    assert_eq!(origin["event"]["kind"], "approval", "{origin}");
+    assert_eq!(origin["event"]["decision"], "allowed");
+    assert_eq!(origin["event"]["request_id"], json!(request));
+    assert_eq!(origin["event"]["child_id"], json!(child));
 
     f.tick().await;
     assert_eq!(f.sessions().await, 2, "the job does not repeat");
@@ -722,9 +727,13 @@ async fn deny_notifies_parent_and_creates_nothing(pool: PgPool) {
     assert!(f.child().await.is_none());
     assert_eq!(f.request_state(request).await, "decision_applied");
     assert_eq!(f.closed_reason(request).await.as_deref(), Some("applied"));
-    let notes = f.notes().await;
+    let notes = f.inputs(f.parent).await;
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("denied"), "{}", notes[0]);
+    assert!(notes[0].0.contains("denied"), "{}", notes[0].0);
+    let origin = notes[0].1.as_ref().unwrap();
+    assert_eq!(origin["event"]["kind"], "approval", "{origin}");
+    assert_eq!(origin["event"]["decision"], "denied");
+    assert_eq!(origin["event"]["request_id"], json!(request));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -746,9 +755,13 @@ async fn failed_allow_closes_as_not_applied_and_notifies_parent(pool: PgPool) {
         f.closed_reason(request).await.as_deref(),
         Some("model_unknown")
     );
-    let notes = f.notes().await;
+    let notes = f.inputs(f.parent).await;
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("model_unknown"), "{}", notes[0]);
+    assert!(notes[0].0.contains("model_unknown"), "{}", notes[0].0);
+    let origin = notes[0].1.as_ref().unwrap();
+    assert_eq!(origin["event"]["kind"], "approval", "{origin}");
+    assert_eq!(origin["event"]["decision"], "failed");
+    assert_eq!(origin["event"]["detail"], "model_unknown");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -804,10 +817,14 @@ async fn approval_lapses_with_parent_execution(pool: PgPool) {
     f.stop_parent().await;
     assert_eq!(f.request_state(request).await, "closed_without_decision");
     f.tick().await;
-    let notes = f.notes().await;
+    let notes = f.inputs(f.parent).await;
     assert_eq!(notes.len(), 1);
-    assert!(notes[0].contains("lapsed"), "{}", notes[0]);
-    assert!(notes[0].contains(&request.to_string()));
+    assert!(notes[0].0.contains("lapsed"), "{}", notes[0].0);
+    assert!(notes[0].0.contains(&request.to_string()));
+    let origin = notes[0].1.as_ref().unwrap();
+    assert_eq!(origin["event"]["kind"], "approval", "{origin}");
+    assert_eq!(origin["event"]["decision"], "lapsed");
+    assert_eq!(origin["event"]["request_id"], json!(request));
     assert!(matches!(
         f.decide(request, PermissionBehavior::Allow).await,
         DecisionResult::AlreadyClosed { .. }

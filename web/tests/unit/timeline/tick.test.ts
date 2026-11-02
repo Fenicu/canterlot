@@ -20,6 +20,7 @@ vi.mock("#lib/timeline/rows.js", async (original) => {
 });
 
 vi.mock("#lib/timeline/AnswerCard.svelte", () => ({ default: () => undefined }));
+vi.mock("#lib/timeline/EventEntry.svelte", () => ({ default: () => undefined }));
 vi.mock("#lib/timeline/UserBubble.svelte", () => ({ default: () => undefined }));
 
 class Quiet {

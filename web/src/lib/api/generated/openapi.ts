@@ -1378,6 +1378,66 @@ export interface components {
             /** @enum {string} */
             reason: "capability_missing";
         };
+        /** @description Коммит из итога сессии: короткий хеш и первая строка сообщения. */
+        HubCommit: {
+            sha: string;
+            title: string;
+        };
+        /**
+         * @description Факты события хаба. Текст для модели остаётся прежним, а здесь лежит то, что
+         *     владелец видит в ленте.
+         */
+        HubEvent: {
+            answer?: string | null;
+            /** Format: uuid */
+            answer_block_id?: string | null;
+            /** Format: int64 */
+            answer_bytes?: number | null;
+            branch?: string | null;
+            branch_kept?: boolean | null;
+            /** Format: int64 */
+            changed_files?: number | null;
+            /** Format: uuid */
+            child_id?: string | null;
+            /** @description `accepted`: событие ушло другому подписчику, а не принявшему родителю. */
+            closed?: boolean | null;
+            commits?: components["schemas"]["HubCommit"][] | null;
+            cpu_busy?: boolean | null;
+            /** @description `approval`: `allowed`, `denied`, `failed` или `lapsed`. */
+            decision?: string | null;
+            detail?: string | null;
+            /** Format: int64 */
+            duration_ms?: number | null;
+            /**
+             * @description `session_result`, `asked`, `stalled`, `failed`, `quota_paused`, `stopped`,
+             *     `accepted`, `approval` или `deleted`.
+             */
+            kind: string;
+            /** Format: date-time */
+            last_event_at?: string | null;
+            outcome?: string | null;
+            phase?: string | null;
+            process_alive?: boolean | null;
+            provider?: string | null;
+            question?: string | null;
+            reason?: string | null;
+            /** Format: uuid */
+            request_id?: string | null;
+            /** Format: uuid */
+            session_id?: string | null;
+            state?: string | null;
+            /** Format: int64 */
+            tokens_in?: number | null;
+            /** Format: int64 */
+            tokens_out?: number | null;
+            /** Format: int64 */
+            turns?: number | null;
+            /** Format: date-time */
+            until?: string | null;
+            window?: string | null;
+            /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
+            worktree?: string | null;
+        };
         InputContentBlock: {
             text: string;
             /** @enum {string} */
@@ -1393,6 +1453,7 @@ export interface components {
         InputOrigin: {
             /** Format: int32 */
             chain_depth: number;
+            event?: components["schemas"]["HubEvent"] | null;
             /** Format: uuid */
             from?: string | null;
             harness?: string | null;

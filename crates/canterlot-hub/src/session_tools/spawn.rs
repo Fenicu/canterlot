@@ -701,8 +701,8 @@ pub(crate) async fn queue_decision_in_tx(
     .await
 }
 
-pub(super) fn note_job(text: String, origin: Value) -> Value {
-    json!({"action": "note", "text": text, "origin": origin})
+pub(super) fn note_job(text: String, origin: Value, event: origin::HubEvent) -> Value {
+    json!({"action": "note", "text": text, "origin": origin::with_event(origin, event)})
 }
 
 /// Вызывается под очередью родителя; сообщение дойдёт отдельным заданием.
@@ -725,7 +725,11 @@ pub(crate) async fn queue_lapsed_note_in_tx(
         owner,
         parent,
         Utc::now(),
-        &note_job(text, origin::note_origin(depth)),
+        &note_job(
+            text,
+            origin::note_origin(depth),
+            origin::HubEvent::approval("lapsed", request, None, None),
+        ),
     )
     .await?;
     Ok(())
@@ -742,6 +746,7 @@ struct Resolution {
     reason: String,
     text: String,
     origin: Value,
+    event: origin::HubEvent,
 }
 
 fn denied(request: Uuid, depth: i32, message: Option<&str>) -> Resolution {
@@ -755,6 +760,7 @@ fn denied(request: Uuid, depth: i32, message: Option<&str>) -> Resolution {
             "[canterlot] The owner denied your session_spawn request {request}. Nothing was started. Do not retry it with different arguments.{remark}"
         ),
         origin: origin::note_origin(depth),
+        event: origin::HubEvent::approval("denied", request, None, None),
     }
 }
 
@@ -766,6 +772,7 @@ fn failed(request: Uuid, depth: i32, code: &str) -> Resolution {
             "[canterlot] The owner allowed your session_spawn request {request}, but the session could not start: {code}."
         ),
         origin: origin::note_origin(depth),
+        event: origin::HubEvent::approval("failed", request, None, Some(code)),
     }
 }
 
@@ -789,6 +796,7 @@ fn started(request: Uuid, spec: &SpawnSpec, child: &Started) -> Resolution {
             child.session_id, spec.harness, spec.model, spec.permission_mode,
         ),
         origin: origin::started_note_origin(&sender, spec.chain_depth),
+        event: origin::HubEvent::approval("allowed", request, Some(child.session_id), None),
     }
 }
 
@@ -897,7 +905,7 @@ pub(crate) async fn run_job(
         "reason": resolution.reason,
     });
     subs::insert_job(conn, job.owner_id, parent_id, now, &close).await?;
-    let note = note_job(resolution.text, resolution.origin);
+    let note = note_job(resolution.text, resolution.origin, resolution.event);
     subs::insert_job(conn, job.owner_id, parent_id, now, &note).await?;
     Ok(JobOutcome::Done(json!({"request_id": request_id})))
 }
@@ -1018,7 +1026,7 @@ pub(crate) async fn abandon_spawn_in_tx(
         owner,
         parent_id,
         now,
-        &note_job(resolution.text, resolution.origin),
+        &note_job(resolution.text, resolution.origin, resolution.event),
     )
     .await?;
     Ok(())

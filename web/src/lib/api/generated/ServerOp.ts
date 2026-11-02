@@ -133,6 +133,43 @@ export interface InputOrigin {
   chain_depth: number;
   sha256?: string;
   sender_deleted?: boolean;
+  event?: HubEvent;
+}
+export interface HubEvent {
+  kind: string;
+  state?: string;
+  session_id?: Uuid;
+  turns?: number;
+  duration_ms?: number;
+  tokens_in?: number;
+  tokens_out?: number;
+  commits?: HubCommit[];
+  changed_files?: number;
+  answer?: string;
+  answer_bytes?: number;
+  answer_block_id?: Uuid;
+  question?: string;
+  phase?: string;
+  last_event_at?: Time;
+  process_alive?: boolean;
+  cpu_busy?: boolean;
+  reason?: string;
+  provider?: string;
+  window?: string;
+  until?: Time;
+  outcome?: string;
+  worktree?: string;
+  branch?: string;
+  branch_kept?: boolean;
+  decision?: string;
+  request_id?: Uuid;
+  child_id?: Uuid;
+  closed?: boolean;
+  detail?: string;
+}
+export interface HubCommit {
+  sha: string;
+  title: string;
 }
 export interface InputStateChanged {
   v: 1;

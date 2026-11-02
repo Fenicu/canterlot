@@ -662,6 +662,215 @@ async fn summary_never_contains_secret_answer(pool: PgPool) {
     }
 }
 
+async fn deliver_event(
+    pool: &PgPool,
+    owner: Uuid,
+    subscriber: Uuid,
+    target: Uuid,
+    state: &str,
+    armed_at: Option<DateTime<Utc>>,
+) -> (String, Value) {
+    use canterlot_hub::{
+        scheduler::{ClaimedJob, JobKind},
+        session_tools::jobs,
+    };
+    let mut tx = pool.begin().await.unwrap();
+    let job = ClaimedJob {
+        id: Uuid::now_v7(),
+        kind: JobKind::SessionTask,
+        owner_id: owner,
+        conversation_id: Some(subscriber),
+        run_at: Utc::now(),
+        payload: json!({
+            "action": "event",
+            "target_id": target,
+            "state": state,
+            "chain_depth": 0,
+            "armed_at": armed_at,
+        }),
+        attempts: 0,
+    };
+    jobs::run_in_tx(&mut tx, &job, Utc::now(), Uuid::now_v7(), None)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let (content, origin): (Value, Option<Value>) = sqlx::query_as(
+        "select content,origin from inputs where conversation_id=$1 order by input_seq desc limit 1",
+    )
+    .bind(subscriber)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (
+        content[0]["text"].as_str().unwrap().to_owned(),
+        origin.unwrap_or(Value::Null),
+    )
+}
+
+async fn expected_summary(
+    pool: &PgPool,
+    f: &Fixture,
+    state: &str,
+    armed_at: Option<DateTime<Utc>>,
+) -> String {
+    let mut conn = pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, f.target, state, armed_at)
+        .await
+        .unwrap()
+        .expect("target exists");
+    summary::render(&summary)
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn summary_events_deliver_facts_without_changing_text(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let subscriber = testkit::seed_conversation(&pool, f.owner, f.machine).await;
+    let now = Utc::now();
+    let armed = Some(now - TimeDelta::minutes(10));
+    let answer_id = add_text(&pool, &f, 1, None, None, "All done, tests pass.").await;
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now,
+            duration_ms: 252_000,
+            git: Some(git(
+                "1a2b3c4d5e6f",
+                "5d6e7f8a9b0c",
+                true,
+                &[("5d6e7f8a9b0c", "Parse the header")],
+                &[("src/a.rs", "M"), ("src/b.rs", "A")],
+            )),
+            tokens: (12345, 678),
+        },
+    )
+    .await;
+
+    let expected = expected_summary(&pool, &f, "idle", armed).await;
+    let (text, origin) = deliver_event(&pool, f.owner, subscriber, f.target, "idle", armed).await;
+    assert_eq!(text, expected, "the delivered text is the rendered summary");
+    let event = &origin["event"];
+    assert_eq!(origin["kind"], "event", "{origin}");
+    assert_eq!(event["kind"], "session_result", "{event}");
+    assert_eq!(event["state"], "idle");
+    assert_eq!(event["session_id"], json!(f.target));
+    assert_eq!(event["turns"], 1);
+    assert_eq!(event["duration_ms"], 252_000);
+    assert_eq!(event["tokens_in"], 12345);
+    assert_eq!(event["tokens_out"], 678);
+    assert_eq!(event["commits"][0]["sha"], "5d6e7f8");
+    assert_eq!(event["commits"][0]["title"], "Parse the header");
+    assert_eq!(event["changed_files"], 2);
+    assert_eq!(event["answer"], "All done, tests pass.");
+    assert_eq!(event["answer_block_id"], json!(answer_id));
+    assert!(event["answer_bytes"].as_i64().unwrap() > 0);
+
+    open_question(
+        &pool,
+        &f,
+        json!({"questions": [{"question": "Which database should I use?"}]}),
+    )
+    .await;
+    set_activity(
+        &pool,
+        f.target,
+        S::WaitingForUser,
+        E::WaitingForUser {
+            phase: "awaiting_answer".into(),
+            question: None,
+        },
+    )
+    .await;
+    let expected = expected_summary(&pool, &f, "waiting_for_user", armed).await;
+    let (text, origin) = deliver_event(
+        &pool,
+        f.owner,
+        subscriber,
+        f.target,
+        "waiting_for_user",
+        armed,
+    )
+    .await;
+    assert_eq!(text, expected);
+    assert_eq!(origin["event"]["kind"], "asked", "{origin}");
+    assert_eq!(origin["event"]["state"], "waiting_for_user");
+    assert_eq!(origin["event"]["question"], "Which database should I use?");
+
+    set_activity(
+        &pool,
+        f.target,
+        S::Stalled,
+        E::Stalled {
+            last_event_at: now - TimeDelta::minutes(7),
+            phase: "tool".into(),
+            process_alive: Some(true),
+            cpu_busy: Some(false),
+            link: "available".into(),
+        },
+    )
+    .await;
+    let expected = expected_summary(&pool, &f, "stalled", armed).await;
+    let (text, origin) =
+        deliver_event(&pool, f.owner, subscriber, f.target, "stalled", armed).await;
+    assert_eq!(text, expected);
+    assert_eq!(origin["event"]["kind"], "stalled", "{origin}");
+    assert_eq!(origin["event"]["phase"], "tool");
+    assert_eq!(origin["event"]["process_alive"], true);
+    assert_eq!(origin["event"]["cpu_busy"], false);
+
+    set_activity(
+        &pool,
+        f.target,
+        S::Failed,
+        E::Failed {
+            reason: "machine_rebooted".into(),
+        },
+    )
+    .await;
+    let expected = expected_summary(&pool, &f, "failed", armed).await;
+    let (text, origin) = deliver_event(&pool, f.owner, subscriber, f.target, "failed", armed).await;
+    assert_eq!(text, expected);
+    assert_eq!(origin["event"]["kind"], "failed", "{origin}");
+    assert_eq!(origin["event"]["reason"], "machine_rebooted");
+
+    set_activity(
+        &pool,
+        f.target,
+        S::QuotaPaused,
+        E::QuotaPaused {
+            reason: "limit".into(),
+            provider: Some("anthropic".into()),
+            window: Some("weekly".into()),
+            until: Some(now + TimeDelta::hours(3)),
+        },
+    )
+    .await;
+    let expected = expected_summary(&pool, &f, "quota_paused", armed).await;
+    let (text, origin) =
+        deliver_event(&pool, f.owner, subscriber, f.target, "quota_paused", armed).await;
+    assert_eq!(text, expected);
+    assert_eq!(origin["event"]["kind"], "quota_paused", "{origin}");
+    assert_eq!(origin["event"]["provider"], "anthropic");
+    assert_eq!(origin["event"]["window"], "weekly");
+    assert!(origin["event"]["until"].is_string());
+
+    set_activity(
+        &pool,
+        f.target,
+        S::Stopped,
+        E::Stopped {
+            outcome: "owner_stop".into(),
+        },
+    )
+    .await;
+    let expected = expected_summary(&pool, &f, "stopped", armed).await;
+    let (text, origin) =
+        deliver_event(&pool, f.owner, subscriber, f.target, "stopped", armed).await;
+    assert_eq!(text, expected);
+    assert_eq!(origin["event"]["kind"], "stopped", "{origin}");
+    assert_eq!(origin["event"]["outcome"], "owner_stop");
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn summary_ignores_answer_from_before_the_window(pool: PgPool) {
     let f = fixture(&pool).await;

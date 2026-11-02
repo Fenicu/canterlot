@@ -4,6 +4,7 @@ import { fmt } from "#lib/format/ru.js";
 import { isDocked } from "#lib/stores/requests.svelte.js";
 import type { TimelineEntry } from "#lib/stores/timeline.js";
 import { isMainAgent } from "./present";
+import { isEventOrigin } from "./hubEvent";
 import type { RowKind } from "./virtual";
 
 export type { RowKind };
@@ -115,7 +116,11 @@ export function buildRows(
     }
     if (entry.kind === "input") {
       card = null;
-      rows.push({ key: entry.key, kind: "input", entries: [entry] });
+      rows.push({
+        key: entry.key,
+        kind: isEventOrigin(entry.input.origin) ? "event" : "input",
+        entries: [entry]
+      });
       continue;
     }
     const run = entry.block.inputCommandId;

@@ -12,7 +12,7 @@ use crate::{
     delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
     scheduler::ClaimedJob,
     session::Registry,
-    session_tools::{accept, spawn, summary},
+    session_tools::{accept, origin, spawn, summary},
 };
 
 #[derive(Deserialize)]
@@ -94,12 +94,13 @@ async fn event_message(
     let summary = summary::build(conn, owner_id, id, &event.state, event.armed_at).await?;
     Ok(match summary {
         Some(summary) => {
-            let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth});
+            let event = summary.hub_event();
+            let origin = json!({"kind":"event","from":id,"title":summary.title,"harness":summary.harness,"model":summary.model,"chain_depth":depth,"event":event});
             (summary::render(&summary), origin)
         }
         None => (
             format!("[canterlot] Session {id} was deleted."),
-            json!({"kind":"event","from":id,"chain_depth":depth}),
+            json!({"kind":"event","from":id,"chain_depth":depth,"event":origin::HubEvent::deleted(id)}),
         ),
     })
 }

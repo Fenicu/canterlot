@@ -5782,6 +5782,124 @@
       ],
       "additionalProperties": false
     },
+    "HubCommit": {
+      "type": "object",
+      "properties": {
+        "sha": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "sha",
+        "title"
+      ],
+      "additionalProperties": false
+    },
+    "HubEvent": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "session_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "turns": {
+          "type": "integer"
+        },
+        "duration_ms": {
+          "type": "integer"
+        },
+        "tokens_in": {
+          "type": "integer"
+        },
+        "tokens_out": {
+          "type": "integer"
+        },
+        "commits": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/HubCommit"
+          }
+        },
+        "changed_files": {
+          "type": "integer"
+        },
+        "answer": {
+          "type": "string"
+        },
+        "answer_bytes": {
+          "type": "integer"
+        },
+        "answer_block_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "question": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "last_event_at": {
+          "$ref": "#/$defs/Time"
+        },
+        "process_alive": {
+          "type": "boolean"
+        },
+        "cpu_busy": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "provider": {
+          "type": "string"
+        },
+        "window": {
+          "type": "string"
+        },
+        "until": {
+          "$ref": "#/$defs/Time"
+        },
+        "outcome": {
+          "type": "string"
+        },
+        "worktree": {
+          "type": "string"
+        },
+        "branch": {
+          "type": "string"
+        },
+        "branch_kept": {
+          "type": "boolean"
+        },
+        "decision": {
+          "type": "string"
+        },
+        "request_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "child_id": {
+          "$ref": "#/$defs/Uuid"
+        },
+        "closed": {
+          "type": "boolean"
+        },
+        "detail": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "additionalProperties": false
+    },
     "InputOrigin": {
       "type": "object",
       "properties": {
@@ -5813,6 +5931,9 @@
         },
         "sender_deleted": {
           "type": "boolean"
+        },
+        "event": {
+          "$ref": "#/$defs/HubEvent"
         }
       },
       "required": [
