@@ -1734,8 +1734,14 @@ async fn drain_until_exit(
         if start.elapsed() >= limit {
             return false;
         }
-        if let Ok(line) = timeout(Duration::from_millis(50), proc.next_line()).await {
-            adapter.dispatch_line(line);
+        match timeout(Duration::from_millis(50), proc.next_line()).await {
+            // Конец stdout отвечает мгновенно, а процесс ещё жив: без паузы цикл крутился бы.
+            Ok(StdoutLine::Eof) => {
+                adapter.dispatch_line(StdoutLine::Eof);
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+            Ok(line) => adapter.dispatch_line(line),
+            Err(_) => {}
         }
     }
 }
