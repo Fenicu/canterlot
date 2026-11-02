@@ -5,7 +5,7 @@
   import Icon from '#lib/ui/Icon.svelte';
   import type { ListRow } from '#lib/stores/list.svelte.js';
   import { activityLine, type Activity } from './activityText';
-  import { colorVar } from './colors';
+  import { colorVar, toneVar } from './colors';
 
   let {
     item,
@@ -22,6 +22,7 @@
   } = $props();
 
   const line = $derived(activityLine(item.activity as Activity, { now }));
+  const mark = $derived(item.color ? colorVar(item.color) : toneVar(line.tone));
   const stamp = $derived(item.last_activity_at ? fmt.clock(Date.parse(item.last_activity_at)) : '');
   const tail = $derived(item.unread_count > 0 && stamp ? ` · ${stamp}` : '');
   let timer = 0;
@@ -46,8 +47,8 @@
 
 <article class="row" class:current class:depth-1={depth === 1} class:depth-2={depth >= 2} data-session={item.id} oncontextmenu={(event) => { event.preventDefault(); onopen(item.id); }}>
   <a href={resolve(`/c/${item.id}` as '/')} aria-current={current ? 'page' : undefined} onpointerdown={down} onpointerup={up} onpointercancel={up} onclick={click}>
-    <span class="mark" data-token={colorVar(item.color)}></span>
-    <span class="title">{#if depth > 0}<span class="branch" aria-hidden="true">└ </span>{/if}{item.title}</span>
+    <span class="mark" data-token={mark}></span>
+    <span class="title">{item.title}</span>
     <span class="side">
       {#if item.unread_count > 1}
         <span class="sr-only">Непрочитанных: {item.unread_count}</span><span class="count" aria-hidden="true">{item.unread_count}</span>
@@ -69,7 +70,6 @@
   .row { display: flex; align-items: flex-start; gap: var(--s2); margin-inline: var(--s3); padding: var(--s4) var(--s3) var(--s4) var(--s6); border-radius: var(--radius-card); }
   .row.depth-1 { margin-left: calc(var(--s3) + var(--s9)); }
   .row.depth-2 { margin-left: calc(var(--s3) + var(--s10) + var(--s4)); }
-  .branch { color: var(--accent-link); font-family: var(--font-mono); }
   .row.current { background: var(--selected); }
   .row.current .count { background: var(--surface); }
   @media (hover: hover) and (pointer: fine) {

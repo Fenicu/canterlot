@@ -43,7 +43,7 @@
       onclick={() => ontoggleKids(node.item.id)}
     >
       <span class="stem" aria-hidden="true">└</span>
-      <span class="kids-title">Делегированные · {node.children.length}{#if node.running > 0}<span> · работает {node.running}</span>{/if}</span>
+      <span class="kids-title">Делегированные · {node.children.length}{node.running > 0 ? ` · работает ${node.running}` : ''}</span>
       <span class="chevron" class:open={node.open}><Icon name="chevron" /></span>
     </button>
     {#if node.open}

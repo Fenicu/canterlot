@@ -31,3 +31,11 @@ export function colorVar(key: string | null): string {
   if (!key) return "--muted";
   return VARS[key] ?? "--muted";
 }
+
+/** Цвет точки строки без выбранного цвета: тот же тон, что у текста активности. */
+export function toneVar(tone: "accent" | "default" | "warning" | "danger"): string {
+  if (tone === "accent") return "--accent";
+  if (tone === "warning") return "--warning";
+  if (tone === "danger") return "--danger";
+  return "--muted";
+}
