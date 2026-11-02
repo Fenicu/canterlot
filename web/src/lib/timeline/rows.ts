@@ -103,7 +103,9 @@ export function buildRows(
     const stamp =
       entry.kind === "block"
         ? entry.block.createdAt
-        : (entry.input.createdAt ?? 0);
+        : entry.kind === "compaction"
+          ? entry.compaction.createdAt
+          : (entry.input.createdAt ?? 0);
     const label = fmt.dayLabel(stamp, now);
     if (label !== day) {
       card = null;
@@ -116,6 +118,11 @@ export function buildRows(
     if (entry.kind === "input") {
       card = null;
       rows.push({ key: entry.key, kind: "input", entries: [entry] });
+      continue;
+    }
+    if (entry.kind === "compaction") {
+      card = null;
+      rows.push({ key: entry.key, kind: "compaction", entries: [entry] });
       continue;
     }
     const run = entry.block.inputCommandId;

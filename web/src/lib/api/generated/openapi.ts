@@ -1030,6 +1030,19 @@ export interface components {
          * @enum {string}
          */
         CompactionProgress: "requested" | "failed";
+        /** @description Строка ленты сжатия. */
+        CompactionView: {
+            created_at: string;
+            created_seq?: string | null;
+            finished_at?: string | null;
+            /** Format: uuid */
+            id: string;
+            /** @description `None` — сжатие ещё идёт. */
+            ok?: boolean | null;
+            /** Format: int64 */
+            pre_tokens?: number | null;
+            trigger: string;
+        };
         CompleteBody: {
             /** @description Контрольная сумма, с которой клиент завершает загрузку; другая сумма даёт конфликт. */
             sha256?: string | null;
@@ -1071,6 +1084,16 @@ export interface components {
             /** Format: int64 */
             window_tokens?: number | null;
         };
+        /**
+         * @description Последний известный расход контекста разговора для индикатора: живое исполнение
+         *     или свежий законченный ход. `None` — данных ещё нет, индикатор скрыт.
+         */
+        ContextSnapshot: {
+            /** Format: int64 */
+            tokens: number;
+            /** Format: int64 */
+            window_tokens?: number | null;
+        };
         ContinueOutcome: {
             remaining: components["schemas"]["PauseReason"][];
             removed: components["schemas"]["PauseReason"][];
@@ -1093,6 +1116,7 @@ export interface components {
         };
         ConversationSnapshot: {
             background: components["schemas"]["BackgroundTaskView"][];
+            context?: components["schemas"]["ContextSnapshot"] | null;
             detail: components["schemas"]["ConversationDetail"];
             history: components["schemas"]["HistoryPage"];
             /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
@@ -1883,6 +1907,7 @@ export interface components {
             cursor: string;
             data: {
                 background: components["schemas"]["BackgroundTaskView"][];
+                context?: components["schemas"]["ContextSnapshot"] | null;
                 detail: components["schemas"]["ConversationDetail"];
                 history: components["schemas"]["HistoryPage"];
                 /** @description Незавершённые запросы по времени создания: открытые, с сохранённым и с передаваемым агенту решением. */
@@ -1974,6 +1999,9 @@ export interface components {
         }) | (components["schemas"]["RequestItemView"] & {
             /** @enum {string} */
             kind: "request";
+        }) | (components["schemas"]["CompactionView"] & {
+            /** @enum {string} */
+            kind: "compaction";
         });
         TodoItemView: {
             status: components["schemas"]["TodoStatus"];

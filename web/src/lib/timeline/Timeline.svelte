@@ -9,6 +9,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { TimelineSource } from '#lib/stores/timeline.js';
   import AnswerCard from '#lib/timeline/AnswerCard.svelte';
+  import CompactionRow from '#lib/timeline/CompactionRow.svelte';
   import UserBubble from '#lib/timeline/UserBubble.svelte';
   import { FeedFolds } from '#lib/timeline/folds.js';
   import { blockLinks, buildRows, dayStart, shownInCard, tailKey, type Row } from '#lib/timeline/rows.js';
@@ -86,6 +87,9 @@
   const streaming = $derived(entries.some((entry) => entry.kind === 'block' && entry.block.state === 'streaming'));
   const failed = $derived(entries.some((entry) => entry.kind === 'block' && (entry.block.kind === 'error' || (entry.block.state === 'incomplete' && shownInCard(entry.block)))));
   const harness = $derived(chat.detail?.harness as { title?: string; provider?: string } | undefined);
+  const compactingPhase = $derived((chat.phase as { phase?: string } | null)?.phase === 'context_maintenance');
+  const compactingRow = $derived(entries.some((entry) => entry.kind === 'compaction' && entry.compaction.ok === null));
+  const compacting = $derived(!feed && !laneRoot && compactingPhase && !compactingRow);
   const activeRun = $derived.by(() => {
     const state = chat.activity?.state;
     if (state !== 'working' && state !== 'waiting_for_user') return null;
@@ -373,10 +377,17 @@
           <RequestCard request={row.entries[0].request} onDecision={async () => undefined} open={folds.isOpen(row.key)} onToggle={() => folds.toggle(row.key)} />
         {:else if row.kind === 'answer'}
           <AnswerCard cardKey={row.key} {laneRoot} entries={row.entries} {folds} {links} {harness} {activeRun} conversationId={chat.id} {now} {onInfo} load={loadBlock} />
+        {:else if row.kind === 'compaction' && row.entries[0]?.kind === 'compaction'}
+          <CompactionRow compaction={row.entries[0].compaction} />
         {/if}
       </div>
     {/each}
     <div class="pad" style:height={`${range.padBottom}px`}></div>
+    {#if compacting}
+      <div class="row" data-row data-kind="compaction" data-key="compaction-live">
+        <CompactionRow compaction={{ id: 'live', trigger: 'auto', preTokens: null, ok: null, createdAt: now, finishedAt: null }} />
+      </div>
+    {/if}
     {#if rows.length === 0 && !navigator.onLine}<p class="day">История недоступна без связи</p>{/if}
   </div>
   {#if !feed && chat.timeline.tailDetached}
