@@ -1572,6 +1572,7 @@ impl Supervisor {
             || self.adapter_exited
             || !self.ready
             || self.active_turn.is_some()
+            || self.pending_compaction.is_some()
             || self.faults.gate_held(&self.exec_dir)
         {
             return Ok(());
@@ -2628,5 +2629,277 @@ mod tests {
             diagnostic_event_type("codex_warning", "codex_warning"),
             "codex_warning"
         );
+    }
+
+    #[derive(Default)]
+    struct StubState {
+        transmit_calls: Vec<Uuid>,
+    }
+
+    struct StubAdapter {
+        state: std::sync::Arc<std::sync::Mutex<StubState>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Adapter for StubAdapter {
+        fn capabilities(&self) -> crate::adapter::Capabilities {
+            crate::adapter::Capabilities {
+                streaming: crate::adapter::Support::Supported,
+                resume: crate::adapter::Support::Supported,
+                interrupt: crate::adapter::Support::Supported,
+                approvals: crate::adapter::Support::Supported,
+                questions: crate::adapter::Support::Supported,
+                background_work: crate::adapter::Support::Supported,
+                interrupt_keeps_process: false,
+            }
+        }
+
+        async fn start(
+            &mut self,
+            _spec: &StartSpec,
+            _group: &dyn Containment,
+        ) -> Result<crate::adapter::Started, crate::adapter::AdapterError> {
+            Ok(crate::adapter::Started {
+                native_conversation_id: "stub".into(),
+                cli_pid: 0,
+                cli_start_ticks: 0,
+            })
+        }
+
+        async fn transmit(
+            &mut self,
+            input: &Transmission,
+            _group: &dyn Containment,
+        ) -> TransmitOutcome {
+            self.state
+                .lock()
+                .unwrap()
+                .transmit_calls
+                .push(input.command_id);
+            TransmitOutcome::Accepted(crate::adapter::Proof {
+                command_id: input.command_id,
+                kind: "stub_proof",
+            })
+        }
+
+        async fn deliver_decision(
+            &mut self,
+            _request_id: &str,
+            _decision: &DecisionPayload,
+        ) -> DecisionOutcome {
+            DecisionOutcome::NotApplied("stub".into())
+        }
+
+        async fn interrupt(&mut self) -> InterruptOutcome {
+            InterruptOutcome::NotApplicable
+        }
+
+        async fn next_event(&mut self) -> AdapterEvent {
+            std::future::pending().await
+        }
+
+        async fn close(
+            &mut self,
+            _mode: CloseMode,
+            _group: &dyn Containment,
+        ) -> Result<(), crate::adapter::AdapterError> {
+            Ok(())
+        }
+    }
+
+    fn test_supervisor() -> (
+        tempfile::TempDir,
+        Supervisor,
+        std::sync::Arc<std::sync::Mutex<StubState>>,
+    ) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let sj = Sj::create(dir.path()).unwrap();
+        let (media_jobs, _prepared) = mpsc::unbounded_channel();
+        let state = std::sync::Arc::new(std::sync::Mutex::new(StubState::default()));
+        let adapter: Option<Box<dyn Adapter>> = Some(Box::new(StubAdapter {
+            state: state.clone(),
+        }));
+        let supervisor = Supervisor {
+            attach_deadline: None,
+            spec: SupervisorSpec {
+                execution_id: Uuid::now_v7(),
+                generation: 1,
+                conversation_id: Uuid::now_v7(),
+                protocol_version: canterlot_proto::limits::IPC_PROTOCOL_VERSION,
+                ipc_socket: None,
+                timers: Default::default(),
+                claude_code: None,
+                codex: None,
+                opencode: None,
+            },
+            exec_dir: dir.path().to_owned(),
+            secret: Vec::new(),
+            sj,
+            containment: Arc::new(TreeContainment::new().unwrap()),
+            faults: SupervisorFaults::from_env(),
+            pid: 0,
+            start_ticks: 0,
+            adapter,
+            adapter_exited: false,
+            start_attempted: false,
+            started: None,
+            ready: true,
+            lifecycle: Lifecycle::Running,
+            closing: None,
+            terminate: None,
+            inputs: HashMap::new(),
+            queue: VecDeque::new(),
+            transmitted: HashSet::new(),
+            cancel_marks: HashMap::new(),
+            reported: HashSet::new(),
+            active_turn: None,
+            adopted_turn: None,
+            turn_started: None,
+            pilot_v1: false,
+            todo_v1: false,
+            compact_v1: true,
+            background_v1: false,
+            session_tools_v1: false,
+            git_head: None,
+            background_drop_reported: false,
+            todo_drop_reported: false,
+            provider: "claude_code".into(),
+            open_blocks: BTreeMap::new(),
+            known_interrupts: HashSet::new(),
+            pending_interrupts: Vec::new(),
+            known_compactions: HashSet::new(),
+            pending_compaction: None,
+            compaction_episode: None,
+            interrupted: false,
+            aborting_turn: false,
+            agent_calls: HashMap::new(),
+            conns: HashMap::new(),
+            attached: None,
+            next_conn: 0,
+            workdir: None,
+            media: MediaQueue::default(),
+            media_jobs,
+        };
+        (dir, supervisor, state)
+    }
+
+    fn queue_owner(supervisor: &mut Supervisor) -> (Uuid, u32) {
+        let id = Uuid::now_v7();
+        supervisor.inputs.insert(
+            (id, 1),
+            Input {
+                state: InputState::Queued,
+                text: "held input".into(),
+                accepted: false,
+                files: Vec::new(),
+                settings: None,
+            },
+        );
+        supervisor.queue.push_back((id, 1));
+        (id, 1)
+    }
+
+    fn shipped_bodies(supervisor: &mut Supervisor) -> Vec<Body> {
+        // Цикл сбрасывает журнал после событий, тест — явно.
+        supervisor.sj.flush().unwrap();
+        let sj = &mut supervisor.sj;
+        sj.enable_ship(0);
+        let mut out = Vec::new();
+        while let Some(batch) = sj.next_batch().unwrap() {
+            let last = batch.records.last().map(|record| record.seq).unwrap_or(0);
+            for record in batch.records {
+                if let Some(body) = record.body.and_then(|record| record.body) {
+                    out.push(body);
+                }
+            }
+            sj.ack(last).unwrap();
+        }
+        out
+    }
+
+    fn assert_delivered_once_with_proof(
+        supervisor: &mut Supervisor,
+        state: &std::sync::Arc<std::sync::Mutex<StubState>>,
+        key: (Uuid, u32),
+    ) {
+        assert_eq!(
+            state.lock().unwrap().transmit_calls,
+            vec![key.0],
+            "held input is delivered exactly once"
+        );
+        assert!(supervisor.inputs[&key].accepted, "delivery proof recorded");
+        let bodies = shipped_bodies(supervisor);
+        assert!(
+            bodies
+                .iter()
+                .any(|body| matches!(body, Body::InputAccepted(_))),
+            "delivery proof shipped: {bodies:?}"
+        );
+        assert!(
+            bodies
+                .iter()
+                .all(|body| !matches!(body, Body::AcceptanceUnconfirmed(_))),
+            "no undetermined state: {bodies:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_input_held_while_compaction_in_flight() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        // Ввод пришёл до границы сжатия: сжатие принято, итога ещё нет.
+        supervisor.pending_compaction = Some(("compact-1".into(), 1));
+        let key = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert!(
+            state.lock().unwrap().transmit_calls.is_empty(),
+            "no transmission while compaction is in flight"
+        );
+        assert!(matches!(supervisor.inputs[&key].state, InputState::Queued));
+        assert!(supervisor.active_turn.is_none());
+        // Итог сжатия снял hold: ввод уходит сам, по порядку.
+        supervisor
+            .on_adapter_event(AdapterEvent::Compacted { ok: true })
+            .await
+            .unwrap();
+        supervisor.try_transmit().await.unwrap();
+        assert_delivered_once_with_proof(&mut supervisor, &state, key);
+    }
+
+    #[tokio::test]
+    async fn owner_input_held_after_compact_boundary_until_result() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        // Ввод пришёл между границей и служебным итогом: эпизод закрыт,
+        // команда сжатия открыта, hold держится до Compacted.
+        supervisor.pending_compaction = Some(("compact-1".into(), 1));
+        supervisor
+            .on_adapter_event(AdapterEvent::CompactionStarted { manual: true })
+            .await
+            .unwrap();
+        supervisor
+            .on_adapter_event(AdapterEvent::CompactionFinished {
+                manual: true,
+                ok: true,
+                pre_tokens: 41_000,
+                post_tokens: 15_000,
+            })
+            .await
+            .unwrap();
+        assert!(
+            supervisor.pending_compaction.is_some(),
+            "boundary must not complete the compact command"
+        );
+        let key = queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        assert!(
+            state.lock().unwrap().transmit_calls.is_empty(),
+            "no transmission before the service result is consumed"
+        );
+        assert!(matches!(supervisor.inputs[&key].state, InputState::Queued));
+        supervisor
+            .on_adapter_event(AdapterEvent::Compacted { ok: true })
+            .await
+            .unwrap();
+        supervisor.try_transmit().await.unwrap();
+        assert_delivered_once_with_proof(&mut supervisor, &state, key);
     }
 }

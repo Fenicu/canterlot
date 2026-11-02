@@ -1663,3 +1663,27 @@ fn live_context_progress_is_rate_limited() {
         "progress must be rate limited, got {progresses}"
     );
 }
+
+#[test]
+fn duplicate_compact_boundary_is_dropped_by_frame_identity() {
+    let mut parser = Parser::new();
+    parser.mark_compact_manual();
+    let boundary = json!({"type":"system","subtype":"compact_boundary",
+        "uuid":"031c33e9-8858-4ae4-b128-ae032b295aca",
+        "compact_metadata":{"trigger":"manual","pre_tokens":30111,"post_tokens":15694}})
+    .to_string();
+    let first = parser.feed(&boundary);
+    assert!(
+        first
+            .iter()
+            .any(|p| matches!(p, Parsed::Event(AdapterEvent::CompactionFinished { .. }))),
+        "first boundary closes the episode"
+    );
+    let second = parser.feed(&boundary);
+    assert!(
+        !second
+            .iter()
+            .any(|p| matches!(p, Parsed::Event(AdapterEvent::CompactionFinished { .. }))),
+        "repeated boundary frame must not close a second episode: {second:?}"
+    );
+}
