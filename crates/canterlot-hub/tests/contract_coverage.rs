@@ -531,6 +531,16 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             .unwrap();
         }
     }
+    let edit_input = setup(
+        Method::POST,
+        format!("/api/v1/conversations/{id}/inputs"),
+        "setup_edit_input",
+        Some(json!({"content":[{"type":"text","text":"Черновик"}]})),
+    )
+    .await["input_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
     let decision_conversation = testkit::seed_conversation(&pool, owner, machine).await;
     let decision_execution = Uuid::now_v7();
     let decision_request = Uuid::now_v7();
@@ -691,6 +701,13 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             format!("/api/v1/conversations/{id}/queue/continue"),
             None,
             None,
+        ),
+        case(
+            Method::PATCH,
+            "/api/v1/conversations/{id}/inputs/{input_id}",
+            format!("/api/v1/conversations/{id}/inputs/{edit_input}"),
+            Some(json!({"text":"Исправлено","expected_revision":1})),
+            Some(json!({"text":"Исправлено ещё раз","expected_revision":2})),
         ),
         case(
             Method::POST,

@@ -3200,6 +3200,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn deliver_stores_hub_text_verbatim_for_later_transmission() {
+        // Сопровождение не держит текст очереди заранее: что прислал хаб в
+        // `deliver_input`, то и уйдёт агенту. Правка живёт только на хабе.
+        use canterlot_proto::worker::v1::{
+            Command, ContentBlock, DeliverInput, TextBlock, command::Kind,
+        };
+        let (_dir, mut supervisor, _state) = test_supervisor();
+        let deliver_id = Uuid::now_v7();
+        supervisor.on_deliver(canterlot_proto::worker::ipc::Deliver {
+            command: Some(Command {
+                command_id: deliver_id.to_string(),
+                dispatch_attempt: 1,
+                execution_id: supervisor.spec.execution_id.to_string(),
+                execution_generation: supervisor.spec.generation,
+                kind: Some(Kind::DeliverInput(DeliverInput {
+                    input_id: Uuid::now_v7().to_string(),
+                    conversation_id: supervisor.spec.conversation_id.to_string(),
+                    content: vec![ContentBlock {
+                        block: Some(
+                            canterlot_proto::worker::v1::content_block::Block::Text(TextBlock {
+                                text: "отредактировано на хабе".into(),
+                            }),
+                        ),
+                    }],
+                    settings: None,
+                })),
+            }),
+            files: Vec::new(),
+        });
+        let stored = supervisor
+            .inputs
+            .get(&(deliver_id, 1))
+            .expect("delivered input is stored");
+        assert_eq!(stored.text, "отредактировано на хабе");
+        assert!(matches!(stored.state, InputState::Queued));
+    }
+
+    #[tokio::test]
     async fn steer_into_running_turn_is_accepted_without_second_turn() {
         let (_dir, mut supervisor, state) = test_supervisor();
         state.lock().unwrap().steer_accept = true;
