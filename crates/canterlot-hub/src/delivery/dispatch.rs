@@ -241,7 +241,8 @@ pub async fn dispatch_next(
     let (attempt, machine_id): (i32, Uuid) = sqlx::query_as(
         "update commands set delivery_state = 'pending', dispatch_attempt = dispatch_attempt + 1,
                 execution_id = $2, execution_generation = $3, last_status = null,
-                last_status_rank = 0, result = null, stored_at = null, machine_stored_at_ms = null, completed_at = null
+                last_status_rank = 0, result = null, stored_at = null, machine_stored_at_ms = null,
+                completed_at = null, dispatch_claimed_at = null
          where id = $1 returning dispatch_attempt, machine_id",
     )
     .bind(command_id)

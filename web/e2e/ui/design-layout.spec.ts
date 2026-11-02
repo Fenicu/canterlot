@@ -399,6 +399,8 @@ test.describe('очередь и вложения', () => {
     const first = await strip.locator('.pill').first().boundingBox();
     expect(first!.height).toBeLessThanOrEqual(48);
     expect(first!.x).toBeGreaterThan(8);
+    // Действия правки живут внутри строки, не добавляя второй строки к каждой заявке.
+    await expect(strip.locator('.pill').first().getByRole('button', { name: 'Изменить' })).toBeVisible();
     expect((await strip.boundingBox())!.height).toBeLessThan(110);
     await queue(hub, api, id, ['Третье', 'Четвёртое']);
     await expect(strip.getByRole('button', { name: 'Ещё 2 в очереди' })).toBeVisible();

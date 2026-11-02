@@ -447,6 +447,43 @@ fn envelope(command: Command) -> ControlDown {
     }
 }
 
+/// Захватывает команду для отправки под замком очереди и возвращает её свежую
+/// строку. После захвата правка ввода отклоняется, поэтому payload, прочитанный
+/// здесь, уже не может разойтись с отправленным. Для ввода и вливания замок тот
+/// же, что у правки, выдачи и квитанций.
+pub async fn claim_for_send(
+    pool: &PgPool,
+    row: &CommandRow,
+) -> Result<Option<CommandRow>, sqlx::Error> {
+    let id = row.id;
+    let attempt = row.dispatch_attempt;
+    let conversation_id = row.conversation_id;
+    let lock_queue = matches!(row.kind.as_str(), "deliver_input" | "steer_input");
+    crate::db::in_tx(pool, move |conn| {
+        Box::pin(async move {
+            if lock_queue && let Some(conversation_id) = conversation_id {
+                sqlx::query(
+                    "select conversation_id from queue_state where conversation_id = $1 for update",
+                )
+                .bind(conversation_id)
+                .execute(&mut *conn)
+                .await?;
+            }
+            sqlx::query_as::<_, CommandRow>(
+                "update commands set dispatch_claimed_at = coalesce(dispatch_claimed_at, now())
+                 where id = $1 and dispatch_attempt = $2 and delivery_state = 'pending'
+                 returning id, machine_id, conversation_id, execution_id, execution_generation,
+                           kind, payload, dispatch_attempt",
+            )
+            .bind(id)
+            .bind(attempt)
+            .fetch_optional(&mut *conn)
+            .await
+        })
+    })
+    .await
+}
+
 pub async fn run(
     pool: PgPool,
     registry: Registry,
@@ -653,6 +690,14 @@ async fn run_machine(context: SenderContext, machine: Uuid, mut wake: mpsc::Rece
             } else if registry.availability(machine) != Availability::Available {
                 continue;
             }
+            let row = match claim_for_send(&pool, &row).await {
+                Ok(Some(row)) => row,
+                Ok(None) => continue,
+                Err(_) => {
+                    eprintln!("outbox_database_error");
+                    continue;
+                }
+            };
             let command = match to_proto_for_connection(&row, &registry, connection) {
                 Ok(command) => command,
                 Err(OutboxError::CapabilityMissing | OutboxError::SessionChanged) => continue,

@@ -12,6 +12,7 @@ use canterlot_hub::{
     },
     executions::{self},
     model::{ExecutionState, InputState},
+    outbox::{self, CommandRow},
     testkit::{self, Seed},
 };
 use chrono::Utc;
@@ -107,6 +108,54 @@ async fn deliver_text(pool: &PgPool, command_id: Uuid) -> String {
                 .ok_or(sqlx::Error::RowNotFound)
         })
         .unwrap()
+}
+
+async fn pending_steer(
+    pool: &PgPool,
+    seed: &Seed,
+    input_id: Uuid,
+    deliver_command_id: Uuid,
+    running_command_id: Uuid,
+    text: &str,
+) -> (Uuid, CommandRow) {
+    let steer_id = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands (id, machine_id, conversation_id, execution_id, execution_generation,
+                               kind, payload, target_command_id, delivery_state, dispatch_attempt)
+         values ($1, $2, $3, (select id from executions where conversation_id = $3 and state = 'running'), 1,
+                 'steer_input', $4, $5, 'pending', 0)",
+    )
+    .bind(steer_id)
+    .bind(seed.machine_id)
+    .bind(seed.conversation_id)
+    .bind(json!({
+        "input_id": input_id,
+        "conversation_id": seed.conversation_id,
+        "content": [{"type": "text", "text": text}],
+        "attachment_ids": [],
+        "expected_running_command_id": running_command_id,
+    }))
+    .bind(deliver_command_id)
+    .execute(pool)
+    .await
+    .unwrap();
+    let row = sqlx::query_as::<_, CommandRow>(
+        "select id, machine_id, conversation_id, execution_id, execution_generation,
+                kind, payload, dispatch_attempt
+         from commands where id = $1",
+    )
+    .bind(steer_id)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    (steer_id, row)
+}
+
+fn row_text(row: &CommandRow) -> String {
+    row.payload["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_owned()
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -378,6 +427,101 @@ async fn edit_updates_pending_steer_and_refuses_in_flight(pool: PgPool) -> TestR
         "second, исправленный"
     );
     let _ = first_id;
+    Ok(())
+}
+
+#[sqlx::test(migrations = "./migrations")]
+async fn edit_races_outbox_claim_without_losing_the_new_text(pool: PgPool) -> TestResult {
+    for _ in 0..20 {
+        let seed = testkit::seed(&pool).await;
+        sqlx::query("update conversations set harness = 'codex' where id = $1")
+            .bind(seed.conversation_id)
+            .execute(&pool)
+            .await?;
+        running(&pool, &seed).await;
+        let (first_id, first_cmd) = input(&pool, &seed, "first").await;
+        let (second_id, second_cmd) = input(&pool, &seed, "second").await;
+        dispatch_next(
+            &pool,
+            seed.conversation_id,
+            GateInputs {
+                machine_available: true,
+                machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into(), "send_now_v1".into()],
+            },
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        for receipt in [
+            InputReceipt::Stored,
+            InputReceipt::TransmissionStarted,
+            InputReceipt::Accepted,
+        ] {
+            apply_input_receipt(&pool, first_cmd, 1, receipt, Uuid::now_v7())
+                .await
+                .unwrap();
+        }
+        let (steer_id, row) =
+            pending_steer(&pool, &seed, second_id, second_cmd, first_cmd, "second").await;
+        let barrier = Arc::new(Barrier::new(3));
+        let edit_task = {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                request_edit_input(
+                    &pool,
+                    EditInput {
+                        owner_id: seed.owner_id,
+                        conversation_id: seed.conversation_id,
+                        input_id: second_id,
+                        text: "исправленный".into(),
+                        attachment_ids: Vec::new(),
+                        expected_revision: 1,
+                        idempotency_key: Uuid::now_v7().to_string(),
+                        correlation_id: Uuid::now_v7(),
+                    },
+                )
+                .await
+            })
+        };
+        let claim = {
+            let pool = pool.clone();
+            let barrier = barrier.clone();
+            tokio::spawn(async move {
+                barrier.wait().await;
+                outbox::claim_for_send(&pool, &row).await
+            })
+        };
+        barrier.wait().await;
+        let (edited, claimed) = tokio::join!(edit_task, claim);
+        let claimed = claimed.unwrap()?.expect("steer is still pending");
+        // Диспетчер либо успел первым и правит уже новый текст, либо правка
+        // отклонена: старого текста после захвата быть не может.
+        match edited.unwrap() {
+            Ok(_) => assert_eq!(row_text(&claimed), "исправленный"),
+            Err(ControlError::InvalidRequest {
+                reason: "steer_in_flight",
+            }) => assert_eq!(row_text(&claimed), "second"),
+            other => panic!("несогласованный исход правки: {other:?}"),
+        }
+        // После захвата правка закрыта до квитанции, даже с актуальной ревизией.
+        let current = revision(&pool, second_id).await;
+        assert!(matches!(
+            edit(&pool, &seed, second_id, "ещё позже", current, "late").await,
+            Err(ControlError::InvalidRequest {
+                reason: "steer_in_flight"
+            })
+        ));
+        let steer_state: String =
+            sqlx::query_scalar("select delivery_state from commands where id = $1")
+                .bind(steer_id)
+                .fetch_one(&pool)
+                .await?;
+        assert_eq!(steer_state, "pending");
+        let _ = first_id;
+    }
     Ok(())
 }
 

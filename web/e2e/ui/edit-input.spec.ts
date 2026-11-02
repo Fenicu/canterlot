@@ -92,11 +92,12 @@ async function confirmQueued(
   ownKey: string,
   text: string,
 ) {
+  const inputId = api.id();
   hub.append(`conversation:${id}`, {
     kind: 'input_queued',
     conversation_id: id,
     payload: {
-      input_id: api.id(),
+      input_id: inputId,
       input_seq: '1',
       idempotency_key: ownKey,
       state: 'queued',
@@ -106,14 +107,14 @@ async function confirmQueued(
   hub.flush();
   const bubble = page.locator('.bubble', { hasText: text });
   await expect(bubble.getByRole('button', { name: 'Изменить' })).toBeVisible();
-  return bubble;
+  return { bubble, inputId };
 }
 
 test('edit_queued_bubble_in_place_and_save', async ({ page }) => {
   const { hub, api, id } = await boot(page, []);
   const { ownKey } = await sendOwn(page, 'Черновик в очереди');
   expect(ownKey).not.toBe('');
-  const bubble = await confirmQueued(page, hub, api, id, ownKey, 'Черновик в очереди');
+  const { bubble } = await confirmQueued(page, hub, api, id, ownKey, 'Черновик в очереди');
   await bubble.getByRole('button', { name: 'Изменить' }).click();
   const editor = page.locator('.bubble').filter({ has: page.locator('textarea') });
   await expect(editor.locator('textarea')).toBeVisible();
@@ -211,6 +212,62 @@ test('edit_strip_item_while_turn_runs_and_remove_attachment', async ({ page }) =
   expect(hits[0]!.body).toMatchObject({ attachment_ids: [] });
 });
 
+test('edit_strip_conflict_uses_revision_from_start', async ({ page }) => {
+  const hub = new FakeHub();
+  const api = new FakeHubApi(hub);
+  const id = seedConversation(api, {
+    title: 'Правка',
+    harness: { id: 'codex', title: 'codex', provider: 'x' }
+  } as never);
+  const runningInput = acceptedInput(api, '1', 'В ход');
+  const queued = queuedInput(api, '2', 'В очереди');
+  api.histories.set(id, [runningInput, queued] as never);
+  await installChatRoutes(page, hub, api, OWNER);
+  await page.goto(`/c/${id}`);
+  await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+  turnRunning(hub, id, runningInput.id);
+  const item = page.locator('.strip .item', { hasText: 'В очереди' });
+  await expect(item.getByRole('button', { name: 'Изменить' })).toBeVisible();
+  await item.getByRole('button', { name: 'Изменить' }).click();
+  hub.append(`conversation:${id}`, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: {
+      input_id: queued.id,
+      state: 'queued',
+      attempt: 0,
+      cause: 'edited',
+      revision: 2,
+      content: [{ type: 'text', text: 'Чужое новое' }]
+    }
+  });
+  hub.flush();
+  const bodies: { text?: string; expected_revision?: number }[] = [];
+  await page.route('**/api/v1/conversations/*/inputs/*', async (route) => {
+    if (route.request().method() !== 'PATCH') return route.fallback();
+    bodies.push(route.request().postDataJSON());
+    await route.fulfill({
+      status: 400,
+      json: {
+        error: {
+          code: 'invalid_request',
+          message: 'Некорректный запрос',
+          scope: 'browser',
+          retry: 'never',
+          correlation_id: '00000000-0000-4000-8000-0000000000f1',
+          details: { reason: 'revision_conflict' }
+        }
+      }
+    });
+  });
+  await item.locator('textarea').fill('Моё');
+  await item.getByRole('button', { name: 'Сохранить' }).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toMatchObject({ text: 'Моё', expected_revision: 1 });
+  await expect(item.getByText('Сообщение уже изменено в другом месте')).toBeVisible();
+  await expect(item.locator('textarea')).toHaveValue('Чужое новое');
+});
+
 test('edit_refusal_shows_reason_in_the_bubble', async ({ page }) => {
   const { hub, api, id } = await boot(page, []);
   const { bubble, ownKey } = await sendOwn(page, 'Уже ушло');
@@ -239,30 +296,76 @@ test('edit_refusal_shows_reason_in_the_bubble', async ({ page }) => {
   await expect(page.locator('.bubble').filter({ has: page.locator('textarea') })).toHaveCount(0);
 });
 
-test('edit_conflict_keeps_the_editor_open', async ({ page }) => {
+test('edit_conflict_keeps_the_editor_open_with_the_other_revision', async ({ page }) => {
   const { hub, api, id } = await boot(page, []);
-  const { bubble, ownKey } = await sendOwn(page, 'Моё');
-  await confirmQueued(page, hub, api, id, ownKey, 'Моё');
+  const { ownKey } = await sendOwn(page, 'Моё');
+  const { bubble, inputId } = await confirmQueued(page, hub, api, id, ownKey, 'Моё');
   await bubble.getByRole('button', { name: 'Изменить' }).click();
+  const editor = page.locator('.bubble').filter({ has: page.locator('textarea') });
+  // Другая сессия успела сохранить свою правку до нашего «Сохранить».
+  hub.append(`conversation:${id}`, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: {
+      input_id: inputId,
+      state: 'queued',
+      attempt: 0,
+      cause: 'edited',
+      revision: 2,
+      content: [{ type: 'text', text: 'Чужое новое' }]
+    }
+  });
+  hub.flush();
+  const bodies: { text?: string; expected_revision?: number }[] = [];
+  let calls = 0;
   await page.route('**/api/v1/conversations/*/inputs/*', async (route) => {
     if (route.request().method() !== 'PATCH') return route.fallback();
-    await route.fulfill({
-      status: 400,
-      json: {
-        error: {
-          code: 'invalid_request',
-          message: 'Некорректный запрос',
-          scope: 'browser',
-          retry: 'never',
-          correlation_id: '00000000-0000-4000-8000-0000000000f1',
-          details: { reason: 'revision_conflict' }
+    bodies.push(route.request().postDataJSON());
+    calls += 1;
+    if (calls === 1) {
+      await route.fulfill({
+        status: 400,
+        json: {
+          error: {
+            code: 'invalid_request',
+            message: 'Некорректный запрос',
+            scope: 'browser',
+            retry: 'never',
+            correlation_id: '00000000-0000-4000-8000-0000000000f1',
+            details: { reason: 'revision_conflict' }
+          }
         }
-      }
-    });
+      });
+      return;
+    }
+    await route.fulfill({ json: { data: { input_id: inputId, revision: 3 } } });
   });
-  const editor = page.locator('.bubble').filter({ has: page.locator('textarea') });
-  await editor.locator('textarea').fill('Чужое');
+  await editor.locator('textarea').fill('Моё');
   await editor.getByRole('button', { name: 'Сохранить' }).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  // Отправляется ревизия, снятая при открытии редактора, а не текущая.
+  expect(bodies[0]).toMatchObject({ text: 'Моё', expected_revision: 1 });
   await expect(editor.getByText('Сообщение уже изменено в другом месте')).toBeVisible();
-  await expect(editor.locator('textarea')).toBeVisible();
+  await expect(editor.locator('textarea')).toHaveValue('Чужое новое');
+
+  // Вторая правка идёт уже с ревизией, показанной после конфликта.
+  await editor.locator('textarea').fill('Моё после конфликта');
+  await editor.getByRole('button', { name: 'Сохранить' }).click();
+  await expect.poll(() => bodies.length).toBe(2);
+  expect(bodies[1]).toMatchObject({ text: 'Моё после конфликта', expected_revision: 2 });
+  hub.append(`conversation:${id}`, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: {
+      input_id: inputId,
+      state: 'queued',
+      attempt: 0,
+      cause: 'edited',
+      revision: 3,
+      content: [{ type: 'text', text: 'Моё после конфликта' }]
+    }
+  });
+  hub.flush();
+  await expect(page.locator('.bubble').filter({ has: page.locator('textarea') })).toHaveCount(0);
+  await expect(page.locator('.bubble', { hasText: 'Моё после конфликта' })).toBeVisible();
 });

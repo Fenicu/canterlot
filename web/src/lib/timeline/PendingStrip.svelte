@@ -132,6 +132,7 @@
   let editing = $state<Record<string, boolean>>({});
   let editTexts = $state<Record<string, string>>({});
   let editKept = $state<Record<string, string[]>>({});
+  let editRevisions = $state<Record<string, number>>({});
   let editBusy = $state<Record<string, boolean>>({});
   let editErrors = $state<Record<string, string | null>>({});
   let editClosed = $state<Record<string, string | null>>({});
@@ -139,6 +140,7 @@
   function startEdit(input: InputView) {
     editTexts = { ...editTexts, [input.key]: input.text };
     editKept = { ...editKept, [input.key]: input.attachments.map((file) => file.attachment_id) };
+    editRevisions = { ...editRevisions, [input.key]: input.revision };
     editErrors = { ...editErrors, [input.key]: null };
     editClosed = { ...editClosed, [input.key]: null };
     editing = { ...editing, [input.key]: true };
@@ -161,12 +163,21 @@
         chat.id,
         editTexts[input.key] ?? input.text,
         editKept[input.key] ?? input.attachments.map((file) => file.attachment_id),
-        input.revision,
+        editRevisions[input.key] ?? input.revision,
       );
       if (outcome === 'saved' || outcome === 'noop') {
         editing = { ...editing, [input.key]: false };
       } else {
         editErrors = { ...editErrors, [input.key]: editInputCaption(outcome.reason) };
+        if (outcome.reason === 'revision_conflict') {
+          // Показываем текст другой сессии и продолжаем с её ревизией.
+          editTexts = { ...editTexts, [input.key]: input.text };
+          editKept = {
+            ...editKept,
+            [input.key]: input.attachments.map((file) => file.attachment_id)
+          };
+          editRevisions = { ...editRevisions, [input.key]: input.revision };
+        }
         if (outcome.reason === 'input_not_queued') {
           editClosed = { ...editClosed, [input.key]: editErrors[input.key] ?? null };
           editing = { ...editing, [input.key]: false };
@@ -185,6 +196,16 @@
       <span class="pill">
         <span class="label accent">{deliveryLabel(input.state)}</span>
         <span class="text">{input.text}</span>
+        {#if input.state === 'queued' && input.id && !editing[input.key]}
+          <IconButton icon="edit" label="Изменить" onclick={() => startEdit(input)} />
+        {/if}
+        {#if input.state === 'queued' && input.id && turnLive && steerSupported}
+          {#if sending[input.key]}
+            <IconButton icon="send" label="Отправляется…" inert={true} />
+          {:else}
+            <IconButton icon="send" label="Отправить сейчас" onclick={() => void doSendNow(input)} />
+          {/if}
+        {/if}
         {#if input.state === 'queued' || input.state === 'on_machine'}
           <IconButton icon="close" label="Отменить" onclick={() => cancel(input.key)} />
         {/if}
@@ -214,16 +235,9 @@
           {/if}
           <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
         </span>
-      {:else if input.state === 'queued' && input.id}
-        <span class="actions"><Button onclick={() => startEdit(input)}>Изменить</Button></span>
       {/if}
-      {#if input.state === 'queued' && input.id && turnLive && steerSupported}
-        {#if sending[input.key]}
-          <span class="actions"><Button disabled={true} reason="Отправляется…">Отправить сейчас</Button></span>
-        {:else}
-          <span class="actions"><Button onclick={() => void doSendNow(input)}>Отправить сейчас</Button></span>
-        {/if}
-        {#if harnessId === 'opencode'}<p class="note">Прервёт текущий шаг</p>{/if}
+      {#if input.state === 'queued' && input.id && turnLive && steerSupported && harnessId === 'opencode'}
+        <p class="note">Прервёт текущий шаг</p>
       {/if}
       {#if steerNotes[input.key]}<p class="note">{steerNotes[input.key]}</p>{/if}
       {#if steered[input.key] && input.state === 'queued'}<p class="note">Вливается в идущий ход</p>{/if}
