@@ -106,7 +106,14 @@
   }
   .facts div { display: flex; align-items: baseline; gap: var(--s2); min-width: 0; }
   dt { color: var(--muted); font-size: var(--fs-sm); }
-  dd { margin: 0; color: var(--secondary); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
+  dd {
+    margin: 0;
+    color: var(--secondary);
+    font-size: var(--fs-sm);
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+    white-space: pre-wrap;
+  }
   .answer-toggle {
     align-self: flex-start;
     min-height: var(--target);

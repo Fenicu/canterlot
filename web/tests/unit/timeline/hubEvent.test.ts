@@ -1,4 +1,5 @@
 import { expect, test } from 'vitest';
+import { fmt } from '#lib/format/ru.js';
 import {
   LEGACY_LIMIT,
   collapsedText,
@@ -54,6 +55,55 @@ test('session_facts_skip_what_the_hub_does_not_know', () => {
     { label: 'ходы', value: '0' },
     { label: 'время', value: '0,0 с' }
   ]);
+});
+
+test('asked_event_keeps_the_whole_question', () => {
+  const question =
+    'Слить ветку canterlot/0190abcd в основную или оставить её для отдельного ревью? ' +
+    'В ветке два коммита, которые есть только здесь.';
+  expect(eventFacts({ kind: 'asked', state: 'waiting_for_user', question })).toContainEqual({
+    label: 'вопрос',
+    value: question
+  });
+});
+
+test('failed_event_names_the_reason', () => {
+  expect(eventFacts({ kind: 'failed', reason: 'auth_required' })).toContainEqual({
+    label: 'причина',
+    value: 'агенту нужна авторизация'
+  });
+});
+
+test('quota_event_shows_provider_window_and_reset', () => {
+  const until = '2026-10-28T17:00:00.000Z';
+  const at = Date.parse(until);
+  const facts = eventFacts({
+    kind: 'quota_paused',
+    provider: 'claude',
+    window: 'five_hour',
+    until
+  });
+  expect(facts).toContainEqual({ label: 'провайдер', value: 'Claude' });
+  expect(facts).toContainEqual({ label: 'окно лимита', value: '5 часов' });
+  expect(facts).toContainEqual({ label: 'лимит до', value: fmt.resetAt(at, at) });
+});
+
+test('stalled_event_shows_the_last_action_and_when_it_happened', () => {
+  const last = '2026-10-28T12:00:00.000Z';
+  const at = Date.parse(last);
+  const facts = eventFacts({
+    kind: 'stalled',
+    phase: 'running_tool',
+    last_event_at: last
+  });
+  expect(facts).toContainEqual({
+    label: 'последнее действие',
+    value: 'выполняет инструмент'
+  });
+  expect(facts).toContainEqual({
+    label: 'последнее событие',
+    value: fmt.resetAt(at, at)
+  });
 });
 
 test('accepted_line_names_the_fate_of_the_worktree', () => {

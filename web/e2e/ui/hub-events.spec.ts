@@ -7,6 +7,11 @@ import { expect, test } from './fixtures';
 const OWNER = '00000000-0000-4000-8000-0000000000d1';
 const AT = '2026-10-28T12:00:00.000Z';
 const LONG_ENGLISH = `${'[canterlot] The worktree of session "Карантин Rust-тестов" could not be removed: git_failed. '.repeat(9)}Конец старого сообщения.`;
+const QUESTION =
+  'Слить ветку canterlot/0190abcd в основную или оставить её для отдельного ревью? ' +
+  'В ней два коммита, которых больше нигде нет, и ответ нужен до пятницы.';
+const QUOTA_UNTIL = '2026-10-28T17:00:00.000Z';
+const STALLED_AT = '2026-10-28T11:40:00.000Z';
 
 async function boot(page: Page) {
   const phone = test.info().project.name === 'phone';
@@ -133,12 +138,107 @@ async function boot(page: Page) {
     {
       kind: 'input',
       id: api.id(),
+      idempotency_key: 'ev-6',
+      state: 'accepted',
+      content: [{ type: 'text', text: '[canterlot] Session "Карантин Rust-тестов" is waiting for the owner.' }],
+      attachments: [],
+      created_seq: '6',
+      feed_seq: '6',
+      created_at: AT,
+      origin: {
+        kind: 'event',
+        from: child,
+        title: 'Карантин Rust-тестов',
+        chain_depth: 1,
+        event: {
+          kind: 'asked',
+          state: 'waiting_for_user',
+          session_id: child,
+          question: QUESTION
+        }
+      }
+    },
+    {
+      kind: 'input',
+      id: api.id(),
+      idempotency_key: 'ev-7',
+      state: 'accepted',
+      content: [{ type: 'text', text: '[canterlot] Session "Карантин Rust-тестов" failed: auth_required.' }],
+      attachments: [],
+      created_seq: '7',
+      feed_seq: '7',
+      created_at: AT,
+      origin: {
+        kind: 'event',
+        from: child,
+        title: 'Карантин Rust-тестов',
+        chain_depth: 1,
+        event: {
+          kind: 'failed',
+          state: 'failed',
+          session_id: child,
+          reason: 'auth_required'
+        }
+      }
+    },
+    {
+      kind: 'input',
+      id: api.id(),
+      idempotency_key: 'ev-8',
+      state: 'accepted',
+      content: [{ type: 'text', text: '[canterlot] Session "Карантин Rust-тестов" is paused by the five-hour limit.' }],
+      attachments: [],
+      created_seq: '8',
+      feed_seq: '8',
+      created_at: AT,
+      origin: {
+        kind: 'event',
+        from: child,
+        title: 'Карантин Rust-тестов',
+        chain_depth: 1,
+        event: {
+          kind: 'quota_paused',
+          state: 'quota_paused',
+          session_id: child,
+          provider: 'claude',
+          window: 'five_hour',
+          until: QUOTA_UNTIL
+        }
+      }
+    },
+    {
+      kind: 'input',
+      id: api.id(),
+      idempotency_key: 'ev-9',
+      state: 'accepted',
+      content: [{ type: 'text', text: '[canterlot] Session "Карантин Rust-тестов" looks stalled.' }],
+      attachments: [],
+      created_seq: '9',
+      feed_seq: '9',
+      created_at: AT,
+      origin: {
+        kind: 'event',
+        from: child,
+        title: 'Карантин Rust-тестов',
+        chain_depth: 1,
+        event: {
+          kind: 'stalled',
+          state: 'stalled',
+          session_id: child,
+          phase: 'running_tool',
+          last_event_at: STALLED_AT
+        }
+      }
+    },
+    {
+      kind: 'input',
+      id: api.id(),
       idempotency_key: 'owner-1',
       state: 'accepted',
       content: [{ type: 'text', text: 'Моё сообщение' }],
       attachments: [],
-      created_seq: '6',
-      feed_seq: '6',
+      created_seq: '10',
+      feed_seq: '10',
       created_at: AT
     }
   ] as never);
@@ -189,6 +289,38 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
 
   await card.getByRole('link', { name: 'Карантин Rust-тестов' }).click();
   await expect(page).toHaveURL(new RegExp(`/c/${child}$`));
+});
+
+test('asked_failed_quota_and_stalled_cards_show_what_the_owner_needs', async ({ page }) => {
+  await boot(page);
+
+  const asked = page.locator('[data-event-kind="asked"]');
+  await expect(asked.getByText('задала вопрос')).toBeVisible();
+  await expect(asked.getByText('вопрос', { exact: true })).toBeVisible();
+  await expect(asked).toContainText(QUESTION);
+
+  const failed = page.locator('[data-event-kind="failed"]');
+  await expect(failed.getByText('сорвалась')).toBeVisible();
+  await expect(failed.getByText('причина', { exact: true })).toBeVisible();
+  await expect(failed.getByText('агенту нужна авторизация')).toBeVisible();
+
+  const quota = page.locator('[data-event-kind="quota_paused"]');
+  await expect(quota.getByText('ждёт лимита')).toBeVisible();
+  await expect(quota.getByText('провайдер', { exact: true })).toBeVisible();
+  await expect(quota.getByText('Claude', { exact: true })).toBeVisible();
+  await expect(quota.getByText('окно лимита', { exact: true })).toBeVisible();
+  await expect(quota.getByText('5 часов', { exact: true })).toBeVisible();
+  await expect(quota.getByText('лимит до', { exact: true })).toBeVisible();
+  await expect(quota.getByText(/октября/)).toBeVisible();
+
+  const stalled = page.locator('[data-event-kind="stalled"]');
+  await expect(stalled.getByText('зависла')).toBeVisible();
+  await expect(stalled.getByText('последнее действие', { exact: true })).toBeVisible();
+  await expect(stalled.getByText('выполняет инструмент', { exact: true })).toBeVisible();
+  await expect(stalled.getByText('последнее событие', { exact: true })).toBeVisible();
+  await expect(stalled.getByText(/октября/)).toBeVisible();
+
+  await noOverflow(page);
 });
 
 test('small_hub_events_are_quiet_lines_without_the_english_text', async ({ page }) => {
