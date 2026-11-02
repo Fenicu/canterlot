@@ -127,7 +127,8 @@
   summary::-webkit-details-marker { display: none; }
   summary::marker { content: ''; }
   .rows { display: flex; flex-direction: column; gap: var(--s2); min-width: 0; }
-  .row { display: grid; grid-template-columns: calc(var(--s2) * 11) 1fr; align-items: baseline; gap: var(--s1) var(--s4); }
+  .row { display: grid; grid-template-columns: calc(var(--s4) * 11) 1fr; align-items: baseline; gap: var(--s1) var(--s4); }
+  .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .meters { display: flex; flex-wrap: wrap; align-items: center; gap: var(--s1) var(--s5); min-width: 0; }
   .limits[open] .meters { flex-direction: column; align-items: flex-start; }
   .meter { display: inline-flex; align-items: center; gap: var(--s2); white-space: nowrap; --gauge-width: calc(var(--s4) * 4); }

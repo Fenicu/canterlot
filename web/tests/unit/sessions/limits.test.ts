@@ -161,5 +161,16 @@ describe("sessions/limits", () => {
     const only: ProviderLimits = { provider: "claude", weekly_reserve_active: false, five_hour: null, five_hour_absent: true, weekly: null };
     expect(limitStrip([only], NOW, cfg).rows[0]).toMatchObject({ empty: true });
   });
+
+  it("opencode_sorts_after_codex_and_keeps_its_label", () => {
+    const strip = limitStrip(
+      [provider("opencode", 125, 340), provider("codex", 0, 150), provider("claude", 340, 960)],
+      NOW,
+      cfg,
+    );
+    expect(strip.rows.map((row) => row.label)).toEqual(["Claude", "Codex", "OpenCode"]);
+    expect(strip.rows[2]!).toMatchObject({ empty: false });
+    expect(strip.rows[2]!.five).toMatchObject({ text: "88%" });
+  });
 });
 
