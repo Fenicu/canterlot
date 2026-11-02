@@ -346,9 +346,9 @@ impl Fixture {
             );
         }
         // Хаб асинхронно дописывает события машины; счётчики и события читаем одним снимком.
-        let mut snapshot = self.pool.begin().await.unwrap();
-        sqlx::query("set transaction isolation level repeatable read")
-            .execute(&mut *snapshot)
+        let mut snapshot = self
+            .pool
+            .begin_with("begin isolation level repeatable read")
             .await
             .unwrap();
         let scopes: Vec<(String, i64)> =
