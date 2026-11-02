@@ -2467,3 +2467,109 @@ async fn compacted_waits_for_service_result_after_boundary() {
     );
     f.close().await;
 }
+
+/// Ход ждёт в `@wait` и не читает stdin; SIGINT даёт записанный итог `aborted_tools`.
+fn stalled_turn(transmit: Duration) -> (Fake, Uuid) {
+    let id = Uuid::now_v7();
+    let f = Fake::with_timers(
+        vec![vec![
+            json!({"type":"stream_event","user_message_uuid":id,"event":{"type":"message_start","message":{"model":"haiku","usage":{}}}}),
+            json!("@wait"),
+        ]],
+        transmit,
+        WAIT,
+    );
+    let mut interrupted = outgoing("interrupt")
+        .into_iter()
+        .filter(|v| v["type"] == "result" && v["terminal_reason"] == "aborted_tools")
+        .take(1)
+        .collect::<Vec<_>>();
+    interrupted[0]["user_message_uuid"] = json!(id);
+    interrupted[0]["user_message_uuids"] = json!([id]);
+    std::fs::write(
+        f.dir.path().join("interrupt.json"),
+        serde_json::to_vec(&interrupted).unwrap(),
+    )
+    .unwrap();
+    (f, id)
+}
+
+#[tokio::test]
+async fn interrupt_after_a_torn_steer_falls_back_to_sigint() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    f.start().await;
+    f.send(&tx(id)).await;
+    f.wait_point().await;
+    // Строка больше буфера pipe: CLI не читает, запись обрывается по сроку на середине.
+    let big = Transmission {
+        text: "x".repeat(1024 * 1024),
+        ..tx(Uuid::now_v7())
+    };
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&big))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::Undetermined
+    ));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.interrupt())
+            .await
+            .expect("interrupt must not hang on a full pipe"),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sigint_fallback_fires_with_a_transmit_deadline_below_the_receipt_wait() {
+    let _sigint =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let (mut f, id) = stalled_turn(Duration::from_secs(1));
+    f.start().await;
+    f.send(&tx(id)).await;
+    f.wait_point().await;
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(30), f.adapter.interrupt())
+            .await
+            .unwrap(),
+        adapter::InterruptOutcome::Acknowledged
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
+async fn input_after_a_torn_steer_goes_to_a_new_process() {
+    let turn = vec![
+        json!({"type":"stream_event","parent_tool_use_id":null,"user_message_uuids":["@input"],"event":{"type":"message_start","message":{"id":"m1","model":"claude-haiku-test","usage":{}}}}),
+        json!("@sleep:2500"),
+        json!({"type":"result","subtype":"success","is_error":false,"user_message_uuids":["@input"],"modelUsage":{}}),
+    ];
+    let mut f = Fake::with_timers(vec![turn], Duration::from_secs(1), WAIT);
+    f.start().await;
+    let first = Uuid::now_v7();
+    f.send(&tx(first)).await;
+    let big = Transmission {
+        text: "x".repeat(1024 * 1024),
+        ..tx(Uuid::now_v7())
+    };
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&big))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::Undetermined
+    ));
+    f.finish().await;
+    let second = Uuid::now_v7();
+    f.send(&tx(second)).await;
+    let mut restarted = false;
+    for event in f.finish().await {
+        restarted |= matches!(event, AdapterEvent::CliRestarted { .. });
+    }
+    assert!(restarted, "the torn stdin is not written to again");
+    // Старый процесс оставил в логе оборванную строку без перевода строки, ввод идёт следом.
+    let log = std::fs::read_to_string(f.dir.path().join("stdin.log")).unwrap();
+    assert!(log.lines().last().unwrap().contains(&second.to_string()));
+    f.close().await;
+}

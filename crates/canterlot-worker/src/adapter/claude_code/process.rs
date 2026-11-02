@@ -373,6 +373,9 @@ pub struct CliProcess {
     discarded: Option<usize>,
     stderr_ring: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
     stderr_task: Option<tokio::task::JoinHandle<()>>,
+    /// Запись строки не дошла до конца (отмена по сроку или ошибка): в pipe может
+    /// остаться половина кадра, следующий кадр склеился бы с ней.
+    stdin_torn: bool,
 }
 
 impl CliProcess {
@@ -456,18 +459,32 @@ impl CliProcess {
             discarded: None,
             stderr_ring: ring,
             stderr_task,
+            stdin_torn: false,
         })
     }
+    /// Строку пишет целиком или ломает stdin: после оборванной записи (отмена по сроку
+    /// посреди `write_all`) кадры больше не пишутся, остаются SIGINT и перезапуск.
     pub async fn write_line(&mut self, json: &serde_json::Value) -> std::io::Result<()> {
         use tokio::io::AsyncWriteExt;
-        if let Some(stdin) = &mut self.stdin {
-            let line = format!("{}\n", json);
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok(())
-        } else {
-            Err(std::io::Error::other("no stdin"))
+        if self.stdin_torn {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "stdin line torn",
+            ));
         }
+        let Some(stdin) = &mut self.stdin else {
+            return Err(std::io::Error::other("no stdin"));
+        };
+        let line = format!("{}\n", json);
+        self.stdin_torn = true;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await?;
+        self.stdin_torn = false;
+        Ok(())
+    }
+
+    pub fn stdin_torn(&self) -> bool {
+        self.stdin_torn
     }
     /// Следующая строка stdout без `\n`; длиннее 64 МиБ пропускается до перевода строки.
     pub async fn next_line(&mut self) -> StdoutLine {

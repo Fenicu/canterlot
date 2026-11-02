@@ -684,6 +684,19 @@ impl ClaudeCodeAdapter {
         Ok(())
     }
 
+    /// В stdin осталась оборванная строка: следующий кадр склеился бы с ней, ввод уходит
+    /// только в новый процесс с той же беседой и действующими настройками.
+    async fn restart_torn(&mut self, group: &dyn Containment) -> bool {
+        tracing::warn!(
+            kind = "cli_stdin_torn",
+            "cli stdin torn, restarting the cli"
+        );
+        self.stop_old_cli(group).await;
+        self.parser.reset_process();
+        let _ = self.respawn_previous(group).await;
+        self.cli.is_some()
+    }
+
     /// Запасной запуск со старыми инструкциями и настройками после неудачного
     /// перезапуска, аргумент беседы тот же, что у перезапуска. Успех — отказ
     /// входа; провал, в том числе невозвращённый файл прежних инструкций, —
@@ -790,6 +803,10 @@ impl ClaudeCodeAdapter {
         }
         if let Err(reason) = self.validate_transmission(input) {
             return TransmitOutcome::Rejected(reason.into());
+        }
+        if self.cli.as_ref().is_some_and(CliProcess::stdin_torn) && !self.restart_torn(group).await
+        {
+            return TransmitOutcome::Undetermined;
         }
         // Перезапуск между ходами со сменой инструкций — до постановки и записи ввода. Пока идёт
         // фоновая работа, ждёт только перезапуск. Модель и режим уходят управляющими запросами
@@ -1116,6 +1133,13 @@ async fn drain_to_eof(cli: &mut CliProcess, parser: &mut Parser, queue: &mut Opt
 }
 
 impl ClaudeCodeAdapter {
+    fn send_sigint(&self) -> std::io::Result<()> {
+        match self.cli.as_ref() {
+            Some(cli) => cli.signal(process::Signal::Int),
+            None => Err(std::io::Error::other("no cli")),
+        }
+    }
+
     /// Просроченное сжатие — отказ: граница так и не пришла, висеть вечно нельзя.
     /// Граница без итога тоже отпускает очередь: эпизод уже закрыт, дублировать нечего.
     fn compact_timed_out(&mut self) -> bool {
@@ -1418,7 +1442,7 @@ impl Adapter for ClaudeCodeAdapter {
     }
 
     async fn interrupt(&mut self) -> InterruptOutcome {
-        if self.exited || self.eof {
+        if self.exited || self.eof || self.cli.is_none() {
             return InterruptOutcome::NotApplicable;
         }
         let Some(line) = self
@@ -1437,11 +1461,20 @@ impl Adapter for ClaudeCodeAdapter {
         self.requests.clear();
         // Управляющий запрос останавливает ход, процесс жив: следующий ввод
         // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
-        if self.cli.as_mut().unwrap().write_line(&line).await.is_err() {
-            return InterruptOutcome::Undetermined;
-        }
+        let written = matches!(
+            timeout(self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
+            Ok(Ok(()))
+        );
         let mut sigint_sent = false;
-        let until = Instant::now() + self.deadline;
+        let mut until = Instant::now() + self.deadline;
+        if !written {
+            // stdin не принял запрос целиком: дальше только сигнал.
+            if self.send_sigint().is_err() {
+                return InterruptOutcome::Undetermined;
+            }
+            sigint_sent = true;
+            until = Instant::now() + self.deadline;
+        }
         loop {
             if self.queue.as_ref().unwrap().interrupt_acknowledged() {
                 return InterruptOutcome::Acknowledged;
@@ -1455,29 +1488,30 @@ impl Adapter for ClaudeCodeAdapter {
             }
             if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
                 // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
-                if self
-                    .cli
-                    .as_ref()
-                    .unwrap()
-                    .signal(process::Signal::Int)
-                    .is_err()
-                {
+                if self.send_sigint().is_err() {
                     return InterruptOutcome::Undetermined;
                 }
                 sigint_sent = true;
+                // У сигнала своё окно: иначе его итог никто бы не дождался.
+                until = Instant::now() + self.deadline;
             }
-            // Без кадров stdout ожидание упирается в срок квитанции,
-            // иначе запасной SIGINT никогда бы не наступил.
-            let bound = self
+            // Пока квитанции нет, ожидание идёт до её срока, даже если срок
+            // передачи короче: иначе запасной SIGINT никогда бы не наступил.
+            let receipt = self
                 .queue
                 .as_ref()
                 .unwrap()
                 .interrupt_receipt_bound()
-                .filter(|_| !sigint_sent)
-                .map(|bound| bound.min(until))
-                .unwrap_or(until);
-            if timeout_at(bound, self.pump()).await.is_err() && Instant::now() >= until {
-                return InterruptOutcome::Undetermined;
+                .filter(|_| !sigint_sent);
+            match receipt {
+                Some(bound) => {
+                    let _ = timeout_at(bound, self.pump()).await;
+                }
+                None => {
+                    if timeout_at(until, self.pump()).await.is_err() {
+                        return InterruptOutcome::Undetermined;
+                    }
+                }
             }
         }
     }
