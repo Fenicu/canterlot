@@ -68,11 +68,11 @@ export class FakeHubApi {
 	presets = new Map<string, FakePreset>();
 	ownerOverview = {
 		files: [
-			{ kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z' },
-			{ kind: 'claude_home', harness: 'claude', path: '/home/owner/CLAUDE.md', present: false, size: 0, mtime: null },
-			{ kind: 'codex_global', harness: 'codex', path: '/home/owner/.codex/AGENTS.md', present: true, size: 18, mtime: '2026-10-28T12:00:00.000Z' },
-			{ kind: 'codex_override', harness: 'codex', path: '/home/owner/.codex/AGENTS.override.md', present: false, size: 0, mtime: null },
-			{ kind: 'opencode_global', harness: 'opencode', path: '/home/owner/.config/opencode/AGENTS.md', present: true, size: 20, mtime: '2026-10-28T12:00:00.000Z' }
+			{ kind: 'claude_user', harness: 'claude', path: '/home/owner/.claude/CLAUDE.md', present: true, size: 24, mtime: '2026-10-28T12:00:00.000Z', reason: '' },
+			{ kind: 'claude_home', harness: 'claude', path: '/home/owner/CLAUDE.md', present: false, size: 0, mtime: null, reason: 'symlink' },
+			{ kind: 'codex_global', harness: 'codex', path: '/home/owner/.codex/AGENTS.md', present: true, size: 18, mtime: '2026-10-28T12:00:00.000Z', reason: '' },
+			{ kind: 'codex_override', harness: 'codex', path: '/home/owner/.codex/AGENTS.override.md', present: false, size: 0, mtime: null, reason: '' },
+			{ kind: 'opencode_global', harness: 'opencode', path: '/home/owner/.config/opencode/AGENTS.md', present: true, size: 20, mtime: '2026-10-28T12:00:00.000Z', reason: '' }
 		],
 		memory_projects: [{ id: 'proj1', files: 2, has_index: true }]
 	};

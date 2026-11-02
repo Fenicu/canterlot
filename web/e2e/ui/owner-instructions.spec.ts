@@ -24,7 +24,7 @@ test('owner_sheet_shows_summary_and_renders_files_as_markdown', async ({ page })
   await expect(page.locator('[data-owner-summary]')).toContainText('codex:');
   await expect(page.locator('[data-owner-summary]')).toContainText('opencode:');
   await expect(page.locator('[data-owner-file="claude_user"]')).toContainText('/home/owner/.claude/CLAUDE.md');
-  await expect(page.locator('[data-owner-file="claude_home"]')).toContainText('отсутствует');
+  await expect(page.locator('[data-owner-file="claude_home"]')).toContainText('файл — ссылка, не показан');
   await page.locator('[data-owner-file="claude_user"] button').click();
   const content = page.locator('[data-owner-content="claude_user"]');
   await expect(content).toBeVisible();

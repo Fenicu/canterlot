@@ -82,10 +82,10 @@ describe("presets/model", () => {
 
   it("owner_harness_summary_counts_found_files_and_total_size", () => {
     const files: OwnerFileLike[] = [
-      { kind: "claude_user", harness: "claude", path: "/a", present: true, size: 100, mtime: null },
-      { kind: "claude_home", harness: "claude", path: "/b", present: false, size: 0, mtime: null },
-      { kind: "codex_global", harness: "codex", path: "/c", present: true, size: 2048, mtime: null },
-      { kind: "opencode_global", harness: "opencode", path: "/d", present: false, size: 0, mtime: null },
+      { kind: "claude_user", harness: "claude", path: "/a", present: true, size: 100, mtime: null, reason: "" },
+      { kind: "claude_home", harness: "claude", path: "/b", present: false, size: 0, mtime: null, reason: "symlink" },
+      { kind: "codex_global", harness: "codex", path: "/c", present: true, size: 2048, mtime: null, reason: "" },
+      { kind: "opencode_global", harness: "opencode", path: "/d", present: false, size: 0, mtime: null, reason: "" },
     ];
     const summary = ownerHarnessSummary(files);
     expect(summary.find((item) => item.harness === "claude")).toMatchObject({ found: 1, total: 100 });

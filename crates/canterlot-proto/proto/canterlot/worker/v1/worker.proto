@@ -632,6 +632,8 @@ message OwnerFileMeta {
   bool present = 3;
   uint64 size = 4;
   uint64 mtime_ms = 5;
+  // Почему файл не показан при present = false: пусто или "symlink".
+  string reason = 6;
 }
 
 message OwnerMemoryProject {
@@ -654,7 +656,8 @@ message OwnerInstructionsOverview {
 }
 
 // Один файл: содержимое урезано до 256 КиБ с признаком, у memory_index
-// дополнительно список файлов проекта.
+// дополнительно список файлов проекта. При present = false поле reason
+// объясняет причину: пусто или "symlink".
 message OwnerInstructionsFile {
   string request_id = 1;
   string kind = 2;
@@ -665,6 +668,7 @@ message OwnerInstructionsFile {
   bool truncated = 7;
   string content = 8;
   repeated OwnerMemoryFile files = 9;
+  string reason = 10;
 }
 
 message ModelUsage {

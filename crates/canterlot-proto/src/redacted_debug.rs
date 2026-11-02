@@ -146,6 +146,7 @@ impl fmt::Debug for crate::worker::v1::OwnerInstructionsFile {
             .field("request_id", &self.request_id)
             .field("kind", &self.kind)
             .field("present", &self.present)
+            .field("reason", &self.reason)
             .field("content_bytes", &self.content.len())
             .field("files", &self.files.len())
             .finish()

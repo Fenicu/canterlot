@@ -1716,6 +1716,8 @@ export interface components {
             mtime?: string | null;
             path: string;
             present: boolean;
+            /** @description Почему файл не показан при `present = false`: пусто или `symlink`. */
+            reason: string;
             /** Format: int64 */
             size: number;
             truncated: boolean;
@@ -1726,6 +1728,8 @@ export interface components {
             mtime?: string | null;
             path: string;
             present: boolean;
+            /** @description Почему файл не показан при `present = false`: пусто или `symlink`. */
+            reason: string;
             /** Format: int64 */
             size: number;
         };

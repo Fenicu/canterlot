@@ -67,6 +67,7 @@ fn overview_reply(request_id: &str) -> OwnerInstructionsOverview {
             present: true,
             size: 7,
             mtime_ms: 1_700_000_000_000,
+            ..Default::default()
         }],
         projects: vec![OwnerMemoryProject {
             id: "proj1".into(),
@@ -250,5 +251,106 @@ async fn owner_file_serves_content_and_validates_kinds(pool: PgPool) {
         .await;
     assert_eq!(body["content"], "# a");
     assert_eq!(body["harness"], "claude");
+    served.await.unwrap();
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_symlink_reason_reaches_the_browser_and_unknown_is_dropped(pool: PgPool) {
+    let f = Fixture::new(pool).await;
+    let mut session = testkit::fake_session(
+        &f.registry,
+        f.machine,
+        &[CAPABILITY_OWNER_INSTRUCTIONS_V1],
+        true,
+    );
+    let machine = f.machine;
+    let registry = f.registry.clone();
+    let served = tokio::spawn(async move {
+        // Обзор с причиной-ссылкой.
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::ReadOwner(request)) = down.msg else {
+            panic!("{down:?}");
+        };
+        assert_eq!(request.kind, "overview");
+        registry.finish_owner_overview(
+            machine,
+            OwnerInstructionsOverview {
+                request_id: request.request_id.clone(),
+                files: vec![OwnerFileMeta {
+                    kind: "claude_home".into(),
+                    path: "/home/owner/CLAUDE.md".into(),
+                    reason: "symlink".into(),
+                    ..Default::default()
+                }],
+                projects: vec![],
+            },
+        );
+        // Файл с причиной-ссылкой.
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::ReadOwner(request)) = down.msg else {
+            panic!("{down:?}");
+        };
+        assert_eq!(request.kind, "claude_home");
+        registry.finish_owner_file(
+            machine,
+            OwnerInstructionsFile {
+                request_id: request.request_id.clone(),
+                kind: request.kind.clone(),
+                path: "/home/owner/CLAUDE.md".into(),
+                reason: "symlink".into(),
+                ..Default::default()
+            },
+        );
+        // Файл с неизвестной причиной: хаб её отбрасывает.
+        let down = session.commands.recv().await.unwrap();
+        let Some(control_down::Msg::ReadOwner(request)) = down.msg else {
+            panic!("{down:?}");
+        };
+        registry.finish_owner_file(
+            machine,
+            OwnerInstructionsFile {
+                request_id: request.request_id.clone(),
+                kind: request.kind.clone(),
+                path: "/home/owner/.claude/CLAUDE.md".into(),
+                reason: "bogus".into(),
+                ..Default::default()
+            },
+        );
+    });
+    let body = f
+        .request(
+            Method::GET,
+            &format!("/api/v1/machines/{}/owner-instructions", f.machine),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body["files"][0]["present"], false);
+    assert_eq!(body["files"][0]["reason"], "symlink");
+    let body = f
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/machines/{}/owner-instructions/file?kind=claude_home",
+                f.machine
+            ),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body["present"], false);
+    assert_eq!(body["reason"], "symlink");
+    let body = f
+        .request(
+            Method::GET,
+            &format!(
+                "/api/v1/machines/{}/owner-instructions/file?kind=claude_user",
+                f.machine
+            ),
+            None,
+            200,
+        )
+        .await;
+    assert_eq!(body["reason"], "");
     served.await.unwrap();
 }

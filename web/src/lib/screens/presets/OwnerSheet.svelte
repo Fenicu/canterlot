@@ -24,7 +24,7 @@
   let loading = $state(true);
   let error = $state('');
   let overview = $state<{
-    files: { kind: string; harness: string; path: string; present: boolean; size: number; mtime: string | null }[];
+    files: { kind: string; harness: string; path: string; present: boolean; size: number; mtime: string | null; reason: string }[];
     memory_projects: { id: string; files: number; has_index: boolean }[];
   } | null>(null);
   let expanded = $state<string | null>(null);
@@ -53,6 +53,7 @@
         present: f.present,
         size: f.size,
         mtime: f.mtime ?? null,
+        reason: f.reason,
       }));
       const memory_projects = [...response.data.memory_projects];
       overview = { files, memory_projects };
@@ -148,7 +149,7 @@
       <section data-owner-file={file.kind}>
         <div class="row">
           <strong>{meta?.title ?? file.kind}</strong>
-          <span class="meta">{file.present ? `${formatSize(file.size)}${file.mtime ? ` · ${formatOwnerMtime(file.mtime)}` : ''}` : 'отсутствует'}</span>
+          <span class="meta">{file.present ? `${formatSize(file.size)}${file.mtime ? ` · ${formatOwnerMtime(file.mtime)}` : ''}` : file.reason === 'symlink' ? 'файл — ссылка, не показан' : 'отсутствует'}</span>
         </div>
         <p class="note">{meta?.note ?? ''}</p>
         <p class="path">{file.path}</p>

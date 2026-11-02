@@ -2,6 +2,9 @@
 //! Запрос называет только вид, для памяти — идентификатор проекта из обзора
 //! и имя файла, никогда путь. Пути строятся из фиксированного списка,
 //! проверяются канонизацией и не выходят за разрешённые каталоги.
+//! Глобальный файл и файл памяти ссылкой не бывают: ссылка вместо настоящего
+//! файла не читается и видна с причиной `symlink`, чтение идёт через дескриптор
+//! с `O_NOFOLLOW`, чтобы подмена между проверкой и чтением не увела в чужой файл.
 //!
 //! Подтверждённые пути CLI:
 //! - Claude Code: пользовательский `~/.claude/CLAUDE.md` (или `CLAUDE_CONFIG_DIR`,
@@ -23,6 +26,7 @@ use canterlot_proto::worker::v1::{
     OwnerMemoryProject,
 };
 use std::ffi::OsString;
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -42,6 +46,9 @@ pub const KIND_CODEX_OVERRIDE: &str = "codex_override";
 pub const KIND_OPENCODE_GLOBAL: &str = "opencode_global";
 pub const KIND_MEMORY_INDEX: &str = "memory_index";
 pub const KIND_MEMORY_FILE: &str = "memory_file";
+
+/// Причина отказа в показе при `present = false`: файл оказался ссылкой.
+pub const REASON_SYMLINK: &str = "symlink";
 
 /// Имена файлов, которые никогда не отдаются, даже при совпадении каталога.
 const DENIED_NAMES: &[&str] = &[".credentials.json", "credentials.json", "auth.json", ".env"];
@@ -159,44 +166,105 @@ fn inside(canonical: &Path, base: &Path) -> bool {
     canonical == base || canonical.starts_with(base)
 }
 
-/// Прочитать обычный текстовый файл с лимитом и проверками.
-fn read_capped(canonical: &Path, base: &Path) -> Option<(Vec<u8>, u64, u64, bool)> {
-    if !inside(canonical, base) {
-        return None;
+/// Исход чтения: текст, отсутствие или отказ из-за ссылки.
+enum ReadOutcome {
+    Text {
+        text: String,
+        size: u64,
+        mtime: u64,
+        truncated: bool,
+    },
+    Absent,
+    Symlink,
+}
+
+fn is_loop(error: &std::io::Error) -> bool {
+    error.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error())
+}
+
+/// Открыть файл без перехода по ссылке: подмена между проверкой и чтением
+/// упрётся в ошибку, а не в чужое содержимое.
+fn open_nofollow(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(path)
+}
+
+/// Прочитать обычный текстовый файл с лимитом и проверками. Ссылка —
+/// отдельный исход с причиной, а не молчаливое отсутствие: настоящий
+/// глобальный файл или файл памяти ссылкой никогда не бывает.
+fn read_text(expected: &Path, base: &Path) -> ReadOutcome {
+    use std::io::Read as _;
+    let meta = match std::fs::symlink_metadata(expected) {
+        Ok(meta) => meta,
+        Err(_) => return ReadOutcome::Absent,
+    };
+    if meta.file_type().is_symlink() {
+        return ReadOutcome::Symlink;
+    }
+    if !meta.is_file() {
+        return ReadOutcome::Absent;
+    }
+    let (Some(parent), Some(name)) = (expected.parent(), expected.file_name()) else {
+        return ReadOutcome::Absent;
+    };
+    // Канонический путь обязан совпасть с ожидаемым побайтово: ссылка
+    // в любом месте цепочки выше уже раскрыта канонизацией родителя.
+    let Ok(parent_canon) = std::fs::canonicalize(parent) else {
+        return ReadOutcome::Absent;
+    };
+    let Ok(canonical) = std::fs::canonicalize(expected) else {
+        return ReadOutcome::Absent;
+    };
+    if canonical != parent_canon.join(name) || !inside(&canonical, base) {
+        return ReadOutcome::Absent;
     }
     if let Some(name) = canonical.file_name().and_then(|n| n.to_str())
         && denied_name(name)
     {
-        return None;
+        return ReadOutcome::Absent;
     }
-    let meta = std::fs::metadata(canonical).ok()?;
-    if !meta.is_file() {
-        return None;
+    let file = match open_nofollow(expected) {
+        Ok(file) => file,
+        Err(error) if is_loop(&error) => return ReadOutcome::Symlink,
+        Err(_) => return ReadOutcome::Absent,
+    };
+    let handle = match file.metadata() {
+        Ok(handle) if handle.is_file() => handle,
+        _ => return ReadOutcome::Absent,
+    };
+    let size = handle.len();
+    let mtime = mtime_ms(expected);
+    // Читать не больше лимита с запасом в байт: признак усечения виден
+    // без загрузки огромного файла в память целиком.
+    let mut capped = Vec::new();
+    if file
+        .take(MAX_OWNER_FILE_BYTES as u64 + 1)
+        .read_to_end(&mut capped)
+        .is_err()
+    {
+        return ReadOutcome::Absent;
     }
-    let size = meta.len();
-    let mtime = mtime_ms(canonical);
-    let bytes = std::fs::read(canonical).ok()?;
-    if bytes.contains(&0) {
-        return None;
+    if capped.contains(&0) {
+        return ReadOutcome::Absent;
     }
-    let truncated = bytes.len() > MAX_OWNER_FILE_BYTES;
-    let mut capped = bytes;
+    let truncated = capped.len() > MAX_OWNER_FILE_BYTES;
     capped.truncate(MAX_OWNER_FILE_BYTES);
     // Срез только по границе символа, иначе markdown покажет половину знака.
     while String::from_utf8(capped.clone()).is_err() && !capped.is_empty() {
         capped.pop();
     }
-    Some((capped, size, mtime, truncated))
-}
-
-fn read_text(canonical: &Path, base: &Path) -> Option<(String, u64, u64, bool)> {
-    let (capped, size, mtime, truncated) = read_capped(canonical, base)?;
     let mut text = String::from_utf8_lossy(&capped).into_owned();
-    let was_truncated = truncated;
-    if was_truncated {
+    if truncated {
         text.push_str(TRUNCATED_MARKER);
     }
-    Some((text, size, mtime, was_truncated))
+    ReadOutcome::Text {
+        text,
+        size,
+        mtime,
+        truncated,
+    }
 }
 
 /// Ожидаемый путь глобального файла без чтения.
@@ -242,16 +310,23 @@ fn meta_for(kind: &str, roots: &OwnerRoots) -> OwnerFileMeta {
             ..Default::default()
         };
     };
+    let display = expected.to_string_lossy().into_owned();
+    let absent = |reason: &str| OwnerFileMeta {
+        kind: kind.into(),
+        path: display.clone(),
+        reason: reason.into(),
+        ..Default::default()
+    };
+    // Ссылка вместо настоящего файла не показывается, но видна в обзоре
+    // с причиной: молчаливое отсутствие скрыло бы подмену.
+    if std::fs::symlink_metadata(&expected).is_ok_and(|meta| meta.file_type().is_symlink()) {
+        return absent(REASON_SYMLINK);
+    }
     let base = global_base(kind, roots).unwrap_or_else(|| expected.clone());
     let base_canon = canonical_base(&base);
-    let display = expected.to_string_lossy().into_owned();
     let canonical = std::fs::canonicalize(&expected).unwrap_or(expected);
     if !inside(&canonical, &base_canon) {
-        return OwnerFileMeta {
-            kind: kind.into(),
-            path: display,
-            ..Default::default()
-        };
+        return absent("");
     }
     match std::fs::metadata(&canonical) {
         Ok(meta) if meta.is_file() => OwnerFileMeta {
@@ -260,12 +335,9 @@ fn meta_for(kind: &str, roots: &OwnerRoots) -> OwnerFileMeta {
             present: true,
             size: meta.len(),
             mtime_ms: mtime_ms(&canonical),
-        },
-        _ => OwnerFileMeta {
-            kind: kind.into(),
-            path: display,
             ..Default::default()
         },
+        _ => absent(""),
     }
 }
 
@@ -335,14 +407,15 @@ fn memory_stats(dir: &Path) -> (u64, bool) {
         let Ok(kind) = entry.file_type() else {
             continue;
         };
-        if !kind.is_file() && !kind.is_symlink() {
+        // Настоящий файл памяти ссылкой не бывает: ссылки не считаются,
+        // даже если цель осталась внутри каталога.
+        if !kind.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
         if !valid_memory_name(&name) {
             continue;
         }
-        // Ссылка наружу не считается: цель обязана остаться в каталоге памяти.
         let target = std::fs::canonicalize(entry.path()).unwrap_or_default();
         if !inside(&target, dir) || !target.is_file() {
             continue;
@@ -367,7 +440,7 @@ fn memory_listing(dir: &Path) -> Vec<OwnerMemoryFile> {
         let Ok(kind) = entry.file_type() else {
             continue;
         };
-        if !kind.is_file() && !kind.is_symlink() {
+        if !kind.is_file() {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
@@ -396,7 +469,8 @@ fn memory_listing(dir: &Path) -> Vec<OwnerMemoryFile> {
 }
 
 /// Один файл по виду запроса. Неизвестный вид и выход за каталог — отсутствие,
-/// а не содержимое чужого пути.
+/// а не содержимое чужого пути. Ссылка вместо настоящего файла — отсутствие
+/// с причиной `symlink`.
 pub fn read_one(
     kind: &str,
     project: &str,
@@ -404,6 +478,21 @@ pub fn read_one(
     roots: &OwnerRoots,
     request_id: &str,
 ) -> OwnerInstructionsFile {
+    fn absent(request_id: &str, kind: &str, path: String, reason: &str) -> OwnerInstructionsFile {
+        OwnerInstructionsFile {
+            request_id: request_id.into(),
+            kind: kind.into(),
+            path,
+            reason: reason.into(),
+            ..Default::default()
+        }
+    }
+    fn refusal(reason: &ReadOutcome) -> &str {
+        match reason {
+            ReadOutcome::Symlink => REASON_SYMLINK,
+            _ => "",
+        }
+    }
     if let Some(expected) = expected_path(kind, roots) {
         // Лишние project/name у глобального файла запрос портят.
         if !project.is_empty() || !name.is_empty() {
@@ -417,27 +506,28 @@ pub fn read_one(
         let base = global_base(kind, roots).unwrap_or_else(|| expected.clone());
         let base_canon = canonical_base(&base);
         let display = expected.to_string_lossy().into_owned();
-        let canonical = std::fs::canonicalize(&expected).unwrap_or(expected);
-        let Some((content, size, mtime, truncated)) = read_text(&canonical, &base_canon) else {
-            return OwnerInstructionsFile {
-                request_id: request_id.into(),
-                kind: kind.into(),
-                path: display,
-                ..Default::default()
-            };
-        };
-        // Время берётся из системных часов машины; хаб его не пересчитывает.
-        return OwnerInstructionsFile {
-            request_id: request_id.into(),
-            kind: kind.into(),
-            path: display,
-            present: true,
-            size,
-            mtime_ms: mtime,
-            truncated,
-            content,
-            ..Default::default()
-        };
+        match read_text(&expected, &base_canon) {
+            ReadOutcome::Text {
+                text: content,
+                size,
+                mtime,
+                truncated,
+            } => {
+                // Время берётся из системных часов машины; хаб его не пересчитывает.
+                return OwnerInstructionsFile {
+                    request_id: request_id.into(),
+                    kind: kind.into(),
+                    path: display,
+                    present: true,
+                    size,
+                    mtime_ms: mtime,
+                    truncated,
+                    content,
+                    ..Default::default()
+                };
+            }
+            outcome => return absent(request_id, kind, display, refusal(&outcome)),
+        }
     }
     if kind == KIND_MEMORY_INDEX || kind == KIND_MEMORY_FILE {
         let Some(dir) = memory_dir(roots, project) else {
@@ -478,28 +568,38 @@ pub fn read_one(
         if kind == KIND_MEMORY_INDEX {
             let expected = dir.join("MEMORY.md");
             let display = expected.to_string_lossy().into_owned();
-            let canonical = std::fs::canonicalize(&expected).unwrap_or(expected);
             let listing = memory_listing(&dir_canon);
-            let Some((content, size, mtime, truncated)) = read_text(&canonical, &dir_canon) else {
-                return OwnerInstructionsFile {
-                    request_id: request_id.into(),
-                    kind: kind.into(),
-                    path: display,
-                    files: listing,
-                    ..Default::default()
-                };
-            };
-            return OwnerInstructionsFile {
-                request_id: request_id.into(),
-                kind: kind.into(),
-                path: display,
-                present: true,
-                size,
-                mtime_ms: mtime,
-                truncated,
-                content,
-                files: listing,
-            };
+            match read_text(&expected, &dir_canon) {
+                ReadOutcome::Text {
+                    text: content,
+                    size,
+                    mtime,
+                    truncated,
+                } => {
+                    return OwnerInstructionsFile {
+                        request_id: request_id.into(),
+                        kind: kind.into(),
+                        path: display,
+                        present: true,
+                        size,
+                        mtime_ms: mtime,
+                        truncated,
+                        content,
+                        files: listing,
+                        ..Default::default()
+                    };
+                }
+                outcome => {
+                    return OwnerInstructionsFile {
+                        request_id: request_id.into(),
+                        kind: kind.into(),
+                        path: display,
+                        files: listing,
+                        reason: refusal(&outcome).into(),
+                        ..Default::default()
+                    };
+                }
+            }
         }
         if !valid_memory_name(name) {
             return OwnerInstructionsFile {
@@ -510,26 +610,27 @@ pub fn read_one(
         }
         let expected = dir.join(name);
         let display = expected.to_string_lossy().into_owned();
-        let canonical = std::fs::canonicalize(&expected).unwrap_or(expected);
-        let Some((content, size, mtime, truncated)) = read_text(&canonical, &dir_canon) else {
-            return OwnerInstructionsFile {
-                request_id: request_id.into(),
-                kind: kind.into(),
-                path: display,
-                ..Default::default()
-            };
-        };
-        return OwnerInstructionsFile {
-            request_id: request_id.into(),
-            kind: kind.into(),
-            path: display,
-            present: true,
-            size,
-            mtime_ms: mtime,
-            truncated,
-            content,
-            ..Default::default()
-        };
+        match read_text(&expected, &dir_canon) {
+            ReadOutcome::Text {
+                text: content,
+                size,
+                mtime,
+                truncated,
+            } => {
+                return OwnerInstructionsFile {
+                    request_id: request_id.into(),
+                    kind: kind.into(),
+                    path: display,
+                    present: true,
+                    size,
+                    mtime_ms: mtime,
+                    truncated,
+                    content,
+                    ..Default::default()
+                };
+            }
+            outcome => return absent(request_id, kind, display, refusal(&outcome)),
+        }
     }
     OwnerInstructionsFile {
         request_id: request_id.into(),
@@ -686,5 +787,65 @@ mod tests {
         assert!(file.truncated);
         assert!(file.content.ends_with(TRUNCATED_MARKER));
         assert_eq!(file.size as usize, big.len());
+    }
+
+    #[test]
+    fn global_symlink_to_another_home_file_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        // Приманка без NUL-байта: имя не из запретного списка, внутри дома.
+        std::fs::create_dir_all(r.home.join(".ssh")).unwrap();
+        std::fs::write(r.home.join(".ssh/id_ed25519"), "secret-key-material").unwrap();
+        std::fs::remove_file(r.home.join("CLAUDE.md")).unwrap();
+        symlink(r.home.join(".ssh/id_ed25519"), r.home.join("CLAUDE.md")).unwrap();
+        let file = read_one(KIND_CLAUDE_HOME, "", "", &r, "req");
+        assert!(!file.present);
+        assert!(file.content.is_empty());
+        assert_eq!(file.reason, "symlink");
+        let view = overview(&r);
+        let meta = view
+            .files
+            .iter()
+            .find(|f| f.kind == KIND_CLAUDE_HOME)
+            .unwrap();
+        assert!(!meta.present);
+        assert_eq!(meta.reason, "symlink");
+    }
+
+    #[test]
+    fn global_symlink_inside_config_dir_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        std::fs::write(r.claude_config_dir.join("other.md"), "чужой текст").unwrap();
+        std::fs::remove_file(r.claude_config_dir.join("CLAUDE.md")).unwrap();
+        symlink(
+            r.claude_config_dir.join("other.md"),
+            r.claude_config_dir.join("CLAUDE.md"),
+        )
+        .unwrap();
+        let file = read_one(KIND_CLAUDE_USER, "", "", &r, "req");
+        assert!(!file.present);
+        assert!(file.content.is_empty());
+        assert_eq!(file.reason, "symlink");
+    }
+
+    #[test]
+    fn symlinked_memory_file_is_neither_listed_nor_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let r = setup(dir.path());
+        let memory = r.claude_config_dir.join("projects/proj1/memory");
+        // Цель внутри каталога памяти: всё равно ссылка, настоящие файлы такими не бывают.
+        symlink(memory.join("a.md"), memory.join("linked.md")).unwrap();
+        let linked = read_one(KIND_MEMORY_FILE, "proj1", "linked.md", &r, "req");
+        assert!(!linked.present);
+        assert!(linked.content.is_empty());
+        let index = read_one(KIND_MEMORY_INDEX, "proj1", "", &r, "req");
+        assert!(
+            index.files.iter().all(|f| f.name != "linked.md"),
+            "ссылка не попадает даже в список"
+        );
+        let view = overview(&r);
+        let proj = view.projects.iter().find(|p| p.id == "proj1").unwrap();
+        assert_eq!(proj.files, 2);
     }
 }

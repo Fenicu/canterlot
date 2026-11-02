@@ -333,6 +333,8 @@ pub struct OwnerFileView {
     pub present: bool,
     pub size: u64,
     pub mtime: Option<String>,
+    /// Почему файл не показан при `present = false`: пусто или `symlink`.
+    pub reason: String,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -366,6 +368,8 @@ pub struct OwnerFileContent {
     pub truncated: bool,
     pub content: String,
     pub files: Vec<OwnerMemoryFileView>,
+    /// Почему файл не показан при `present = false`: пусто или `symlink`.
+    pub reason: String,
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -423,6 +427,7 @@ async fn owner_overview(
             present: file.present,
             size: file.size,
             mtime: owner_mtime(file.mtime_ms),
+            reason: owner_reason(&file.reason),
         });
     }
     let mut memory_projects = Vec::new();
@@ -499,7 +504,18 @@ async fn owner_file(
         truncated: reply.truncated,
         content: reply.content,
         files,
+        reason: owner_reason(&reply.reason),
     }))
+}
+
+/// Причина отказа из ответа воркера: только из фиксированного списка,
+/// остальное отбрасывается, чтобы наружу не ушёл произвольный текст.
+fn owner_reason(reason: &str) -> String {
+    if reason == "symlink" {
+        "symlink".into()
+    } else {
+        String::new()
+    }
 }
 
 #[derive(ToSchema)]
