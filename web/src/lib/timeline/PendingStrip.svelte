@@ -4,8 +4,9 @@
   import { getRuntime } from '#lib/app/runtime.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
-  import { sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import { editInput, editInputCaption, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
   import type { InputView } from '#lib/stores/inputs.js';
+  import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { CANCEL_REQUESTED_LABEL } from '#lib/stores/inputs.js';
   import type { ChatStore, ScheduledMessage } from '#lib/stores/chat.svelte.js';
@@ -127,6 +128,54 @@
       sending = { ...sending, [input.key]: false };
     }
   }
+
+  let editing = $state<Record<string, boolean>>({});
+  let editTexts = $state<Record<string, string>>({});
+  let editKept = $state<Record<string, string[]>>({});
+  let editBusy = $state<Record<string, boolean>>({});
+  let editErrors = $state<Record<string, string | null>>({});
+  let editClosed = $state<Record<string, string | null>>({});
+
+  function startEdit(input: InputView) {
+    editTexts = { ...editTexts, [input.key]: input.text };
+    editKept = { ...editKept, [input.key]: input.attachments.map((file) => file.attachment_id) };
+    editErrors = { ...editErrors, [input.key]: null };
+    editClosed = { ...editClosed, [input.key]: null };
+    editing = { ...editing, [input.key]: true };
+  }
+
+  function dropEditAttachment(input: InputView, attachmentId: string) {
+    editKept = {
+      ...editKept,
+      [input.key]: (editKept[input.key] ?? []).filter((id) => id !== attachmentId)
+    };
+  }
+
+  async function saveQueuedEdit(input: InputView) {
+    if (editBusy[input.key] || !input.id) return;
+    editBusy = { ...editBusy, [input.key]: true };
+    editErrors = { ...editErrors, [input.key]: null };
+    try {
+      const outcome = await editInput(
+        input,
+        chat.id,
+        editTexts[input.key] ?? input.text,
+        editKept[input.key] ?? input.attachments.map((file) => file.attachment_id),
+        input.revision,
+      );
+      if (outcome === 'saved' || outcome === 'noop') {
+        editing = { ...editing, [input.key]: false };
+      } else {
+        editErrors = { ...editErrors, [input.key]: editInputCaption(outcome.reason) };
+        if (outcome.reason === 'input_not_queued') {
+          editClosed = { ...editClosed, [input.key]: editErrors[input.key] ?? null };
+          editing = { ...editing, [input.key]: false };
+        }
+      }
+    } finally {
+      editBusy = { ...editBusy, [input.key]: false };
+    }
+  }
 </script>
 
 <div class="strip">
@@ -141,6 +190,33 @@
         {/if}
       </span>
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
+      {#if input.revision > 1}<p class="note">Изменено</p>{/if}
+      {#if editClosed[input.key] && !editing[input.key] && input.state === 'queued'}<p class="note">{editClosed[input.key]}</p>{/if}
+      {#if editing[input.key]}
+        <label class="edit-label" for="strip-edit-{input.key}">Текст сообщения</label>
+        <textarea id="strip-edit-{input.key}" class="edit-text" bind:value={editTexts[input.key]} rows="3"></textarea>
+        {#if (editKept[input.key] ?? []).length > 0}
+          <ul class="files">
+            {#each input.attachments.filter((file) => (editKept[input.key] ?? []).includes(file.attachment_id)) as file (file.attachment_id)}
+              <li class="edit-file">
+                <AttachmentTile {file} onopen={() => {}} />
+                <IconButton icon="close" label="Убрать вложение {file.name}" onclick={() => dropEditAttachment(input, file.attachment_id)} />
+              </li>
+            {/each}
+          </ul>
+        {/if}
+        {#if editErrors[input.key]}<p class="note">{editErrors[input.key]}</p>{/if}
+        <span class="actions">
+          {#if editBusy[input.key]}
+            <Button disabled={true} reason="Сохраняется…">Сохранить</Button>
+          {:else}
+            <Button onclick={() => void saveQueuedEdit(input)}>Сохранить</Button>
+          {/if}
+          <Button onclick={() => { editing = { ...editing, [input.key]: false }; }}>Отмена</Button>
+        </span>
+      {:else if input.state === 'queued' && input.id}
+        <span class="actions"><Button onclick={() => startEdit(input)}>Изменить</Button></span>
+      {/if}
       {#if input.state === 'queued' && input.id && turnLive && steerSupported}
         {#if sending[input.key]}
           <span class="actions"><Button disabled={true} reason="Отправляется…">Отправить сейчас</Button></span>
@@ -216,6 +292,10 @@
   .pill :global(button) { color: var(--secondary); }
   .note { margin: 0; padding-inline: var(--s6); color: var(--muted); font-size: var(--fs-sm); }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); padding-inline: var(--s2); }
+  .edit-label { color: var(--secondary); font-size: var(--fs-sm); padding-inline: var(--s6); }
+  .edit-text { width: 100%; min-height: calc(var(--target) * 2); resize: vertical; border-radius: var(--radius-sm); padding: var(--s3) var(--s4); font: inherit; }
+  .files { display: flex; flex-wrap: wrap; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
+  .edit-file { display: flex; align-items: center; gap: var(--s2); }
   .more { align-self: flex-start; min-height: var(--target); padding-inline: var(--s6); background: var(--transparent); color: var(--accent-link); font-size: var(--fs-sm); }
   .edit { display: flex; flex-direction: column; gap: var(--s6); }
 </style>

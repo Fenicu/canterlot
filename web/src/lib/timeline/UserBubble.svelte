@@ -4,6 +4,7 @@
   import { rejectionLabel } from '#lib/format/labels.js';
   import { fmt } from '#lib/format/ru.js';
   import Button from '#lib/ui/Button.svelte';
+  import IconButton from '#lib/ui/IconButton.svelte';
   import AttachmentTile from '#lib/timeline/AttachmentTile.svelte';
   import { attachmentKind, attachmentUrl } from '#lib/timeline/attachments.js';
   import type { Component } from 'svelte';
@@ -13,6 +14,7 @@
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import { retryAsNew, returnToDraft, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import { editInput, editInputCaption } from '#lib/timeline/QueueActions.js';
   import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
   import { turnIsLive } from '#lib/composer/sendRules.js';
   import { originLabel } from '#lib/timeline/origin.js';
@@ -90,6 +92,46 @@
   let sendNowReason = $state<string | null>(null);
   let sendNowSent = $state(false);
 
+  // Правка — в самом пузыре: текст уже на месте, черновик композера не трогаем.
+  let editing = $state(false);
+  let editText = $state('');
+  let editKept = $state<string[]>([]);
+  let editBusy = $state(false);
+  let editError = $state<string | null>(null);
+  let editClosedNote = $state<string | null>(null);
+
+  function startEdit() {
+    editText = input.text;
+    editKept = input.attachments.map((file) => file.attachment_id);
+    editError = null;
+    editClosedNote = null;
+    editing = true;
+  }
+
+  function dropEditAttachment(attachmentId: string) {
+    editKept = editKept.filter((id) => id !== attachmentId);
+  }
+
+  async function saveEdit() {
+    if (editBusy || !input.id) return;
+    editBusy = true;
+    editError = null;
+    try {
+      const outcome = await editInput(input, chat.id, editText, editKept, input.revision);
+      if (outcome === 'saved' || outcome === 'noop') {
+        editing = false;
+      } else {
+        editError = editInputCaption(outcome.reason);
+        if (outcome.reason === 'input_not_queued') {
+          editClosedNote = editError;
+          editing = false;
+        }
+      }
+    } finally {
+      editBusy = false;
+    }
+  }
+
   async function doSendNow() {
     if (sendingNow) return;
     sendingNow = true;
@@ -109,6 +151,29 @@
 
 <article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} use:enter>
   {#if from}<p class="origin">{from}</p>{/if}
+  {#if editing}
+    <label class="edit-label" for="edit-{input.key}">Текст сообщения</label>
+    <textarea id="edit-{input.key}" class="edit-text" bind:value={editText} rows="4"></textarea>
+    {#if editKept.length > 0}
+      <ul class="files">
+        {#each input.attachments.filter((file) => editKept.includes(file.attachment_id)) as file (file.attachment_id)}
+          <li class="edit-file">
+            <AttachmentTile {file} onopen={() => void view(file.attachment_id)} />
+            <IconButton icon="close" label="Убрать вложение {file.name}" onclick={() => dropEditAttachment(file.attachment_id)} />
+          </li>
+        {/each}
+      </ul>
+    {/if}
+    {#if editError}<p class="reason">{editError}</p>{/if}
+    <div class="actions">
+      {#if editBusy}
+        <Button disabled={true} reason="Сохраняется…">Сохранить</Button>
+      {:else}
+        <Button onclick={() => void saveEdit()}>Сохранить</Button>
+      {/if}
+      <Button onclick={() => { editing = false; }}>Отмена</Button>
+    </div>
+  {:else}
   <p class="text">{input.text}</p>
   {#if input.attachments.length > 0}
     <ul class="files">
@@ -117,6 +182,9 @@
       {/each}
     </ul>
   {/if}
+  {/if}
+  {#if input.revision > 1 && !editing}<p class="edited">Изменено</p>{/if}
+  {#if editClosedNote && !editing && input.state === 'queued'}<p class="reason">{editClosedNote}</p>{/if}
   {#if settled}
     <p class="status">{label}{stamp}</p>
   {:else}
@@ -139,15 +207,18 @@
       >Отправить повторно как новое</Button>
     </div>
   {/if}
-  {#if showSendNow}
+  {#if input.state === 'queued' && input.id !== null && !editing}
     <div class="actions">
-      {#if sendingNow}
-        <Button disabled={true} reason="Отправляется…">Отправить сейчас</Button>
-      {:else}
-        <Button onclick={() => void doSendNow()}>Отправить сейчас</Button>
+      <Button onclick={() => startEdit()}>Изменить</Button>
+      {#if showSendNow}
+        {#if sendingNow}
+          <Button disabled={true} reason="Отправляется…">Отправить сейчас</Button>
+        {:else}
+          <Button onclick={() => void doSendNow()}>Отправить сейчас</Button>
+        {/if}
       {/if}
     </div>
-    {#if harnessId === 'opencode'}<p class="reason">Прервёт текущий шаг</p>{/if}
+    {#if harnessId === 'opencode' && showSendNow}<p class="reason">Прервёт текущий шаг</p>{/if}
     {#if sendNowReason}<p class="reason">{sendNowReason}</p>{/if}
     {#if sendNowSent}<p class="reason">Вливается в идущий ход</p>{/if}
   {:else if sendNowReason && input.state === 'queued'}
@@ -199,4 +270,8 @@
   .files { display: flex; flex-wrap: wrap; align-items: flex-start; gap: var(--s2); margin: 0; padding: 0; list-style: none; }
   li { display: flex; min-width: 0; max-width: 100%; }
   .actions { display: flex; flex-wrap: wrap; gap: var(--s2); }
+  .edit-label { color: var(--secondary); font-size: var(--fs-sm); }
+  .edit-text { width: 100%; min-height: calc(var(--target) * 2); resize: vertical; border-radius: var(--radius-sm); padding: var(--s3) var(--s4); font: inherit; }
+  .edit-file { align-items: center; gap: var(--s2); }
+  .edited { color: var(--secondary); font-size: var(--fs-sm); }
 </style>

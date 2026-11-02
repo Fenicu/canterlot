@@ -565,6 +565,23 @@ export function sendNow(
   );
 }
 
+export function editInput(
+  conversationId: string,
+  inputId: string,
+  body: Body<operations["patch__api_v1_conversations__id__inputs__input_id_"]>,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["patch__api_v1_conversations__id__inputs__input_id_"]>>
+> {
+  return http(
+    "PATCH",
+    `/api/v1/conversations/${id(conversationId)}/inputs/${id(inputId)}`,
+    body,
+    keyed(key, opts),
+  );
+}
+
 export function accept(
   conversationId: string,
   body: Body<operations["post__api_v1_conversations__id__accept"]>,

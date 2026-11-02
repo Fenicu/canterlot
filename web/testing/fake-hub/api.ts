@@ -353,6 +353,7 @@ export class FakeHubApi {
 					id: String(p.input_id),
 					idempotency_key: String(p.idempotency_key),
 					state: String(p.state ?? 'queued'),
+					revision: typeof p.revision === 'number' ? p.revision : 1,
 					content: (p.content ?? []) as QueueSnapshot['queued'][number]['content'],
 					attachments: [],
 					created_seq: String(p.input_seq ?? ev.scope_seq),
@@ -363,6 +364,10 @@ export class FakeHubApi {
 			} else if (ev.kind === 'input_state_changed') {
 				const view = held.get(String(p.input_id));
 				if (!view) continue;
+				if (typeof p.revision === 'number') view.revision = p.revision;
+				if (p.cause === 'edited' && Array.isArray(p.content)) {
+					view.content = p.content as QueueSnapshot['queued'][number]['content'];
+				}
 				if (WAITING.has(String(p.state))) view.state = String(p.state);
 				else held.delete(String(p.input_id));
 			}

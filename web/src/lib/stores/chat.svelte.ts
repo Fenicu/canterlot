@@ -90,6 +90,7 @@ export interface HistoryInput {
   created_at: string;
   retry_of?: string | null;
   origin?: InputOrigin | null;
+  revision?: number | null;
 }
 
 export type HistoryRequest = components["schemas"]["RequestItemView"] & {
@@ -1033,6 +1034,26 @@ export class ChatStore {
     if (payload.retry_of) input.retryOf = payload.retry_of;
     if (payload.reason) input.rejection = payload.reason;
     if (payload.cause === "cancel_requested") input.cancelRequested = true;
+    if (typeof payload.revision === "number" && Number.isFinite(payload.revision)) {
+      input.revision = Math.max(1, Math.floor(payload.revision));
+    }
+    if (payload.cause === "edited" && Array.isArray(payload.content)) {
+      input.text = textOf(payload.content as HistoryInput["content"]);
+      input.attachments = (payload.content as HistoryInput["content"])
+        .filter(
+          (b): b is Extract<HistoryInput["content"][number], { type: string }> & {
+            attachment_id: string;
+          } => b.type === "attachment" && typeof b.attachment_id === "string",
+        )
+        .map((b) => ({
+          attachment_id: b.attachment_id,
+          name: typeof b.name === "string" ? b.name : "",
+          mime: typeof b.mime === "string" ? b.mime : "",
+          size: typeof b.size === "number" ? b.size : 0,
+          sha256: typeof b.sha256 === "string" ? b.sha256 : "",
+          image: b.image === true,
+        }));
+    }
     assignFeedSeq(input, state, event.scope_seq);
     if (state === "cancelled") {
       input.optimistic = false;
@@ -1298,6 +1319,7 @@ export class ChatStore {
     input.text = textOf(item.content);
     input.attachments = item.attachments;
     input.state = state;
+    input.revision = item.revision ?? 1;
     if (item.feed_seq || placeInput(state) !== "strip") input.optimistic = false;
     input.placement = input.optimistic ? "feed" : placeInput(state);
     input.marks = marksFor(state);

@@ -2,7 +2,7 @@ import type { InputView } from "#lib/stores/inputs.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { DraftStore } from "#lib/drafts/store.js";
-import { cancelInput as apiCancelInput, sendNow as apiSendNow } from "#lib/api/client.js";
+import { cancelInput as apiCancelInput, editInput as apiEditInput, sendNow as apiSendNow } from "#lib/api/client.js";
 import { ApiError } from "#lib/api/http.js";
 import { returnToComposer } from "#lib/composer/returned.js";
 import { freshInput } from "#lib/stores/inputs.js";
@@ -205,5 +205,86 @@ export function sendNowCaption(reason: string): string | null {
       return null;
     default:
       return "Не получилось отправить сейчас";
+  }
+}
+
+export interface EditInputDeps {
+  clientEditInput?: (
+    conversationId: string,
+    inputId: string,
+    body: { text: string; attachment_ids: string[]; expected_revision: number },
+    key: string,
+  ) => Promise<unknown>;
+}
+
+export type EditInputResult = "saved" | "noop" | { reason: string };
+
+const EDIT_INPUT_REASONS = new Set([
+  "input_not_queued",
+  "revision_conflict",
+  "steer_in_flight",
+  "empty_content",
+  "content_too_long",
+  "attachment_not_ready",
+  "attachment_not_found",
+  "attachment_unavailable",
+  "capability_missing",
+  "limits_mismatch",
+]);
+
+/**
+ * Правка ожидающего ввода сравнением-и-заменой по ревизии. Устаревшая ревизия
+ * и ушедший из очереди ввод отклоняются хабом с причиной, а не затирают чужое.
+ */
+export async function editInput(
+  input: InputView,
+  conversationId: string,
+  text: string,
+  attachmentIds: string[],
+  expectedRevision: number,
+  deps?: EditInputDeps,
+): Promise<EditInputResult> {
+  if (!input.id) return "noop";
+  try {
+    const key = crypto.randomUUID();
+    const body = { text, attachment_ids: attachmentIds, expected_revision: expectedRevision };
+    if (deps?.clientEditInput) await deps.clientEditInput(conversationId, input.id, body, key);
+    else await apiEditInput(conversationId, input.id, body, key);
+    return "saved";
+  } catch (err) {
+    if (err instanceof ApiError) {
+      const reason =
+        err.code === "invalid_request" && typeof err.details?.reason === "string"
+          ? err.details.reason
+          : "unknown";
+      if (reason === "unknown" || EDIT_INPUT_REASONS.has(reason)) return { reason };
+    }
+    return { reason: "unknown" };
+  }
+}
+
+/** Подпись отказа правки; null прячет кнопку вместо подписи. */
+export function editInputCaption(reason: string): string | null {
+  switch (reason) {
+    case "revision_conflict":
+      return "Сообщение уже изменено в другом месте";
+    case "input_not_queued":
+      return "Сообщение уже ушло, править поздно";
+    case "steer_in_flight":
+      return "Сообщение вливается в ход, дождитесь конца хода";
+    case "empty_content":
+      return "Сообщение не должно быть пустым";
+    case "content_too_long":
+      return "Сообщение длиннее 256 КиБ";
+    case "attachment_not_ready":
+      return "Вложение ещё загружается";
+    case "attachment_not_found":
+    case "attachment_unavailable":
+      return "Вложение недоступно";
+    case "capability_missing":
+    case "limits_mismatch":
+      return "Машина сейчас не принимает вложения";
+    default:
+      return "Не получилось сохранить";
   }
 }
