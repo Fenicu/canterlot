@@ -1527,6 +1527,7 @@ impl Adapter for ClaudeCodeAdapter {
             }
             if self.deferred.is_some()
                 && !self.deferred_due
+                && self.compact_pending.is_none()
                 && !self.background_busy()
                 && self.queue.as_ref().is_some_and(|q| q.active().is_none())
             {
@@ -1537,7 +1538,9 @@ impl Adapter for ClaudeCodeAdapter {
         }
     }
     async fn apply_deferred(&mut self, group: &dyn Containment) {
+        // Перезапуск посреди `/compact` потерял бы сжатие.
         if self.background_busy()
+            || self.compact_pending.is_some()
             || self.exited
             || self.eof
             || self.cli.is_none()

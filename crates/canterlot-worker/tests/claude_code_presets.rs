@@ -22,6 +22,7 @@ use std::{
     time::Duration,
 };
 use tempfile::TempDir;
+use tokio::time::Instant;
 use uuid::Uuid;
 
 #[path = "support/fake_exec.rs"]
@@ -402,6 +403,8 @@ for line in sys.stdin:
         for frame in json.loads(frames.read_text()):
             emit(frame)
         frames.unlink()
+    if (d / 'no-result').exists():
+        continue
     emit({'type': 'result', 'subtype': 'success', 'session_id': sid, 'is_error': False,
           'user_message_uuids': [uid], 'modelUsage': usage, 'result': 'ok'})
 "#;
@@ -627,6 +630,37 @@ async fn instructions_change_waits_for_background_work_and_applies_when_the_list
         "the next input reaches the new CLI"
     );
     assert_eq!(h.spawns().len(), 2, "applied once");
+}
+
+#[tokio::test]
+async fn deferred_restart_waits_for_a_manual_compaction() {
+    let mut h = RestartHarness::new().await;
+    deferred_change(&mut h).await;
+    background_frames(&h, serde_json::json!([]));
+    assert!(matches!(
+        h.transmit(None).await,
+        TransmitOutcome::Accepted(_)
+    ));
+    h.until_finished().await;
+    // `/compact` принят, итога ещё нет: перезапуск убил бы сжатие.
+    std::fs::write(h.dir.path().join("no-result"), "1").unwrap();
+    assert!(matches!(
+        tokio::time::timeout(WAIT, h.adapter.compact(Uuid::now_v7()))
+            .await
+            .unwrap(),
+        canterlot_worker::adapter::CompactOutcome::Accepted
+    ));
+    let quiet = Instant::now() + Duration::from_millis(3_000);
+    while let Ok(event) = tokio::time::timeout_at(quiet, h.adapter.next_event()).await {
+        assert!(
+            !matches!(event, AdapterEvent::DeferredRestartDue),
+            "no restart during the compaction"
+        );
+    }
+    tokio::time::timeout(WAIT, h.adapter.apply_deferred(&h.group))
+        .await
+        .unwrap();
+    assert_eq!(h.spawns().len(), 1, "the compacting CLI keeps running");
 }
 
 #[tokio::test]
