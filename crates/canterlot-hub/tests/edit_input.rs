@@ -5,13 +5,13 @@ use std::sync::Arc;
 
 use canterlot_hub::{
     delivery::{
-        control::{ControlError, EditInputOutcome, request_edit_input},
+        control::{ControlError, EditInput, EditInputOutcome, request_edit_input},
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
         receipts::{InputReceipt, apply_input_receipt},
         submit::{ContentBlock, SubmitInput, submit_input},
     },
     executions::{self},
-    model::{ExecutionState, InputState, RunSlot},
+    model::{ExecutionState, InputState},
     testkit::{self, Seed},
 };
 use chrono::Utc;
@@ -61,14 +61,16 @@ async fn edit(
 ) -> Result<EditInputOutcome, ControlError> {
     request_edit_input(
         pool,
-        seed.owner_id,
-        seed.conversation_id,
-        input_id,
-        text.into(),
-        Vec::new(),
-        revision,
-        key,
-        Uuid::now_v7(),
+        EditInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            input_id,
+            text: text.into(),
+            attachment_ids: Vec::new(),
+            expected_revision: revision,
+            idempotency_key: key.into(),
+            correlation_id: Uuid::now_v7(),
+        },
     )
     .await
 }
@@ -231,14 +233,16 @@ async fn edit_races_dispatch_without_double_delivery(pool: PgPool) -> TestResult
                 barrier.wait().await;
                 request_edit_input(
                     &pool,
-                    seed.owner_id,
-                    seed.conversation_id,
-                    input_id,
-                    "исправленный".into(),
-                    Vec::new(),
-                    1,
-                    &Uuid::now_v7().to_string(),
-                    Uuid::now_v7(),
+                    EditInput {
+                        owner_id: seed.owner_id,
+                        conversation_id: seed.conversation_id,
+                        input_id,
+                        text: "исправленный".into(),
+                        attachment_ids: Vec::new(),
+                        expected_revision: 1,
+                        idempotency_key: Uuid::now_v7().to_string(),
+                        correlation_id: Uuid::now_v7(),
+                    },
                 )
                 .await
             })
@@ -342,14 +346,21 @@ async fn edit_updates_pending_steer_and_refuses_in_flight(pool: PgPool) -> TestR
     .bind(second_cmd)
     .execute(&pool)
     .await?;
-    edit(&pool, &seed, second_id, "second, исправленный", 1, "edit-steer").await?;
-    // Ожидающий steer тянет новое содержимое.
-    let steer_text: String = sqlx::query_scalar(
-        "select payload->'content'->0->>'text' from commands where id = $1",
+    edit(
+        &pool,
+        &seed,
+        second_id,
+        "second, исправленный",
+        1,
+        "edit-steer",
     )
-    .bind(steer_id)
-    .fetch_one(&pool)
     .await?;
+    // Ожидающий steer тянет новое содержимое.
+    let steer_text: String =
+        sqlx::query_scalar("select payload->'content'->0->>'text' from commands where id = $1")
+            .bind(steer_id)
+            .fetch_one(&pool)
+            .await?;
     assert_eq!(steer_text, "second, исправленный");
     // Ушедший на машину steer правится только отзывом.
     sqlx::query("update commands set delivery_state = 'stored_on_machine' where id = $1")
@@ -362,7 +373,10 @@ async fn edit_updates_pending_steer_and_refuses_in_flight(pool: PgPool) -> TestR
             reason: "steer_in_flight"
         })
     ));
-    assert_eq!(deliver_text(&pool, second_cmd).await, "second, исправленный");
+    assert_eq!(
+        deliver_text(&pool, second_cmd).await,
+        "second, исправленный"
+    );
     let _ = first_id;
     Ok(())
 }
@@ -389,18 +403,26 @@ async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
         .execute(&pool)
         .await?;
     }
-    sqlx::query("insert into input_attachments(input_id,attachment_id,position) values($1,$2,0),($1,$3,1)")
-        .bind(input_id).bind(kept).bind(dropped).execute(&pool).await?;
+    sqlx::query(
+        "insert into input_attachments(input_id,attachment_id,position) values($1,$2,0),($1,$3,1)",
+    )
+    .bind(input_id)
+    .bind(kept)
+    .bind(dropped)
+    .execute(&pool)
+    .await?;
     let outcome = request_edit_input(
         &pool,
-        seed.owner_id,
-        seed.conversation_id,
-        input_id,
-        "без лишнего".into(),
-        vec![kept],
-        1,
-        "edit-attachments",
-        Uuid::now_v7(),
+        EditInput {
+            owner_id: seed.owner_id,
+            conversation_id: seed.conversation_id,
+            input_id,
+            text: "без лишнего".into(),
+            attachment_ids: vec![kept],
+            expected_revision: 1,
+            idempotency_key: "edit-attachments".into(),
+            correlation_id: Uuid::now_v7(),
+        },
     )
     .await?;
     assert_eq!(outcome.revision, 2);
@@ -411,11 +433,10 @@ async fn edit_replaces_attachment_list(pool: PgPool) -> TestResult {
     .fetch_all(&pool)
     .await?;
     assert_eq!(linked, vec![kept]);
-    let content: Value =
-        sqlx::query_scalar("select content from inputs where id = $1")
-            .bind(input_id)
-            .fetch_one(&pool)
-            .await?;
+    let content: Value = sqlx::query_scalar("select content from inputs where id = $1")
+        .bind(input_id)
+        .fetch_one(&pool)
+        .await?;
     let texts: Vec<&str> = content
         .as_array()
         .unwrap()

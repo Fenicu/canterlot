@@ -1134,6 +1134,18 @@ pub struct EditInputOutcome {
     pub revision: i64,
 }
 
+/// Параметры правки ожидающего ввода.
+pub struct EditInput {
+    pub owner_id: Uuid,
+    pub conversation_id: Uuid,
+    pub input_id: Uuid,
+    pub text: String,
+    pub attachment_ids: Vec<Uuid>,
+    pub expected_revision: i64,
+    pub idempotency_key: String,
+    pub correlation_id: Uuid,
+}
+
 /// Правка ожидающего ввода: замена текста и списка вложений сравнением-и-заменой
 /// по ревизии. Действует, только пока ввод ещё в `queued`: выдача, передача,
 /// приём и отмена идут мимо. Решение принимается под тем же замком очереди,
@@ -1141,16 +1153,19 @@ pub struct EditInputOutcome {
 /// содержимое едет следующим ходом целиком, либо правка отклоняется.
 pub async fn request_edit_input(
     pool: &PgPool,
-    owner_id: Uuid,
-    conversation_id: Uuid,
-    input_id: Uuid,
-    text: String,
-    attachment_ids: Vec<Uuid>,
-    expected_revision: i64,
-    idempotency_key: &str,
-    correlation_id: Uuid,
+    edit: EditInput,
 ) -> Result<EditInputOutcome, ControlError> {
-    idempotency::validate_key(idempotency_key)
+    let EditInput {
+        owner_id,
+        conversation_id,
+        input_id,
+        text,
+        attachment_ids,
+        expected_revision,
+        idempotency_key,
+        correlation_id,
+    } = edit;
+    idempotency::validate_key(&idempotency_key)
         .map_err(|reason| ControlError::InvalidRequest { reason })?;
     const OPERATION: &str = "edit_input";
     let hash = idempotency::request_hash(

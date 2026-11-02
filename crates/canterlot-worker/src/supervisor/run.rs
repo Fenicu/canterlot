@@ -3218,11 +3218,11 @@ mod tests {
                     input_id: Uuid::now_v7().to_string(),
                     conversation_id: supervisor.spec.conversation_id.to_string(),
                     content: vec![ContentBlock {
-                        block: Some(
-                            canterlot_proto::worker::v1::content_block::Block::Text(TextBlock {
+                        block: Some(canterlot_proto::worker::v1::content_block::Block::Text(
+                            TextBlock {
                                 text: "отредактировано на хабе".into(),
-                            }),
-                        ),
+                            },
+                        )),
                     }],
                     settings: None,
                 })),

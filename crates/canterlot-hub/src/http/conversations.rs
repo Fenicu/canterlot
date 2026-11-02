@@ -339,14 +339,16 @@ async fn edit_input(
 ) -> Result<Json<crate::delivery::control::EditInputOutcome>, ApiError> {
     let result = crate::delivery::control::request_edit_input(
         &s.pool,
-        o.owner_id,
-        id,
-        input_id,
-        body.text,
-        body.attachment_ids,
-        body.expected_revision,
-        &key,
-        c,
+        crate::delivery::control::EditInput {
+            owner_id: o.owner_id,
+            conversation_id: id,
+            input_id,
+            text: body.text,
+            attachment_ids: body.attachment_ids,
+            expected_revision: body.expected_revision,
+            idempotency_key: key,
+            correlation_id: c,
+        },
     )
     .await
     .map_err(|error| match error {
