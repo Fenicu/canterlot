@@ -740,6 +740,12 @@ async fn machine_metrics_and_stalled_activity_over_wss(pool: PgPool) {
             .execute(&pool)
             .await
             .unwrap();
+        // Часы молчания идут от начала хода: сдвигаем и его, иначе слот выглядит только что занятым.
+        sqlx::query("update queue_state set run_slot_since=clock_timestamp()-interval '10 minutes' where conversation_id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
         let state: String = sqlx::query_scalar(
             "select activity_state from conversation_derived where conversation_id=$1",
         )

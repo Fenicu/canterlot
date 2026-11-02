@@ -420,6 +420,57 @@ test('user_bubble_marks_follow_input_state', async ({ page }) => {
   }
 });
 
+test('transmitting_bubble_waits_quietly_and_escalates_only_when_unconfirmed', async ({ page }) => {
+  const { hub, api, id } = await boot(page, 0);
+  const input = inputItem(api, 'quiet', 'transmitting', '1', 'тихо ждёт подтверждения');
+  api.histories.set(id, [input]);
+  const detail = api.details.get(id);
+  if (detail) detail.execution = { state: 'running' };
+  api.bindConversation(id);
+  await page.reload();
+  const bubble = page.locator('.bubble', { hasText: 'тихо ждёт подтверждения' });
+  await expect(bubble).toBeVisible();
+  await expect(bubble).toContainText('Передаётся');
+  await expect(bubble.getByRole('button', { name: 'Отправить повторно как новое' })).toHaveCount(0);
+  await expect(page.getByText('Приём сообщения не подтверждён')).toHaveCount(0);
+
+  const scope = `conversation:${id}`;
+  hub.append(scope, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: { input_id: input.id, state: 'acceptance_unconfirmed' }
+  });
+  hub.append(scope, {
+    kind: 'queue_state_changed',
+    conversation_id: id,
+    payload: {
+      pause_reasons: [{ reason: 'unconfirmed_delivery', input_id: input.id }],
+      hold_reasons: [],
+      run_slot: 'free'
+    }
+  });
+  hub.flush();
+  await expect(bubble).toContainText('Приём не подтверждён');
+  await expect(bubble.getByRole('button', { name: 'Отправить повторно как новое' })).toBeVisible();
+  await expect(page.getByText('Приём сообщения не подтверждён')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Продолжить очередь' })).toBeVisible();
+
+  hub.append(scope, {
+    kind: 'input_state_changed',
+    conversation_id: id,
+    payload: { input_id: input.id, state: 'accepted' }
+  });
+  hub.append(scope, {
+    kind: 'queue_state_changed',
+    conversation_id: id,
+    payload: { pause_reasons: [], hold_reasons: [], run_slot: { running: { input_id: input.id } } }
+  });
+  hub.flush();
+  await expect(page.getByText('Приём сообщения не подтверждён')).toHaveCount(0);
+  await expect(bubble.getByRole('button', { name: 'Отправить повторно как новое' })).toHaveCount(0);
+  await expect(bubble).toContainText(/Принято агентом|Агент работает/);
+});
+
 test('incomplete_block_is_marked_and_partial_text_stays', async ({ page }) => {
   const { api, id } = await boot(page, 0);
   const block = textBlock(api, 'частичный текст', '1', 'incomplete');

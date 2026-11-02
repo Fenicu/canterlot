@@ -41,6 +41,7 @@ fn inputs() -> ActivityInputs {
         open_requests: 0,
         last_event_at: Some(now),
         last_turn_at: None,
+        turn_started_at: Some(now),
         process: Some(ProcessFacts {
             alive: true,
             cpu_permille: 50,
@@ -199,6 +200,30 @@ fn running_turn_beats_quota_hold() {
     });
     assert!(
         matches!(activity::compute(&i, &thresholds()).evidence, E::QuotaPaused { reason, .. } if reason == "limit_reached")
+    );
+}
+
+#[test]
+fn a_new_turn_after_a_long_idle_counts_silence_from_its_own_start() {
+    let mut i = inputs();
+    i.last_event_at = Some(i.now - TimeDelta::hours(1));
+    i.execution.as_mut().unwrap().phase_at = Some(i.now - TimeDelta::hours(1));
+    i.turn_started_at = Some(i.now);
+    assert_eq!(activity::compute(&i, &thresholds()).state, S::Working);
+
+    i.now += TimeDelta::seconds(301);
+    let activity = activity::compute(&i, &thresholds());
+    assert_eq!(activity.state, S::Stalled);
+    assert_eq!(
+        activity.evidence,
+        E::Stalled {
+            last_event_at: i.now - TimeDelta::seconds(301),
+            phase: "generating".into(),
+            process_alive: Some(true),
+            cpu_busy: Some(true),
+            link: "available".into(),
+        },
+        "the stall clock starts at the turn, not at the previous event"
     );
 }
 

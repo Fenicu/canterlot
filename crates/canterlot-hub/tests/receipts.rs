@@ -144,7 +144,7 @@ async fn receipts_are_monotonic_and_attempt_scoped(pool: PgPool) -> TestResult {
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn undetermined_pauses_and_never_redispatches(pool: PgPool) -> TestResult {
-    let (seed, _, head) = setup(&pool).await;
+    let (seed, execution, head) = setup(&pool).await;
     input(&pool, &seed).await;
     let unrelated = PauseReason::UnconfirmedDelivery {
         input_id: Uuid::now_v7(),
@@ -206,11 +206,25 @@ async fn undetermined_pauses_and_never_redispatches(pool: PgPool) -> TestResult 
         state["queue"]["pause_reasons"],
         json!([PauseReason::UserStop, unrelated])
     );
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running {
+            input_id: head.input_id
+        },
+        "the late proof says the turn had started; the slot is busy again"
+    );
     assert_eq!(
         apply(&pool, head.command_id, 1, InputReceipt::Accepted).await,
         ApplyOutcome::Ignored(Ignored::NotMonotonic)
     );
+    apply_run_finished(
+        &pool,
+        execution.execution_id,
+        head.command_id,
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Free);
     Ok(())
 }
 

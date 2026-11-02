@@ -219,6 +219,10 @@ async fn queue_events_cover_lifecycle_receipts_controls_and_run_slot(pool: PgPoo
         apply_input_receipt(&pool, input.command_id, 1, value, correlation).await?;
         assert_queue_event(&pool, &seed, correlation).await?;
     }
+    // Позднее доказательство вернуло слот ходу: следующий ввод ждёт его конца.
+    let correlation = Uuid::now_v7();
+    apply_run_finished(&pool, execution.execution_id, input.command_id, correlation).await?;
+    assert_queue_event(&pool, &seed, correlation).await?;
     let next = submit_input(&pool, request(&seed, "next")).await?;
     dispatch(&pool, &seed).await;
     let correlation = Uuid::now_v7();

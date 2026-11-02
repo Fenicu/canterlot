@@ -407,7 +407,7 @@ async fn message_written_during_wake_turn_is_still_proven_by_its_own_answer_fram
 }
 
 #[test]
-fn delivery_is_proven_by_answer_frame_not_by_echo() {
+fn delivery_is_proven_by_command_lifecycle_before_the_answer() {
     let mut queue = InputQueue::new(launch("ask"));
     let mut parser = Parser::new();
     queue.enqueue(&tx(
@@ -428,15 +428,46 @@ fn delivery_is_proven_by_answer_frame_not_by_echo() {
                 proofs.push((line, proof));
             }
         }
-        if line <= 17 {
+        if line < 14 {
             assert!(
                 proofs.is_empty(),
-                "line {line}: system frames and the replay echo prove nothing"
+                "line {line}: the queued frame and the replay echo prove nothing"
             );
             assert!(!queue.is_proven(id(ALPHA)));
         }
     }
     assert_eq!(echo_lines, vec![17]);
+    assert_eq!(proofs.len(), 1, "one proof per input");
+    let (line, proof) = &proofs[0];
+    assert_eq!(
+        *line, 14,
+        "the CLI's started frame proves delivery before the model answers"
+    );
+    assert_eq!(proof.command_id, id(ALPHA));
+    assert_eq!(proof.kind, "claude_code_command_lifecycle");
+    assert!(queue.is_proven(id(ALPHA)));
+    assert!(queue.active().is_none(), "the result ended the turn");
+}
+
+#[test]
+fn answer_frame_still_proves_delivery_without_a_lifecycle_frame() {
+    let mut queue = InputQueue::new(launch("ask"));
+    let mut parser = Parser::new();
+    queue.enqueue(&tx(
+        id(ALPHA),
+        1,
+        "Reply with exactly the single word ALPHA and nothing else.",
+    ));
+    written(queue.next(None));
+    parser.set_input_command(id(ALPHA));
+    let mut proofs = Vec::new();
+    for (line, frame) in out_lines("multi_input", 17, 18) {
+        for parsed in parser.feed(&frame) {
+            if let Some(proof) = queue.on_parsed(&parsed) {
+                proofs.push((line, proof));
+            }
+        }
+    }
     assert_eq!(proofs.len(), 1, "one proof per input");
     let (line, proof) = &proofs[0];
     assert_eq!(
@@ -446,7 +477,27 @@ fn delivery_is_proven_by_answer_frame_not_by_echo() {
     assert_eq!(proof.command_id, id(ALPHA));
     assert_eq!(proof.kind, "claude_code_answer_frame");
     assert!(queue.is_proven(id(ALPHA)));
-    assert!(queue.active().is_none(), "the result ended the turn");
+}
+
+#[test]
+fn completed_command_lifecycle_proves_a_replayed_uuid() {
+    let mut queue = InputQueue::new(launch("ask"));
+    let mut parser = Parser::new();
+    queue.enqueue(&tx(id(ALPHA), 2, "a retry of the same message"));
+    written(queue.next(None));
+    parser.set_input_command(id(ALPHA));
+    let frames = [json!({"type":"command_lifecycle","command_uuid":ALPHA,"state":"completed"})];
+    let mut proofs = Vec::new();
+    for frame in frames {
+        for parsed in parser.feed(&frame.to_string()) {
+            if let Some(proof) = queue.on_parsed(&parsed) {
+                proofs.push(proof);
+            }
+        }
+    }
+    assert_eq!(proofs.len(), 1);
+    assert_eq!(proofs[0].kind, "claude_code_command_lifecycle");
+    assert!(queue.is_proven(id(ALPHA)));
 }
 
 #[tokio::test]

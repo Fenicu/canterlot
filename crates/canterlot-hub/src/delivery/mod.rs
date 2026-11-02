@@ -51,7 +51,13 @@ impl LockedQueue {
         let (name, input_id, attempt) = slot.to_columns();
         let changed = sqlx::query(
             "update queue_state set pause_reasons = $2, hold_reasons = $3,
-                    run_slot = $4, run_slot_input_id = $5, run_slot_attempt = $6
+                    run_slot = $4, run_slot_input_id = $5, run_slot_attempt = $6,
+                    run_slot_since = case
+                        when (run_slot, run_slot_input_id, run_slot_attempt)
+                            is distinct from ($4::text, $5::uuid, $6::integer)
+                        then clock_timestamp()
+                        else run_slot_since
+                    end
              where conversation_id = $1
                and (pause_reasons, hold_reasons, run_slot, run_slot_input_id, run_slot_attempt)
                    is distinct from ($2::jsonb, $3::jsonb, $4::text, $5::uuid, $6::integer)",

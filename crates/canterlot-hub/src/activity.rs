@@ -167,6 +167,9 @@ pub struct ActivityInputs {
     pub open_requests: u32,
     pub last_event_at: Option<DateTime<Utc>>,
     pub last_turn_at: Option<DateTime<Utc>>,
+    /// Когда занялся текущий слот (`dispatching`/`running`): молчание нового хода
+    /// считается с него, а не с последнего события прошлого.
+    pub turn_started_at: Option<DateTime<Utc>>,
     pub process: Option<ProcessFacts>,
     pub link: LinkState,
     pub awaiting_attachments: bool,
@@ -333,7 +336,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
         if i.awaiting_attachments {
             return working("delivering_attachments");
         }
-        let last = i.last_event_at.max(e.phase_at);
+        let last = i.last_event_at.max(e.phase_at).max(i.turn_started_at);
         let threshold = if matches!(e.phase.as_str(), "running_tool" | "context_maintenance") {
             t.stalled_tool
         } else {
@@ -347,7 +350,7 @@ pub fn compute(i: &ActivityInputs, t: &Thresholds) -> Activity {
             return Activity {
                 state: S::Stalled,
                 evidence: Evidence::Stalled {
-                    last_event_at: i.last_event_at.unwrap_or(last),
+                    last_event_at: last,
                     phase: e.phase.clone(),
                     process_alive: i.process.map(|p| p.alive),
                     cpu_busy: i.process.map(|p| p.cpu_permille >= 50),
@@ -440,6 +443,10 @@ pub async fn load_inputs(
         q.try_get("run_slot_attempt")?,
     )
     .map_err(|e| sqlx::Error::Decode(Box::new(e)))?;
+    let turn_started_at = match slot {
+        RunSlot::Free => None,
+        RunSlot::Dispatching { .. } | RunSlot::Running { .. } => q.try_get("run_slot_since")?,
+    };
     let queued:i64=sqlx::query_scalar("select count(*) from inputs where conversation_id=$1 and state in ('queued','dispatched','on_machine')").bind(conversation_id).fetch_one(&mut *conn).await?;
     let latest=sqlx::query("select * from executions where conversation_id=$1 order by (state in ('created','starting','running','stopping')) desc,generation desc limit 1").bind(conversation_id).fetch_optional(&mut *conn).await?;
     let mut process = None;
@@ -543,6 +550,7 @@ pub async fn load_inputs(
         open_requests,
         last_event_at,
         last_turn_at,
+        turn_started_at,
         process,
         link: match availability {
             "available" => LinkState::Available,

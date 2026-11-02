@@ -839,13 +839,16 @@ impl ClaudeCodeAdapter {
             }
             let queue = self.queue.as_mut().unwrap();
             if queue.is_proven(input.command_id) {
+                let kind = queue
+                    .proof_kind(input.command_id)
+                    .unwrap_or(input::PROOF_KIND);
                 if self.cli_ready {
-                    return Self::accepted(input.command_id);
+                    return Self::accepted(input.command_id, kind);
                 }
                 // Ход уже закончился без init: ждать нечего. Идущий ход ещё может получить init.
                 if !queue.is_active(input.command_id) {
                     self.diagnostic("cli_init_missing", true);
-                    return Self::accepted(input.command_id);
+                    return Self::accepted(input.command_id, kind);
                 }
             }
             if let Some(reason) = queue.take_rejection(input.command_id) {
@@ -887,8 +890,8 @@ impl ClaudeCodeAdapter {
                     self.diagnostic("cli_init_missing", true);
                 }
                 if written {
-                    if self.queue.as_ref().unwrap().is_proven(input.command_id) {
-                        return Self::accepted(input.command_id);
+                    if let Some(kind) = self.queue.as_ref().unwrap().proof_kind(input.command_id) {
+                        return Self::accepted(input.command_id, kind);
                     }
                     return TransmitOutcome::Undetermined;
                 }
@@ -898,11 +901,8 @@ impl ClaudeCodeAdapter {
         }
     }
 
-    fn accepted(command_id: Uuid) -> TransmitOutcome {
-        TransmitOutcome::Accepted(Proof {
-            command_id,
-            kind: input::PROOF_KIND,
-        })
+    fn accepted(command_id: Uuid, kind: &'static str) -> TransmitOutcome {
+        TransmitOutcome::Accepted(Proof { command_id, kind })
     }
 
     /// Пока процесс не прислал init, ждут срок запуска; готовый процесс отвечает за срок передачи.
