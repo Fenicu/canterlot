@@ -5993,6 +5993,92 @@ async fn steer_during_a_turn_posts_steer_delivery_and_is_accepted() {
     bench.close(CloseMode::Graceful).await;
 }
 
+/// Неуверенное вливание сверяется отдельно от обычного ввода: провал сверки
+/// не трогает чужой ход — ни `delivery.active`, ни его конец.
+#[tokio::test]
+async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    let path = script.steps[position].expected_path().unwrap().to_owned();
+    script.steps.insert(
+        position + 1,
+        Step::Expect {
+            method: "POST".into(),
+            path,
+            reply: Reply {
+                status: 500,
+                body: Some(json!({"_tag": "UnknownError"})),
+                ..Default::default()
+            },
+            bind: Default::default(),
+        },
+    );
+    // После вливания проекций нет: сверка ничего не найдёт.
+    script.steps.truncate(position + 2);
+    let mut bench = Bench::new(script);
+    bench.start_ok().await;
+    let first = bench.input("one");
+    bench.accepted(&first).await;
+    let second = bench.input("send now");
+    let outcome = tokio::time::timeout(WAIT, bench.adapter.steer(&second))
+        .await
+        .expect("steer must finish");
+    assert!(
+        matches!(outcome, SteerOutcome::Undetermined),
+        "failed POST reconciles later: {outcome:?}"
+    );
+    // Гоняем события, пока сверка не уляжется: конца чужого хода быть не должно.
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    let mut stray_finish = false;
+    while std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        match tokio::time::timeout(remaining, bench.adapter.next_event()).await {
+            Ok(event) => {
+                if matches!(
+                    &event,
+                    AdapterEvent::RunFinished { input_command_id, .. }
+                    if *input_command_id == second.command_id
+                ) {
+                    stray_finish = true;
+                    break;
+                }
+                if matches!(
+                    &event,
+                    AdapterEvent::RunFinished { input_command_id, .. }
+                    if *input_command_id == first.command_id
+                ) {
+                    break;
+                }
+            }
+            Err(_) => break,
+        }
+    }
+    assert!(!stray_finish, "uncertain steer must not finish any turn");
+    let requests = bench.fake.requests();
+    assert!(
+        requests
+            .iter()
+            .any(|request| path_of(request).ends_with("/inbox")),
+        "the steer was reconciled through projections"
+    );
+    // Исходный ход жив: новый ввод отклоняется занятостью.
+    assert!(
+        matches!(
+            bench.transmit(&bench.input("third")).await,
+            TransmitOutcome::Rejected(reason) if reason == "turn_active"
+        ),
+        "the original turn must still run"
+    );
+    bench.close(CloseMode::Force).await;
+}
+
 #[tokio::test]
 async fn steer_without_a_turn_sends_nothing() {
     let mut bench = Bench::new(ready());

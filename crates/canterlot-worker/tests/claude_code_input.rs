@@ -1151,6 +1151,61 @@ async fn interrupt_falls_back_to_sigint_without_receipt() {
     );
 }
 
+/// Гонка прерывания с обычным концом хода: квитанция есть, итог не прерванный.
+/// Ожидание заканчивается вместе с ходом, а не висит до срока.
+#[tokio::test]
+async fn interrupt_ends_on_normal_result_after_receipt() {
+    let _interrupt =
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt()).unwrap();
+    let mut fake = Fake::start(|dir| {
+        let turn: Vec<String> = out_lines("interrupt", 5, 38)
+            .into_iter()
+            .map(|(_, frame)| frame)
+            .collect();
+        write_frames(dir, "turn_1.out", &turn);
+        let normal = out_lines("interrupt", 42, 44)
+            .into_iter()
+            .find(|(line, _)| *line == 44)
+            .map(|(_, frame)| frame.replace("aborted_tools", "completed"))
+            .unwrap();
+        write_frames(dir, "int.out", &[normal]);
+    })
+    .await;
+    let queue = InputQueue::new(launch("ask"));
+    let mut driver = InputDriver::new(queue, Parser::new());
+    let text = in_line("interrupt", 4)["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let outcome = tokio::time::timeout(
+        WAIT,
+        driver.transmit(
+            &mut fake.cli,
+            &tx(id(SLEEP_INPUT), 1, &text),
+            None,
+            DEADLINE,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, TransmitOutcome::Accepted(_)));
+    let outcome = tokio::time::timeout(WAIT, driver.interrupt(&mut fake.cli, DEADLINE))
+        .await
+        .expect("interrupt must end with the normal turn result, not hang");
+    assert!(
+        matches!(outcome, InterruptOutcome::Undetermined),
+        "a normally finished turn is not an acknowledgement, got {outcome:?}"
+    );
+    assert!(
+        driver.queue.interrupt_receipt().is_some(),
+        "the control_response receipt arrived before the normal result"
+    );
+    assert!(
+        driver.queue.active().is_none(),
+        "the normally finished turn is over"
+    );
+}
+
 // --- чтение потока и управляющие ответы -------------------------------------------
 
 #[tokio::test]

@@ -207,6 +207,7 @@ message ShareUpload {
   string sha256 = 8;
   uint32 width = 9;
   uint32 height = 10;
+  string block_id = 11;
 }
 
 message ShareResult {
