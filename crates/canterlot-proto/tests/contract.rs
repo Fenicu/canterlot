@@ -1215,6 +1215,43 @@ fn start_execution_capabilities_machine_report_os_and_limits_snapshot_roundtrip(
     };
     assert_eq!(message.encode_to_vec()[0], 8 << 3 | 2);
     assert_roundtrip(message);
+    let read = ReadOwnerInstructions {
+        request_id: "request".into(),
+        kind: "memory_file".into(),
+        project: "secret-project".into(),
+        name: "MEMORY.md".into(),
+    };
+    assert_roundtrip(read.clone());
+    assert!(!format!("{read:?}").contains("secret-project"));
+    let message = ControlDown {
+        msg: Some(control_down::Msg::ReadOwner(read)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 8 << 3 | 2);
+    assert_roundtrip(message);
+    let file = OwnerInstructionsFile {
+        request_id: "request".into(),
+        kind: "claude_user".into(),
+        path: "/home/owner/.claude/CLAUDE.md".into(),
+        content: "private-name".into(),
+        ..Default::default()
+    };
+    assert_roundtrip(file.clone());
+    assert!(!format!("{file:?}").contains("private-name"));
+    let message = ControlUp {
+        msg: Some(control_up::Msg::OwnerFile(file)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 10 << 3 | 2);
+    assert_roundtrip(message);
+    let overview = OwnerInstructionsOverview {
+        request_id: "request".into(),
+        ..Default::default()
+    };
+    assert_roundtrip(overview.clone());
+    let message = ControlUp {
+        msg: Some(control_up::Msg::OwnerOverview(overview)),
+    };
+    assert_eq!(message.encode_to_vec()[0], 9 << 3 | 2);
+    assert_roundtrip(message);
     let snapshot = LimitsSnapshot {
         provider: "claude".into(),
         current: vec![LimitObservation {

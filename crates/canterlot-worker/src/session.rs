@@ -42,6 +42,7 @@ pub const OPTIONAL_CAPABILITIES: &[&str] = &[
     "background_v1",
     "session_tools_v1",
     "owner_exit_v1",
+    "owner_instructions_v1",
 ];
 
 #[derive(Clone)]
@@ -1015,6 +1016,10 @@ impl Worker {
             .capabilities
             .iter()
             .any(|cap| cap == "workdir_suggest_v1");
+        let owner_enabled = accepted
+            .capabilities
+            .iter()
+            .any(|cap| cap == "owner_instructions_v1");
         self.manager
             .as_ref()
             .unwrap()
@@ -1127,6 +1132,11 @@ impl Worker {
         let mut suggest_outbound = None;
         type SuggestFuture = Pin<Box<dyn Future<Output = WorkdirSuggestions> + Send>>;
         let mut suggest_operation: Option<SuggestFuture> = None;
+        // Чтение инструкций владельца: тоже только последний запрос.
+        let mut owner_next: Option<ReadOwnerInstructions> = None;
+        let mut owner_outbound: Option<ControlUp> = None;
+        type OwnerFuture = Pin<Box<dyn Future<Output = ControlUp> + Send>>;
+        let mut owner_operation: Option<OwnerFuture> = None;
         let session_state = self.state.clone();
         let manager = self.manager.as_ref().unwrap();
         let (data_state, mut data_attached) = watch::channel(true);
@@ -1186,6 +1196,77 @@ impl Worker {
                         directories: workdirs.suggest(request.path).await,
                         request_id: request.request_id,
                     }
+                }));
+            }
+            if owner_operation.is_none()
+                && owner_outbound.is_none()
+                && let Some(request) = owner_next.take()
+            {
+                let codex_owner = self
+                    .config
+                    .codex
+                    .as_ref()
+                    .and_then(|c| c.owner_home.clone());
+                let opencode_owner = self
+                    .config
+                    .opencode
+                    .as_ref()
+                    .and_then(|c| c.owner_config.clone());
+                owner_operation = Some(Box::pin(async move {
+                    let request_id = request.request_id.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let home =
+                            std::env::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/"));
+                        let env: Vec<(std::ffi::OsString, std::ffi::OsString)> =
+                            ["HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "CLAUDE_CONFIG_DIR"]
+                                .into_iter()
+                                .filter_map(|key| {
+                                    std::env::var_os(key).map(|value| (key.into(), value))
+                                })
+                                .collect();
+                        let roots = crate::machine::owner_instructions::OwnerRoots::from_env(
+                            &home,
+                            &env,
+                            codex_owner.as_deref(),
+                            opencode_owner.as_deref(),
+                        );
+                        if request.kind == crate::machine::owner_instructions::KIND_OVERVIEW {
+                            let mut view = crate::machine::owner_instructions::overview(&roots);
+                            view.request_id = request.request_id.clone();
+                            ControlUp {
+                                msg: Some(control_up::Msg::OwnerOverview(view)),
+                            }
+                        } else {
+                            let mut file = crate::machine::owner_instructions::read_one(
+                                &request.kind,
+                                &request.project,
+                                &request.name,
+                                &roots,
+                                &request.request_id,
+                            );
+                            file.request_id = request.request_id.clone();
+                            ControlUp {
+                                msg: Some(control_up::Msg::OwnerFile(file)),
+                            }
+                        }
+                    })
+                    .await
+                    .unwrap_or(ControlUp {
+                        msg: Some(control_up::Msg::OwnerFile(
+                            crate::machine::owner_instructions::read_one(
+                                "invalid",
+                                "",
+                                "",
+                                &crate::machine::owner_instructions::OwnerRoots::new(
+                                    std::path::PathBuf::from("/"),
+                                    std::path::PathBuf::from("/"),
+                                    std::path::PathBuf::from("/"),
+                                    std::path::PathBuf::from("/"),
+                                ),
+                                &request_id,
+                            ),
+                        )),
+                    })
                 }));
             }
             if !report_created && acknowledged >= replay_end {
@@ -1271,6 +1352,7 @@ impl Worker {
                 || machine_outbound.is_some()
                 || limits_outbound.is_some()
                 || suggest_outbound.is_some()
+                || owner_outbound.is_some()
                 || report_outbound.is_some()
                 || range_outbound.is_some()
                 || (ready_batch.is_some() && pending_batches.len() < 8);
@@ -1284,6 +1366,7 @@ impl Worker {
                         }
                         Some(control_down::Msg::LimitsSnapshot(snapshot)) if pilot => {self.limits_cache.update(snapshot);}
                         Some(control_down::Msg::SuggestWorkdirs(request)) if suggest_enabled => {suggest_next = Some(request);}
+                        Some(control_down::Msg::ReadOwner(request)) if owner_enabled => {owner_next = Some(request);}
                         Some(control_down::Msg::Command(command)) => { commands.push_back(command); }
                         Some(control_down::Msg::CjAck(ack)) => {
                             if ack.journal_id != journal_id { return Err(WorkerError::Protocol); }
@@ -1348,6 +1431,7 @@ impl Worker {
                     else if let Some(message)=machine_outbound.take() {message}
                     else if let Some(message)=limits_outbound.take() {message}
                     else if let Some(message)=suggest_outbound.take() {message}
+                    else if let Some(message)=owner_outbound.take() {message}
                     else if let Some(message) = report_outbound.take() {
                         manager.on_hub_session(data::session_committed(&hello, &accepted,self.manager.as_ref().unwrap())?);
                         activate_data.send_replace(true);
@@ -1395,6 +1479,9 @@ impl Worker {
                 }
                 reply=async{suggest_operation.as_mut().unwrap().await}, if suggest_operation.is_some()=>{
                     suggest_operation=None;suggest_outbound=Some(ControlUp{msg:Some(control_up::Msg::WorkdirSuggestions(reply))});
+                }
+                owned=async{owner_operation.as_mut().unwrap().await}, if owner_operation.is_some()=>{
+                    owner_operation=None;owner_outbound=Some(owned);
                 }
                 result = &mut data_loop => return result,
                 changed = data_attached.changed() => {

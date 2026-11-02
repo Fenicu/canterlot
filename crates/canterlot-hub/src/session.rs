@@ -9,7 +9,9 @@ use std::{
 
 use canterlot_proto::{
     limits::MAX_WORKDIR_SUGGESTIONS,
-    worker::v1::{ControlDown, SuggestWorkdirs, WorkdirSuggestions, control_down},
+    worker::v1::{
+        ControlDown, ReadOwnerInstructions, SuggestWorkdirs, WorkdirSuggestions, control_down,
+    },
 };
 use tokio::sync::{Notify, broadcast, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -27,9 +29,12 @@ pub const CAPABILITY_OWNER_EXIT_V1: &str = "owner_exit_v1";
 
 pub const CAPABILITY_EXEC_V1: &str = "exec_v1";
 pub const CAPABILITY_WORKDIR_SUGGEST_V1: &str = "workdir_suggest_v1";
+pub const CAPABILITY_OWNER_INSTRUCTIONS_V1: &str = "owner_instructions_v1";
 
 /// Форма спрашивает по одному запросу с паузой на ввод, остальным ждать незачем.
 pub const MAX_SUGGESTS_PER_MACHINE: usize = 4;
+/// Параллельных чтений инструкций владельца на машину.
+pub const MAX_OWNER_READS_PER_MACHINE: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Availability {
@@ -62,6 +67,19 @@ struct SessionEntry {
 }
 
 type SuggestWaiters = Arc<Mutex<HashMap<(Uuid, Uuid), oneshot::Sender<Vec<String>>>>>;
+type OwnerOverviewWaiters = Arc<
+    Mutex<
+        HashMap<
+            (Uuid, Uuid),
+            oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsOverview>,
+        >,
+    >,
+>;
+type OwnerFileWaiters = Arc<
+    Mutex<
+        HashMap<(Uuid, Uuid), oneshot::Sender<canterlot_proto::worker::v1::OwnerInstructionsFile>>,
+    >,
+>;
 
 #[derive(Clone)]
 pub struct Registry {
@@ -69,6 +87,8 @@ pub struct Registry {
     timers: HubTimers,
     changes: broadcast::Sender<(Uuid, Availability)>,
     suggests: SuggestWaiters,
+    owner_overview: OwnerOverviewWaiters,
+    owner_files: OwnerFileWaiters,
 }
 
 /// Снимает ожидание и на сроке, и при обрыве HTTP-запроса.
@@ -86,11 +106,46 @@ impl Drop for SuggestSlot {
     }
 }
 
+struct OwnerOverviewSlot {
+    waiters: OwnerOverviewWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for OwnerOverviewSlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("owner overview waiters lock")
+            .remove(&self.key);
+    }
+}
+
+struct OwnerFileSlot {
+    waiters: OwnerFileWaiters,
+    key: (Uuid, Uuid),
+}
+
+impl Drop for OwnerFileSlot {
+    fn drop(&mut self) {
+        self.waiters
+            .lock()
+            .expect("owner file waiters lock")
+            .remove(&self.key);
+    }
+}
+
 /// Тестовое подключение к реестру: держит слот, пока живёт guard.
 #[cfg(feature = "testkit")]
 pub struct TestLease {
     _lease: ControlLease,
     _commands: mpsc::Receiver<ControlDown>,
+}
+
+/// Ошибка чтения инструкций владельца: нет сеанса, нет возможности или вышел срок.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OwnerReadError {
+    Unavailable,
+    CapabilityMissing,
 }
 
 impl Registry {
@@ -100,6 +155,8 @@ impl Registry {
             timers,
             changes: broadcast::channel(256).0,
             suggests: Arc::default(),
+            owner_overview: Arc::default(),
+            owner_files: Arc::default(),
         }
     }
 
@@ -329,6 +386,139 @@ impl Registry {
             let mut directories = reply.directories;
             directories.truncate(MAX_WORKDIR_SUGGESTIONS);
             let _ = waiter.send(directories);
+        }
+    }
+
+    fn owner_sender(&self, machine_id: Uuid) -> Result<mpsc::Sender<ControlDown>, OwnerReadError> {
+        if self.session_info(machine_id).is_none() {
+            return Err(OwnerReadError::Unavailable);
+        }
+        if !self.has_capability(machine_id, CAPABILITY_OWNER_INSTRUCTIONS_V1) {
+            return Err(OwnerReadError::CapabilityMissing);
+        }
+        self.command_sender(machine_id)
+            .ok_or(OwnerReadError::Unavailable)
+    }
+
+    /// Обзор без содержимого: метаданные файлов и список проектов памяти.
+    pub async fn owner_overview(
+        &self,
+        machine_id: Uuid,
+        wait: std::time::Duration,
+    ) -> Result<canterlot_proto::worker::v1::OwnerInstructionsOverview, OwnerReadError> {
+        let sender = self.owner_sender(machine_id)?;
+        let request_id = Uuid::now_v7();
+        let key = (machine_id, request_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self
+                .owner_overview
+                .lock()
+                .expect("owner overview waiters lock");
+            let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
+            if busy >= MAX_OWNER_READS_PER_MACHINE {
+                return Err(OwnerReadError::Unavailable);
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = OwnerOverviewSlot {
+            waiters: self.owner_overview.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::ReadOwner(ReadOwnerInstructions {
+                request_id: request_id.to_string(),
+                kind: "overview".into(),
+                project: String::new(),
+                name: String::new(),
+            })),
+        };
+        if sender.try_send(message).is_err() {
+            return Err(OwnerReadError::Unavailable);
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(OwnerReadError::Unavailable)
+    }
+
+    /// Один файл по виду; проверяются вид и длины, путь воркер строит сам.
+    pub async fn owner_file(
+        &self,
+        machine_id: Uuid,
+        kind: &str,
+        project: &str,
+        name: &str,
+        wait: std::time::Duration,
+    ) -> Result<canterlot_proto::worker::v1::OwnerInstructionsFile, OwnerReadError> {
+        let sender = self.owner_sender(machine_id)?;
+        let request_id = Uuid::now_v7();
+        let key = (machine_id, request_id);
+        let (answer, answered) = oneshot::channel();
+        {
+            let mut waiters = self.owner_files.lock().expect("owner file waiters lock");
+            let busy = waiters.keys().filter(|(id, _)| *id == machine_id).count();
+            if busy >= MAX_OWNER_READS_PER_MACHINE {
+                return Err(OwnerReadError::Unavailable);
+            }
+            waiters.insert(key, answer);
+        }
+        let _slot = OwnerFileSlot {
+            waiters: self.owner_files.clone(),
+            key,
+        };
+        let message = ControlDown {
+            msg: Some(control_down::Msg::ReadOwner(ReadOwnerInstructions {
+                request_id: request_id.to_string(),
+                kind: kind.to_owned(),
+                project: project.to_owned(),
+                name: name.to_owned(),
+            })),
+        };
+        if sender.try_send(message).is_err() {
+            return Err(OwnerReadError::Unavailable);
+        }
+        tokio::time::timeout(wait, answered)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .ok_or(OwnerReadError::Unavailable)
+    }
+
+    pub fn finish_owner_overview(
+        &self,
+        machine_id: Uuid,
+        reply: canterlot_proto::worker::v1::OwnerInstructionsOverview,
+    ) {
+        let Ok(request_id) = Uuid::parse_str(&reply.request_id) else {
+            return;
+        };
+        let waiter = self
+            .owner_overview
+            .lock()
+            .expect("owner overview waiters lock")
+            .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(reply);
+        }
+    }
+
+    pub fn finish_owner_file(
+        &self,
+        machine_id: Uuid,
+        reply: canterlot_proto::worker::v1::OwnerInstructionsFile,
+    ) {
+        let Ok(request_id) = Uuid::parse_str(&reply.request_id) else {
+            return;
+        };
+        let waiter = self
+            .owner_files
+            .lock()
+            .expect("owner file waiters lock")
+            .remove(&(machine_id, request_id));
+        if let Some(waiter) = waiter {
+            let _ = waiter.send(reply);
         }
     }
 

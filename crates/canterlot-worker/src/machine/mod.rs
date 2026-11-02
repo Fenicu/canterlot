@@ -12,6 +12,7 @@ use std::{
 pub mod codexbar;
 pub mod limits;
 pub mod metrics;
+pub mod owner_instructions;
 pub mod workdirs;
 
 pub fn now_ms() -> u64 {

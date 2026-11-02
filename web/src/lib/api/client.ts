@@ -240,6 +240,35 @@ export function recentWorkdirs(
   );
 }
 
+export function getOwnerOverview(
+  machineId: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_machines__id__owner_instructions"]>>
+> {
+  return http(
+    "GET",
+    `/api/v1/machines/${id(machineId)}/owner-instructions`,
+    undefined,
+    opts,
+  );
+}
+
+export function getOwnerFile(
+  machineId: string,
+  query: { kind: string; project?: string; name?: string },
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<Ok<operations["get__api_v1_machines__id__owner_instructions_file"]>>
+> {
+  return http(
+    "GET",
+    withQuery(`/api/v1/machines/${id(machineId)}/owner-instructions/file`, query),
+    undefined,
+    opts,
+  );
+}
+
 export function getLimits(
   opts?: RequestOptions,
 ): Promise<HttpResponse<Ok<operations["get__api_v1_limits"]>>> {

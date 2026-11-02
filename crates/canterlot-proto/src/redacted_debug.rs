@@ -119,6 +119,40 @@ impl fmt::Debug for crate::worker::v1::WorkdirSuggestions {
     }
 }
 
+impl fmt::Debug for crate::worker::v1::ReadOwnerInstructions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ReadOwnerInstructions")
+            .field("request_id", &self.request_id)
+            .field("kind", &self.kind)
+            .field("project_bytes", &self.project.len())
+            .field("name_bytes", &self.name.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::OwnerInstructionsOverview {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerInstructionsOverview")
+            .field("request_id", &self.request_id)
+            .field("files", &self.files.len())
+            .field("projects", &self.projects.len())
+            .finish()
+    }
+}
+
+impl fmt::Debug for crate::worker::v1::OwnerInstructionsFile {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OwnerInstructionsFile")
+            .field("request_id", &self.request_id)
+            .field("kind", &self.kind)
+            .field("present", &self.present)
+            .field("reason", &self.reason)
+            .field("content_bytes", &self.content.len())
+            .field("files", &self.files.len())
+            .finish()
+    }
+}
+
 impl fmt::Debug for crate::worker::v1::BlockDelta {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BlockDelta")

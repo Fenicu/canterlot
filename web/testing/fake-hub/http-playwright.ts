@@ -953,6 +953,28 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
     await route.fulfill({ headers: headers(), json: api.suggestWorkdirs(path) });
   });
 
+  await page.route(/\/api\/v1\/machines\/[^/]+\/owner-instructions\/file.*/, async (route) => {
+    const url = new URL(route.request().url());
+    const kind = url.searchParams.get('kind') ?? '';
+    const project = url.searchParams.get('project') ?? '';
+    const name = url.searchParams.get('name') ?? '';
+    const key = kind === 'memory_index' ? `memory_index:${project}` : kind === 'memory_file' ? `memory_file:${project}:${name}` : kind;
+    const found = api.ownerFiles.get(key);
+    if (!found) {
+      await route.fulfill({ headers: headers(), json: { kind, harness: 'claude', path: '', present: false, size: 0, mtime: null, truncated: false, content: '', files: [] } });
+      return;
+    }
+    await route.fulfill({ headers: headers(), json: found });
+  });
+
+  await page.route(/\/api\/v1\/machines\/[^/]+\/owner-instructions\/?(\?.*)?$/, async (route) => {
+    if (!route.request().url().includes('/owner-instructions/file')) {
+      await route.fulfill({ headers: headers(), json: api.ownerOverview });
+    } else {
+      await route.fallback();
+    }
+  });
+
   const decisions = api.decisions;
 
   await page.route('**/api/v1/conversations/*/requests/*/decision', async (route) => {

@@ -2,9 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   byteCounter,
   formatOrigin,
+  formatOwnerMtime,
+  formatSize,
   isAgentMarked,
+  ownerHarnessSummary,
   shouldShowApplyNewVersion,
   sortPresets,
+  type OwnerFileLike,
   type PresetSummaryLike,
 } from "#lib/screens/presets/presetsModel.js";
 
@@ -74,5 +78,25 @@ describe("presets/model", () => {
     expect(
       isAgentMarked(summary({ last_edit: { by: "agent", conversation_id: null, conversation_title: null, at: null } })),
     ).toBe(true);
+  });
+
+  it("owner_harness_summary_counts_found_files_and_total_size", () => {
+    const files: OwnerFileLike[] = [
+      { kind: "claude_user", harness: "claude", path: "/a", present: true, size: 100, mtime: null, reason: "" },
+      { kind: "claude_home", harness: "claude", path: "/b", present: false, size: 0, mtime: null, reason: "symlink" },
+      { kind: "codex_global", harness: "codex", path: "/c", present: true, size: 2048, mtime: null, reason: "" },
+      { kind: "opencode_global", harness: "opencode", path: "/d", present: false, size: 0, mtime: null, reason: "" },
+    ];
+    const summary = ownerHarnessSummary(files);
+    expect(summary.find((item) => item.harness === "claude")).toMatchObject({ found: 1, total: 100 });
+    expect(summary.find((item) => item.harness === "codex")?.text).toContain("2,0 КиБ");
+    expect(summary.find((item) => item.harness === "opencode")?.found).toBe(0);
+  });
+
+  it("owner_size_and_mtime_format", () => {
+    expect(formatSize(0)).toBe("0 Б");
+    expect(formatSize(2048)).toBe("2,0 КиБ");
+    expect(formatOwnerMtime(null)).toBe("");
+    expect(formatOwnerMtime("2026-10-28T12:00:00.000Z")).toContain("28.10.2026");
   });
 });

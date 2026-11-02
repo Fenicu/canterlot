@@ -64,3 +64,78 @@ export function shouldShowApplyNewVersion(applied: AppliedPresetLike): boolean {
   if (applied.current_revision == null || applied.revision == null) return false;
   return applied.current_revision > applied.revision;
 }
+
+export type OwnerFileLike = components["schemas"]["OwnerFileView"];
+export type OwnerProjectLike = components["schemas"]["OwnerMemoryProjectView"];
+export type OwnerOverviewLike = components["schemas"]["OwnerOverviewView"];
+export type OwnerContentLike = components["schemas"]["OwnerFileContent"];
+
+// Подписи видов для листа «Как у владельца»: путь и роль файла.
+export const OWNER_KIND_META: Record<string, { harness: string; title: string; note: string }> = {
+  claude_user: {
+    harness: "claude",
+    title: "Claude Code · пользовательский",
+    note: "~/.claude/CLAUDE.md для всех проектов",
+  },
+  claude_home: {
+    harness: "claude",
+    title: "Claude Code · домашний",
+    note: "~/CLAUDE.md действует для проектов под домом",
+  },
+  codex_global: {
+    harness: "codex",
+    title: "Codex · глобальный",
+    note: "$CODEX_HOME/AGENTS.md, по умолчанию ~/.codex/AGENTS.md",
+  },
+  codex_override: {
+    harness: "codex",
+    title: "Codex · переопределение",
+    note: "AGENTS.override.md читается вместо AGENTS.md",
+  },
+  opencode_global: {
+    harness: "opencode",
+    title: "OpenCode · глобальный",
+    note: "~/.config/opencode/AGENTS.md",
+  },
+};
+
+// Краткий итог по харнессу: сколько файлов найдено и общий объём.
+export function ownerHarnessSummary(
+  files: OwnerFileLike[],
+): { harness: string; found: number; total: number; text: string }[] {
+  const groups = new Map<string, { found: number; total: number }>();
+  for (const file of files) {
+    const slot = groups.get(file.harness) ?? { found: 0, total: 0 };
+    if (file.present) {
+      slot.found += 1;
+      slot.total += file.size;
+    }
+    groups.set(file.harness, slot);
+  }
+  return ["claude", "codex", "opencode"].map((harness) => {
+    const slot = groups.get(harness) ?? { found: 0, total: 0 };
+    const filesWord =
+      slot.found === 1 ? "файл" : slot.found >= 2 && slot.found <= 4 ? "файла" : "файлов";
+    return {
+      harness,
+      found: slot.found,
+      total: slot.total,
+      text: `${slot.found} ${filesWord}, ${formatSize(slot.total)}`,
+    };
+  });
+}
+
+// Размер файла: «0 Б», «1,2 КиБ», «3,4 МиБ».
+export function formatSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} Б`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1).replace(".", ",")} КиБ`;
+  return `${(bytes / 1024 / 1024).toFixed(1).replace(".", ",")} МиБ`;
+}
+
+// Время изменения для подписи файла: дата и время, пусто при отсутствии.
+export function formatOwnerMtime(mtime: string | null | undefined): string {
+  if (!mtime) return "";
+  const date = new Date(mtime);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleString("ru-RU", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+}

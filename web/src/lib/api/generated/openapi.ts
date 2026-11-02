@@ -609,6 +609,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/machines/{id}/owner-instructions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_machines__id__owner_instructions"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/machines/{id}/owner-instructions/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get__api_v1_machines__id__owner_instructions_file"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/machines/{id}/workdirs/recent": {
         parameters: {
             query?: never;
@@ -1675,6 +1707,47 @@ export interface components {
             sha256: string;
             /** Format: int64 */
             size: number;
+        };
+        OwnerFileContent: {
+            content: string;
+            files: components["schemas"]["OwnerMemoryFileView"][];
+            harness: string;
+            kind: string;
+            mtime?: string | null;
+            path: string;
+            present: boolean;
+            /** @description Почему файл не показан при `present = false`: пусто или `symlink`. */
+            reason: string;
+            /** Format: int64 */
+            size: number;
+            truncated: boolean;
+        };
+        OwnerFileView: {
+            harness: string;
+            kind: string;
+            mtime?: string | null;
+            path: string;
+            present: boolean;
+            /** @description Почему файл не показан при `present = false`: пусто или `symlink`. */
+            reason: string;
+            /** Format: int64 */
+            size: number;
+        };
+        OwnerMemoryFileView: {
+            mtime?: string | null;
+            name: string;
+            /** Format: int64 */
+            size: number;
+        };
+        OwnerMemoryProjectView: {
+            /** Format: int64 */
+            files: number;
+            has_index: boolean;
+            id: string;
+        };
+        OwnerOverviewView: {
+            files: components["schemas"]["OwnerFileView"][];
+            memory_projects: components["schemas"]["OwnerMemoryProjectView"][];
         };
         PartView: {
             agent: string;
@@ -4079,6 +4152,97 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["MachineView"];
                 };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_machines__id__owner_instructions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Метаданные инструкций владельца и проекты памяти */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerOverviewView"];
+                };
+            };
+            /** @description Воркер без возможности или машина недоступна */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    get__api_v1_machines__id__owner_instructions_file: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                id: string;
+                kind: string;
+                project: string;
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Содержимое одного файла инструкций владельца */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerFileContent"];
+                };
+            };
+            /** @description Воркер без возможности или машина недоступна */
+            409: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
             default: {
