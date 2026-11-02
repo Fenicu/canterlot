@@ -441,6 +441,7 @@ pub async fn set_state_in_tx(
                     *compaction = Some(CompactionProgress::Failed);
                 }
             }
+            crate::runs::close_open_in_tx(conn, execution_id).await?;
             // Открытая строка сжатия закрывается тем же переходом: иначе она идёт вечно.
             let closed: Vec<(Uuid, String)> = sqlx::query_as(
                 "update compactions set ok = false, finished_at = coalesce(finished_at, now())

@@ -1628,3 +1628,151 @@ async fn zero_machine_time_has_no_hub_time(pool: PgPool) -> TestResult {
     hub.join.await??;
     Ok(())
 }
+
+async fn stop(pool: &PgPool, r: &Run, to: ExecutionState, outcome: &str) {
+    executions::set_state(
+        pool,
+        r.execution.execution_id,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+    executions::set_state(
+        pool,
+        r.execution.execution_id,
+        to,
+        Some(outcome),
+        Uuid::now_v7(),
+    )
+    .await
+    .unwrap();
+}
+async fn working(pool: &PgPool, i: &SubmittedInput) -> i64 {
+    sqlx::query_scalar("select working_ms from run_working where input_command_id=$1")
+        .bind(i.command_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+// CLI умер посреди хода, конца хода не будет: ход закрывается переходом исполнения
+// в конечное состояние, иначе его время росло бы вечно, а все поздние ходы провайдера
+// считались бы пересекающимися с ним.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn terminal_execution_closes_its_open_run(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    let b = Run::new(&pool).await;
+    let ms = Utc::now().timestamp_millis() - 60_000;
+    let ia = begin_run(&pool, &a, ms).await;
+    stop(&pool, &a, ExecutionState::Stopped, "normal_exit").await;
+    let (finished, duration, exact): (Option<DateTime<Utc>>, Option<i64>, bool) =
+        sqlx::query_as("select finished_at,duration_ms,exact from runs where input_command_id=$1")
+            .bind(ia.command_id)
+            .fetch_one(&pool)
+            .await?;
+    let terminal: DateTime<Utc> =
+        sqlx::query_scalar("select updated_at from executions where id=$1")
+            .bind(a.execution.execution_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(finished, Some(terminal));
+    assert!((duration.unwrap() - (terminal.timestamp_millis() - ms)).abs() <= 1);
+    assert!(!exact);
+    let before = working(&pool, &ia).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(working(&pool, &ia).await, before);
+    let ib = begin_run(&pool, &b, Utc::now().timestamp_millis() + 5000).await;
+    assert!(!overlapped(&pool, &ib).await);
+    assert!(!overlapped(&pool, &ia).await);
+    Ok(())
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn failed_execution_closes_its_open_run(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    begin_run(&pool, &a, Utc::now().timestamp_millis() - 1000).await;
+    stop(&pool, &a, ExecutionState::Failed, "context_exhausted").await;
+    assert_eq!(
+        count(&pool, "select count(*) from runs where finished_at is null").await,
+        0
+    );
+    Ok(())
+}
+
+// Потеря владения обратима: процесс может жить дальше и сам закончить ход.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn owner_lost_keeps_the_run_open(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    begin_run(&pool, &a, Utc::now().timestamp_millis()).await;
+    executions::set_state(
+        &pool,
+        a.execution.execution_id,
+        ExecutionState::OwnerLost,
+        None,
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(
+        count(&pool, "select count(*) from runs where finished_at is null").await,
+        1
+    );
+    Ok(())
+}
+
+// Если конец хода всё же пришёл после закрытия хабом, он заменяет оценку хаба.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn a_late_run_finished_replaces_the_hub_close(pool: PgPool) -> TestResult {
+    let a = Run::new(&pool).await;
+    let ms = Utc::now().timestamp_millis() - 60_000;
+    let ia = begin_run(&pool, &a, ms).await;
+    stop(&pool, &a, ExecutionState::Stopped, "normal_exit").await;
+    end_run(&pool, &a, &ia, ms, 1000).await;
+    let row: (Option<i64>, bool) =
+        sqlx::query_as("select duration_ms,exact from runs where input_command_id=$1")
+            .bind(ia.command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(row, (Some(1000), false));
+    assert_eq!(
+        count(&pool, "select count(*) from run_model_usage").await,
+        1
+    );
+    Ok(())
+}
+
+// Ходы, оставшиеся открытыми до исправления, миграция закрывает и пересчитывает пересечения.
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn migration_closes_runs_of_ended_executions_and_clears_their_overlap(
+    pool: PgPool,
+) -> TestResult {
+    let a = Run::new(&pool).await;
+    let b = Run::new(&pool).await;
+    let ms = Utc::now().timestamp_millis() - 600_000;
+    let ia = begin_run(&pool, &a, ms).await;
+    let ib = begin_run(&pool, &b, ms + 300_000).await;
+    end_run(&pool, &b, &ib, ms + 300_000, 1000).await;
+    assert!(overlapped(&pool, &ib).await);
+    // Исполнение закончилось до исправления: ход остался открытым.
+    sqlx::query("update executions set state='stopped', updated_at=$2 where id=$1")
+        .bind(a.execution.execution_id)
+        .bind(DateTime::from_timestamp_millis(ms + 10_000).unwrap())
+        .execute(&pool)
+        .await?;
+    sqlx::query("alter table runs drop column forced_close")
+        .execute(&pool)
+        .await?;
+    sqlx::raw_sql(include_str!("../migrations/0050_close_dead_runs.sql"))
+        .execute(&pool)
+        .await?;
+    let row: (Option<i64>, bool, bool) =
+        sqlx::query_as("select duration_ms,exact,forced_close from runs where input_command_id=$1")
+            .bind(ia.command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(row, (Some(10_000), false, true));
+    assert!(!overlapped(&pool, &ia).await);
+    assert!(!overlapped(&pool, &ib).await);
+    Ok(())
+}
