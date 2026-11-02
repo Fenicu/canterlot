@@ -1435,6 +1435,7 @@ impl Supervisor {
         let request = canterlot_proto::worker::ipc::ShareUpload {
             share_id: next.prepared.id.to_string(),
             call_id: next.call_id.to_string(),
+            block_id: next.block_id.to_string(),
             name: next.prepared.name.clone(),
             title: next.prepared.title.clone(),
             note: next.prepared.note.clone(),

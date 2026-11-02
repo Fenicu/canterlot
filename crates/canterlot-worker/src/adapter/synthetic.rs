@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -217,6 +217,14 @@ fn decode(value: Value, blocks: &mut HashMap<Uuid, Uuid>) -> Result<Frame, Adapt
                 .cloned()
                 .filter(|v| v.is_object())
                 .ok_or(AdapterError::Protocol)?,
+        },
+        "share_file" => AdapterEvent::ShareFile {
+            call_id: Uuid::now_v7(),
+            arguments: json!({
+                "path": string("path")?,
+                "title": value.get("title").and_then(Value::as_str).unwrap_or(""),
+                "note": value.get("note").and_then(Value::as_str).unwrap_or(""),
+            }),
         },
         "limit_observed" | "limit_reached" => {
             let window = serde_json::from_value(value["window"].clone())

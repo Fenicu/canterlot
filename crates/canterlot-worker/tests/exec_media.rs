@@ -209,6 +209,70 @@ async fn media_is_referenced_only_after_durable_publish(pool: PgPool) {
 }
 
 #[sqlx::test(migrations = "../canterlot-hub/migrations")]
+async fn shared_file_is_published_with_the_supervisor_block_id(pool: PgPool) {
+    // Сквозной путь вызова share_file: загрузка несёт block_id записи BlockFile,
+    // иначе хаб отвергает её без UUID.
+    let f = Fixture::new(&pool).await;
+    let bytes = b"owner document";
+    let path = f.root.path().join("doc.txt");
+    fs::write(&path, bytes).unwrap();
+    let input = f
+        .submit(
+            &[],
+            &script(json!([
+                {"share_file": {"path": path.to_str().unwrap(), "title": "Doc", "note": "see attached"}},
+                {"delta": "файл ушёл"},
+            ])),
+        )
+        .await;
+    f.accepted(&input).await;
+    final_text(&f, "файл ушёл").await;
+    let mut found = None;
+    until(async || {
+        found = sqlx::query_as::<_, (Uuid, Uuid)>(
+            "select id, block_id from block_files where execution_id=$1 and attached_at is not null",
+        )
+        .bind(f.execution)
+        .fetch_optional(&f.pool)
+        .await
+        .unwrap();
+        found.is_some()
+    })
+    .await;
+    let (attachment, block) = found.unwrap();
+    assert_eq!(block, tool_block(&f, "Doc").await);
+    let row: (String, String, i64, String, String, String) = sqlx::query_as(
+        "select name, mime, size_bytes, sha256, title, note from block_files where id=$1",
+    )
+    .bind(attachment)
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        (
+            "doc.txt".to_owned(),
+            "text/plain".to_owned(),
+            bytes.len() as i64,
+            sha(bytes),
+            "Doc".to_owned(),
+            "see attached".to_owned(),
+        )
+    );
+    assert_eq!(fs::read(hub_blob(&f, attachment)).unwrap(), bytes);
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where scope=$1 and kind='block_file_attached' order by scope_seq",
+    )
+    .bind(format!("conversation:{}", f.conversation))
+    .fetch_one(&f.pool)
+    .await
+    .unwrap();
+    assert_eq!(payload["block_id"], json!(block));
+    assert_eq!(payload["attachment_id"], json!(attachment));
+    until(async || files_in(&f.exec_dir().join("media")).is_empty()).await;
+}
+
+#[sqlx::test(migrations = "../canterlot-hub/migrations")]
 async fn media_upload_resumes_after_reconnect_without_duplicate_record(pool: PgPool) {
     let mut f = Fixture::new(&pool).await;
     let bytes = png(8, 6, 1_000_000);

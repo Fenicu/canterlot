@@ -110,11 +110,12 @@ pub(super) enum Start {
     Reattach(Box<(spawn::Linked, Ownership)>),
 }
 
+// Размер варианта растёт с аддитивными полями IPC: форму не меняем.
+#[allow(clippy::large_enum_variant)]
 enum Up {
     Msg(up::Msg),
     Eof,
 }
-
 struct Link {
     write: OwnedWriteHalf,
     up_rx: mpsc::UnboundedReceiver<Up>,
@@ -2245,10 +2246,12 @@ impl Actor {
             .clone();
         let sink = self.shared.media_sink.subscribe();
         let backoff_cap = self.shared.attachment_config.fetch_backoff_cap;
+        // Тот же блок, что в записи BlockFile: иначе хаб отвергнет загрузку без UUID.
+        let block_id = Uuid::parse_str(&request.block_id).unwrap_or(share_id);
         let header = MediaHeader {
             media_id: request.share_id,
             execution_id: self.id.to_string(),
-            block_id: String::new(),
+            block_id: block_id.to_string(),
             mime: request.mime,
             size: request.size,
             sha256: request.sha256,

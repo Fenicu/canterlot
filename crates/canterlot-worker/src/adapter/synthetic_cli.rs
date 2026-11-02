@@ -29,6 +29,8 @@
 //! {"read_attachment":0}, {"view_image":"<путь>"} или {"view_image":{"path":"…",
 //! "inline":true}}: блок `Read` с путём в summary, кадр `media {block_id, path | data}`
 //! (data - base64 байтов файла) и результат «<размер> bytes». Ввод также несёт files и settings.
+//! {"share_file":{"path":"…","title":"…","note":"…"}}: вызов инструмента share_file
+//! (кадр `share_file`, затем блок с результатом из хаба).
 //! {"todo":[{"text":"…","status":"in_progress"}]} — полный список задач; внутри субагента
 //! идёт в его дорожку. {"large_todo":{"repeat":"щ","times":3000,"count":1000}} — такой же
 //! список сверх всех потолков.
@@ -665,6 +667,13 @@ fn run_steps<'a>(
                 )
                 .await?;
                 phase(Phase::Generating).await?;
+            } else if let Some(share) = step.get("share_file") {
+                let path = share["path"]
+                    .as_str()
+                    .ok_or_else(|| io::Error::other("invalid share_file step"))?;
+                let title = share.get("title").and_then(Value::as_str).unwrap_or("");
+                let note = share.get("note").and_then(Value::as_str).unwrap_or("");
+                emit(json!({"type":"share_file","path":path,"title":title,"note":note})).await?;
             } else if let Some(error) = step["error"].as_str() {
                 turn.block(BlockKind::Error, error, lane, None, None)
                     .await?;
