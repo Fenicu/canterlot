@@ -6867,6 +6867,227 @@
           }
         ]
       },
+      "HubCommit": {
+        "type": "object",
+        "description": "Коммит из итога сессии: короткий хеш и первая строка сообщения.",
+        "required": [
+          "sha",
+          "title"
+        ],
+        "properties": {
+          "sha": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          }
+        }
+      },
+      "HubEvent": {
+        "type": "object",
+        "description": "Факты события хаба. Текст для модели остаётся прежним, а здесь лежит то, что\nвладелец видит в ленте.",
+        "required": [
+          "kind"
+        ],
+        "properties": {
+          "answer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "answer_block_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "answer_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "branch": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "branch_kept": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "changed_files": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "child_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "closed": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`accepted`: событие ушло другому подписчику, а не принявшему родителю."
+          },
+          "commits": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/HubCommit"
+            }
+          },
+          "cpu_busy": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "decision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`approval`: `allowed`, `denied`, `failed` или `lapsed`."
+          },
+          "detail": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "duration_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`session_result`, `asked`, `stalled`, `failed`, `quota_paused`, `stopped`,\n`accepted`, `approval` или `deleted`."
+          },
+          "last_event_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "outcome": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "process_alive": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "provider": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "question": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "request_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "session_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "tokens_in": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "tokens_out": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "turns": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "window": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "worktree": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`accepted`: `removed`, `none`, `dirty` или `failed`."
+          }
+        }
+      },
       "InputContentBlock": {
         "oneOf": [
           {
@@ -6921,6 +7142,17 @@
           "chain_depth": {
             "type": "integer",
             "format": "int32"
+          },
+          "event": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HubEvent",
+                "description": "Разобранные факты служебного события: клиент не читает английский текст."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "from": {
             "type": [

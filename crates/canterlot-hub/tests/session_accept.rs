@@ -336,6 +336,17 @@ impl Fx {
         self.notes().await.pop().expect("a note for the parent")
     }
 
+    async fn last_note_origin(&self) -> Value {
+        sqlx::query_scalar::<_, Option<Value>>(
+            "select origin from inputs where conversation_id=$1 order by input_seq desc limit 1",
+        )
+        .bind(self.parent)
+        .fetch_one(&self.pool)
+        .await
+        .unwrap()
+        .unwrap_or(Value::Null)
+    }
+
     async fn report(&self, command: Uuid, outcome: &str, branch_kept: bool, detail: &str) {
         self.report_from(self.machine, command, outcome, branch_kept, detail)
             .await;
@@ -489,6 +500,12 @@ async fn accept_stops_then_removes_then_archives(pool: PgPool) {
         !note.contains("/data/worktrees"),
         "no path in the note: {note}"
     );
+    let origin = fx.last_note_origin().await;
+    assert_eq!(origin["event"]["kind"], "accepted", "{origin}");
+    assert_eq!(origin["event"]["session_id"], json!(fx.child));
+    assert_eq!(origin["event"]["worktree"], "removed");
+    assert_eq!(origin["event"]["branch"], branch);
+    assert_eq!(origin["event"]["branch_kept"], true);
     assert_eq!(fx.open_subscriptions().await, 0);
     assert_eq!(fx.live_executions().await, 0);
 }
@@ -509,6 +526,9 @@ async fn accept_without_worktree_stops_and_archives(pool: PgPool) {
     assert_eq!(fx.open_subscriptions().await, 0);
     fx.tick().await;
     assert!(fx.last_note().await.contains("archived"));
+    let origin = fx.last_note_origin().await;
+    assert_eq!(origin["event"]["kind"], "accepted", "{origin}");
+    assert_eq!(origin["event"]["worktree"], "none");
 
     // Уже остановленную сессию без копии архивируют сразу, заданий не остаётся.
     let (other, execution) = fx.spawn_child(false).await;
@@ -729,6 +749,16 @@ async fn accept_tells_other_subscribers_instead_of_dropping_them(pool: PgPool) {
             .any(|text| text.contains("accepted") && text.contains("no further")),
         "the subscriber is told the session was accepted: {texts:?}"
     );
+    let closed: Value = sqlx::query_scalar(
+        "select origin from inputs where conversation_id=$1 and origin->'event'->>'closed'='true'",
+    )
+    .bind(sibling)
+    .fetch_one(&fx.pool)
+    .await
+    .unwrap();
+    assert_eq!(closed["event"]["kind"], "accepted", "{closed}");
+    assert_eq!(closed["event"]["session_id"], json!(fx.child));
+
     // Принявший родитель о собственном приёме отдельно не оповещается.
     assert!(
         fx.notes()
@@ -905,6 +935,9 @@ async fn dirty_keeps_work_and_tells_parent(pool: PgPool) {
     assert!(note.contains("commits on no branch"), "{note}");
     assert!(!note.contains("session_send to"), "{note}");
     assert!(note.contains("the owner has to resume"), "{note}");
+    let origin = fx.last_note_origin().await;
+    assert_eq!(origin["event"]["kind"], "accepted", "{origin}");
+    assert_eq!(origin["event"]["worktree"], "dirty");
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
@@ -952,6 +985,10 @@ async fn failed_removal_is_reported_and_can_be_retried(pool: PgPool) {
     assert!(!fx.archived().await);
     fx.tick().await;
     assert!(fx.last_note().await.contains("git_failed"));
+    let origin = fx.last_note_origin().await;
+    assert_eq!(origin["event"]["kind"], "accepted", "{origin}");
+    assert_eq!(origin["event"]["worktree"], "failed");
+    assert_eq!(origin["event"]["detail"], "git_failed");
 
     assert_eq!(fx.accept(false).await["status"], "removing");
     fx.tick().await;

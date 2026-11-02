@@ -452,6 +452,8 @@ async fn subscription_survives_subscriber_restart(pool: PgPool) {
     assert_eq!(inputs[0].1["kind"], "event");
     assert_eq!(inputs[0].1["from"], json!(p.target));
     assert_eq!(inputs[0].1["chain_depth"], 0);
+    assert_eq!(inputs[0].1["event"]["kind"], "session_result");
+    assert_eq!(inputs[0].1["event"]["state"], "idle");
 
     // Владелец продолжил сессию: новое исполнение забирает ввод, его гибель ввод не теряет.
     let next = start(&pool, p.owner, p.subscriber).await;
@@ -944,6 +946,8 @@ async fn deleted_target_fires_and_delete_is_not_blocked(pool: PgPool) {
         format!("[canterlot] Session {} was deleted.", p.target)
     );
     assert!(!inputs[0].1.to_string().contains("private title"));
+    assert_eq!(inputs[0].1["event"]["kind"], "deleted");
+    assert_eq!(inputs[0].1["event"]["session_id"], json!(p.target));
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

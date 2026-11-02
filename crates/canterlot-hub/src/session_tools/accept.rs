@@ -319,7 +319,11 @@ pub async fn begin_in_tx(
             other.owner_id,
             other.subscriber_id,
             now,
-            &super::spawn::note_job(subscription_closed_text(&child), origin),
+            &super::spawn::note_job(
+                subscription_closed_text(&child),
+                origin,
+                origin::HubEvent::accepted_closed(child.id),
+            ),
         )
         .await?;
     }
@@ -459,6 +463,7 @@ async fn notify_parent_in_tx(
     conn: &mut PgConnection,
     child: &Child,
     text: String,
+    event: origin::HubEvent,
     now: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
     let Some(parent) = child.parent else {
@@ -471,7 +476,7 @@ async fn notify_parent_in_tx(
         child.owner_id,
         parent,
         now,
-        &super::spawn::note_job(text, origin),
+        &super::spawn::note_job(text, origin, event),
     )
     .await?;
     Ok(())
@@ -615,16 +620,30 @@ pub(crate) async fn apply_removal_in_tx(
             )
             .await?;
             archive_in_tx(conn, &child, correlation_id).await?;
-            notify_parent_in_tx(conn, &child, accepted_text(&child, Some(branch_kept)), now)
-                .await?;
+            let event = origin::HubEvent::accepted(
+                child.id,
+                "removed",
+                Some(child.branch()),
+                Some(branch_kept),
+            );
+            notify_parent_in_tx(
+                conn,
+                &child,
+                accepted_text(&child, Some(branch_kept)),
+                event,
+                now,
+            )
+            .await?;
         }
         Removal::Dirty => {
             set_worktree_state(conn, &child, "dirty", None, None, correlation_id).await?;
-            notify_parent_in_tx(conn, &child, dirty_text(&child), now).await?;
+            let event = origin::HubEvent::accepted_with_detail(child.id, "dirty", None);
+            notify_parent_in_tx(conn, &child, dirty_text(&child), event, now).await?;
         }
         Removal::Failed => {
             set_worktree_state(conn, &child, "failed", Some(&detail), None, correlation_id).await?;
-            notify_parent_in_tx(conn, &child, failed_text(&child, &detail), now).await?;
+            let event = origin::HubEvent::accepted_with_detail(child.id, "failed", Some(&detail));
+            notify_parent_in_tx(conn, &child, failed_text(&child, &detail), event, now).await?;
         }
     }
     Ok(false)
@@ -674,7 +693,8 @@ pub(crate) async fn cleanup_job(
     match child.worktree_state() {
         None | Some("removed") => {
             archive_in_tx(conn, &child, correlation_id).await?;
-            notify_parent_in_tx(conn, &child, accepted_text(&child, None), now).await?;
+            let event = origin::HubEvent::accepted(child.id, "none", None, None);
+            notify_parent_in_tx(conn, &child, accepted_text(&child, None), event, now).await?;
             Ok(JobOutcome::Done(json!({"archived": true})))
         }
         Some("removing") => {
@@ -689,7 +709,19 @@ pub(crate) async fn cleanup_job(
                     correlation_id,
                 )
                 .await?;
-                notify_parent_in_tx(conn, &child, failed_text(&child, "no_execution"), now).await?;
+                let event = origin::HubEvent::accepted_with_detail(
+                    child.id,
+                    "failed",
+                    Some("no_execution"),
+                );
+                notify_parent_in_tx(
+                    conn,
+                    &child,
+                    failed_text(&child, "no_execution"),
+                    event,
+                    now,
+                )
+                .await?;
             }
             Ok(JobOutcome::Done(json!({"command_id": queued})))
         }
@@ -740,7 +772,8 @@ async fn give_up_in_tx(
         )
         .await?;
     }
-    notify_parent_in_tx(conn, child, failed_text(child, "stop_timeout"), now).await
+    let event = origin::HubEvent::accepted_with_detail(child.id, "failed", Some("stop_timeout"));
+    notify_parent_in_tx(conn, child, failed_text(child, "stop_timeout"), event, now).await
 }
 
 /// Команда воркеру с последним исполнением сессии: без него команда не уходит. Воркер
@@ -822,5 +855,13 @@ pub(crate) async fn abandon_cleanup_in_tx(
         )
         .await?;
     }
-    notify_parent_in_tx(conn, &child, failed_text(&child, "cleanup_failed"), now).await
+    let event = origin::HubEvent::accepted_with_detail(child.id, "failed", Some("cleanup_failed"));
+    notify_parent_in_tx(
+        conn,
+        &child,
+        failed_text(&child, "cleanup_failed"),
+        event,
+        now,
+    )
+    .await
 }
