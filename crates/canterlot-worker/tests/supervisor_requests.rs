@@ -208,10 +208,12 @@ impl Harness {
         )
     }
     fn stdin(&self) -> Vec<Value> {
+        // Фейковый CLI дописывает файл параллельно: строка без перевода ещё не запись.
         fs::read_to_string(self.root.path().join("stdin.jsonl"))
             .unwrap_or_default()
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
+            .split_inclusive('\n')
+            .filter(|s| s.ends_with('\n'))
+            .map(|s| serde_json::from_str(s.trim_end()).unwrap())
             .collect()
     }
     fn sj(&self) -> Vec<Body> {
