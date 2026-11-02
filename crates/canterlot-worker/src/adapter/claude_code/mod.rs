@@ -1398,6 +1398,10 @@ impl Adapter for ClaudeCodeAdapter {
                 });
             }
         }
+        // Процесса нет или его stdin сломан: вливать некуда, сообщение уйдёт обычным вводом.
+        if self.exited || self.eof || self.cli.as_ref().is_none_or(CliProcess::stdin_torn) {
+            return SteerOutcome::NotApplicable("cli_unavailable".into());
+        }
         if let Err(reason) = self.validate_steer(input) {
             return SteerOutcome::Rejected(reason.into());
         }

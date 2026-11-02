@@ -2573,3 +2573,37 @@ async fn input_after_a_torn_steer_goes_to_a_new_process() {
     assert!(log.lines().last().unwrap().contains(&second.to_string()));
     f.close().await;
 }
+
+#[tokio::test]
+async fn steer_without_a_cli_after_a_failed_restart_is_deferred() {
+    let mut f = Fake::new(vec![answer_turn()]);
+    f.start().await;
+    f.send(&tx(Uuid::now_v7())).await;
+    f.finish().await;
+    // Ни новый, ни запасной запуск не проходят проверку версии: процесса больше нет.
+    std::fs::write(f.dir.path().join("version"), "failed").unwrap();
+    let mut change = tx(Uuid::now_v7());
+    change.settings = Some(SettingsChange {
+        instructions: Some(InstructionSpec {
+            mode: InstructionMode::Clean,
+            text: String::new(),
+            preset_id: None,
+            revision: 1,
+            title: String::new(),
+        }),
+        ..Default::default()
+    });
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.transmit(&change, &f.group))
+            .await
+            .unwrap(),
+        TransmitOutcome::Rejected(_)
+    ));
+    assert!(matches!(
+        tokio::time::timeout(WAIT, f.adapter.steer(&tx(Uuid::now_v7())))
+            .await
+            .unwrap(),
+        adapter::SteerOutcome::NotApplicable(_)
+    ));
+    f.close().await;
+}
