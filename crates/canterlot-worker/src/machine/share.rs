@@ -26,6 +26,7 @@ pub enum ShareError {
     TooLarge,
     Unreadable,
     NotOwned,
+    OutsideWorkdir,
 }
 
 impl ShareError {
@@ -38,6 +39,7 @@ impl ShareError {
             Self::TooLarge => "share_too_large",
             Self::Unreadable => "share_unreadable",
             Self::NotOwned => "share_not_owned",
+            Self::OutsideWorkdir => "share_outside_workdir",
         }
     }
 
@@ -50,6 +52,9 @@ impl ShareError {
             Self::TooLarge => "The file is larger than 50 MiB",
             Self::Unreadable => "The file cannot be read",
             Self::NotOwned => "The file belongs to another user",
+            Self::OutsideWorkdir => {
+                "Only files under the session workdir or the temp directory can be shared; copy the file there first"
+            }
         }
     }
 }
@@ -69,20 +74,76 @@ pub struct Prepared {
 
 /// Секретные каталоги: путь под любым из них не отдаётся, даже через ссылки.
 fn denied_dir(part: &str) -> bool {
-    matches!(part, ".ssh" | ".gnupg" | ".claude" | ".codex")
+    matches!(
+        part,
+        ".ssh" | ".gnupg" | ".claude" | ".codex" | ".docker" | ".kube" | ".aws"
+    )
+}
+
+/// Секретные каталоги внутри `.config`.
+fn denied_config_dir(part: &str) -> bool {
+    matches!(part, "opencode" | "canterlot" | "gh" | "rclone")
+}
+
+/// Файлы с токенами и паролями инструментов, где бы они ни лежали.
+fn denied_share_name(name: &str) -> bool {
+    matches!(
+        name,
+        ".git-credentials"
+            | ".netrc"
+            | ".npmrc"
+            | ".pypirc"
+            | ".pgpass"
+            | "credentials.toml"
+            | ".bash_history"
+            | ".zsh_history"
+    ) || name.starts_with(".claude.json")
 }
 
 /// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
-/// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.config/opencode`),
-/// секретные имена и любой `.env` не отдаются.
+/// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.docker`, `~/.kube`, `~/.aws`,
+/// `~/.config/{opencode,canterlot,gh,rclone}`), секретные имена и любой `.env` не отдаются.
 fn denied_parts(parts: &[&str]) -> bool {
     if parts.iter().any(|part| denied_dir(part)) {
         return true;
     }
-    if parts.windows(2).any(|pair| pair == [".config", "opencode"]) {
+    if parts
+        .windows(2)
+        .any(|pair| pair[0] == ".config" && denied_config_dir(pair[1]))
+    {
         return true;
     }
-    parts.last().is_some_and(|name| denied_name(name))
+    parts
+        .last()
+        .is_some_and(|name| denied_name(name) || denied_share_name(name))
+}
+
+/// Псевдофайловые системы: `/proc/<pid>/environ` проходит все проверки дескриптора.
+fn denied_system(resolved: &Path) -> bool {
+    ["/proc", "/sys", "/dev"]
+        .iter()
+        .any(|root| resolved.starts_with(root))
+}
+
+/// Временные каталоги, из которых можно отдавать файлы помимо рабочего каталога сессии.
+fn temp_roots() -> Vec<std::path::PathBuf> {
+    let mut roots = vec![
+        std::path::PathBuf::from("/tmp"),
+        std::path::PathBuf::from("/var/tmp"),
+        std::env::temp_dir(),
+    ];
+    roots.retain(|root| root.is_absolute());
+    roots
+}
+
+/// Раскрытый путь лежит под рабочим каталогом сессии или под временным каталогом.
+fn inside_allowed(resolved: &Path, workdir: Option<&Path>) -> bool {
+    workdir
+        .into_iter()
+        .map(Path::to_path_buf)
+        .chain(temp_roots())
+        .filter_map(|root| fs::canonicalize(root).ok())
+        .any(|root| resolved.starts_with(root))
 }
 
 fn denied_resolved(path: &Path) -> bool {
@@ -188,12 +249,14 @@ fn open_resolved(resolved_parent: &Path, name: &str) -> Result<fs::File, ShareEr
 }
 
 /// Скопировать проверенный файл в `exec_dir/media/<id>` и посчитать SHA-256.
+/// Отдаются только файлы под рабочим каталогом сессии `workdir` и под временными каталогами.
 pub fn prepare(
     exec_dir: &Path,
     id: Uuid,
     path: &Path,
     title: String,
     note: String,
+    workdir: Option<&Path>,
 ) -> Result<Prepared, ShareError> {
     if !valid_title(&title) || note.len() > canterlot_proto::limits::MAX_SHARE_NOTE_BYTES {
         return Err(ShareError::Unreadable);
@@ -206,8 +269,12 @@ pub fn prepare(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let resolved_parent = fs::canonicalize(parent).map_err(|_| ShareError::Unreadable)?;
-    if denied_lexical(path) || denied_resolved(&resolved_parent.join(&name)) {
+    let resolved = resolved_parent.join(&name);
+    if denied_lexical(path) || denied_resolved(&resolved) || denied_system(&resolved) {
         return Err(ShareError::Denied);
+    }
+    if !inside_allowed(&resolved, workdir) {
+        return Err(ShareError::OutsideWorkdir);
     }
     let file = open_resolved(&resolved_parent, &name)?;
     let meta = file.metadata().map_err(|_| ShareError::Unreadable)?;
@@ -321,6 +388,99 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
+    /// Файлы тестов лежат во временном каталоге: рабочий каталог сессии не нужен.
+    fn prepare_tmp(
+        exec_dir: &Path,
+        id: Uuid,
+        path: &Path,
+        title: String,
+        note: String,
+    ) -> Result<Prepared, ShareError> {
+        prepare(exec_dir, id, path, title, note, None)
+    }
+
+    /// Каталог вне временных: рядом с исходниками крейта, удаляется при сбросе.
+    fn outside_tmp() -> tempfile::TempDir {
+        tempfile::tempdir_in(env!("CARGO_MANIFEST_DIR")).unwrap()
+    }
+
+    fn share(path: &Path, workdir: Option<&Path>) -> Result<Prepared, ShareError> {
+        let exec = dir();
+        prepare(
+            exec.path(),
+            Uuid::now_v7(),
+            path,
+            String::new(),
+            String::new(),
+            workdir,
+        )
+    }
+
+    #[test]
+    fn shares_only_from_the_workdir_or_the_temp_directory() {
+        let place = outside_tmp();
+        if inside_allowed(&fs::canonicalize(place.path()).unwrap(), None) {
+            // Исходники сами лежат во временном каталоге: проверить «снаружи» нечем.
+            return;
+        }
+        let path = place.path().join("report.txt");
+        fs::write(&path, b"report").unwrap();
+        assert_eq!(share(&path, None).unwrap_err(), ShareError::OutsideWorkdir);
+        let other = outside_tmp();
+        assert_eq!(
+            share(&path, Some(other.path())).unwrap_err(),
+            ShareError::OutsideWorkdir
+        );
+        assert_eq!(share(&path, Some(place.path())).unwrap().size, 6);
+        let temp = dir();
+        let path = temp.path().join("report.txt");
+        fs::write(&path, b"report").unwrap();
+        assert_eq!(share(&path, Some(place.path())).unwrap().size, 6);
+    }
+
+    #[test]
+    fn refuses_proc_and_sys() {
+        for path in [
+            "/proc/self/environ",
+            "/proc/self/status",
+            "/sys/kernel/uevent_seqnum",
+        ] {
+            let error = share(Path::new(path), Some(Path::new("/"))).unwrap_err();
+            assert_eq!(error, ShareError::Denied, "{path}");
+        }
+    }
+
+    #[test]
+    fn refuses_common_secret_stores() {
+        let home = dir();
+        for relative in [
+            ".claude.json",
+            ".config/canterlot/token",
+            ".config/gh/hosts.yml",
+            ".git-credentials",
+            ".netrc",
+            ".npmrc",
+            ".pypirc",
+            ".docker/config.json",
+            ".kube/config",
+            ".aws/credentials",
+            ".pgpass",
+            ".cargo/credentials.toml",
+        ] {
+            let path = home.path().join(relative);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(&path, b"secret").unwrap();
+            assert_eq!(
+                share(&path, None).unwrap_err(),
+                ShareError::Denied,
+                "{relative}"
+            );
+        }
+        let fine = home.path().join("claude.json.md");
+        fs::write(&fine, b"doc").unwrap();
+        assert!(share(&fine, None).is_ok());
+    }
+
     #[test]
     fn refuses_symlink() {
         let dir = dir();
@@ -329,7 +489,7 @@ mod tests {
         let link = dir.path().join("link.txt");
         symlink(&target, &link).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &link,
@@ -349,7 +509,7 @@ mod tests {
         let second = dir.path().join("two.txt");
         fs::hard_link(&first, &second).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &first,
@@ -374,7 +534,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &fifo,
@@ -393,7 +553,7 @@ mod tests {
             let path = dir.path().join(name);
             fs::write(&path, b"secret").unwrap();
             assert_eq!(
-                prepare(
+                prepare_tmp(
                     dir.path(),
                     Uuid::now_v7(),
                     &path,
@@ -409,7 +569,7 @@ mod tests {
         let key = ssh.join("id_ed25519");
         fs::write(&key, b"secret").unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &key,
@@ -428,7 +588,7 @@ mod tests {
         let file = fs::File::create(&path).unwrap();
         file.set_len(MAX_SHARE_BYTES + 1).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &path,
@@ -445,7 +605,7 @@ mod tests {
         let dir = dir();
         let path = dir.path().join("note.txt");
         fs::write(&path, b"hello").unwrap();
-        let prepared = prepare(
+        let prepared = prepare_tmp(
             dir.path(),
             Uuid::now_v7(),
             &path,
@@ -476,7 +636,7 @@ mod tests {
         fs::write(ssh.join("id_ed25519"), b"secret").unwrap();
         symlink(&ssh, dir.path().join("export")).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &dir.path().join("export").join("id_ed25519"),
@@ -500,7 +660,7 @@ mod tests {
         fs::create_dir_all(&home).unwrap();
         symlink(&keys, home.join(".ssh")).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &home.join(".ssh").join("id_ed25519"),
@@ -523,7 +683,7 @@ mod tests {
         symlink(&outer, dir.path().join("a")).unwrap();
         symlink(ssh.clone(), dir.path().join("a").join("b")).unwrap();
         assert_eq!(
-            prepare(
+            prepare_tmp(
                 dir.path(),
                 Uuid::now_v7(),
                 &dir.path().join("a").join("b").join("id_ed25519"),
@@ -542,7 +702,7 @@ mod tests {
         fs::create_dir(&real).unwrap();
         fs::write(real.join("note.txt"), b"hello").unwrap();
         symlink(&real, dir.path().join("alias")).unwrap();
-        let prepared = prepare(
+        let prepared = prepare_tmp(
             dir.path(),
             Uuid::now_v7(),
             &dir.path().join("alias").join("note.txt"),

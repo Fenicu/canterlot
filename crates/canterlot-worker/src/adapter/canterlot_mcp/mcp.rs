@@ -133,7 +133,7 @@ fn is_session_tool(mcp_name: &str) -> bool {
 }
 
 fn share_tool_description() -> &'static str {
-    "Hand a file to the owner: pass a path this session can read (relative paths start at the workdir), an optional title and note. The worker uploads it once and the owner sees it in this turn: images and videos as thumbnails, other files with name, size, type and download. Refuses symlinks, hard links, devices and files on the secret deny list; at most 50 MiB. Use it for a document, image or archive meant for the owner."
+    "Hand a file to the owner: pass a path under the session workdir or the temp directory (relative paths start at the workdir; copy other files there first), an optional title and note. The worker uploads it once and the owner sees it in this turn: images and videos as thumbnails, other files with name, size, type and download. Refuses symlinks, hard links, devices and files on the secret deny list; at most 50 MiB. Use it for a document, image or archive meant for the owner."
 }
 
 fn share_input_schema() -> Value {

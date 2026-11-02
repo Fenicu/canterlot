@@ -99,6 +99,8 @@ struct ShareJob {
     call_id: Uuid,
     block_id: Uuid,
     path: PathBuf,
+    /// Рабочий каталог сессии: вне него отдаются только файлы из временных каталогов.
+    workdir: Option<PathBuf>,
     title: String,
     note: String,
 }
@@ -501,9 +503,10 @@ fn share_preparer(
         while let Some(job) = queue.recv().await {
             let dir = exec_dir.clone();
             let (path, title, note) = (job.path.clone(), job.title.clone(), job.note.clone());
+            let workdir = job.workdir.clone();
             let share_id = job.share_id;
             let result = tokio::task::spawn_blocking(move || {
-                share::prepare(&dir, share_id, &path, title, note)
+                share::prepare(&dir, share_id, &path, title, note, workdir.as_deref())
             })
             .await
             .unwrap_or(Err(ShareError::Unreadable));
@@ -1414,6 +1417,7 @@ impl Supervisor {
             call_id,
             block_id: Uuid::now_v7(),
             path,
+            workdir: self.workdir.clone(),
             title: args.title.unwrap_or_default(),
             note: args.note.unwrap_or_default(),
         };
