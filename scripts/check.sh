@@ -59,6 +59,12 @@ if ((!unknown)); then
 fi
 printf 'режим: %s, Rust: %s, web: %s\n' "$mode" "$((want_rust))" "$((want_web))"
 
+if ((all)); then
+    stage "версия"
+    bash scripts/check-version.sh
+    stage_done "версия"
+fi
+
 # --- Rust ---
 nextest_filter() {
     # Выражение nextest для изменённых крейтов; зависимые от них проверяет полный прогон.

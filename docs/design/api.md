@@ -179,7 +179,7 @@
 | `GET /healthz` | Живость процесса |
 | `GET /readyz` | База отвечает, установка совпадает с манифестом, фоновые службы готовы |
 | `GET /api/v1/me` | `{owner_id, login}` владельца |
-| `GET /api/v1/config` | Лимиты, пороги, путь и протокол WSS, `logout_url` |
+| `GET /api/v1/config` | Версия хаба, лимиты, пороги, путь и протокол WSS, `logout_url` |
 | `GET /api/v1/openapi.json` | Документ OpenAPI |
 | `GET /api/v1/conversations/{id}/scheduled` | Отложенные сообщения разговора |
 | `POST /api/v1/conversations/{id}/scheduled` | Запланировать обычный ввод |

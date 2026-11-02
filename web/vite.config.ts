@@ -5,10 +5,15 @@ import { directives } from "./csp.mjs";
 import { sveltekit, type Config } from "@sveltejs/kit/vite";
 import { defineConfig } from "vite";
 import { pwaManifest } from "./scripts/gen-manifest.mjs";
+import { workspaceVersion } from "./scripts/workspace-version.mjs";
 
+const appVersion = workspaceVersion();
 const version = (process.env.PWA_VERSION ??= String(Date.now()));
 
 export default defineConfig({
+  define: {
+    __APP_VERSION__: JSON.stringify(appVersion)
+  },
   plugins: [
     pwaManifest(),
     sveltekit({
@@ -24,6 +29,7 @@ export default defineConfig({
     }),
   ],
   server: {
+    fs: { allow: [".."] },
     proxy: {
       "/api": {
         target: process.env.HUB_URL ?? "http://127.0.0.1:8080",

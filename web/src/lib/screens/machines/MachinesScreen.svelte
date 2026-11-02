@@ -46,6 +46,7 @@
       {#if machines.length > 1}<Segmented name="machine" label="Машина" options={machines.map(m => ({ value: m.id, label: m.name }))} bind:value={selected} />{/if}
       <div class="heading"><h2>{machine.name}</h2><span class="availability" data-availability={machine.availability}>{machineStatus(machine.availability)}</span></div>
       {#if machine.os}<p class="note">{({ linux: 'Linux', darwin: 'macOS', windows: 'Windows' } as Record<string, string>)[machine.os] ?? machine.os}</p>{/if}
+      {#if machine.worker_version}<p class="note">Версия воркера {machine.worker_version}</p>{/if}
       {#if machine.availability === 'unavailable'}<p class="notice">Машина не в сети. Данные от последнего сигнала</p>{/if}
       {#if machine.availability === 'degraded'}<p class="notice">Связь нестабильна. Показаны последние полученные данные</p>{/if}
       <div data-stale={stale} class:stale>

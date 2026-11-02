@@ -6,6 +6,8 @@
   import { loadConfig } from '#lib/api/config.js';
   import { me } from '#lib/api/client.js';
   import type { components } from '#lib/api/generated/openapi.js';
+  import { compareVersions } from '#lib/changelog.js';
+  import { APP_VERSION } from '#lib/stores/appVersion.js';
   import { fmt } from '#lib/format/ru.js';
   import { theme, type ThemePref } from '#lib/theme.js';
   import { getEnterPref, setEnterPref, type EnterPref } from '#lib/composer/prefs.js';
@@ -26,6 +28,8 @@
   let canInstall = $state(false); let tick = $state(0);
   const update = $derived.by(() => { void tick; return currentUpdate(); });
   const updateState = $derived.by(() => { void tick; return update?.state ?? 'idle'; });
+  const hubVersion = $derived(config?.version ?? null);
+  const versionMismatch = $derived(hubVersion !== null && compareVersions(APP_VERSION, hubVersion) !== 0);
   const sync = $derived.by(() => { void tick; return staleness.lastSyncAt; });
   const phase = $derived(runtime?.connection.status.phase);
   const connectionText = $derived(phase === 'live' ? 'Подключено' : phase === 'auth_required' ? 'Требуется вход' : phase === 'incompatible' ? 'Требуется обновление' : phase === 'connecting' ? 'Подключаюсь' : 'Нет связи');
@@ -78,7 +82,7 @@
         <section><h2>Предупреждения о лимитах</h2><div class="card"><p>Предупредить при {config.limit_thresholds.warn_pcts.join('%, ')}%</p><p>Резерв владельца {config.limit_thresholds.weekly_reserve_pct}%</p><p class="note">Для 5 часов и недели, Claude и Codex. Кранч ждёт сброса, сохраняя резерв владельца</p></div><a href={resolve('/limits')}>История лимитов</a></section>
         <section><a href={resolve('/machines')}>Машины</a></section>
         <SpawnWhitelist />
-        <section><h2>О приложении</h2><p>Canterlot</p>{#if canInstall}<button type="button" onclick={() => { void installation().prompt().catch(() => error = 'Не удалось установить приложение. Повторите в меню браузера'); }}>Установить приложение</button>{/if}<p>Обновление: {updateState === 'idle' ? 'Установлена текущая версия' : updateState === 'applying' ? 'Обновляю…' : 'Доступна новая версия'}</p>{#if update}<button type="button" onclick={updateAction}>{updateState === 'idle' ? 'Проверить обновления' : 'Обновить приложение'}</button>{/if}</section>
+        <section><h2>О приложении</h2><p>Canterlot</p><p class="versions">Приложение <strong>{APP_VERSION}</strong>{#if hubVersion} · хаб <strong>{hubVersion}</strong>{/if}</p>{#if versionMismatch}<p class="note">Версии приложения и хаба различаются. Обновите отставшую часть при удобном случае</p>{/if}<a href={resolve('/changes')}>История изменений</a>{#if canInstall}<button type="button" onclick={() => { void installation().prompt().catch(() => error = 'Не удалось установить приложение. Повторите в меню браузера'); }}>Установить приложение</button>{/if}<p>Обновление: {updateState === 'idle' ? 'Установлена текущая версия' : updateState === 'applying' ? 'Обновляю…' : 'Доступна новая версия'}</p>{#if update}<button type="button" onclick={updateAction}>{updateState === 'idle' ? 'Проверить обновления' : 'Обновить приложение'}</button>{/if}</section>
       </div></div>
     {/if}
   </div></div>
@@ -88,6 +92,7 @@
   section { margin-bottom: var(--s10); }
   .card { padding: var(--s8); background: var(--surface); border-radius: var(--radius-card); }
   section > a { display: inline-flex; align-items: center; min-height: var(--target); }
+  .versions { color: var(--secondary); }
   .logout { display: block; margin-top: var(--s6); color: var(--danger); width: 100%; }
   @media (min-width: 1100px) { .settings-grid { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s10); } }
 </style>
