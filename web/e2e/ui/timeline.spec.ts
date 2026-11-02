@@ -498,11 +498,12 @@ test('error_and_warning_blocks_carry_text_not_colour_alone', async ({ page }) =>
   await expect(page.getByText('сбор оборвался')).toBeVisible();
 });
 
-test('answer_card_header_shows_agent_time_and_info_button_and_leaves_the_model_to_the_sheet', async ({ page }) => {
+test('answer_card_footer_shows_agent_time_and_info_button_and_leaves_the_model_to_the_sheet', async ({ page }) => {
   await boot(page, 1);
-  await expect(page.locator('header')).toContainText('Agent');
-  await expect(page.locator('header')).not.toContainText('opus');
-  await expect(page.getByRole('button', { name: 'Сведения о ходе' })).toBeVisible();
+  const footer = page.locator('footer[data-role="answer-footer"]');
+  await expect(footer).toContainText('Agent');
+  await expect(footer).not.toContainText('opus');
+  await expect(footer.getByRole('button', { name: 'Сведения о ходе' })).toBeVisible();
 });
 
 test('reduced_motion_stops_caret_and_expand_transitions', async ({ page }) => {
