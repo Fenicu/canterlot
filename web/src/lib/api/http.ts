@@ -59,6 +59,14 @@ export class AuthRequired extends Error {
   }
 }
 
+/**
+ * Итог проверки входа: истёкшей сессия считается только по явному отказу,
+ * сетевая ошибка или ответ без личности не должны останавливать переподключение.
+ */
+export function authProbeResult(error: unknown): "expired" | "down" {
+  return error instanceof AuthRequired ? "expired" : "down";
+}
+
 class SessionManager {
   state: "ok" | "expired" = "ok";
 

@@ -97,9 +97,21 @@
     });
     const offlineChanged = () => { offlineLabel = staleness.label(Date.now()); };
     const online = () => staleness.setOnline(navigator.onLine);
+    const loadRuntime = () => {
+      void browserRuntime().then((value) => {
+        runtime = value;
+        offlineChanged();
+      }).catch(() => undefined);
+    };
+    const retryRuntime = () => {
+      if (!runtime && !document.hidden) loadRuntime();
+    };
     staleness.addEventListener('change', offlineChanged);
     window.addEventListener('online', online);
+    window.addEventListener('online', retryRuntime);
     window.addEventListener('offline', online);
+    window.addEventListener('pageshow', retryRuntime);
+    document.addEventListener('visibilitychange', retryRuntime);
     online();
     const changed = () => { updateState = update?.state ?? 'idle'; };
     const incompatible = () => update?.incompatible();
@@ -132,10 +144,7 @@
     laidOut = true;
     window.addEventListener('resize', read);
     const timer = window.setInterval(() => tick++, 1000);
-    void browserRuntime().then((value) => {
-      runtime = value;
-      offlineChanged();
-    }).catch(() => undefined);
+    loadRuntime();
     return () => {
       alive = false;
       stopSignout();
@@ -143,7 +152,10 @@
       update?.destroy();
       staleness.removeEventListener('change', offlineChanged);
       window.removeEventListener('online', online);
+      window.removeEventListener('online', retryRuntime);
       window.removeEventListener('offline', online);
+      window.removeEventListener('pageshow', retryRuntime);
+      document.removeEventListener('visibilitychange', retryRuntime);
       window.removeEventListener('canterlot:incompatible', incompatible);
       document.removeEventListener('visibilitychange', visibility);
       window.removeEventListener('resize', read);
@@ -178,6 +190,7 @@
       failure={updateError}
       onupdate={applyUpdate}
       onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
+      onrelogin={() => window.location.assign('/')}
     />
   {/snippet}
   {#if harness || !laidOut || mode === 'phone'}{@render banner()}{/if}
