@@ -7,7 +7,7 @@ use std::{
     fs,
     io::{Read, Write},
     os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt},
-    path::Path,
+    path::{Component, Path},
 };
 
 use canterlot_proto::limits::MAX_SHARE_BYTES;
@@ -75,20 +75,42 @@ fn denied_dir(part: &str) -> bool {
 /// Разрешённый путь после раскрытия ссылок в родителях: секретные каталоги
 /// (`~/.ssh`, `~/.gnupg`, `~/.claude`, `~/.codex`, `~/.config/opencode`),
 /// секретные имена и любой `.env` не отдаются.
-fn denied_resolved(path: &Path) -> bool {
-    let parts: Vec<&str> = path
-        .components()
-        .filter_map(|part| part.as_os_str().to_str())
-        .collect();
+fn denied_parts(parts: &[&str]) -> bool {
     if parts.iter().any(|part| denied_dir(part)) {
         return true;
     }
     if parts.windows(2).any(|pair| pair == [".config", "opencode"]) {
         return true;
     }
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(denied_name)
+    parts.last().is_some_and(|name| denied_name(name))
+}
+
+fn denied_resolved(path: &Path) -> bool {
+    let parts: Vec<&str> = path
+        .components()
+        .filter_map(|part| part.as_os_str().to_str())
+        .collect();
+    denied_parts(&parts)
+}
+
+/// Путь как он задан: `.` и `..` нормализуются лексически, ссылки не раскрываются.
+/// Иначе `~/.ssh -> /srv/private-keys` прячет секретное имя от проверки.
+fn denied_lexical(path: &Path) -> bool {
+    let mut parts: Vec<&str> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(part) => {
+                if let Some(part) = part.to_str() {
+                    parts.push(part);
+                }
+            }
+            Component::ParentDir => {
+                parts.pop();
+            }
+            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
+        }
+    }
+    denied_parts(&parts)
 }
 
 fn valid_title(title: &str) -> bool {
@@ -169,7 +191,7 @@ pub fn prepare(
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(Path::new("."));
     let resolved_parent = fs::canonicalize(parent).map_err(|_| ShareError::Unreadable)?;
-    if denied_resolved(&resolved_parent.join(&name)) {
+    if denied_lexical(path) || denied_resolved(&resolved_parent.join(&name)) {
         return Err(ShareError::Denied);
     }
     let parent_fd = rustix::fs::open(
@@ -443,6 +465,30 @@ mod tests {
                 dir.path(),
                 Uuid::now_v7(),
                 &dir.path().join("export").join("id_ed25519"),
+                String::new(),
+                String::new()
+            )
+            .unwrap_err(),
+            ShareError::Denied
+        );
+    }
+
+    #[test]
+    fn refuses_key_when_ssh_itself_is_a_symlink() {
+        // `~/.ssh -> /srv/private-keys`: после раскрытия секретного имени нет,
+        // поэтому путь как он задан проверяется отдельно.
+        let dir = dir();
+        let keys = dir.path().join("srv").join("private-keys");
+        fs::create_dir_all(&keys).unwrap();
+        fs::write(keys.join("id_ed25519"), b"secret").unwrap();
+        let home = dir.path().join("home");
+        fs::create_dir_all(&home).unwrap();
+        symlink(&keys, home.join(".ssh")).unwrap();
+        assert_eq!(
+            prepare(
+                dir.path(),
+                Uuid::now_v7(),
+                &home.join(".ssh").join("id_ed25519"),
                 String::new(),
                 String::new()
             )
