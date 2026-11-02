@@ -2253,12 +2253,15 @@ impl Actor {
         let backoff_cap = self.shared.attachment_config.fetch_backoff_cap;
         // Тот же блок, что в записи BlockFile: без него хаб молча не свяжет файл,
         // поэтому угадывать нельзя — отказ возвращается агенту.
-        let Ok(block_id) = Uuid::parse_str(&request.block_id) else {
-            let _ = sender.send(Msg::ShareFinished {
-                share_id,
-                result: Err(PutError::NoBlock),
-            });
-            return;
+        let block_id = match Uuid::parse_str(&request.block_id) {
+            Ok(id) if !id.is_nil() => id,
+            _ => {
+                let _ = sender.send(Msg::ShareFinished {
+                    share_id,
+                    result: Err(PutError::NoBlock),
+                });
+                return;
+            }
         };
         let header = MediaHeader {
             media_id: request.share_id,
@@ -2868,35 +2871,37 @@ mod tests {
         actor.exec_dir = Some(root.path().to_owned());
         let (self_tx, mut self_rx) = mpsc::unbounded_channel();
         manager.shared.actors.lock().unwrap().insert(id, self_tx);
-        let share_id = Uuid::now_v7();
-        actor
-            .on_up(up::Msg::ShareUpload(
-                canterlot_proto::worker::ipc::ShareUpload {
-                    share_id: share_id.to_string(),
-                    call_id: Uuid::now_v7().to_string(),
-                    name: "doc.txt".into(),
-                    title: String::new(),
-                    note: String::new(),
-                    mime: "text/plain".into(),
-                    size: 6,
-                    sha256: "e".repeat(64),
-                    width: 0,
-                    height: 0,
-                    block_id: String::new(),
-                },
-            ))
-            .await
-            .unwrap();
-        assert!(actor.uploads.is_empty(), "nothing is uploaded");
-        match self_rx.try_recv().expect("refusal") {
-            Msg::ShareFinished {
-                share_id: refused,
-                result: Err(error),
-            } => {
-                assert_eq!(refused, share_id);
-                assert_eq!(error.reason(), "share_block_missing");
+        for block_id in [String::new(), Uuid::nil().to_string()] {
+            let share_id = Uuid::now_v7();
+            actor
+                .on_up(up::Msg::ShareUpload(
+                    canterlot_proto::worker::ipc::ShareUpload {
+                        share_id: share_id.to_string(),
+                        call_id: Uuid::now_v7().to_string(),
+                        name: "doc.txt".into(),
+                        title: String::new(),
+                        note: String::new(),
+                        mime: "text/plain".into(),
+                        size: 6,
+                        sha256: "e".repeat(64),
+                        width: 0,
+                        height: 0,
+                        block_id,
+                    },
+                ))
+                .await
+                .unwrap();
+            assert!(actor.uploads.is_empty(), "nothing is uploaded");
+            match self_rx.try_recv().expect("refusal") {
+                Msg::ShareFinished {
+                    share_id: refused,
+                    result: Err(error),
+                } => {
+                    assert_eq!(refused, share_id);
+                    assert_eq!(error.reason(), "share_block_missing");
+                }
+                _ => panic!("a share without a block id must be refused"),
             }
-            _ => panic!("a share without a block id must be refused"),
         }
         drop(actor);
         manager.shutdown().await;
