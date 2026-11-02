@@ -159,7 +159,7 @@ test.describe('stack: input and queue', () => {
     // Отложенное сообщение через 5 с появляется в полосе и ждёт своей очереди.
     const runAt = new Date(Date.now() + 5000).toISOString();
     await hub.json(`/api/v1/conversations/${id}/scheduled`, { method: 'POST', body: JSON.stringify({ run_at: runAt, content: [{ type: 'text', text: synthetic.script([synthetic.delta('S-ответ')]) }] }) });
-    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
 
     // Отменяем второе сообщение очереди: остаётся одно «Отменить» очереди.
     await strip.locator('[data-state]').filter({ hasText: 'Q2-ответ' }).getByRole('button', { name: 'Отменить' }).click();
@@ -228,14 +228,14 @@ test.describe('stack: input and queue', () => {
     await expect(strip).not.toContainText('Z-отменить', { timeout: 15_000 });
 
     await schedule(new Date(Date.now() + 3000).toISOString(), synthetic.script([synthetic.delta('Z-сработало')]));
-    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
+    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(1, { timeout: 15_000 });
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 30_000 });
-    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(0);
 
     await page.reload();
     await expect(page.locator('[data-ready]').first()).toBeVisible({ timeout: 15_000 });
     await expect(page.locator('article.card [data-block]').filter({ hasText: 'Z-сработало' })).toBeVisible({ timeout: 15_000 });
-    await expect(strip.getByRole('button', { name: 'Изменить' })).toHaveCount(0);
+    await expect(strip.locator('.item:not([data-state])').getByRole('button', { name: 'Изменить' })).toHaveCount(0);
     await expect(strip).not.toContainText('Z-отменить');
   });
 
