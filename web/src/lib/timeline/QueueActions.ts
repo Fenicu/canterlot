@@ -2,7 +2,8 @@ import type { InputView } from "#lib/stores/inputs.js";
 import type { OpJournal } from "#lib/ops/journal.js";
 import type { ChatStore } from "#lib/stores/chat.svelte.js";
 import type { DraftStore } from "#lib/drafts/store.js";
-import { cancelInput as apiCancelInput } from "#lib/api/client.js";
+import { cancelInput as apiCancelInput, sendNow as apiSendNow } from "#lib/api/client.js";
+import { ApiError } from "#lib/api/http.js";
 import { returnToComposer } from "#lib/composer/returned.js";
 import { freshInput } from "#lib/stores/inputs.js";
 
@@ -140,4 +141,69 @@ export async function returnToDraft(
     },
     deps.drafts,
   );
+}
+
+export interface SendNowDeps {
+  clientSendNow?: (
+    conversationId: string,
+    inputId: string,
+    key: string,
+  ) => Promise<unknown>;
+}
+
+export type SendNowResult = "requested" | "noop" | { reason: string };
+
+const SEND_NOW_REASONS = new Set([
+  "input_not_queued",
+  "no_running_turn",
+  "request_open",
+  "compacting",
+  "unsupported_harness",
+  "capability_missing",
+]);
+
+/**
+ * «Отправить сейчас»: влить ожидающее сообщение в идущий ход. По умолчанию
+ * сообщение ждёт конца хода; это действие — явный обход. Ход между кликом и
+ * доставкой мог кончиться: тогда сообщение просто уйдёт следующим ходом.
+ */
+export async function sendNow(
+  input: InputView,
+  conversationId: string,
+  deps?: SendNowDeps,
+): Promise<SendNowResult> {
+  if (!input.id) return "noop";
+  try {
+    const key = crypto.randomUUID();
+    if (deps?.clientSendNow) await deps.clientSendNow(conversationId, input.id, key);
+    else await apiSendNow(conversationId, input.id, key);
+    return "requested";
+  } catch (err) {
+    if (err instanceof ApiError) {
+      const reason =
+        err.code === "invalid_request" && typeof err.details?.reason === "string"
+          ? err.details.reason
+          : "unknown";
+      if (reason === "unknown" || SEND_NOW_REASONS.has(reason)) return { reason };
+    }
+    return { reason: "unknown" };
+  }
+}
+
+/** Подпись отказа «Отправить сейчас» и скрытие кнопки, когда она неуместна. */
+export function sendNowCaption(reason: string): string | null {
+  switch (reason) {
+    case "no_running_turn":
+      return "Ход уже кончился: сообщение уйдёт следующим";
+    case "request_open":
+      return "Дождитесь ответа на запрос";
+    case "compacting":
+      return "Дождитесь конца сжатия";
+    case "input_not_queued":
+    case "unsupported_harness":
+    case "capability_missing":
+      return null;
+    default:
+      return "Не получилось отправить сейчас";
+  }
 }

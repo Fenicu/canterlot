@@ -4,6 +4,9 @@
   import { getRuntime } from '#lib/app/runtime.js';
   import { returnToComposer } from '#lib/composer/returned.js';
   import { cancelInput } from '#lib/timeline/QueueActions.js';
+  import { sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
+  import type { InputView } from '#lib/stores/inputs.js';
+  import { turnIsLive } from '#lib/composer/sendRules.js';
   import { CANCEL_REQUESTED_LABEL } from '#lib/stores/inputs.js';
   import type { ChatStore, ScheduledMessage } from '#lib/stores/chat.svelte.js';
   import { deliveryLabel, scheduledLabel } from '#lib/timeline/present.js';
@@ -102,6 +105,28 @@
   function retryUnknown(key: string) {
     getRuntime().journal.retryNow(key);
   }
+
+  const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+  const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode');
+  let sending = $state<Record<string, boolean>>({});
+  let steerNotes = $state<Record<string, string | null>>({});
+  let steered = $state<Record<string, boolean>>({});
+
+  async function doSendNow(input: InputView) {
+    if (sending[input.key] || !input.id) return;
+    sending = { ...sending, [input.key]: true };
+    try {
+      const outcome = await sendNow(input, chat.id);
+      if (outcome !== 'requested' && outcome !== 'noop') {
+        steerNotes = { ...steerNotes, [input.key]: sendNowCaption(outcome.reason) };
+      } else if (outcome === 'requested') {
+        steered = { ...steered, [input.key]: true };
+      }
+    } finally {
+      sending = { ...sending, [input.key]: false };
+    }
+  }
 </script>
 
 <div class="strip">
@@ -116,6 +141,16 @@
         {/if}
       </span>
       {#if input.cancelRequested}<p class="note">{CANCEL_REQUESTED_LABEL}</p>{/if}
+      {#if input.state === 'queued' && input.id && turnLive && steerSupported}
+        {#if sending[input.key]}
+          <span class="actions"><Button disabled={true} reason="Отправляется…">Отправить сейчас</Button></span>
+        {:else}
+          <span class="actions"><Button onclick={() => void doSendNow(input)}>Отправить сейчас</Button></span>
+        {/if}
+        {#if harnessId === 'opencode'}<p class="note">Прервёт текущий шаг</p>{/if}
+      {/if}
+      {#if steerNotes[input.key]}<p class="note">{steerNotes[input.key]}</p>{/if}
+      {#if steered[input.key] && input.state === 'queued'}<p class="note">Вливается в идущий ход</p>{/if}
       {#if lost[input.key]}
         <p class="note">Передача уже началась, обычная отмена невозможна</p>
         <span class="actions"><Button onclick={() => interrupt(chat.id, crypto.randomUUID())}>Прервать исполнение</Button></span>

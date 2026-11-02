@@ -301,6 +301,7 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         testkit::test_app_deps(pool.clone(), testkit::test_http_config(), None).await;
     let owner = deps.installation.owner_id;
     let machine = Uuid::now_v7();
+    let send_now_registry = deps.registry.clone();
     sqlx::query("insert into machines(id,owner_id,name) values($1,$2,'test')")
         .bind(machine)
         .bind(owner)
@@ -435,6 +436,99 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
                 .to_owned(),
         );
     }
+    // «Отправить сейчас»: ход идёт, один ввод принят, второй ждёт в очереди.
+    let send_now_conversation = testkit::seed_conversation(&pool, owner, machine).await;
+    sqlx::query("update conversations set harness = 'codex' where id = $1")
+        .bind(send_now_conversation)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let _send_now_caps = send_now_registry.connect_for_tests(
+        machine,
+        &[
+            "pilot_v1",
+            "instructions_v1",
+            "todo_v1",
+            "compact_v1",
+            "background_v1",
+            "session_tools_v1",
+            "owner_exit_v1",
+            "workdir_suggest_v1",
+            "owner_instructions_v1",
+            "send_now_v1",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<Vec<_>>(),
+    );
+    let send_now_execution = canterlot_hub::executions::start(
+        &pool,
+        owner,
+        send_now_conversation,
+        Uuid::now_v7(),
+    )
+        .await
+        .unwrap()
+        .execution_id;
+    {
+        use canterlot_hub::model::ExecutionState as State;
+        for state in [State::Starting, State::Running] {
+            canterlot_hub::executions::set_state(&pool, send_now_execution, state, None, Uuid::now_v7())
+                .await
+                .unwrap();
+        }
+    }
+    let first = setup(
+        Method::POST,
+        format!("/api/v1/conversations/{send_now_conversation}/inputs"),
+        "setup_send_now_first",
+        Some(json!({"content":[{"type":"text","text":"Ход"}]})),
+    )
+    .await;
+    let queued = setup(
+        Method::POST,
+        format!("/api/v1/conversations/{send_now_conversation}/inputs"),
+        "setup_send_now_queued",
+        Some(json!({"content":[{"type":"text","text":"В очередь"}]})),
+    )
+    .await;
+    {
+        use canterlot_hub::delivery::{
+            dispatch::{GateInputs, dispatch_next},
+            receipts::{InputReceipt, apply_input_receipt},
+        };
+        let outcome = dispatch_next(
+            &pool,
+            send_now_conversation,
+            GateInputs {
+                machine_available: true,
+                machine_reconciled: true,
+                session_capabilities: vec!["pilot_v1".into(), "send_now_v1".into()],
+            },
+            Uuid::now_v7(),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            outcome,
+            canterlot_hub::delivery::dispatch::DispatchOutcome::Dispatched { .. }
+        ));
+        for receipt in [
+            InputReceipt::Stored,
+            InputReceipt::TransmissionStarted,
+            InputReceipt::Accepted,
+        ] {
+            apply_input_receipt(
+                &pool,
+                first["command_id"].as_str().unwrap().parse().unwrap(),
+                1,
+                receipt,
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
+        }
+    }
     let decision_conversation = testkit::seed_conversation(&pool, owner, machine).await;
     let decision_execution = Uuid::now_v7();
     let decision_request = Uuid::now_v7();
@@ -562,6 +656,16 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
             Method::POST,
             "/api/v1/conversations/{id}/interrupt",
             format!("/api/v1/conversations/{id}/interrupt"),
+            None,
+            None,
+        ),
+        case(
+            Method::POST,
+            "/api/v1/conversations/{id}/inputs/{input_id}/send-now",
+            format!(
+                "/api/v1/conversations/{send_now_conversation}/inputs/{}/send-now",
+                queued["input_id"].as_str().unwrap()
+            ),
             None,
             None,
         ),

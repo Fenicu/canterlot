@@ -1632,6 +1632,82 @@
         }
       }
     },
+    "/api/v1/conversations/{id}/inputs/{input_id}/send-now": {
+      "post": {
+        "tags": [
+          "conversations"
+        ],
+        "operationId": "post__api_v1_conversations__id__inputs__input_id__send_now",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "input_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ожидающий ввод влит в идущий ход",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SendNowOutcome"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry",
+            "headers": {
+              "X-Server-Time-Ms": {
+                "schema": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "description": "Часы хаба: целые миллисекунды Unix"
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorEnvelope"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/v1/conversations/{id}/interrupt": {
       "post": {
         "tags": [
@@ -9367,6 +9443,50 @@
             "$ref": "#/components/schemas/JobState"
           }
         }
+      },
+      "SendNowOutcome": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "requested"
+            ],
+            "properties": {
+              "requested": {
+                "type": "object",
+                "required": [
+                  "steer_command_id"
+                ],
+                "properties": {
+                  "steer_command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "already_requested"
+            ],
+            "properties": {
+              "already_requested": {
+                "type": "object",
+                "required": [
+                  "steer_command_id"
+                ],
+                "properties": {
+                  "steer_command_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        ]
       },
       "SessionView": {
         "type": "object",

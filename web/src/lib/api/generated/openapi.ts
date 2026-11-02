@@ -256,6 +256,22 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/conversations/{id}/inputs/{input_id}/send-now": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["post__api_v1_conversations__id__inputs__input_id__send_now"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/conversations/{id}/interrupt": {
         parameters: {
             query?: never;
@@ -2014,6 +2030,17 @@ export interface components {
             run_at: string;
             state: components["schemas"]["JobState"];
         };
+        SendNowOutcome: {
+            requested: {
+                /** Format: uuid */
+                steer_command_id: string;
+            };
+        } | {
+            already_requested: {
+                /** Format: uuid */
+                steer_command_id: string;
+            };
+        };
         SessionView: {
             activity_state: string;
             /** Format: uuid */
@@ -3121,6 +3148,44 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmittedInput"];
+                };
+            };
+            /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */
+            default: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorEnvelope"];
+                };
+            };
+        };
+    };
+    post__api_v1_conversations__id__inputs__input_id__send_now: {
+        parameters: {
+            query?: never;
+            header: {
+                "Idempotency-Key": string;
+            };
+            path: {
+                id: string;
+                input_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Ожидающий ввод влит в идущий ход */
+            200: {
+                headers: {
+                    /** @description Часы хаба: целые миллисекунды Unix */
+                    "X-Server-Time-Ms"?: number;
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SendNowOutcome"];
                 };
             };
             /** @description Ошибка в формате ErrorEnvelope; код из ErrorCode, повтор определяет retry */

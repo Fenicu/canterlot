@@ -1,7 +1,7 @@
 use super::{
     AppState,
     auth::{Correlation, IdempotencyKey, Owner},
-    error::{ApiError, ErrorCode},
+    error::{ApiError, ErrorCode, ErrorDetails},
     extract::{ApiJson, ApiPath, ApiQuery},
 };
 use crate::conversations::{
@@ -306,7 +306,17 @@ async fn send_now(
         c,
         &capabilities.unwrap_or_default(),
     )
-    .await?;
+    .await
+    .map_err(|error| match error {
+        crate::delivery::control::ControlError::InvalidRequest { reason } => {
+            ApiError::new(ErrorCode::InvalidRequest)
+                .with_details(ErrorDetails {
+                    reason: Some(reason.into()),
+                    ..Default::default()
+                })
+        }
+        error => error.into(),
+    })?;
     Ok(Json(result))
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, serde::Serialize, ToSchema)]

@@ -173,3 +173,41 @@ describe("timeline/QueueActions", () => {
     );
   });
 });
+
+describe("timeline/QueueActions sendNow", () => {
+  it("send_now_posts_to_the_running_turn_and_maps_refusal_reasons", async () => {
+    const { sendNow, sendNowCaption } = await import("#lib/timeline/QueueActions.js");
+    const { ApiError } = await import("#lib/api/http.js");
+    const input: InputView = freshInput("k1", "В ход", Date.now());
+    input.id = "inp-uuid-1";
+    input.state = "queued";
+
+    let posted: Array<[string, string, string]> = [];
+    const res = await sendNow(input, "conv-1", {
+      clientSendNow: async (conv, id, key) => {
+        posted.push([conv, id, key]);
+        return { data: { requested: {} } };
+      },
+    });
+    expect(res).toBe("requested");
+    expect(posted).toHaveLength(1);
+    expect(posted[0][0]).toBe("conv-1");
+    expect(posted[0][1]).toBe("inp-uuid-1");
+
+    const refused = await sendNow(input, "conv-1", {
+      clientSendNow: async () => {
+        throw new ApiError(400, "invalid_request", "Некорректный запрос", "Browser", "Never", "c", {
+          reason: "request_open",
+        });
+      },
+    });
+    expect(refused).toEqual({ reason: "request_open" });
+    expect(sendNowCaption("request_open")).toBe("Дождитесь ответа на запрос");
+    expect(sendNowCaption("compacting")).toBe("Дождитесь конца сжатия");
+    expect(sendNowCaption("no_running_turn")).toBe("Ход уже кончился: сообщение уйдёт следующим");
+    expect(sendNowCaption("capability_missing")).toBeNull();
+
+    const idless: InputView = freshInput("k2", "Черновик", Date.now());
+    expect(await sendNow(idless, "conv-1")).toBe("noop");
+  });
+});

@@ -12,8 +12,9 @@
   import type { Stage } from '#lib/ui/stage-track.js';
   import type { ChatStore } from '#lib/stores/chat.svelte.js';
   import type { InputView } from '#lib/stores/inputs.js';
-  import { retryAsNew, returnToDraft } from '#lib/timeline/QueueActions.js';
+  import { retryAsNew, returnToDraft, sendNow, sendNowCaption } from '#lib/timeline/QueueActions.js';
   import { deliveryIndex, deliveryLabel } from '#lib/timeline/present.js';
+  import { turnIsLive } from '#lib/composer/sendRules.js';
   import { originLabel } from '#lib/timeline/origin.js';
 
   let { input, chat, agentWorking = false }: { input: InputView; chat: ChatStore; agentWorking?: boolean } = $props();
@@ -79,6 +80,31 @@
   }
   const from = $derived(originLabel(input.origin));
   const stamp = $derived(input.state === 'accepted' && input.createdAt !== null ? ` · ${fmt.clock(input.createdAt)}` : '');
+  const harnessId = $derived((chat.detail?.harness as { id?: string } | undefined)?.id ?? '');
+  const steerSupported = $derived(harnessId === 'claude_code' || harnessId === 'codex' || harnessId === 'opencode');
+  const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
+  // Кнопка видна, пока сообщение ждёт в очереди, а ход идёт: по умолчанию оно
+  // ушло бы следующим ходом, «Отправить сейчас» вливает его в текущий.
+  const showSendNow = $derived(input.state === 'queued' && input.id !== null && turnLive && steerSupported);
+  let sendingNow = $state(false);
+  let sendNowReason = $state<string | null>(null);
+  let sendNowSent = $state(false);
+
+  async function doSendNow() {
+    if (sendingNow) return;
+    sendingNow = true;
+    sendNowReason = null;
+    try {
+      const outcome = await sendNow(input, chat.id);
+      if (outcome !== 'requested' && outcome !== 'noop') {
+        sendNowReason = sendNowCaption(outcome.reason);
+      } else if (outcome === 'requested') {
+        sendNowSent = true;
+      }
+    } finally {
+      sendingNow = false;
+    }
+  }
 </script>
 
 <article class="bubble" data-state={input.state} data-origin={input.origin?.kind} data-optimistic={input.optimistic ? '' : undefined} use:enter>
@@ -112,6 +138,20 @@
           })}
       >Отправить повторно как новое</Button>
     </div>
+  {/if}
+  {#if showSendNow}
+    <div class="actions">
+      {#if sendingNow}
+        <Button disabled={true} reason="Отправляется…">Отправить сейчас</Button>
+      {:else}
+        <Button onclick={() => void doSendNow()}>Отправить сейчас</Button>
+      {/if}
+    </div>
+    {#if harnessId === 'opencode'}<p class="reason">Прервёт текущий шаг</p>{/if}
+    {#if sendNowReason}<p class="reason">{sendNowReason}</p>{/if}
+    {#if sendNowSent}<p class="reason">Вливается в идущий ход</p>{/if}
+  {:else if sendNowReason && input.state === 'queued'}
+    <p class="reason">{sendNowReason}</p>
   {/if}
   {#if input.state === 'rejected'}
     {#if input.rejection}<p class="reason">{rejectionLabel(input.rejection)}</p>{/if}

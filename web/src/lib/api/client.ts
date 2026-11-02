@@ -547,6 +547,24 @@ export function interrupt(
   );
 }
 
+export function sendNow(
+  conversationId: string,
+  inputId: string,
+  key: string,
+  opts?: RequestOptions,
+): Promise<
+  HttpResponse<
+    Ok<operations["post__api_v1_conversations__id__inputs__input_id__send_now"]>
+  >
+> {
+  return http(
+    "POST",
+    `/api/v1/conversations/${id(conversationId)}/inputs/${id(inputId)}/send-now`,
+    undefined,
+    keyed(key, opts),
+  );
+}
+
 export function accept(
   conversationId: string,
   body: Body<operations["post__api_v1_conversations__id__accept"]>,
