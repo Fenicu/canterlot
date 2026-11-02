@@ -97,8 +97,10 @@ fn parse_turn_error(error: &Value) -> TurnErrorInfo {
     }
 }
 
-pub enum Translated {
-    Event(AdapterEvent),
+/// Шаг живого расхода контекста между записями `ContextProgress`.
+const CONTEXT_PROGRESS_STEP: u64 = 10_000;
+
+pub enum Translated {    Event(AdapterEvent),
     UserMessage {
         thread_id: String,
         turn_id: String,
@@ -237,6 +239,9 @@ pub struct Translator {
     usage: HashMap<(String, String), UsageAcc>,
     last_context_tokens: u64,
     last_context_window: u64,
+    /// Живой расход, уже отданный `ContextProgress`: реже журнала, не чаще каждых
+    /// `CONTEXT_PROGRESS_STEP` токенов.
+    progress_sent: u64,
     phase: Phase,
     previous_phase: Phase,
     waiting: bool,
@@ -289,6 +294,7 @@ impl Translator {
             usage: HashMap::new(),
             last_context_tokens: 0,
             last_context_window: 0,
+            progress_sent: 0,
             phase: Phase::Generating,
             previous_phase: Phase::Generating,
             waiting: false,
@@ -315,6 +321,7 @@ impl Translator {
         self.usage.clear();
         self.last_context_tokens = 0;
         self.last_context_window = 0;
+        self.progress_sent = 0;
         self.retry_count = 0;
     }
 
@@ -788,7 +795,7 @@ impl Translator {
             return vec![Translated::Ignored];
         }
         if item_type == "contextCompaction" {
-            return vec![self.context_maintenance()];
+            return self.context_maintenance();
         }
         if item_type == "subAgentActivity" {
             return self.on_sub_agent_item(item, agent, &model, parent, command_id);
@@ -1023,13 +1030,18 @@ impl Translator {
         })
     }
 
-    fn context_maintenance(&mut self) -> Translated {
+    fn context_maintenance(&mut self) -> Vec<Translated> {
         self.phase = Phase::ContextMaintenance;
-        Translated::Event(AdapterEvent::Phase {
-            phase: Phase::ContextMaintenance,
-            tool_name: None,
-            summary: None,
-        })
+        // Кадры дают только факт сжатия без токенов и триггера: кнопка для Codex
+        // отключена, поэтому эпизод всегда автоматический.
+        vec![
+            Translated::Event(AdapterEvent::Phase {
+                phase: Phase::ContextMaintenance,
+                tool_name: None,
+                summary: None,
+            }),
+            Translated::Event(AdapterEvent::CompactionStarted { manual: false }),
+        ]
     }
 
     fn on_item_completed(&mut self, params: &Value) -> Vec<Translated> {
@@ -1038,11 +1050,22 @@ impl Translator {
         let item_type = item.get("type").and_then(Value::as_str).unwrap_or_default();
         if item_type == "contextCompaction" {
             self.phase = Phase::Generating;
-            return vec![Translated::Event(AdapterEvent::Phase {
-                phase: Phase::Generating,
-                tool_name: None,
-                summary: None,
-            })];
+            // После сжатия расход начинается заново: старые проценты не должны пережить границу.
+            self.last_context_tokens = 0;
+            self.last_context_window = 0;
+            self.progress_sent = 0;
+            return vec![
+                Translated::Event(AdapterEvent::Phase {
+                    phase: Phase::Generating,
+                    tool_name: None,
+                    summary: None,
+                }),
+                Translated::Event(AdapterEvent::CompactionFinished {
+                    manual: false,
+                    ok: true,
+                    pre_tokens: 0,
+                }),
+            ];
         }
         let Some(mut block) = self.open.remove(item_id) else {
             return vec![Translated::Ignored];
@@ -1557,6 +1580,14 @@ impl Translator {
                     .get("modelContextWindow")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
+                // Живой расход в ходу: реже журнала, иначе болтливый ход зальёт хаб.
+                if self.last_context_tokens >= self.progress_sent + CONTEXT_PROGRESS_STEP {
+                    self.progress_sent = self.last_context_tokens;
+                    return vec![Translated::Event(AdapterEvent::ContextProgress {
+                        context_tokens: self.last_context_tokens,
+                        context_window_tokens: self.last_context_window,
+                    })];
+                }
             }
             return vec![Translated::Ignored];
         }

@@ -114,6 +114,9 @@ struct MessageUsage {
     cache_write: u64,
 }
 
+/// Шаг живого расхода контекста между записями `ContextProgress`.
+const CONTEXT_PROGRESS_STEP: u64 = 10_000;
+
 /// Фоновая задача CLI. Ключ — `task_id`: завершившийся субагент может запуститься снова
 /// с тем же `task_id` и новым `run_id`, последнее событие главнее.
 struct TrackedTask {
@@ -253,6 +256,16 @@ pub struct Parser {
     streamed_messages: HashSet<String>,
     assembler: ToolInputAssembler,
     last_usage: Option<MessageUsage>,
+    /// Ручное сжатие по кнопке ждёт своей границы: адаптер выставил флаг через `compact`.
+    compact_manual: bool,
+    /// Сжатие уже объявлено началом: повторный `status=compacting` не дублирует эпизод.
+    compact_active: bool,
+    /// Граница сжатия прошла: ближайший `result` без открытого хода — итог служебного
+    /// `/compact`, а не ход прошлой команды.
+    compact_swallow_result: bool,
+    /// Живой расход контекста, уже отданный `ContextProgress`: реже журнала, не чаще каждых
+    /// `CONTEXT_PROGRESS_STEP` токенов, иначе болтливый ход зальёт журнал и хаб.
+    progress_sent: u64,
     /// Имена уже названных неизвестных кадров: на исполнение один раз на имя.
     unknown: HashSet<String>,
     /// Записанная команда ждёт своего `result`.
@@ -289,6 +302,10 @@ impl Parser {
             streamed_messages: HashSet::new(),
             assembler: ToolInputAssembler::default(),
             last_usage: None,
+            compact_manual: false,
+            compact_active: false,
+            compact_swallow_result: false,
+            progress_sent: 0,
             unknown: HashSet::new(),
             command_open: false,
             wake: None,
@@ -328,6 +345,11 @@ impl Parser {
     pub fn set_input_command(&mut self, id: Uuid) {
         self.input_command = Some(id);
         self.command_open = true;
+    }
+
+    /// Кнопка «Сжать контекст» отправила `/compact`: ближайшая граница — ручная.
+    pub fn mark_compact_manual(&mut self) {
+        self.compact_manual = true;
     }
 
     /// CLI занят ходом, который начал сам: ввод ему не нужен, перезапуск его оборвал бы.
@@ -491,6 +513,10 @@ impl Parser {
         self.command_open = false;
         self.wake = None;
         self.cli_turn = false;
+        self.compact_manual = false;
+        self.compact_active = false;
+        self.compact_swallow_result = false;
+        self.progress_sent = 0;
         self.background.clear();
         self.task_calls.clear();
         self.background_sent = (Vec::new(), false);
@@ -564,7 +590,12 @@ impl Parser {
         }
     }
 
-    fn note_usage(&mut self, usage: &serde_json::Value, parent_tool_use_id: Option<&str>) {
+    fn note_usage(
+        &mut self,
+        usage: &serde_json::Value,
+        parent_tool_use_id: Option<&str>,
+        out: &mut Vec<Parsed>,
+    ) {
         if parent_tool_use_id.is_some() {
             return;
         }
@@ -574,11 +605,20 @@ impl Parser {
                 .and_then(serde_json::Value::as_u64)
                 .unwrap_or(0)
         };
+        let total = get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens");
         self.last_usage = Some(MessageUsage {
             input: get("input_tokens"),
             cache_read: get("cache_read_input_tokens"),
             cache_write: get("cache_creation_input_tokens"),
         });
+        // Живой расход в ходу: та же сумма, что в `RunFinished`, но реже журнала.
+        if total >= self.progress_sent + CONTEXT_PROGRESS_STEP {
+            self.progress_sent = total;
+            out.push(Parsed::Event(AdapterEvent::ContextProgress {
+                context_tokens: total,
+                context_window_tokens: 0,
+            }));
+        }
     }
 
     fn start_text_block(
@@ -679,9 +719,40 @@ impl Parser {
                         tool_name: None,
                         summary: None,
                     }));
+                    // Повторный статус одного сжатия эпизод не дублирует.
+                    if !self.compact_active {
+                        self.compact_active = true;
+                        out.push(Parsed::Event(AdapterEvent::CompactionStarted {
+                            manual: self.compact_manual,
+                        }));
+                    }
                 } else {
                     out.push(Parsed::Ignored);
                 }
+            }
+            Some("compact_boundary") => {
+                let meta = value.get("compact_metadata").unwrap_or(&serde_json::Value::Null);
+                let manual = self.compact_manual
+                    || meta
+                        .get("trigger")
+                        .and_then(serde_json::Value::as_str)
+                        == Some("manual");
+                let pre_tokens = meta
+                    .get("pre_tokens")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(0);
+                self.compact_active = false;
+                self.compact_manual = false;
+                self.compact_swallow_result = true;
+                // После сжатия расход начинается заново: старое значение не должно
+                // пережить границу ни в ходу, ни в индикаторе.
+                self.last_usage = None;
+                self.progress_sent = 0;
+                out.push(Parsed::Event(AdapterEvent::CompactionFinished {
+                    manual,
+                    ok: true,
+                    pre_tokens,
+                }));
             }
             Some("background_tasks_changed") => {
                 self.feed_background_list(value, out);
@@ -739,7 +810,7 @@ impl Parser {
                     parent,
                 );
                 if let Some(usage) = message.and_then(|message| message.get("usage")) {
-                    self.note_usage(usage, parent);
+                    self.note_usage(usage, parent, out);
                 }
                 if let Some(answer) = Self::answer_frame(value) {
                     out.push(answer);
@@ -924,7 +995,7 @@ impl Parser {
             }
             Some("message_delta") => {
                 if let Some(usage) = event.and_then(|event| event.get("usage")) {
-                    self.note_usage(usage, parent);
+                    self.note_usage(usage, parent, out);
                 }
             }
             Some(kind) if IGNORED_STREAM_EVENTS.contains(&kind) => {}
@@ -1059,7 +1130,7 @@ impl Parser {
             parent,
         );
         if let Some(usage) = message.and_then(|message| message.get("usage")) {
-            self.note_usage(usage, parent);
+            self.note_usage(usage, parent, out);
         }
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
@@ -1259,6 +1330,35 @@ impl Parser {
     }
 
     fn feed_result(&mut self, value: &serde_json::Value, out: &mut Vec<Parsed>) {
+        // Сжатие оборвалось ошибкой: граница не придёт, эпизод закрывает отказ.
+        if self.compact_active
+            && value.get("is_error").and_then(serde_json::Value::as_bool) == Some(true)
+        {
+            self.compact_active = false;
+            let manual = std::mem::take(&mut self.compact_manual);
+            self.compact_swallow_result = true;
+            self.last_usage = None;
+            self.progress_sent = 0;
+            out.push(Parsed::Event(AdapterEvent::CompactionFinished {
+                manual,
+                ok: false,
+                pre_tokens: 0,
+            }));
+        }
+        // Итог служебного `/compact` между ходами: ходу прошлой команды он не принадлежит,
+        // приписывать его некому, расход уже ушёл в границу сжатия.
+        if self.compact_swallow_result && !self.command_open {
+            self.compact_swallow_result = false;
+            self.cli_turn = false;
+            out.push(Parsed::Event(AdapterEvent::Phase {
+                phase: Phase::AwaitingInput,
+                tool_name: None,
+                summary: None,
+            }));
+            self.report_background(out);
+            return;
+        }
+        self.compact_swallow_result = false;
         if let Some(answer) = Self::answer_frame(value) {
             out.push(answer);
         }
@@ -1277,6 +1377,8 @@ impl Parser {
                 .clone()
                 .unwrap_or_else(|| self.current_model.clone());
             let last = self.last_usage.unwrap_or_default();
+            // Живой учёт следующего хода начинается заново: итог ушёл в `RunFinished`.
+            self.progress_sent = 0;
             out.push(Parsed::Event(AdapterEvent::RunFinished {
                 input_command_id,
                 usage,

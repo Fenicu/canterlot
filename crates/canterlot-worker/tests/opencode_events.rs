@@ -1474,3 +1474,58 @@ fn unknown_events_carry_data_names_and_never_values() {
     };
     assert_eq!(field_names, &["data", "token"]);
 }
+
+#[test]
+fn compaction_frames_open_and_close_a_timeline_episode() {
+    let events = capture_events("compaction", Some("overflow"));
+    let (mut translator, _) = translator(&events);
+    let tail: Vec<Value> = events
+        .iter()
+        .skip_while(|event| event["type"] != "session.compaction.started")
+        .take_while(|event| event["type"] != "session.step.started")
+        .cloned()
+        .collect();
+    let out = adapter_events(feed_all(&mut translator, &tail));
+    // Записанное автоматическое сжатие: эпизод авто, цифры CLI не даёт.
+    assert!(
+        out.iter().any(|e| matches!(
+            e,
+            AdapterEvent::CompactionStarted { manual: false }
+        )),
+        "{out:?}"
+    );
+    assert!(
+        out.iter().any(|e| matches!(
+            e,
+            AdapterEvent::CompactionFinished {
+                manual: false,
+                ok: true,
+                pre_tokens: 0,
+            }
+        )),
+        "{out:?}"
+    );
+}
+
+#[test]
+fn compaction_failure_closes_the_episode_as_failed() {
+    let events = capture_events("compaction", Some("overflow"));
+    let session = session_of(&events);
+    let (mut translator, _) = translator(&events);
+    let failed = json!({"type": "session.compaction.failed", "data": {
+        "sessionID": session,
+        "reason": "auto",
+        "error": {"type": "compaction.unavailable", "message": "Nothing to compact yet"}}});
+    let out = adapter_events(translator.feed(&failed));
+    assert!(
+        out.iter().any(|e| matches!(
+            e,
+            AdapterEvent::CompactionFinished {
+                manual: false,
+                ok: false,
+                pre_tokens: 0,
+            }
+        )),
+        "{out:?}"
+    );
+}

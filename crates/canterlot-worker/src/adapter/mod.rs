@@ -556,6 +556,25 @@ pub enum AdapterEvent {
     Compacted {
         ok: bool,
     },
+    /// Контекст сжимается (автоматически или по кнопке): начало эпизода для
+    /// durable ленты. Транзиентная фаза `ContextMaintenance` шлётся отдельно.
+    CompactionStarted {
+        manual: bool,
+    },
+    /// Эпизод сжатия закончен. `pre_tokens` — токенов до сжатия, если CLI дал
+    /// (0 — неизвестно). Приходит и без `CompactionStarted` (переподключение):
+    /// сопровождение тогда открывает и закрывает эпизод сразу.
+    CompactionFinished {
+        manual: bool,
+        ok: bool,
+        pre_tokens: u64,
+    },
+    /// Живой расход контекста в ходу; адаптер ограничивает частоту, хаб держит
+    /// последнее, итог хода в `RunFinished` главнее.
+    ContextProgress {
+        context_tokens: u64,
+        context_window_tokens: u64,
+    },
 }
 impl fmt::Debug for AdapterEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -649,6 +668,16 @@ impl fmt::Debug for AdapterEvent {
             Self::DeferredRestartDue => f.write_str("DeferredRestartDue"),
             Self::SessionStuck => f.write_str("SessionStuck"),
             Self::Compacted { ok } => f.debug_struct("Compacted").field("ok", ok).finish(),
+            Self::CompactionStarted { manual } => f
+                .debug_struct("CompactionStarted")
+                .field("manual", manual)
+                .finish(),
+            Self::CompactionFinished { manual, ok, .. } => f
+                .debug_struct("CompactionFinished")
+                .field("manual", manual)
+                .field("ok", ok)
+                .finish_non_exhaustive(),
+            Self::ContextProgress { .. } => f.write_str("ContextProgress"),
             Self::TodoUpdated { lane, items } => f
                 .debug_struct("TodoUpdated")
                 .field("lane", lane)

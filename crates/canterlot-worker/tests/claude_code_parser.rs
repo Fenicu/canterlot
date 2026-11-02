@@ -1569,3 +1569,96 @@ fn real_tool_result_of_a_synchronous_agent_is_not_marked() {
         Parsed::Event(AdapterEvent::BlockFinal { summary: None, .. })
     )));
 }
+
+#[test]
+fn compaction_boundary_opens_and_closes_one_episode() {
+    let lines = fixtures::replay_fixture("compaction");
+    let mut parser = Parser::new();
+    let parsed = feed_all(&mut parser, &lines);
+    let events: Vec<&AdapterEvent> = parsed
+        .iter()
+        .filter_map(|p| match p {
+            Parsed::Event(event) => Some(event),
+            _ => None,
+        })
+        .collect();
+    let starts = events
+        .iter()
+        .filter(|e| matches!(e, AdapterEvent::CompactionStarted { .. }))
+        .count();
+    // Повторный статус того же сжатия эпизод не дублирует: стартов три, а не четыре.
+    assert_eq!(starts, 3, "one start per episode, duplicates collapse");
+    let finishes: Vec<(&bool, &bool, &u64)> = events
+        .iter()
+        .filter_map(|e| match e {
+            AdapterEvent::CompactionFinished {
+                manual,
+                ok,
+                pre_tokens,
+            } => Some((manual, ok, pre_tokens)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        finishes,
+        vec![
+            (&false, &true, &980_000),
+            (&true, &true, &0),
+            (&false, &false, &0),
+        ],
+        "auto with tokens, manual without, then a failure"
+    );
+    // Служебный /compact ходу прошлой команды не принадлежит: RunFinished нет.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, AdapterEvent::RunFinished { .. })),
+        "compaction frames must not finish a turn"
+    );
+}
+
+#[test]
+fn compaction_manual_flag_comes_from_the_button() {
+    let mut parser = Parser::new();
+    parser.mark_compact_manual();
+    let parsed = parser.feed(
+        &json!({"type":"system","subtype":"status","status":"compacting"}).to_string(),
+    );
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::CompactionStarted { manual: true })
+    )));
+    let parsed = parser.feed(
+        &json!({"type":"system","subtype":"compact_boundary","compact_metadata":{}}).to_string(),
+    );
+    assert!(parsed.iter().any(|p| matches!(
+        p,
+        Parsed::Event(AdapterEvent::CompactionFinished {
+            manual: true,
+            ok: true,
+            pre_tokens: 0,
+        })
+    )));
+}
+
+#[test]
+fn live_context_progress_is_rate_limited() {
+    let mut parser = Parser::new();
+    parser.set_input_command(command_id());
+    let usage = |input: u64| {
+        json!({"type":"assistant","message":{"model":"m","usage":{"input_tokens":input,"cache_read_input_tokens":0,"cache_creation_input_tokens":0},"content":[]}}).to_string()
+    };
+    let mut progresses = 0;
+    for input in [1_000u64, 5_000, 9_999, 10_000, 10_001, 25_000] {
+        for p in parser.feed(&usage(input)) {
+            if matches!(
+                p,
+                Parsed::Event(AdapterEvent::ContextProgress { .. })
+            ) {
+                progresses += 1;
+            }
+        }
+    }
+    // Порог 10 000: срабатывает на 10 000 и 25 000, мелкие приросты молчат.
+    assert_eq!(progresses, 2, "progress must be rate limited, got {progresses}");
+}

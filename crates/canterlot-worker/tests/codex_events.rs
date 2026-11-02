@@ -1735,3 +1735,57 @@ fn goal_cleared_after_resume_is_known_and_silent() {
     let out = feed_frames(&mut translator, &codex::replay("goal_cleared_live"));
     assert!(events_of(&out).is_empty(), "{out:?}");
 }
+
+#[test]
+fn compaction_frames_open_and_close_a_timeline_episode() {
+    let frames = codex::replay("compaction");
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let out = feed_frames(&mut translator, &frames);
+    let events = events_of(&out);
+    // Кадры дают факт без токенов и триггера: эпизод автоматический, цифры нет.
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::CompactionStarted { manual: false }
+        )),
+        "{events:?}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            AdapterEvent::CompactionFinished {
+                manual: false,
+                ok: true,
+                pre_tokens: 0,
+            }
+        )),
+        "{events:?}"
+    );
+}
+
+#[test]
+fn token_usage_updates_emit_rate_limited_progress() {
+    let mut translator = Translator::new("thread-main", "gpt-6-luna");
+    translator.begin_turn("turn-main", command_id());
+    let usage = |total: u64| {
+        json!({"threadId": "thread-main", "turnId": "turn-main",
+            "tokenUsage": {"last": {"inputTokens": total, "cachedInputTokens": 0,
+                "cacheWriteInputTokens": 0, "outputTokens": 1, "totalTokens": total},
+            "modelContextWindow": 200000}})
+    };
+    let mut progresses = Vec::new();
+    for total in [1_000u64, 5_000, 10_000, 10_001, 25_000] {
+        for t in translator.feed("thread/tokenUsage/updated", &usage(total)) {
+            if let Translated::Event(AdapterEvent::ContextProgress {
+                context_tokens,
+                context_window_tokens,
+            }) = t
+            {
+                progresses.push((context_tokens, context_window_tokens));
+            }
+        }
+    }
+    // Порог 10 000: срабатывает на 10 000 и 25 000; окно из кадра прикладывается.
+    assert_eq!(progresses, vec![(10_000, 200_000), (25_000, 200_000)]);
+}
