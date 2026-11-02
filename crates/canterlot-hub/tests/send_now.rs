@@ -862,3 +862,42 @@ async fn steer_without_outcome_expires_as_undetermined(pool: PgPool) -> TestResu
     ));
     Ok(())
 }
+
+/// Ход кончился, пока вливание A в пути: B, поставленный позже, не обгоняет A.
+/// Выдача ждёт итога вливания, затем A уходит первым.
+#[sqlx::test(migrations = "./migrations")]
+async fn later_input_waits_for_the_steered_head(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    let execution_id = running(&pool, &seed).await;
+    let (_, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    let (third_id, _) = input(&pool, &seed, "third").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    apply_run_finished(&pool, execution_id, first_cmd, Uuid::now_v7()).await?;
+    assert!(matches!(
+        gate_dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Blocked(_) | DispatchOutcome::Empty
+    ));
+    assert_eq!(state(&pool, third_id).await, InputState::Queued);
+    apply_steer(
+        &pool,
+        steer_command_id,
+        InputReceipt::DispatchDeferred {
+            reason: "steer_no_turn".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        gate_dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Dispatched { input_id, .. } if input_id == second_id
+    ));
+    assert_eq!(state(&pool, third_id).await, InputState::Queued);
+    Ok(())
+}

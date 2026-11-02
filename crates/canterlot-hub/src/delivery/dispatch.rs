@@ -27,6 +27,7 @@ pub enum BlockReason {
     MachineUnavailable,
     MachineNotReconciled,
     CapabilityMissing { input_id: Uuid },
+    SteerInFlight { input_id: Uuid },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,19 +168,26 @@ pub async fn dispatch_next(
     if !reasons.is_empty() {
         return Ok(DispatchOutcome::Blocked(reasons));
     }
-    let head: Option<(Uuid, Uuid)> = sqlx::query_as(
-        "select id, command_id from inputs where conversation_id = $1 and state = 'queued'
-         and not exists (select 1 from commands where kind = 'steer_input'
+    // Голова с вливанием в пути ждёт его итога: позже поставленный ввод не
+    // обгоняет её, а обычная выдача не дублирует вливание.
+    let head: Option<(Uuid, Uuid, bool)> = sqlx::query_as(
+        "select id, command_id, exists (select 1 from commands where kind = 'steer_input'
                          and target_command_id = inputs.command_id
                          and delivery_state <> 'completed')
+         from inputs where conversation_id = $1 and state = 'queued'
          order by input_seq limit 1",
     )
     .bind(conversation_id)
     .fetch_optional(&mut *conn)
     .await?;
-    let Some((input_id, command_id)) = head else {
+    let Some((input_id, command_id, steering)) = head else {
         return Ok(DispatchOutcome::Empty);
     };
+    if steering {
+        return Ok(DispatchOutcome::Blocked(vec![BlockReason::SteerInFlight {
+            input_id,
+        }]));
+    }
     let (mut pending, rev) =
         crate::conversations::revalidate_pending_in_tx(&mut *conn, conversation_id, correlation_id)
             .await?;
