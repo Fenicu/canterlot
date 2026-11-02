@@ -124,12 +124,9 @@ for (const theme of ['dark', 'light'] as const) {
 		void id;
 	});
 
-	test(`compaction_indicator_codex_caption_${theme}`, async ({ page }) => {
+	test(`compaction_indicator_no_live_execution_caption_${theme}`, async ({ page }) => {
 		await boot(page, (seed, conversation) => {
 			seed.pushContext(conversation, 100_000, 1_000_000);
-			const detail = seed.details.get(conversation) as Record<string, unknown>;
-			detail.harness = { id: 'codex', title: 'Codex', provider: 'codex' };
-			detail.execution = { state: 'running', generation: 1 };
 		});
 		await page.evaluate((value) => localStorage.setItem('canterlot.theme', value), theme);
 		await page.reload();
@@ -138,7 +135,7 @@ for (const theme of ['dark', 'light'] as const) {
 		const ctx = await indicator(page);
 		await ctx.click();
 		const details = page.locator('[data-details]');
-		await expect(details).toContainText('Codex не сжимает контекст по кнопке');
+		await expect(details).toContainText('Нет живого исполнения для сжатия');
 		await expect(details.getByRole('button', { name: 'Сжать контекст' })).toBeDisabled();
 	});
 }

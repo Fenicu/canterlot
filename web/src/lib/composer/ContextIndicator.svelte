@@ -28,19 +28,14 @@
 	const model = $derived(
 		modelLabel((chat.detail as { model?: string } | null)?.model ?? '')
 	);
-	const harnessId = $derived(
-		(chat.detail as { harness?: { id?: string } } | null)?.harness?.id ?? ''
-	);
 	const turnLive = $derived(turnIsLive(chat.activity, chat.queue.run_slot));
 	const execLive = $derived(executionLive(chat.execution));
 	const disabledReason = $derived(
-		harnessId === 'codex'
-			? 'Codex не сжимает контекст по кнопке'
-			: turnLive
-				? 'Сжатие доступно между ходами'
-				: !execLive
-					? 'Нет живого исполнения для сжатия'
-					: ''
+		turnLive
+			? 'Сжатие доступно между ходами'
+			: !execLive
+				? 'Нет живого исполнения для сжатия'
+				: ''
 	);
 
 	$effect(() => {
