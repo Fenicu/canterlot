@@ -31,11 +31,11 @@
   import { page } from '$app/state';
   import { onMount, untrack } from 'svelte';
   import { dismissable } from '#lib/ui/dismiss.js';
-  import { collapsedSet, readCollapsed, writeCollapsed } from './collapsed';
+  import { collapsedSet, readCollapsed, readKidsChoice, writeCollapsed, writeKidsChoice } from './collapsed';
   import EmptyState from './EmptyState.svelte';
   import GroupManager from './GroupManager.svelte';
   import GroupTabs from './GroupTabs.svelte';
-  import { buildSections, tabCounts, type Tab } from './grouping';
+  import { buildSections, tabCounts, type Tab, type TreeNode } from './grouping';
   import LimitsStrip from './LimitsStrip.svelte';
   import SearchBar from './SearchBar.svelte';
   import Section from './Section.svelte';
@@ -46,6 +46,8 @@
 
   let runtime = $state<Runtime | null>(null);
   let collapsed = $state<string[]>([]);
+  let kidsCollapsed = $state<string[]>([]);
+  let kidsExpanded = $state<string[]>([]);
   let tab = $state<Tab>({ kind: 'all' });
   let query = $state('');
   let searchOpen = $state(false);
@@ -76,6 +78,9 @@
     changed();
     install.addEventListener('change', changed);
     collapsed = readCollapsed();
+    const kids = readKidsChoice();
+    kidsCollapsed = kids.collapsed;
+    kidsExpanded = kids.expanded;
     let alive = true;
     void browserRuntime().then(async (value) => {
       if (!alive) return;
@@ -122,11 +127,20 @@
   const groups = $derived(runtime?.list.groups ?? []);
   const tabs = $derived(runtime ? tabCounts(runtime.list.counts, groups) : []);
   // Ответ поиска живёт дольше строки списка: удалённая сессия не должна в нём оставаться.
-  const found = $derived(results?.filter((item) => !runtime?.list.deleted.has(item.id)) ?? null);
+  // Поиск показывает и делегированные сессии плоским списком.
+  const found = $derived.by((): TreeNode[] | null => {
+    const store = runtime;
+    if (!results || !store) return null;
+    const deleted = store.list.deleted;
+    return results
+      .filter((item) => !deleted.has(item.id))
+      .map((item) => ({ item, depth: 0, open: true, running: 0, children: [] }));
+  });
+  const kids = $derived({ collapsed: collapsedSet(kidsCollapsed), expanded: collapsedSet(kidsExpanded) });
   const sections = $derived(
     found
       ? [{ id: 'search', title: 'Результаты', count: found.length, items: found, collapsed: false }]
-      : buildSections(rows, groups, tab, collapsedSet(collapsed))
+      : buildSections(rows, groups, tab, collapsedSet(collapsed), kids)
   );
   const emptyTab = $derived.by(() => {
     if (results || !ready || rows.length === 0 || sections.some((section) => section.items.length > 0)) return '';
@@ -136,13 +150,17 @@
   });
   const openRow = $derived(rows.find((item) => item.id === (page.params.id ?? '')) ?? null);
   const sheetItem = $derived(
-    sections.some((section) => section.items.some((item) => item.id === sheetId))
+    sheetId && sections.some((section) => section.items.some((node) => node.item.id === sheetId))
       ? (rows.find((item) => item.id === sheetId) ?? null)
       : null
   );
   const groupCounts = $derived.by(() => {
+    // Делегированные сессии групп не занимают: считают только верхний уровень.
     const counts: Record<string, number> = {};
-    for (const item of rows) for (const id of item.groups) counts[id] = (counts[id] ?? 0) + 1;
+    for (const item of rows) {
+      if (item.parent_id) continue;
+      for (const id of item.groups) counts[id] = (counts[id] ?? 0) + 1;
+    }
     return counts;
   });
   const ready = $derived(runtime ? runtime.list.status === 'live' || runtime.list.status === 'degraded' || rows.length > 0 : false);
@@ -187,6 +205,19 @@
   function toggle(id: string) {
     collapsed = collapsed.includes(id) ? collapsed.filter((item) => item !== id) : [...collapsed, id];
     writeCollapsed(collapsed);
+  }
+
+  function toggleKids(id: string) {
+    const node = sections.flatMap((section) => section.items).find((item) => item.item.id === id);
+    const isOpen = node ? node.open : kidsExpanded.includes(id);
+    if (isOpen) {
+      kidsCollapsed = [...kidsCollapsed.filter((item) => item !== id), id];
+      kidsExpanded = kidsExpanded.filter((item) => item !== id);
+    } else {
+      kidsExpanded = [...kidsExpanded.filter((item) => item !== id), id];
+      kidsCollapsed = kidsCollapsed.filter((item) => item !== id);
+    }
+    writeKidsChoice({ collapsed: kidsCollapsed, expanded: kidsExpanded });
   }
 
   function openSheet(id: string) {
@@ -295,6 +326,7 @@
           current={openRow?.id ?? ''}
           heading={tab.kind === 'all' && !results}
           ontoggle={toggle}
+          ontoggleKids={toggleKids}
           onopen={openSheet}
         />
       {/each}

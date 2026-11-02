@@ -13,6 +13,8 @@ function row(patch: Partial<ListRow> & { id: string; title: string }): ListRow {
     pinned: false,
     archived: false,
     groups: [],
+    parent_id: null,
+    spawn_depth: 0,
     machine: { id: "m", name: "workstation" },
     harness: { id: "claude", title: "Claude Code", provider: "claude" },
     workdir: "/work",
@@ -61,10 +63,10 @@ describe("sessions/grouping", () => {
     expect(sections.reduce((sum, section) => sum + section.count, 0)).toBe(10);
     expect(
       new Set(
-        sections.flatMap((section) => section.items.map((item) => item.id)),
+        sections.flatMap((section) => section.items.map((node) => node.item.id)),
       ).size,
     ).toBe(10);
-    expect(sections[0]?.items.map((item) => item.id)).toEqual(["p1", "p2"]);
+    expect(sections[0]?.items.map((node) => node.item.id)).toEqual(["p1", "p2"]);
     expect(sections[1]?.title).toBe("canterlot");
   });
 
@@ -80,7 +82,7 @@ describe("sessions/grouping", () => {
       { kind: "group", id: "canterlot" },
       new Set(),
     );
-    expect(section?.items.map((item) => item.id)).toEqual(["p1", "c1"]);
+    expect(section?.items.map((node) => node.item.id)).toEqual(["p1", "c1"]);
   });
 
   it("counts_come_from_the_snapshot_and_events_not_the_visible_slice", () => {

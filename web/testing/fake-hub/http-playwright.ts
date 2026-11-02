@@ -266,6 +266,8 @@ export async function installChatRoutes(page: Page, hub: FakeHub, api: FakeHubAp
         pinned: false,
         archived: false,
         groups: [],
+        parent_id: null,
+        spawn_depth: 0,
         machine: { id: body.machine_id ?? api.id(), name: 'workstation' },
         harness: { id: body.harness ?? 'claude', title: 'Claude Code', provider: 'claude' },
         workdir: body.workdir ?? '/',
