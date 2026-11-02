@@ -1,5 +1,6 @@
 <script lang="ts">
   import { resolve } from '$app/paths';
+  import { fmt } from '#lib/format/ru.js';
   import type { InputView } from '#lib/stores/inputs.js';
   import TextBlock from '#lib/timeline/TextBlock.svelte';
   import {
@@ -52,6 +53,11 @@
       {#if open}
         <div class="answer"><TextBlock block={{ id: input.key, text: answer, state: 'final' }} /></div>
       {/if}
+    {/if}
+    {#if input.createdAt !== null}
+      <footer class="stamp" data-role="event-footer">
+        <time datetime={new Date(input.createdAt).toISOString()}>{fmt.clock(input.createdAt)}</time>
+      </footer>
     {/if}
   </article>
 {:else if line}
@@ -123,6 +129,7 @@
     font-size: var(--fs-sm);
   }
   .answer { min-width: 0; }
+  .stamp { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .line {
     margin: 0;
     padding-inline: var(--s6);

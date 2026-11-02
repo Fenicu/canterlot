@@ -42,6 +42,34 @@ async function bootInfo(
 	return { hub, api, id, runId };
 }
 
+test('answer_footer_holds_agent_time_and_info_below_the_text', async ({ page }) => {
+	await bootInfo(page);
+	const card = page
+		.locator('.card')
+		.filter({ has: page.getByRole('button', { name: 'Сведения о ходе' }) })
+		.first();
+	const footer = card.locator('[data-role="answer-footer"]');
+	await expect(footer).toBeVisible();
+	await expect(footer).toContainText('Claude Code');
+	await expect(card.locator('header')).toHaveCount(0);
+
+	const text = card.locator('.text').first();
+	const textBox = await text.boundingBox();
+	const footerBox = await footer.boundingBox();
+	expect(footerBox!.y).toBeGreaterThan(textBox!.y);
+
+	const info = footer.getByRole('button', { name: 'Сведения о ходе' });
+	const infoBox = await info.boundingBox();
+	const timeBox = await footer.locator('time').boundingBox();
+	expect(infoBox!.x).toBeGreaterThan(timeBox!.x);
+	const target = await page.evaluate(() =>
+		parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--target'))
+	);
+	expect(infoBox!.height).toBeGreaterThanOrEqual(target - 0.5);
+	expect(infoBox!.width).toBeGreaterThanOrEqual(target - 0.5);
+	await page.screenshot({ path: `test-results/answer-footer-${test.info().project.name}.png` });
+});
+
 test('info_sheet_matches_mockup_04_with_per_model_parts_and_the_limit_estimate', async ({ page }) => {
 	await bootInfo(page);
 

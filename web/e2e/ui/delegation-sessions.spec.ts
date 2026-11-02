@@ -30,6 +30,7 @@ function seedFamily(api: FakeHubApi) {
     machine,
     harness,
     model: 'sonnet',
+    working_ms: 3_900_000,
     activity: WORKING as never,
   });
   const done = seedConversation(api, {
@@ -65,6 +66,7 @@ function derivedPayload(api: FakeHubApi, id: string, activity: unknown) {
     last_activity_at: '2026-10-28T12:00:00.000Z',
     settings: { model: row.model, effort: 'medium', permission_mode: 'owner' },
     crunch: { enabled: false },
+    working_ms: row.working_ms ?? 0,
   };
 }
 
@@ -90,6 +92,7 @@ test('child_nests_under_parent_and_keeps_counts', async ({ page }) => {
   // Ветку рисует строка-сгиб: в самой строке второго значка и склейки с названием нет.
   await expect(child.locator('.title')).not.toContainText('└');
   await expect(child.locator('.title')).toHaveText('Миграция схемы');
+  await expect(child.locator('[data-worked]')).toHaveText('работала 1 ч 5 мин');
   // Ребёнок не занимает места в счёте группы и вкладок.
   await expect(page.getByRole('tab', { name: /canterlot 1/ })).toBeVisible();
   await expect(page.getByRole('tab', { name: /Все 4/ })).toBeVisible();
@@ -294,6 +297,7 @@ async function bootChat(page: Page) {
     parent_id: parent,
     spawn_depth: 1,
     model: 'sonnet',
+    working_ms: 3_900_000,
     activity: WORKING as never,
   });
   const childDetail = api.details.get(child) as Record<string, unknown>;
@@ -323,7 +327,9 @@ test('phone_sheet_lists_child_sessions_and_opens_them', async ({ page, isMobile 
   const link = sessionLink(sheet, child);
   await expect(link).toContainText('Миграция схемы');
   await expect(link).toContainText('sonnet');
+  await expect(link).toContainText('работала 1 ч 5 мин');
   await expect(link).toContainText('Генерирует');
+  await page.screenshot({ path: `test-results/delegation-session-worked-${test.info().project.name}.png` });
   await link.click();
   await expect(page).toHaveURL(new RegExp(`/c/${child}$`));
 });
@@ -363,6 +369,7 @@ test('desktop_panel_lists_child_sessions', async ({ page, isMobile }) => {
   await expect(panel.getByText('Сессии')).toBeVisible();
   const link = sessionLink(panel, child);
   await expect(link).toContainText('Миграция схемы');
+  await expect(link).toContainText('работала 1 ч 5 мин');
   await link.click();
   await expect(page).toHaveURL(new RegExp(`/c/${child}$`));
 });

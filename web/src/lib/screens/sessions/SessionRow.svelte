@@ -60,6 +60,9 @@
     </span>
     <span class="meta">{item.harness.title} · {modelLabel(item.model)} · {item.machine.name}</span>
     <span class="activity" data-tone={line.tone}>{#if line.live}<span class="live" aria-hidden="true"></span>{/if}{line.text}{tail}</span>
+    {#if depth > 0 && item.working_ms}
+      <span class="worked" data-worked>работала {fmt.durationCoarse(item.working_ms)}</span>
+    {/if}
   </a>
   <button type="button" aria-label={`Действия: ${item.title}`} onpointerdown={(event) => event.stopPropagation()} onclick={() => onopen(item.id)}>
     <Icon name="more" />
@@ -87,6 +90,7 @@
   .side { display: inline-flex; align-items: center; justify-content: flex-end; height: calc(var(--fs-body) * var(--lh-body)); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
   .meta, .activity { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: var(--secondary); font-size: var(--fs-sm); text-overflow: ellipsis; white-space: nowrap; }
+  .worked { grid-column: 2 / -1; min-width: 0; overflow: hidden; color: var(--muted); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .activity[data-tone='accent'] { color: var(--accent-link); }
   .activity[data-tone='warning'] { color: var(--warning); }
   .activity[data-tone='danger'] { color: var(--danger); }

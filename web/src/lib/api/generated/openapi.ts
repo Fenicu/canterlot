@@ -1508,6 +1508,11 @@ export interface components {
             /** Format: date-time */
             until?: string | null;
             window?: string | null;
+            /**
+             * Format: int64
+             * @description Сумма ходов без ожидания владельца: разрешения и вопросы внутри хода.
+             */
+            working_ms?: number | null;
             /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
             worktree?: string | null;
         };
@@ -1592,6 +1597,11 @@ export interface components {
             queue: components["schemas"]["QueueView"];
             /** Format: int32 */
             unread_count: number;
+            /**
+             * Format: int64
+             * @description Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом.
+             */
+            working_ms: number;
         };
         ListPage: {
             counts: components["schemas"]["Counts"];

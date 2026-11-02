@@ -26,6 +26,9 @@ const FILES_BUDGET: usize = 2 * 1024;
 const SHORT_FIELD: usize = 200;
 const PATH_FIELD: usize = 1024;
 
+/// Ход для итога: команда, длительность, git-факты и рабочее время.
+type RunRow = (Uuid, Option<i64>, Option<Value>, Option<i64>);
+
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct RunGit {
@@ -100,6 +103,7 @@ pub struct SessionSummary {
     state: String,
     turns: usize,
     duration_ms: i64,
+    working_ms: i64,
     tokens_in: i64,
     tokens_out: i64,
     git: Option<Git>,
@@ -200,11 +204,12 @@ pub async fn build(
     let Some((title, harness, model, worktree)) = conversation else {
         return Ok(None);
     };
-    let runs: Vec<(Uuid, Option<i64>, Option<Value>)> = sqlx::query_as(
-        "select input_command_id,duration_ms,git from runs
-         where conversation_id=$1 and finished_at is not null
-           and ($2::timestamptz is null or finished_at >= $2)
-         order by finished_at,started_at,input_command_id",
+    let runs: Vec<RunRow> = sqlx::query_as(
+        "select r.input_command_id,r.duration_ms,r.git,w.working_ms from runs r
+         left join run_working w on w.input_command_id=r.input_command_id
+         where r.conversation_id=$1 and r.finished_at is not null
+           and ($2::timestamptz is null or r.finished_at >= $2)
+         order by r.finished_at,r.started_at,r.input_command_id",
     )
     .bind(target_id)
     .bind(armed_at)
@@ -252,6 +257,7 @@ pub async fn build(
         state: state.to_owned(),
         turns: runs.len(),
         duration_ms: runs.iter().filter_map(|run| run.1).sum(),
+        working_ms: runs.iter().filter_map(|run| run.3).sum(),
         tokens_in,
         tokens_out,
         git: aggregate_git(&git),
@@ -581,6 +587,7 @@ impl SessionSummary {
             session_id: Some(self.id),
             turns: Some(self.turns as i64),
             duration_ms: Some(self.duration_ms),
+            working_ms: Some(self.working_ms),
             tokens_in: Some(self.tokens_in),
             tokens_out: Some(self.tokens_out),
             commits: self.git.as_ref().map(|git| {

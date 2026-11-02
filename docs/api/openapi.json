@@ -7379,6 +7379,14 @@
               "null"
             ]
           },
+          "working_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сумма ходов без ожидания владельца: разрешения и вопросы внутри хода."
+          },
           "worktree": {
             "type": [
               "string",
@@ -7695,7 +7703,8 @@
               "activity",
               "unread_count",
               "queue",
-              "crunch"
+              "crunch",
+              "working_ms"
             ],
             "properties": {
               "activity": {
@@ -7725,6 +7734,11 @@
               "unread_count": {
                 "type": "integer",
                 "format": "int32"
+              },
+              "working_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом."
               }
             }
           }

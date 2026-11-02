@@ -57,6 +57,9 @@ pub struct HubEvent {
     pub turns: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
+    /// Сумма ходов без ожидания владельца: разрешения и вопросы внутри хода.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_ms: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tokens_in: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
