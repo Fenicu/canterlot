@@ -45,11 +45,6 @@ slow-timeout = { period = "30s", terminate-after = 8 }
 filter = 'package(canterlot-worker) & test(=media_upload_resumes_after_reconnect_without_duplicate_record)'
 retries = 2
 
-# QUARANTINE: в базе остаётся рекомендательная блокировка после остановки служб (1 прогон с линтом, 0 из 8 отдельно)
-[[profile.default.overrides]]
-filter = 'package(canterlot-hub) & test(=background_services_stop_on_shutdown_and_release_their_locks)'
-retries = 2
-
 # Карантин нестабильных тестов. Повтор разрешён только здесь: каждая запись с причиной и строкой
 # в .superpowers/carry/flaky-tests.md. Повтор виден в выводе как TRY n и итоговый FLAKY, молча
 # ничего не перезапускается. Запись помечается строкой с причиной (слово в верхнем регистре, см. выше), её показывает
