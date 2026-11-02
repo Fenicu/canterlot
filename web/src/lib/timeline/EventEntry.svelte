@@ -116,8 +116,9 @@
   }
   .answer-toggle {
     align-self: flex-start;
+    margin-top: var(--s4);
     min-height: var(--target);
-    padding-inline: var(--s0);
+    padding-inline: var(--s6);
     color: var(--accent-link);
     font-size: var(--fs-sm);
   }

@@ -340,3 +340,34 @@ test('monthly_windows_line_up_by_kind_across_providers', async ({ page }) => {
   expect(overflow).toBeLessThanOrEqual(0);
   await shot(page, 'strip-monthly');
 });
+
+test('expanded_strip_has_one_shared_grid_across_providers', async ({ page }) => {
+  await boot(page, (api) => {
+    const observed = new Date(Date.now() - 60_000).toISOString();
+    const reset = new Date(Date.now() + 3_600_000).toISOString();
+    const codex = api.limits.find((item) => item.provider === 'codex')!;
+    codex.monthly = { used_permille: 300, resets_at: reset, observed_at: observed };
+    api.limits.push({
+      provider: 'opencode',
+      weekly_reserve_active: false,
+      five_hour: { used_permille: 125, resets_at: reset, observed_at: observed },
+      weekly: { used_permille: 340, resets_at: reset, observed_at: observed },
+      monthly: { used_permille: 93, resets_at: reset, observed_at: observed }
+    });
+  });
+  const strip = page.locator('.limits').first();
+  await strip.locator('summary').click();
+  const bars = strip.locator('.bar');
+  const barBoxes = await bars.evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().x));
+  for (const x of barBoxes) expect(Math.abs(x - barBoxes[0]!)).toBeLessThanOrEqual(1);
+  const resets = strip.locator('.reset');
+  const resetBoxes = await resets.evaluateAll((nodes) => nodes.map((n) => n.getBoundingClientRect().x));
+  for (const x of resetBoxes) expect(Math.abs(x - resetBoxes[0]!)).toBeLessThanOrEqual(1);
+  await expect(strip.locator('.pname').filter({ hasText: /.+/ })).toHaveCount(3);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(0);
+  await shot(page, 'strip-expanded-grid');
+  await page.getByRole('button', { name: 'Сменить тему' }).click();
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await shot(page, 'strip-expanded-grid');
+});

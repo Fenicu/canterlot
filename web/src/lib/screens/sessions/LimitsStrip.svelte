@@ -66,8 +66,9 @@
   onDestroy(() => clearTimeout(timer));
 </script>
 
-{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'month')}
+{#snippet meter(tag: string, name: string, m: MeterView, window: 'five' | 'week' | 'month', first: boolean = false)}
   <span class="meter" data-window={window} data-stale={m.stale || undefined} data-known={m.known}>
+    <span class="pname">{first ? name : ''}</span>
     <span class="tag">{tag}</span>
     <span class="bar" aria-hidden="true"><Gauge value={m.fill} tone={m.tone} dim={m.stale || !m.known} label="{name} {tag}" /></span>
     <b class="pct" data-tone={m.tone}><span class="sr-only">осталось </span>{m.text}</b>
@@ -86,9 +87,9 @@
               {#if row.empty}
                 <span class="none">нет данных</span>
               {:else}
-                {#if !row.five.absent}{@render meter('5ч', row.label, row.five, 'five')}{:else}<span class="slot" aria-hidden="true"></span>{/if}
-                {@render meter('нед', row.label, row.week, 'week')}
-                {#if row.month}{@render meter('мес', row.label, row.month, 'month')}{/if}
+                {#if !row.five.absent}{@render meter('5ч', row.label, row.five, 'five', true)}{:else}<span class="slot" aria-hidden="true"></span>{/if}
+                {@render meter('нед', row.label, row.week, 'week', row.five.absent)}
+                {#if row.month}{@render meter('мес', row.label, row.month, 'month', false)}{/if}
                 {#if row.reserve}<span class="reserve" title="Остаток недели в резерве">резерв</span>{/if}
               {/if}
             </span>
@@ -131,16 +132,20 @@
   .rows { display: flex; flex: 1; flex-direction: column; gap: var(--s2); min-width: 0; }
   .row { display: grid; grid-template-columns: minmax(calc(var(--s4) * 7), 1fr) max-content max-content; align-items: baseline; gap: var(--s2) var(--s4); min-width: 0; }
   .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pname { display: none; }
   .meters { display: contents; }
   .meter { display: inline-flex; align-items: center; gap: var(--s2); width: calc(var(--s4) * 11); white-space: nowrap; --gauge-width: calc(var(--s4) * 2); }
   .meter[data-window='five'], .slot { grid-column: 2; }
   .slot { width: calc(var(--s4) * 11); }
   .meter[data-window='week'] { grid-column: 3; }
   .meter[data-window='month'] { grid-column: 2 / -1; grid-row: 2; justify-self: start; }
-  .limits[open] .rows { display: flex; flex-direction: column; gap: var(--s2); }
-  .limits[open] .row { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: var(--s2) var(--s4); }
-  .limits[open] .meters { display: flex; flex-direction: column; align-items: flex-start; gap: var(--s1); }
-  .limits[open] .meter { width: auto; }
+  .limits[open] .rows { display: grid; grid-template-columns: auto auto auto auto auto; align-items: baseline; gap: var(--s1) var(--s4); min-width: 0; }
+  .limits[open] .row { display: contents; }
+  .limits[open] .meters { display: contents; }
+  .limits[open] .meter { display: contents; width: auto; }
+  .limits[open] .pname { display: inline-block; white-space: nowrap; }
+  .limits[open] .name { display: none; }
+  .limits[open] .reset { white-space: normal; word-break: break-word; }
   .limits[open] .slot { display: none; }
   .tag { color: var(--muted); font-size: var(--fs-xs); min-width: calc(var(--s4) * 3); }
   .bar { display: inline-flex; }
