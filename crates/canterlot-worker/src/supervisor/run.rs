@@ -2275,14 +2275,20 @@ impl Supervisor {
                         .await;
                 };
                 self.record(Body::RequestOpened(RequestOpened {
-                    request_id,
+                    request_id: request_id.clone(),
                     execution_id: self.spec.execution_id.to_string(),
                     generation: self.spec.generation,
                     kind,
                     payload_json,
                 }))?;
                 if self.aborting_turn {
+                    // Карточка закрыта сразу: ответить на неё нельзя, CLI нужен отказ.
                     self.close_requests("interrupted")?;
+                    if let Some(adapter) = self.adapter.as_mut() {
+                        adapter
+                            .refuse_request(&request_id, "The turn is being interrupted")
+                            .await;
+                    }
                 }
             }
             AdapterEvent::RequestClosed { request_id, reason } => {
@@ -2735,7 +2741,6 @@ impl Supervisor {
         }
         self.interrupt_record(&id, attempt, InterruptState::SentToAgent)?;
         self.aborting_turn = true;
-        self.close_requests("interrupted")?;
         self.sj.flush()?;
         let Some(adapter) = self.adapter.as_mut() else {
             return Ok(());
@@ -2743,14 +2748,18 @@ impl Supervisor {
         match adapter.interrupt().await {
             InterruptOutcome::Acknowledged => {
                 self.interrupted = true;
+                self.close_requests("interrupted")?;
                 self.interrupt_record(&id, attempt, InterruptState::Acknowledged)?;
                 self.pending_interrupts.push((id, attempt));
             }
             InterruptOutcome::Undetermined => {
                 self.interrupted = true;
+                self.close_requests("interrupted")?;
                 self.pending_interrupts.push((id, attempt));
             }
             InterruptOutcome::NotApplicable => {
+                // Прерывать было нечего: ход и его запросы остаются как были.
+                self.aborting_turn = false;
                 self.interrupt_record(&id, attempt, InterruptState::NotApplicable)?;
             }
         }
@@ -3227,6 +3236,7 @@ mod tests {
         ack_interrupt: bool,
         steer_accept: bool,
         steer_undetermined: bool,
+        refused: Vec<String>,
     }
 
     struct StubAdapter {
@@ -3294,6 +3304,14 @@ mod tests {
             } else {
                 InterruptOutcome::NotApplicable
             }
+        }
+
+        async fn refuse_request(&mut self, request_id: &str, _message: &str) {
+            self.state
+                .lock()
+                .unwrap()
+                .refused
+                .push(request_id.to_owned());
         }
 
         async fn steer(&mut self, input: &Transmission) -> SteerOutcome {
@@ -4036,5 +4054,46 @@ mod tests {
             state.lock().unwrap().transmit_calls,
             vec![first.0, second.0]
         );
+    }
+
+    fn permission_opened(request_id: &str) -> AdapterEvent {
+        AdapterEvent::RequestOpened {
+            request_id: request_id.into(),
+            kind: "permission".into(),
+            payload: serde_json::json!({"tool_name": "Bash", "input": {"command": "ls"}}),
+        }
+    }
+
+    #[tokio::test]
+    async fn request_opened_during_an_interrupt_is_refused_to_the_cli() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        state.lock().unwrap().ack_interrupt = true;
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        supervisor
+            .on_adapter_event(permission_opened("req-late"))
+            .await
+            .unwrap();
+        assert!(!supervisor.sj.has_open_requests());
+        assert_eq!(state.lock().unwrap().refused, vec!["req-late".to_owned()]);
+    }
+
+    #[tokio::test]
+    async fn interrupt_not_applicable_leaves_the_turn_answerable() {
+        let (_dir, mut supervisor, state) = test_supervisor();
+        queue_owner(&mut supervisor);
+        supervisor.try_transmit().await.unwrap();
+        supervisor
+            .on_adapter_event(permission_opened("req-1"))
+            .await
+            .unwrap();
+        supervisor.on_interrupt("int-1".into(), 1).await.unwrap();
+        assert!(!supervisor.aborting_turn, "nothing is being aborted");
+        assert!(
+            supervisor.sj.request("req-1").is_some() && supervisor.sj.has_open_requests(),
+            "the request stays open for the owner"
+        );
+        assert!(state.lock().unwrap().refused.is_empty());
     }
 }
