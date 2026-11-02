@@ -30,7 +30,7 @@ pub async fn running(pool: &PgPool) -> (Seed, Uuid) {
     let s = testkit::seed(pool).await;
     let e = Uuid::now_v7();
     sqlx::query("insert into executions(id,conversation_id,generation,state,phase,phase_at,last_event_at) values($1,$2,1,'running','generating',clock_timestamp()-interval '10 minutes',clock_timestamp()-interval '10 minutes')").bind(e).bind(s.conversation_id).execute(pool).await.unwrap();
-    sqlx::query("update queue_state set run_slot='running',run_slot_input_id=$2,hold_reasons='[]' where conversation_id=$1").bind(s.conversation_id).bind(Uuid::now_v7()).execute(pool).await.unwrap();
+    sqlx::query("update queue_state set run_slot='running',run_slot_input_id=$2,run_slot_since=clock_timestamp()-interval '10 minutes',hold_reasons='[]' where conversation_id=$1").bind(s.conversation_id).bind(Uuid::now_v7()).execute(pool).await.unwrap();
     sqlx::query("update machines set availability='available' where id=$1")
         .bind(s.machine_id)
         .execute(pool)

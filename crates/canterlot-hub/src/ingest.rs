@@ -892,6 +892,7 @@ fn touches_activity(body: &Body) -> bool {
             | Body::BlockFinal(_)
             | Body::BlockIncomplete(_)
             | Body::RunFinished(_)
+            | Body::TransmissionStarted(_)
             | Body::InputAccepted(_)
             | Body::LimitObserved(_)
             | Body::LimitReached(_)

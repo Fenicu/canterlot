@@ -505,11 +505,13 @@ async fn stalled_fires_once_per_episode(pool: PgPool) {
         .await
         .unwrap();
     sqlx::query(
-        "update queue_state set run_slot='running',run_slot_input_id=$2,hold_reasons='[]'
+        "update queue_state set run_slot='running',run_slot_input_id=$2,
+                run_slot_since=$3,hold_reasons='[]'
          where conversation_id=$1",
     )
     .bind(p.target)
     .bind(Uuid::now_v7())
+    .bind(now - TimeDelta::minutes(10))
     .execute(&pool)
     .await
     .unwrap();
