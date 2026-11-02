@@ -1,6 +1,6 @@
 # PWA: основа клиента
 
-Клиент работает как статическое SPA: SvelteKit 3, Svelte 5 с runes, adapter-static 4, `200.html` для глубоких ссылок. Сервер Node нужен только локальному тестовому edge. Manifest и контроллеры установки, обновления и выхода работают поверх API и синхронизации Tasks 2–7. Постоянного service worker нет: offline-оболочки и push не будет, а старые регистрации снимаются при старте и аварийным worker.
+Клиент работает как статическое SPA: SvelteKit 3, Svelte 5 с runes, adapter-static 4, `200.html` для глубоких ссылок. Сервер Node нужен только локальному тестовому edge. Manifest и контроллеры установки, обновления и выхода работают поверх API и синхронизации Tasks 2–7. Service worker не собирается и не регистрируется: offline-оболочки и push нет. Старые установки владелец переустанавливает вручную; код миграции не поставляется.
 
 ## Токены и форма
 
@@ -271,7 +271,7 @@ Backoff: 250 мс × 2ⁿ с jitter ±30 %, итоговый предел 15 с;
 | Сведения о ходе, экспорт, субагенты | Экспорт и сведения о ходе, Ленты субагентов | `e2e/ui`, `e2e/stack/features.spec.ts` |
 | Вопросы и разрешения: карточки, дорожка доставки, синхронизация решений между устройствами | Запросы агента и разрешения | `tests/unit/requests`, `tests/unit/stores/requests.test.ts`, `e2e/ui/requests.spec.ts` |
 | Бюджет JS и ленивые фрагменты | Проверки и CSP | `tests/unit/budget/bundle.test.ts` |
-| Обновление, снятие старого service worker и выход | Обновление и удаление worker, Приватность при выходе | `e2e/ui/update.spec.ts`, `e2e/ui/worker-migration.spec.ts` |
+| Обновление и выход | Обновление, Приватность при выходе | `e2e/ui/update.spec.ts`, `e2e/ui/pwa.spec.ts` |
 
 Известные пробелы этапа: вопрос и разрешение остаются заглушкой до плана 1.3c.
 
@@ -290,11 +290,11 @@ Backoff: 250 мс × 2ⁿ с jitter ±30 %, итоговый предел 15 с;
 
 Все числа первые: выборки меньше профиля §16.1, телефон эмулирован, хост общий. Промах мимо цели записывается в отчёт и не блокирует этап.
 
-## Обновление и снятие service worker
+## Обновление
 
-Постоянного service worker нет: приложение не регистрирует его и не держит precache. На старте `register.ts` вызывает `navigator.serviceWorker.getRegistrations()`, снимает все регистрации и удаляет все кэши origin. Это второй путь миграции; первый — аварийный worker по тому же URL `/service-worker.js`. Он ставится браузером как обновление старой регистрации, на `install` вызывает `skipWaiting`, на `activate` удаляет все кэши, вызывает `self.registration.unregister()`, затем `clients.claim()` и перезагружает каждое окно по его текущему URL. Обработчика `fetch` у него нет. Worker нужно удалить после того, как истечёт окно обновления старых установок (не раньше нескольких релизов и не раньше, чем в логах перестанут появляться запросы `/service-worker.js` от старых версий).
+Service worker не собирается и не регистрируется; precache, offline-оболочки и подстановки `200.html` из кэша больше нет. Без сети доступна только уже загруженная страница, а состояние связи показывает баннер WebSocket. Старые установки с прежним worker владелец переустанавливает вручную: приложение не снимает чужие регистрации и не чистит их кэши.
 
-О новой версии сообщает только `_app/version.json`: `UpdateController.check()` запрашивает его с `cache: 'no-store'` и сравнивает с версией сборки из `$app/env`; проверка идёт на старте, по focus, visibility, pageshow и online. SvelteKit `updated.current` и несовместимость схемы дают тот же сигнал. `UpdateController` проходит `idle → available → applying → failed`. Явное нажатие «Обновить» сохраняет черновики и делает полную перезагрузку; HTML запрашивается с `cache: 'no-store'` перед переходом. Неудачная запись черновика переводит в `failed` с причиной и кнопкой «Повторить». Автоматическое применение в скрытой вкладке разрешено после flush и проверки безопасности; непустое поле в фокусе и незавершённая запись его откладывают. Offline-оболочки и подстановки `200.html` из кэша больше нет: без сети доступна только уже загруженная страница, а состояние связи показывает баннер WebSocket.
+О новой версии сообщает только `_app/version.json`: `UpdateController.check()` запрашивает его с `cache: 'no-store'` и сравнивает с версией сборки из `$app/env`; проверка идёт на старте, по focus, visibility, pageshow и online. SvelteKit `updated.current` и несовместимость схемы дают тот же сигнал. `UpdateController` проходит `idle → available → applying → failed`. Явное нажатие «Обновить» сохраняет черновики и делает полную перезагрузку; HTML запрашивается с `cache: 'no-store'` перед переходом. Неудачная запись черновика переводит в `failed` с причиной и кнопкой «Повторить». Автоматическое применение в скрытой вкладке разрешено после flush и проверки безопасности; непустое поле в фокусе и незавершённая запись его откладывают.
 
 Manifest генерируется из тёмных токенов, meta `theme-color` читает активную тему. Контроллер установки однократно сохраняет `beforeinstallprompt`; пункт «Установить» виден только при доступном prompt и скрывается при `appinstalled`. Иконки растеризуются Chromium из `static/icons/source.svg`; цвет фона и акцента подставляется из токенов. Буква c с точкой состояния повторяет язык интерфейса, без нового набора пиктограмм. ENERGY 1 / RHYTHM 2 / MOTION 1; баннеры используют утверждённую поверхность, радиусы и акцент действия макетов 19/29.
 
@@ -316,7 +316,7 @@ Manifest генерируется из тёмных токенов, meta `theme-
 
 Единый `web/csp.mjs` задаёт `kit.csp` в hash-режиме и политику edge: `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self'; worker-src 'self' blob:; manifest-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'`. Caddy добавляет только `wss://<origin-host>`, локальный edge только собственный `ws://127.0.0.1:<port>`. `unsafe-inline` и inline-обработчиков нет, `theme-init.js` внешний. SPA fallback содержит hash-CSP meta, но `frame-ancestors` требует HTTP-заголовка. `node web/scripts/print-csp.mjs https://chat.example` извлекает SHA-256 каждого bootstrap-скрипта именно из опубликованного `200.html`. При каждой публикации результат заново задаётся в Caddy как `CANTERLOT_CSP`; инструкция и полный Caddyfile есть в README.
 
-Для manifest используется credentials и MIME `application/manifest+json`, для worker JavaScript MIME, `Service-Worker-Allowed: /` и `Cache-Control: no-cache`. Всё, включая manifest и worker, защищено `forward_auth`. Общая Playwright fixture собирает `securitypolicyviolation`; обход всех маршрутов проверяется в Chromium и Firefox на production-сборке.
+Для manifest используется credentials и MIME `application/manifest+json` с `Cache-Control: no-cache`; service worker не публикуется. Всё, включая manifest, защищено `forward_auth`. Общая Playwright fixture собирает `securitypolicyviolation`; обход всех маршрутов проверяется в Chromium и Firefox на production-сборке.
 
 
 ## Дополнительные экраны (Task 9b)

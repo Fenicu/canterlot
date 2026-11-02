@@ -7,7 +7,7 @@ import { bindOwner } from '../../../src/lib/storage/owner';
 
 const modules = import.meta.glob('../../../src/lib/pwa/*.ts');
 type PwaModules = {
-  register: typeof import('../../../src/lib/pwa/register'); update: typeof import('../../../src/lib/pwa/update');
+  update: typeof import('../../../src/lib/pwa/update');
   install: typeof import('../../../src/lib/pwa/install'); share: typeof import('../../../src/lib/pwa/share');
   signout: typeof import('../../../src/lib/pwa/signout'); csp: typeof import('../../../src/lib/pwa/csp');
 };
@@ -48,17 +48,6 @@ test('icons_are_rasterised_from_the_svg_with_token_colours', async () => {
     const dot = (Math.floor(size / 2) * size + Math.floor(size * 336 / 512)) * 4;
     expect([...icon.data.subarray(dot, dot + 4)]).toEqual([0, 244, 238, 255]);
   }
-});
-
-test('start_unregisters_every_old_worker_and_deletes_the_caches', async () => {
-  const { removeInstalledWorkers } = await load('register');
-  const unregisterA = vi.fn(async () => true); const unregisterB = vi.fn(async () => true);
-  const remove = vi.fn(async () => true);
-  vi.stubGlobal('navigator', { serviceWorker: { getRegistrations: async () => [{ unregister: unregisterA }, { unregister: unregisterB }] } });
-  vi.stubGlobal('caches', { keys: async () => ['canterlot-shell-old', 'private-v0'], delete: remove });
-  await removeInstalledWorkers();
-  expect(unregisterA).toHaveBeenCalledOnce(); expect(unregisterB).toHaveBeenCalledOnce();
-  expect(remove).toHaveBeenCalledWith('canterlot-shell-old'); expect(remove).toHaveBeenCalledWith('private-v0');
 });
 
 test('incompatible_schema_version_prompts_an_update', async () => {

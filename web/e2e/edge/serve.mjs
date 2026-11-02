@@ -21,14 +21,10 @@ const nextRoot = resolve('build-update');
 const shell = await readFile(resolve(root, '200.html'), 'utf8');
 const fixturePath = resolve('e2e/edge/fixtures/ws-smoke.html');
 const fixture = await readFile(fixturePath, 'utf8');
-const legacyWorker = await readFile(resolve('e2e/edge/legacy-service-worker.js'), 'utf8');
-const legacyFixture = await readFile(resolve('e2e/edge/fixtures/legacy-sw.html'), 'utf8');
 const hashes = html => [...html.matchAll(/<script\b(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g)].map(m => `sha256-${createHash('sha256').update(m[1]).digest('base64')}`);
 const scriptHashes = hashes(shell);
 const csp = productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes });
 const fixtureCsp = productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(fixture) });
-const legacyCsp = productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(legacyFixture) });
-const legacyCookie = request => /(?:^|;\s*)pwa-legacy=1(?:;|$)/.test(request.headers.cookie ?? '');
 const mime = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript; charset=utf-8',
@@ -144,13 +140,6 @@ const server = createServer(async (request, response) => {
       const nextShell = await readFile(resolve(nextRoot, '200.html'), 'utf8');
       response.setHeader('Content-Security-Policy', productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(nextShell) }));
     }
-    if (url.pathname === '/service-worker.js') response.setHeader('Service-Worker-Allowed', '/');
-    if (url.pathname === '/service-worker.js' && legacyCookie(request)) {
-      response.setHeader('Content-Type', mime['.js']);
-      response.writeHead(200);
-      response.end(request.method === 'HEAD' ? undefined : legacyWorker);
-      return;
-    }
     if (request.method === 'POST' && url.pathname === '/_share') {
       response.writeHead(303, { Location: '/share?error=sw_inactive' });
       response.end();
@@ -168,14 +157,6 @@ const server = createServer(async (request, response) => {
       response.end(request.method === 'HEAD' ? undefined : fixture);
       return;
     }
-    if (url.pathname === '/__fixtures__/legacy-sw.html') {
-      response.setHeader('Content-Security-Policy', legacyCsp);
-      response.setHeader('Content-Type', mime['.html']);
-      response.writeHead(200);
-      response.end(request.method === 'HEAD' ? undefined : legacyFixture);
-      return;
-    }
-
     let file = resolve(selectedRoot, `.${decodeURIComponent(url.pathname)}`);
     if (file !== selectedRoot && !file.startsWith(selectedRoot + sep)) {
       response.writeHead(403);

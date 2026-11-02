@@ -472,9 +472,9 @@ chat.example.com {
             redir * /share?error=sw_inactive 303
         }
 
-        # 6. Раздача статики PWA: аварийный worker удаления и manifest без кэширования
+        # 6. Раздача статики PWA: manifest без кэширования
         handle {
-            @fresh path /service-worker.js /manifest.webmanifest
+            @fresh path /manifest.webmanifest
             header @fresh Cache-Control "no-cache"
             root * /var/www/canterlot/build
             try_files {path} /200.html

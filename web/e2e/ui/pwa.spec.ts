@@ -20,6 +20,7 @@ test('fresh_load_leaves_no_service_worker_and_no_shell_caches', async ({ page })
   await boot(page);
   await expect.poll(() => page.evaluate(async () => (await navigator.serviceWorker.getRegistrations()).length)).toBe(0);
   expect(await page.evaluate(() => caches.keys())).toEqual([]);
+  expect((await page.request.get('/service-worker.js')).status()).toBe(404);
 });
 
 test('manifest_and_icons_are_served_with_credentials_and_valid', async ({ page }) => {

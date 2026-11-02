@@ -19,7 +19,6 @@ export default defineConfig({
         fallback: "200.html",
         strict: false,
       }),
-      serviceWorker: { register: false },
       version: { name: version },
       csp: { mode: "hash", directives: directives as unknown as NonNullable<Config['csp']>['directives'] },
     }),
