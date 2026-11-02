@@ -13,7 +13,6 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 struct Fixture {
-    pool: PgPool,
     client: TestClient,
     machine: Uuid,
     registry: canterlot_hub::session::Registry,
@@ -32,7 +31,6 @@ impl Fixture {
         testkit::seed_catalog(&pool, machine).await;
         let client = TestClient::in_process(http::router(AppState::new(deps))).as_owner();
         Self {
-            pool,
             client,
             machine,
             registry,
