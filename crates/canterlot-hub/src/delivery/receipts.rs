@@ -286,6 +286,13 @@ pub async fn apply_input_receipt_in_tx(
             delivery = "completed";
             InputState::AcceptanceUnconfirmed
         }
+        InputReceipt::ExplicitRejection { .. } if steer => {
+            // Отказ влить ввод в идущий ход не губит ввод: он остаётся в
+            // очереди и уйдёт обычным следующим ходом. Причина остаётся у
+            // команды вливания и в событии.
+            delivery = "completed";
+            InputState::Queued
+        }
         InputReceipt::ExplicitRejection { .. }
         | InputReceipt::RejectedBeforeTransmission { .. } => {
             reject_reason = reason.as_deref();
@@ -378,7 +385,20 @@ pub async fn apply_input_receipt_in_tx(
             kind: "input_state_changed",
             conversation_id: Some(queue.conversation_id),
             execution_id: target.execution_id,
-            payload: json!({"input_id": target.input_id, "state": input_state, "attempt": attempt, "cause": receipt.status()}),
+            payload: if steer && input_state == InputState::Queued {
+                let cause = if matches!(receipt, InputReceipt::ExplicitRejection { .. }) {
+                    "steer_rejected"
+                } else {
+                    "steer_deferred"
+                };
+                let mut payload = json!({"input_id": target.input_id, "state": input_state, "attempt": attempt, "cause": cause, "command_id": command_id});
+                if let Some(reason) = &reason {
+                    payload["reason"] = json!(reason);
+                }
+                payload
+            } else {
+                json!({"input_id": target.input_id, "state": input_state, "attempt": attempt, "cause": receipt.status()})
+            },
             correlation_id,
         },
     )

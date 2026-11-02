@@ -426,7 +426,8 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
     gate_dispatch(&pool, seed.conversation_id).await;
     accept_turn(&pool, first_cmd).await;
 
-    // Явный отказ воркера — терминален, слот чужого хода цел.
+    // Отказ воркера влить ввод не губит его: ввод остаётся в очереди, слот
+    // чужого хода цел, причина у команды вливания.
     let SendNowOutcome::Requested { steer_command_id } =
         send_now(&pool, &seed, second_id, "k1", &caps()).await?
     else {
@@ -443,14 +444,16 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
     assert!(matches!(
         outcome,
         ApplyOutcome::Applied {
-            input_state: InputState::Rejected
+            input_state: InputState::Queued
         }
     ));
-    assert_eq!(state(&pool, second_id).await, InputState::Rejected);
+    assert_eq!(state(&pool, second_id).await, InputState::Queued);
     assert_eq!(
         slot(&pool, seed.conversation_id).await,
         RunSlot::Running { input_id: first_id }
     );
+    let (_, delivery, _) = steer_row(&pool, second_cmd).await;
+    assert_eq!(delivery, "completed");
 
     // Неподтверждённый приём — пауза, но слот хода не освобождается.
     let (third_id, third_cmd) = input(&pool, &seed, "third").await;
@@ -608,5 +611,81 @@ async fn dispatch_skips_steer_pending_input(pool: PgPool) -> TestResult {
         .await?;
     assert_eq!((before, after), (0, 0));
     let _ = first_id;
+    Ok(())
+}
+
+/// Codex отвечает ошибкой на `turn/steer` (любой код, кроме -32600): воркер
+/// пишет отказ. Ввод остаётся в очереди и уходит обычным следующим ходом,
+/// владелец видит причину в событии.
+#[sqlx::test(migrations = "./migrations")]
+async fn codex_steer_rejection_keeps_input_for_next_turn(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    let execution_id = running(&pool, &seed).await;
+    let (first_id, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, second_cmd) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    let outcome = apply_steer(
+        &pool,
+        steer_command_id,
+        InputReceipt::ExplicitRejection {
+            reason: "Internal error: turn cannot be steered".into(),
+        },
+    )
+    .await;
+    assert!(matches!(
+        outcome,
+        ApplyOutcome::Applied {
+            input_state: InputState::Queued
+        }
+    ));
+    let (delivery, result): (String, Value) =
+        sqlx::query_as("select delivery_state, result from commands where id = $1")
+            .bind(steer_command_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(delivery, "completed");
+    assert_eq!(
+        result,
+        json!({"reason": "Internal error: turn cannot be steered"})
+    );
+    let reject_reason: Option<String> =
+        sqlx::query_scalar("select reject_reason from inputs where id = $1")
+            .bind(second_id)
+            .fetch_one(&pool)
+            .await?;
+    assert_eq!(reject_reason, None);
+    let payload: Value = sqlx::query_scalar(
+        "select payload from events where kind = 'input_state_changed'
+         and payload->>'input_id' = $1 order by scope_seq desc limit 1",
+    )
+    .bind(second_id.to_string())
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(payload["state"], json!("queued"));
+    assert_eq!(payload["cause"], json!("steer_rejected"));
+    assert_eq!(
+        payload["reason"],
+        json!("Internal error: turn cannot be steered")
+    );
+    assert_eq!(payload["command_id"], json!(steer_command_id));
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    // Ход кончился: ввод уходит обычной доставкой.
+    apply_run_finished(&pool, execution_id, first_cmd, Uuid::now_v7()).await?;
+    assert!(matches!(
+        gate_dispatch(&pool, seed.conversation_id).await,
+        DispatchOutcome::Dispatched { .. }
+    ));
+    assert_eq!(state(&pool, second_id).await, InputState::Dispatched);
+    let _ = second_cmd;
     Ok(())
 }
