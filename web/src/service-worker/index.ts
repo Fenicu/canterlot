@@ -52,7 +52,8 @@ sw.addEventListener('fetch', event => {
       return Response.redirect(new URL(`/share?id=${encodeURIComponent(id)}`, sw.location.origin), 303);
     })());
   } else if (route === 'navigation') {
-    event.respondWith(navigationResponse(req, () => fetch(req), async () => (await caches.open(cacheName)).match('/200.html')));
+    // Перезагрузка после обновления не должна взять старую оболочку из HTTP-кэша.
+    event.respondWith(navigationResponse(req, () => fetch(new Request(req, { cache: 'no-cache' })), async () => (await caches.open(cacheName)).match('/200.html')));
   } else if (route === 'asset' && assets.has(new URL(req.url).pathname)) {
     event.respondWith((async () => (await (await caches.open(cacheName)).match(req)) ?? fetch(req))());
   }

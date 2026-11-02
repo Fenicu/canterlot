@@ -12,6 +12,7 @@
     scope,
     offline = '',
     update = 'idle',
+    updateMessage = '',
     failure = '',
     onupdate,
     onrefresh,
@@ -23,6 +24,7 @@
     scope: ScopeStatus;
     offline?: string;
     update?: string;
+    updateMessage?: string;
     failure?: string;
     onupdate?: () => void;
     onrefresh: () => void;
@@ -49,6 +51,7 @@
   // Баннер всегда один: при нескольких состояниях показывается самое важное.
   const view = $derived.by((): View | null => {
     if (offline) return { kind: 'offline', text: offline, tone: 'warning' };
+    if (update === 'failed') return { kind: 'update', text: updateMessage || 'Не удалось обновить приложение', tone: 'danger', action: { label: 'Повторить', run: () => onupdate?.() } };
     if (update !== 'idle') {
       return update === 'applying'
         ? { kind: 'update', text: 'Доступна новая версия. Сохраняю и обновляю…', tone: 'neutral' }

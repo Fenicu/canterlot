@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { page } from '$app/state';
+  import { page, updated } from '$app/state';
   import { clock } from '#lib/clock.js';
   import { browserRuntime, leaseChatSession } from '#lib/screens/chat/open.js';
   import SessionList from '#lib/screens/sessions/SessionList.svelte';
@@ -27,6 +27,7 @@
   let tick = $state(0);
   let update = $state<UpdateController | null>(null);
   let updateState = $state('idle');
+  let updateMessage = $state('');
   let offlineLabel = $state('');
   let updateError = $state('');
   const mode: LayoutMode = $derived(layoutMode(width || 412));
@@ -113,7 +114,7 @@
     window.addEventListener('pageshow', retryRuntime);
     document.addEventListener('visibilitychange', retryRuntime);
     online();
-    const changed = () => { updateState = update?.state ?? 'idle'; };
+    const changed = () => { updateState = update?.state ?? 'idle'; updateMessage = update?.message ?? ''; };
     const incompatible = () => update?.incompatible();
     window.addEventListener('canterlot:incompatible', incompatible);
     void register({
@@ -133,7 +134,7 @@
       changed();
     }).catch(() => { updateError = 'Не удалось подготовить обновление. Повторите при восстановлении связи'; });
     const visibility = () => {
-      if (document.hidden && update?.state === 'ready') void applyUpdate();
+      if (document.hidden && update?.state === 'ready') void applyUpdate(false);
       else if (!document.hidden) void update?.check().catch(() => undefined);
     };
     document.addEventListener('visibilitychange', visibility);
@@ -163,18 +164,22 @@
     };
   });
 
-  async function applyUpdate() {
+  async function applyUpdate(force = true) {
     try {
       await runtime?.drafts.flush();
-      await update?.apply();
+      await update?.apply(force);
     } catch { updateError = 'Не удалось сохранить черновик. Обновление отложено'; }
   }
+  $effect(() => {
+    if (updated.current) update?.notify();
+  });
   $effect(() => {
     if (runtime?.connection.status.phase === 'incompatible') update?.incompatible();
   });
   $effect(() => {
     if (offlineLabel) announce(offlineLabel);
-    else if (updateState !== 'idle') announce('Доступна новая версия');
+    else if (updateState === 'failed' && updateMessage) announce(updateMessage);
+    else if (updateState === 'available' || updateState === 'ready') announce('Доступна новая версия');
   });
 </script>
 
@@ -187,6 +192,7 @@
       scope={runtime?.list.status ?? 'idle'}
       offline={offlineLabel}
       update={updateState}
+      updateMessage={updateMessage}
       failure={updateError}
       onupdate={applyUpdate}
       onrefresh={() => { void runtime?.drafts.flush().then(() => window.location.reload()); }}
