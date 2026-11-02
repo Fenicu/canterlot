@@ -139,6 +139,35 @@ for (const theme of ['dark', 'light'] as const) {
 		void id;
 	});
 
+	test(`started_compaction_is_visible_in_an_open_chat_and_resolves_${theme}`, async ({ page }) => {
+		const { hub, api, id } = await boot(page, (seed, conversation) => {
+			seed.pushContext(conversation, 100_000, 1_000_000);
+			liveExecution(seed, conversation);
+		});
+		await page.evaluate((value) => localStorage.setItem('canterlot.theme', value), theme);
+		await page.reload();
+		await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+
+		const feed = page.locator('.feed');
+		await expect(feed.locator('.compact[data-running="true"]')).toHaveCount(0);
+		const started = api.pushCompaction(id);
+		hub.flush();
+		await expect(feed.getByText('Сжимает контекст')).toBeVisible();
+		await expect(feed.locator('.compact[data-running="true"]')).toHaveCount(1);
+
+		const compactionId = (started.payload as unknown as { id: string }).id;
+		api.finishCompaction(id, compactionId);
+		hub.flush();
+		await expect(feed.getByText('Контекст сжат автоматически')).toBeVisible();
+		await expect(feed.locator('.compact[data-running="true"]')).toHaveCount(0);
+		await expect(feed.getByText('Контекст сжат автоматически')).toHaveCount(1);
+
+		await page.reload();
+		await expect(page.locator('[data-ready]')).toBeVisible({ timeout: 15_000 });
+		await expect(page.getByText('Контекст сжат автоматически')).toBeVisible();
+		await expect(page.locator('.compact[data-running="true"]')).toHaveCount(0);
+	});
+
 	test(`compaction_indicator_no_live_execution_caption_${theme}`, async ({ page }) => {
 		await boot(page, (seed, conversation) => {
 			seed.pushContext(conversation, 100_000, 1_000_000);
