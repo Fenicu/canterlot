@@ -6079,6 +6079,107 @@ async fn failed_steer_reconciliation_leaves_the_running_turn_alone() {
     bench.close(CloseMode::Force).await;
 }
 
+/// Два неуверенных вливания в один ход сверяются независимо: ответы потеряны,
+/// первое подтверждает очередь проекций, второе — событие очереди сервера.
+#[tokio::test]
+async fn two_uncertain_steers_are_both_confirmed_and_leave_the_turn_alone() {
+    let mut script = ready();
+    let position = script
+        .steps
+        .iter()
+        .position(|step| {
+            step.expected_path()
+                .is_some_and(|path| path.ends_with("/prompt"))
+        })
+        .unwrap();
+    let path = script.steps[position].expected_path().unwrap().to_owned();
+    for (offset, placeholder) in ["msg_steer_first", "msg_steer_second"]
+        .into_iter()
+        .enumerate()
+    {
+        script.steps.insert(
+            position + 1 + offset,
+            Step::Expect {
+                method: "POST".into(),
+                path: path.clone(),
+                reply: Reply {
+                    status: 500,
+                    body: Some(json!({"_tag": "UnknownError"})),
+                    ..Default::default()
+                },
+                bind: [(placeholder.to_owned(), "/id".to_owned())]
+                    .into_iter()
+                    .collect(),
+            },
+        );
+    }
+    script.steps.insert(
+        position + 3,
+        Step::Emit {
+            events: vec![json!({
+                "type": "session.inbox.enqueued",
+                "data": {"inboxID": "msg_steer_second"},
+            })],
+        },
+    );
+    // Исходный ход не завершается: проверяем, что вливания его не трогают.
+    script.steps.truncate(position + 4);
+    let mut bench = Bench::new(script);
+    let started = bench.start_ok().await;
+    let first = bench.input("one");
+    bench.accepted(&first).await;
+    let second = bench.input("send now one");
+    let third = bench.input("send now two");
+    // Только первое вливание видно в проекции очереди; второе подтверждает событие.
+    bench.fake.write_override(
+        "GET",
+        &format!("/api/session/{}/inbox", started.native_conversation_id),
+        &json!({"data": [{"id": format!("msg_{}", second.command_id.simple())}]}),
+    );
+    for input in [&second, &third] {
+        let outcome = tokio::time::timeout(WAIT, bench.adapter.steer(input))
+            .await
+            .expect("steer must finish");
+        assert!(
+            matches!(outcome, SteerOutcome::Undetermined),
+            "lost response reconciles later: {outcome:?}"
+        );
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(12);
+    let mut confirmed = Vec::new();
+    while confirmed.len() < 2 && std::time::Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        let Ok(event) = tokio::time::timeout(remaining, bench.adapter.next_event()).await else {
+            break;
+        };
+        if let AdapterEvent::InputAccepted { command_id } = event {
+            confirmed.push(command_id);
+        }
+        assert!(
+            !matches!(
+                &event,
+                AdapterEvent::RunFinished { input_command_id, .. }
+                    if *input_command_id == second.command_id
+                        || *input_command_id == third.command_id
+            ),
+            "an uncertain steer must not finish a turn"
+        );
+    }
+    confirmed.sort();
+    let mut expected = vec![second.command_id, third.command_id];
+    expected.sort();
+    assert_eq!(confirmed, expected, "both steers were reconciled");
+    // Исходный ход жив: новый ввод отклоняется занятостью.
+    assert!(
+        matches!(
+            bench.transmit(&bench.input("fourth")).await,
+            TransmitOutcome::Rejected(reason) if reason == "turn_active"
+        ),
+        "the original turn must still run"
+    );
+    bench.close(CloseMode::Force).await;
+}
+
 #[tokio::test]
 async fn steer_without_a_turn_sends_nothing() {
     let mut bench = Bench::new(ready());
