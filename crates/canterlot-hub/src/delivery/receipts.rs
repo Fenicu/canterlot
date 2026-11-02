@@ -175,8 +175,7 @@ pub async fn apply_input_receipt_in_tx(
         // (или на запоздалое доказательство непринятого): ушедший дальше ввод
         // принадлежит обычной доставке. Хранение и начало передачи steer
         // не присылает.
-        if state != InputState::Queued
-            && !late_acceptance
+        if state != InputState::Queued && !late_acceptance
             || matches!(
                 receipt,
                 InputReceipt::Stored | InputReceipt::TransmissionStarted

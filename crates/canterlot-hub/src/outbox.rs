@@ -5,7 +5,8 @@ use canterlot_proto::{
     worker::v1::{
         CancelInput, Command, CompactSession, ControlDown, DeliverDecision, DeliverInput,
         Instructions, Interrupt, RemoveWorktree, ResolveOwnerLost, SettingsOverride,
-        StartExecution, SteerInput, StopExecution, WithdrawInput, WorktreeSpec, command, control_down,
+        StartExecution, SteerInput, StopExecution, WithdrawInput, WorktreeSpec, command,
+        control_down,
     },
 };
 use prost::Message;

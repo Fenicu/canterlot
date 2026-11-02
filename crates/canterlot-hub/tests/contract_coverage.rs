@@ -461,21 +461,23 @@ async fn every_mutating_endpoint_records_its_key_once_across_the_whole_api(pool:
         .map(str::to_owned)
         .collect::<Vec<_>>(),
     );
-    let send_now_execution = canterlot_hub::executions::start(
-        &pool,
-        owner,
-        send_now_conversation,
-        Uuid::now_v7(),
-    )
-        .await
-        .unwrap()
-        .execution_id;
+    let send_now_execution =
+        canterlot_hub::executions::start(&pool, owner, send_now_conversation, Uuid::now_v7())
+            .await
+            .unwrap()
+            .execution_id;
     {
         use canterlot_hub::model::ExecutionState as State;
         for state in [State::Starting, State::Running] {
-            canterlot_hub::executions::set_state(&pool, send_now_execution, state, None, Uuid::now_v7())
-                .await
-                .unwrap();
+            canterlot_hub::executions::set_state(
+                &pool,
+                send_now_execution,
+                state,
+                None,
+                Uuid::now_v7(),
+            )
+            .await
+            .unwrap();
         }
     }
     let first = setup(

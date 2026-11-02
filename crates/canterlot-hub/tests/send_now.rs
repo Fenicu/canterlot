@@ -94,11 +94,7 @@ async fn accept_turn(pool: &PgPool, command_id: Uuid) {
     }
 }
 
-async fn apply_steer(
-    pool: &PgPool,
-    steer_command_id: Uuid,
-    receipt: InputReceipt,
-) -> ApplyOutcome {
+async fn apply_steer(pool: &PgPool, steer_command_id: Uuid, receipt: InputReceipt) -> ApplyOutcome {
     apply_input_receipt(pool, steer_command_id, 0, receipt, Uuid::now_v7())
         .await
         .unwrap()
@@ -166,9 +162,10 @@ async fn send_now_into_running_turn_keeps_queue_and_slot(pool: PgPool) -> TestRe
         DispatchOutcome::Dispatched { .. }
     ));
     accept_turn(&pool, first_cmd).await;
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
 
     let outcome = send_now(&pool, &seed, second_id, "send-now-1", &caps()).await?;
     let SendNowOutcome::Requested { steer_command_id } = outcome else {
@@ -176,9 +173,10 @@ async fn send_now_into_running_turn_keeps_queue_and_slot(pool: PgPool) -> TestRe
     };
     // Ввод остался в очереди, слот занят прежним ходом, второго хода нет.
     assert_eq!(state(&pool, second_id).await, InputState::Queued);
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
     let (row_id, delivery, payload) = steer_row(&pool, second_cmd).await;
     assert_eq!(row_id, steer_command_id);
     assert_eq!(delivery, "pending");
@@ -208,10 +206,7 @@ async fn send_now_is_idempotent(pool: PgPool) -> TestResult {
     };
     // Другой ключ на тот же ввод: та же команда, нового хода нет.
     let other = send_now(&pool, &seed, second_id, "key-2", &caps()).await?;
-    assert_eq!(
-        other,
-        SendNowOutcome::AlreadyRequested { steer_command_id }
-    );
+    assert_eq!(other, SendNowOutcome::AlreadyRequested { steer_command_id });
     let count: i64 = sqlx::query_scalar(
         "select count(*) from commands where kind = 'steer_input' and conversation_id = $1",
     )
@@ -230,7 +225,9 @@ async fn send_now_valid_only_while_queued_and_running(pool: PgPool) -> TestResul
     let (lonely_id, _) = input(&pool, &lonely_seed, "lonely").await;
     assert!(matches!(
         send_now(&pool, &lonely_seed, lonely_id, "k", &caps()).await,
-        Err(ControlError::InvalidRequest { reason: "no_running_turn" })
+        Err(ControlError::InvalidRequest {
+            reason: "no_running_turn"
+        })
     ));
 
     let seed = testkit::seed(&pool).await;
@@ -241,19 +238,25 @@ async fn send_now_valid_only_while_queued_and_running(pool: PgPool) -> TestResul
     // Ход ещё не идёт (слот свободен): вливать некуда.
     assert!(matches!(
         send_now(&pool, &seed, second_id, "k", &caps()).await,
-        Err(ControlError::InvalidRequest { reason: "no_running_turn" })
+        Err(ControlError::InvalidRequest {
+            reason: "no_running_turn"
+        })
     ));
     gate_dispatch(&pool, seed.conversation_id).await;
     accept_turn(&pool, first_cmd).await;
     // Выданный ввод уже не в очереди.
     assert!(matches!(
         send_now(&pool, &seed, first_id, "k", &caps()).await,
-        Err(ControlError::InvalidRequest { reason: "input_not_queued" })
+        Err(ControlError::InvalidRequest {
+            reason: "input_not_queued"
+        })
     ));
     // Нет возможности — чистый отказ, команда не создаётся.
     assert!(matches!(
         send_now(&pool, &seed, second_id, "k", &[]).await,
-        Err(ControlError::InvalidRequest { reason: "capability_missing" })
+        Err(ControlError::InvalidRequest {
+            reason: "capability_missing"
+        })
     ));
     // Чужой профиль — тоже отказ.
     harness(&pool, &seed, "synthetic").await;
@@ -288,7 +291,9 @@ async fn send_now_refused_for_request_and_compaction(pool: PgPool) -> TestResult
     .await?;
     assert!(matches!(
         send_now(&pool, &seed, second_id, "k1", &caps()).await,
-        Err(ControlError::InvalidRequest { reason: "request_open" })
+        Err(ControlError::InvalidRequest {
+            reason: "request_open"
+        })
     ));
     sqlx::query("update requests set state = 'decision_applied' where conversation_id = $1")
         .bind(seed.conversation_id)
@@ -308,7 +313,9 @@ async fn send_now_refused_for_request_and_compaction(pool: PgPool) -> TestResult
     .await?;
     assert!(matches!(
         send_now(&pool, &seed, second_id, "k2", &caps()).await,
-        Err(ControlError::InvalidRequest { reason: "compacting" })
+        Err(ControlError::InvalidRequest {
+            reason: "compacting"
+        })
     ));
     Ok(())
 }
@@ -331,13 +338,16 @@ async fn steer_accepted_belongs_to_running_turn(pool: PgPool) -> TestResult {
     let outcome = apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await;
     assert!(matches!(
         outcome,
-        ApplyOutcome::Applied { input_state: InputState::Accepted }
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
     ));
     // Ответ принадлежит идущему ходу: слот не тронут, второго хода нет.
     assert_eq!(state(&pool, second_id).await, InputState::Accepted);
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
     let (_, delivery, _): (Uuid, String, Value) = steer_row(&pool, second_cmd).await;
     assert_eq!(delivery, "completed");
     // Ход кончился как обычно.
@@ -381,7 +391,9 @@ async fn turn_end_between_click_and_delivery_becomes_next_turn(pool: PgPool) -> 
     .await;
     assert!(matches!(
         outcome,
-        ApplyOutcome::Applied { input_state: InputState::Queued }
+        ApplyOutcome::Applied {
+            input_state: InputState::Queued
+        }
     ));
     assert_eq!(state(&pool, second_id).await, InputState::Queued);
     // Обычная выдача следующим ходом — ровно один раз, без дубля.
@@ -430,12 +442,15 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
     .await;
     assert!(matches!(
         outcome,
-        ApplyOutcome::Applied { input_state: InputState::Rejected }
+        ApplyOutcome::Applied {
+            input_state: InputState::Rejected
+        }
     ));
     assert_eq!(state(&pool, second_id).await, InputState::Rejected);
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
 
     // Неподтверждённый приём — пауза, но слот хода не освобождается.
     let (third_id, third_cmd) = input(&pool, &seed, "third").await;
@@ -444,26 +459,35 @@ async fn steer_rejected_and_unconfirmed(pool: PgPool) -> TestResult {
     else {
         panic!("not requested");
     };
-    let outcome = apply_steer(&pool, steer_command_id, InputReceipt::AcceptanceUndetermined).await;
+    let outcome = apply_steer(
+        &pool,
+        steer_command_id,
+        InputReceipt::AcceptanceUndetermined,
+    )
+    .await;
     assert!(matches!(
         outcome,
         ApplyOutcome::Applied {
             input_state: InputState::AcceptanceUnconfirmed
         }
     ));
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
     // Позднее доказательство снимает паузу, ход тот же.
     let outcome = apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await;
     assert!(matches!(
         outcome,
-        ApplyOutcome::Applied { input_state: InputState::Accepted }
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
     ));
     assert_eq!(state(&pool, third_id).await, InputState::Accepted);
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
     let _ = (second_cmd, third_cmd);
     Ok(())
 }
@@ -494,7 +518,9 @@ async fn stale_steer_outcome_is_ignored(pool: PgPool) -> TestResult {
             }
         )
         .await,
-        ApplyOutcome::Applied { input_state: InputState::Queued }
+        ApplyOutcome::Applied {
+            input_state: InputState::Queued
+        }
     ));
     gate_dispatch(&pool, seed.conversation_id).await;
     accept_turn(&pool, second_cmd).await;
@@ -521,13 +547,15 @@ async fn several_send_now_in_a_row_keep_order(pool: PgPool) -> TestResult {
     gate_dispatch(&pool, seed.conversation_id).await;
     accept_turn(&pool, first_cmd).await;
 
-    let SendNowOutcome::Requested { steer_command_id: s1 } =
-        send_now(&pool, &seed, y1_id, "k1", &caps()).await?
+    let SendNowOutcome::Requested {
+        steer_command_id: s1,
+    } = send_now(&pool, &seed, y1_id, "k1", &caps()).await?
     else {
         panic!("not requested");
     };
-    let SendNowOutcome::Requested { steer_command_id: s2 } =
-        send_now(&pool, &seed, y2_id, "k2", &caps()).await?
+    let SendNowOutcome::Requested {
+        steer_command_id: s2,
+    } = send_now(&pool, &seed, y2_id, "k2", &caps()).await?
     else {
         panic!("not requested");
     };
@@ -536,9 +564,10 @@ async fn several_send_now_in_a_row_keep_order(pool: PgPool) -> TestResult {
     apply_steer(&pool, s2, InputReceipt::Accepted).await;
     assert_eq!(state(&pool, y1_id).await, InputState::Accepted);
     assert_eq!(state(&pool, y2_id).await, InputState::Accepted);
-    assert_eq!(slot(&pool, seed.conversation_id).await, RunSlot::Running {
-        input_id: first_id
-    });
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
     let _ = (y1_cmd, y2_cmd);
     Ok(())
 }

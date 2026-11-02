@@ -289,13 +289,12 @@ async fn send_now(
     IdempotencyKey(key): IdempotencyKey,
     Correlation(c): Correlation,
 ) -> Result<Json<crate::delivery::control::SendNowOutcome>, ApiError> {
-    let machine_id: Option<Uuid> = sqlx::query_scalar(
-        "select machine_id from conversations where id = $1 and owner_id = $2",
-    )
-    .bind(id)
-    .bind(o.owner_id)
-    .fetch_optional(&s.pool)
-    .await?;
+    let machine_id: Option<Uuid> =
+        sqlx::query_scalar("select machine_id from conversations where id = $1 and owner_id = $2")
+            .bind(id)
+            .bind(o.owner_id)
+            .fetch_optional(&s.pool)
+            .await?;
     let capabilities = machine_id.map(|machine| s.registry.capabilities(machine));
     let result = crate::delivery::control::request_send_now(
         &s.pool,
@@ -309,11 +308,10 @@ async fn send_now(
     .await
     .map_err(|error| match error {
         crate::delivery::control::ControlError::InvalidRequest { reason } => {
-            ApiError::new(ErrorCode::InvalidRequest)
-                .with_details(ErrorDetails {
-                    reason: Some(reason.into()),
-                    ..Default::default()
-                })
+            ApiError::new(ErrorCode::InvalidRequest).with_details(ErrorDetails {
+                reason: Some(reason.into()),
+                ..Default::default()
+            })
         }
         error => error.into(),
     })?;
