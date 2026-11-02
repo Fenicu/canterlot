@@ -145,6 +145,7 @@ export interface HubEvent {
   session_id?: Uuid;
   turns?: number;
   duration_ms?: number;
+  working_ms?: number;
   tokens_in?: number;
   tokens_out?: number;
   commits?: HubCommit[];
@@ -566,6 +567,7 @@ export interface ConversationCreated {
       enabled: boolean;
     };
     last_activity_at: Time | null;
+    working_ms?: number;
     counts: Counts;
     parent_id?: Uuid | null;
     spawn_depth?: number;
@@ -768,6 +770,7 @@ export interface DerivedChanged {
     crunch: {
       enabled: boolean;
     };
+    working_ms?: number;
   };
 }
 export interface Settings {

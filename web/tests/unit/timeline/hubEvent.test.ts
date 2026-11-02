@@ -34,6 +34,7 @@ test('session_facts_use_the_owner_language', () => {
       kind: 'session_result',
       turns: 4,
       duration_ms: 372_000,
+      working_ms: 120_000,
       tokens_in: 12_000,
       tokens_out: 900,
       commits: [
@@ -44,10 +45,24 @@ test('session_facts_use_the_owner_language', () => {
     })
   ).toEqual([
     { label: 'ходы', value: '4' },
-    { label: 'время', value: '6 мин 12 с' },
+    { label: 'работала', value: '2 мин из 6 мин' },
     { label: 'коммиты', value: '2' },
     { label: 'файлы', value: '3' }
   ]);
+});
+
+test('working_time_is_shown_against_the_whole_turn_time', () => {
+  expect(
+    eventFacts({
+      kind: 'session_result',
+      duration_ms: 15_540_000,
+      working_ms: 3_900_000
+    })
+  ).toContainEqual({ label: 'работала', value: '1 ч 5 мин из 4 ч 19 мин' });
+  // Без ожиданий работа и время хода совпадают: «из» только повторяло бы число.
+  expect(
+    eventFacts({ kind: 'session_result', duration_ms: 372_000, working_ms: 372_000 })
+  ).toContainEqual({ label: 'работала', value: '6 мин' });
 });
 
 test('session_facts_skip_what_the_hub_does_not_know', () => {

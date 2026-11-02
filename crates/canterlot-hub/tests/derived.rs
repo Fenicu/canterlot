@@ -386,6 +386,7 @@ async fn derived_changed_carries_queue_summary_and_last_activity_and_copies_it_t
         json!({"model":"","effort":"","permission_mode":""})
     );
     assert_eq!(payload["crunch"], json!({"enabled":false}));
+    assert_eq!(payload["working_ms"], json!(0));
 }
 
 #[sqlx::test(migrations = "./migrations")]

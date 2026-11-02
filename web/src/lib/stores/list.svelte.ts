@@ -45,6 +45,8 @@ export interface ListRow {
   queue: { queued: number; pause_reasons: unknown[]; hold_reasons: unknown[] };
   crunch: { enabled: boolean };
   last_activity_at: string | null;
+  /** Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом. */
+  working_ms?: number;
 }
 
 export interface GroupCount {
@@ -215,6 +217,7 @@ export class ListStore {
       row.unread_count = event.payload.unread_count;
       row.queue = event.payload.queue;
       row.last_activity_at = event.payload.last_activity_at;
+      row.working_ms = event.payload.working_ms;
       row.model = event.payload.settings.model;
       row.effort = event.payload.settings.effort;
       row.permission_mode = event.payload.settings.permission_mode;

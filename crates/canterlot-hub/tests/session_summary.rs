@@ -65,7 +65,7 @@ async fn add_run(pool: &PgPool, f: &Fixture, run: Run) -> Uuid {
     .unwrap();
     sqlx::query(
         "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at,duration_ms,git)
-         values($1,$2,$3,$4,$4,$5,$6)",
+         values($1,$2,$3,$4-($5::bigint * interval '1 millisecond'),$4,$5,$6)",
     )
     .bind(command)
     .bind(f.execution.execution_id)
@@ -278,6 +278,130 @@ async fn summary_aggregates_several_turns(pool: PgPool) {
     assert_eq!(l[9], "Uncommitted changes: no");
     assert!(text.contains("Final answer:\nSecond answer\n"), "{text}");
     assert!(!text.contains("Old answer") && !text.contains("Helper chatter"));
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn summary_working_time_skips_gaps_between_turns(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now - TimeDelta::minutes(20),
+            duration_ms: 60_000,
+            git: None,
+            tokens: (1, 1),
+        },
+    )
+    .await;
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: now,
+            duration_ms: 125_000,
+            git: None,
+            tokens: (1, 1),
+        },
+    )
+    .await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, f.target, "idle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let event = summary.hub_event();
+    assert_eq!(event.duration_ms, Some(185_000));
+    assert_eq!(
+        event.working_ms,
+        Some(185_000),
+        "the idle gap between turns is not working time"
+    );
+}
+
+async fn add_wait(
+    pool: &PgPool,
+    f: &Fixture,
+    kind: &str,
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> Uuid {
+    let id = Uuid::now_v7();
+    sqlx::query(
+        "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload,created_at,updated_at)
+         values($1,$2,$3,$4,$5,$6,'decision_applied','{}',$7,$8)",
+    )
+    .bind(id)
+    .bind(f.target)
+    .bind(f.execution.execution_id)
+    .bind(f.execution.generation)
+    .bind(kind)
+    .bind(format!("{kind}:{id}"))
+    .bind(from)
+    .bind(to)
+    .execute(pool)
+    .await
+    .unwrap();
+    id
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn summary_working_time_subtracts_permission_and_question_waits(pool: PgPool) {
+    let f = fixture(&pool).await;
+    let now = Utc::now();
+    let finished = now - TimeDelta::minutes(1);
+    let started = finished - TimeDelta::minutes(10);
+    add_run(
+        &pool,
+        &f,
+        Run {
+            finished_at: finished,
+            duration_ms: 600_000,
+            git: None,
+            tokens: (1, 1),
+        },
+    )
+    .await;
+    add_wait(
+        &pool,
+        &f,
+        "permission",
+        started + TimeDelta::minutes(1),
+        started + TimeDelta::minutes(4),
+    )
+    .await;
+    add_wait(
+        &pool,
+        &f,
+        "question",
+        started + TimeDelta::minutes(5),
+        started + TimeDelta::minutes(8),
+    )
+    .await;
+    // Одобрение запуска ждёт родитель, а не ход этой сессии.
+    add_wait(
+        &pool,
+        &f,
+        "spawn_approval",
+        started + TimeDelta::minutes(8),
+        started + TimeDelta::minutes(9),
+    )
+    .await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    let summary = summary::build(&mut conn, f.owner, f.target, "idle", None)
+        .await
+        .unwrap()
+        .unwrap();
+    let event = summary.hub_event();
+    assert_eq!(event.duration_ms, Some(600_000));
+    assert_eq!(
+        event.working_ms,
+        Some(240_000),
+        "six minutes of owner waits are not working time"
+    );
 }
 
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]

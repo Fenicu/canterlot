@@ -46,6 +46,7 @@ async function boot(page: Page) {
           session_id: child,
           turns: 4,
           duration_ms: 372_000,
+          working_ms: 120_000,
           tokens_in: 12_000,
           tokens_out: 900,
           commits: [
@@ -264,7 +265,7 @@ test('session_result_is_a_full_width_card_with_expandable_answer_and_link', asyn
   await expect(card.getByText('завершена')).toBeVisible();
   for (const [label, value] of [
     ['ходы', '4'],
-    ['время', '6 мин 12 с'],
+    ['работала', '2 мин из 6 мин'],
     ['коммиты', '2'],
     ['файлы', '3']
   ]) {

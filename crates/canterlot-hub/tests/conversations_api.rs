@@ -1,5 +1,6 @@
 use axum::http::Method;
 use canterlot_hub::{
+    executions,
     http::{self, AppState},
     session::{CAPABILITY_WORKDIR_SUGGEST_V1, MAX_SUGGESTS_PER_MACHINE, Registry},
     testkit::{self, TestClient},
@@ -721,6 +722,64 @@ async fn list_item_machine_is_id_and_name_only(pool: PgPool) {
     let m = f.list("").await["items"][0]["machine"].clone();
     assert_eq!(m, json!({"id":f.machine,"name":"Машина"}));
 }
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn list_item_carries_working_time_without_owner_waits(pool: PgPool) {
+    let f = Fixture::new(pool.clone()).await;
+    let id = f.create(json!({})).await;
+    let execution = executions::start(&pool, f.owner, id, Uuid::now_v7())
+        .await
+        .unwrap();
+    let command = Uuid::now_v7();
+    sqlx::query(
+        "insert into commands(id,machine_id,conversation_id,execution_id,execution_generation,kind,payload,delivery_state)
+         values($1,$2,$3,$4,$5,'deliver_input','{}','completed')",
+    )
+    .bind(command)
+    .bind(f.machine)
+    .bind(id)
+    .bind(execution.execution_id)
+    .bind(execution.generation)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let finished = Utc::now();
+    let started = finished - TimeDelta::minutes(10);
+    sqlx::query(
+        "insert into runs(input_command_id,execution_id,conversation_id,started_at,finished_at,duration_ms)
+         values($1,$2,$3,$4,$5,600000)",
+    )
+    .bind(command)
+    .bind(execution.execution_id)
+    .bind(id)
+    .bind(started)
+    .bind(finished)
+    .execute(&pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "insert into requests(id,conversation_id,execution_id,generation,kind,native_request_id,state,request_payload,created_at,updated_at)
+         values($1,$2,$3,$4,'permission','wait:1','decision_applied','{}',$5,$6)",
+    )
+    .bind(Uuid::now_v7())
+    .bind(id)
+    .bind(execution.execution_id)
+    .bind(execution.generation)
+    .bind(started + TimeDelta::minutes(1))
+    .bind(started + TimeDelta::minutes(6))
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let page = f.list("").await;
+    let item = page["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == id.to_string())
+        .expect("created conversation is listed");
+    assert_eq!(item["working_ms"], json!(300_000));
+}
+
 #[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
 async fn foreign_conversation_ids_are_not_found(pool: PgPool) {
     let f = Fixture::new(pool).await;

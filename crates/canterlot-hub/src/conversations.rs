@@ -215,6 +215,8 @@ pub struct ListItem {
     pub queue: QueueView,
     pub crunch: CrunchView,
     pub last_activity_at: Option<String>,
+    /// Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом.
+    pub working_ms: i64,
 }
 #[derive(Serialize, Deserialize, ToSchema)]
 pub struct EffectiveSettings {
@@ -325,6 +327,7 @@ const SELECT:&str="select c.*,m.name machine_name,m.capabilities,m.availability,
  coalesce(d.activity_since,c.created_at) activity_since,coalesce(d.unread_count,0) unread_count,
  coalesce(d.queue_queued,0) queue_queued,coalesce(d.pause_reasons,'[]') derived_pauses,coalesce(d.hold_reasons,'[]') derived_holds,
  d.last_activity_at derived_last_activity,
+ coalesce((select sum(w.working_ms)::bigint from run_working w where w.conversation_id=c.id),0) working_ms,
  array(select gm.group_id from conversation_group_members gm where gm.conversation_id=c.id order by gm.group_id) groups
  from conversations c join machines m on m.id=c.machine_id
  left join machine_harnesses h on h.machine_id=c.machine_id and h.harness=c.harness
@@ -380,6 +383,7 @@ fn item(row: &PgRow) -> Result<ListItem, sqlx::Error> {
             enabled: row.try_get("derived_crunch")?,
         },
         last_activity_at: optional_time(row, "derived_last_activity")?,
+        working_ms: row.try_get("working_ms")?,
     })
 }
 pub async fn counts(conn: &mut PgConnection, owner_id: Uuid) -> Result<Counts, sqlx::Error> {

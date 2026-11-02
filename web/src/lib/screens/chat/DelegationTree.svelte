@@ -3,6 +3,7 @@
 	import { resolve } from '$app/paths';
 	import { delegation } from '#lib/api/client.js';
 	import { modelLabel } from '#lib/format/labels.js';
+	import { fmt } from '#lib/format/ru.js';
 	import type { Runtime } from '#lib/app/runtime.js';
 	import { getRuntime } from '#lib/app/runtime.js';
 	import type { ChatStore } from '#lib/stores/chat.svelte.js';
@@ -96,10 +97,22 @@
 		const line = activityLine(row.activity as Activity, { now: Date.now() });
 		return { text: line.text, tone: line.tone === 'default' ? 'muted' : line.tone };
 	}
+
+	function workedMs(node: DelegationNode): number | null {
+		if (!node.finished_at) return null;
+		const start = Date.parse(node.started_at);
+		const end = Date.parse(node.finished_at);
+		return Number.isFinite(start) && Number.isFinite(end) && end >= start ? end - start : null;
+	}
+
+	function workedSession(row: ListRow): string | null {
+		return row.working_ms && row.working_ms > 0 ? `работала ${fmt.durationCoarse(row.working_ms)}` : null;
+	}
 </script>
 
 {#snippet row(node: DelegationNode)}
 	{#snippet body()}
+		{@const active = workedMs(node)}
 		<span class="branch">└</span>
 		<span class="grow node-info">
 			<span class="subagent-name">{node.subagent && !isMainAgent(node.subagent.name) ? node.subagent.name : 'Субагент'}</span>
@@ -110,6 +123,9 @@
 				<small class="node-task"> · {toolTitle({ toolName: node.tool_name, summary: node.task }).argument}</small>
 			{/if}
 		</span>
+		{#if active !== null}
+			<span class="worked" data-worked={node.block_id} title="Активное время">{fmt.durationCoarse(active)}</span>
+		{/if}
 		<span class={tone(node)}>{verb(node)}</span>
 	{/snippet}
 	{#if href}
@@ -124,9 +140,9 @@
 	<!-- eslint-disable-next-line svelte/no-navigation-without-resolve -->
 	<a class="tree-node" href={resolve(`/c/${row.id}` as '/')}>
 		<span class="branch">└</span>
-		<span class="grow node-info">
+		<span class="grow node-info session-info">
 			<span class="session-name">{row.title}</span>
-			<span class="subagent-model">· {modelLabel(row.model)}</span>
+			<small class="node-task">{modelLabel(row.model)}{#if workedSession(row)} · {workedSession(row)}{/if}</small>
 		</span>
 		<span class={sessionLine(row).tone}>{sessionLine(row).text}</span>
 	</a>
@@ -259,6 +275,24 @@
 	.node-task {
 		color: var(--muted);
 		font-size: var(--fs-sm);
+	}
+	.worked {
+		color: var(--muted);
+		font-size: var(--fs-sm);
+		font-variant-numeric: tabular-nums;
+		white-space: nowrap;
+	}
+	.session-info {
+		display: flex;
+		flex-direction: column;
+		gap: var(--s1);
+		white-space: normal;
+	}
+	.session-name,
+	.session-info .node-task {
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
 	}
 	.accent {
 		color: var(--accent-link);

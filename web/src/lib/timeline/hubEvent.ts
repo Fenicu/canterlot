@@ -77,8 +77,12 @@ function moment(value: string | null | undefined): string | null {
 export function eventFacts(event: HubEvent): HubFact[] {
   const facts: HubFact[] = [];
   if (event.turns != null) facts.push({ label: 'ходы', value: String(event.turns) });
-  if (event.duration_ms != null)
-    facts.push({ label: 'время', value: fmt.duration(event.duration_ms) });
+  if (event.duration_ms != null) {
+    if (event.working_ms != null)
+      facts.push({ label: 'работала', value: fmt.worked(event.working_ms, event.duration_ms) });
+    else facts.push({ label: 'время', value: fmt.duration(event.duration_ms) });
+  } else if (event.working_ms != null)
+    facts.push({ label: 'работала', value: fmt.durationCoarse(event.working_ms) });
   if (event.commits != null)
     facts.push({ label: 'коммиты', value: String(event.commits.length) });
   if (event.changed_files != null)
