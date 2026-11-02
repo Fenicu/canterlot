@@ -419,6 +419,100 @@ pub async fn apply_input_receipt_in_tx(
     Ok(ApplyOutcome::Applied { input_state })
 }
 
+/// Страховка для вливания без итога. Не ушедшее с хаба вливание просто
+/// гасится, и ввод остаётся в очереди. Ушедшее (захваченное или хранимое
+/// на машине) считается неподтверждённым: решает владелец, повторно хаб
+/// ничего не отправляет. Позднее доказательство воркера по-прежнему принимается.
+pub(crate) async fn settle_steer_in_tx(
+    conn: &mut PgConnection,
+    steer_command_id: Uuid,
+    reason: &str,
+    correlation_id: Uuid,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query(
+        "select q.conversation_id from queue_state q join commands c on c.conversation_id = q.conversation_id
+         where c.id = $1 for update of q",
+    )
+    .bind(steer_command_id)
+    .execute(&mut *conn)
+    .await?;
+    let open: Option<(String, bool, i32)> = sqlx::query_as(
+        "select delivery_state, dispatch_claimed_at is not null, dispatch_attempt from commands
+         where id = $1 and kind = 'steer_input' and delivery_state <> 'completed'",
+    )
+    .bind(steer_command_id)
+    .fetch_optional(&mut *conn)
+    .await?;
+    let Some((delivery, claimed, attempt)) = open else {
+        return Ok(false);
+    };
+    let receipt = if delivery == "pending" && !claimed {
+        InputReceipt::DispatchDeferred {
+            reason: reason.to_owned(),
+        }
+    } else {
+        InputReceipt::AcceptanceUndetermined
+    };
+    apply_input_receipt_in_tx(conn, steer_command_id, attempt, receipt, correlation_id).await?;
+    sqlx::query(
+        "update commands set delivery_state = 'completed', completed_at = coalesce(completed_at, now()),
+                result = coalesce(result, jsonb_build_object('reason', $2::text))
+         where id = $1 and delivery_state <> 'completed'",
+    )
+    .bind(steer_command_id)
+    .bind(reason)
+    .execute(&mut *conn)
+    .await?;
+    Ok(true)
+}
+
+/// Гасит вливания исполнения, которое кончилось: итога от него уже не будет.
+pub(crate) async fn settle_steers_of_execution_in_tx(
+    conn: &mut PgConnection,
+    execution_id: Uuid,
+    correlation_id: Uuid,
+) -> Result<(), sqlx::Error> {
+    let steers: Vec<Uuid> = sqlx::query_scalar(
+        "select id from commands where kind = 'steer_input' and execution_id = $1
+           and delivery_state <> 'completed' order by created_at, id",
+    )
+    .bind(execution_id)
+    .fetch_all(&mut *conn)
+    .await?;
+    for steer in steers {
+        settle_steer_in_tx(conn, steer, "execution_ended", correlation_id).await?;
+    }
+    Ok(())
+}
+
+/// Гасит вливания, итог которых не пришёл за `older_than`. Возвращает их число.
+pub async fn expire_steers(
+    pool: &PgPool,
+    older_than: std::time::Duration,
+) -> Result<u64, sqlx::Error> {
+    let steers: Vec<Uuid> = sqlx::query_scalar(
+        "select id from commands where kind = 'steer_input' and delivery_state <> 'completed'
+           and created_at < now() - make_interval(secs => $1) order by created_at, id",
+    )
+    .bind(older_than.as_secs_f64())
+    .fetch_all(pool)
+    .await?;
+    let mut settled = 0;
+    for steer in steers {
+        let done = crate::db::in_tx(pool, move |conn| {
+            Box::pin(async move {
+                settle_steer_in_tx(&mut *conn, steer, "steer_expired", Uuid::now_v7()).await
+            })
+        })
+        .await?;
+        if done {
+            tracing::warn!(kind = "steer_expired", command_id = %steer, "steer outcome timeout");
+            settled += 1;
+        }
+    }
+    Ok(settled)
+}
+
 pub async fn apply_run_finished(
     pool: &PgPool,
     execution_id: Uuid,

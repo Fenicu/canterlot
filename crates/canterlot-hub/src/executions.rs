@@ -498,6 +498,14 @@ pub async fn set_state_in_tx(
         ),
     )
     .await?;
+    if matches!(to, ExecutionState::Stopped | ExecutionState::Failed) {
+        crate::delivery::receipts::settle_steers_of_execution_in_tx(
+            conn,
+            execution_id,
+            correlation_id,
+        )
+        .await?;
+    }
     Ok(())
 }
 

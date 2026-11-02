@@ -8,7 +8,10 @@ use canterlot_hub::{
     delivery::{
         control::{ControlError, SendNowOutcome, request_send_now},
         dispatch::{DispatchOutcome, GateInputs, dispatch_next},
-        receipts::{ApplyOutcome, Ignored, InputReceipt, apply_input_receipt, apply_run_finished},
+        receipts::{
+            ApplyOutcome, Ignored, InputReceipt, apply_input_receipt, apply_run_finished,
+            expire_steers,
+        },
         submit::{ContentBlock, SubmitInput, submit_input},
     },
     executions::{self},
@@ -687,5 +690,175 @@ async fn codex_steer_rejection_keeps_input_for_next_turn(pool: PgPool) -> TestRe
     ));
     assert_eq!(state(&pool, second_id).await, InputState::Dispatched);
     let _ = second_cmd;
+    Ok(())
+}
+
+async fn queue_pauses(pool: &PgPool, conversation_id: Uuid) -> Value {
+    sqlx::query_scalar("select to_jsonb(pause_reasons) from queue_state where conversation_id = $1")
+        .bind(conversation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn steer_delivery(pool: &PgPool, steer_command_id: Uuid) -> String {
+    sqlx::query_scalar("select delivery_state from commands where id = $1")
+        .bind(steer_command_id)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+/// Вливание дошло до машины, а исполнение кончилось без итога: ввод не висит
+/// вечно и не уходит второй раз молча, владелец решает сам.
+#[sqlx::test(migrations = "./migrations")]
+async fn execution_end_settles_a_stored_steer_as_undetermined(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    let execution_id = running(&pool, &seed).await;
+    let (_, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    sqlx::query(
+        "update commands set delivery_state = 'stored_on_machine', dispatch_claimed_at = now(),
+                stored_at = now() where id = $1",
+    )
+    .bind(steer_command_id)
+    .execute(&pool)
+    .await?;
+    executions::set_state(
+        &pool,
+        execution_id,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await?;
+    executions::set_state(
+        &pool,
+        execution_id,
+        ExecutionState::Failed,
+        Some("supervisor_died"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(steer_delivery(&pool, steer_command_id).await, "completed");
+    assert_eq!(
+        state(&pool, second_id).await,
+        InputState::AcceptanceUnconfirmed
+    );
+    assert!(
+        queue_pauses(&pool, seed.conversation_id)
+            .await
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|reason| reason
+                == &json!({"reason": "unconfirmed_delivery", "input_id": second_id})),
+        "owner decides about the unconfirmed input"
+    );
+    Ok(())
+}
+
+/// Вливание так и не ушло с хаба, а исполнение кончилось: ввод просто
+/// остаётся в очереди и уходит следующим ходом.
+#[sqlx::test(migrations = "./migrations")]
+async fn execution_end_returns_an_unsent_steer_to_the_queue(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    let execution_id = running(&pool, &seed).await;
+    let (_, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    executions::set_state(
+        &pool,
+        execution_id,
+        ExecutionState::Stopping,
+        None,
+        Uuid::now_v7(),
+    )
+    .await?;
+    executions::set_state(
+        &pool,
+        execution_id,
+        ExecutionState::Failed,
+        Some("supervisor_died"),
+        Uuid::now_v7(),
+    )
+    .await?;
+    assert_eq!(steer_delivery(&pool, steer_command_id).await, "completed");
+    assert_eq!(state(&pool, second_id).await, InputState::Queued);
+    Ok(())
+}
+
+/// Итог вливания не пришёл за отведённый срок: хаб считает приём
+/// неподтверждённым, повторно ничего не отправляет.
+#[sqlx::test(migrations = "./migrations")]
+async fn steer_without_outcome_expires_as_undetermined(pool: PgPool) -> TestResult {
+    let seed = testkit::seed(&pool).await;
+    harness(&pool, &seed, "codex").await;
+    running(&pool, &seed).await;
+    let (first_id, first_cmd) = input(&pool, &seed, "first").await;
+    let (second_id, _) = input(&pool, &seed, "second").await;
+    gate_dispatch(&pool, seed.conversation_id).await;
+    accept_turn(&pool, first_cmd).await;
+    let SendNowOutcome::Requested { steer_command_id } =
+        send_now(&pool, &seed, second_id, "k", &caps()).await?
+    else {
+        panic!("not requested");
+    };
+    sqlx::query("update commands set delivery_state = 'stored_on_machine', dispatch_claimed_at = now() where id = $1")
+        .bind(steer_command_id)
+        .execute(&pool)
+        .await?;
+    // Свежее вливание срок не трогает.
+    assert_eq!(
+        expire_steers(&pool, std::time::Duration::from_secs(600)).await?,
+        0
+    );
+    assert_eq!(
+        steer_delivery(&pool, steer_command_id).await,
+        "stored_on_machine"
+    );
+    sqlx::query("update commands set created_at = now() - interval '1 hour' where id = $1")
+        .bind(steer_command_id)
+        .execute(&pool)
+        .await?;
+    assert_eq!(
+        expire_steers(&pool, std::time::Duration::from_secs(600)).await?,
+        1
+    );
+    assert_eq!(steer_delivery(&pool, steer_command_id).await, "completed");
+    assert_eq!(
+        state(&pool, second_id).await,
+        InputState::AcceptanceUnconfirmed
+    );
+    assert_eq!(
+        slot(&pool, seed.conversation_id).await,
+        RunSlot::Running { input_id: first_id }
+    );
+    assert_eq!(
+        expire_steers(&pool, std::time::Duration::from_secs(600)).await?,
+        0
+    );
+    // Позднее доказательство воркера всё ещё принимается.
+    assert!(matches!(
+        apply_steer(&pool, steer_command_id, InputReceipt::Accepted).await,
+        ApplyOutcome::Applied {
+            input_state: InputState::Accepted
+        }
+    ));
     Ok(())
 }
