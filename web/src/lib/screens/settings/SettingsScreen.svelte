@@ -10,7 +10,7 @@
   import { theme, type ThemePref } from '#lib/theme.js';
   import { getEnterPref, setEnterPref, type EnterPref } from '#lib/composer/prefs.js';
   import { currentUpdate, installation } from '#lib/pwa/register.js';
-  import { staleness } from '#lib/pwa/offline.js';
+  import { staleness } from '#lib/pwa/sync-state.js';
   import { purgeLocal } from '#lib/pwa/signout.js';
   import SecondaryHeader from '../SecondaryHeader.svelte';
   import Button from '#lib/ui/Button.svelte';

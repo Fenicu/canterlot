@@ -140,7 +140,6 @@ const server = createServer(async (request, response) => {
       const nextShell = await readFile(resolve(nextRoot, '200.html'), 'utf8');
       response.setHeader('Content-Security-Policy', productionCsp({ websocketOrigin: `ws://127.0.0.1:${port}`, scriptHashes: hashes(nextShell) }));
     }
-    if (url.pathname === '/service-worker.js') response.setHeader('Service-Worker-Allowed', '/');
     if (request.method === 'POST' && url.pathname === '/_share') {
       response.writeHead(303, { Location: '/share?error=sw_inactive' });
       response.end();
@@ -158,7 +157,6 @@ const server = createServer(async (request, response) => {
       response.end(request.method === 'HEAD' ? undefined : fixture);
       return;
     }
-
     let file = resolve(selectedRoot, `.${decodeURIComponent(url.pathname)}`);
     if (file !== selectedRoot && !file.startsWith(selectedRoot + sep)) {
       response.writeHead(403);

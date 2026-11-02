@@ -59,6 +59,7 @@ pub struct ClaudeCodeAdapter {
     tool_ids: HashMap<String, Uuid>,
     tool_finals: HashMap<Uuid, AdapterEvent>,
     requests: HashMap<String, (String, Value)>,
+    limits_calls: HashMap<Uuid, String>,
     /// Вводы, о которых `transmit` вернул `Undetermined`: их позднее
     /// доказательство уходит событием `InputAccepted`.
     unconfirmed: HashSet<Uuid>,
@@ -113,6 +114,7 @@ impl ClaudeCodeAdapter {
             tool_ids: HashMap::new(),
             tool_finals: HashMap::new(),
             requests: HashMap::new(),
+            limits_calls: HashMap::new(),
             unconfirmed: HashSet::new(),
             initialized: false,
             cli_ready: false,
@@ -477,7 +479,11 @@ impl ClaudeCodeAdapter {
                     arguments,
                 });
             }
-            BrokerEvent::LimitsQuery { call } => {
+            BrokerEvent::ShareFile { call_id, arguments } => {
+                self.events
+                    .push_back(AdapterEvent::ShareFile { call_id, arguments });
+            }
+            BrokerEvent::LimitsQuery { call_id } => {
                 let snap = self.limits.snapshot();
                 let current = [
                     (LimitWindow::FiveHour, snap.five_hour),
@@ -493,14 +499,16 @@ impl ClaudeCodeAdapter {
                     })
                 })
                 .collect();
-                self.broker.as_mut().unwrap().answer_limits(
-                    call,
+                let text = crate::adapter::canterlot_mcp::mcp::limits_tool_text(
                     &LimitsSnapshot {
                         provider: "claude".into(),
                         current,
                         ..Default::default()
                     },
+                    "claude",
                 );
+                self.limits_calls.insert(call_id, text);
+                self.events.push_back(AdapterEvent::Limits { call_id });
             }
         }
     }
@@ -1299,6 +1307,7 @@ impl Adapter for ClaudeCodeAdapter {
     }
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
         // Итог вызова пресетов уходит запросившему CLI; чужой итог брокер отбросит.
+        let result = crate::adapter::limits_fallback(&mut self.limits_calls, call_id, result);
         if let Some(broker) = self.broker.as_mut() {
             broker.answer_agent_tool(call_id, &result).await;
         }

@@ -117,6 +117,9 @@ async fn owned_files(pool: &PgPool, owner_id: Uuid, id: Uuid) -> Result<Vec<Uuid
           where c.id=$1 and c.owner_id=$2
          union all
          select m.id from block_media m join conversations c on c.id=m.conversation_id
+          where c.id=$1 and c.owner_id=$2
+         union all
+         select f.id from block_files f join conversations c on c.id=f.conversation_id
           where c.id=$1 and c.owner_id=$2",
     )
     .bind(id)
@@ -247,6 +250,7 @@ async fn purge_rows(
         "delete from inputs where conversation_id=$1",
         "delete from blocks where conversation_id=$1",
         "delete from block_media where conversation_id=$1",
+        "delete from block_files where conversation_id=$1",
         "delete from commands where conversation_id=$1",
         "delete from attachments where conversation_id=$1",
         "delete from queue_state where conversation_id=$1",

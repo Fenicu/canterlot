@@ -463,7 +463,7 @@ chat.example.com {
             }
         }
 
-        # 5. Обработка Web Share Target при неактивном Service Worker
+        # 5. Переходный ответ для старых установок с Web Share Target
         @share {
             method POST
             path /_share
@@ -472,9 +472,9 @@ chat.example.com {
             redir * /share?error=sw_inactive 303
         }
 
-        # 6. Раздача статики PWA (service-worker и manifest без кэширования)
+        # 6. Раздача статики PWA: manifest без кэширования
         handle {
-            @fresh path /service-worker.js /manifest.webmanifest
+            @fresh path /manifest.webmanifest
             header @fresh Cache-Control "no-cache"
             root * /var/www/canterlot/build
             try_files {path} /200.html

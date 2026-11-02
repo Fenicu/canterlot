@@ -1,4 +1,4 @@
-export type ResumeReason = 'visible' | 'pageshow' | 'resume' | 'online' | 'clock_jump';
+export type ResumeReason = 'visible' | 'pageshow' | 'resume' | 'online' | 'focus' | 'clock_jump';
 export interface Lifecycle {
   onResume(cb: (i: { hiddenMs: number; reason: ResumeReason }) => void): () => void;
   onSuspend(cb: (r: 'hidden' | 'pagehide' | 'freeze') => void): () => void;
@@ -32,12 +32,13 @@ export function browserLifecycle(environment?: LifecycleEnvironment): Lifecycle 
     for (const cb of suspends) cb(reason);
   };
   const visibility = () => env.document.visibilityState === 'hidden' ? suspend('hidden') : resume('visible');
-  const pageshow = (event: PageTransitionEvent) => { if (event.persisted) resume('pageshow'); };
+  const pageshow = () => resume('pageshow');
   const pagehide = () => suspend('pagehide');
   const freeze = () => suspend('freeze');
   const thaw = () => resume('resume');
   const online = () => resume('online');
   const offline = () => suspend('hidden');
+  const focus = () => resume('focus');
   const tick = () => {
     const nextWall = env.wall(), nextMonotonic = env.monotonic();
     const jump = Math.max(Math.abs((nextWall - wall) - (nextMonotonic - monotonic)), nextMonotonic - monotonic - 1000);
@@ -48,7 +49,7 @@ export function browserLifecycle(environment?: LifecycleEnvironment): Lifecycle 
   const bindings: [EventTarget, string, EventListener][] = [
     [env.document, 'visibilitychange', visibility], [env.window, 'pageshow', pageshow as EventListener],
     [env.window, 'pagehide', pagehide], [env.document, 'freeze', freeze], [env.document, 'resume', thaw],
-    [env.window, 'online', online], [env.window, 'offline', offline]
+    [env.window, 'online', online], [env.window, 'offline', offline], [env.window, 'focus', focus]
   ];
   function connect() {
     if (listening) return;

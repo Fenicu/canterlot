@@ -67,6 +67,16 @@ export interface HistoryBlock {
     height?: number | null;
     ready?: boolean;
   }[];
+  files?: {
+    attachment_id: string;
+    name: string;
+    mime: string;
+    size: number;
+    title: string;
+    note: string;
+    width?: number | null;
+    height?: number | null;
+  }[];
 }
 
 export interface HistoryInput {
@@ -685,6 +695,9 @@ export class ChatStore {
       case "block_incomplete":
         this.#block(event);
         return;
+      case "block_file_attached":
+        if (event.kind === "block_file_attached") this.#attachFile(event.payload);
+        break;
       case "block_media_attached":
         if (event.kind === "block_media_attached")
           this.#attachMedia(event.payload);
@@ -911,6 +924,36 @@ export class ChatStore {
     this.diagnostics.push(item);
     if (this.diagnostics.length > MAX_DIAGNOSTICS)
       this.diagnostics.splice(0, this.diagnostics.length - MAX_DIAGNOSTICS);
+  }
+
+  #attachFile(payload: {
+    block_id: string;
+    attachment_id: string;
+    name: string;
+    mime: string;
+    size: number;
+    title: string;
+    note: string;
+    width: number | null;
+    height: number | null;
+  }): void {
+    const block = this.blocks.get(payload.block_id);
+    if (!block) return;
+    const next = block.files.map((item) => ({ ...item }));
+    const found = next.find((item) => item.attachment_id === payload.attachment_id);
+    const file = {
+      attachment_id: payload.attachment_id,
+      name: payload.name,
+      mime: payload.mime,
+      size: payload.size,
+      title: payload.title,
+      note: payload.note,
+      width: payload.width,
+      height: payload.height,
+    };
+    if (found) Object.assign(found, file);
+    else next.push(file);
+    block.files = next;
   }
 
   #attachMedia(payload: {
@@ -1273,6 +1316,18 @@ export class ChatStore {
         width: shot.width ?? 1,
         height: shot.height ?? 1,
         ready: shot.ready !== false,
+      }));
+    }
+    if (item.files) {
+      block.files = item.files.map((file) => ({
+        attachment_id: file.attachment_id,
+        name: file.name,
+        mime: file.mime,
+        size: file.size,
+        title: file.title,
+        note: file.note,
+        width: file.width,
+        height: file.height,
       }));
     }
     block.truncated = item.content_truncated;

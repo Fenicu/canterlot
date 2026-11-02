@@ -5527,7 +5527,8 @@
           "content_bytes",
           "rev",
           "revision_gap",
-          "media"
+          "media",
+          "files"
         ],
         "properties": {
           "agent": {
@@ -5558,6 +5559,13 @@
           },
           "created_seq": {
             "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileView"
+            },
+            "description": "Файлы, которые агент отдал владельцу; появляются после `block_file_attached`."
           },
           "finished_at": {
             "type": [
@@ -6897,6 +6905,54 @@
           }
         ]
       },
+      "FileView": {
+        "type": "object",
+        "description": "Файл, который агент отдал владельцу, в моделях чтения блока.",
+        "required": [
+          "attachment_id",
+          "name",
+          "mime",
+          "size",
+          "title",
+          "note"
+        ],
+        "properties": {
+          "attachment_id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "mime": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "note": {
+            "type": "string"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "title": {
+            "type": "string"
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          }
+        }
+      },
       "Group": {
         "type": "object",
         "required": [
@@ -7526,6 +7582,14 @@
               "null"
             ]
           },
+          "working_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Сумма ходов без ожидания владельца: разрешения и вопросы внутри хода."
+          },
           "worktree": {
             "type": [
               "string",
@@ -7848,7 +7912,8 @@
               "activity",
               "unread_count",
               "queue",
-              "crunch"
+              "crunch",
+              "working_ms"
             ],
             "properties": {
               "activity": {
@@ -7878,6 +7943,11 @@
               "unread_count": {
                 "type": "integer",
                 "format": "int32"
+              },
+              "working_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом."
               }
             }
           }

@@ -313,6 +313,8 @@ message RecordBody {
     // context compactions (auto and manual) and live context fill.
     CompactionEvent compaction_event = 39;
     ContextProgress context_progress = 40;
+    // Только при согласованной возможности session_tools_v1: файл, отданный владельцу.
+    BlockFile block_file = 41;
   }
 }
 
@@ -774,6 +776,13 @@ message MediaHeader {
   string mime = 4;
   uint64 size = 5;
   string sha256 = 6;
+  // Общий файл для владельца: имя, заголовок и заметка; без share — картинка агента.
+  string name = 7;
+  string title = 8;
+  string note = 9;
+  bool share = 10;
+  uint32 width = 11;
+  uint32 height = 12;
 }
 
 message MediaChunk {
@@ -788,6 +797,19 @@ message MediaStored {
 }
 
 // Пишется сопровождением только после MediaStored: хаб не видит ссылок на неопубликованное.
+message BlockFile {
+  string block_id = 1;
+  string attachment_id = 2;
+  string name = 3;
+  string mime = 4;
+  uint64 size = 5;
+  string sha256 = 6;
+  string title = 7;
+  string note = 8;
+  uint32 width = 9;
+  uint32 height = 10;
+}
+
 message BlockMedia {
   string block_id = 1;
   string media_id = 2;

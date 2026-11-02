@@ -7,7 +7,6 @@ import { PNG } from 'pngjs';
 import { getStack } from './global-setup';
 import { synthetic } from './synthetic';
 import { answerText, createHubClient, createSessionUI, fetchFrames, sendChaos, sendScript } from './hub';
-import { postShare } from '../ui/secondary-fixture';
 
 const tag = { tag: '@stack' };
 
@@ -354,31 +353,6 @@ test.describe('stack: features and security', () => {
     expect(detail.settings.effective.model).toBe('synthetic-small');
     expect(detail.settings.pending.model ?? null).toBeNull();
     await expect(page.locator('.subtitle').first()).not.toContainText('со следующего хода');
-  });
-
-  test('share_target_post_reaches_a_real_conversation', tag, async ({ page }) => {
-    test.setTimeout(90_000);
-    const stack = getStack();
-    const hub = createHubClient(stack);
-    const title = `Общий-${randomUUID().slice(0, 6)}`;
-    const id = await hub.createConversation({ title, start: false });
-
-    await page.goto(`${stack.baseUrl}/sessions`);
-    await expect(page.locator('[data-list-ready]')).toBeVisible({ timeout: 20_000 });
-    // Android «Поделиться» открывает /_share навигацией верхнего уровня: сервис-воркер кладёт POST в приёмник и переводит на выбор сессии.
-    await postShare(page, {
-      title: 'Из галереи',
-      text: 'Сверь с кодом',
-      url: 'https://example.org/',
-      files: [{ name: 'notes.txt', body: 'содержимое файла' }]
-    });
-    await expect(page.getByText('notes.txt')).toBeVisible({ timeout: 15_000 });
-    await page.getByRole('button', { name: new RegExp(`^${title}`) }).click();
-    await expect(page).toHaveURL(new RegExp(`/c/${id}`), { timeout: 20_000 });
-    // Файл настоящий: он загружается на хаб и встаёт вложением в поле ввода.
-    await expect(page.getByRole('progressbar', { name: 'notes.txt' })).toBeVisible({ timeout: 20_000 });
-    await expect.poll(async () => Number(await page.getByRole('progressbar', { name: 'notes.txt' }).getAttribute('aria-valuenow')), { timeout: 20_000 }).toBe(Buffer.byteLength('содержимое файла'));
-    await expect(page.getByRole('textbox', { name: 'Сообщение' })).toHaveValue(/Сверь с кодом/);
   });
 
   test('new_session_gets_home_and_suggestions_from_the_real_worker', tag, async ({ page }) => {

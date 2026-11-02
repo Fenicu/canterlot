@@ -19,6 +19,7 @@ message ControlToSupervisor {
     canterlot.worker.v1.DeliverDecision deliver_decision = 11;
     AgentCallResult agent_call_result = 12;
     CompactRequest compact = 13;
+    ShareResult share_result = 14;
   }
 }
 
@@ -33,6 +34,7 @@ message SupervisorToControl {
     DecisionAck decision_ack = 7;
     DecisionOutcome decision_outcome = 8;
     AgentCall agent_call = 9;
+    ShareUpload share_upload = 10;
   }
 }
 
@@ -189,6 +191,26 @@ message MediaUpload {
 
 message MediaResult {
   string media_id = 1;
+  bool stored = 2;
+  string reason = 3;
+}
+
+// Файл лежит в exec_dir/media/<media_id>; путь по IPC не передаётся.
+message ShareUpload {
+  string share_id = 1;
+  string call_id = 2;
+  string name = 3;
+  string title = 4;
+  string note = 5;
+  string mime = 6;
+  uint64 size = 7;
+  string sha256 = 8;
+  uint32 width = 9;
+  uint32 height = 10;
+}
+
+message ShareResult {
+  string share_id = 1;
   bool stored = 2;
   string reason = 3;
 }

@@ -49,6 +49,12 @@ export const fmt = {
 		const minutes = total % 60;
 		return [hours ? `${hours} ч` : '', minutes ? `${minutes} мин` : ''].filter(Boolean).join(' ');
 	},
+	/** «1 ч 5 мин из 4 ч 19 мин»: работа внутри ходов против их общей длительности. */
+	worked(workingMs: number, totalMs: number): string {
+		const working = fmt.durationCoarse(Math.max(0, workingMs));
+		const total = fmt.durationCoarse(Math.max(0, totalMs));
+		return Math.abs(totalMs - workingMs) < 1000 ? total : `${working} из ${total}`;
+	},
 	clock(ts: number): string {
 		return clockFmt.format(ts);
 	},

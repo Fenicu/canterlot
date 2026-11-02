@@ -38,9 +38,9 @@ for (const [path, open] of [['after_reload', reloaded], ['live', live]] as const
     test('rows_read_as_the_mockup_and_no_internal_label_leaks', async ({ page }) => {
       await open(page);
       await expect(toolRow(page, 'canterlot_limits').locator('.name')).toHaveText('canterlot_limits');
-      await expect(page.locator('.card header strong').last()).toHaveText('Claude');
+      await expect(page.locator('.card [data-role="answer-footer"] strong').last()).toHaveText('Claude');
       for (const leak of ['rchestrator', 'claude-opus-5-5', 'mcp__', '0,0 с', 'Bash: ', 'Read: ', 'Agent: ', 'инструмент']) {
-        await expect(page.locator('.tool .head, .card header, .sub')).not.toContainText([leak]);
+        await expect(page.locator('.tool .head, .card [data-role="answer-footer"], .sub')).not.toContainText([leak]);
       }
       await expect(page.locator('.sub .title')).toHaveText('Субагент · Explore · Opus 5.5');
       await expect(page.locator('.sub .status')).toHaveText('Готово · Find note.txt in check dir');

@@ -26,6 +26,7 @@ const labels: Record<ConnectionPhase, string> = {
   offline: 'Нет связи с сервером', auth_required: 'Сессия истекла. Войдите снова', incompatible: 'Обновите приложение для продолжения'
 };
 type Slot = { sync: ScopeSync; applier: ScopeApplier; refs: number; cancelRelease?: () => void };
+const OPEN_TIMEOUT = 10_000;
 export class ConnectionManager {
   readonly status: ConnectionStatus;
   private scopes = new Map<ScopeName, Slot>();
@@ -34,6 +35,9 @@ export class ConnectionManager {
   private disposed = false;
   private opened = false;
   private connecting = false;
+  private connectStartedAt = 0;
+  private selfClosing = false;
+  private authRechecking = false;
   private failed = 0;
   private generation = 0;
   private immediate = false;
@@ -47,7 +51,7 @@ export class ConnectionManager {
     this.cleanup.push(deps.transport.on({
       open: () => this.onOpen(), close: info => this.onClose(info), message: text => this.onMessage(text)
     }));
-    this.cleanup.push(deps.lifecycle.onResume(info => { if (info.reason !== 'visible' || info.hiddenMs > 5000) this.probe(info.reason); }));
+    this.cleanup.push(deps.lifecycle.onResume(info => this.probe(info.reason)));
     this.cleanup.push(deps.lifecycle.onSuspend(() => {
       this.cancelPing?.(); this.cancelPing = undefined; this.ping = undefined;
       for (const slot of this.scopes.values()) slot.sync.flushNow();
@@ -68,11 +72,12 @@ export class ConnectionManager {
   private connect(): void {
     if (this.disposed || this.connecting || this.opened || this.status.phase === 'incompatible' || this.status.phase === 'auth_required') return;
     this.cancelReconnect?.(); this.cancelReconnect = undefined;
-    this.connecting = true; this.deps.transport.open();
+    this.selfClosing = false;
+    this.connecting = true; this.connectStartedAt = this.deps.now(); this.deps.transport.open();
   }
   private onOpen(): void {
     if (this.disposed) return;
-    this.generation++; this.connecting = false; this.opened = true; this.failed = 0;
+    this.generation++; this.connecting = false; this.opened = true; this.selfClosing = false; this.failed = 0;
     this.status.lastFrameAt = this.lastPingAt = this.deps.now();
     this.phase('live');
     const generation = this.generation;
@@ -81,14 +86,15 @@ export class ConnectionManager {
   }
   private onClose(info: { code: number; opened: boolean }): void {
     if (this.disposed) return;
-    this.generation++; this.opened = false; this.connecting = false;
+    this.generation++; this.opened = false; this.connecting = false; this.connectStartedAt = 0;
+    const selfClosing = this.selfClosing; this.selfClosing = false;
     this.cancelPing?.(); this.cancelPing = undefined; this.ping = undefined;
     for (const slot of this.scopes.values()) slot.sync.onTransportClosed();
     if (this.status.phase === 'incompatible' || this.status.phase === 'auth_required') return;
     this.phase('reconnecting');
     const immediate = this.immediate || info.code === 4401;
     this.immediate = false;
-    if (!info.opened) this.failed++; else this.failed = 0;
+    if (info.opened) this.failed = 0; else if (!selfClosing) this.failed++;
     if (this.failed >= 2) { void this.checkAuth(); return; }
     this.retry(immediate ? 0 : backoff(this.status.attempt++, this.deps.rng));
   }
@@ -101,6 +107,20 @@ export class ConnectionManager {
     this.phase(result === 'down' ? 'offline' : 'reconnecting');
     this.retry(backoff(this.status.attempt++, this.deps.rng));
   }
+  /** Повторная проверка входа после истечения сессии: без явного отказа снова подключаемся. */
+  private async recheckAuth(): Promise<void> {
+    if (this.authRechecking || this.disposed || this.status.phase !== 'auth_required') return;
+    this.authRechecking = true;
+    const generation = this.generation;
+    let result: 'ok' | 'expired' | 'down';
+    try { result = await this.deps.probeAuth(); } catch { result = 'down'; }
+    this.authRechecking = false;
+    if (this.disposed || generation !== this.generation || this.status.phase !== 'auth_required') return;
+    if (result !== 'ok') return;
+    this.failed = 0;
+    this.phase('reconnecting');
+    this.connect();
+  }
   private retry(ms: number): void {
     this.cancelReconnect?.();
     this.cancelReconnect = this.schedule(() => { this.cancelReconnect = undefined; this.connect(); }, ms);
@@ -108,7 +128,7 @@ export class ConnectionManager {
   private restart(immediate = true): void {
     if (this.disposed || this.status.phase === 'incompatible' || this.status.phase === 'auth_required') return;
     this.cancelReconnect?.(); this.cancelReconnect = undefined;
-    if (this.opened || this.connecting) { this.immediate = immediate; this.deps.transport.close(); }
+    if (this.opened || this.connecting) { this.immediate = immediate; this.selfClosing = true; this.deps.transport.close(); }
     else this.retry(0);
   }
   private onMessage(text: string): void {
@@ -134,8 +154,9 @@ export class ConnectionManager {
   }
   private tick(): void {
     if (this.disposed) return;
-    if (this.deps.lifecycle.visible && this.opened && this.status.phase === 'live') {
-      const now = this.deps.now();
+    const now = this.deps.now();
+    if (this.connecting && now - this.connectStartedAt >= OPEN_TIMEOUT) this.restart(false);
+    else if (this.deps.lifecycle.visible && this.opened && this.status.phase === 'live') {
       if (!this.ping && now - this.status.lastFrameAt >= 45_000) this.restart(false);
       else if (now - this.lastPingAt >= 25_000) this.sendPing(5000);
     }
@@ -184,8 +205,10 @@ export class ConnectionManager {
   probe(reason: ResumeReason | 'manual'): void {
     if (this.disposed || this.status.phase === 'incompatible') return;
     if (this.status.phase === 'auth_required') {
-      if (reason !== 'manual') return;
-      this.failed = 0; this.phase('connecting');
+      if (reason === 'manual') {
+        this.failed = 0; this.generation++; this.phase('connecting'); this.connect();
+      } else void this.recheckAuth();
+      return;
     }
     if (this.opened) {
       this.cancelPing?.(); this.cancelPing = undefined; this.ping = undefined;

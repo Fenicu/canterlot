@@ -1047,6 +1047,8 @@ export interface components {
             content_truncated: boolean;
             created_at: string;
             created_seq: string;
+            /** @description Файлы, которые агент отдал владельцу; появляются после `block_file_attached`. */
+            files: components["schemas"]["FileView"][];
             finished_at?: string | null;
             /** Format: uuid */
             id: string;
@@ -1378,6 +1380,21 @@ export interface components {
             kind: "stopped";
             outcome: string;
         };
+        /** @description Файл, который агент отдал владельцу, в моделях чтения блока. */
+        FileView: {
+            /** Format: uuid */
+            attachment_id: string;
+            /** Format: int32 */
+            height?: number | null;
+            mime: string;
+            name: string;
+            note: string;
+            /** Format: int64 */
+            size: number;
+            title: string;
+            /** Format: int32 */
+            width?: number | null;
+        };
         Group: {
             created_at: string;
             /** Format: uuid */
@@ -1535,6 +1552,11 @@ export interface components {
             /** Format: date-time */
             until?: string | null;
             window?: string | null;
+            /**
+             * Format: int64
+             * @description Сумма ходов без ожидания владельца: разрешения и вопросы внутри хода.
+             */
+            working_ms?: number | null;
             /** @description `accepted`: `removed`, `none`, `dirty` или `failed`. */
             worktree?: string | null;
         };
@@ -1624,6 +1646,11 @@ export interface components {
             queue: components["schemas"]["QueueView"];
             /** Format: int32 */
             unread_count: number;
+            /**
+             * Format: int64
+             * @description Сумма ходов без ожидания владельца; у живой сессии — вместе с текущим ходом.
+             */
+            working_ms: number;
         };
         ListPage: {
             counts: components["schemas"]["Counts"];

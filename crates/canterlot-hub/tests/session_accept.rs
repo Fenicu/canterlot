@@ -1216,3 +1216,82 @@ async fn rejected_removal_does_not_leave_the_copy_removing(pool: PgPool) {
     assert!(!fx.archived().await);
     assert_eq!(fx.commands("remove_worktree").await[0].2, "completed");
 }
+
+async fn control_tool(
+    fx: &Fx,
+    caller: Caller,
+    tool: &str,
+    target: Uuid,
+) -> Result<Value, ToolError> {
+    session_tools::call(&fx.context, &caller, tool, json!({"session_id": target})).await
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn interrupt_stops_the_live_turn_once(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.run_child().await;
+    let first = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(first["status"], "interrupted");
+    let second = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(second["status"], "interrupted");
+    assert_eq!(second["command_id"], first["command_id"]);
+    assert_eq!(fx.commands("interrupt").await.len(), 1);
+    assert_eq!(fx.live_executions().await, 1);
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn interrupt_reports_nothing_running(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.stopped_child().await;
+    let answer = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "nothing_running");
+    assert!(fx.commands("interrupt").await.is_empty());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn stop_stops_the_process_and_keeps_the_worktree(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    fx.run_child().await;
+    let answer = control_tool(&fx, fx.parent_caller(), "sessions.stop", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(answer["status"], "stopping");
+    assert_eq!(answer["worktree_kept"], true);
+    assert_eq!(fx.commands("stop_execution").await.len(), 1);
+    let again = control_tool(&fx, fx.parent_caller(), "sessions.stop", fx.child)
+        .await
+        .unwrap();
+    assert_eq!(again["status"], "already_stopping");
+    assert_eq!(again["command_id"], answer["command_id"]);
+    assert_eq!(fx.worktree().await["state"], "active");
+    assert!(!fx.archived().await);
+    assert!(fx.accept(false).await["status"].is_string());
+}
+
+#[sqlx::test(migrator = "canterlot_hub::db::MIGRATOR")]
+async fn only_the_direct_parent_may_stop_and_owner_sessions_are_untouchable(pool: PgPool) {
+    let fx = Fx::new(pool).await;
+    let elsewhere = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
+    sqlx::query("update conversations set parent_conversation_id=$2 where id=$1")
+        .bind(fx.child)
+        .bind(elsewhere)
+        .execute(&fx.pool)
+        .await
+        .unwrap();
+    let error = control_tool(&fx, fx.parent_caller(), "sessions.stop", fx.child)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::NotParent);
+
+    let root = testkit::seed_conversation(&fx.pool, fx.owner, fx.machine).await;
+    let error = control_tool(&fx, fx.parent_caller(), "sessions.interrupt", root)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, Code::NotDelegated);
+}

@@ -55,6 +55,7 @@ use crate::{
         SteerOutcome, TodoStatus, Transmission, TransmitOutcome, frame_names, registry_with,
     },
     containment::{Containment, ContainmentError, Member, Termination, TreeContainment},
+    machine::share::{self, Prepared as PreparedShare, ShareError},
     media::{self, Prepared, Skip},
 };
 
@@ -77,6 +78,30 @@ struct MediaJob {
 struct MediaQueue {
     preparing: usize,
     ready: VecDeque<Prepared>,
+    inflight: Option<Uuid>,
+}
+
+struct ShareJob {
+    share_id: Uuid,
+    call_id: Uuid,
+    block_id: Uuid,
+    path: PathBuf,
+    title: String,
+    note: String,
+}
+
+struct PendingShare {
+    call_id: Uuid,
+    block_id: Uuid,
+    prepared: PreparedShare,
+}
+
+/// Очередь файлов владельцу: читается и загружается по одному, блок и ссылка
+/// появляются только после ответа хаба о надёжной публикации.
+#[derive(Default)]
+struct ShareQueue {
+    preparing: usize,
+    ready: VecDeque<PendingShare>,
     inflight: Option<Uuid>,
 }
 
@@ -200,6 +225,8 @@ struct Supervisor {
     workdir: Option<PathBuf>,
     media: MediaQueue,
     media_jobs: mpsc::UnboundedSender<MediaJob>,
+    shares: ShareQueue,
+    share_jobs: mpsc::UnboundedSender<ShareJob>,
 }
 
 fn now_ms() -> u64 {
@@ -342,6 +369,7 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
     let pid = std::process::id();
     let start_ticks = crate::containment::start_ticks(pid)?;
     let (media_jobs, prepared) = media_preparer(exec_dir.clone());
+    let (share_jobs, share_prepared) = share_preparer(exec_dir.clone());
     let mut supervisor = Supervisor {
         attach_deadline: Some(Instant::now() + spec.timers.attach_wait),
         spec,
@@ -393,6 +421,8 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         workdir: None,
         media: MediaQueue::default(),
         media_jobs,
+        shares: ShareQueue::default(),
+        share_jobs,
     };
     if !recovered {
         supervisor.record(Body::JournalOpened(JournalOpened {
@@ -406,7 +436,10 @@ pub(super) async fn run(exec_dir: PathBuf) -> Result<ExitCode, SupervisorError> 
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     tracing::info!(execution_id = %supervisor.spec.execution_id, journal_id = %supervisor.sj.journal_id(), "supervisor started");
-    match supervisor.event_loop(server, prepared).await {
+    match supervisor
+        .event_loop(server, prepared, share_prepared)
+        .await
+    {
         Ok(code) => Ok(code),
         Err(error) => {
             tracing::error!(error_kind = ?std::mem::discriminant(&error), "supervisor failed");
@@ -434,6 +467,38 @@ fn media_preparer(
             .await
             .unwrap_or(Err(Skip::Unreadable));
             if done.send(result).is_err() {
+                break;
+            }
+        }
+    });
+    (jobs, prepared)
+}
+
+type SharePrepared = Result<(ShareJob, PreparedShare), (ShareJob, ShareError)>;
+
+fn share_preparer(
+    exec_dir: PathBuf,
+) -> (
+    mpsc::UnboundedSender<ShareJob>,
+    mpsc::UnboundedReceiver<SharePrepared>,
+) {
+    let (jobs, mut queue) = mpsc::unbounded_channel::<ShareJob>();
+    let (done, prepared) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Some(job) = queue.recv().await {
+            let dir = exec_dir.clone();
+            let (path, title, note) = (job.path.clone(), job.title.clone(), job.note.clone());
+            let share_id = job.share_id;
+            let result = tokio::task::spawn_blocking(move || {
+                share::prepare(&dir, share_id, &path, title, note)
+            })
+            .await
+            .unwrap_or(Err(ShareError::Unreadable));
+            let sent = match result {
+                Ok(prepared) => done.send(Ok((job, prepared))),
+                Err(error) => done.send(Err((job, error))),
+            };
+            if sent.is_err() {
                 break;
             }
         }
@@ -533,6 +598,9 @@ impl Supervisor {
         &mut self,
         mut server: IpcServer,
         mut prepared: mpsc::UnboundedReceiver<Result<Prepared, Skip>>,
+        mut share_prepared: mpsc::UnboundedReceiver<
+            Result<(ShareJob, PreparedShare), (ShareJob, ShareError)>,
+        >,
     ) -> Result<ExitCode, SupervisorError> {
         let (accepted_tx, mut accepted) = mpsc::channel::<IpcConnection>(8);
         let accept_task = tokio::spawn(async move {
@@ -571,6 +639,7 @@ impl Supervisor {
                 Some(connection) = accepted.recv() => self.on_connection(connection, &control_tx),
                 Some(control) = control_rx.recv() => self.on_control(control).await?,
                 Some(result) = prepared.recv() => self.on_media_prepared(result),
+                Some(result) = share_prepared.recv() => self.on_share_prepared(result).await?,
                 event = adapter_event(&mut self.adapter, self.adapter_exited || matches!(self.lifecycle, Lifecycle::Draining { .. })) => {
                     self.on_adapter_event(event).await?;
                     for _ in 0..63 {
@@ -824,6 +893,7 @@ impl Supervisor {
             down::Msg::ShipFrom(ship) => self.sj.enable_ship(ship.committed_seq),
             down::Msg::SjAck(ack) => self.sj.ack(ack.up_to_seq)?,
             down::Msg::MediaResult(result) => self.on_media_result(result)?,
+            down::Msg::ShareResult(result) => self.on_share_result(result).await?,
             down::Msg::DeliverDecision(decision) => self.on_decision(decision).await?,
             down::Msg::AgentCallResult(result) => self.on_agent_call_result(result).await,
         }
@@ -1222,6 +1292,251 @@ impl Supervisor {
         }
         self.pump_media();
         Ok(())
+    }
+
+    async fn on_share(
+        &mut self,
+        call_id: Uuid,
+        arguments: &serde_json::Value,
+    ) -> Result<(), SupervisorError> {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Args {
+            path: String,
+            title: Option<String>,
+            note: Option<String>,
+        }
+        let args: Args = match serde_json::from_value(arguments.clone()) {
+            Ok(args) => args,
+            Err(_) => {
+                self.answer_share(
+                    call_id,
+                    crate::adapter::AgentCallResult::Err {
+                        code: "invalid_arguments".into(),
+                        message: "invalid share_file arguments".into(),
+                    },
+                )
+                .await;
+                return Ok(());
+            }
+        };
+        if args.path.is_empty() || args.path.len() > 2048 || args.path.contains('\0') {
+            self.answer_share(
+                call_id,
+                crate::adapter::AgentCallResult::Err {
+                    code: "invalid_arguments".into(),
+                    message: "invalid path".into(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        let path = PathBuf::from(&args.path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            match self.workdir.clone() {
+                Some(workdir) => workdir.join(path),
+                None => {
+                    self.answer_share(
+                        call_id,
+                        crate::adapter::AgentCallResult::Err {
+                            code: "share_unreadable".into(),
+                            message: "the workdir is not known".into(),
+                        },
+                    )
+                    .await;
+                    return Ok(());
+                }
+            }
+        };
+        if !self.pilot_v1 {
+            self.answer_share(
+                call_id,
+                crate::adapter::AgentCallResult::Err {
+                    code: "capability_missing".into(),
+                    message: "the hub does not support files yet".into(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        if self.shares.preparing + self.shares.ready.len() >= 4 {
+            self.answer_share(
+                call_id,
+                crate::adapter::AgentCallResult::Err {
+                    code: "share_busy".into(),
+                    message: "too many files are being shared, try again".into(),
+                },
+            )
+            .await;
+            return Ok(());
+        }
+        let job = ShareJob {
+            share_id: Uuid::now_v7(),
+            call_id,
+            block_id: Uuid::now_v7(),
+            path,
+            title: args.title.unwrap_or_default(),
+            note: args.note.unwrap_or_default(),
+        };
+        if self.share_jobs.send(job).is_ok() {
+            self.shares.preparing += 1;
+        }
+        Ok(())
+    }
+
+    async fn on_share_prepared(&mut self, result: SharePrepared) -> Result<(), SupervisorError> {
+        self.shares.preparing = self.shares.preparing.saturating_sub(1);
+        match result {
+            Ok((job, prepared)) if !matches!(self.lifecycle, Lifecycle::Draining { .. }) => {
+                self.shares.ready.push_back(PendingShare {
+                    call_id: job.call_id,
+                    block_id: job.block_id,
+                    prepared,
+                });
+            }
+            Ok((job, prepared)) => {
+                let _ = std::fs::remove_file(media::media_path(&self.exec_dir, prepared.id));
+                self.answer_share(
+                    job.call_id,
+                    crate::adapter::AgentCallResult::Err {
+                        code: "share_unavailable".into(),
+                        message: "the session is stopping".into(),
+                    },
+                )
+                .await;
+            }
+            Err((job, error)) => {
+                self.answer_share(
+                    job.call_id,
+                    crate::adapter::AgentCallResult::Err {
+                        code: error.reason().into(),
+                        message: error.message().into(),
+                    },
+                )
+                .await;
+            }
+        }
+        self.pump_share();
+        Ok(())
+    }
+
+    fn pump_share(&mut self) {
+        if self.shares.inflight.is_some()
+            || self.attached.is_none()
+            || matches!(self.lifecycle, Lifecycle::Draining { .. })
+        {
+            return;
+        }
+        let Some(next) = self.shares.ready.front() else {
+            return;
+        };
+        let request = canterlot_proto::worker::ipc::ShareUpload {
+            share_id: next.prepared.id.to_string(),
+            call_id: next.call_id.to_string(),
+            name: next.prepared.name.clone(),
+            title: next.prepared.title.clone(),
+            note: next.prepared.note.clone(),
+            mime: next.prepared.mime.clone(),
+            size: next.prepared.size,
+            sha256: next.prepared.sha256.clone(),
+            width: next.prepared.width.unwrap_or_default(),
+            height: next.prepared.height.unwrap_or_default(),
+        };
+        self.shares.inflight = Some(next.prepared.id);
+        self.send(up::Msg::ShareUpload(request));
+    }
+
+    async fn on_share_result(
+        &mut self,
+        result: canterlot_proto::worker::ipc::ShareResult,
+    ) -> Result<(), SupervisorError> {
+        let Ok(id) = Uuid::parse_str(&result.share_id) else {
+            return Ok(());
+        };
+        if self.shares.inflight != Some(id)
+            || self.shares.ready.front().map(|p| p.prepared.id) != Some(id)
+        {
+            return Ok(());
+        }
+        self.shares.inflight = None;
+        let pending = self.shares.ready.pop_front().expect("front share");
+        let _ = std::fs::remove_file(media::media_path(&self.exec_dir, id));
+        if result.stored {
+            self.record(Body::BlockStarted(BlockStarted {
+                block_id: pending.block_id.to_string(),
+                rev: 1,
+                kind: "tool_call".into(),
+                tool_name: "share_file".into(),
+                summary: if pending.prepared.title.is_empty() {
+                    pending.prepared.name.clone()
+                } else {
+                    pending.prepared.title.clone()
+                },
+                model: String::new(),
+                agent: "main".into(),
+                ..Default::default()
+            }))?;
+            self.record(Body::BlockFinal(BlockFinal {
+                block_id: pending.block_id.to_string(),
+                rev: 2,
+                text: pending.prepared.note.clone(),
+                ..Default::default()
+            }))?;
+            self.record(Body::BlockFile(canterlot_proto::worker::v1::BlockFile {
+                block_id: pending.block_id.to_string(),
+                attachment_id: id.to_string(),
+                name: pending.prepared.name.clone(),
+                mime: pending.prepared.mime.clone(),
+                size: pending.prepared.size,
+                sha256: pending.prepared.sha256.clone(),
+                title: pending.prepared.title.clone(),
+                note: pending.prepared.note.clone(),
+                width: pending.prepared.width.unwrap_or_default(),
+                height: pending.prepared.height.unwrap_or_default(),
+            }))?;
+            let kind = if pending.prepared.mime.starts_with("image/") {
+                "image"
+            } else if pending.prepared.mime.starts_with("video/") {
+                "video"
+            } else {
+                "file"
+            };
+            self.answer_share(
+                pending.call_id,
+                crate::adapter::AgentCallResult::Ok(serde_json::json!({
+                    "status": "shared",
+                    "attachment_id": id,
+                    "name": pending.prepared.name,
+                    "mime": pending.prepared.mime,
+                    "size": pending.prepared.size,
+                    "kind": kind,
+                    "title": pending.prepared.title,
+                    "note": pending.prepared.note,
+                    "hint": "The owner sees this file in this turn: images and videos open on tap, other files download.",
+                })),
+            )
+            .await;
+        } else {
+            self.answer_share(
+                pending.call_id,
+                crate::adapter::AgentCallResult::Err {
+                    code: "share_unavailable".into(),
+                    message: format!("the hub did not accept the file ({})", result.reason),
+                },
+            )
+            .await;
+        }
+        self.pump_share();
+        Ok(())
+    }
+
+    async fn answer_share(&mut self, call_id: Uuid, result: crate::adapter::AgentCallResult) {
+        self.agent_calls.remove(&call_id);
+        if let Some(adapter) = self.adapter.as_mut() {
+            adapter.agent_call_result(call_id, result).await;
+        }
     }
 
     fn received_table(&self) -> Vec<ReceivedInput> {
@@ -2212,6 +2527,22 @@ impl Supervisor {
                     self.send(up::Msg::CliStarted(info));
                 }
             }
+            AdapterEvent::ShareFile { call_id, arguments } => {
+                self.on_share(call_id, &arguments).await?;
+            }
+            AdapterEvent::Limits { call_id } => {
+                let tool = "limits.report".to_owned();
+                let arguments = serde_json::json!({"provider": self.provider});
+                let deadline = crate::exec::deadline_for(&tool, &arguments).supervisor;
+                self.agent_calls.insert(call_id, Instant::now() + deadline);
+                self.send(up::Msg::AgentCall(
+                    canterlot_proto::worker::ipc::AgentCall {
+                        call_id: call_id.to_string(),
+                        tool,
+                        arguments_json: arguments.to_string(),
+                    },
+                ));
+            }
             AdapterEvent::AgentCall {
                 call_id,
                 tool,
@@ -2957,6 +3288,7 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sj = Sj::create(dir.path()).unwrap();
         let (media_jobs, _prepared) = mpsc::unbounded_channel();
+        let (share_jobs, _share_prepared) = mpsc::unbounded_channel();
         let state = std::sync::Arc::new(std::sync::Mutex::new(StubState::default()));
         let adapter: Option<Box<dyn Adapter>> = Some(Box::new(StubAdapter {
             state: state.clone(),
@@ -3023,6 +3355,8 @@ mod tests {
             workdir: None,
             media: MediaQueue::default(),
             media_jobs,
+            shares: ShareQueue::default(),
+            share_jobs,
         };
         (dir, supervisor, state)
     }

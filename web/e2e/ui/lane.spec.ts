@@ -254,6 +254,10 @@ test('delegation_collapses_old_subagents_into_a_row_and_opens_each_lane', async 
 
 	const names = scope.locator('.tree-node:not(.older-toggle) .subagent-name');
 	await expect(names).toHaveText(['идёт', 'свежий']);
+	const fresh = scope.locator('.tree-node').filter({ hasText: 'свежий' });
+	await expect(fresh.locator('.worked')).toHaveText('2 мин');
+	await expect(scope.locator('.tree-node').filter({ hasText: 'идёт' }).locator('.worked')).toHaveCount(0);
+	await page.screenshot({ path: `test-results/delegation-worked-${test.info().project.name}.png` });
 	const toggle = scope.getByRole('button', { name: /^Завершённые/ });
 	await expect(toggle).toHaveText('Завершённые · 14, прервано 1');
 	await expect(toggle).toHaveAttribute('aria-expanded', 'false');

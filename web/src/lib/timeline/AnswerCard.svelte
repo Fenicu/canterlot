@@ -93,12 +93,6 @@
 {/snippet}
 
 <article class="card">
-  {#if head}
-    <header>
-      <p><strong>{agent}</strong><time>{fmt.clock(head.createdAt)}</time></p>
-      <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
-    </header>
-  {/if}
   {#each view.shown as item (item.key)}
     {#if item.key === view.seam}
       <button type="button" class="more" onclick={() => folds.reveal(cardKey)}>Показать ещё {view.hidden} {fmt.plural(view.hidden, ['шаг', 'шага', 'шагов'])}</button>
@@ -114,6 +108,12 @@
   {#if streaming && head}
     <LiveLine {phase} tool={active ? toolTitle(active).name : ''} startedAt={started} {now} />
   {/if}
+  {#if head}
+    <footer class="byline" data-role="answer-footer">
+      <p><strong>{agent}</strong><time datetime={new Date(head.createdAt).toISOString()}>{fmt.clock(head.createdAt)}</time></p>
+      <IconButton icon="info" label="Сведения о ходе" onclick={() => onInfo?.(head.inputCommandId || head.id)} />
+    </footer>
+  {/if}
 </article>
 
 <style>
@@ -126,11 +126,11 @@
     gap: var(--s2);
     min-width: 0;
   }
-  header { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-right: calc(var(--s3) * -1); }
-  header p { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; margin: 0; }
+  .byline { display: flex; justify-content: space-between; align-items: center; gap: var(--s2); margin-top: var(--s2); margin-right: calc(var(--s3) * -1); }
+  .byline p { display: flex; align-items: baseline; gap: var(--s4); min-width: 0; margin: 0; }
   strong { font-weight: var(--weight-semibold); }
   time { color: var(--time); font-size: var(--fs-sm); font-variant-numeric: tabular-nums; }
-  header :global(button) { color: var(--secondary); }
+  .byline :global(button) { color: var(--secondary); }
   .entry { min-width: 0; }
   .entry:has(> :global(.text)) { margin-block: var(--s2); }
   .report { display: flex; flex-direction: column; gap: var(--s2); margin-top: var(--s2); }

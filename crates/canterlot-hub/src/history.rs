@@ -101,6 +101,8 @@ pub struct BlockView {
     pub incomplete_reason: Option<String>,
     /// Картинки, на которые смотрел агент; появляются после `block_media_attached`.
     pub media: Vec<crate::media::MediaView>,
+    /// Файлы, которые агент отдал владельцу; появляются после `block_file_attached`.
+    pub files: Vec<crate::media::FileView>,
 }
 /// Вопрос или разрешение на том месте ленты, где агент его задал: открытый запрос
 /// стоит у поля ввода, решённый остаётся здесь и после перезагрузки.
@@ -211,6 +213,7 @@ async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx
     };
     let at = time(r.try_get("created_at")?);
     let media = crate::media::for_block(conn, id).await?;
+    let files = crate::media::files_for_block(conn, id).await?;
     Ok(BlockView {
         id,
         kind,
@@ -236,6 +239,7 @@ async fn block_view(conn: &mut PgConnection, id: Uuid) -> Result<BlockView, sqlx
         revision_gap: r.try_get("revision_gap")?,
         incomplete_reason: r.try_get("incomplete_reason")?,
         media,
+        files,
     })
 }
 pub async fn page(

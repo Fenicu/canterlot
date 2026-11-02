@@ -1,4 +1,4 @@
-type UpdateState = 'idle' | 'available' | 'ready' | 'applying';
+type UpdateState = 'idle' | 'available' | 'applying' | 'failed';
 export let needsUpdate = false;
 export function notifyIncompatible(): void {
   needsUpdate = true;
@@ -8,98 +8,76 @@ interface UpdateEnvironment {
   isSafe(): boolean;
   flushDrafts(): Promise<void>;
   hidden(): boolean;
-  serviceWorker?: EventTarget;
   reload?(): void;
+  /** Версия текущей сборки; сравнивается с _app/version.json. */
+  version?: string;
+  fetch?(input: string, init?: RequestInit): Promise<Response>;
 }
+
+const FLUSH_FAILED = 'Не удалось сохранить черновик. Обновление отложено';
 
 export class UpdateController extends EventTarget {
   #state: UpdateState = 'idle';
-  #changed = false;
-  #requested = false;
-  #flushed = false;
+  #failure = '';
   #applying = false;
-  #applyWhenReady = false;
   #destroyed = false;
-  #worker?: EventTarget;
-  #installing?: ServiceWorker;
-  constructor(private reg: ServiceWorkerRegistration, private env: UpdateEnvironment) {
+  constructor(private env: UpdateEnvironment) {
     super();
-    this.#worker = env.serviceWorker ?? (typeof navigator !== 'undefined' ? navigator.serviceWorker : undefined);
-    this.#worker?.addEventListener('controllerchange', this.#controllerChange);
-    reg.addEventListener('updatefound', this.#updateFound);
-    this.#observe();
   }
   get state(): UpdateState { return this.#state; }
-  get message(): string { return this.#state === 'idle' ? '' : 'Доступна новая версия'; }
+  get message(): string {
+    if (this.#state === 'failed') return this.#failure;
+    return this.#state === 'idle' ? '' : 'Доступна новая версия';
+  }
   #set(state: UpdateState) { this.#state = state; this.dispatchEvent(new Event('change')); }
-  #observe() {
-    if (this.reg.waiting) { this.#set('ready'); this.#resumeRequested(); }
-    const installing = this.reg.installing;
-    if (installing && ['installing', 'installed'].includes(installing.state) && installing !== this.#installing) {
-      this.#installing?.removeEventListener('statechange', this.#installed);
-      this.#installing = installing;
-      this.#set('available');
-      installing.addEventListener('statechange', this.#installed);
-    }
+  #fail(message: string): void { this.#failure = message; this.#set('failed'); }
+  /** Новая версия есть по _app/version.json или из-за несовместимости протокола. */
+  notify(): void {
+    if (this.#destroyed || this.#state === 'applying') return;
+    this.#failure = '';
+    this.#set('available');
   }
-  #installed = () => { if (this.#installing?.state === 'installed') { this.#set('ready'); this.#resumeRequested(); } };
-  #resumeRequested(): void {
-    if (!this.#applyWhenReady || this.#applying || this.#destroyed) return;
-    queueMicrotask(() => { void this.apply().catch(() => { this.#applyWhenReady = false; this.#set('ready'); }); });
-  }
-  #updateFound = () => this.#observe();
-  #controllerChange = () => {
-    if (!this.#requested) return;
-    this.#changed = true;
-    if (!this.env.hidden() && !this.env.isSafe()) { this.#set('ready'); return; }
-    void this.apply().catch(() => this.#set('ready'));
-  };
-  #reloadIfSafe() {
-    if (this.#destroyed || !this.#changed || !this.#flushed) return;
-    if (!this.env.hidden() && !this.env.isSafe()) { this.#set('ready'); return; }
-    this.#changed = false;
-    (this.env.reload ?? (() => location.reload()))();
-  }
-  schemaVersion(version: number): void { if (version !== 1) this.incompatible(); }
-  incompatible(): void { if (this.#state === 'idle') this.#set('available'); }
+  incompatible(): void { if (this.#state === 'idle') this.notify(); }
+  /** Сверяет _app/version.json без HTTP-кэша. Сетевые ошибки ничего не меняют. */
   async check(): Promise<void> {
-    await this.reg.update();
-    await this.#refreshRegistration();
-    if (!this.#destroyed) this.#observe();
+    const fetcher = this.env.fetch ?? (typeof fetch === 'undefined' ? undefined : fetch);
+    if (this.#destroyed || !this.env.version || !fetcher) return;
+    let version: string | undefined;
+    try {
+      const response = await fetcher('/_app/version.json', {
+        cache: 'no-store',
+        headers: { 'cache-control': 'no-cache' }
+      });
+      if (!response.ok) return;
+      const data = await response.json() as { version?: unknown };
+      version = typeof data.version === 'string' ? data.version : undefined;
+    } catch {
+      return;
+    }
+    if (!this.#destroyed && version !== undefined && version !== this.env.version) this.notify();
   }
-  async #refreshRegistration(): Promise<void> {
-    const container = this.#worker as ServiceWorkerContainer | undefined;
-    const current = await container?.getRegistration?.(this.reg.scope);
-    if (!current || current === this.reg || this.#destroyed) return;
-    this.reg.removeEventListener('updatefound', this.#updateFound);
-    this.reg = current;
-    current.addEventListener('updatefound', this.#updateFound);
-    this.#observe();
-  }
-  async apply(): Promise<void> {
-    if (this.#destroyed || this.#applying || (!this.env.hidden() && !this.env.isSafe())) return;
+  async apply(force = false): Promise<void> {
+    if (this.#destroyed || this.#applying) return;
+    if (!force && !this.env.hidden() && !this.env.isSafe()) return;
     this.#applying = true;
     try {
-      await this.#refreshRegistration();
-      await this.env.flushDrafts();
-      if (this.#destroyed || (!this.env.hidden() && !this.env.isSafe())) return;
-      this.#flushed = true;
-      if (this.#changed) { this.#reloadIfSafe(); return; }
-      const waiting = this.reg.waiting ?? (this.#installing?.state === 'installed' ? this.#installing : null);
-      if (!waiting) { this.#applyWhenReady = true; await this.check(); return; }
-      this.#applyWhenReady = false;
-      this.#requested = true;
+      this.#failure = '';
       this.#set('applying');
-      waiting.postMessage({ type: 'SKIP_WAITING' });
+      try {
+        await this.env.flushDrafts();
+      } catch {
+        this.#fail(FLUSH_FAILED);
+        return;
+      }
+      if (this.#destroyed) return;
+      if (this.env.reload) { this.env.reload(); return; }
+      // Полная перезагрузка: оболочку больше не отдаёт service worker, а HTML
+      // запрашиваем без кэша перед переходом.
+      try { await fetch(location.href, { cache: 'no-store', credentials: 'same-origin', signal: AbortSignal.timeout(3000) }); } catch { /* сеть решает переход ниже */ }
+      if (!this.#destroyed) location.reload();
     } finally {
       this.#applying = false;
-      if (this.reg.waiting || this.#installing?.state === 'installed') this.#resumeRequested();
     }
   }
-  destroy(): void {
-    this.#destroyed = true;
-    this.reg.removeEventListener('updatefound', this.#updateFound);
-    this.#installing?.removeEventListener('statechange', this.#installed);
-    this.#worker?.removeEventListener('controllerchange', this.#controllerChange);
-  }
+  destroy(): void { this.#destroyed = true; }
 }

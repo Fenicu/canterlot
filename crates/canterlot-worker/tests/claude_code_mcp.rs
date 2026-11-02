@@ -3,10 +3,7 @@
 
 #![forbid(unsafe_code)]
 
-use canterlot_proto::{
-    requests::{AnswerValue, DecisionPayload, PermissionBehavior},
-    worker::v1::{LimitObservation, LimitWindow, LimitsSnapshot},
-};
+use canterlot_proto::requests::{AnswerValue, DecisionPayload, PermissionBehavior};
 use canterlot_worker::adapter::claude_code::{
     broker::{Broker, BrokerEvent},
     mcp,
@@ -158,7 +155,7 @@ fn initialize_echoes_protocol_and_lists_approve_and_limits_tools() {
         .as_array()
         .expect("tools array")
         .clone();
-    assert_eq!(tools.len(), 13);
+    assert_eq!(tools.len(), 16);
     let names: Vec<&str> = tools
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
@@ -897,41 +894,23 @@ async fn pending_call_survives_hub_link_loss_and_is_denied_only_on_supervisor_sh
     );
 }
 
-fn observation(window: &str, used_permille: u32, resets_at_ms: u64) -> LimitObservation {
-    LimitObservation {
-        provider: "claude".into(),
-        window: match window {
-            "five_hour" => LimitWindow::FiveHour as i32,
-            _ => LimitWindow::Weekly as i32,
-        },
-        used_permille,
-        resets_at_ms,
-        ..Default::default()
-    }
-}
-
 #[tokio::test]
-async fn limits_tool_reports_latest_observation_or_no_data() {
+async fn limits_tool_reports_the_hub_text_or_no_data() {
     let mut relay = RelayHarness::bind().await;
     relay.call(json!(9), "canterlot_limits", json!({})).await;
-    let call = match relay.broker.next().await {
-        BrokerEvent::LimitsQuery { call } => {
-            assert_eq!(call.rpc_id, json!(9));
-            call
-        }
+    let call_id = match relay.broker.next().await {
+        BrokerEvent::LimitsQuery { call_id } => call_id,
         other => panic!("expected LimitsQuery, got {other:?}"),
     };
-    relay.broker.answer_limits(
-        call,
-        &LimitsSnapshot {
-            provider: "claude".into(),
-            current: vec![
-                observation("five_hour", 500, 1792919400000),
-                observation("weekly", 810, 1793062800000),
-            ],
-            weekly_reserve_active: false,
-        },
-    );
+    relay
+        .broker
+        .answer_agent_tool(
+            call_id,
+            &canterlot_worker::adapter::AgentCallResult::Ok(serde_json::json!({
+                "text": "Claude API budget: five-hour window 50% used; weekly window 81% used."
+            })),
+        )
+        .await;
     let text = relay.reply().await["result"]["content"][0]["text"]
         .as_str()
         .expect("text block")
@@ -939,20 +918,19 @@ async fn limits_tool_reports_latest_observation_or_no_data() {
     assert!(text.contains("50"), "five-hour percent in {text}");
     assert!(text.contains("81"), "weekly percent in {text}");
     relay.call(json!(10), "canterlot_limits", json!({})).await;
-    let call = match relay.broker.next().await {
-        BrokerEvent::LimitsQuery { call } => {
-            assert_eq!(call.rpc_id, json!(10));
-            call
-        }
+    let call_id = match relay.broker.next().await {
+        BrokerEvent::LimitsQuery { call_id } => call_id,
         other => panic!("expected LimitsQuery, got {other:?}"),
     };
-    relay.broker.answer_limits(
-        call,
-        &LimitsSnapshot {
-            provider: "claude".into(),
-            ..Default::default()
-        },
-    );
+    relay
+        .broker
+        .answer_agent_tool(
+            call_id,
+            &canterlot_worker::adapter::AgentCallResult::Ok(serde_json::json!({
+                "text": "no limit data yet in this session"
+            })),
+        )
+        .await;
     let text = relay.reply().await["result"]["content"][0]["text"]
         .as_str()
         .expect("text block")

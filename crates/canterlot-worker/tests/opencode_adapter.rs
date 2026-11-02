@@ -919,6 +919,8 @@ async fn session_tools_follow_the_mode() {
             "canterlot_session_send",
             "canterlot_session_spawn",
             "canterlot_session_accept",
+            "canterlot_session_interrupt",
+            "canterlot_session_stop",
         ] {
             assert_eq!(effect(tool), default, "{mode} {tool}");
         }
@@ -4559,6 +4561,7 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
         names,
         [
             "canterlot_limits",
+            "share_file",
             "canterlot_presets_list",
             "canterlot_preset_save",
             "canterlot_preset_apply",
@@ -4569,24 +4572,32 @@ async fn relay_sees_the_preset_tools_and_the_opencode_budget() {
             "session_subscribe",
             "session_unsubscribe",
             "session_wait",
-            "session_accept"
+            "session_accept",
+            "session_interrupt",
+            "session_stop"
         ]
     );
     bench.close(CloseMode::Graceful).await;
 }
 
-// Лимиты отвечает адаптер, пресеты идут через хаб и возвращаются результатом инструмента.
+// Лимиты и пресеты идут через хаб и возвращаются результатом инструмента.
 #[tokio::test]
 async fn limits_and_preset_calls_go_through_the_broker() {
     let mut bench = Bench::new(session_only());
     bench.start_ok().await;
     let mut relay = Relay::connect(&bench).await;
     relay.call(1, "canterlot_limits").await;
-    let pump = tokio::time::timeout(Duration::from_millis(200), bench.adapter.next_event()).await;
-    assert!(
-        pump.is_err(),
-        "a limits query is answered inside the adapter"
-    );
+    let event = bench.event().await;
+    let AdapterEvent::Limits { call_id } = event else {
+        panic!("{event:?}");
+    };
+    bench
+        .adapter
+        .agent_call_result(
+            call_id,
+            AgentCallResult::Ok(json!({"text": "no limit data yet in this session"})),
+        )
+        .await;
     let answer = relay.reply().await;
     assert_eq!(
         answer["result"]["content"][0]["text"],

@@ -192,6 +192,7 @@ pub async fn run_once(
         "select a.id from attachments a where a.state='ready' and a.updated_at < $1
            and not exists(select 1 from input_attachments ia where ia.attachment_id=a.id)
            and not exists(select 1 from scheduled_job_attachments sa where sa.attachment_id=a.id)
+           and not exists(select 1 from block_files bf where bf.attachment_id=a.id and bf.attached_at is not null)
          order by a.id limit $2",
     )
     .bind(cutoff)

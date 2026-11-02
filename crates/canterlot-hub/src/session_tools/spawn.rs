@@ -22,7 +22,10 @@ use crate::{
         self, CreateError, CrunchSetting, NewConversation, ParentLink, WorktreeSource,
     },
     crunch::JobOutcome,
-    delivery::{ContentBlock, SubmitError, SubmitInput, submit_input_in_tx},
+    delivery::{
+        ContentBlock, SubmitError, SubmitInput, submit_forwarded_message_input_in_tx,
+        submit_input_in_tx,
+    },
     events::{self, NewEvent, Scope},
     presets::PresetRef,
     requests::{self, RequestKind, RequestState},
@@ -66,6 +69,8 @@ struct SpawnArgs {
     permission_mode: Option<String>,
     #[serde(default = "subscribe_by_default")]
     subscribe: bool,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
 }
 
 /// Проверенный запуск с уже выбранным режимом: `request_payload` карточки.
@@ -82,6 +87,8 @@ pub struct SpawnSpec {
     permission_mode: String,
     brief: String,
     subscribe: bool,
+    #[serde(default)]
+    attachment_ids: Vec<Uuid>,
     /// Глубина хода родителя: с неё подписка и бриф считают цепочку.
     chain_depth: i32,
 }
@@ -408,6 +415,7 @@ async fn validate(
             permission_mode: mode,
             brief: args.brief,
             subscribe: args.subscribe,
+            attachment_ids: args.attachment_ids,
             chain_depth,
         },
         catalog,
@@ -487,21 +495,23 @@ async fn start_child(conn: &mut PgConnection, launch: Launch<'_>) -> Result<Star
         .as_ref()
         .and_then(|worktree| worktree["branch"].as_str());
     let from = parent.sender();
-    submit_input_in_tx(
-        conn,
-        &SubmitInput {
-            owner_id: owner,
-            conversation_id: child,
-            idempotency_key: key,
-            content: vec![ContentBlock::Text {
-                text: origin::spawn_text(&from, branch, &spec.brief),
-            }],
-            received_at: Utc::now(),
-            correlation_id,
-            origin: Some(origin::spawn_origin(&from, spec.chain_depth + 1)),
-        },
-    )
-    .await
+    let request = SubmitInput {
+        owner_id: owner,
+        conversation_id: child,
+        idempotency_key: key,
+        content: vec![ContentBlock::Text {
+            text: origin::spawn_text(&from, branch, &spec.brief),
+        }],
+        received_at: Utc::now(),
+        correlation_id,
+        origin: Some(origin::spawn_origin(&from, spec.chain_depth + 1)),
+    };
+    if spec.attachment_ids.is_empty() {
+        submit_input_in_tx(conn, &request).await
+    } else {
+        submit_forwarded_message_input_in_tx(conn, &request, &spec.attachment_ids, None, parent.id)
+            .await
+    }
     .map_err(send::submit_error)?;
     if spec.subscribe {
         subs::subscribe_in_tx(conn, owner, parent.id, child, spec.chain_depth).await?;

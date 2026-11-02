@@ -32,6 +32,14 @@ test('bfcache_and_freeze_resume_trigger_probe', async () => {
   off(); offSuspend(); expect(h.clock.pending).toBe(0);
   expect(h.addDoc.mock.calls.length + h.addWin.mock.calls.length).toBe(h.removeDoc.mock.calls.length + h.removeWin.mock.calls.length);
 });
+test('window_focus_resumes_the_connection', () => {
+  const h = lifecycleHarness(), resume = vi.fn();
+  const off = h.lifecycle.onResume(resume);
+  h.win.dispatchEvent(new Event('focus'));
+  expect(resume).toHaveBeenCalledWith({ reason: 'focus', hiddenMs: 0 });
+  off(); expect(h.clock.pending).toBe(0);
+  expect(h.addWin.mock.calls.length).toBe(h.removeWin.mock.calls.length);
+});
 test('lifecycle_tracks_hidden_time_online_offline_and_unsubscribes_every_listener', () => {
   const h = lifecycleHarness(), resume = vi.fn(), suspend = vi.fn();
   const off = h.lifecycle.onResume(resume), offSuspend = h.lifecycle.onSuspend(suspend);

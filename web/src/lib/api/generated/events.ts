@@ -16,6 +16,7 @@ export type WireEvent =
   | BlockChecksumMismatch
   | BlockConflictingFinal
   | BlockMediaAttached
+  | BlockFileAttached
   | ConversationCreated
   | ConversationUpdated
   | ConversationDeleted
@@ -105,6 +106,7 @@ export interface HubEvent {
   session_id?: Uuid;
   turns?: number;
   duration_ms?: number;
+  working_ms?: number;
   tokens_in?: number;
   tokens_out?: number;
   commits?: HubCommit[];
@@ -463,6 +465,30 @@ export interface BlockMediaAttached {
     height: number | null;
   };
 }
+export interface BlockFileAttached {
+  v: 1;
+  id: Uuid;
+  scope: Scope;
+  scope_seq: Seq;
+  scope_seq_from: Seq;
+  committed_at: Time;
+  committed_at_from: Time;
+  conversation_id: Uuid | null;
+  execution_id: Uuid | null;
+  correlation_id: Uuid;
+  kind: "block_file_attached";
+  payload: {
+    block_id: Uuid;
+    attachment_id: Uuid;
+    name: string;
+    mime: string;
+    size: number;
+    title: string;
+    note: string;
+    width: number | null;
+    height: number | null;
+  };
+}
 export interface ConversationCreated {
   v: 1;
   id: Uuid;
@@ -504,6 +530,7 @@ export interface ConversationCreated {
       enabled: boolean;
     };
     last_activity_at: Time | null;
+    working_ms?: number;
     counts: Counts;
     parent_id?: Uuid | null;
     spawn_depth?: number;
@@ -706,6 +733,7 @@ export interface DerivedChanged {
     crunch: {
       enabled: boolean;
     };
+    working_ms?: number;
   };
 }
 export interface Settings {

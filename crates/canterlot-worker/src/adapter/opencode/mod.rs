@@ -478,6 +478,7 @@ pub struct OpenCodeAdapter {
     /// Вызовы, по которым был запрос: пометки CLI у них нет.
     asked: HashSet<String>,
     requests: Requests,
+    limits_calls: HashMap<Uuid, String>,
     refusals: JoinSet<()>,
     /// Снимки фоновых команд для журнала сирот.
     shell_journal: JoinSet<()>,
@@ -540,6 +541,7 @@ impl OpenCodeAdapter {
             held: HeldTools::default(),
             asked: HashSet::new(),
             requests: Requests::default(),
+            limits_calls: HashMap::new(),
             refusals: JoinSet::new(),
             shell_journal: JoinSet::new(),
             orphan_journal: None,
@@ -1004,16 +1006,14 @@ impl OpenCodeAdapter {
                 tool: tool.to_owned(),
                 arguments,
             }),
-            BrokerEvent::LimitsQuery { call } => {
-                if let Some(broker) = self.broker.as_mut() {
-                    broker.answer_limits(
-                        call,
-                        &canterlot_proto::worker::v1::LimitsSnapshot {
-                            provider: "opencode".into(),
-                            ..Default::default()
-                        },
-                    );
-                }
+            BrokerEvent::ShareFile { call_id, arguments } => {
+                self.events
+                    .push_back(AdapterEvent::ShareFile { call_id, arguments });
+            }
+            BrokerEvent::LimitsQuery { call_id } => {
+                let text = "no limit data yet in this session".to_owned();
+                self.limits_calls.insert(call_id, text);
+                self.events.push_back(AdapterEvent::Limits { call_id });
             }
             _ => {}
         }
@@ -2124,6 +2124,7 @@ impl Adapter for OpenCodeAdapter {
     }
 
     async fn agent_call_result(&mut self, call_id: Uuid, result: AgentCallResult) {
+        let result = crate::adapter::limits_fallback(&mut self.limits_calls, call_id, result);
         if let Some(broker) = self.broker.as_mut() {
             broker.answer_agent_tool(call_id, &result).await;
         }
