@@ -594,6 +594,120 @@ test.describe('E2E Requests and Recovery', () => {
     await expect(page.getByText('Дедупликация повторного объявления')).toBeVisible();
   });
 
+  const LONG_OPTIONS = [1, 2, 3, 4].map((n) => ({
+    label: `Вариант ${n}`,
+    description: `Подробное описание варианта ${n}: на узком экране оно занимает несколько строк и делает карточку выше экрана.`
+  }));
+
+  for (const theme of ['dark', 'light'] as const) {
+    for (const viewport of [
+      { width: 384, height: 800 },
+      { width: 384, height: 640 }
+    ]) {
+      test(`e2e_two_long_questions_scroll_and_submit_${theme}_${viewport.width}x${viewport.height}`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await page.addInitScript((value) => localStorage.setItem('canterlot.theme', value), theme);
+        const { hub, api, id } = await bootChat(page);
+
+        const header = page.locator('.chat-header');
+        const composer = page.locator('[data-composer]');
+        const headerBefore = await header.boundingBox();
+        const composerBefore = await composer.boundingBox();
+
+        const reqId = api.id();
+        hub.append(`conversation:${id}`, {
+          kind: 'request_opened',
+          conversation_id: id,
+          payload: {
+            request_id: reqId,
+            kind: 'question',
+            payload: {
+              questions: [
+                {
+                  id: 'q1',
+                  header: 'ВЕРСИЯ',
+                  text: 'Какую версию считать основной?',
+                  options: LONG_OPTIONS
+                },
+                {
+                  id: 'q2',
+                  header: 'ТЕГИ',
+                  text: 'Какие теги повесить на релиз?',
+                  options: LONG_OPTIONS,
+                  multi_select: true,
+                  allow_custom: true
+                }
+              ]
+            }
+          }
+        });
+        hub.flush();
+
+        await expect(page.getByText('Вопрос от агента')).toBeVisible();
+        await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+
+        // Шапка и поле ввода остаются на месте: карточка отнимает место у ленты, а не у них.
+        const headerAfter = await header.boundingBox();
+        const composerAfter = await composer.boundingBox();
+        expect(Math.abs(headerAfter!.y - headerBefore!.y)).toBeLessThanOrEqual(1);
+        expect(Math.abs(composerAfter!.y - composerBefore!.y)).toBeLessThanOrEqual(1);
+
+        const slot = page.locator('.request-cards-slot');
+        const submit = page.getByRole('button', { name: 'Ответить' });
+        // Кнопка отправки закреплена и видна без прокрутки.
+        await expect(submit).toBeInViewport();
+
+        const scrollable = await slot.evaluate((el) => el.scrollHeight > el.clientHeight + 1);
+        expect(scrollable).toBe(true);
+
+        await page.locator('[data-question="q1"] [data-option="Вариант 1"]').click();
+
+        const second = page.locator('[data-question="q2"]');
+        await second.scrollIntoViewIfNeeded();
+        await expect(second).toBeInViewport();
+        await second.locator('[data-option="Вариант 2"]').click();
+
+        const custom = second.locator('input[data-custom="true"]');
+        await custom.scrollIntoViewIfNeeded();
+        await custom.fill('Свой ответ на второй вопрос');
+        await expect(custom).toBeFocused();
+        await expect(custom).toBeInViewport();
+        await expect(submit).toBeInViewport();
+
+        // Клавиатура сжимает видимую область: поле остаётся в прокручиваемой карточке,
+        // а закреплённая кнопка и поле ввода сообщения не уезжают за экран.
+        await page.setViewportSize({ width: viewport.width, height: viewport.height - 280 });
+        await expect
+          .poll(() =>
+            custom.evaluate((el) => {
+              const slotEl = el.closest('.request-cards-slot');
+              if (!slotEl) return false;
+              const field = el.getBoundingClientRect();
+              const box = slotEl.getBoundingClientRect();
+              return field.top >= box.top - 1 && field.bottom <= box.bottom + 1;
+            })
+          )
+          .toBe(true);
+        await expect(submit).toBeInViewport();
+        await expect(composer).toBeInViewport();
+
+        const [decision] = await Promise.all([
+          page.waitForResponse(
+            (resp) => resp.url().includes('/decision') && resp.request().method() === 'POST'
+          ),
+          submit.click()
+        ]);
+        const body = decision.request().postDataJSON() as {
+          answers: Record<string, string | string[]>;
+        };
+        expect(body.answers.q1).toBe('Вариант 1');
+        expect(body.answers.q2).toEqual(['Вариант 2', 'Свой ответ на второй вопрос']);
+
+        await expect(page.locator('[data-collapsed="true"]')).toBeVisible();
+      });
+    }
+  }
+
   test('e2e_request_cards_are_usable_at_360px_and_200_percent_zoom', async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 640 });
     const { hub, api, id } = await bootChat(page);

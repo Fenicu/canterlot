@@ -150,6 +150,32 @@
     }
   }
 
+  // Клавиатура сжимает видимую область: поле «Свой ответ» остаётся над закреплённой кнопкой.
+  function keepInputInView(node: HTMLElement) {
+    let frame = 0;
+    const reveal = () => {
+      const active = document.activeElement;
+      if (!(active instanceof HTMLElement) || !node.contains(active)) return;
+      if (!active.matches('input[data-custom="true"]')) return;
+      active.scrollIntoView({ block: 'nearest' });
+    };
+    const schedule = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(reveal);
+    };
+    node.addEventListener('focusin', schedule);
+    window.addEventListener('resize', schedule);
+    window.visualViewport?.addEventListener('resize', schedule);
+    return {
+      destroy() {
+        cancelAnimationFrame(frame);
+        node.removeEventListener('focusin', schedule);
+        window.removeEventListener('resize', schedule);
+        window.visualViewport?.removeEventListener('resize', schedule);
+      }
+    };
+  }
+
   function bindCustomInput(node: HTMLInputElement, qId: string) {
     const onInput = () => {
       customValues[qId] = node.value;
@@ -224,7 +250,7 @@
     <span class="meta">Вопрос от агента</span>
   </div>
 
-  <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form">
+  <form bind:this={formEl} onsubmit={handleSubmit} class="questions-form" use:keepInputInView>
     {#each questions as q, qIndex (q.id)}
       <section class="question-section" data-question={q.id}>
         {#if q.header || questions.length > 1}
@@ -493,9 +519,25 @@
     cursor: not-allowed;
   }
 
+  /* Кнопка ответа закреплена у нижнего края прокручиваемой карточки. */
   .actions {
+    --fade: var(--surface);
     display: flex;
+    position: sticky;
+    bottom: var(--s0);
+    z-index: 1;
     margin-top: var(--s2);
+    padding-block: var(--s4) var(--s2);
+    background: var(--fade);
+  }
+
+  .actions::before {
+    content: '';
+    position: absolute;
+    inset: auto 0 100%;
+    height: var(--s8);
+    background: linear-gradient(to bottom, var(--transparent), var(--fade));
+    pointer-events: none;
   }
 
   .submit-btn {

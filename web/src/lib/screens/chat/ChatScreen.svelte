@@ -311,4 +311,17 @@
 		flex-direction: column;
 		gap: var(--s3);
 	}
+
+	/* Карточка вопроса выше экрана прокручивается сама, не выталкивая поле ввода.
+	   60dvh ограничивает карточку на обычном экране, calc оставляет место шапке и
+	   полю ввода, когда клавиатура сжимает видимую область. */
+	.request-cards-slot {
+		flex: 0 1 auto;
+		min-height: 0;
+		max-height: var(--request-card-max);
+		overflow-y: auto;
+		overscroll-behavior: contain;
+		scrollbar-gutter: stable;
+		scroll-padding-block: var(--s4) calc(var(--target) + var(--s8));
+	}
 </style>
