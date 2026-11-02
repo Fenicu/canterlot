@@ -7,8 +7,8 @@
 use canterlot_proto::requests::{DecisionPayload, PermissionBehavior};
 use canterlot_worker::{
     adapter::{
-        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, StartSpec, Transmission,
-        TransmitOutcome, SteerOutcome,
+        self, Adapter, AdapterContext, AdapterEvent, BlockKind, CloseMode, StartSpec, SteerOutcome,
+        Transmission, TransmitOutcome,
         codex::{CodexCatalog, input::model_entries},
     },
     config::CodexConfig,
@@ -1383,7 +1383,8 @@ async fn steer_without_turn_sends_nothing() {
 }
 
 #[tokio::test]
-async fn adopted_turn_ending_without_a_response_frees_the_next_input() {    let mut lines = handshake("thread-mini");
+async fn adopted_turn_ending_without_a_response_frees_the_next_input() {
+    let mut lines = handshake("thread-mini");
     lines.push(w_in(10, "turn/start", json!({})));
     lines.push(turn_started("thread-mini", "turn-1"));
     lines.extend(user_message("thread-mini", "turn-1"));

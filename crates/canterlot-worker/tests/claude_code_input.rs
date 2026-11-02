@@ -1051,7 +1051,11 @@ async fn interrupt_uses_control_request_and_acknowledges_on_aborted_tools_result
         "got {outcome:?}"
     );
     let log = fake.stdin_log();
-    assert_eq!(log.len(), 2, "user message plus one interrupt control_request");
+    assert_eq!(
+        log.len(),
+        2,
+        "user message plus one interrupt control_request"
+    );
     assert_eq!(log[0]["uuid"], SLEEP_INPUT);
     assert_eq!(log[1]["type"], "control_request");
     assert_eq!(log[1]["request"]["subtype"], "interrupt");
@@ -1060,10 +1064,11 @@ async fn interrupt_uses_control_request_and_acknowledges_on_aborted_tools_result
         "the control_response receipt is captured before the turn result"
     );
     let parsed = drain(&mut driver);
-    assert!(parsed.iter().any(|p| matches!(
-        p,
-        Parsed::ControlResponse { success: true, .. }
-    )));
+    assert!(
+        parsed
+            .iter()
+            .any(|p| matches!(p, Parsed::ControlResponse { success: true, .. }))
+    );
     assert!(parsed.iter().any(|p| matches!(
         p,
         Parsed::Event(AdapterEvent::RunFinished { input_command_id, .. }) if *input_command_id == id(SLEEP_INPUT)
@@ -1128,7 +1133,11 @@ async fn interrupt_falls_back_to_sigint_without_receipt() {
         "no control_response, no receipt"
     );
     let log = fake.stdin_log();
-    assert_eq!(log.len(), 2, "user message plus one interrupt control_request");
+    assert_eq!(
+        log.len(),
+        2,
+        "user message plus one interrupt control_request"
+    );
     assert_eq!(log[1]["type"], "control_request");
     assert_eq!(log[1]["request"]["subtype"], "interrupt");
     let parsed = drain(&mut driver);
@@ -1185,12 +1194,20 @@ fn control_response_success_is_read_from_the_recorded_frame() {
     let mut parser = Parser::new();
     let (_, recorded) = out_lines("interrupt", 90, 90).remove(0);
     let parsed = parser.feed(&recorded);
-    let [Parsed::ControlResponse { request_id, success: true, interrupt: Some(receipt) }] =
-        parsed.as_slice()
+    let [
+        Parsed::ControlResponse {
+            request_id,
+            success: true,
+            interrupt: Some(receipt),
+        },
+    ] = parsed.as_slice()
     else {
         panic!("expected the recorded interrupt receipt, got {parsed:?}");
     };
-    assert_eq!(request_id, "probe-interrupt-b9039f8e-e82f-4e39-8cbc-d18b74389337");
+    assert_eq!(
+        request_id,
+        "probe-interrupt-b9039f8e-e82f-4e39-8cbc-d18b74389337"
+    );
     assert!(receipt.still_queued.is_empty());
     assert_eq!(
         receipt.cancelled,
@@ -1217,8 +1234,13 @@ fn interrupt_receipt_carries_still_queued_and_cancelled() {
     });
     let mut parser = Parser::new();
     let parsed = parser.feed(&frame.to_string());
-    let [Parsed::ControlResponse { request_id, success: true, interrupt: Some(receipt) }] =
-        parsed.as_slice()
+    let [
+        Parsed::ControlResponse {
+            request_id,
+            success: true,
+            interrupt: Some(receipt),
+        },
+    ] = parsed.as_slice()
     else {
         panic!("expected an interrupt receipt, got {parsed:?}");
     };
@@ -1254,7 +1276,10 @@ fn interrupt_receipt_carries_still_queued_and_cancelled() {
     assert!(
         matches!(
             parsed.as_slice(),
-            [Parsed::ControlResponse { interrupt: None, .. }]
+            [Parsed::ControlResponse {
+                interrupt: None,
+                ..
+            }]
         ),
         "got {parsed:?}"
     );
@@ -1307,14 +1332,20 @@ fn live_interrupt_and_send_now_frames_parse() {
             saw_send_now_receipt = true;
         }
         for parsed in parser.feed(&frame) {
-            if let Parsed::ControlResponse { interrupt: Some(receipt), .. } = &parsed
+            if let Parsed::ControlResponse {
+                interrupt: Some(receipt),
+                ..
+            } = &parsed
                 && !receipt.still_queued.is_empty()
             {
                 queued_saw_new_init = true;
             }
         }
     }
-    assert!(saw_send_now_receipt, "the send_now receipt is in the fixture");
+    assert!(
+        saw_send_now_receipt,
+        "the send_now receipt is in the fixture"
+    );
     assert!(
         queued_saw_new_init,
         "the queued message uuid is listed in still_queued before the new turn"
@@ -1389,7 +1420,10 @@ async fn steer_writes_user_frame_into_running_turn_without_new_turn() {
     assert_eq!(log[1]["type"], "user");
     assert_eq!(log[1]["uuid"], steered.to_string());
     assert!(
-        driver.queue.active().is_some_and(|turn| turn.command_id == id(SLEEP_INPUT)),
+        driver
+            .queue
+            .active()
+            .is_some_and(|turn| turn.command_id == id(SLEEP_INPUT)),
         "the running turn is untouched by the steer"
     );
 }

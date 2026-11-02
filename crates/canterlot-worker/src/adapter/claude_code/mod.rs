@@ -1374,7 +1374,11 @@ impl Adapter for ClaudeCodeAdapter {
         // Разбор кадров никому не переназначается: итог хода принадлежит чужому вводу.
         let written_at = Instant::now();
         if !matches!(
-            timeout_at(written_at + self.deadline, self.cli.as_mut().unwrap().write_line(&line)).await,
+            timeout_at(
+                written_at + self.deadline,
+                self.cli.as_mut().unwrap().write_line(&line)
+            )
+            .await,
             Ok(Ok(()))
         ) {
             self.queue.as_mut().unwrap().drop_steer(input.command_id);
@@ -1423,14 +1427,7 @@ impl Adapter for ClaudeCodeAdapter {
         self.requests.clear();
         // Управляющий запрос останавливает ход, процесс жив: следующий ввод
         // уйдёт в тот же CLI без перезапуска. SIGINT — только запасной.
-        if self
-            .cli
-            .as_mut()
-            .unwrap()
-            .write_line(&line)
-            .await
-            .is_err()
-        {
+        if self.cli.as_mut().unwrap().write_line(&line).await.is_err() {
             return InterruptOutcome::Undetermined;
         }
         let mut sigint_sent = false;
@@ -1442,13 +1439,7 @@ impl Adapter for ClaudeCodeAdapter {
             if self.eof {
                 return InterruptOutcome::Undetermined;
             }
-            if !sigint_sent
-                && self
-                    .queue
-                    .as_ref()
-                    .unwrap()
-                    .interrupt_receipt_expired()
-            {
+            if !sigint_sent && self.queue.as_ref().unwrap().interrupt_receipt_expired() {
                 // Запасной путь: квитанции нет в срок, останавливаем ход сигналом.
                 if self
                     .cli

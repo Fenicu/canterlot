@@ -1470,8 +1470,13 @@ impl Supervisor {
     /// открывается: доказательство приписывает ввод чужому ходу, слот хода и
     /// очередь не трогаются. Любой отказ оставляет ввод в очереди хаба —
     /// следующим ходом он уйдёт сам, дубля нет.
-    async fn on_steer(&mut self, deliver: canterlot_proto::worker::ipc::Deliver) -> Result<(), SupervisorError> {
-        let Some(command) = deliver.command else { return Ok(()) };
+    async fn on_steer(
+        &mut self,
+        deliver: canterlot_proto::worker::ipc::Deliver,
+    ) -> Result<(), SupervisorError> {
+        let Some(command) = deliver.command else {
+            return Ok(());
+        };
         let ack = |command_id: String, attempt: u32, result: &str| {
             up::Msg::DeliverAck(DeliverAck {
                 command_id,
@@ -1618,7 +1623,11 @@ impl Supervisor {
                     reason: "undetermined".into(),
                 }))?;
                 self.reported.insert((sid, attempt, "unconfirmed"));
-                self.send(ack(command.command_id.clone(), attempt, "steer_unconfirmed"));
+                self.send(ack(
+                    command.command_id.clone(),
+                    attempt,
+                    "steer_unconfirmed",
+                ));
             }
         }
         Ok(())
@@ -3168,11 +3177,11 @@ mod tests {
                     input_id: Uuid::now_v7().to_string(),
                     conversation_id: supervisor.spec.conversation_id.to_string(),
                     content: vec![ContentBlock {
-                        block: Some(
-                            canterlot_proto::worker::v1::content_block::Block::Text(TextBlock {
+                        block: Some(canterlot_proto::worker::v1::content_block::Block::Text(
+                            TextBlock {
                                 text: text.to_owned(),
-                            }),
-                        ),
+                            },
+                        )),
                     }],
                     settings: None,
                     expected_running_command_id: running_command.to_string(),
@@ -3182,10 +3191,7 @@ mod tests {
         }
     }
 
-    fn steer_key(
-        supervisor: &Supervisor,
-        deliver: &canterlot_proto::worker::ipc::Deliver,
-    ) -> (Uuid, u32) {
+    fn steer_key(deliver: &canterlot_proto::worker::ipc::Deliver) -> (Uuid, u32) {
         let command = deliver.command.as_ref().unwrap();
         (
             Uuid::parse_str(&command.command_id).unwrap(),
@@ -3203,7 +3209,7 @@ mod tests {
         assert_eq!(supervisor.active_turn, Some(first.0));
         // Вливание второго ввода в тот же ход.
         let deliver = steer_deliver(&supervisor, first.0, "send now");
-        let key = steer_key(&supervisor, &deliver);
+        let key = steer_key(&deliver);
         supervisor.on_steer(deliver).await.unwrap();
         // Доказательство записано, ход тот же, сессия бежит.
         assert!(supervisor.inputs[&key].accepted);
@@ -3222,10 +3228,9 @@ mod tests {
             !bodies.iter().any(|body| matches!(
                 body,
                 Body::TransmissionStarted(started) if started.command_id == key.0.to_string()
-            )) && !bodies.iter().any(|body| matches!(
-                body,
-                Body::DispatchDeferred(_) | Body::InputRejected(_)
-            )),
+            )) && !bodies
+                .iter()
+                .any(|body| matches!(body, Body::DispatchDeferred(_) | Body::InputRejected(_))),
             "no second turn, no refusal: {bodies:?}"
         );
         // Конец хода закрывает его как обычно, влитый ввод историю не ломает.
@@ -3246,7 +3251,7 @@ mod tests {
         let (_dir, mut supervisor, _state) = test_supervisor();
         let running = Uuid::now_v7();
         let deliver = steer_deliver(&supervisor, running, "too late");
-        let key = steer_key(&supervisor, &deliver);
+        let key = steer_key(&deliver);
         supervisor.on_steer(deliver).await.unwrap();
         // Хода нет: ввод не записан, хаб вернёт его в очередь следующим ходом.
         assert!(!supervisor.inputs.contains_key(&key));
@@ -3269,7 +3274,7 @@ mod tests {
         supervisor.try_transmit().await.unwrap();
         // Ход другой команды: вливать некуда.
         let deliver = steer_deliver(&supervisor, Uuid::now_v7(), "stale");
-        let key = steer_key(&supervisor, &deliver);
+        let key = steer_key(&deliver);
         supervisor.on_steer(deliver).await.unwrap();
         assert!(!supervisor.inputs.contains_key(&key));
         assert_eq!(supervisor.active_turn, Some(first.0));
@@ -3328,13 +3333,14 @@ mod tests {
         let first = queue_owner(&mut supervisor);
         supervisor.try_transmit().await.unwrap();
         let deliver = steer_deliver(&supervisor, first.0, "unconfirmed");
-        let key = steer_key(&supervisor, &deliver);
+        let key = steer_key(&deliver);
         supervisor.on_steer(deliver).await.unwrap();
-        assert!(matches!(supervisor.inputs[&key].state, InputState::Transmitting));
+        assert!(matches!(
+            supervisor.inputs[&key].state,
+            InputState::Transmitting
+        ));
         assert!(
-            supervisor
-                .reported
-                .contains(&(key.0, key.1, "unconfirmed")),
+            supervisor.reported.contains(&(key.0, key.1, "unconfirmed")),
             "late proof is awaited, not dropped"
         );
         // Ход при этом чужой и продолжается.
@@ -3354,7 +3360,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn acknowledged_interrupt_is_turn_aborted_not_session_stopped() {        let (_dir, mut supervisor, state) = test_supervisor();
+    async fn acknowledged_interrupt_is_turn_aborted_not_session_stopped() {
+        let (_dir, mut supervisor, state) = test_supervisor();
         state.lock().unwrap().ack_interrupt = true;
         let first = queue_owner(&mut supervisor);
         supervisor.try_transmit().await.unwrap();

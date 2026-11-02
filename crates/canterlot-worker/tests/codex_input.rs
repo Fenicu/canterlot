@@ -9,9 +9,9 @@ use canterlot_worker::adapter::{
         input::{
             CurrentSettings, INTERRUPT_TIMEOUT, Outbox, PROOF_KIND_HISTORY, PROOF_KIND_MESSAGE,
             background_terminal_terminate_params, background_terminals_list_params,
-            build_turn_start, build_turn_steer, error_rejection, history_contains, history_lookup_params,
-            interrupt_params, model_entries, terminals_to_terminate, threshold_note,
-            validate_settings,
+            build_turn_start, build_turn_steer, error_rejection, history_contains,
+            history_lookup_params, interrupt_params, model_entries, terminals_to_terminate,
+            threshold_note, validate_settings,
         },
         process::{AppServerProcess, LaunchSpec},
         rpc::{Incoming, RpcClient, RpcError},
@@ -604,8 +604,7 @@ fn recorded_steer_request_targets_the_active_turn_without_overrides() {
     }
     let response = evidence_data("turn_steer", 3);
     assert_eq!(
-        response["result"]["turnId"],
-        params["expectedTurnId"],
+        response["result"]["turnId"], params["expectedTurnId"],
         "steer answers with the same turn id"
     );
 }

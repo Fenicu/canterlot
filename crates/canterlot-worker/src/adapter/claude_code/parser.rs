@@ -31,11 +31,12 @@ const TOOL_LAUNCHED_SUMMARY: &str = "async_launched";
 const MAX_UNKNOWN_TYPES: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 
-const IGNORED_SYSTEM: [&str; 4] = [
+const IGNORED_SYSTEM: [&str; 5] = [
     "api_retry",
     "task_progress",
     "task_updated",
     "thinking_tokens",
+    "commands_changed",
 ];
 const IGNORED_STREAM_EVENTS: [&str; 1] = ["message_stop"];
 const IGNORED_DELTAS: [&str; 1] = ["signature_delta"];

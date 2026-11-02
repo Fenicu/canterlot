@@ -27,9 +27,8 @@ use crate::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, Capabilities, CloseMode,
         CompactOutcome, DecisionOutcome, DecisionProof, InstructionMode, InstructionSpec,
         InterruptOutcome, ModelCatalog, Phase, Proof, SettingsChange, StartSpec, Started,
-        SteerOutcome, Support,
-        Transmission, TransmitOutcome, canterlot_mcp::Broker, canterlot_mcp::BrokerEvent,
-        held_tool::HeldTools, reaped,
+        SteerOutcome, Support, Transmission, TransmitOutcome, canterlot_mcp::Broker,
+        canterlot_mcp::BrokerEvent, held_tool::HeldTools, reaped,
     },
     config::CodexConfig,
     containment::Containment,
@@ -2052,9 +2051,7 @@ impl Adapter for CodexAdapter {
                     // Хода уже нет или `expectedTurnId` протух: ввод остаётся
                     // в очереди, следующим ходом уйдёт сам.
                     let stale = error.message.contains("expected active turn id");
-                    SteerOutcome::NotApplicable(
-                        if stale { "stale_turn" } else { "no_turn" }.into(),
-                    )
+                    SteerOutcome::NotApplicable(if stale { "stale_turn" } else { "no_turn" }.into())
                 } else {
                     SteerOutcome::Rejected(input::error_rejection(&error))
                 }

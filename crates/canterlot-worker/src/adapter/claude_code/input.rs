@@ -270,7 +270,8 @@ impl InputQueue {
             return build_message(t.command_id, &t.text, &t.files, None);
         }
         let message = build_message(t.command_id, &t.text, &t.files, None)?;
-        self.steered.retain(|queued| queued.command_id != t.command_id);
+        self.steered
+            .retain(|queued| queued.command_id != t.command_id);
         self.steered.push_back(Queued {
             command_id: t.command_id,
             attempt: t.attempt,
@@ -283,7 +284,8 @@ impl InputQueue {
 
     /// Убрать влитый ввод, который уже не дождаться (процесс умер).
     pub fn drop_steer(&mut self, command_id: Uuid) {
-        self.steered.retain(|queued| queued.command_id != command_id);
+        self.steered
+            .retain(|queued| queued.command_id != command_id);
     }
 
     pub fn take_rejection(&mut self, command_id: Uuid) -> Option<&'static str> {
@@ -418,23 +420,25 @@ impl InputQueue {
     pub fn on_parsed(&mut self, parsed: &Parsed) -> Option<Proof> {
         match parsed {
             Parsed::AnswerFrame { user_message_uuids } => {
-                if let Some(turn) = self.active.as_mut() {
-                    if !turn.delivery_proven && user_message_uuids.contains(&turn.command_id) {
-                        turn.delivery_proven = true;
-                        self.proven.insert(turn.command_id, PROOF_KIND);
-                        return Some(Proof {
-                            command_id: turn.command_id,
-                            kind: PROOF_KIND,
-                        });
-                    }
+                if let Some(turn) = self.active.as_mut()
+                    && !turn.delivery_proven
+                    && user_message_uuids.contains(&turn.command_id)
+                {
+                    turn.delivery_proven = true;
+                    self.proven.insert(turn.command_id, PROOF_KIND);
+                    return Some(Proof {
+                        command_id: turn.command_id,
+                        kind: PROOF_KIND,
+                    });
                 }
                 // Кадр итога перечисляет все UUID хода, в том числе влитые:
                 // первое совпадение уходит доказательством, остальные ждут
                 // своего вызова (каждый влитый ввод подтверждается отдельно).
-                if let Some(matched) = user_message_uuids
-                    .iter()
-                    .find(|uuid| self.steered.iter().any(|queued| queued.command_id == **uuid))
-                {
+                if let Some(matched) = user_message_uuids.iter().find(|uuid| {
+                    self.steered
+                        .iter()
+                        .any(|queued| queued.command_id == **uuid)
+                }) {
                     let command_id = *matched;
                     self.steered
                         .retain(|queued| queued.command_id != command_id);
@@ -451,15 +455,16 @@ impl InputQueue {
             Parsed::CommandLifecycle { command_id, state }
                 if matches!(state.as_str(), "started" | "completed") =>
             {
-                if let Some(turn) = self.active.as_mut() {
-                    if !turn.delivery_proven && turn.command_id == *command_id {
-                        turn.delivery_proven = true;
-                        self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
-                        return Some(Proof {
-                            command_id: turn.command_id,
-                            kind: PROOF_KIND_STARTED,
-                        });
-                    }
+                if let Some(turn) = self.active.as_mut()
+                    && !turn.delivery_proven
+                    && turn.command_id == *command_id
+                {
+                    turn.delivery_proven = true;
+                    self.proven.insert(turn.command_id, PROOF_KIND_STARTED);
+                    return Some(Proof {
+                        command_id: turn.command_id,
+                        kind: PROOF_KIND_STARTED,
+                    });
                 }
                 // Доказательство вливания: UUID чужого сообщения, ход при этом чужой.
                 if self
@@ -508,8 +513,7 @@ impl InputQueue {
                     // Отказ прерывания квитанции не даст: итога ждём так же,
                     // запасной SIGINT решит срок.
                     if *success {
-                        pending.receipt =
-                            Some(interrupt.clone().unwrap_or_default());
+                        pending.receipt = Some(interrupt.clone().unwrap_or_default());
                     } else {
                         self.interrupt_request = None;
                     }
@@ -569,16 +573,16 @@ impl InputQueue {
 
     /// Срок ожидания квитанции, если её ещё нет: пробуждение для запасного SIGINT.
     pub fn interrupt_receipt_bound(&self) -> Option<Instant> {
-        self.interrupt_request.as_ref().and_then(|pending| {
-            pending.receipt.is_none().then_some(pending.deadline)
-        })
+        self.interrupt_request
+            .as_ref()
+            .and_then(|pending| pending.receipt.is_none().then_some(pending.deadline))
     }
 
     /// Срок квитанции вышел, а её нет: пора в запасной SIGINT.
     pub fn interrupt_receipt_expired(&self) -> bool {
-        self.interrupt_request.as_ref().is_some_and(|pending| {
-            pending.receipt.is_none() && Instant::now() >= pending.deadline
-        })
+        self.interrupt_request
+            .as_ref()
+            .is_some_and(|pending| pending.receipt.is_none() && Instant::now() >= pending.deadline)
     }
 
     /// Отметить отправку SIGINT; `false`, если хода нет и прерывать нечего.
@@ -711,7 +715,9 @@ fn proof(queue: &InputQueue, command_id: Uuid) -> TransmitOutcome {
 fn steer_proof(queue: &InputQueue, command_id: Uuid) -> SteerOutcome {
     SteerOutcome::Accepted(Proof {
         command_id,
-        kind: queue.steer_proof_kind(command_id).unwrap_or(PROOF_KIND_STARTED),
+        kind: queue
+            .steer_proof_kind(command_id)
+            .unwrap_or(PROOF_KIND_STARTED),
     })
 }
 

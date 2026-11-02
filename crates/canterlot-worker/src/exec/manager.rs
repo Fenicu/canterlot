@@ -1865,12 +1865,10 @@ impl Actor {
                 Ok(())
             }
             Some(Kind::DeliverInput(input)) => {
-                self.deliver_input_like(command, input.content, live)
-                    .await
+                self.deliver_input_like(command, input.content, live).await
             }
             Some(Kind::SteerInput(steer)) => {
-                self.deliver_input_like(command, steer.content, live)
-                    .await
+                self.deliver_input_like(command, steer.content, live).await
             }
             Some(Kind::CancelInput(CancelInput {
                 target_command_id,
@@ -2152,7 +2150,8 @@ impl Actor {
         Ok(())
     }
 
-    async fn deliver(&mut self, command: Command, files: Vec<LocalFile>) -> Result<(), ExecError> {        let id = Uuid::parse_str(&command.command_id).map_err(|_| ExecError::InvalidCommand)?;
+    async fn deliver(&mut self, command: Command, files: Vec<LocalFile>) -> Result<(), ExecError> {
+        let id = Uuid::parse_str(&command.command_id).map_err(|_| ExecError::InvalidCommand)?;
         self.handed.insert((id, command.dispatch_attempt));
         if !self
             .send(down::Msg::Deliver(Deliver {

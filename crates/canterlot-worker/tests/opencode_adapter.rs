@@ -9,7 +9,8 @@ use canterlot_worker::{
     adapter::{
         Adapter, AdapterError, AdapterEvent, AgentCallResult, BlockKind, CloseMode, CompactOutcome,
         DecisionOutcome, InstructionMode, InstructionSpec, InterruptOutcome, LimitFact,
-        LimitWindow, Phase, SettingsChange, StartSpec, Started, SteerOutcome, Transmission, TransmitOutcome,
+        LimitWindow, Phase, SettingsChange, StartSpec, Started, SteerOutcome, Transmission,
+        TransmitOutcome,
         opencode::{
             DiscoverError, OpenCodeAdapter,
             catalog::ModelEntry,
